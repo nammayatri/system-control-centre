@@ -32,7 +32,7 @@ const VSEditSummary: React.FC = () => {
   });
 
   const applyMut = useMutation({
-    mutationFn: () => applyVSEdit(id!),
+    mutationFn: () => applyVSEdit(id!, edit?.new_vs_data || ''),
     onSuccess: () => { toast.success('VS edit applied'); queryClient.invalidateQueries({ queryKey: ['vs-edit', id] }); },
     onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to apply'),
   });

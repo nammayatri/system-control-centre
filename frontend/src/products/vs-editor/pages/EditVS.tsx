@@ -48,17 +48,17 @@ const EditVS: React.FC = () => {
   }, [currentVS]);
 
   const lockMut = useMutation({
-    mutationFn: () => lockAndEditVS({ product, service, vs_data: vsData }),
+    mutationFn: () => lockAndEditVS({ product, service, env: 'UAT', vsName: '', lockedBy: 'admin', oldVsData: vsData }),
     onSuccess: (data) => {
       toast.success('VS locked for editing');
-      setTrackerId(data.id);
+      setTrackerId(data.message?.includes('Tracker ID:') ? data.message.split('Tracker ID: ')[1] : data.id);
       setIsLocked(true);
     },
     onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to lock VS'),
   });
 
   const applyMut = useMutation({
-    mutationFn: () => applyVSEdit(trackerId!),
+    mutationFn: () => applyVSEdit(trackerId!, vsData),
     onSuccess: () => {
       toast.success('VS edit applied');
       queryClient.invalidateQueries({ queryKey: ['vs-edits'] });

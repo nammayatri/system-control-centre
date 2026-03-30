@@ -407,16 +407,20 @@ export async function fetchReleaseEvents(id: string): Promise<RolloutEvent[]> {
 }
 
 export async function fetchProductConfigs(): Promise<ProductConfig[]> {
-    const { data } = await apiClient.get('/products');
+    const { data } = await apiClient.get('/products/config');
     if (!Array.isArray(data)) return [];
     return data.map((p: any) => ({
+        id: p.id,
         product: p.product,
         cluster: p.cluster,
         namespace: p.namespace,
         vs_name: p.vsName || '',
-        product_type: p.productType,
-        product_acronym: p.productAcronym,
+        product_type: p.productType || '',
+        product_acronym: p.productAcronym || '',
+        release_branch: p.releaseBranch || '',
+        repo_name: p.repoName || '',
         sync_cluster: p.syncCluster || p.sync_cluster || null,
+        need_infra_approval: p.needInfraApproval ? 1 : 0,
     }));
 }
 
@@ -633,12 +637,37 @@ export async function fetchResources(product: string, service: string): Promise<
 // ── Product Config CRUD ───────────────────────────────────────────
 
 export async function createProductConfig(payload: Partial<ProductConfig>): Promise<any> {
-    const { data } = await apiClient.post('/products/config', payload);
+    const body = {
+        product: payload.product,
+        cluster: payload.cluster,
+        namespace: payload.namespace,
+        vsName: payload.vs_name,
+        productType: payload.product_type,
+        productAcronym: payload.product_acronym,
+        releaseBranch: payload.release_branch,
+        repoName: payload.repo_name,
+        syncCluster: payload.sync_cluster,
+        needInfraApproval: payload.need_infra_approval ? true : false,
+    };
+    const { data } = await apiClient.post('/products/config', body);
     return data;
 }
 
 export async function updateProductConfig(id: number, payload: Partial<ProductConfig>): Promise<any> {
-    const { data } = await apiClient.put(`/products/config/${id}`, payload);
+    const body = {
+        id,
+        product: payload.product,
+        cluster: payload.cluster,
+        namespace: payload.namespace,
+        vsName: payload.vs_name,
+        productType: payload.product_type,
+        productAcronym: payload.product_acronym,
+        releaseBranch: payload.release_branch,
+        repoName: payload.repo_name,
+        syncCluster: payload.sync_cluster,
+        needInfraApproval: payload.need_infra_approval ? true : false,
+    };
+    const { data } = await apiClient.put(`/products/config/${id}`, body);
     return data;
 }
 
@@ -656,22 +685,56 @@ export interface ReleaseConfig {
     host: string;
     rollout_strategy: string;
     slack_channel: string;
+    serviceType?: string;
+    serviceAcronym?: string;
+    emails?: string;
 }
 
 export async function fetchReleaseConfigs(product?: string): Promise<ReleaseConfig[]> {
     const params = product ? { product } : {};
     const { data } = await apiClient.get('/services/config', { params });
     if (!Array.isArray(data)) return [];
-    return data;
+    // Map backend field names to frontend interface
+    return data.map((d: any) => ({
+        id: d.id,
+        product: d.serviceProduct || d.product || '',
+        service: d.serviceName || d.service || '',
+        host: d.serviceHost || d.host || '',
+        rollout_strategy: d.rolloutStrategy || d.rollout_strategy || '',
+        slack_channel: d.slackWebhookUrls || d.slack_channel || '',
+        serviceType: d.serviceType || '',
+        serviceAcronym: d.serviceAcronym || '',
+        emails: d.emails || '',
+    }));
 }
 
 export async function createReleaseConfig(payload: Partial<ReleaseConfig>): Promise<any> {
-    const { data } = await apiClient.post('/services/config', payload);
+    const body = {
+        id: payload.id,
+        product: payload.product,
+        service: payload.service,
+        serviceType: payload.serviceType || 'SERVICE',
+        serviceHost: payload.host,
+        rolloutStrategyText: payload.rollout_strategy,
+        slackWebhookUrls: payload.slack_channel,
+        emails: payload.emails,
+    };
+    const { data } = await apiClient.post('/services/config', body);
     return data;
 }
 
 export async function updateReleaseConfig(id: number, payload: Partial<ReleaseConfig>): Promise<any> {
-    const { data } = await apiClient.put(`/services/config/${id}`, payload);
+    const body = {
+        id,
+        product: payload.product,
+        service: payload.service,
+        serviceType: payload.serviceType || 'SERVICE',
+        serviceHost: payload.host,
+        rolloutStrategyText: payload.rollout_strategy,
+        slackWebhookUrls: payload.slack_channel,
+        emails: payload.emails,
+    };
+    const { data } = await apiClient.put(`/services/config/${id}`, body);
     return data;
 }
 
