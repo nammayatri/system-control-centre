@@ -21,7 +21,8 @@ import Control.Concurrent (threadDelay)
 import qualified Data.Text as T
 
 import NammaAP.Core.Config (Config(..))
-import NammaAP.Core.Utils.FlowMonad (getConfig)
+import NammaAP.Core.Environment (DBEnv)
+import NammaAP.Core.Utils.FlowMonad (getConfig, getDBEnv)
 import NammaAP.Products.Autopilot.K8s.Execute (K8sError(..), runCmd, executeWithRetry)
 import NammaAP.Products.Autopilot.K8s.Deployment
   ( deploymentExists, getDeploymentReplicaStatus
@@ -29,6 +30,11 @@ import NammaAP.Products.Autopilot.K8s.Deployment
   , buildDeleteDeploymentCommand, buildConfigMapApplyCommand, serviceExists )
 import NammaAP.Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout)
 import NammaAP.Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
+import NammaAP.Products.Autopilot.Notifications
+  ( notifyReleaseProgress
+  , notifyReleaseCompleted
+  , notifyPodsScaledDown
+  )
 import NammaAP.Products.Autopilot.Workflow.Helpers
   ( (|>>)
   , updateRT
@@ -71,6 +77,10 @@ backendServiceWorkflow = do
 -- | Get bootstrap config from the Flow (ReaderT) environment
 getCfg :: StateFlow Config
 getCfg = lift getConfig
+
+-- | Get DBEnv from the Flow (ReaderT) environment
+getDB :: StateFlow DBEnv
+getDB = lift getDBEnv
 
 -- | Extract K8sReleaseContext from the current workflow state
 getK8sCtx :: StateFlow K8sReleaseContext
@@ -173,10 +183,15 @@ progressiveRollout = do
   updateK8sStatus BSProgressiveRollout
   -- Traffic weight steps: (oldWeight, newWeight)
   let steps = [(75, 25), (50, 50), (0, 100)] :: [(Int, Int)]
+  db <- getDB
   forM_ steps $ \(oldW, newW) -> do
     liftIO $ putStrLn $ "  Shifting traffic: old=" <> show oldW <> "% new=" <> show newW <> "%"
     _ <- runK8sIO $ applyVirtualServiceRollout cfg ctx oldW newW
     updateK8sField (\k8s -> k8s { trafficPercentage = newW })
+
+    -- Notify Slack of traffic shift
+    currentRT <- getRT
+    liftIO $ notifyReleaseProgress db currentRT newW
 
     -- Health check between steps (skip after final 100% step)
     when (newW < 100) $ do
@@ -234,6 +249,10 @@ cleanupOldVersion = do
   _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
   updateK8sField (\k8s -> k8s { oldDeploymentScaledDown = True })
 
+  -- Notify Slack of pods scaled down
+  db <- getDB
+  liftIO $ notifyPodsScaledDown db rt (oldVersion ctx)
+
   -- Optionally delete old deployment
   when (deleteOldDeploymentOnComplete cfg) $ do
     liftIO $ putStrLn $ "  Deleting old deployment: " <> T.unpack oldDepName
@@ -246,6 +265,7 @@ cleanupOldVersion = do
 notifyComplete :: StateFlow ()
 notifyComplete = do
   rt <- getRT
+  db <- getDB
   updateK8sStatus BSDone
 
   liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
@@ -254,6 +274,9 @@ notifyComplete = do
   liftIO $ putStrLn $ "   Status: Completed"
 
   updateRT $ \r -> r { status = Completed }
+
+  -- Notify Slack
+  liftIO $ notifyReleaseCompleted db rt
 
 -- ============================================================================
 -- K8s State Helpers

@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS release_config (
 );
 
 CREATE TABLE IF NOT EXISTS release_events (
-  re_id BIGINT NOT NULL,
+  re_id BIGSERIAL NOT NULL,
   re_release_id TEXT NOT NULL,
   re_category TEXT NOT NULL,
   re_label TEXT NOT NULL,

@@ -36,6 +36,7 @@ import NammaAP.Products.Autopilot.K8s.Deployment (getDeploymentEnvs)
 import NammaAP.Products.Autopilot.K8s.Execute (runCmd, K8sResult (..))
 import NammaAP.Core.Config (Config (..))
 import NammaAP.Core.Config.Runtime (isApproveAllReleases)
+import NammaAP.Products.Autopilot.Notifications (notifyReleaseCreated, notifyReleaseApproved, notifyReleaseReverted)
 import NammaAP.Products.Autopilot.Sync (triggerImmediateRevertSync)
 import NammaAP.Products.Autopilot.Queries.ProductService
 import NammaAP.Products.Autopilot.Queries.ReleaseTracker
@@ -336,6 +337,7 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq {..} = do
                 }
           liftIO $ insertReleaseTracker db tracker (Just targetState)
           liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
+          liftIO $ notifyReleaseCreated db tracker
           pure $ APIResponse "SUCCESS" ("Tracker created: " <> rid)
 
 getReleaseH :: Text -> Flow (Maybe ReleaseTracker)
@@ -360,6 +362,7 @@ approveReleaseH rid req = do
             }
       liftIO $ insertReleaseTracker db updated mTargetState
       liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_APPROVED" (toJSON approver)
+      liftIO $ notifyReleaseApproved db updated
       pure (Just updated)
 
 triggerReleaseH :: Text -> TriggerReleaseReq -> Flow APIResponse
@@ -452,6 +455,7 @@ revertReleaseH rid req = do
                 , "isImmediate" .= isImmediate
                 , "origUdf1" .= origUdf1
                 ])
+      liftIO $ notifyReleaseReverted db revertedTracker
       when (isImmediate && shouldSyncRevert) $
         liftIO $ triggerImmediateRevertSync cfg db tracker mTargetState
       pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)

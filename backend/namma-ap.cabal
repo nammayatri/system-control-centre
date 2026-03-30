@@ -41,6 +41,7 @@ library
       NammaAP.Products.Autopilot.K8s.Execute
       NammaAP.Products.Autopilot.K8s.HPA
       NammaAP.Products.Autopilot.K8s.Kubectl
+      NammaAP.Products.Autopilot.Notifications
       NammaAP.Products.Autopilot.K8s.VirtualService
       NammaAP.Products.Autopilot.Queries.ProductService
       NammaAP.Products.Autopilot.Queries.ReleaseTracker
@@ -102,6 +103,8 @@ library
     , containers
     , directory
     , filepath
+    , http-client
+    , http-client-tls
     , http-types
     , mtl
     , postgresql-simple

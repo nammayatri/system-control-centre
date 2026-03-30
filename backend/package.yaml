@@ -46,6 +46,8 @@ dependencies:
   - containers
   - directory
   - filepath
+  - http-client
+  - http-client-tls
   - http-types
   - mtl
   - postgresql-simple

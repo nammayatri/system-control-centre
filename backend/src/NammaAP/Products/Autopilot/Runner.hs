@@ -8,6 +8,7 @@ import Data.Aeson (toJSON)
 import Data.Maybe (isJust)
 import qualified Data.Map.Strict as Map
 import Data.Time.Clock (getCurrentTime)
+import NammaAP.Products.Autopilot.Notifications (notifyReleaseAborted)
 import NammaAP.Products.Autopilot.Queries.ReleaseTracker
 import NammaAP.Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductVsLockedBy)
 import NammaAP.Core.Config (Config (..), isMultiReleasePerProduct, runnerPollSeconds)
@@ -92,8 +93,10 @@ trigger db (rt, mts) = do
       let errStatus = case status rt of
             Aborting -> UserAborted
             _ -> Aborted
-      liftIO $ insertReleaseTracker db (rtInProgress {status = errStatus, releaseWFStatus = RollingBack}) mts
+          abortedTracker = rtInProgress {status = errStatus, releaseWFStatus = RollingBack}
+      liftIO $ insertReleaseTracker db abortedTracker mts
       liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
+      liftIO $ notifyReleaseAborted db abortedTracker
     Right finalState -> do
       liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
 
