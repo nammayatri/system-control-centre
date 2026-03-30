@@ -1,0 +1,70 @@
+name: namma-ap
+version: 0.1.0.0
+github: "nammayatri/namma-ap"
+license: OtherLicense
+author: NammaYatri
+maintainer: platform@nammayatri.in
+synopsis: Namma AP release orchestration engine
+description: Mobius-style workflow engine with kubectl backend release orchestration.
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+  - -Widentities
+  - -Wincomplete-uni-patterns
+  - -Wincomplete-record-updates
+  - -Wpartial-fields
+
+dependencies:
+  - base >= 4.16 && < 5
+  - aeson
+  - async
+  - beam-core
+  - beam-postgres
+  - bytestring
+  - containers
+  - directory
+  - filepath
+  - http-types
+  - mtl
+  - postgresql-simple
+  - process
+  - resource-pool
+  - scientific
+  - servant
+  - servant-server
+  - stm
+  - text
+  - time
+  - transformers
+  - unordered-containers
+  - uuid
+  - wai
+  - wai-cors
+  - warp
+
+default-extensions:
+  - OverloadedStrings
+  - DeriveGeneric
+  - RecordWildCards
+  - DuplicateRecordFields
+
+library:
+  source-dirs: src
+
+executables:
+  namma-ap-exe:
+    main: Main.hs
+    source-dirs: app
+    ghc-options:
+      - -threaded
+      - -rtsopts
+    dependencies:
+      - namma-ap
+
+tests:
+  namma-ap-test:
+    main: Main.hs
+    source-dirs: test
+    dependencies:
+      - namma-ap

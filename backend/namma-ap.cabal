@@ -1,0 +1,188 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.39.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           namma-ap
+version:        0.1.0.0
+synopsis:       Namma AP release orchestration engine
+description:    Mobius-style workflow engine with kubectl backend release orchestration.
+homepage:       https://github.com/nammayatri/namma-ap#readme
+bug-reports:    https://github.com/nammayatri/namma-ap/issues
+author:         NammaYatri
+maintainer:     platform@nammayatri.in
+license:        OtherLicense
+build-type:     Simple
+
+source-repository head
+  type: git
+  location: https://github.com/nammayatri/namma-ap
+
+library
+  exposed-modules:
+      NammaAP.Admin.Queries
+      NammaAP.Admin.Routes
+      NammaAP.Admin.Types
+      NammaAP.Auth.Middleware
+      NammaAP.Auth.Queries
+      NammaAP.Auth.Routes
+      NammaAP.Auth.Types
+      NammaAP.App.Product.Discovery
+      NammaAP.App.Routes.Core
+      NammaAP.App.Storage.Queries.ProductService
+      NammaAP.App.Storage.Queries.ReleaseTracker
+      NammaAP.App.Storage.Queries.ServerConfig
+      NammaAP.Config
+      NammaAP.Config.Runtime
+      NammaAP.DB.Connection
+      NammaAP.Environment
+      NammaAP.K8s.Deployment
+      NammaAP.K8s.DestinationRule
+      NammaAP.K8s.Execute
+      NammaAP.K8s.HPA
+      NammaAP.K8s.Kubectl
+      NammaAP.K8s.VirtualService
+      NammaAP.Runner
+      NammaAP.RuntimeConfig
+      NammaAP.Server
+      NammaAP.Service.Sync
+      NammaAP.Types
+      NammaAP.Types.API
+      NammaAP.Types.Release
+      NammaAP.Types.Storage.Schema
+      NammaAP.Types.Target
+      NammaAP.Types.Target.AppStore
+      NammaAP.Types.Target.Config
+      NammaAP.Types.Target.Kubernetes
+      NammaAP.Types.Target.PlayStore
+      NammaAP.Types.Workflow
+      NammaAP.Utils.FlowMonad
+      NammaAP.Workflow.BackendConfigWorkflow
+      NammaAP.Workflow.BackendServiceWorkflow
+      NammaAP.Workflow.Factory
+      NammaAP.Workflow.Helpers
+      NammaAP.Workflow.MobileAppAndroidWorkflow
+      NammaAP.Workflow.Recorded
+      NammaAP.Workflow.Types
+  other-modules:
+      Paths_namma_ap
+  hs-source-dirs:
+      src
+  default-extensions:
+      OverloadedStrings
+      DeriveGeneric
+      RecordWildCards
+      DuplicateRecordFields
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields
+  build-depends:
+      aeson
+    , async
+    , base >=4.16 && <5
+    , beam-core
+    , beam-postgres
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , http-types
+    , mtl
+    , postgresql-simple
+    , process
+    , resource-pool
+    , scientific
+    , servant
+    , servant-server
+    , stm
+    , text
+    , time
+    , transformers
+    , unordered-containers
+    , uuid
+    , wai
+    , wai-cors
+    , warp
+  default-language: Haskell2010
+
+executable namma-ap-exe
+  main-is: Main.hs
+  other-modules:
+      Paths_namma_ap
+  hs-source-dirs:
+      app
+  default-extensions:
+      OverloadedStrings
+      DeriveGeneric
+      RecordWildCards
+      DuplicateRecordFields
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields -threaded -rtsopts
+  build-depends:
+      aeson
+    , async
+    , base >=4.16 && <5
+    , beam-core
+    , beam-postgres
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , mtl
+    , namma-ap
+    , postgresql-simple
+    , process
+    , resource-pool
+    , scientific
+    , servant
+    , servant-server
+    , stm
+    , text
+    , time
+    , transformers
+    , unordered-containers
+    , uuid
+    , wai
+    , wai-cors
+    , warp
+  default-language: Haskell2010
+
+test-suite namma-ap-test
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  other-modules:
+      Paths_namma_ap
+  hs-source-dirs:
+      test
+  default-extensions:
+      OverloadedStrings
+      DeriveGeneric
+      RecordWildCards
+      DuplicateRecordFields
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields
+  build-depends:
+      aeson
+    , async
+    , base >=4.16 && <5
+    , beam-core
+    , beam-postgres
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , mtl
+    , namma-ap
+    , postgresql-simple
+    , process
+    , resource-pool
+    , scientific
+    , servant
+    , servant-server
+    , stm
+    , text
+    , time
+    , transformers
+    , unordered-containers
+    , uuid
+    , wai
+    , wai-cors
+    , warp
+  default-language: Haskell2010

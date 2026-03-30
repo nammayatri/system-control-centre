@@ -1,0 +1,7 @@
+packages:
+  .
+
+allow-newer:
+  connection:tls,
+  connection:network,
+  word24:base

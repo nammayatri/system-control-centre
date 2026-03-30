@@ -1,0 +1,6 @@
+.env
+dist-newstyle/
+.direnv/
+.stack-work/
+scripts/
+.claude/
