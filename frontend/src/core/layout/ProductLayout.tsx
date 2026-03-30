@@ -5,7 +5,7 @@ import { PRODUCT_REGISTRY, type ProductDefinition } from '../../products/registr
 import {
   Rocket, FileText, Settings, Package, Layers,
   Plus, List, ChevronDown, ChevronRight, ChevronLeft,
-  PanelLeftClose, PanelLeft,
+  PanelLeftClose, PanelLeft, GitBranch,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import TopBar from './TopBar';

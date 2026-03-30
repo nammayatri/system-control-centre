@@ -559,6 +559,178 @@ export async function deleteRelease(releaseId: string): Promise<any> {
     return data;
 }
 
+export async function restartRelease(releaseId: string): Promise<any> {
+    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/restart`);
+    return data;
+}
+
+export async function fastForwardRelease(releaseId: string): Promise<any> {
+    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/fast-forward`);
+    return data;
+}
+
+export async function immediateRevertRelease(releaseId: string, isRevertSync: boolean): Promise<any> {
+    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/revert/immediate`, { isRevertSync });
+    return data;
+}
+
+// ── Release Diff ──────────────────────────────────────────────────
+
+export interface ReleaseDiff {
+    oldfile: string;
+    newfile: string;
+    message: string;
+}
+
+export async function fetchReleaseDiff(releaseId: string): Promise<ReleaseDiff> {
+    const { data } = await apiClient.get(`/releases/${encodeURIComponent(releaseId)}/diff`);
+    return data;
+}
+
+// ── Pod Health ────────────────────────────────────────────────────
+
+export interface PodInfo {
+    name: string;
+    status: string;
+    ready: string;
+    restarts: number;
+    age: string;
+    version: string;
+}
+
+export interface PodHealthSummary {
+    total: number;
+    running: number;
+    pending: number;
+    failed: number;
+    unknown: number;
+}
+
+export interface PodHealthResponse {
+    pods: PodInfo[];
+    summary: PodHealthSummary;
+}
+
+export async function fetchPodHealth(releaseId: string): Promise<PodHealthResponse> {
+    const { data } = await apiClient.get(`/releases/${encodeURIComponent(releaseId)}/pods/health`);
+    return data;
+}
+
+// ── Resources ─────────────────────────────────────────────────────
+
+export interface ResourceInfo {
+    cpu_requests: string;
+    cpu_limits: string;
+    memory_requests: string;
+    memory_limits: string;
+}
+
+export async function fetchResources(product: string, service: string): Promise<ResourceInfo> {
+    const { data } = await apiClient.get('/resources', { params: { PRODUCT: product, SERVICE: service } });
+    return data;
+}
+
+// ── Product Config CRUD ───────────────────────────────────────────
+
+export async function createProductConfig(payload: Partial<ProductConfig>): Promise<any> {
+    const { data } = await apiClient.post('/products', payload);
+    return data;
+}
+
+export async function updateProductConfig(id: number, payload: Partial<ProductConfig>): Promise<any> {
+    const { data } = await apiClient.put(`/products/${id}`, payload);
+    return data;
+}
+
+export async function deleteProductConfig(id: number): Promise<any> {
+    const { data } = await apiClient.delete(`/products/${id}`);
+    return data;
+}
+
+// ── Release Config (Service Config) ───────────────────────────────
+
+export interface ReleaseConfig {
+    id?: number;
+    product: string;
+    service: string;
+    host: string;
+    rollout_strategy: string;
+    slack_channel: string;
+}
+
+export async function fetchReleaseConfigs(product?: string): Promise<ReleaseConfig[]> {
+    const params = product ? { product } : {};
+    const { data } = await apiClient.get('/release-configs', { params });
+    if (!Array.isArray(data)) return [];
+    return data;
+}
+
+export async function createReleaseConfig(payload: Partial<ReleaseConfig>): Promise<any> {
+    const { data } = await apiClient.post('/release-configs', payload);
+    return data;
+}
+
+export async function updateReleaseConfig(id: number, payload: Partial<ReleaseConfig>): Promise<any> {
+    const { data } = await apiClient.put(`/release-configs/${id}`, payload);
+    return data;
+}
+
+export async function deleteReleaseConfig(id: number): Promise<any> {
+    const { data } = await apiClient.delete(`/release-configs/${id}`);
+    return data;
+}
+
+// ── VS Edit Tracker ───────────────────────────────────────────────
+
+export interface VSEditTracker {
+    id: string;
+    product: string;
+    service: string;
+    vs_name: string;
+    status: string;
+    created_by: string;
+    created_at: string;
+    updated_at: string;
+    old_vs_data: string;
+    new_vs_data: string;
+}
+
+export async function fetchVSEdits(params: { from?: string; to?: string; search?: string }): Promise<VSEditTracker[]> {
+    const { data } = await apiClient.get('/vs-edits', { params });
+    if (!Array.isArray(data)) return [];
+    return data;
+}
+
+export async function fetchVSEditDetail(id: string): Promise<VSEditTracker> {
+    const { data } = await apiClient.get(`/vs-edits/${encodeURIComponent(id)}`);
+    return data;
+}
+
+export async function fetchCurrentVS(product: string, service: string): Promise<string> {
+    const { data } = await apiClient.get('/vs-edits/current-vs', { params: { product, service } });
+    return typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+}
+
+export async function lockAndEditVS(payload: { product: string; service: string; vs_data: string }): Promise<VSEditTracker> {
+    const { data } = await apiClient.post('/vs-edits/lock', payload);
+    return data;
+}
+
+export async function applyVSEdit(id: string): Promise<any> {
+    const { data } = await apiClient.post(`/vs-edits/${encodeURIComponent(id)}/apply`);
+    return data;
+}
+
+export async function revertVSEdit(id: string): Promise<any> {
+    const { data } = await apiClient.post(`/vs-edits/${encodeURIComponent(id)}/revert`);
+    return data;
+}
+
+export async function unlockVSEdit(id: string): Promise<any> {
+    const { data } = await apiClient.post(`/vs-edits/${encodeURIComponent(id)}/unlock`);
+    return data;
+}
+
 // ── ConfigMap CRUD ─────────────────────────────────────────────────
 
 export async function createConfigMap(payload: any, isUpdate: boolean = false): Promise<any> {

@@ -319,6 +319,37 @@ data ProductResponse = ProductResponse
 
 instance ToJSON ProductResponse
 
+data ImmediateRevertReq = ImmediateRevertReq
+    { requestedBy :: Maybe Text
+    , info :: Maybe Text
+    , isRevertSync :: Maybe Bool
+    }
+    deriving (Show, Generic)
+
+instance FromJSON ImmediateRevertReq
+
+instance ToJSON ImmediateRevertReq
+
+data RestartReleaseReq = RestartReleaseReq
+    { requestedBy :: Maybe Text
+    , reason :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance FromJSON RestartReleaseReq
+
+instance ToJSON RestartReleaseReq
+
+data FastForwardReq = FastForwardReq
+    { requestedBy :: Maybe Text
+    , reason :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance FromJSON FastForwardReq
+
+instance ToJSON FastForwardReq
+
 data ServiceResponse = ServiceResponse
     { service :: Text
     , serviceHost :: Maybe Text
@@ -328,3 +359,98 @@ data ServiceResponse = ServiceResponse
     deriving (Show, Generic)
 
 instance ToJSON ServiceResponse
+
+-- ── Product Config CRUD types ──────────────────────────────────────
+
+data ProductConfigResponse = ProductConfigResponse
+    { id :: Int32
+    , product :: Text
+    , repoName :: Text
+    , productType :: Text
+    , productAcronym :: Text
+    , releaseBranch :: Text
+    , needInfraApproval :: Maybe Bool
+    , cluster :: Maybe Text
+    , namespace :: Maybe Text
+    , vsName :: Maybe Text
+    , syncCluster :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ProductConfigResponse
+
+-- ── Release Config CRUD types ──────────────────────────────────────
+
+data ReleaseConfigResponse = ReleaseConfigResponse
+    { id :: Int32
+    , serviceName :: Text
+    , serviceProduct :: Text
+    , serviceType :: Text
+    , emails :: Maybe Text
+    , rolloutStrategy :: Maybe Text
+    , decisionConfig :: Maybe Text
+    , flags :: Maybe Text
+    , slackWebhookUrls :: Maybe Text
+    , serviceAcronym :: Maybe Text
+    , bitbucketPath :: Maybe Text
+    , microserviceType :: Maybe Text
+    , revertStrategy :: Maybe Text
+    , jiraWebhookUrl :: Maybe Text
+    , serviceHost :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ReleaseConfigResponse
+
+-- ── VS Edit Tracker types ──────────────────────────────────────────
+
+data CreateVsEditTrackerReq = CreateVsEditTrackerReq
+    { product :: Text
+    , service :: Text
+    , env :: Text
+    , vsName :: Text
+    , oldVsData :: Maybe Text
+    , createdBy :: Text
+    , info :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance FromJSON CreateVsEditTrackerReq
+
+instance ToJSON CreateVsEditTrackerReq
+
+data UpdateVsEditTrackerReq = UpdateVsEditTrackerReq
+    { newVsData :: Maybe Text
+    , status :: Maybe Text
+    , approvedBy :: Maybe Text
+    , info :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance FromJSON UpdateVsEditTrackerReq
+
+instance ToJSON UpdateVsEditTrackerReq
+
+data VsLockReq = VsLockReq
+    { product :: Text
+    , vsName :: Text
+    , env :: Text
+    , lockedBy :: Text
+    , lockDurationMinutes :: Maybe Int
+    }
+    deriving (Show, Generic)
+
+instance FromJSON VsLockReq
+
+instance ToJSON VsLockReq
+
+data VsUnlockReq = VsUnlockReq
+    { product :: Text
+    , vsName :: Text
+    , env :: Text
+    }
+    deriving (Show, Generic)
+
+instance FromJSON VsUnlockReq
+
+instance ToJSON VsUnlockReq

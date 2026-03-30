@@ -12,7 +12,7 @@ where
 import Control.Concurrent (forkIO)
 import Control.Exception (SomeException, try)
 import Core.Config (Config (..))
-import Core.Config.Runtime (isSyncClusterEnabled)
+import Products.Autopilot.RuntimeConfig (isSyncClusterEnabled)
 import Core.Environment (DBEnv)
 import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS

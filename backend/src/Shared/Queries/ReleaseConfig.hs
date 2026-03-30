@@ -6,6 +6,9 @@ module Shared.Queries.ReleaseConfig (
     findServiceByProductAndName,
     listReleaseConfigByProduct,
     listSchedulerServicesByProduct,
+    listAllReleaseConfigs,
+    findReleaseConfigById,
+    deleteReleaseConfig,
 
     -- * Service config extractors
     getServiceHost,
@@ -19,4 +22,10 @@ import Products.Autopilot.Queries.ProductService (
     listReleaseConfigByProduct,
     listSchedulerServicesByProduct,
     upsertService,
+ )
+
+import Products.Autopilot.Queries.VsEditTracker (
+    listAllReleaseConfigs,
+    findReleaseConfigById,
+    deleteReleaseConfig,
  )

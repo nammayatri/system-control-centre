@@ -49,6 +49,12 @@ findRoutePermission method pathSegs =
             ("POST", ["releases", _, "delete"]) -> Just $ mkPP "RELEASE_DISCARD" "autopilot"
             ("POST", ["releases", _, "update"]) -> Just $ mkPP "RELEASE_UPDATE" "autopilot"
             ("POST", ["releases", _, "trigger"]) -> Just $ mkPP "RELEASE_CREATE" "autopilot"
+            -- Diff, pods, immediate revert, restart, fast-forward
+            ("GET", ["releases", _, "diff"]) -> Just $ mkPP "RELEASE_VIEW" "autopilot"
+            ("GET", ["releases", _, "pods", "health"]) -> Just $ mkPP "RELEASE_VIEW" "autopilot"
+            ("POST", ["releases", _, "revert", "immediate"]) -> Just $ mkPP "RELEASE_REVERT" "autopilot"
+            ("POST", ["releases", _, "restart"]) -> Just $ mkPP "RELEASE_CREATE" "autopilot"
+            ("POST", ["releases", _, "fast-forward"]) -> Just $ mkPP "RELEASE_UPDATE" "autopilot"
             -- Product services
             ("GET", ("products" : _ : "services" : _)) -> Just $ mkPP "PRODUCT_CONFIG_VIEW" "autopilot"
             -- Envs
@@ -58,6 +64,18 @@ findRoutePermission method pathSegs =
             -- ConfigMap tracker with ID
             ("GET", ["tracker", "configmap", _]) -> Just $ mkPP "RELEASE_VIEW" "autopilot"
             ("PUT", ["tracker", "configmap", _]) -> Just $ mkPP "RELEASE_UPDATE" "autopilot"
+            -- Product Config CRUD with ID
+            ("GET", ["products", "config", _]) -> Just $ mkPP "PRODUCT_CONFIG_VIEW" "autopilot"
+            ("PUT", ["products", "config", _]) -> Just $ mkPP "PRODUCT_CONFIG_EDIT" "autopilot"
+            ("DELETE", ["products", "config", _]) -> Just $ mkPP "PRODUCT_CONFIG_EDIT" "autopilot"
+            -- Release Config CRUD with ID
+            ("GET", ["services", "config", _]) -> Just $ mkPP "PRODUCT_CONFIG_VIEW" "autopilot"
+            ("PUT", ["services", "config", _]) -> Just $ mkPP "PRODUCT_CONFIG_EDIT" "autopilot"
+            ("DELETE", ["services", "config", _]) -> Just $ mkPP "PRODUCT_CONFIG_EDIT" "autopilot"
+            -- VS Edit Tracker with ID
+            ("GET", ["vs-edit-tracker", _]) -> Just $ mkPP "RELEASE_VIEW" "autopilot"
+            ("PUT", ["vs-edit-tracker", _]) -> Just $ mkPP "RELEASE_UPDATE" "autopilot"
+            ("PUT", ["vs-edit-tracker", "revert", _]) -> Just $ mkPP "RELEASE_REVERT" "autopilot"
             _ -> Nothing
      in case dynamicMatch of
             Just pp -> Just pp

@@ -7,6 +7,8 @@ module Shared.Queries.ProductConfig (
     findProductByNameAndCluster,
     listProductsByName,
     listProducts,
+    findProductConfigById,
+    deleteProductConfig,
 
     -- * Product config extractors
     getK8sProductConfig,
@@ -31,4 +33,9 @@ import Products.Autopilot.Queries.ProductService (
     listProducts,
     listProductsByName,
     upsertProduct,
+ )
+
+import Products.Autopilot.Queries.VsEditTracker (
+    findProductConfigById,
+    deleteProductConfig,
  )

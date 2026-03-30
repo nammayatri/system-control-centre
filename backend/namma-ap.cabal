@@ -29,7 +29,7 @@ library
       Core.Auth.Routes
       Core.Auth.Types
       Core.Config
-      Core.Config.Runtime
+      Shared.Config.Runtime
       Core.DB.Connection
       Core.Environment
       Core.Server
@@ -46,6 +46,7 @@ library
       Products.Autopilot.Queries.ProductService
       Products.Autopilot.Queries.ReleaseTracker
       Products.Autopilot.Queries.ServerConfig
+      Products.Autopilot.Queries.VsEditTracker
       Products.Autopilot.Routes
       Products.Autopilot.Runner
       Products.Autopilot.RuntimeConfig
@@ -62,6 +63,9 @@ library
       Products.Autopilot.Types.Target.PlayStore
       Products.Autopilot.Types.Workflow
       Products.Autopilot.Workflow.BackendConfigWorkflow
+      Products.Autopilot.Workflow.BackendCronJobWorkflow
+      Products.Autopilot.Workflow.BackendJobWorkflow
+      Products.Autopilot.Workflow.BackendSchedulerWorkflow
       Products.Autopilot.Workflow.BackendServiceWorkflow
       Products.Autopilot.Workflow.Factory
       Products.Autopilot.Workflow.Helpers

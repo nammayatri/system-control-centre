@@ -84,4 +84,22 @@ autopilotConfigs =
         ScalingGroup
         "Products with HPA scaling enabled (JSON array)"
         (Just "autopilot")
+    , ConfigEntry
+        "hpa_max_replicas_buffer"
+        (IntConfig 1)
+        ScalingGroup
+        "Buffer added to HPA max replicas calculation"
+        (Just "autopilot")
+    , ConfigEntry
+        "max_k8s_retries"
+        (IntConfig 3)
+        DeploymentGroup
+        "Maximum K8s command retry attempts"
+        (Just "autopilot")
+    , ConfigEntry
+        "multi_release_per_product"
+        (BoolConfig False)
+        DeploymentGroup
+        "Allow multiple concurrent releases per product"
+        (Just "autopilot")
     ]

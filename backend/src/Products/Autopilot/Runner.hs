@@ -3,17 +3,21 @@ module Products.Autopilot.Runner where
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
-import Core.Config (Config (..), isMultiReleasePerProduct, runnerPollSeconds)
+import Core.Config (Config (..))
+import Products.Autopilot.RuntimeConfig (getReleaseWatchDelay, isMultiReleasePerProduct)
 import Core.Environment (AppState, DBEnv)
 import Core.Utils.FlowMonad
-import Data.Aeson (toJSON)
+import Data.Aeson (Value (..), toJSON, object, (.=))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
+import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
+import Products.Autopilot.K8s.VirtualService (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Notifications (notifyReleaseAborted)
 import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductVsLockedBy)
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.Types
+import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (..), K8sReleaseContext (..), PodsScaleDownStatus (..))
 import Products.Autopilot.Workflow.Factory (executeReleaseWorkflow)
@@ -24,7 +28,7 @@ runnerLoop :: AppState -> IO ()
 runnerLoop st = runFlow st loop
   where
     loop = forever $ do
-        cfg <- getConfig
+        _cfg <- getConfig
         db <- getDBEnv
         now <- liftIO getCurrentTime
 
@@ -34,7 +38,8 @@ runnerLoop st = runFlow st loop
         eligible <- liftIO $ filterM (isEligibleToRun db ongoing) jobs
 
         -- Step 2: Pick jobs respecting single-release constraint and priority
-        let picked = pickJobs (isMultiReleasePerProduct cfg) eligible
+        multiRelease <- liftIO $ isMultiReleasePerProduct db
+        let picked = pickJobs multiRelease eligible
         mapM_ (trigger db) picked
 
         -- TODO: Step 3: Handle aborting trackers (needs reimplementation)
@@ -46,12 +51,11 @@ runnerLoop st = runFlow st loop
         -- mapM_ runScheduledCleanup cleanupJobs
 
         -- TODO: Step 5: Handle scale-down (needs reimplementation)
-        -- let scaleDownTime = addUTCTime (fromIntegral (-(oldDeploymentCleanupDelaySeconds cfg))) now
-        -- scaleDownCandidates <- liftIO $ findTrackersWithStatusAndTime db
-        --   ["Completed", "Aborted", "UserAborted", "GcltAborted"] scaleDownTime
+        -- scaleDownCandidates <- ...
         -- mapM_ runScheduledCleanup (filter isScaleDownReady scaleDownCandidates)
 
-        liftIO $ threadDelay (runnerPollSeconds cfg * 1000000)
+        pollDelay <- liftIO $ getReleaseWatchDelay db
+        liftIO $ threadDelay (pollDelay * 1000000)
 
     filterM _ [] = pure []
     filterM f (x : xs) = do
@@ -83,22 +87,38 @@ isEligibleToRun db ongoing (rt, mts) = case category rt of
 -- | Trigger a release - dispatch to appropriate workflow using new Factory
 trigger :: DBEnv -> TrackerWithTarget -> Flow ()
 trigger db (rt, mts) = do
-    -- Mark InProgress BEFORE dispatching to prevent re-pickup on next poll
-    let rtInProgress = rt{status = InProgress}
-    liftIO $ insertReleaseTracker db rtInProgress mts
-    liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "RUNNER_PICKED" (toJSON rt)
-    result <- dispatchWorkflow rtInProgress mts
-    case result of
-        Left err -> do
-            let errStatus = case status rt of
-                    Aborting -> UserAborted
-                    _ -> Aborted
-                abortedTracker = rtInProgress{status = errStatus, releaseWFStatus = RollingBack}
-            liftIO $ insertReleaseTracker db abortedTracker mts
-            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
-            liftIO $ notifyReleaseAborted db abortedTracker
-        Right finalState -> do
-            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
+    cfg <- getConfig
+    -- Version validation: compare tracker's oldVersion with what K8s actually has
+    versionOk <- liftIO $ validateRunningVersion cfg db rt mts
+    case versionOk of
+        Just mismatchMsg -> do
+            -- Version mismatch: discard the release
+            let discarded = rt{status = Discarded}
+            liftIO $ insertReleaseTracker db discarded mts
+            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "VERSION_MISMATCH"
+                (object
+                    [ "message" .= mismatchMsg
+                    , "trackerOldVersion" .= NT.oldVersion rt
+                    ])
+            liftIO $ notifyReleaseAborted db discarded
+            pure ()
+        Nothing -> do
+            -- Mark InProgress BEFORE dispatching to prevent re-pickup on next poll
+            let rtInProgress = rt{status = InProgress}
+            liftIO $ insertReleaseTracker db rtInProgress mts
+            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "RUNNER_PICKED" (toJSON rt)
+            result <- dispatchWorkflow rtInProgress mts
+            case result of
+                Left err -> do
+                    let errStatus = case status rt of
+                            Aborting -> UserAborted
+                            _ -> Aborted
+                        abortedTracker = rtInProgress{status = errStatus, releaseWFStatus = RollingBack}
+                    liftIO $ insertReleaseTracker db abortedTracker mts
+                    liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
+                    liftIO $ notifyReleaseAborted db abortedTracker
+                Right _finalState -> do
+                    liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
 
 -- | Dispatch to the new workflow factory
 dispatchWorkflow :: ReleaseTracker -> Maybe TargetState -> Flow (Either WorkFlowError ReleaseState)
@@ -140,3 +160,41 @@ sortByPriority = foldr insert []
     insert twt@(rt, _) (x@(xrt, _) : xs)
         | priority rt > priority xrt = twt : x : xs
         | otherwise = x : insert twt xs
+
+-- ============================================================================
+-- Version Validation
+-- ============================================================================
+
+{- | Validate the running version matches the tracker's oldVersion.
+Returns Nothing if validation passes (or cannot be performed),
+Just errorMessage if there is a mismatch.
+-}
+validateRunningVersion :: Config -> DBEnv -> ReleaseTracker -> Maybe TargetState -> IO (Maybe T.Text)
+validateRunningVersion cfg db rt mts = do
+    -- Only validate K8s-backed releases
+    case mts of
+        Just (K8sState k8s) -> do
+            let ctx = context k8s
+                ns = namespace ctx
+                vsName' = virtualServiceName ctx
+                svcHost = serviceName ctx
+                trackerOldVer = NT.oldVersion rt
+                isNewSvc = newService k8s
+            -- Skip validation for new services, or if oldVersion is empty/unknown/new
+            if isNewSvc || T.null trackerOldVer || T.toLower trackerOldVer == "unknown" || trackerOldVer == "new"
+                then pure Nothing
+                else do
+                    result <- getPrimarySubsetFromVirtualService cfg ns vsName' svcHost
+                    case result of
+                        Left _err ->
+                            -- Cannot validate (VS not found, etc.) - let it through
+                            pure Nothing
+                        Right Nothing ->
+                            -- No primary subset found - let it through
+                            pure Nothing
+                        Right (Just runningVersion) ->
+                            if runningVersion == trackerOldVer
+                                then pure Nothing
+                                else pure $ Just $
+                                    "Running version (" <> runningVersion <> ") does not match tracker oldVersion (" <> trackerOldVer <> ")"
+        _ -> pure Nothing -- Non-K8s releases: skip validation

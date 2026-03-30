@@ -39,6 +39,11 @@ import ListConfigMap from './configmap/pages/ListConfigMap';
 import CreateConfigMap from './configmap/pages/CreateConfigMap';
 import ConfigMapSummary from './configmap/pages/ConfigMapSummary';
 import Configurations from './config/pages/Configurations';
+import ProductConfigs from './config/pages/ProductConfigs';
+import ServiceConfigs from './config/pages/ServiceConfigs';
+import ListVSEdit from './vs-editor/pages/ListVSEdit';
+import EditVS from './vs-editor/pages/EditVS';
+import VSEditSummary from './vs-editor/pages/VSEditSummary';
 
 const releasesProduct: ProductDefinition = {
   slug: 'autopilot',
@@ -49,6 +54,9 @@ const releasesProduct: ProductDefinition = {
     { label: 'Releases', path: '/releases', icon: 'List' },
     { label: 'Create Release', path: '/releases/new', icon: 'Plus' },
     { label: 'Config Maps', path: '/configmap', icon: 'FileText' },
+    { label: 'Product Config', path: '/product-config', icon: 'Package' },
+    { label: 'Service Config', path: '/service-config', icon: 'Layers' },
+    { label: 'VS Editor', path: '/vs-editor', icon: 'Settings' },
     { label: 'Server Config', path: '/configurations', icon: 'Settings' },
   ],
   routes: [
@@ -61,6 +69,14 @@ const releasesProduct: ProductDefinition = {
     { path: '/configmap', component: ListConfigMap },
     { path: '/configmap/new', component: CreateConfigMap, permission: 'RELEASE_CREATE' },
     { path: '/configmap/:clusterId', component: ConfigMapSummary },
+    // Product Config
+    { path: '/product-config', component: ProductConfigs },
+    // Service Config
+    { path: '/service-config', component: ServiceConfigs },
+    // VS Editor
+    { path: '/vs-editor', component: ListVSEdit },
+    { path: '/vs-editor/new', component: EditVS, permission: 'RELEASE_CREATE' },
+    { path: '/vs-editor/:id', component: VSEditSummary },
     // Server Config
     { path: '/configurations', component: Configurations },
   ],
@@ -74,38 +90,3 @@ export const PRODUCT_REGISTRY: ProductDefinition[] = [
   releasesProduct,
   // ← Add new products here when ready
 ];
-
-/**
- * TEMPLATE for adding a new product:
- *
- * 1. Create products/my-product/ folder with:
- *    - List.tsx (list view)
- *    - Create.tsx (create form)
- *    - Detail.tsx (detail/summary view)
- *
- * 2. Import and register here:
- *
- *    import MyList from '../my-product/List';
- *    import MyCreate from '../my-product/Create';
- *    import MyDetail from '../my-product/Detail';
- *
- *    const myProduct: ProductDefinition = {
- *      slug: 'my-product',        // must match DB sc_product.slug
- *      label: 'My Product',
- *      icon: 'Package',
- *      basePath: '/my-product',
- *      navItems: [
- *        { label: 'List', path: '/my-product', icon: 'List' },
- *        { label: 'Create', path: '/my-product/new', icon: 'Plus' },
- *      ],
- *      routes: [
- *        { path: '/my-product', component: MyList },
- *        { path: '/my-product/new', component: MyCreate, permission: 'MY_CREATE' },
- *        { path: '/my-product/:id', component: MyDetail },
- *      ],
- *    };
- *
- * 3. Add to PRODUCT_REGISTRY array above.
- *
- * That's it. Routes + sidebar + permissions auto-wire.
- */

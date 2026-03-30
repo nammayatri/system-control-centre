@@ -141,12 +141,43 @@ instance Table ServerConfigT where
     data PrimaryKey ServerConfigT f = ServerConfigId (Columnar f Int32) deriving (Generic, Beamable)
     primaryKey = ServerConfigId . scId
 
+data VsEditTrackerT f = VsEditTrackerT
+    { vetId :: Columnar f Text
+    , vetProduct :: Columnar f Text
+    , vetService :: Columnar f Text
+    , vetEnv :: Columnar f Text
+    , vetVsName :: Columnar f Text
+    , vetOldVsData :: Columnar f (Maybe Text)
+    , vetNewVsData :: Columnar f (Maybe Text)
+    , vetStatus :: Columnar f Text
+    , vetCreatedBy :: Columnar f Text
+    , vetApprovedBy :: Columnar f (Maybe Text)
+    , vetIsLocked :: Columnar f (Maybe Bool)
+    , vetLockedBy :: Columnar f (Maybe Text)
+    , vetLockedAt :: Columnar f (Maybe UTCTime)
+    , vetLockExpiry :: Columnar f (Maybe UTCTime)
+    , vetMonitoringEndTime :: Columnar f (Maybe UTCTime)
+    , vetInfo :: Columnar f (Maybe Text)
+    , vetCreatedAt :: Columnar f UTCTime
+    , vetUpdatedAt :: Columnar f UTCTime
+    }
+    deriving (Generic, Beamable)
+
+type VsEditTracker = VsEditTrackerT Identity
+
+deriving instance Show VsEditTracker
+
+instance Table VsEditTrackerT where
+    data PrimaryKey VsEditTrackerT f = VsEditTrackerId (Columnar f Text) deriving (Generic, Beamable)
+    primaryKey = VsEditTrackerId . vetId
+
 data NammaAPDb f = NammaAPDb
     { productConfig :: f (TableEntity ProductConfigT)
     , releaseConfig :: f (TableEntity ReleaseConfigT)
     , releaseTrackers :: f (TableEntity ReleaseTrackerT)
     , releaseEvents :: f (TableEntity ReleaseEventT)
     , serverConfigs :: f (TableEntity ServerConfigT)
+    , vsEditTrackers :: f (TableEntity VsEditTrackerT)
     }
     deriving (Generic, Database be)
 
@@ -246,5 +277,28 @@ nammaAPDb =
                             , scLastUpdated = fieldNamed "last_updated"
                             , scEnabled = fieldNamed "enabled"
                             , scProduct = fieldNamed "product"
+                            }
+            , vsEditTrackers =
+                setEntityName "vs_edit_tracker"
+                    <> modifyTableFields
+                        tableModification
+                            { vetId = fieldNamed "id"
+                            , vetProduct = fieldNamed "product"
+                            , vetService = fieldNamed "service"
+                            , vetEnv = fieldNamed "env"
+                            , vetVsName = fieldNamed "vs_name"
+                            , vetOldVsData = fieldNamed "old_vs_data"
+                            , vetNewVsData = fieldNamed "new_vs_data"
+                            , vetStatus = fieldNamed "status"
+                            , vetCreatedBy = fieldNamed "created_by"
+                            , vetApprovedBy = fieldNamed "approved_by"
+                            , vetIsLocked = fieldNamed "is_locked"
+                            , vetLockedBy = fieldNamed "locked_by"
+                            , vetLockedAt = fieldNamed "locked_at"
+                            , vetLockExpiry = fieldNamed "lock_expiry"
+                            , vetMonitoringEndTime = fieldNamed "monitoring_end_time"
+                            , vetInfo = fieldNamed "info"
+                            , vetCreatedAt = fieldNamed "created_at"
+                            , vetUpdatedAt = fieldNamed "updated_at"
                             }
             }

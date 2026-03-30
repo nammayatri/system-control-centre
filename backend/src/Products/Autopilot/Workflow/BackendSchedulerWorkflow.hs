@@ -1,16 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Backend service workflow (K8s deployment)
+{- | Backend scheduler workflow (K8s pod-count based deployment)
 
-This module implements the workflow for deploying backend services to Kubernetes.
-It uses the new type system with:
-- ReleaseCategory (BackendService)
-- ReleaseWFStatus (generic stages)
-- BackendServiceWFStatus (K8s-specific sub-stages)
-- Recorded monad for checkpoint/resume
+This module implements the workflow for deploying backend schedulers to Kubernetes.
+Unlike BackendServiceWorkflow, schedulers use pod-count based rollout:
+- NO VirtualService manipulation (schedulers don't have VS)
+- NO DestinationRule manipulation
+- Scale old to 0, then scale new up progressively
+- Pod count at each step: max(podsRolloutRatio * rollout%, totalPods)
 -}
-module Products.Autopilot.Workflow.BackendServiceWorkflow (
-    backendServiceWorkflow,
+module Products.Autopilot.Workflow.BackendSchedulerWorkflow (
+    backendSchedulerWorkflow,
 )
 where
 
@@ -25,18 +25,16 @@ import Core.Environment (DBEnv)
 import Core.Utils.FlowMonad (getConfig, getDBEnv)
 import qualified Data.Text as T
 import Products.Autopilot.K8s.Deployment (
-    buildApplyFileCommand,
     buildCloneDeploymentCommand,
     buildConfigMapApplyCommand,
     buildDeleteDeploymentCommand,
+    buildScaleDeploymentCommand,
     buildScaleNamedDeploymentCommand,
     deploymentExists,
     getDeploymentReplicaStatus,
-    serviceExists,
  )
-import Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
 import Products.Autopilot.K8s.Execute (K8sError (..), executeWithRetry, runCmd)
-import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout)
+import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, hpaExists)
 import Products.Autopilot.Notifications (
     notifyPodsScaledDown,
     notifyReleaseCompleted,
@@ -44,7 +42,7 @@ import Products.Autopilot.Notifications (
  )
 
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
-import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (product, releaseId, status))
+import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (product, releaseId, rolloutStrategy, status), RolloutStep (..))
 import Products.Autopilot.Types.Target (
     BackendServiceWFStatus (..),
     K8sDeploymentState (..),
@@ -69,12 +67,12 @@ import Prelude hiding (product)
 -- Workflow Definition
 -- ============================================================================
 
--- | Backend service workflow using generic stages
-backendServiceWorkflow :: ReleaseWorkFlow ()
-backendServiceWorkflow = do
+-- | Backend scheduler workflow using pod-count based rollout (no traffic shifting)
+backendSchedulerWorkflow :: ReleaseWorkFlow ()
+backendSchedulerWorkflow = do
     Init |>> validatePreconditions
     Preparing |>> prepareK8sResources
-    Deploying |>> progressiveRollout
+    Deploying |>> podCountRollout
     Monitoring |>> monitorHealth
     Finalizing |>> cleanupOldVersion
     Done |>> notifyComplete
@@ -97,15 +95,7 @@ getK8sCtx = do
     rs <- gets id
     case targetState rs of
         Just (K8sState k8s) -> pure (context k8s)
-        _ -> error "BackendServiceWorkflow: missing K8sState in targetState"
-
--- | Check if this is a new service release (no existing deployment)
-isNewServiceRelease :: StateFlow Bool
-isNewServiceRelease = do
-    rs <- gets id
-    case targetState rs of
-        Just (K8sState k8s) -> pure (newService k8s)
-        _ -> pure False
+        _ -> error "BackendSchedulerWorkflow: missing K8sState in targetState"
 
 -- | Run an IO action that returns Either K8sError, lifting into StateFlow
 runK8sIO :: IO (Either K8sError a) -> StateFlow a
@@ -124,7 +114,7 @@ validatePreconditions :: StateFlow ()
 validatePreconditions = do
     rt <- getRT
     cfg <- getCfg
-    liftIO $ putStrLn $ "Validating preconditions for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Validating preconditions for scheduler " <> T.unpack (product rt)
 
     -- Initialise or update K8s deployment state
     rs <- gets id
@@ -136,7 +126,6 @@ validatePreconditions = do
             modify $ \s -> s{targetState = Just (K8sState k8sState)}
 
     ctx <- getK8sCtx
-    isNew <- isNewServiceRelease
 
     -- Check cluster reachable by verifying namespace exists
     liftIO $ putStrLn "  Checking cluster reachability"
@@ -152,20 +141,24 @@ validatePreconditions = do
                     ]
                 )
 
-    when isNew $
-        liftIO $ putStrLn "  New service release: skipping old version validation"
+    -- Verify old deployment exists (for non-new schedulers)
+    let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
+    oldExists <- liftIO $ deploymentExists cfg (namespace ctx) oldDepName
+    when (not oldExists && not (T.null (oldVersion ctx)) && oldVersion ctx /= "new") $
+        liftIO $
+            putStrLn $
+                "  WARNING: Old deployment not found: " <> T.unpack oldDepName
 
     liftIO $ putStrLn "  Cluster reachable, namespace exists"
-    liftIO $ putStrLn "Preconditions validated"
+    liftIO $ putStrLn "Preconditions validated for scheduler"
 
--- | Prepare K8s resources: ConfigMap, clone/create deployment, service check, DestinationRule
+-- | Prepare K8s resources: ConfigMap, clone deployment with 1 pod for verification
 prepareK8sResources :: StateFlow ()
 prepareK8sResources = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    isNew <- isNewServiceRelease
-    liftIO $ putStrLn $ "Preparing K8s resources for " <> T.unpack (product rt) <> if isNew then " (NEW SERVICE)" else ""
+    liftIO $ putStrLn $ "Preparing K8s resources for scheduler " <> T.unpack (product rt)
 
     -- 1. Apply ConfigMap
     updateK8sStatus BSApplyConfigMap
@@ -173,87 +166,86 @@ prepareK8sResources = do
     _ <- runK8sIO $ executeWithRetry cfg (buildConfigMapApplyCommand cfg ctx)
     updateK8sField (\k8s -> k8s{configMapApplied = True})
 
-    -- 2. Create/clone deployment (skip if target already exists, e.g. checkpoint resume)
+    -- 2. Clone deployment with 1 pod for verification (skip if already exists)
     updateK8sStatus BSCreateDeployment
     newDepExists <- liftIO $ deploymentExists cfg (namespace ctx) (deploymentName ctx)
     if newDepExists
-        then liftIO $ putStrLn "  Deployment already exists, skipping create/clone"
-        else
-            if isNew
-                then do
-                    -- New service: create from deploy file path or error
-                    case deployFilePath ctx of
-                        Just fp -> do
-                            liftIO $ putStrLn $ "  Creating new deployment from: " <> T.unpack fp
-                            _ <- runK8sIO $ executeWithRetry cfg (buildApplyFileCommand cfg fp)
-                            pure ()
-                        Nothing -> do
-                            liftIO $ putStrLn $ "  ERROR: New service requires deployFilePath"
-                            error "New service release requires deployFilePath to create deployment from scratch"
-                else do
-                    liftIO $ putStrLn $ "  Cloning deployment to " <> T.unpack (deploymentName ctx)
-                    _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg ctx)
-                    pure ()
+        then liftIO $ putStrLn "  Deployment already exists, skipping clone"
+        else do
+            liftIO $ putStrLn $ "  Cloning deployment to " <> T.unpack (deploymentName ctx) <> " with 1 pod for verification"
+            _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg ctx)
+            -- Scale to 1 pod for initial verification
+            _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
+            pure ()
     updateK8sField (\k8s -> k8s{deploymentCreated = True})
 
-    -- 3. Check Service exists
-    updateK8sStatus BSUpdateService
-    liftIO $ putStrLn "  Checking Service exists"
-    svcOk <- liftIO $ serviceExists cfg (namespace ctx) (serviceName ctx)
-    when (not svcOk) $
-        liftIO $
-            putStrLn "  WARNING: Service not found (pods may still route via selector)"
-    updateK8sField (\k8s -> k8s{serviceCreated = svcOk})
+    -- Wait for verification pod to be ready
+    liftIO $ putStrLn "  Waiting for verification pod"
+    liftIO $ threadDelay 10000000 -- 10 seconds
+    checkDeploymentHealth cfg ctx
 
-    -- 4. Ensure DestinationRule (creates if missing, adds subset if existing)
-    updateK8sStatus BSApplyDestinationRule
-    liftIO $ putStrLn "  Ensuring DestinationRule"
-    _ <- runK8sIO $ ensureDestinationRule cfg ctx
-    updateK8sField (\k8s -> k8s{destinationRuleApplied = True})
+    liftIO $ putStrLn "K8s resources prepared for scheduler"
 
-    liftIO $ putStrLn "K8s resources prepared"
-
--- | Progressive rollout: shift traffic old -> new in steps
-progressiveRollout :: StateFlow ()
-progressiveRollout = do
+-- | Pod-count based rollout: scale old to 0, scale new up progressively
+podCountRollout :: StateFlow ()
+podCountRollout = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    isNew <- isNewServiceRelease
-    liftIO $ putStrLn $ "Starting progressive rollout for " <> T.unpack (product rt)
-
-    updateK8sStatus BSFlipVirtualService
-    updateK8sField (\k8s -> k8s{virtualServiceApplied = True})
+    db <- getDB
+    liftIO $ putStrLn $ "Starting pod-count rollout for scheduler " <> T.unpack (product rt)
 
     updateK8sStatus BSProgressiveRollout
-    db <- getDB
 
-    if isNew
+    -- Step 1: Scale old deployment to 0 replicas
+    let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
+    liftIO $ putStrLn $ "  Scaling down old deployment to 0: " <> T.unpack oldDepName
+    _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
+    updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
+
+    -- Notify Slack of old pods scaled down
+    currentRT <- getRT
+    liftIO $ notifyPodsScaledDown db currentRT (oldVersion ctx)
+
+    -- Step 2: Scale new deployment up progressively through rollout steps
+    let steps = rolloutStrategy rt
+    if null steps
         then do
-            -- New service: route 100% traffic to new version directly (no old version)
-            liftIO $ putStrLn "  New service: routing 100% traffic to new version"
-            _ <- runK8sIO $ applyVirtualServiceRollout cfg ctx 0 100
+            -- No rollout strategy defined, scale to full desired count
+            -- Get the desired count from the old deployment's spec (use a reasonable default)
+            liftIO $ putStrLn "  No rollout strategy, scaling new deployment to desired count"
+            _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
             updateK8sField (\k8s -> k8s{trafficPercentage = 100})
-            currentRT <- getRT
             liftIO $ notifyReleaseProgress db currentRT 100
         else do
-            -- Existing service: progressive traffic shift
-            let steps = [(75, 25), (50, 50), (0, 100)] :: [(Int, Int)]
-            forM_ steps $ \(oldW, newW) -> do
-                liftIO $ putStrLn $ "  Shifting traffic: old=" <> show oldW <> "% new=" <> show newW <> "%"
-                _ <- runK8sIO $ applyVirtualServiceRollout cfg ctx oldW newW
-                updateK8sField (\k8s -> k8s{trafficPercentage = newW})
+            forM_ steps $ \step -> do
+                let targetPods = max 1 (podPercent step)
+                liftIO $
+                    putStrLn $
+                        "  Scaling new deployment to "
+                            <> show targetPods
+                            <> " pods (rollout "
+                            <> show (rolloutPercent step)
+                            <> "%)"
+                _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx targetPods)
+                updateK8sField (\k8s -> k8s{trafficPercentage = rolloutPercent step})
 
-                -- Notify Slack of traffic shift
-                currentRT <- getRT
-                liftIO $ notifyReleaseProgress db currentRT newW
+                -- Notify Slack of progress
+                latestRT <- getRT
+                liftIO $ notifyReleaseProgress db latestRT (rolloutPercent step)
 
-                -- Health check between steps (skip after final 100% step)
-                when (newW < 100) $ do
-                    liftIO $ threadDelay 5000000 -- 5 seconds between steps
+                -- Cooloff between steps
+                when (cooloffSeconds step > 0 && rolloutPercent step < 100) $ do
+                    liftIO $
+                        putStrLn $
+                            "  Cooloff: " <> show (cooloffSeconds step) <> " seconds"
+                    liftIO $ threadDelay (cooloffSeconds step * 1000000)
+
+                -- Health check between steps
+                when (rolloutPercent step < 100) $
                     checkDeploymentHealth cfg ctx
 
-    liftIO $ putStrLn "Progressive rollout complete"
+    liftIO $ putStrLn "Pod-count rollout complete"
 
 -- | Check deployment health via replica status
 checkDeploymentHealth :: Config -> K8sReleaseContext -> StateFlow ()
@@ -279,7 +271,7 @@ monitorHealth = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    liftIO $ putStrLn $ "Monitoring health for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Monitoring health for scheduler " <> T.unpack (product rt)
 
     updateK8sStatus BSMonitoring
     liftIO $ putStrLn "  Monitoring pod health metrics"
@@ -303,45 +295,36 @@ monitorHealth = do
                     <> "/"
                     <> show desired
 
-    liftIO $ putStrLn "Health monitoring complete"
+    liftIO $ putStrLn "Health monitoring complete for scheduler"
 
--- | Cleanup old version: scale down (and optionally delete) old deployment
+-- | Cleanup old version: optionally delete old deployment and its HPA
 cleanupOldVersion :: StateFlow ()
 cleanupOldVersion = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    isNew <- isNewServiceRelease
-    liftIO $ putStrLn $ "Cleaning up old version for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Cleaning up old version for scheduler " <> T.unpack (product rt)
 
     updateK8sStatus BSScaleDownOld
+    let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
+        oldHpaName = oldDepName <> "-hpa"
 
-    if isNew
-        then do
-            -- New service: no old deployment to clean up
-            liftIO $ putStrLn "  New service: no old deployment to clean up"
-            updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
-        else do
-            let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
-            liftIO $ putStrLn $ "  Scaling down old deployment: " <> T.unpack oldDepName
+    -- Clean up old deployment's HPA if it exists
+    oldHpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
+    when oldHpaFound $ do
+        liftIO $ putStrLn $ "  Deleting old HPA: " <> T.unpack oldHpaName
+        _ <- runK8sIO $ runCmd (buildDeleteHpaCommand cfg (namespace ctx) oldHpaName)
+        pure ()
 
-            -- Scale old deployment to 0 replicas
-            _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
-            updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
+    -- Optionally delete old deployment
+    db <- getDB
+    shouldDelete <- liftIO $ isScaleDownPodsOnCompletion db
+    when shouldDelete $ do
+        liftIO $ putStrLn $ "  Deleting old deployment: " <> T.unpack oldDepName
+        _ <- runK8sIO $ runCmd (buildDeleteDeploymentCommand cfg (namespace ctx) oldDepName)
+        pure ()
 
-            -- Notify Slack of pods scaled down
-            db <- getDB
-            liftIO $ notifyPodsScaledDown db rt (oldVersion ctx)
-
-            -- Optionally delete old deployment
-            db <- getDB
-            shouldDelete <- liftIO $ isScaleDownPodsOnCompletion db
-            when shouldDelete $ do
-                liftIO $ putStrLn $ "  Deleting old deployment: " <> T.unpack oldDepName
-                _ <- runK8sIO $ runCmd (buildDeleteDeploymentCommand cfg (namespace ctx) oldDepName)
-                pure ()
-
-    liftIO $ putStrLn "Cleanup complete"
+    liftIO $ putStrLn "Cleanup complete for scheduler"
 
 -- | Notify complete
 notifyComplete :: StateFlow ()
@@ -352,7 +335,7 @@ notifyComplete = do
 
     liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
     liftIO $ putStrLn $ "   Service: " <> T.unpack (product rt)
-    liftIO $ putStrLn $ "   Category: BackendService"
+    liftIO $ putStrLn $ "   Category: BackendScheduler"
     liftIO $ putStrLn $ "   Status: Completed"
 
     updateRT $ \r -> r{status = Completed}

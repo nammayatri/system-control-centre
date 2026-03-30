@@ -14,6 +14,12 @@ import {
   immediateRevert,
   updateTracker,
   deleteRelease,
+  restartRelease,
+  fastForwardRelease,
+  immediateRevertRelease,
+  fetchReleaseDiff,
+  fetchPodHealth,
+  fetchResources,
 } from './api';
 import { toast } from 'sonner';
 
@@ -202,5 +208,73 @@ export function useUpdateTracker() {
     onError: (err: any) => {
       toast.error(err?.response?.data?.message || err.message || 'Update failed');
     },
+  });
+}
+
+export function useRestartRelease() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (releaseId: string) => restartRelease(releaseId),
+    onSuccess: (_, releaseId) => {
+      toast.success('Restart initiated');
+      qc.invalidateQueries({ queryKey: ['release', releaseId] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err.message || 'Restart failed');
+    },
+  });
+}
+
+export function useFastForwardRelease() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (releaseId: string) => fastForwardRelease(releaseId),
+    onSuccess: (_, releaseId) => {
+      toast.success('Fast forward initiated');
+      qc.invalidateQueries({ queryKey: ['release', releaseId] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err.message || 'Fast forward failed');
+    },
+  });
+}
+
+export function useImmediateRevertWithSync() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ releaseId, isRevertSync }: { releaseId: string; isRevertSync: boolean }) =>
+      immediateRevertRelease(releaseId, isRevertSync),
+    onSuccess: (_, vars) => {
+      toast.success('Immediate revert initiated');
+      qc.invalidateQueries({ queryKey: ['release', vars.releaseId] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err.message || 'Immediate revert failed');
+    },
+  });
+}
+
+export function useReleaseDiff(id: string | undefined) {
+  return useQuery({
+    queryKey: ['release-diff', id],
+    queryFn: () => fetchReleaseDiff(id!),
+    enabled: !!id,
+  });
+}
+
+export function usePodHealth(id: string | undefined) {
+  return useQuery({
+    queryKey: ['pod-health', id],
+    queryFn: () => fetchPodHealth(id!),
+    refetchInterval: 10000,
+    enabled: !!id,
+  });
+}
+
+export function useResources(product: string | undefined, service: string | undefined) {
+  return useQuery({
+    queryKey: ['resources', product, service],
+    queryFn: () => fetchResources(product!, service!),
+    enabled: !!product && !!service,
   });
 }

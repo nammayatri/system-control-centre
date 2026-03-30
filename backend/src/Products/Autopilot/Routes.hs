@@ -14,7 +14,7 @@ import Control.Exception (SomeException, try)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
-import Core.Config.Runtime (isApproveAllReleases)
+import Products.Autopilot.RuntimeConfig (isApproveAllReleases)
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
@@ -28,17 +28,20 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
-import Data.Time.Format (defaultTimeLocale, parseTimeM)
+import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
-import Products.Autopilot.K8s.Deployment (getDeploymentEnvs)
-import Products.Autopilot.K8s.Execute (K8sResult (..), runCmd)
+import Products.Autopilot.K8s.Deployment (buildSetImageCommand, getDeploymentEnvs)
+import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
+import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout)
 import Products.Autopilot.Notifications (notifyReleaseApproved, notifyReleaseCreated, notifyReleaseReverted)
+import GHC.Int (Int32)
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.Queries.ServerConfig (listAllServerConfigs, upsertServerConfig)
+import Products.Autopilot.Queries.VsEditTracker
 import Products.Autopilot.Sync (triggerImmediateRevertSync)
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
@@ -80,6 +83,33 @@ type CoreAPI =
         :<|> "server-config" :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
         :<|> "envs" :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
         :<|> "envs" :> "secondary" :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
+        -- New endpoints
+        :<|> "releases" :> Capture "releaseId" Text :> "diff" :> Get '[JSON] Value
+        :<|> "releases" :> Capture "releaseId" Text :> "pods" :> "health" :> Get '[JSON] Value
+        :<|> "releases" :> Capture "releaseId" Text :> "revert" :> "immediate" :> ReqBody '[JSON] ImmediateRevertReq :> Post '[JSON] APIResponse
+        :<|> "releases" :> Capture "releaseId" Text :> "restart" :> ReqBody '[JSON] RestartReleaseReq :> Post '[JSON] APIResponse
+        :<|> "releases" :> Capture "releaseId" Text :> "fast-forward" :> ReqBody '[JSON] FastForwardReq :> Post '[JSON] APIResponse
+        :<|> "resources" :> QueryParam "PRODUCT" Text :> QueryParam "SERVICE" Text :> Get '[JSON] Value
+        -- Product Config CRUD
+        :<|> "products" :> "config" :> Get '[JSON] [ProductConfigResponse]
+        :<|> "products" :> "config" :> ReqBody '[JSON] UpsertProductReq :> Post '[JSON] APIResponse
+        :<|> "products" :> "config" :> Capture "id" Int32 :> Get '[JSON] Value
+        :<|> "products" :> "config" :> Capture "id" Int32 :> ReqBody '[JSON] UpsertProductReq :> Put '[JSON] APIResponse
+        :<|> "products" :> "config" :> Capture "id" Int32 :> Delete '[JSON] APIResponse
+        -- Release Config CRUD
+        :<|> "services" :> "config" :> QueryParam "product" Text :> Get '[JSON] [ReleaseConfigResponse]
+        :<|> "services" :> "config" :> ReqBody '[JSON] UpsertServiceReq :> Post '[JSON] APIResponse
+        :<|> "services" :> "config" :> Capture "id" Int32 :> Get '[JSON] Value
+        :<|> "services" :> "config" :> Capture "id" Int32 :> ReqBody '[JSON] UpsertServiceReq :> Put '[JSON] APIResponse
+        :<|> "services" :> "config" :> Capture "id" Int32 :> Delete '[JSON] APIResponse
+        -- VS Edit Tracker
+        :<|> "vs-edit-tracker" :> ReqBody '[JSON] CreateVsEditTrackerReq :> Post '[JSON] Value
+        :<|> "vs-edit-tracker" :> "list" :> QueryParam "from" Text :> QueryParam "to" Text :> Get '[JSON] [Value]
+        :<|> "vs-edit-tracker" :> Capture "id" Text :> Get '[JSON] Value
+        :<|> "vs-edit-tracker" :> Capture "id" Text :> ReqBody '[JSON] UpdateVsEditTrackerReq :> Put '[JSON] APIResponse
+        :<|> "vs-edit-tracker" :> "lock" :> ReqBody '[JSON] VsLockReq :> Post '[JSON] APIResponse
+        :<|> "vs-edit-tracker" :> "unlock" :> ReqBody '[JSON] VsUnlockReq :> Post '[JSON] APIResponse
+        :<|> "vs-edit-tracker" :> "revert" :> Capture "id" Text :> Put '[JSON] APIResponse
 
 coreServer :: ServerT CoreAPI Flow
 coreServer =
@@ -114,6 +144,33 @@ coreServer =
         -- Envs
         :<|> fetchEnvsH
         :<|> fetchSecondaryEnvsH
+        -- New endpoints
+        :<|> releaseDiffH
+        :<|> podHealthH
+        :<|> immediateRevertH
+        :<|> restartReleaseH
+        :<|> fastForwardH
+        :<|> fetchResourcesH
+        -- Product Config CRUD
+        :<|> listProductConfigsH
+        :<|> createProductConfigH
+        :<|> getProductConfigH
+        :<|> updateProductConfigH
+        :<|> deleteProductConfigH
+        -- Release Config CRUD
+        :<|> listReleaseConfigsH
+        :<|> createReleaseConfigH
+        :<|> getReleaseConfigH
+        :<|> updateReleaseConfigH
+        :<|> deleteReleaseConfigH
+        -- VS Edit Tracker
+        :<|> createVsEditTrackerH
+        :<|> listVsEditTrackersH
+        :<|> getVsEditTrackerH
+        :<|> updateVsEditTrackerH
+        :<|> lockVsEditTrackerH
+        :<|> unlockVsEditTrackerH
+        :<|> revertVsEditTrackerH
 
 upsertProductH :: UpsertProductReq -> Flow APIResponse
 upsertProductH UpsertProductReq{..} = do
@@ -259,13 +316,19 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                                 _ -> Nothing
                                 _ -> Nothing
                     resolvedOldVersion <-
-                        if T.toLower oldVersion == "unknown" || T.null oldVersion
+                        if fromMaybe False newService
                             then do
-                                discovered <- liftIO $ getPrimarySubsetFromVirtualService cfg (getProductNamespace pCfg) (getProductVsName pCfg) targetSvcHost
-                                pure $ case discovered of
-                                    Right (Just subset) -> subset
-                                    _ -> oldVersion
-                            else pure oldVersion
+                                -- New service: no old version to discover, set to "new"
+                                liftIO $ putStrLn $ "[createReleaseH] New service flag set, skipping old version discovery"
+                                pure (if T.null oldVersion then "new" else oldVersion)
+                            else
+                                if T.toLower oldVersion == "unknown" || T.null oldVersion
+                                    then do
+                                        discovered <- liftIO $ getPrimarySubsetFromVirtualService cfg (getProductNamespace pCfg) (getProductVsName pCfg) targetSvcHost
+                                        pure $ case discovered of
+                                            Right (Just subset) -> subset
+                                            _ -> oldVersion
+                                    else pure oldVersion
                     let derivedContext =
                             K8sReleaseContext
                                 { cluster = getProductCluster pCfg
@@ -306,9 +369,18 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                             Just "manual" -> Manual
                             _ -> Auto
                     approveAll <- liftIO $ isApproveAllReleases db
+                    now <- liftIO getCurrentTime
                     let initialApproval = case isApproved of
                             Just True -> True
                             _ -> approveAll && fromMaybe False isSystemTriggered
+                        -- Auto-generate release tag if not provided
+                        autoTag = case releaseTag of
+                            Just t | not (T.null t) -> Just t
+                            _ ->
+                                let datePart = T.pack (formatTime defaultTimeLocale "%Y%m%d" now)
+                                    modeText = case reqMode of Auto -> "AUTO"; Manual -> "MANUAL"
+                                    priText = T.pack (show (fromMaybe 0 priority))
+                                 in Just (T.intercalate "_" [product, datePart, newVersion, service, modeText, env, priText])
                         tracker =
                             ReleaseTracker
                                 { releaseId = rid
@@ -323,7 +395,7 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                 , approvedBy = approvedBy
                                 , isApproved = initialApproval
                                 , isInfraApproved = fromMaybe (fromMaybe False (S.productNeedInfraApproval pCfg >>= \need -> if need then Just False else Just True)) isInfraApproved
-                                , releaseTag = releaseTag
+                                , releaseTag = autoTag
                                 , dateCreated = Nothing -- DB sets via DEFAULT now()
                                 , lastUpdated = Nothing -- DB sets via DEFAULT now()
                                 , scheduleTime = scheduleTime
@@ -431,7 +503,7 @@ revertReleaseH rid req = do
                 trackerCreatedBy = NT.createdBy tracker
                 isImmediate = fromMaybe False (immediate req)
                 origUdf1 = maybe False (\t -> T.toLower t == "true") (NT.udf1 tracker)
-                shouldSyncRevert = fromMaybe False (isRevertSync req) && origUdf1
+                shouldSyncRevert = fromMaybe False ((req :: RevertReleaseReq).isRevertSync) && origUdf1
                 revertedContext =
                     oldCtx
                         { deploymentName = ctxServiceName <> "-" <> ctxOldVersion
@@ -455,8 +527,8 @@ revertReleaseH rid req = do
                         { NT.releaseId = newRid
                         , NT.status = Created
                         , NT.releaseWFStatus = Init
-                        , NT.createdBy = fromMaybe trackerCreatedBy (requestedBy req)
-                        , NT.approvedBy = if isImmediate then Just (fromMaybe trackerCreatedBy (requestedBy req)) else Nothing
+                        , NT.createdBy = fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)
+                        , NT.approvedBy = if isImmediate then Just (fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)) else Nothing
                         , NT.isApproved = isImmediate
                         , NT.scheduleTime = Just now
                         , NT.startTime = Nothing
@@ -477,7 +549,7 @@ revertReleaseH rid req = do
                         [ "originalId" .= rid
                         , "shouldSyncRevert" .= shouldSyncRevert
                         , "isImmediate" .= isImmediate
-                        , "origUdf1" .= origUdf1
+                        , "origUdf1" .= (origUdf1 :: Bool)
                         ]
                     )
             liftIO $ notifyReleaseReverted db revertedTracker
@@ -1135,3 +1207,608 @@ fetchSecondaryEnvsH mProduct mEnv mService = do
                     Just v -> pure v
                     Nothing -> pure $ toJSON ([] :: [Value])
             _ -> pure $ toJSON ([] :: [Value])
+
+-- ============================================================================
+-- Diff Endpoint (GET /releases/:id/diff)
+-- ============================================================================
+
+releaseDiffH :: Text -> Flow Value
+releaseDiffH rid = do
+    cfg <- getConfig
+    db <- getDBEnv
+    m <- liftIO $ findReleaseTracker db rid
+    case m of
+        Nothing -> pure $ object ["oldfile" .= ("" :: Text), "newfile" .= ("" :: Text), "message" .= ("Release not found" :: Text)]
+        Just (tracker, mTargetState) -> do
+            let mCtx = case mTargetState of
+                    Just (K8sState k8s) -> Just (context k8s)
+                    _ -> Nothing
+            case mCtx of
+                Nothing ->
+                    pure $ object ["oldfile" .= ("" :: Text), "newfile" .= ("" :: Text), "message" .= ("No K8s context available" :: Text)]
+                Just ctx -> do
+                    let ns = ctx.namespace
+                        svcHost = ctx.serviceName
+                        oldDep = svcHost <> "-" <> ctx.oldVersion
+                        newDep = svcHost <> "-" <> ctx.newVersion
+                    -- Get old deployment envs
+                    oldEnvResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack oldDep, "-o jsonpath='{.spec.template.spec.containers[0].env}'"])
+                    -- Get new deployment envs (or udf2 env switch data)
+                    let newEnvSource = NT.udf2 tracker
+                    case newEnvSource of
+                        Just udf2Envs | not (T.null udf2Envs) -> do
+                            -- udf2 contains the new env switch data
+                            let oldEnvText = case oldEnvResult of
+                                    Right (K8sResult out) -> cleanJsonpath out
+                                    Left _ -> ""
+                            pure $ object ["oldfile" .= oldEnvText, "newfile" .= udf2Envs, "message" .= ("Diff from env switch (udf2)" :: Text)]
+                        _ -> do
+                            -- Fetch new deployment envs from K8s
+                            newEnvResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack newDep, "-o jsonpath='{.spec.template.spec.containers[0].env}'"])
+                            let oldEnvText = case oldEnvResult of
+                                    Right (K8sResult out) -> cleanJsonpath out
+                                    Left _ -> ""
+                                newEnvText = case newEnvResult of
+                                    Right (K8sResult out) -> cleanJsonpath out
+                                    Left _ -> ""
+                            if T.null oldEnvText && T.null newEnvText
+                                then pure $ object ["oldfile" .= ("" :: Text), "newfile" .= ("" :: Text), "message" .= ("No diff data available" :: Text)]
+                                else pure $ object ["oldfile" .= oldEnvText, "newfile" .= newEnvText, "message" .= ("Deployment env diff" :: Text)]
+  where
+    cleanJsonpath :: Text -> Text
+    cleanJsonpath out = T.strip (T.dropWhile (== '\'') (T.dropWhileEnd (== '\'') (T.strip out)))
+
+-- ============================================================================
+-- Pod Health Endpoint (GET /releases/:id/pods/health)
+-- ============================================================================
+
+podHealthH :: Text -> Flow Value
+podHealthH rid = do
+    cfg <- getConfig
+    db <- getDBEnv
+    m <- liftIO $ findReleaseTracker db rid
+    case m of
+        Nothing -> pure $ object ["error" .= ("Release not found" :: Text)]
+        Just (_tracker, mTargetState) -> do
+            let mCtx = case mTargetState of
+                    Just (K8sState k8s) -> Just (context k8s)
+                    _ -> Nothing
+            case mCtx of
+                Nothing -> pure $ object ["error" .= ("No K8s context available" :: Text)]
+                Just ctx -> do
+                    let ns = ctx.namespace
+                        svcHost = ctx.serviceName
+                    podResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get pods -l app=" <> T.unpack svcHost, "-o json"])
+                    case podResult of
+                        Left (K8sError err) -> pure $ object ["error" .= err]
+                        Right (K8sResult out) ->
+                            case A.decodeStrict' (encodeUtf8 out) :: Maybe Value of
+                                Nothing -> pure $ object ["error" .= ("Failed to parse pod JSON" :: Text)]
+                                Just podJson -> pure $ parsePodHealth podJson
+
+parsePodHealth :: Value -> Value
+parsePodHealth (Object root) =
+    case KM.lookup (K.fromText "items") root of
+        Just (Array items) ->
+            let pods = map parseSinglePod (foldr (:) [] items)
+                total = length pods
+                running = length (filter (\p -> getStr' "status" p == "Running") pods)
+                pending = length (filter (\p -> getStr' "status" p == "Pending") pods)
+                failed = length (filter (\p -> getStr' "status" p == "Failed") pods)
+                unknown = total - running - pending - failed
+             in object
+                    [ "pods" .= pods
+                    , "summary" .= object
+                        [ "total" .= total
+                        , "running" .= running
+                        , "pending" .= pending
+                        , "failed" .= failed
+                        , "unknown" .= unknown
+                        ]
+                    ]
+        _ -> object ["pods" .= ([] :: [Value]), "summary" .= object ["total" .= (0 :: Int), "running" .= (0 :: Int), "pending" .= (0 :: Int), "failed" .= (0 :: Int), "unknown" .= (0 :: Int)]]
+parsePodHealth _ = object ["pods" .= ([] :: [Value]), "summary" .= object ["total" .= (0 :: Int), "running" .= (0 :: Int), "pending" .= (0 :: Int), "failed" .= (0 :: Int), "unknown" .= (0 :: Int)]]
+
+parseSinglePod :: Value -> Value
+parseSinglePod (Object podObj) =
+    let nameVal = case getObj' "metadata" podObj >>= getTxt' "name" of
+            Just n -> n
+            Nothing -> ""
+        phaseVal = case getObj' "status" podObj >>= getTxt' "phase" of
+            Just p -> p
+            Nothing -> "Unknown"
+        -- Check container readiness
+        readyVal = case getObj' "status" podObj >>= getArr' "containerStatuses" of
+            Just statuses -> all isContainerReady statuses
+            Nothing -> False
+        -- Get restart count
+        restartsVal = case getObj' "status" podObj >>= getArr' "containerStatuses" of
+            Just statuses -> sum (map getRestartCount statuses)
+            Nothing -> 0 :: Int
+        -- Get creation timestamp as age
+        ageVal = case getObj' "metadata" podObj >>= getTxt' "creationTimestamp" of
+            Just ts -> ts
+            Nothing -> ""
+        -- Get version from container image tag
+        versionVal = case getObj' "spec" podObj >>= getArr' "containers" of
+            Just (c : _) -> extractImageTag c
+            _ -> ""
+     in object
+            [ "name" .= nameVal
+            , "status" .= phaseVal
+            , "ready" .= readyVal
+            , "restarts" .= restartsVal
+            , "age" .= ageVal
+            , "version" .= versionVal
+            ]
+parseSinglePod _ = object ["name" .= ("" :: Text), "status" .= ("Unknown" :: Text), "ready" .= False, "restarts" .= (0 :: Int), "age" .= ("" :: Text), "version" .= ("" :: Text)]
+
+isContainerReady :: Value -> Bool
+isContainerReady (Object cs) = case KM.lookup (K.fromText "ready") cs of
+    Just (Bool b) -> b
+    _ -> False
+isContainerReady _ = False
+
+getRestartCount :: Value -> Int
+getRestartCount (Object cs) = case KM.lookup (K.fromText "restartCount") cs of
+    Just (Number n) -> round n
+    _ -> 0
+getRestartCount _ = 0
+
+extractImageTag :: Value -> Text
+extractImageTag (Object c) = case KM.lookup (K.fromText "image") c of
+    Just (String img) ->
+        -- Extract tag: image might be repo/name:tag or repo/name-version
+        let afterColon = T.takeWhileEnd (/= ':') img
+            afterDash = T.takeWhileEnd (/= '-') img
+         in if T.isInfixOf ":" img then afterColon else afterDash
+    _ -> ""
+extractImageTag _ = ""
+
+-- Helpers for pod parsing (avoid clash with existing ones)
+getObj' :: Text -> KM.KeyMap Value -> Maybe (KM.KeyMap Value)
+getObj' key obj = case KM.lookup (K.fromText key) obj of Just (Object o) -> Just o; _ -> Nothing
+
+getArr' :: Text -> KM.KeyMap Value -> Maybe [Value]
+getArr' key obj = case KM.lookup (K.fromText key) obj of Just (Array a) -> Just (foldr (:) [] a); _ -> Nothing
+
+getTxt' :: Text -> KM.KeyMap Value -> Maybe Text
+getTxt' key obj = case KM.lookup (K.fromText key) obj of Just (String t) -> Just t; _ -> Nothing
+
+getStr' :: Text -> Value -> Text
+getStr' key (Object obj) = case KM.lookup (K.fromText key) obj of Just (String t) -> t; _ -> ""
+getStr' _ _ = ""
+
+-- ============================================================================
+-- Immediate Revert (POST /releases/:id/revert/immediate)
+-- ============================================================================
+
+immediateRevertH :: Text -> ImmediateRevertReq -> Flow APIResponse
+immediateRevertH rid req = do
+    cfg <- getConfig
+    db <- getDBEnv
+    m <- liftIO $ findReleaseTracker db rid
+    case m of
+        Nothing -> pure $ APIResponse "ERROR" "Release not found"
+        Just (tracker, mTargetState) -> do
+            let currentStatus = NT.status tracker
+            if currentStatus /= Completed && currentStatus /= InProgress
+                then pure $ APIResponse "ERROR" ("Cannot immediate-revert from status: " <> T.pack (show currentStatus))
+                else do
+                    let mCtx = case mTargetState of
+                            Just (K8sState k8s) -> Just (context k8s)
+                            _ -> Nothing
+                    case mCtx of
+                        Nothing -> pure $ APIResponse "ERROR" "No K8s context available for revert"
+                        Just ctx -> do
+                            -- Build a context for setting the old image back on the new deployment
+                            let revertCtx = (ctx :: K8sReleaseContext)
+                                    { oldVersion = ctx.newVersion
+                                    , newVersion = ctx.oldVersion
+                                    }
+                            -- Set image back to old version
+                            let setImageCmd = buildSetImageCommand cfg revertCtx
+                            imgResult <- liftIO $ executeWithRetry cfg setImageCmd
+                            case imgResult of
+                                Left (K8sError err) -> pure $ APIResponse "ERROR" ("Failed to set image: " <> err)
+                                Right _ -> do
+                                    -- Update VS to route 100% to old version
+                                    vsResult <- liftIO $ applyVirtualServiceRollout cfg ctx 100 0
+                                    case vsResult of
+                                        Left (K8sError err) -> do
+                                            liftIO $ putStrLn $ "[IMMEDIATE-REVERT] VS update failed: " <> T.unpack err
+                                            pure ()
+                                        Right _ -> pure ()
+                                    -- Update tracker status to Reverted
+                                    let updated = (tracker :: ReleaseTracker){NT.status = Reverted}
+                                    liftIO $ insertReleaseTracker db updated mTargetState
+                                    liftIO $ insertReleaseEvent db rid "BUSINESS" "IMMEDIATE_REVERT" (object ["requestedBy" .= (req :: ImmediateRevertReq).requestedBy, "info" .= (req :: ImmediateRevertReq).info])
+                                    -- Send Slack notification
+                                    liftIO $ notifyReleaseReverted db updated
+                                    -- Optionally trigger sync revert
+                                    let shouldSync = fromMaybe False (isRevertSync (req :: ImmediateRevertReq))
+                                    when shouldSync $
+                                        liftIO $ triggerImmediateRevertSync cfg db tracker mTargetState
+                                    pure $ APIResponse "SUCCESS" "Immediate revert completed"
+
+-- ============================================================================
+-- Restart Release (POST /releases/:id/restart)
+-- ============================================================================
+
+restartReleaseH :: Text -> RestartReleaseReq -> Flow APIResponse
+restartReleaseH rid req = do
+    db <- getDBEnv
+    m <- liftIO $ findReleaseTracker db rid
+    case m of
+        Nothing -> pure $ APIResponse "ERROR" "Release not found"
+        Just (tracker, mTargetState) -> do
+            let currentStatus = NT.status tracker
+            if currentStatus /= Aborted && currentStatus /= UserAborted && currentStatus /= Reverted
+                then pure $ APIResponse "ERROR" ("Cannot restart from status: " <> T.pack (show currentStatus) <> ". Valid: Aborted, UserAborted, Reverted")
+                else do
+                    now <- liftIO getCurrentTime
+                    let updated = (tracker :: ReleaseTracker)
+                            { NT.status = Created
+                            , NT.releaseWFStatus = Init
+                            , NT.startTime = Nothing
+                            , NT.endTime = Nothing
+                            , NT.scheduleTime = Just now
+                            , NT.rolloutHistory = []
+                            }
+                    liftIO $ insertReleaseTracker db updated mTargetState
+                    liftIO $ insertReleaseEvent db rid "BUSINESS" "RELEASE_RESTARTED"
+                        (object
+                            [ "requestedBy" .= (req :: RestartReleaseReq).requestedBy
+                            , "reason" .= (req :: RestartReleaseReq).reason
+                            , "previousStatus" .= T.pack (show currentStatus)
+                            ])
+                    pure $ APIResponse "SUCCESS" "Release restarted"
+
+-- ============================================================================
+-- Fast Forward (POST /releases/:id/fast-forward)
+-- ============================================================================
+
+fastForwardH :: Text -> FastForwardReq -> Flow APIResponse
+fastForwardH rid req = do
+    db <- getDBEnv
+    m <- liftIO $ findReleaseTracker db rid
+    case m of
+        Nothing -> pure $ APIResponse "ERROR" "Release not found"
+        Just (tracker, mTargetState) -> do
+            let currentStatus = NT.status tracker
+            if currentStatus /= InProgress
+                then pure $ APIResponse "ERROR" ("Cannot fast-forward from status: " <> T.pack (show currentStatus) <> ". Must be InProgress")
+                else do
+                    -- Mark the current rollout history step as completed by zeroing out the cooloff
+                    let history = NT.rolloutHistory tracker
+                        updatedHistory = case history of
+                            [] -> []
+                            steps ->
+                                let lastIdx = length steps - 1
+                                    updateStep i step =
+                                        if i == lastIdx
+                                            then step{historyCooloffSeconds = 0}
+                                            else step
+                                 in zipWith updateStep [0 ..] steps
+                        updated = (tracker :: ReleaseTracker){NT.rolloutHistory = updatedHistory}
+                    liftIO $ insertReleaseTracker db updated mTargetState
+                    liftIO $ insertReleaseEvent db rid "BUSINESS" "FAST_FORWARD"
+                        (object
+                            [ "requestedBy" .= (req :: FastForwardReq).requestedBy
+                            , "reason" .= (req :: FastForwardReq).reason
+                            ])
+                    pure $ APIResponse "SUCCESS" "Fast forward: cooloff period skipped, runner will advance on next poll"
+
+-- ============================================================================
+-- Resources Endpoint (GET /resources?PRODUCT=&SERVICE=)
+-- ============================================================================
+
+fetchResourcesH :: Maybe Text -> Maybe Text -> Flow Value
+fetchResourcesH mProduct mService = do
+    cfg <- getConfig
+    db <- getDBEnv
+    case (mProduct, mService) of
+        (Just productName, Just serviceName') -> do
+            p <- liftIO $ findProductByName db productName
+            case p of
+                Nothing -> pure $ object ["error" .= ("Product not found" :: Text)]
+                Just pCfg -> do
+                    svc <- liftIO $ findServiceByProductAndName db productName serviceName'
+                    let svcHost = case svc of
+                            Just s -> fromMaybe serviceName' (getServiceHost s)
+                            Nothing -> serviceName'
+                        ns = getProductNamespace pCfg
+                        vsName' = getProductVsName pCfg
+                    -- Get the running version from VS
+                    versionResult <- liftIO $ getPrimarySubsetFromVirtualService cfg ns vsName' svcHost
+                    case versionResult of
+                        Left err -> pure $ object ["error" .= err]
+                        Right Nothing -> pure $ object ["error" .= ("No running version found" :: Text)]
+                        Right (Just runningVersion) -> do
+                            let fullDepName = svcHost <> "-" <> runningVersion
+                            resResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack fullDepName, "-o jsonpath='{.spec.template.spec.containers[0].resources}'"])
+                            case resResult of
+                                Left (K8sError err) -> pure $ object ["error" .= err]
+                                Right (K8sResult out) ->
+                                    let cleaned = T.strip (T.dropWhile (== '\'') (T.dropWhileEnd (== '\'') (T.strip out)))
+                                     in case A.decodeStrict' (encodeUtf8 cleaned) :: Maybe Value of
+                                            Just v -> pure v
+                                            Nothing -> pure $ object ["requests" .= object [], "limits" .= object []]
+        _ -> pure $ object ["error" .= ("PRODUCT and SERVICE query params required" :: Text)]
+
+-- ============================================================================
+-- Product Config CRUD (GET/POST/GET/:id/PUT/:id/DELETE/:id /products/config)
+-- ============================================================================
+
+listProductConfigsH :: Flow [ProductConfigResponse]
+listProductConfigsH = do
+    db <- getDBEnv
+    rows <- liftIO $ listProducts db
+    pure $ map toProductConfigResponse rows
+
+toProductConfigResponse :: S.ProductConfig -> ProductConfigResponse
+toProductConfigResponse p =
+    ProductConfigResponse
+        { id = S.productConfigId p
+        , product = S.productName p
+        , repoName = S.productRepoName p
+        , productType = S.productType p
+        , productAcronym = S.productAcronym p
+        , releaseBranch = S.productReleaseBranch p
+        , needInfraApproval = S.productNeedInfraApproval p
+        , cluster = Just (getProductCluster p)
+        , namespace = Just (getProductNamespace p)
+        , vsName = Just (getProductVsName p)
+        , syncCluster = getProductSyncCluster p
+        }
+
+createProductConfigH :: UpsertProductReq -> Flow APIResponse
+createProductConfigH req = upsertProductH req
+
+getProductConfigH :: Int32 -> Flow Value
+getProductConfigH pid = do
+    db <- getDBEnv
+    m <- liftIO $ findProductConfigById db pid
+    case m of
+        Nothing -> pure $ object ["error" .= ("Product config not found" :: Text)]
+        Just p -> pure $ toJSON (toProductConfigResponse p)
+
+updateProductConfigH :: Int32 -> UpsertProductReq -> Flow APIResponse
+updateProductConfigH _ req = upsertProductH req
+
+deleteProductConfigH :: Int32 -> Flow APIResponse
+deleteProductConfigH pid = do
+    db <- getDBEnv
+    liftIO $ deleteProductConfig db pid
+    pure $ APIResponse "SUCCESS" "Product config deleted"
+
+-- ============================================================================
+-- Release Config CRUD (GET/POST/GET/:id/PUT/:id/DELETE/:id /services/config)
+-- ============================================================================
+
+listReleaseConfigsH :: Maybe Text -> Flow [ReleaseConfigResponse]
+listReleaseConfigsH mProduct = do
+    db <- getDBEnv
+    rows <- case mProduct of
+        Just p -> liftIO $ listReleaseConfigByProduct db p
+        Nothing -> liftIO $ listAllReleaseConfigs db
+    pure $ map toReleaseConfigResponse rows
+
+toReleaseConfigResponse :: S.ReleaseConfig -> ReleaseConfigResponse
+toReleaseConfigResponse r =
+    ReleaseConfigResponse
+        { id = S.releaseConfigId r
+        , serviceName = S.serviceName r
+        , serviceProduct = S.serviceProduct r
+        , serviceType = S.serviceType r
+        , emails = S.releaseConfigEmails r
+        , rolloutStrategy = S.releaseConfigRolloutStrategy r
+        , decisionConfig = S.releaseConfigDecisionConfig r
+        , flags = S.releaseConfigFlags r
+        , slackWebhookUrls = S.releaseConfigSlackWebhookUrls r
+        , serviceAcronym = S.serviceAcronym r
+        , bitbucketPath = S.releaseConfigBitbucketPath r
+        , microserviceType = S.releaseConfigMicroserviceType r
+        , revertStrategy = S.releaseConfigRevertStrategy r
+        , jiraWebhookUrl = S.releaseConfigJiraWebhookUrl r
+        , serviceHost = getServiceHost r
+        }
+
+createReleaseConfigH :: UpsertServiceReq -> Flow APIResponse
+createReleaseConfigH req = upsertServiceH req
+
+getReleaseConfigH :: Int32 -> Flow Value
+getReleaseConfigH rid = do
+    db <- getDBEnv
+    m <- liftIO $ findReleaseConfigById db rid
+    case m of
+        Nothing -> pure $ object ["error" .= ("Release config not found" :: Text)]
+        Just r -> pure $ toJSON (toReleaseConfigResponse r)
+
+updateReleaseConfigH :: Int32 -> UpsertServiceReq -> Flow APIResponse
+updateReleaseConfigH _ req = upsertServiceH req
+
+deleteReleaseConfigH :: Int32 -> Flow APIResponse
+deleteReleaseConfigH rid = do
+    db <- getDBEnv
+    liftIO $ deleteReleaseConfig db rid
+    pure $ APIResponse "SUCCESS" "Release config deleted"
+
+-- ============================================================================
+-- VS Edit Tracker CRUD
+-- ============================================================================
+
+vsEditTrackerToJson :: S.VsEditTracker -> Value
+vsEditTrackerToJson t =
+    object
+        [ "id" .= S.vetId t
+        , "product" .= S.vetProduct t
+        , "service" .= S.vetService t
+        , "env" .= S.vetEnv t
+        , "vs_name" .= S.vetVsName t
+        , "old_vs_data" .= S.vetOldVsData t
+        , "new_vs_data" .= S.vetNewVsData t
+        , "status" .= S.vetStatus t
+        , "created_by" .= S.vetCreatedBy t
+        , "approved_by" .= S.vetApprovedBy t
+        , "is_locked" .= S.vetIsLocked t
+        , "locked_by" .= S.vetLockedBy t
+        , "locked_at" .= S.vetLockedAt t
+        , "lock_expiry" .= S.vetLockExpiry t
+        , "monitoring_end_time" .= S.vetMonitoringEndTime t
+        , "info" .= S.vetInfo t
+        , "created_at" .= S.vetCreatedAt t
+        , "updated_at" .= S.vetUpdatedAt t
+        ]
+
+createVsEditTrackerH :: CreateVsEditTrackerReq -> Flow Value
+createVsEditTrackerH CreateVsEditTrackerReq{..} = do
+    db <- getDBEnv
+    now <- liftIO getCurrentTime
+    tid <- liftIO (UUID.toText <$> UUID.nextRandom)
+    -- Check for existing active lock
+    mLock <- liftIO $ findActiveLock db product vsName env now
+    case mLock of
+        Just existing ->
+            pure $ object
+                [ "error" .= ("VS is already locked by " <> fromMaybe "unknown" (S.vetLockedBy existing) :: Text)
+                , "locked_by" .= S.vetLockedBy existing
+                , "lock_expiry" .= S.vetLockExpiry existing
+                ]
+        Nothing -> do
+            let lockExpiry = addUTCTime (15 * 60) now -- 15 min default
+                row = S.VsEditTrackerT
+                    { vetId = tid
+                    , vetProduct = product
+                    , vetService = service
+                    , vetEnv = env
+                    , vetVsName = vsName
+                    , vetOldVsData = oldVsData
+                    , vetNewVsData = Nothing
+                    , vetStatus = "CREATED"
+                    , vetCreatedBy = createdBy
+                    , vetApprovedBy = Nothing
+                    , vetIsLocked = Just True
+                    , vetLockedBy = Just createdBy
+                    , vetLockedAt = Just now
+                    , vetLockExpiry = Just lockExpiry
+                    , vetMonitoringEndTime = Nothing
+                    , vetInfo = info
+                    , vetCreatedAt = now
+                    , vetUpdatedAt = now
+                    }
+            liftIO $ insertVsEditTracker db row
+            pure $ vsEditTrackerToJson row
+
+listVsEditTrackersH :: Maybe Text -> Maybe Text -> Flow [Value]
+listVsEditTrackersH mFrom mTo = do
+    db <- getDBEnv
+    let tryParse t = case parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" (T.unpack t) of
+            Just v -> Just v
+            Nothing -> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q%z" (T.unpack t)
+        from = mFrom >>= tryParse
+        to = mTo >>= tryParse
+    rows <- liftIO $ listVsEditTrackers db from to
+    pure $ map vsEditTrackerToJson rows
+
+getVsEditTrackerH :: Text -> Flow Value
+getVsEditTrackerH tid = do
+    db <- getDBEnv
+    m <- liftIO $ findVsEditTrackerById db tid
+    case m of
+        Nothing -> pure $ object ["error" .= ("VS edit tracker not found" :: Text)]
+        Just t -> pure $ vsEditTrackerToJson t
+
+updateVsEditTrackerH :: Text -> UpdateVsEditTrackerReq -> Flow APIResponse
+updateVsEditTrackerH tid UpdateVsEditTrackerReq{..} = do
+    db <- getDBEnv
+    now <- liftIO getCurrentTime
+    m <- liftIO $ findVsEditTrackerById db tid
+    case m of
+        Nothing -> pure $ APIResponse "ERROR" "VS edit tracker not found"
+        Just existing -> do
+            let updated = existing
+                    { S.vetNewVsData = case newVsData of
+                        Just d -> Just d
+                        Nothing -> S.vetNewVsData existing
+                    , S.vetStatus = fromMaybe (S.vetStatus existing) status
+                    , S.vetApprovedBy = case approvedBy of
+                        Just a -> Just a
+                        Nothing -> S.vetApprovedBy existing
+                    , S.vetInfo = case info of
+                        Just i -> Just i
+                        Nothing -> S.vetInfo existing
+                    , S.vetUpdatedAt = now
+                    }
+            liftIO $ updateVsEditTracker db updated
+            pure $ APIResponse "SUCCESS" "VS edit tracker updated"
+
+lockVsEditTrackerH :: VsLockReq -> Flow APIResponse
+lockVsEditTrackerH VsLockReq{..} = do
+    db <- getDBEnv
+    now <- liftIO getCurrentTime
+    -- Check for existing active lock
+    mLock <- liftIO $ findActiveLock db product vsName env now
+    case mLock of
+        Just existing ->
+            pure $ APIResponse "ERROR" ("VS already locked by " <> fromMaybe "unknown" (S.vetLockedBy existing))
+        Nothing -> do
+            tid <- liftIO (UUID.toText <$> UUID.nextRandom)
+            let durationSecs = fromIntegral (fromMaybe 15 lockDurationMinutes) * 60
+                lockExpiry = addUTCTime durationSecs now
+                row = S.VsEditTrackerT
+                    { vetId = tid
+                    , vetProduct = product
+                    , vetService = ""
+                    , vetEnv = env
+                    , vetVsName = vsName
+                    , vetOldVsData = Nothing
+                    , vetNewVsData = Nothing
+                    , vetStatus = "LOCKED"
+                    , vetCreatedBy = lockedBy
+                    , vetApprovedBy = Nothing
+                    , vetIsLocked = Just True
+                    , vetLockedBy = Just lockedBy
+                    , vetLockedAt = Just now
+                    , vetLockExpiry = Just lockExpiry
+                    , vetMonitoringEndTime = Nothing
+                    , vetInfo = Nothing
+                    , vetCreatedAt = now
+                    , vetUpdatedAt = now
+                    }
+            liftIO $ insertVsEditTracker db row
+            pure $ APIResponse "SUCCESS" ("VS locked until " <> T.pack (show lockExpiry))
+
+unlockVsEditTrackerH :: VsUnlockReq -> Flow APIResponse
+unlockVsEditTrackerH VsUnlockReq{..} = do
+    db <- getDBEnv
+    now <- liftIO getCurrentTime
+    mLock <- liftIO $ findActiveLock db product vsName env now
+    case mLock of
+        Nothing -> pure $ APIResponse "ERROR" "No active lock found"
+        Just existing -> do
+            let updated = existing
+                    { S.vetIsLocked = Just False
+                    , S.vetLockExpiry = Just now
+                    , S.vetUpdatedAt = now
+                    }
+            liftIO $ updateVsEditTracker db updated
+            pure $ APIResponse "SUCCESS" "VS unlocked"
+
+revertVsEditTrackerH :: Text -> Flow APIResponse
+revertVsEditTrackerH tid = do
+    db <- getDBEnv
+    now <- liftIO getCurrentTime
+    m <- liftIO $ findVsEditTrackerById db tid
+    case m of
+        Nothing -> pure $ APIResponse "ERROR" "VS edit tracker not found"
+        Just existing -> do
+            case S.vetOldVsData existing of
+                Nothing -> pure $ APIResponse "ERROR" "No old VS data to revert to"
+                Just _oldData -> do
+                    let updated = existing
+                            { S.vetStatus = "REVERTED"
+                            , S.vetUpdatedAt = now
+                            }
+                    liftIO $ updateVsEditTracker db updated
+                    pure $ APIResponse "SUCCESS" "VS edit tracker marked as REVERTED"

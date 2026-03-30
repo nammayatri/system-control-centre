@@ -1,15 +1,25 @@
 import React, { useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { useRelease, useReleaseEvents, useApproveRelease, useDiscardRelease, usePauseRelease, useResumeRelease, useAbortRelease, useRevertRelease, useImmediateRevert, useDeleteRelease } from '../hooks';
+import {
+  useRelease, useReleaseEvents, useApproveRelease, useDiscardRelease,
+  usePauseRelease, useResumeRelease, useAbortRelease, useRevertRelease,
+  useImmediateRevert, useDeleteRelease, useRestartRelease,
+  useFastForwardRelease, useImmediateRevertWithSync,
+  useReleaseDiff, usePodHealth, useResources,
+} from '../hooks';
 import type { RolloutHistoryEvent, RolloutEvent } from '../../../api';
 import { StatusBadge, Badge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
-import { Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap, Search, Trash2, ChevronRight as ChevronRightIcon } from 'lucide-react';
+import {
+  Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap,
+  Search, Trash2, ChevronRight as ChevronRightIcon, FastForward, RotateCw,
+} from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
+import ReactDiffViewer from 'react-diff-viewer-continued';
 
 const formatDate = (d?: string) => {
   if (!d) return '-';
@@ -92,10 +102,138 @@ const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
   );
 };
 
+/** ENV Diff Tab */
+const EnvDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
+  const { data: diff, isLoading, error } = useReleaseDiff(releaseId);
+
+  if (isLoading) return <div className="p-6"><div className="animate-pulse space-y-3"><div className="h-4 bg-zinc-100 rounded w-1/3" /><div className="h-64 bg-zinc-100 rounded" /></div></div>;
+  if (error || !diff) return <div className="p-6"><p className="text-sm text-zinc-400">No ENV difference found.</p></div>;
+  if (!diff.oldfile && !diff.newfile) return <div className="p-6"><p className="text-sm text-zinc-400">No ENV difference found.</p>{diff.message && <p className="text-xs text-zinc-400 mt-1">{diff.message}</p>}</div>;
+
+  return (
+    <div className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">ENV Diff</h3>
+        {diff.message && <span className="text-xs text-zinc-400">{diff.message}</span>}
+      </div>
+      <div className="border border-zinc-200 rounded-lg overflow-hidden">
+        <ReactDiffViewer
+          oldValue={diff.oldfile || ''}
+          newValue={diff.newfile || ''}
+          splitView={true}
+          leftTitle="Old ENV"
+          rightTitle="New ENV"
+          useDarkTheme={false}
+        />
+      </div>
+    </div>
+  );
+};
+
+/** Pod Health Section (in Summary tab) */
+const PodHealthSection: React.FC<{ releaseId: string }> = ({ releaseId }) => {
+  const { data: podData, isLoading } = usePodHealth(releaseId);
+
+  if (isLoading) return <div className="animate-pulse space-y-2"><div className="h-20 bg-zinc-100 rounded" /></div>;
+  if (!podData) return null;
+
+  const { pods, summary } = podData;
+  const summaryCards = [
+    { label: 'Total', value: summary.total, color: 'bg-zinc-400' },
+    { label: 'Running', value: summary.running, color: 'bg-emerald-500' },
+    { label: 'Pending', value: summary.pending, color: 'bg-amber-500' },
+    { label: 'Failed', value: summary.failed, color: 'bg-red-500' },
+  ];
+
+  const podStatusVariant = (status: string): 'success' | 'warning' | 'danger' | 'default' | 'muted' => {
+    const s = status.toLowerCase();
+    if (s === 'running') return 'success';
+    if (s === 'pending' || s === 'containercreating') return 'warning';
+    if (s === 'failed' || s === 'crashloopbackoff' || s === 'error') return 'danger';
+    if (s === 'terminated' || s === 'completed') return 'muted';
+    return 'default';
+  };
+
+  return (
+    <div className="border border-zinc-100 rounded-xl p-5 mb-6">
+      <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Pods</h3>
+      <div className="grid grid-cols-4 gap-3 mb-4">
+        {summaryCards.map((card) => (
+          <div key={card.label} className="border border-zinc-100 rounded-lg px-3 py-2">
+            <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider mb-1">{card.label}</div>
+            <div className="flex items-center gap-1.5">
+              <span className={cn('w-1.5 h-1.5 rounded-full', card.color)} />
+              <span className="text-lg font-bold text-zinc-900">{card.value}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      {pods.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm text-left border-collapse">
+            <thead>
+              <tr className="bg-zinc-50 border-y border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+                <th className="py-2 px-3">Name</th>
+                <th className="py-2 px-3">Status</th>
+                <th className="py-2 px-3">Ready</th>
+                <th className="py-2 px-3">Restarts</th>
+                <th className="py-2 px-3">Age</th>
+                <th className="py-2 px-3">Version</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pods.map((pod, idx) => (
+                <tr key={pod.name} className={cn('border-b border-zinc-100', idx % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
+                  <td className="py-2 px-3 font-mono text-xs text-zinc-700">{pod.name}</td>
+                  <td className="py-2 px-3"><Badge variant={podStatusVariant(pod.status)} size="sm">{pod.status}</Badge></td>
+                  <td className="py-2 px-3 text-xs text-zinc-600">{pod.ready}</td>
+                  <td className="py-2 px-3 font-mono text-xs text-zinc-600">{pod.restarts}</td>
+                  <td className="py-2 px-3 text-xs text-zinc-500">{pod.age}</td>
+                  <td className="py-2 px-3 font-mono text-xs text-zinc-600">{pod.version}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/** Resources Section (in Summary tab) */
+const ResourcesSection: React.FC<{ product: string; service: string }> = ({ product, service }) => {
+  const { data: resources, isLoading } = useResources(product, service);
+
+  if (isLoading) return <div className="animate-pulse"><div className="h-16 bg-zinc-100 rounded" /></div>;
+  if (!resources) return null;
+
+  const items = [
+    { label: 'CPU Requests', value: resources.cpu_requests },
+    { label: 'CPU Limits', value: resources.cpu_limits },
+    { label: 'Memory Requests', value: resources.memory_requests },
+    { label: 'Memory Limits', value: resources.memory_limits },
+  ];
+
+  return (
+    <div className="border border-zinc-100 rounded-xl p-5">
+      <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Resources</h3>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {items.map((item) => (
+          <div key={item.label} className="border border-zinc-100 rounded-lg px-3 py-2">
+            <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider mb-1">{item.label}</div>
+            <div className="text-sm font-mono font-medium text-zinc-800">{item.value || '-'}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const ReleaseSummary: React.FC = () => {
   const { id, clusterId } = useParams<{ clusterId: string; id: string }>();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'summary' | 'history' | 'events'>('summary');
+  const [activeTab, setActiveTab] = useState<'summary' | 'history' | 'events' | 'env-diff'>('summary');
+  const [revertSyncChecked, setRevertSyncChecked] = useState(true);
 
   const { data: release, isLoading, error, refetch } = useRelease(id);
   const { data: events = [] } = useReleaseEvents(id);
@@ -108,6 +246,9 @@ const ReleaseSummary: React.FC = () => {
   const revertMut = useRevertRelease();
   const immRevertMut = useImmediateRevert();
   const deleteMut = useDeleteRelease();
+  const restartMut = useRestartRelease();
+  const fastForwardMut = useFastForwardRelease();
+  const immRevertSyncMut = useImmediateRevertWithSync();
 
   const confirmAction = useConfirm();
 
@@ -120,6 +261,20 @@ const ReleaseSummary: React.FC = () => {
     });
     if (!ok) return;
     try { await fn(); } catch {}
+  };
+
+  // Custom confirm for immediate revert with checkbox
+  const doImmediateRevert = async () => {
+    const ok = await confirmAction({
+      title: 'Immediate Revert',
+      description: 'This will instantly swap the image and bypass normal rollout pipeline. This action cannot be undone.',
+      confirmLabel: 'Immediate Revert',
+      variant: 'danger',
+    });
+    if (!ok) return;
+    try {
+      await immRevertSyncMut.mutateAsync({ releaseId: id!, isRevertSync: revertSyncChecked });
+    } catch {}
   };
 
   if (isLoading && !release) {
@@ -141,6 +296,13 @@ const ReleaseSummary: React.FC = () => {
       <div className={cn('border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm min-h-[38px] break-all', mono && 'font-mono text-xs')}>{value || '-'}</div>
     </div>
   );
+
+  const tabs = [
+    { key: 'summary' as const, label: 'Summary' },
+    { key: 'history' as const, label: 'Rollout History' },
+    { key: 'events' as const, label: 'Events' },
+    { key: 'env-diff' as const, label: 'ENV Diff' },
+  ];
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12 max-w-6xl">
@@ -173,10 +335,15 @@ const ReleaseSummary: React.FC = () => {
             </PermissionGate>
           )}
           {(s === 'INPROGRESS') && (
-            <PermissionGate product="autopilot" permission="RELEASE_PAUSE">
-              <Button size="sm" variant="outline" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
-              <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!))}><Square className="w-3.5 h-3.5" /> Abort</Button>
-            </PermissionGate>
+            <>
+              <PermissionGate product="autopilot" permission="RELEASE_PAUSE">
+                <Button size="sm" variant="outline" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
+                <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!))}><Square className="w-3.5 h-3.5" /> Abort</Button>
+              </PermissionGate>
+              <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+                <Button size="sm" variant="outline" loading={fastForwardMut.isPending} onClick={() => doAction('fast forward (skip current cooloff and advance to next rollout step)', () => fastForwardMut.mutateAsync(id!))}><FastForward className="w-3.5 h-3.5" /> Fast Forward</Button>
+              </PermissionGate>
+            </>
           )}
           {s === 'PAUSED' && (
             <PermissionGate product="autopilot" permission="RELEASE_RESUME">
@@ -185,14 +352,24 @@ const ReleaseSummary: React.FC = () => {
             </PermissionGate>
           )}
           {s === 'COMPLETED' && (
-            <PermissionGate product="autopilot" permission="RELEASE_REVERT">
-              <Button size="sm" variant="outline" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: 'admin' }))}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
-            </PermissionGate>
+            <>
+              <PermissionGate product="autopilot" permission="RELEASE_REVERT">
+                <Button size="sm" variant="outline" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: 'admin' }))}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
+              </PermissionGate>
+              <PermissionGate product="autopilot" permission="RELEASE_REVERT">
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="danger" loading={immRevertSyncMut.isPending} onClick={doImmediateRevert}><Zap className="w-3.5 h-3.5" /> Immediate Revert</Button>
+                  <label className="flex items-center gap-1.5 text-xs text-zinc-500 cursor-pointer">
+                    <input type="checkbox" checked={revertSyncChecked} onChange={(e) => setRevertSyncChecked(e.target.checked)} className="rounded border-zinc-300 accent-zinc-900" />
+                    Also revert in other cloud
+                  </label>
+                </div>
+              </PermissionGate>
+            </>
           )}
-          {s === 'COMPLETED' && (
-            <PermissionGate product="autopilot" permission="RELEASE_REVERT">
-              <Button size="sm" variant="outline" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: 'admin' }))}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
-              <Button size="sm" variant="danger" loading={immRevertMut.isPending} onClick={() => doAction('immediate revert', () => immRevertMut.mutateAsync({ releaseId: id!, requestedBy: 'admin' }))}><Zap className="w-3.5 h-3.5" /> Immediate Revert</Button>
+          {(s === 'ABORTED' || s === 'USER_ABORTED' || s === 'GCLT_ABORTED' || s === 'REVERTED') && (
+            <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+              <Button size="sm" variant="outline" loading={restartMut.isPending} onClick={() => doAction('restart', () => restartMut.mutateAsync(id!))}><RotateCw className="w-3.5 h-3.5" /> Restart</Button>
             </PermissionGate>
           )}
 
@@ -208,10 +385,10 @@ const ReleaseSummary: React.FC = () => {
       {/* Main Card with Tabs */}
       <div className="bg-white rounded-xl border border-zinc-200">
         <div className="flex border-b border-zinc-200 px-5">
-          {(['summary', 'history', 'events'] as const).map(tab => (
-            <button key={tab} onClick={() => setActiveTab(tab)}
-              className={cn('py-3 px-4 text-sm font-medium border-b-2 transition-colors duration-150 cursor-pointer', activeTab === tab ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-400 hover:text-zinc-600')}>
-              {tab === 'summary' ? 'Summary' : tab === 'history' ? 'Rollout History' : 'Events'}
+          {tabs.map(tab => (
+            <button key={tab.key} onClick={() => setActiveTab(tab.key)}
+              className={cn('py-3 px-4 text-sm font-medium border-b-2 transition-colors duration-150 cursor-pointer', activeTab === tab.key ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-400 hover:text-zinc-600')}>
+              {tab.label}
             </button>
           ))}
         </div>
@@ -219,6 +396,9 @@ const ReleaseSummary: React.FC = () => {
         {/* Summary */}
         {activeTab === 'summary' && (
           <div className="p-6">
+            {/* Pod Health */}
+            <PodHealthSection releaseId={id!} />
+
             {/* Two-column info cards */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
               {/* Release Info */}
@@ -261,7 +441,7 @@ const ReleaseSummary: React.FC = () => {
             </div>
 
             {/* Details - full width */}
-            <div className="border border-zinc-100 rounded-xl p-5">
+            <div className="border border-zinc-100 rounded-xl p-5 mb-6">
               <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Details</h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-3">
                 <InfoField label="Description" value={release.description} />
@@ -269,6 +449,9 @@ const ReleaseSummary: React.FC = () => {
                 <InfoField label="Info" value={release.info} />
               </div>
             </div>
+
+            {/* Resources */}
+            <ResourcesSection product={release.product} service={release.service} />
           </div>
         )}
 
@@ -319,6 +502,9 @@ const ReleaseSummary: React.FC = () => {
 
         {/* Events */}
         {activeTab === 'events' && <ReleaseEventsTab events={events} />}
+
+        {/* ENV Diff */}
+        {activeTab === 'env-diff' && <EnvDiffTab releaseId={id!} />}
       </div>
 
       <div className="flex justify-end pt-5">

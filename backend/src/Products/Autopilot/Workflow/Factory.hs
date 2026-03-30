@@ -24,6 +24,9 @@ import Products.Autopilot.Types.Workflow (ReleaseCategory (..))
 -- Import category-specific workflows
 
 import qualified Products.Autopilot.Workflow.BackendConfigWorkflow as Config
+import qualified Products.Autopilot.Workflow.BackendCronJobWorkflow as CronJob
+import qualified Products.Autopilot.Workflow.BackendJobWorkflow as Job
+import qualified Products.Autopilot.Workflow.BackendSchedulerWorkflow as Scheduler
 import qualified Products.Autopilot.Workflow.BackendServiceWorkflow as Backend
 import qualified Products.Autopilot.Workflow.MobileAppAndroidWorkflow as Android
 import Products.Autopilot.Workflow.Recorded (runRecorded)
@@ -80,7 +83,9 @@ executeReleaseWorkflow initialState = do
 
 Dispatches to category-specific workflow implementations:
 - BackendService → Backend.backendServiceWorkflow
-- BackendScheduler → Backend.backendServiceWorkflow (same as service)
+- BackendScheduler → Scheduler.backendSchedulerWorkflow (pod-count based, no VS/DR)
+- BackendCronJob → CronJob.backendCronJobWorkflow (image update)
+- BackendJob → Job.backendJobWorkflow (one-time execution)
 - MobileAppAndroid → Android.mobileAppAndroidWorkflow
 - etc.
 -}
@@ -88,9 +93,9 @@ getWorkflowForCategory :: ReleaseCategory -> WorkflowExecutor
 getWorkflowForCategory = \case
     -- Backend workflows (K8s-based)
     BackendService -> Backend.backendServiceWorkflow
-    BackendScheduler -> Backend.backendServiceWorkflow -- Same workflow, different deployment
-    BackendCronJob -> Backend.backendServiceWorkflow
-    BackendJob -> Backend.backendServiceWorkflow
+    BackendScheduler -> Scheduler.backendSchedulerWorkflow
+    BackendCronJob -> CronJob.backendCronJobWorkflow
+    BackendJob -> Job.backendJobWorkflow
     -- Backend config workflow
     BackendConfig -> Config.backendConfigWorkflow
     -- Mobile app workflows
