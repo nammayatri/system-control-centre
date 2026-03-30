@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { login as loginApi, getProfile, logout as logoutApi } from './api';
 import type { AuthUser, ProductAccess } from './api';
+import { TOKEN_KEY } from '../../lib/constants';
 
 interface AuthContextType {
   user: AuthUser | null;
@@ -24,7 +25,7 @@ const AuthContext = createContext<AuthContextType>({
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [token, setToken] = useState<string | null>(localStorage.getItem('auth_token'));
+  const [token, setToken] = useState<string | null>(localStorage.getItem('sc_token'));
   const [products, setProducts] = useState<ProductAccess[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -32,14 +33,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
     setToken(null);
     setProducts([]);
-    localStorage.removeItem('auth_token');
+    localStorage.removeItem('sc_token');
     localStorage.removeItem('auth_user');
     localStorage.removeItem('auth_products');
   }, []);
 
   // Validate token on mount
   useEffect(() => {
-    const storedToken = localStorage.getItem('auth_token');
+    const storedToken = localStorage.getItem('sc_token');
     if (!storedToken) {
       setLoading(false);
       return;
@@ -62,7 +63,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(data.person);
     setToken(data.token);
     setProducts(data.products || []);
-    localStorage.setItem('auth_token', data.token);
+    localStorage.setItem('sc_token', data.token);
     localStorage.setItem('auth_user', JSON.stringify(data.person));
     localStorage.setItem('auth_products', JSON.stringify(data.products || []));
   }, []);

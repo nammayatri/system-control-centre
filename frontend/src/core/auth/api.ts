@@ -3,8 +3,11 @@ import { apiClient } from '../../lib/api-client';
 export interface AuthUser {
   id: string;
   email: string;
-  name: string;
-  status: string;
+  firstName?: string;
+  lastName?: string;
+  name?: string;
+  isSuperadmin?: boolean;
+  status?: string;
 }
 
 export interface ProductAccess {
@@ -21,8 +24,14 @@ export interface LoginResponse {
 
 export async function login(email: string, password: string): Promise<LoginResponse> {
   const { data } = await apiClient.post('/auth/login', { email, password });
+  // Normalize: backend returns firstName/lastName, frontend uses name
+  if (data.person && !data.person.name) {
+    data.person.name = [data.person.firstName, data.person.lastName].filter(Boolean).join(' ');
+  }
   return data;
 }
+
+
 
 export async function logout(): Promise<void> {
   try {
@@ -34,6 +43,9 @@ export async function logout(): Promise<void> {
 
 export async function getProfile(): Promise<LoginResponse> {
   const { data } = await apiClient.get('/auth/me');
+  if (data.person && !data.person.name) {
+    data.person.name = [data.person.firstName, data.person.lastName].filter(Boolean).join(' ');
+  }
   return data;
 }
 
