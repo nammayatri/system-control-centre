@@ -446,24 +446,42 @@ instance ToJSON UpdateVsEditTrackerReq
 
 data VsLockReq = VsLockReq
     { product :: Text
-    , vsName :: Text
-    , env :: Text
-    , lockedBy :: Text
+    , service :: Maybe Text
+    , vsName :: Maybe Text
+    , env :: Maybe Text
+    , lockedBy :: Maybe Text
+    , oldVsData :: Maybe Text
     , lockDurationMinutes :: Maybe Int
     }
     deriving (Show, Generic)
 
-instance FromJSON VsLockReq
+instance FromJSON VsLockReq where
+    parseJSON = withObject "VsLockReq" $ \v ->
+        VsLockReq
+            <$> v .: "product"
+            <*> v .:? "service"
+            <*> (v .:? "vsName" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "vs_name")
+            <*> v .:? "env"
+            <*> (v .:? "lockedBy" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "locked_by")
+            <*> (v .:? "oldVsData" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "old_vs_data" >>= \mv2 -> case mv2 of Just x2 -> pure (Just x2); Nothing -> v .:? "vs_data")
+            <*> (v .:? "lockDurationMinutes" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "lock_duration_minutes")
 
 instance ToJSON VsLockReq
 
 data VsUnlockReq = VsUnlockReq
-    { product :: Text
-    , vsName :: Text
-    , env :: Text
+    { trackerId :: Maybe Text
+    , product :: Maybe Text
+    , vsName :: Maybe Text
+    , env :: Maybe Text
     }
     deriving (Show, Generic)
 
-instance FromJSON VsUnlockReq
+instance FromJSON VsUnlockReq where
+    parseJSON = withObject "VsUnlockReq" $ \v ->
+        VsUnlockReq
+            <$> (v .:? "trackerId" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "tracker_id")
+            <*> v .:? "product"
+            <*> (v .:? "vsName" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "vs_name")
+            <*> v .:? "env"
 
 instance ToJSON VsUnlockReq

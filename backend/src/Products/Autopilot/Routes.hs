@@ -1752,9 +1752,16 @@ updateVsEditTrackerH tid UpdateVsEditTrackerReq{..} = do
 lockVsEditTrackerH :: VsLockReq -> Flow APIResponse
 lockVsEditTrackerH VsLockReq{..} = do
     db <- getDBEnv
+    cfg <- getConfig
     now <- liftIO getCurrentTime
+    -- Resolve vsName from product_config if not provided
+    mProdCfg <- liftIO $ findProductByNameAndCluster db product ""
+    let resolvedVsName = fromMaybe (maybe "" getProductVsName mProdCfg) vsName
+        resolvedEnv = fromMaybe (envName cfg) env
+        resolvedService = fromMaybe "" service
+        resolvedLockedBy = fromMaybe "admin" lockedBy
     -- Check for existing active lock
-    mLock <- liftIO $ findActiveLock db product vsName env now
+    mLock <- liftIO $ findActiveLock db product resolvedVsName resolvedEnv now
     case mLock of
         Just existing ->
             pure $ APIResponse "ERROR" ("VS already locked by " <> fromMaybe "unknown" (S.vetLockedBy existing))
@@ -1765,16 +1772,16 @@ lockVsEditTrackerH VsLockReq{..} = do
                 row = S.VsEditTrackerT
                     { vetId = tid
                     , vetProduct = product
-                    , vetService = ""
-                    , vetEnv = env
-                    , vetVsName = vsName
-                    , vetOldVsData = Nothing
+                    , vetService = resolvedService
+                    , vetEnv = resolvedEnv
+                    , vetVsName = resolvedVsName
+                    , vetOldVsData = oldVsData
                     , vetNewVsData = Nothing
                     , vetStatus = "LOCKED"
-                    , vetCreatedBy = lockedBy
+                    , vetCreatedBy = resolvedLockedBy
                     , vetApprovedBy = Nothing
                     , vetIsLocked = Just True
-                    , vetLockedBy = Just lockedBy
+                    , vetLockedBy = Just resolvedLockedBy
                     , vetLockedAt = Just now
                     , vetLockExpiry = Just lockExpiry
                     , vetMonitoringEndTime = Nothing
@@ -1783,23 +1790,33 @@ lockVsEditTrackerH VsLockReq{..} = do
                     , vetUpdatedAt = now
                     }
             liftIO $ insertVsEditTracker db row
-            pure $ APIResponse "SUCCESS" ("VS locked until " <> T.pack (show lockExpiry))
+            pure $ APIResponse "SUCCESS" ("VS locked. Tracker ID: " <> tid)
 
 unlockVsEditTrackerH :: VsUnlockReq -> Flow APIResponse
 unlockVsEditTrackerH VsUnlockReq{..} = do
     db <- getDBEnv
     now <- liftIO getCurrentTime
-    mLock <- liftIO $ findActiveLock db product vsName env now
-    case mLock of
-        Nothing -> pure $ APIResponse "ERROR" "No active lock found"
-        Just existing -> do
-            let updated = existing
-                    { S.vetIsLocked = Just False
-                    , S.vetLockExpiry = Just now
-                    , S.vetUpdatedAt = now
-                    }
-            liftIO $ updateVsEditTracker db updated
-            pure $ APIResponse "SUCCESS" "VS unlocked"
+    -- Can unlock by trackerId OR by product+vsName+env
+    case trackerId of
+        Just tid -> do
+            m <- liftIO $ findVsEditTrackerById db tid
+            case m of
+                Nothing -> pure $ APIResponse "ERROR" "Tracker not found"
+                Just existing -> do
+                    let updated = existing { S.vetIsLocked = Just False, S.vetLockExpiry = Just now, S.vetUpdatedAt = now, S.vetStatus = "UNLOCKED" }
+                    liftIO $ updateVsEditTracker db updated
+                    pure $ APIResponse "SUCCESS" "VS unlocked"
+        Nothing -> do
+            let p = fromMaybe "" product
+                v = fromMaybe "" vsName
+                e = fromMaybe "" env
+            mLock <- liftIO $ findActiveLock db p v e now
+            case mLock of
+                Nothing -> pure $ APIResponse "ERROR" "No active lock found"
+                Just existing -> do
+                    let updated = existing { S.vetIsLocked = Just False, S.vetLockExpiry = Just now, S.vetUpdatedAt = now, S.vetStatus = "UNLOCKED" }
+                    liftIO $ updateVsEditTracker db updated
+                    pure $ APIResponse "SUCCESS" "VS unlocked"
 
 revertVsEditTrackerH :: Text -> Flow APIResponse
 revertVsEditTrackerH tid = do

@@ -633,17 +633,17 @@ export async function fetchResources(product: string, service: string): Promise<
 // ── Product Config CRUD ───────────────────────────────────────────
 
 export async function createProductConfig(payload: Partial<ProductConfig>): Promise<any> {
-    const { data } = await apiClient.post('/products', payload);
+    const { data } = await apiClient.post('/products/config', payload);
     return data;
 }
 
 export async function updateProductConfig(id: number, payload: Partial<ProductConfig>): Promise<any> {
-    const { data } = await apiClient.put(`/products/${id}`, payload);
+    const { data } = await apiClient.put(`/products/config/${id}`, payload);
     return data;
 }
 
 export async function deleteProductConfig(id: number): Promise<any> {
-    const { data } = await apiClient.delete(`/products/${id}`);
+    const { data } = await apiClient.delete(`/products/config/${id}`);
     return data;
 }
 
@@ -660,23 +660,23 @@ export interface ReleaseConfig {
 
 export async function fetchReleaseConfigs(product?: string): Promise<ReleaseConfig[]> {
     const params = product ? { product } : {};
-    const { data } = await apiClient.get('/release-configs', { params });
+    const { data } = await apiClient.get('/services/config', { params });
     if (!Array.isArray(data)) return [];
     return data;
 }
 
 export async function createReleaseConfig(payload: Partial<ReleaseConfig>): Promise<any> {
-    const { data } = await apiClient.post('/release-configs', payload);
+    const { data } = await apiClient.post('/services/config', payload);
     return data;
 }
 
 export async function updateReleaseConfig(id: number, payload: Partial<ReleaseConfig>): Promise<any> {
-    const { data } = await apiClient.put(`/release-configs/${id}`, payload);
+    const { data } = await apiClient.put(`/services/config/${id}`, payload);
     return data;
 }
 
 export async function deleteReleaseConfig(id: number): Promise<any> {
-    const { data } = await apiClient.delete(`/release-configs/${id}`);
+    const { data } = await apiClient.delete(`/services/config/${id}`);
     return data;
 }
 
