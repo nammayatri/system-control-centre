@@ -1,7 +1,7 @@
 # Env / secrets
 .env
-dhall-configs/dev/secrets/
-!dhall-configs/dev/secrets/common.dhall.example
+dhall-configs/secrets.dhall
+!dhall-configs/secrets.dhall.example
 
 # Build artifacts
 dist-newstyle/
