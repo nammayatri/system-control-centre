@@ -321,6 +321,8 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq {..} = do
                   , isApproved = initialApproval
                   , isInfraApproved = fromMaybe (fromMaybe False (S.productNeedInfraApproval pCfg >>= \need -> if need then Just False else Just True)) isInfraApproved
                   , releaseTag = releaseTag
+                  , dateCreated = Nothing    -- DB sets via DEFAULT now()
+                  , lastUpdated = Nothing   -- DB sets via DEFAULT now()
                   , scheduleTime = scheduleTime
                   , startTime = Nothing
                   , endTime = Nothing
