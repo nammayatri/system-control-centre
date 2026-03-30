@@ -1,7 +1,14 @@
 packages:
   .
 
+-- Development: faster builds with no optimization
+-- Uncomment the Local flag for faster dev builds
+flags: +Local
+
 allow-newer:
   connection:tls,
   connection:network,
   word24:base
+
+-- Parallel jobs
+jobs: 4

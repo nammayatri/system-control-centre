@@ -46,15 +46,39 @@
             config.haskellProjects.default.outputs.devShell
           ];
           packages = with pkgs; [
+            # Dev tools
             git
             cacert
+            hpack
+
+            # DB
+            postgresql
+
+            # System libs
             pcre
             openssl
             zlib
             zstd
             pkg-config
-            postgresql
           ];
+          shellHook = ''
+            export CABAL_DIR="$PWD/.cabal-dir"
+            export CABAL_CONFIG="$CABAL_DIR/config"
+            mkdir -p "$CABAL_DIR"
+            if [ ! -f "$CABAL_CONFIG" ]; then
+              cabal user-config init -f 2>/dev/null || true
+            fi
+            export NammaAP_DATABASE_URL="postgres://vijaygupta@localhost:5432/system_control"
+            export PORT=8012
+            echo ""
+            echo "  System Control Centre"
+            echo "  ─────────────────────"
+            echo "  cabal build              — compile"
+            echo "  cabal run namma-ap-exe   — start server on :$PORT"
+            echo "  hpack                    — regenerate .cabal from package.yaml"
+            echo "  DB: $NammaAP_DATABASE_URL"
+            echo ""
+          '';
         });
       };
     };

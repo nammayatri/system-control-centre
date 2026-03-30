@@ -2,5 +2,12 @@
 dist-newstyle/
 .direnv/
 .stack-work/
-scripts/
+.cabal-dir/
+.cabal-home/
+result
+!scripts/
+*.hi
+*.o
+*.dyn_hi
+*.dyn_o
 .claude/
