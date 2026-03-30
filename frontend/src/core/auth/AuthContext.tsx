@@ -22,43 +22,11 @@ const AuthContext = createContext<AuthContextType>({
   loading: true,
 });
 
-// DEV MODE: set to true to bypass auth and see full UI without backend
-const DEV_BYPASS = import.meta.env.VITE_DEV_BYPASS === 'true' || import.meta.env.DEV;
-
-const DEV_USER: AuthUser = {
-  id: 'dev-user-id',
-  email: 'admin@juspay.in',
-  name: 'Admin User',
-  status: 'active',
-};
-
-const DEV_PRODUCTS: ProductAccess[] = [
-  {
-    slug: 'autopilot',
-    role: 'Admin',
-    permissions: [
-      'AP_RELEASE_VIEW', 'AP_RELEASE_CREATE', 'AP_RELEASE_APPROVE',
-      'AP_RELEASE_REVERT', 'AP_RELEASE_DISCARD', 'AP_RELEASE_PAUSE',
-      'AP_RELEASE_RESUME', 'AP_RELEASE_ABORT', 'AP_RELEASE_UPDATE',
-      'AP_MANAGE_STAGGER', 'AP_PRODUCT_CONFIG_VIEW', 'AP_PRODUCT_CONFIG_EDIT',
-      'AP_SERVICE_CONFIG_VIEW', 'AP_SERVICE_CONFIG_EDIT',
-    ],
-  },
-  {
-    slug: 'config-manager',
-    role: 'Admin',
-    permissions: [
-      'CM_CONFIG_VIEW', 'CM_CONFIG_CREATE', 'CM_CONFIG_APPLY',
-      'CM_CONFIG_ROLLBACK', 'CM_CONFIG_UPDATE',
-    ],
-  },
-];
-
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(DEV_BYPASS ? DEV_USER : null);
-  const [token, setToken] = useState<string | null>(DEV_BYPASS ? 'dev-token' : localStorage.getItem('auth_token'));
-  const [products, setProducts] = useState<ProductAccess[]>(DEV_BYPASS ? DEV_PRODUCTS : []);
-  const [loading, setLoading] = useState(DEV_BYPASS ? false : true);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [token, setToken] = useState<string | null>(localStorage.getItem('auth_token'));
+  const [products, setProducts] = useState<ProductAccess[]>([]);
+  const [loading, setLoading] = useState(true);
 
   const clearAuth = useCallback(() => {
     setUser(null);
@@ -69,10 +37,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem('auth_products');
   }, []);
 
-  // Validate token on mount (skip in dev bypass mode)
+  // Validate token on mount
   useEffect(() => {
-    if (DEV_BYPASS) return;
-
     const storedToken = localStorage.getItem('auth_token');
     if (!storedToken) {
       setLoading(false);
@@ -92,12 +58,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [clearAuth]);
 
   const login = useCallback(async (email: string, password: string) => {
-    if (DEV_BYPASS) {
-      setUser(DEV_USER);
-      setToken('dev-token');
-      setProducts(DEV_PRODUCTS);
-      return;
-    }
     const data = await loginApi(email, password);
     setUser(data.person);
     setToken(data.token);
