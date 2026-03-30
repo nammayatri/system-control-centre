@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 
 {- | Workflow helper functions for Recorded monad
@@ -14,6 +15,11 @@ module Products.Autopilot.Workflow.Helpers (
     persistWorkflowState,
     persistFinalState,
 
+    -- * Snapshot Capture Functions
+    captureDeploymentSnapshot,
+    captureVSSnapshot,
+    captureConfigMapSnapshot,
+
     -- * Utility Functions
     continueIf,
     scheduleAfter,
@@ -28,8 +34,15 @@ import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (get, gets, modify)
 import Control.Monad.Trans.Class (lift)
+import Core.Config (Config (..))
+import Core.Environment (DBEnv)
 import Core.Utils.FlowMonad (Flow, getDBEnv)
+import Data.Aeson (toJSON)
+import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Time.Clock (NominalDiffTime, addUTCTime, getCurrentTime)
+import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
+import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import qualified Products.Autopilot.Queries.ReleaseTracker as DB
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
 import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
@@ -102,6 +115,34 @@ getReleaseTracker = getRT
 -- | Update ReleaseTracker in current state
 updateRT :: (ReleaseTracker -> ReleaseTracker) -> StateFlow ()
 updateRT f = modify $ \rs -> rs{releaseTracker = f (releaseTracker rs)}
+
+-- ============================================================================
+-- Snapshot Capture Functions
+-- ============================================================================
+
+-- | Capture deployment YAML snapshot and store as release event
+captureDeploymentSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()
+captureDeploymentSnapshot cfg db releaseId ns depName label = do
+    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack depName, "-o", "yaml"])
+    case result of
+        Right (K8sResult yaml) -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON yaml)
+        Left _ -> pure () -- silently skip if can't capture
+
+-- | Capture VirtualService JSON snapshot and store as release event
+captureVSSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()
+captureVSSnapshot cfg db releaseId ns vsName label = do
+    result <- getVirtualServiceJson cfg ns vsName
+    case result of
+        Right vsJson -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON vsJson)
+        Left _ -> pure () -- silently skip if can't capture
+
+-- | Capture ConfigMap snapshot and store as release event
+captureConfigMapSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()
+captureConfigMapSnapshot cfg db releaseId ns cmName label = do
+    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get configmap", T.unpack cmName, "-o", "yaml"])
+    case result of
+        Right (K8sResult yaml) -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON yaml)
+        Left _ -> pure () -- silently skip if can't capture
 
 -- ============================================================================
 -- ReleaseWFStatus-based Helpers

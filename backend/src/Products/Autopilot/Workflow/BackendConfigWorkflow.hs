@@ -30,6 +30,7 @@ import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..)
 import Products.Autopilot.Types.Target (BackendConfigWFStatus (..), ConfigDeploymentState (..), TargetState (..), emptyConfigState)
 import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers (
+    captureConfigMapSnapshot,
     getRT,
     updateRT,
     (|>>),
@@ -125,6 +126,9 @@ resolveConfigContent = do
                             _ -> T.unpack (env rt)
                         _ -> T.unpack (env rt)
 
+            -- Capture BEFORE snapshot of configmap
+            liftIO $ captureConfigMapSnapshot cfg db (releaseId rt) (T.pack ns) (service rt) "CONFIGMAP_BEFORE"
+
             if isK8sManifest fc
                 then do
                     -- Store resolved content + namespace in workflowMetadata for Deploying stage
@@ -186,6 +190,9 @@ applyConfigMap = do
                                     Just (ConfigState cs) -> Just (ConfigState (cs{configMapsUpdated = [service rt], rolloutComplete = True}))
                                     _ -> Just (ConfigState (emptyConfigState{configMapsUpdated = [service rt], rolloutComplete = True}))
                             }
+                    -- Capture AFTER snapshot of configmap
+                    db <- lift getDBEnv
+                    liftIO $ captureConfigMapSnapshot cfg db (releaseId rt) (T.pack ns) (service rt) "CONFIGMAP_AFTER"
                     liftIO $ putStrLn "ConfigMap applied successfully"
                 Left err -> error $ "kubectl replace failed: " <> T.unpack err
         _ -> error "Missing workflow metadata (resolveConfigContent did not run?)"

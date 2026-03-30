@@ -84,7 +84,7 @@ type CoreAPI =
         :<|> "envs" :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
         :<|> "envs" :> "secondary" :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
         -- New endpoints
-        :<|> "releases" :> Capture "releaseId" Text :> "diff" :> Get '[JSON] Value
+        :<|> "releases" :> Capture "releaseId" Text :> "diff" :> QueryParam "type" Text :> Get '[JSON] Value
         :<|> "releases" :> Capture "releaseId" Text :> "pods" :> "health" :> Get '[JSON] Value
         :<|> "releases" :> Capture "releaseId" Text :> "revert" :> "immediate" :> ReqBody '[JSON] ImmediateRevertReq :> Post '[JSON] APIResponse
         :<|> "releases" :> Capture "releaseId" Text :> "restart" :> ReqBody '[JSON] RestartReleaseReq :> Post '[JSON] APIResponse
@@ -1218,48 +1218,74 @@ fetchSecondaryEnvsH mProduct mEnv mService = do
 -- Diff Endpoint (GET /releases/:id/diff)
 -- ============================================================================
 
-releaseDiffH :: Text -> Flow Value
-releaseDiffH rid = do
+releaseDiffH :: Text -> Maybe Text -> Flow Value
+releaseDiffH rid mType = do
     cfg <- getConfig
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
         Nothing -> pure $ object ["oldfile" .= ("" :: Text), "newfile" .= ("" :: Text), "message" .= ("Release not found" :: Text)]
         Just (tracker, mTargetState) -> do
-            let mCtx = case mTargetState of
-                    Just (K8sState k8s) -> Just (context k8s)
-                    _ -> Nothing
-            case mCtx of
-                Nothing ->
-                    pure $ object ["oldfile" .= ("" :: Text), "newfile" .= ("" :: Text), "message" .= ("No K8s context available" :: Text)]
-                Just ctx -> do
-                    let ns = ctx.namespace
-                        svcHost = ctx.serviceName
-                        oldDep = svcHost <> "-" <> ctx.oldVersion
-                        newDep = svcHost <> "-" <> ctx.newVersion
-                    -- Get old deployment envs
-                    oldEnvResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack oldDep, "-o jsonpath='{.spec.template.spec.containers[0].env}'"])
-                    -- Get new deployment envs (or udf2 env switch data)
-                    let newEnvSource = NT.udf2 tracker
-                    case newEnvSource of
-                        Just udf2Envs | not (T.null udf2Envs) -> do
-                            -- udf2 contains the new env switch data
-                            let oldEnvText = case oldEnvResult of
-                                    Right (K8sResult out) -> cleanJsonpath out
-                                    Left _ -> ""
-                            pure $ object ["oldfile" .= oldEnvText, "newfile" .= udf2Envs, "message" .= ("Diff from env switch (udf2)" :: Text)]
-                        _ -> do
-                            -- Fetch new deployment envs from K8s
-                            newEnvResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack newDep, "-o jsonpath='{.spec.template.spec.containers[0].env}'"])
-                            let oldEnvText = case oldEnvResult of
-                                    Right (K8sResult out) -> cleanJsonpath out
-                                    Left _ -> ""
-                                newEnvText = case newEnvResult of
-                                    Right (K8sResult out) -> cleanJsonpath out
-                                    Left _ -> ""
-                            if T.null oldEnvText && T.null newEnvText
-                                then pure $ object ["oldfile" .= ("" :: Text), "newfile" .= ("" :: Text), "message" .= ("No diff data available" :: Text)]
-                                else pure $ object ["oldfile" .= oldEnvText, "newfile" .= newEnvText, "message" .= ("Deployment env diff" :: Text)]
+            -- Check for stored SNAPSHOT events first
+            events <- liftIO $ listReleaseEvents db rid
+            let snapshotEvents = filter (\e -> S.reCategory e == "SNAPSHOT") events
+                diffType = fromMaybe "deployment" mType
+                (beforeLabel, afterLabel, diffLabel) = case diffType of
+                    "vs" -> ("VS_BEFORE", "VS_AFTER", "VirtualService diff" :: Text)
+                    "configmap" -> ("CONFIGMAP_BEFORE", "CONFIGMAP_AFTER", "ConfigMap diff")
+                    _ -> ("DEPLOYMENT_BEFORE", "DEPLOYMENT_AFTER", "Deployment diff")
+                findSnapshot label = find (\e -> S.reLabel e == label) snapshotEvents
+                mBefore = findSnapshot beforeLabel
+                mAfter = findSnapshot afterLabel
+            case (mBefore, mAfter) of
+                (Just beforeEvt, Just afterEvt) ->
+                    pure $ object
+                        [ "oldfile" .= S.rePayload beforeEvt
+                        , "newfile" .= S.rePayload afterEvt
+                        , "message" .= diffLabel
+                        ]
+                (Just beforeEvt, Nothing) ->
+                    pure $ object
+                        [ "oldfile" .= S.rePayload beforeEvt
+                        , "newfile" .= ("" :: Text)
+                        , "message" .= (diffLabel <> " (after not yet captured)")
+                        ]
+                _ -> do
+                    -- Fall back to live K8s diff (original behavior)
+                    let mCtx = case mTargetState of
+                            Just (K8sState k8s) -> Just (context k8s)
+                            _ -> Nothing
+                    case mCtx of
+                        Nothing ->
+                            pure $ object ["oldfile" .= ("" :: Text), "newfile" .= ("" :: Text), "message" .= ("No K8s context available" :: Text)]
+                        Just ctx -> do
+                            let ns = ctx.namespace
+                                svcHost = ctx.serviceName
+                                oldDep = svcHost <> "-" <> ctx.oldVersion
+                                newDep = svcHost <> "-" <> ctx.newVersion
+                            -- Get old deployment envs
+                            oldEnvResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack oldDep, "-o jsonpath='{.spec.template.spec.containers[0].env}'"])
+                            -- Get new deployment envs (or udf2 env switch data)
+                            let newEnvSource = NT.udf2 tracker
+                            case newEnvSource of
+                                Just udf2Envs | not (T.null udf2Envs) -> do
+                                    -- udf2 contains the new env switch data
+                                    let oldEnvText = case oldEnvResult of
+                                            Right (K8sResult out) -> cleanJsonpath out
+                                            Left _ -> ""
+                                    pure $ object ["oldfile" .= oldEnvText, "newfile" .= udf2Envs, "message" .= ("Diff from env switch (udf2)" :: Text)]
+                                _ -> do
+                                    -- Fetch new deployment envs from K8s
+                                    newEnvResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack newDep, "-o jsonpath='{.spec.template.spec.containers[0].env}'"])
+                                    let oldEnvText = case oldEnvResult of
+                                            Right (K8sResult out) -> cleanJsonpath out
+                                            Left _ -> ""
+                                        newEnvText = case newEnvResult of
+                                            Right (K8sResult out) -> cleanJsonpath out
+                                            Left _ -> ""
+                                    if T.null oldEnvText && T.null newEnvText
+                                        then pure $ object ["oldfile" .= ("" :: Text), "newfile" .= ("" :: Text), "message" .= ("No diff data available" :: Text)]
+                                        else pure $ object ["oldfile" .= oldEnvText, "newfile" .= newEnvText, "message" .= ("Deployment env diff" :: Text)]
   where
     cleanJsonpath :: Text -> Text
     cleanJsonpath out = T.strip (T.dropWhile (== '\'') (T.dropWhileEnd (== '\'') (T.strip out)))

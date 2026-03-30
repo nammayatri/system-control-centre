@@ -52,6 +52,7 @@ import Products.Autopilot.Types.Target (
 import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..))
 import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers (
+    captureDeploymentSnapshot,
     getRT,
     updateRT,
     (|>>),
@@ -158,7 +159,12 @@ prepareK8sResources = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
+    db <- getDB
     liftIO $ putStrLn $ "Preparing K8s resources for scheduler " <> T.unpack (product rt)
+
+    -- Capture BEFORE snapshot (old deployment)
+    let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
+    liftIO $ captureDeploymentSnapshot cfg db (releaseId rt) (namespace ctx) oldDepName "DEPLOYMENT_BEFORE"
 
     -- 1. Apply ConfigMap
     updateK8sStatus BSApplyConfigMap
@@ -323,6 +329,13 @@ cleanupOldVersion = do
         liftIO $ putStrLn $ "  Deleting old deployment: " <> T.unpack oldDepName
         _ <- runK8sIO $ runCmd (buildDeleteDeploymentCommand cfg (namespace ctx) oldDepName)
         pure ()
+
+    -- Capture AFTER snapshot (new deployment)
+    cfgAfter <- getCfg
+    dbAfter <- getDB
+    rtAfter <- getRT
+    ctxAfter <- getK8sCtx
+    liftIO $ captureDeploymentSnapshot cfgAfter dbAfter (releaseId rtAfter) (namespace ctxAfter) (deploymentName ctxAfter) "DEPLOYMENT_AFTER"
 
     liftIO $ putStrLn "Cleanup complete for scheduler"
 

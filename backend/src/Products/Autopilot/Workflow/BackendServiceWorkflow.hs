@@ -54,6 +54,8 @@ import Products.Autopilot.Types.Target (
 import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..))
 import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers (
+    captureDeploymentSnapshot,
+    captureVSSnapshot,
     getRT,
     updateRT,
     (|>>),
@@ -164,8 +166,15 @@ prepareK8sResources = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
+    db <- getDB
     isNew <- isNewServiceRelease
     liftIO $ putStrLn $ "Preparing K8s resources for " <> T.unpack (product rt) <> if isNew then " (NEW SERVICE)" else ""
+
+    -- Capture BEFORE snapshots
+    when (not isNew) $ do
+        let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
+        liftIO $ captureDeploymentSnapshot cfg db (releaseId rt) (namespace ctx) oldDepName "DEPLOYMENT_BEFORE"
+    liftIO $ captureVSSnapshot cfg db (releaseId rt) (namespace ctx) (virtualServiceName ctx) "VS_BEFORE"
 
     -- 1. Apply ConfigMap
     updateK8sStatus BSApplyConfigMap
@@ -340,6 +349,14 @@ cleanupOldVersion = do
                 liftIO $ putStrLn $ "  Deleting old deployment: " <> T.unpack oldDepName
                 _ <- runK8sIO $ runCmd (buildDeleteDeploymentCommand cfg (namespace ctx) oldDepName)
                 pure ()
+
+    -- Capture AFTER snapshots
+    cfgAfter <- getCfg
+    dbAfter <- getDB
+    rtAfter <- getRT
+    ctxAfter <- getK8sCtx
+    liftIO $ captureDeploymentSnapshot cfgAfter dbAfter (releaseId rtAfter) (namespace ctxAfter) (deploymentName ctxAfter) "DEPLOYMENT_AFTER"
+    liftIO $ captureVSSnapshot cfgAfter dbAfter (releaseId rtAfter) (namespace ctxAfter) (virtualServiceName ctxAfter) "VS_AFTER"
 
     liftIO $ putStrLn "Cleanup complete"
 
