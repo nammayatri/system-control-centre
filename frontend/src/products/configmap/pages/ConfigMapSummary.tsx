@@ -120,7 +120,7 @@ const ConfigMapSummary: React.FC = () => {
               <Button size="sm" variant="ghost" onClick={() => handleAction('Discard')}>Discard</Button>
             </PermissionGate>
           )}
-          {['COMPLETED', 'RECORDED'].includes(data.status) && (
+          {['COMPLETED'].includes(data.status) && (
             <PermissionGate product="config-manager" permission="CONFIG_REVERT">
               <Button size="sm" variant="outline" onClick={() => handleAction('Revert')}><RefreshCw className="w-3.5 h-3.5" /> Revert</Button>
             </PermissionGate>

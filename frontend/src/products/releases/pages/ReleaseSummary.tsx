@@ -162,7 +162,7 @@ const ReleaseSummary: React.FC = () => {
               <Button size="sm" variant="ghost" loading={discardMut.isPending} onClick={() => doAction('discard', () => discardMut.mutateAsync({ releaseId: id! }))}><X className="w-3.5 h-3.5" /> Discard</Button>
             </PermissionGate>
           )}
-          {(s === 'INPROGRESS' || s === 'RECORDING') && (
+          {(s === 'INPROGRESS') && (
             <PermissionGate product="autopilot" permission="RELEASE_PAUSE">
               <Button size="sm" variant="outline" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
               <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!))}><Square className="w-3.5 h-3.5" /> Abort</Button>
@@ -174,7 +174,7 @@ const ReleaseSummary: React.FC = () => {
               <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!))}><Square className="w-3.5 h-3.5" /> Abort</Button>
             </PermissionGate>
           )}
-          {s === 'RECORDED' && (
+          {s === 'COMPLETED' && (
             <PermissionGate product="autopilot" permission="RELEASE_REVERT">
               <Button size="sm" variant="outline" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: 'admin' }))}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
             </PermissionGate>
@@ -243,7 +243,6 @@ const ReleaseSummary: React.FC = () => {
                   <InfoField label="End Time" value={formatDate(release.end_time)} mono />
                   <InfoField label="Priority" value={String(release.priority)} />
                   <InfoField label="AB HS Status" value={release.ab_hs_status} />
-                  <InfoField label="ART Recorder" value={release.is_art_recorder ? 'Yes' : 'No'} />
                   <InfoField label="Cronjob Suspend" value={release.cronjob_suspend ? 'Yes' : 'No'} />
                   <InfoField label="Scale Down Delay" value={release.release_context?.pods_scale_down_delay ? `${release.release_context.pods_scale_down_delay} hrs` : '-'} />
                   <InfoField label="Scale Down Status" value={release.release_context?.pods_scale_down_status || '-'} />

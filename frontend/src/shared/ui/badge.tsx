@@ -48,10 +48,10 @@ export function Badge({ children, variant = 'default', size = 'sm', dot, classNa
 export function statusVariant(status: ReleaseStatus | string): BadgeProps['variant'] {
   switch (status) {
     case 'COMPLETED':
-    case 'RECORDED':
+
       return 'success';
     case 'INPROGRESS':
-    case 'RECORDING':
+
     case 'RESTARTING':
       return 'warning';
     case 'PAUSED':

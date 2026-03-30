@@ -21,8 +21,8 @@ const CreateRelease: React.FC = () => {
   const [formData, setFormData] = useState({
     product: '', service: '', env: '', new_version: '', docker_image: '', change_log: '',
     status: 'CREATED', mode: 'AUTO', priority: '0', info: '', custom_pods_scale_down_days: '1',
-    cronjob_suspend: false, is_art_recorder: false, description: '', schedule_time: '',
     cluster: 'EULER_UAT', scale_down_delay: '1',
+    cronjob_suspend: false, description: '', schedule_time: '',
   });
   const [isNewService, setIsNewService] = useState(false);
   const [error, setError] = useState('');
@@ -147,7 +147,6 @@ const CreateRelease: React.FC = () => {
       priority: parseInt(formData.priority, 10) || 0, info: formData.info,
       pods_scale_down_delay: parseFloat(formData.scale_down_delay) || 1.0,
       cronjob_suspend: formData.cronjob_suspend,
-      is_art_recorder: formData.is_art_recorder ? 1 : 0,
       description: formData.description, schedule_time: formData.schedule_time,
       cluster: formData.cluster, new_service: isNewService, rollout_strategy: stages,
       is_approved: formData.env === 'INTEG_CLUSTER' ? 1 : 0,
@@ -208,7 +207,6 @@ const CreateRelease: React.FC = () => {
               <div><FieldLabel>Info</FieldLabel><input type="text" name="info" value={formData.info} onChange={handleInputChange} placeholder="Any Valid JSON" className={inputClass} /></div>
               <div><FieldLabel>Scale Down Days</FieldLabel><select name="custom_pods_scale_down_days" value={formData.custom_pods_scale_down_days} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>{[1,2,3,4,5,6].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
               <label className="flex items-center gap-2.5 cursor-pointer"><input type="checkbox" name="cronjob_suspend" checked={formData.cronjob_suspend} onChange={handleInputChange} className="rounded border-zinc-300 accent-zinc-900" /><span className="text-sm text-zinc-700">Cronjob Suspend</span></label>
-              <label className="flex items-center gap-2.5 cursor-pointer"><input type="checkbox" name="is_art_recorder" checked={formData.is_art_recorder} onChange={handleInputChange} className="rounded border-zinc-300 accent-zinc-900" /><span className="text-sm text-zinc-700">ART Recorder</span></label>
             </div>
 
             {/* Col 2 */}

@@ -28,7 +28,7 @@ const TIME_RANGE_OPTIONS = [
 
 const STATUS_FILTER_OPTIONS: ReleaseStatus[] = [
   'CREATED', 'INPROGRESS', 'PAUSED', 'COMPLETED', 'ABORTED', 'USER_ABORTED',
-  'GCLT_ABORTED', 'REVERTED', 'REVERTING', 'DISCARDED', 'RECORDING', 'RECORDED',
+  'GCLT_ABORTED', 'REVERTED', 'REVERTING', 'DISCARDED', 'DISCARDING', 'ABORTING', 'VS_APPLIED', 'RESTARTING',
 ];
 
 const getDateRange = (range: TimeRange, customFrom: string, customTo: string): { from: Date; to: Date } => {
@@ -119,7 +119,7 @@ const ListRelease: React.FC = () => {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     return {
       total: releases.length,
-      active: releases.filter(r => ['INPROGRESS', 'RECORDING', 'RESTARTING'].includes(r.status)).length,
+      active: releases.filter(r => ['INPROGRESS', 'RESTARTING'].includes(r.status)).length,
       completedToday: releases.filter(r => r.status === 'COMPLETED' && r.end_time && new Date(r.end_time) >= today).length,
       failedToday: releases.filter(r => ['ABORTED', 'USER_ABORTED', 'GCLT_ABORTED'].includes(r.status) && r.end_time && new Date(r.end_time) >= today).length,
     };
