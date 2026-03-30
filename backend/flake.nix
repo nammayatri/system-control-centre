@@ -62,7 +62,7 @@
             gnumake
 
             # Formatting
-            fourmolu
+            haskellPackages.fourmolu
 
             # DB
             postgresql

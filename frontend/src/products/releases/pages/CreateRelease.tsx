@@ -29,12 +29,24 @@ const CreateRelease: React.FC = () => {
   const [isEnvSwitch, setIsEnvSwitch] = useState(false);
   const [envData, setEnvData] = useState('');
   const [clonedService, setClonedService] = useState('');
-  const [stages, setStages] = useState([{ rollout: 100, cooloff: 1, pods: 2 }]);
+  const [stages, setStages] = useState([
+    { rollout: 5, cooloff: 10, pods: 2 },
+    { rollout: 25, cooloff: 10, pods: 2 },
+    { rollout: 50, cooloff: 10, pods: 2 },
+    { rollout: 75, cooloff: 10, pods: 2 },
+    { rollout: 100, cooloff: 10, pods: 2 },
+  ]);
   const [isReleaseSync, setIsReleaseSync] = useState(false);
   const [isSecondaryEnvSwitch, setIsSecondaryEnvSwitch] = useState(false);
   const [secondaryEnvData, setSecondaryEnvData] = useState('');
   const [secondaryEnvLoading, setSecondaryEnvLoading] = useState(false);
-  const [secondaryStages, setSecondaryStages] = useState([{ rollout: 100, cooloff: 1, pods: 2 }]);
+  const [secondaryStages, setSecondaryStages] = useState([
+    { rollout: 5, cooloff: 10, pods: 2 },
+    { rollout: 25, cooloff: 10, pods: 2 },
+    { rollout: 50, cooloff: 10, pods: 2 },
+    { rollout: 75, cooloff: 10, pods: 2 },
+    { rollout: 100, cooloff: 10, pods: 2 },
+  ]);
   const [syncCluster, setSyncCluster] = useState('');
 
   const { data: services = [] } = useServices(formData.product, isNewService);

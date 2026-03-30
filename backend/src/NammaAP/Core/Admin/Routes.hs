@@ -21,7 +21,7 @@ import Servant
 
 import NammaAP.Core.Admin.Types
 import NammaAP.Core.Admin.Queries
-import NammaAP.Products.Types (ProductSlug (..), productSlugToText, allPermissionsText, permissionToText, allPermissions)
+import NammaAP.Products.Types (ProductSlug (..), productSlugToText, allPermissionsText)
 import NammaAP.Core.Auth.Types (PersonAuth (..), PersonProductPerms (..))
 import NammaAP.Core.Auth.Queries (findPersonById, findProductAccessForPerson, findAllProductsForPerson, findTokenByValue, TokenRow (..))
 import NammaAP.Products.Autopilot.Types.API (APIResponse (..))
@@ -107,6 +107,14 @@ getBoolM :: Text -> KM.KeyMap Value -> Maybe Bool
 getBoolM k obj = case KM.lookup (K.fromText k) obj of
   Just (Bool b) -> Just b
   _ -> Nothing
+
+getStrListM :: Text -> KM.KeyMap Value -> [Text]
+getStrListM k obj = case KM.lookup (K.fromText k) obj of
+  Just (Array arr) -> concatMap extractStr (toList arr)
+  _ -> []
+  where
+    extractStr (String t) = [t]
+    extractStr _ = []
 
 getUuidListM :: Text -> KM.KeyMap Value -> [UUID]
 getUuidListM k obj = case KM.lookup (K.fromText k) obj of
@@ -219,13 +227,9 @@ assignRoleH userId mAuth (Object obj) = do
       case mRoleId of
         Nothing -> pure $ APIResponse "ERROR" "roleId is required"
         Just roleId -> do
-          mProduct <- liftIO $ findProductBySlug db productSlug
-          case mProduct of
-            Nothing -> pure $ APIResponse "ERROR" ("Product not found: " <> productSlug)
-            Just (productId, _) -> do
-              liftIO $ assignRole db userId productId roleId (Just (personId admin))
-              liftIO $ writeAuditLog db (personId admin) "ROLE_ASSIGNED" (Just "person_product_access") (Just $ UUID.toText userId) Nothing
-              pure $ APIResponse "SUCCESS" "Role assigned"
+          liftIO $ assignRole db userId productSlug roleId (Just (personId admin))
+          liftIO $ writeAuditLog db (personId admin) "ROLE_ASSIGNED" (Just "person_product_access") (Just $ UUID.toText userId) Nothing
+          pure $ APIResponse "SUCCESS" "Role assigned"
 assignRoleH _ _ _ = pure $ APIResponse "ERROR" "Invalid request body"
 
 revokeAccessH :: UUID -> Text -> Maybe Text -> Flow APIResponse
@@ -254,11 +258,12 @@ addOverrideH userId mAuth (Object obj) = do
         else if overrideType /= "GRANT" && overrideType /= "DENY"
           then pure $ object ["error" .= ("overrideType must be GRANT or DENY" :: Text)]
           else do
-            mPerm <- liftIO $ findPermissionByAction db productSlug permAction
-            case mPerm of
-              Nothing -> pure $ object ["error" .= ("Permission not found: " <> permAction :: Text)]
-              Just (permId, productId) -> do
-                oid <- liftIO $ addPermissionOverride db userId productId permId overrideType (Just (personId admin))
+            -- Validate permission against ADT (no DB lookup needed)
+            let validPerms = allPermissionsText productSlug
+            if permAction `notElem` validPerms
+              then pure $ object ["error" .= ("Invalid permission for product: " <> permAction :: Text)]
+              else do
+                oid <- liftIO $ addPermissionOverride db userId productSlug permAction overrideType (Just (personId admin))
                 pure $ object ["id" .= oid, "status" .= ("SUCCESS" :: Text)]
 addOverrideH _ _ _ = pure $ object ["error" .= ("Invalid request body" :: Text)]
 
@@ -310,16 +315,12 @@ createRoleH slug mAuth (Object obj) = do
       db <- getDBEnv
       let name = getStr "name" obj
           desc = getStrM "description" obj
-          permIds = getUuidListM "permissionIds" obj
+          permActions = getStrListM "permissions" obj
       if T.null name
         then pure $ object ["error" .= ("name is required" :: Text)]
         else do
-          mProduct <- liftIO $ findProductBySlug db slug
-          case mProduct of
-            Nothing -> pure $ object ["error" .= ("Product not found: " <> slug :: Text)]
-            Just (productId, _) -> do
-              roleId <- liftIO $ createRole db productId name desc permIds
-              pure $ object ["id" .= roleId, "status" .= ("SUCCESS" :: Text)]
+          roleId <- liftIO $ createRole db slug name desc permActions
+          pure $ object ["id" .= roleId, "status" .= ("SUCCESS" :: Text)]
 createRoleH _ _ _ = pure $ object ["error" .= ("Invalid request body" :: Text)]
 
 updateRoleH :: Text -> UUID -> Maybe Text -> Value -> Flow APIResponse
@@ -330,8 +331,8 @@ updateRoleH _slug roleId mAuth (Object obj) = do
     Just _ -> do
       db <- getDBEnv
       let desc = getStrM "description" obj
-          permIds = getUuidListM "permissionIds" obj
-      liftIO $ updateRolePermissions db roleId desc permIds
+          permActions = getStrListM "permissions" obj
+      liftIO $ updateRolePermissions db roleId desc permActions
       pure $ APIResponse "SUCCESS" "Role updated"
 updateRoleH _ _ _ _ = pure $ APIResponse "ERROR" "Invalid request body"
 
