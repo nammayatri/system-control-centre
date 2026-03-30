@@ -33,6 +33,7 @@ import NammaAP.Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualServic
 import NammaAP.Products.Autopilot.K8s.Deployment (getDeploymentEnvs)
 import NammaAP.Products.Autopilot.K8s.Execute (runCmd, K8sResult (..))
 import NammaAP.Core.Config (Config (..))
+import NammaAP.Core.Config.Runtime (isApproveAllReleases)
 import NammaAP.Products.Autopilot.Sync (triggerImmediateRevertSync)
 import NammaAP.Products.Autopilot.Queries.ProductService
 import NammaAP.Products.Autopilot.Queries.ReleaseTracker
@@ -272,6 +273,10 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq {..} = do
                 Just "MANUAL" -> Manual
                 Just "manual" -> Manual
                 _ -> Auto
+          approveAll <- liftIO $ isApproveAllReleases db
+          let initialApproval = case isApproved of
+                Just True -> True
+                _ -> approveAll && fromMaybe False isSystemTriggered
               tracker =
                 ReleaseTracker
                   { releaseId = rid
@@ -284,7 +289,7 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq {..} = do
                   , mode = reqMode
                   , createdBy = createdBy
                   , approvedBy = approvedBy
-                  , isApproved = fromMaybe False isApproved
+                  , isApproved = initialApproval
                   , isInfraApproved = fromMaybe (fromMaybe False (S.productNeedInfraApproval pCfg >>= \need -> if need then Just False else Just True)) isInfraApproved
                   , releaseTag = releaseTag
                   , scheduleTime = scheduleTime

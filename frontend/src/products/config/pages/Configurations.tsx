@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '../../../lib/api-client';
 import { Button } from '../../../shared/ui/button';
@@ -34,20 +34,20 @@ const Configurations: React.FC = () => {
 
   const { data: configs = [], isLoading, refetch } = useQuery({
     queryKey: ['server-configs'],
-    queryFn: async () => { const res = await apiClient.get('/server-config'); return res.data.configs || []; },
+    queryFn: async () => { const res = await apiClient.get('/server-config'); return (res.data.configs || []) as ServerConfig[]; },
   });
 
   const saveMut = useMutation({
     mutationFn: async (row: EditingRow) => {
       await apiClient.post('/server-config', { name: row.name, type: row.configType, value: row.value, enabled: String(row.enabled) });
     },
-    onSuccess: (_, row) => {
+    onSuccess: (_: void, row: EditingRow) => {
       toast.success(`Saved: ${row.name}`);
       setNewRow(null);
       setSelectedConfig(null);
       queryClient.invalidateQueries({ queryKey: ['server-configs'] });
     },
-    onError: (err: any) => { toast.error(err.message || 'Failed to save'); },
+    onError: (err: Error) => { toast.error(err.message || 'Failed to save'); },
   });
 
   const openConfigModal = (cfg: ServerConfig) => {
@@ -61,9 +61,9 @@ const Configurations: React.FC = () => {
     saveMut.mutate({ configType: selectedConfig.type, name: selectedConfig.name, value: modalValue, enabled: modalEnabled });
   };
 
-  const filtered = configs.filter((c: ServerConfig) =>
+  const filtered = useMemo(() => configs.filter((c: ServerConfig) =>
     !search || c.name.toLowerCase().includes(search.toLowerCase()) || (c.type || '').toLowerCase().includes(search.toLowerCase()) || (c.value || '').toLowerCase().includes(search.toLowerCase())
-  );
+  ), [configs, search]);
 
   const inputClass = "h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
 
@@ -79,7 +79,7 @@ const Configurations: React.FC = () => {
               className="pl-9 pr-4 h-9 border border-zinc-300 rounded-lg text-sm w-64 outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
           </div>
           <Button size="icon" variant="ghost" onClick={() => refetch()}><RefreshCw className="w-4 h-4" /></Button>
-          <PermissionGate product="backend-releases" permission="SERVICE_CONFIG_EDIT">
+          <PermissionGate product="config-manager" permission="SERVICE_CONFIG_EDIT">
             <Button size="sm" onClick={() => setNewRow({ configType: '', name: '', value: '', enabled: 1, isNew: true })} disabled={!!newRow}>
               <Plus className="w-4 h-4" /> Add Config
             </Button>
@@ -154,12 +154,14 @@ const Configurations: React.FC = () => {
               </div>
               <div>
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Config Value</label>
-                <textarea value={modalValue} onChange={e => setModalValue(e.target.value)} rows={8} className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm font-mono text-xs resize-y focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
+                <textarea value={modalValue} onChange={e => setModalValue(e.target.value)} rows={8} className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
               </div>
             </div>
             <div className="flex items-center justify-end gap-3 px-6 pb-5 pt-2 border-t border-zinc-100">
               <Button variant="secondary" onClick={() => setSelectedConfig(null)}>Cancel</Button>
-              <Button onClick={handleModalUpdate} loading={saveMut.isPending}>Update</Button>
+              <PermissionGate product="config-manager" permission="SERVICE_CONFIG_EDIT">
+                <Button onClick={handleModalUpdate} loading={saveMut.isPending}>Update</Button>
+              </PermissionGate>
             </div>
           </div>
         </div>

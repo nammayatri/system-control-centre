@@ -114,7 +114,9 @@ upsertService db rowId emails rolloutStrategy decisionConfig serviceName' produc
             serviceAcronym = Nothing,
             serviceType = sType,
             releaseConfigBitbucketPath = bitbucketPath,
+            releaseConfigMicroserviceType = Nothing,
             releaseConfigRevertStrategy = revertStrategy,
+            releaseConfigJiraWebhookUrl = Nothing,
             serviceTargetConfig = Just (encodeJsonText svcCfg)
           }
   runDB db $ do

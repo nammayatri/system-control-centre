@@ -77,6 +77,7 @@ data K8sCreateReleaseReq = K8sCreateReleaseReq
   , udf2 :: Maybe Text
   , udf3 :: Maybe Text
   , isReleaseSync :: Maybe Bool
+  , isSystemTriggered :: Maybe Bool
   , syncClusterUdf2 :: Maybe Text
   , syncClusterRolloutStrategy :: Maybe Value
   }
@@ -103,8 +104,8 @@ instance FromJSON K8sCreateReleaseReq where
     description <- o .:? "description"
     metadata <- parseMetadata o
     mode <- o .:? "mode"
-    isApproved <- o .:? "is_approved"
-    isInfraApproved <- o .:? "is_infra_approved"
+    isApproved <- parseBoolish o "is_approved"
+    isInfraApproved <- parseBoolish o "is_infra_approved"
     priority <- o .:? "priority"
     globalId <- o .:? "global_id"
     newService <- o .:? "new_service"
@@ -115,6 +116,7 @@ instance FromJSON K8sCreateReleaseReq where
     udf2 <- o .:? "udf2"
     udf3 <- o .:? "udf3"
     isReleaseSync <- o .:? "isReleaseSync"
+    isSystemTriggered <- o .:? "isSystemTriggered"
     syncClusterUdf2 <- o .:? "syncClusterUdf2"
     syncClusterRolloutStrategy <- o .:? "syncClusterRolloutStrategy"
     pure K8sCreateReleaseReq {..}
@@ -143,6 +145,14 @@ instance FromJSON K8sCreateReleaseReq where
         case v of
           Just "" -> pure Nothing
           _ -> pure v
+      parseBoolish obj k = do
+        v <- obj .:? k
+        case v of
+          Nothing -> pure Nothing
+          Just (Bool b) -> pure (Just b)
+          Just (Number n) -> pure (Just (n /= 0))
+          Just (String t) -> pure (Just (t == "true" || t == "1"))
+          _ -> pure Nothing
       parseRollout obj = do
         v1 <- obj .:? "rolloutStrategy"
         case v1 of
@@ -213,6 +223,7 @@ instance ToJSON K8sCreateReleaseReq where
       , "udf2" .= udf2
       , "udf3" .= udf3
       , "isReleaseSync" .= isReleaseSync
+      , "isSystemTriggered" .= isSystemTriggered
       , "syncClusterUdf2" .= syncClusterUdf2
       , "syncClusterRolloutStrategy" .= syncClusterRolloutStrategy
       ]
