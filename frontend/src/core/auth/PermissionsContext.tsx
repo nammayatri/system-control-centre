@@ -28,7 +28,7 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
 
   const isAdmin = useMemo(() => {
     return products.some(
-      (p) => p.role === 'superadmin' || p.role === 'admin'
+      (p) => p.role?.toLowerCase() === 'superadmin' || p.role?.toLowerCase() === 'admin'
     );
   }, [products]);
 
