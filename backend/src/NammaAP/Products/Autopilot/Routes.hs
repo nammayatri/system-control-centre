@@ -176,8 +176,21 @@ listServicesH productName' = do
                           else pure (Right deduped)
           res <- liftIO $ pickServices products
           case res of
-            Left errMsg -> liftIO $ ioError $ userError ("VirtualService discovery failed: " <> T.unpack errMsg)
-            Right hosts -> pure $ map toResponse hosts
+            Left _ ->
+              -- Fallback: if VirtualService discovery fails (e.g., no K8s locally),
+              -- return services directly from release_config
+              pure $
+                map
+                  (\s -> ServiceResponse (S.serviceName s) (getServiceHost s) (S.serviceType s) "DB")
+                  cfgServices
+            Right hosts
+              | null hosts ->
+                -- If K8s returned empty, also fallback to DB
+                pure $
+                  map
+                    (\s -> ServiceResponse (S.serviceName s) (getServiceHost s) (S.serviceType s) "DB")
+                    cfgServices
+              | otherwise -> pure $ map toResponse hosts
 
 upsertServiceH :: UpsertServiceReq -> Flow APIResponse
 upsertServiceH UpsertServiceReq {..} = do
