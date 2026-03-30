@@ -69,7 +69,7 @@ const ListRelease: React.FC = () => {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(10);
-  const [timeRange, setTimeRange] = useState<TimeRange>('last_30_days');
+  const [timeRange, setTimeRange] = useState<TimeRange>('today');
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
