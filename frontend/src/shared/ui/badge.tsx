@@ -65,9 +65,12 @@ export function statusVariant(status: ReleaseStatus | string): BadgeProps['varia
     case 'DISCARDED':
     case 'DISCARDING':
       return 'muted';
+    case 'VS_APPLIED':
+    case 'VSAPPLIED':
+    case 'APPLIED':
+      return 'success';
     case 'REVERTING':
     case 'REVERTED':
-    case 'VS_APPLIED':
       return 'purple';
     case 'ABORTED':
     case 'USER_ABORTED':
