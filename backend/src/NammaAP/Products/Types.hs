@@ -110,7 +110,11 @@ isViewPerm (ConfigManagerPerm p) = p == CM_CONFIG_VIEW
 defaultPermissions :: SystemRole -> ProductSlug -> [Permission]
 defaultPermissions Admin p = allPermissions p
 defaultPermissions Viewer p = filter isViewPerm (allPermissions p)
-defaultPermissions Manager p = allPermissions p  -- Managers get all permissions except edit (simplified)
+defaultPermissions Manager p = filter (not . isEditPerm) (allPermissions p)
+
+isEditPerm :: Permission -> Bool
+isEditPerm (AutopilotPerm p) = p `elem` [AP_PRODUCT_CONFIG_EDIT, AP_SERVICE_CONFIG_EDIT]
+isEditPerm (ConfigManagerPerm _) = False
 
 -- | Product typeclass - each product must implement this.
 -- Missing implementation causes a compile error.
