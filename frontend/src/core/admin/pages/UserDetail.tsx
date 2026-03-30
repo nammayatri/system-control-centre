@@ -48,9 +48,9 @@ const UserDetail: React.FC = () => {
   const [assignProduct, setAssignProduct] = useState('');
   const [assignRoleId, setAssignRoleId] = useState('');
 
-  // Override form
+  // Override form — multi-select
   const [overrideProduct, setOverrideProduct] = useState('');
-  const [overridePermission, setOverridePermission] = useState('');
+  const [selectedOverridePerms, setSelectedOverridePerms] = useState<string[]>([]);
   const [overrideType, setOverrideType] = useState<'GRANT' | 'DENY'>('GRANT');
 
   // Queries — response is { user, products, overrides }
@@ -130,18 +130,22 @@ const UserDetail: React.FC = () => {
   });
 
   const addOverrideMut = useMutation({
-    mutationFn: () =>
-      addPermissionOverride(id!, {
-        productSlug: overrideProduct,
-        permissionAction: overridePermission,
-        overrideType: overrideType,
-      }),
+    mutationFn: async () => {
+      // Add all selected permissions as overrides
+      for (const perm of selectedOverridePerms) {
+        await addPermissionOverride(id!, {
+          productSlug: overrideProduct,
+          permissionAction: perm,
+          overrideType: overrideType,
+        });
+      }
+    },
     onSuccess: () => {
-      toast.success('Permission override added');
+      toast.success(`${selectedOverridePerms.length} permission override(s) added`);
       queryClient.invalidateQueries({ queryKey: ['admin-user', id] });
       setOverrideOpen(false);
       setOverrideProduct('');
-      setOverridePermission('');
+      setSelectedOverridePerms([]);
       setOverrideType('GRANT');
     },
     onError: (err: any) => toast.error(err?.response?.data?.error || err.message || 'Failed to add override'),
@@ -515,18 +519,18 @@ const UserDetail: React.FC = () => {
         </DialogContent>
       </Dialog>
 
-      {/* ── Add Override Dialog ── */}
+      {/* ── Add Override Dialog (multi-select) ── */}
       <Dialog open={overrideOpen} onOpenChange={setOverrideOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Add Permission Override</DialogTitle>
-            <DialogDescription>Grant or deny a specific permission for this user.</DialogDescription>
+            <DialogTitle>Add Permission Overrides</DialogTitle>
+            <DialogDescription>Select one or more permissions to grant or deny for this user.</DialogDescription>
           </DialogHeader>
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              if (!overrideProduct || !overridePermission) {
-                toast.error('Select a product and permission');
+              if (!overrideProduct || selectedOverridePerms.length === 0) {
+                toast.error('Select a product and at least one permission');
                 return;
               }
               addOverrideMut.mutate();
@@ -540,59 +544,92 @@ const UserDetail: React.FC = () => {
                 value={overrideProduct}
                 onChange={(e) => {
                   setOverrideProduct(e.target.value);
-                  setOverridePermission('');
+                  setSelectedOverridePerms([]);
                 }}
                 options={products.map((p: any) => ({
                   value: p.slug || p,
                   label: p.name || p.slug || p,
                 }))}
               />
-              <SelectInput
-                label="Permission"
-                required
-                placeholder={overrideProduct ? 'Select a permission' : 'Select a product first'}
-                disabled={!overrideProduct}
-                value={overridePermission}
-                onChange={(e) => setOverridePermission(e.target.value)}
-                options={productPermissions.map((perm: any) => ({
-                  value: typeof perm === 'string' ? perm : perm.action || perm.name,
-                  label: typeof perm === 'string' ? perm : perm.action || perm.name,
-                }))}
-              />
+
+              {/* Override type */}
               <div className="space-y-1.5">
                 <span className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider">Type</span>
                 <div className="flex items-center gap-4">
                   <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="overrideType"
-                      value="GRANT"
-                      checked={overrideType === 'GRANT'}
-                      onChange={() => setOverrideType('GRANT')}
-                      className="accent-emerald-600 cursor-pointer"
-                    />
+                    <input type="radio" name="overrideType" value="GRANT" checked={overrideType === 'GRANT'} onChange={() => setOverrideType('GRANT')} className="accent-emerald-600 cursor-pointer" />
                     <span className="text-sm text-zinc-700">Grant</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="overrideType"
-                      value="DENY"
-                      checked={overrideType === 'DENY'}
-                      onChange={() => setOverrideType('DENY')}
-                      className="accent-red-600 cursor-pointer"
-                    />
+                    <input type="radio" name="overrideType" value="DENY" checked={overrideType === 'DENY'} onChange={() => setOverrideType('DENY')} className="accent-red-600 cursor-pointer" />
                     <span className="text-sm text-zinc-700">Deny</span>
                   </label>
                 </div>
+              </div>
+
+              {/* Multi-select permissions */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider">
+                    Permissions {selectedOverridePerms.length > 0 && <span className="text-zinc-400">({selectedOverridePerms.length} selected)</span>}
+                  </span>
+                  {overrideProduct && productPermissions.length > 0 && (
+                    <button
+                      type="button"
+                      className="text-[11px] text-blue-600 hover:text-blue-800 cursor-pointer transition-colors duration-150"
+                      onClick={() => {
+                        const allPerms = productPermissions.map((p: any) => typeof p === 'string' ? p : p.action || p.name);
+                        setSelectedOverridePerms(selectedOverridePerms.length === allPerms.length ? [] : allPerms);
+                      }}
+                    >
+                      {selectedOverridePerms.length === productPermissions.length ? 'Deselect All' : 'Select All'}
+                    </button>
+                  )}
+                </div>
+                {!overrideProduct ? (
+                  <p className="text-xs text-zinc-400 py-2">Select a product first</p>
+                ) : (
+                  <div className="max-h-52 overflow-y-auto border border-zinc-200 rounded-lg divide-y divide-zinc-100">
+                    {productPermissions.map((perm: any) => {
+                      const permName = typeof perm === 'string' ? perm : perm.action || perm.name;
+                      const isSelected = selectedOverridePerms.includes(permName);
+                      // Check if already overridden
+                      const alreadyOverridden = userOverrides.some((o: any) => o.permissionAction === permName || o.permission === permName);
+                      return (
+                        <label
+                          key={permName}
+                          className={cn(
+                            'flex items-center gap-3 px-3 py-2 cursor-pointer transition-colors duration-100',
+                            isSelected ? 'bg-zinc-50' : 'hover:bg-zinc-50',
+                            alreadyOverridden && 'opacity-50'
+                          )}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            disabled={alreadyOverridden}
+                            onChange={() => {
+                              setSelectedOverridePerms(prev =>
+                                isSelected ? prev.filter(p => p !== permName) : [...prev, permName]
+                              );
+                            }}
+                            className="accent-zinc-900 cursor-pointer rounded"
+                          />
+                          <span className="text-xs font-mono text-zinc-700">{permName}</span>
+                          {alreadyOverridden && <span className="text-[10px] text-zinc-400 ml-auto">already overridden</span>}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </DialogBody>
             <DialogFooter>
               <Button variant="secondary" type="button" onClick={() => setOverrideOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit" loading={addOverrideMut.isPending}>
-                Add Override
+              <Button type="submit" loading={addOverrideMut.isPending} disabled={selectedOverridePerms.length === 0}>
+                Add {selectedOverridePerms.length > 0 ? `${selectedOverridePerms.length} Override${selectedOverridePerms.length > 1 ? 's' : ''}` : 'Override'}
               </Button>
             </DialogFooter>
           </form>
