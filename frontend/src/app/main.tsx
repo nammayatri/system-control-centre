@@ -5,6 +5,7 @@ import { TooltipProvider } from '../shared/ui/tooltip';
 import { Toaster } from 'sonner';
 import { AuthProvider } from '../core/auth/AuthContext';
 import { PermissionsProvider } from '../core/auth/PermissionsContext';
+import { ConfirmProvider } from '../shared/ui/confirm-dialog';
 import '../index.css';
 import App from './App';
 
@@ -24,8 +25,10 @@ createRoot(document.getElementById('root')!).render(
       <TooltipProvider>
         <AuthProvider>
           <PermissionsProvider>
-            <App />
-            <Toaster position="top-right" richColors closeButton />
+            <ConfirmProvider>
+              <App />
+              <Toaster position="top-right" richColors closeButton />
+            </ConfirmProvider>
           </PermissionsProvider>
         </AuthProvider>
       </TooltipProvider>

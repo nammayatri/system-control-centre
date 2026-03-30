@@ -9,6 +9,7 @@ import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap, Search, Trash2, ChevronRight as ChevronRightIcon } from 'lucide-react';
 import { cn } from '../../../lib/utils';
+import { useConfirm } from '../../../shared/ui/confirm-dialog';
 
 const formatDate = (d?: string) => {
   if (!d) return '-';
@@ -107,8 +108,16 @@ const ReleaseSummary: React.FC = () => {
   const revertMut = useRevertRelease();
   const immRevertMut = useImmediateRevert();
 
-  const doAction = async (label: string, fn: () => Promise<any>) => {
-    if (!confirm(`Are you sure you want to ${label}?`)) return;
+  const confirmAction = useConfirm();
+
+  const doAction = async (label: string, fn: () => Promise<any>, isDanger = false) => {
+    const ok = await confirmAction({
+      title: `${label.charAt(0).toUpperCase() + label.slice(1)} Release`,
+      description: `Are you sure you want to ${label} this release? This action cannot be undone.`,
+      confirmLabel: label.charAt(0).toUpperCase() + label.slice(1),
+      variant: isDanger ? 'danger' : 'primary',
+    });
+    if (!ok) return;
     try { await fn(); } catch {}
   };
 
