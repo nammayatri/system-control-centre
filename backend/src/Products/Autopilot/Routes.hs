@@ -1820,21 +1820,27 @@ revertVsEditTrackerH tid = do
                     pure $ APIResponse "SUCCESS" "VS edit tracker marked as REVERTED"
 
 -- | Fetch the current live VirtualService JSON from K8s
+-- Uses the product_config's vsName (e.g. "atlas-vs"), NOT the service name
 fetchCurrentVsH :: Maybe Text -> Maybe Text -> Flow Value
-fetchCurrentVsH mProduct mService = do
+fetchCurrentVsH mProduct _mService = do
     cfg <- getConfig
     db <- getDBEnv
-    case (mProduct, mService) of
-        (Just prod, Just svc) -> do
-            -- Look up namespace from product_config
+    case mProduct of
+        Just prod -> do
             mProdCfg <- liftIO $ findProductByNameAndCluster db prod ""
-            let ns = maybe (defaultNamespace cfg) getProductNamespace mProdCfg
-                svcHost = T.toLower (T.replace "_" "-" svc)
-                vsName = svcHost
-            result <- liftIO $ getVirtualServiceJson cfg ns vsName
-            case result of
-                Left err -> pure $ object ["error" .= show err, "message" .= ("Failed to fetch VirtualService" :: Text)]
-                Right vsText -> case eitherDecode (LBS.pack (T.unpack vsText)) of
-                    Right vsJson -> pure vsJson
-                    Left _ -> pure $ object ["data" .= vsText]
+            case mProdCfg of
+                Nothing -> pure $ object ["error" .= ("No product_config found for " <> prod), "message" .= ("Configure product first" :: Text)]
+                Just pCfg -> do
+                    let ns = getProductNamespace pCfg
+                        vsN = getProductVsName pCfg
+                    if T.null vsN
+                        then pure $ object ["error" .= ("No vsName configured for product " <> prod), "message" .= ("Set vsName in product config" :: Text)]
+                        else do
+                            result <- liftIO $ getVirtualServiceJson cfg ns vsN
+                            case result of
+                                Left err -> pure $ object ["error" .= show err, "message" .= ("Failed to fetch VirtualService" :: Text)]
+                                Right vsText -> case eitherDecode (LBS.pack (T.unpack vsText)) of
+                                    Right vsJson -> pure vsJson
+                                    Left _ -> pure $ object ["data" .= vsText]
+        _ -> pure $ object ["error" .= ("product query param required" :: Text)]
         _ -> pure $ object ["error" .= ("product and service query params required" :: Text)]

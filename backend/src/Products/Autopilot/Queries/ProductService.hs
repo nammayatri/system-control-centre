@@ -143,7 +143,14 @@ findProductByName db pName = do
 findProductByNameAndCluster :: DBEnv -> Text -> Text -> IO (Maybe ProductConfig)
 findProductByNameAndCluster db pName clusterName = do
     rows <- listProductsByName db pName
-    pure $ find (\p -> getProductCluster p == clusterName) rows
+    pure $ case clusterName of
+        "" -> safeHead rows
+        _  -> case find (\p -> getProductCluster p == clusterName) rows of
+            Just p  -> Just p
+            Nothing -> safeHead rows
+  where
+    safeHead []    = Nothing
+    safeHead (x:_) = Just x
 
 listProductsByName :: DBEnv -> Text -> IO [ProductConfig]
 listProductsByName db pName =
