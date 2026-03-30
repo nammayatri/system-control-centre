@@ -7,10 +7,38 @@
 - Each product is fully self-contained -- owns its tables, types, queries, logic
 
 ## Local Setup
-- Backend: `nix develop` -> `cabal build` -> `cabal run namma-ap-exe`
-- Frontend: `cd frontend && npm install && npm run dev`
-- DB: `createdb system_control && psql system_control -f scripts/all_schema.sql`
-- Connection: `DATABASE_URL=postgres://vijaygupta@localhost:5432/system_control`
+
+### Quick Start (one command)
+```bash
+cd backend
+nix develop --accept-flake-config
+# Inside nix shell:
+bash scripts/run.sh   # creates DB + builds + starts server on :8012
+```
+
+### Step by Step
+```bash
+# Backend
+cd backend
+nix develop --accept-flake-config  # enter nix shell (GHC 9.2.7 + cabal + psql)
+bash scripts/setup-db.sh           # create DB + schema + seed data
+cabal build                        # compile
+cabal run namma-ap-exe             # start server on :8012
+
+# Frontend (separate terminal)
+cd frontend
+npm install
+npm run dev                        # starts on :5173
+```
+
+### Environment Variables
+| Variable | Default | Description |
+|----------|---------|-------------|
+| SC_DB_NAME | system_control | PostgreSQL database name |
+| SC_DB_USER | $(whoami) | PostgreSQL user |
+| SC_DB_HOST | localhost | PostgreSQL host |
+| SC_DB_PORT | 5432 | PostgreSQL port |
+| PORT | 8012 | Backend server port |
 
 ## Default Login
 - Email: admin@juspay.in
