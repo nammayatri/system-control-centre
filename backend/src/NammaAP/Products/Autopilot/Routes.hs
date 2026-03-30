@@ -665,6 +665,7 @@ createConfigMapH body = do
           targetState = ConfigState emptyConfigState
       liftIO $ insertReleaseTracker db tracker (Just targetState)
       liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
+      liftIO $ notifyReleaseCreated db tracker
       -- Handle sync to secondary cluster
       let isSync = case body of
             Object o -> isTruthy "isSync" o
