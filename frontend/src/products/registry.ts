@@ -38,7 +38,7 @@ import ReleaseSummary from './releases/pages/ReleaseSummary';
 
 const releasesProduct: ProductDefinition = {
   slug: 'backend-releases',
-  label: 'Releases',
+  label: 'Backend Releases',
   icon: 'Rocket',
   basePath: '/releases',
   navItems: [
