@@ -34,6 +34,7 @@ library
       NammaAP.Core.Environment
       NammaAP.Core.Server
       NammaAP.Core.Utils.FlowMonad
+      NammaAP.Products.Autopilot.Config
       NammaAP.Products.Autopilot.Discovery
       NammaAP.Products.Autopilot.K8s.Deployment
       NammaAP.Products.Autopilot.K8s.DestinationRule
@@ -68,6 +69,8 @@ library
       NammaAP.Products.Autopilot.Workflow.Types
       NammaAP.Products.Registry
       NammaAP.Products.Types
+      NammaAP.Shared.Config.Registry
+      NammaAP.Shared.Config.Types
       NammaAP.Shared.Queries.ProductConfig
       NammaAP.Shared.Queries.ReleaseConfig
       NammaAP.Shared.Queries.ReleaseEvents

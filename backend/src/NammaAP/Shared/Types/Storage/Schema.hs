@@ -124,7 +124,8 @@ data ServerConfigT f = ServerConfigT
     scName :: Columnar f Text,
     scValue :: Columnar f Text,
     scLastUpdated :: Columnar f UTCTime,
-    scEnabled :: Columnar f Int32
+    scEnabled :: Columnar f Int32,
+    scProduct :: Columnar f (Maybe Text)
   }
   deriving (Generic, Beamable)
 
@@ -239,6 +240,7 @@ nammaAPDb =
                   scName = fieldNamed "name",
                   scValue = fieldNamed "value",
                   scLastUpdated = fieldNamed "last_updated",
-                  scEnabled = fieldNamed "enabled"
+                  scEnabled = fieldNamed "enabled",
+                  scProduct = fieldNamed "product"
                 }
         }

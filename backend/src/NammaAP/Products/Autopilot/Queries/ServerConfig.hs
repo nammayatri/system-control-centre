@@ -16,6 +16,7 @@ import NammaAP.Core.Environment (DBEnv)
 import NammaAP.Shared.Types.Storage.Schema
 
 -- | Fetch a server_config value by name where enabled is truthy (1).
+-- Backward compatible: does not filter by product.
 getEnabledServerConfigValue :: DBEnv -> Text -> IO (Maybe Text)
 getEnabledServerConfigValue db name = do
   rows <-
@@ -30,8 +31,8 @@ getEnabledServerConfigValue db name = do
     (v : _) -> Just v
     _ -> Nothing
 
--- | List all server_config rows.
-listAllServerConfigs :: DBEnv -> IO [(Int, Text, Text, Text, Int)]
+-- | List all server_config rows (now includes product column).
+listAllServerConfigs :: DBEnv -> IO [(Int, Text, Text, Text, Int, Maybe Text)]
 listAllServerConfigs db = do
   rows <-
     runDB db $
@@ -41,18 +42,19 @@ listAllServerConfigs db = do
             all_ (serverConfigs nammaAPDb)
   pure $ map toTuple rows
   where
-    toTuple :: ServerConfig -> (Int, Text, Text, Text, Int)
+    toTuple :: ServerConfig -> (Int, Text, Text, Text, Int, Maybe Text)
     toTuple sc =
       ( fromIntegral (scId sc)
       , scType sc
       , scName sc
       , scValue sc
       , fromIntegral (scEnabled sc)
+      , scProduct sc
       )
 
--- | Upsert a server_config row by name.
-upsertServerConfig :: DBEnv -> Text -> Text -> Text -> Bool -> IO ()
-upsertServerConfig db name typ value enabled = do
+-- | Upsert a server_config row by name (now includes product column).
+upsertServerConfig :: DBEnv -> Text -> Text -> Text -> Bool -> Maybe Text -> IO ()
+upsertServerConfig db name typ value enabled product_ = do
   let enabledInt = if enabled then (1 :: Int32) else 0
   now <- getCurrentTime
   existing <-
@@ -73,7 +75,8 @@ upsertServerConfig db name typ value enabled = do
                   [ scType sc <-. val_ typ,
                     scValue sc <-. val_ value,
                     scEnabled sc <-. val_ enabledInt,
-                    scLastUpdated sc <-. val_ now
+                    scLastUpdated sc <-. val_ now,
+                    scProduct sc <-. val_ product_
                   ]
             )
             (\sc -> scId sc ==. val_ existingId)
@@ -88,6 +91,7 @@ upsertServerConfig db name typ value enabled = do
                     scName = val_ name,
                     scValue = val_ value,
                     scLastUpdated = val_ now,
-                    scEnabled = val_ enabledInt
+                    scEnabled = val_ enabledInt,
+                    scProduct = val_ product_
                   }
               ]

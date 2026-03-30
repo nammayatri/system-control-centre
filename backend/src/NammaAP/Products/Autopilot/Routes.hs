@@ -14,6 +14,7 @@ import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.List (find)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -21,6 +22,7 @@ import Data.Time.Clock (UTCTime, getCurrentTime, addUTCTime)
 import Data.Time.Format (parseTimeM, defaultTimeLocale)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
+import Control.Applicative ((<|>))
 import Control.Concurrent (forkIO)
 import Control.Exception (SomeException, try)
 import Control.Monad (when, void)
@@ -38,6 +40,8 @@ import NammaAP.Products.Autopilot.Sync (triggerImmediateRevertSync)
 import NammaAP.Products.Autopilot.Queries.ProductService
 import NammaAP.Products.Autopilot.Queries.ReleaseTracker
 import NammaAP.Products.Autopilot.Queries.ServerConfig (listAllServerConfigs, upsertServerConfig)
+import NammaAP.Shared.Config.Types (ConfigEntry(..), ConfigGroup(..), configGroupToText, configTypeDefault, configTypeTag)
+import NammaAP.Shared.Config.Registry (allConfigEntries, findConfigEntry, validateConfigValue)
 import NammaAP.Products.Autopilot.Types
 import qualified NammaAP.Products.Autopilot.Types as NT
 import NammaAP.Products.Autopilot.Types.Target (TargetState(..), emptyConfigState)
@@ -814,27 +818,98 @@ listServerConfigH :: Flow Value
 listServerConfigH = do
   db <- getDBEnv
   rows <- liftIO $ listAllServerConfigs db
-  let toObj (rowId, typ, name, val, enabled) = object
-        [ "id" .= rowId
-        , "type" .= typ
-        , "name" .= name
-        , "value" .= val
-        , "enabled" .= enabled
-        ]
-  pure $ object ["configs" .= map toObj rows]
+  -- Build a map of DB rows by name
+  let dbMap :: Map.Map Text (Int, Text, Text, Text, Int, Maybe Text)
+      dbMap = Map.fromList [(n, row) | row@(_, _, n, _, _, _) <- rows]
+      -- Merge registry entries with DB state
+      mergedConfigs = map (mergeEntry dbMap) allConfigEntries
+      -- Also include DB rows that are NOT in registry (unknown/legacy configs)
+      registryKeys = map ceKey allConfigEntries
+      extraDbConfigs = [ mkUnknownObj row | row@(_, _, n, _, _, _) <- rows, n `notElem` registryKeys ]
+      allConfigs = mergedConfigs ++ extraDbConfigs
+      -- Group by group name
+      grouped = Map.toAscList $ Map.fromListWith (++) [(g, [c]) | (g, c) <- allConfigs]
+      groupObjs = map (\(gName, cs) -> object ["name" .= gName, "configs" .= cs]) grouped
+  -- Also return flat configs list for backward compat
+  let flatConfigs = map toFlatObj rows
+  pure $ object ["groups" .= groupObjs, "configs" .= flatConfigs]
+  where
+    mergeEntry dbMap entry =
+      let key = ceKey entry
+          groupName = configGroupToText (ceGroup entry)
+          typTag = configTypeTag (ceType entry)
+          defVal = configTypeDefault (ceType entry)
+          prod = ceProduct entry
+          desc = ceDescription entry
+      in case Map.lookup key dbMap of
+        Just (_rowId, _typ, _name, val, enabled, dbProd) ->
+          ( groupName
+          , object
+              [ "key" .= key
+              , "value" .= val
+              , "type" .= typTag
+              , "default" .= defVal
+              , "description" .= desc
+              , "product" .= (dbProd <|> prod)
+              , "enabled" .= (enabled == 1)
+              , "id" .= _rowId
+              ]
+          )
+        Nothing ->
+          ( groupName
+          , object
+              [ "key" .= key
+              , "value" .= defVal
+              , "type" .= typTag
+              , "default" .= defVal
+              , "description" .= desc
+              , "product" .= prod
+              , "enabled" .= True
+              , "id" .= (0 :: Int)
+              ]
+          )
+    mkUnknownObj (_rowId, typ, name, val, enabled, prod) =
+      ( "General" :: Text
+      , object
+          [ "key" .= name
+          , "value" .= val
+          , "type" .= typ
+          , "default" .= ("" :: Text)
+          , "description" .= ("" :: Text)
+          , "product" .= prod
+          , "enabled" .= (enabled == 1)
+          , "id" .= _rowId
+          ]
+      )
+    toFlatObj (_rowId, typ, name, val, enabled, prod) = object
+      [ "id" .= _rowId
+      , "type" .= typ
+      , "name" .= name
+      , "value" .= val
+      , "enabled" .= enabled
+      , "product" .= prod
+      ]
 
 upsertServerConfigH :: Value -> Flow APIResponse
 upsertServerConfigH (Object obj) = do
   db <- getDBEnv
   let name = getStr "name" obj
-      typ = fromMaybe "" (getStrM "type" obj)
       value = fromMaybe "" (getStrM "value" obj)
       enabled = maybe True (\t -> t == "1" || T.toLower t == "true") (getStrM "enabled" obj)
   if T.null name
     then pure $ APIResponse "ERROR" "name is required"
-    else do
-      liftIO $ upsertServerConfig db name typ value enabled
-      pure $ APIResponse "SUCCESS" ("server_config upserted: " <> name)
+    else case findConfigEntry name of
+      Nothing ->
+        pure $ APIResponse "ERROR" ("Unknown config key: " <> name)
+      Just entry ->
+        case validateConfigValue entry value of
+          Left err ->
+            pure $ APIResponse "ERROR" ("Validation failed for " <> name <> ": " <> err)
+          Right _ -> do
+            let typ = configTypeTag (ceType entry)
+                product_ = ceProduct entry
+            liftIO $ upsertServerConfig db name typ value enabled product_
+            pure $ APIResponse "SUCCESS" ("server_config upserted: " <> name)
 upsertServerConfigH _ = pure $ APIResponse "ERROR" "Invalid JSON body"
 
 
