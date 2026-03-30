@@ -95,15 +95,17 @@ const UserDetail: React.FC = () => {
     onError: (err: any) => toast.error(err?.response?.data?.error || err.message || 'Failed to update user'),
   });
 
-  const deactivateMut = useMutation({
-    mutationFn: () => deactivateUser(id!),
+  const isUserActive = user?.isActive !== false;
+
+  const toggleActiveMut = useMutation({
+    mutationFn: () => isUserActive ? deactivateUser(id!) : updateUser(id!, { isActive: true }),
     onSuccess: () => {
-      toast.success('User deactivated');
+      toast.success(isUserActive ? 'User deactivated' : 'User activated');
       queryClient.invalidateQueries({ queryKey: ['admin-user', id] });
       queryClient.invalidateQueries({ queryKey: ['admin-users'] });
       setDeactivateOpen(false);
     },
-    onError: (err: any) => toast.error(err?.response?.data?.error || err.message || 'Failed to deactivate user'),
+    onError: (err: any) => toast.error(err?.response?.data?.error || err.message || 'Failed to update user status'),
   });
 
   const assignMut = useMutation({
@@ -230,8 +232,24 @@ const UserDetail: React.FC = () => {
             <div className="text-zinc-800 font-medium mt-0.5">{user.lastName || '-'}</div>
           </div>
           <div>
+            <span className="text-zinc-400 text-[11px] uppercase tracking-wider block">Email</span>
+            <div className="text-zinc-800 mt-0.5" style={{ fontFamily: 'Fira Code, monospace', fontSize: '12px' }}>{user.email || '-'}</div>
+          </div>
+          <div>
+            <span className="text-zinc-400 text-[11px] uppercase tracking-wider block">Status</span>
+            <div className="mt-0.5">
+              <Badge variant={user.isActive !== false ? 'success' : 'danger'} dot size="sm">
+                {user.isActive !== false ? 'Active' : 'Inactive'}
+              </Badge>
+            </div>
+          </div>
+          <div>
             <span className="text-zinc-400 text-[11px] uppercase tracking-wider block">Superadmin</span>
-            <div className="text-zinc-800 font-medium mt-0.5">{user.isSuperadmin ? 'Yes' : 'No'}</div>
+            <div className="mt-0.5">
+              <Badge variant={user.isSuperadmin ? 'purple' : 'muted'} size="sm">
+                {user.isSuperadmin ? 'Yes' : 'No'}
+              </Badge>
+            </div>
           </div>
           <div>
             <span className="text-zinc-400 text-[11px] uppercase tracking-wider block">Created</span>
@@ -360,10 +378,10 @@ const UserDetail: React.FC = () => {
         )}
       </div>
 
-      {/* Deactivate User */}
+      {/* Activate / Deactivate User */}
       <div className="flex justify-end pt-2 mb-8">
-        <Button variant="danger" size="sm" onClick={() => setDeactivateOpen(true)}>
-          Deactivate User
+        <Button variant={isUserActive ? 'danger' : 'success'} size="sm" onClick={() => setDeactivateOpen(true)}>
+          {isUserActive ? 'Deactivate User' : 'Activate User'}
         </Button>
       </div>
 
@@ -581,21 +599,28 @@ const UserDetail: React.FC = () => {
         </DialogContent>
       </Dialog>
 
-      {/* ── Deactivate Confirmation Dialog ── */}
+      {/* ── Activate/Deactivate Confirmation Dialog ── */}
       <Dialog open={deactivateOpen} onOpenChange={setDeactivateOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Deactivate User</DialogTitle>
+            <DialogTitle>{isUserActive ? 'Deactivate' : 'Activate'} User</DialogTitle>
             <DialogDescription>
-              Are you sure you want to deactivate <strong>{userName}</strong>? They will lose access to all products.
+              {isUserActive
+                ? <>Are you sure you want to deactivate <strong>{userName}</strong>? They will lose access to all products.</>
+                : <>Are you sure you want to activate <strong>{userName}</strong>? They will regain their previous product access.</>
+              }
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="secondary" onClick={() => setDeactivateOpen(false)}>
               Cancel
             </Button>
-            <Button variant="danger" onClick={() => deactivateMut.mutate()} loading={deactivateMut.isPending}>
-              Deactivate
+            <Button
+              variant={isUserActive ? 'danger' : 'success'}
+              onClick={() => toggleActiveMut.mutate()}
+              loading={toggleActiveMut.isPending}
+            >
+              {isUserActive ? 'Deactivate' : 'Activate'}
             </Button>
           </DialogFooter>
         </DialogContent>
