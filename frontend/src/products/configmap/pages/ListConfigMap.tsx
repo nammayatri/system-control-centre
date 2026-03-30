@@ -62,7 +62,7 @@ function useDebounce<T>(value: T, delay: number): T {
 const ListConfigMap: React.FC = () => {
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebounce(search, 300);
-  const [timeRange, setTimeRange] = useState<TimeRange>('last_30_days');
+  const [timeRange, setTimeRange] = useState<TimeRange>('today');
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
