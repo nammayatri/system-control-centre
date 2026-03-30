@@ -64,6 +64,19 @@ listReleaseTrackers db = do
             pure rt
   pure (map fromRow rows)
 
+listReleaseTrackersByDateRange :: DBEnv -> UTCTime -> UTCTime -> IO [TrackerWithTarget]
+listReleaseTrackersByDateRange db fromTime toTime = do
+  rows <-
+    runDB db $
+      runSelectReturningList $
+        select $
+          orderBy_ (desc_ . rtCreatedAt) $ do
+            rt <- all_ (releaseTrackers nammaAPDb)
+            guard_ (rtCreatedAt rt >=. val_ fromTime)
+            guard_ (rtCreatedAt rt <=. val_ toTime)
+            pure rt
+  pure (map fromRow rows)
+
 findRunnableReleaseTrackers :: DBEnv -> UTCTime -> IO [TrackerWithTarget]
 findRunnableReleaseTrackers db now = do
   rows <-

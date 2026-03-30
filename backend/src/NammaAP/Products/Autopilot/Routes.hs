@@ -204,10 +204,21 @@ upsertServiceH UpsertServiceReq {..} = do
   pure $ APIResponse "SUCCESS" "release_config upserted"
 
 listReleasesH :: Maybe Text -> Maybe Text -> Flow [ReleaseTracker]
-listReleasesH _ _ = do
+listReleasesH mFrom mTo = do
   db <- getDBEnv
-  pairs <- liftIO $ listReleaseTrackers db
-  pure (map fst pairs)
+  case (mFrom >>= parseISO, mTo >>= parseISO) of
+    (Just fromTime, Just toTime) -> do
+      pairs <- liftIO $ listReleaseTrackersByDateRange db fromTime toTime
+      pure (map fst pairs)
+    _ -> do
+      -- No valid date range — return all (last 30 days as safety)
+      pairs <- liftIO $ listReleaseTrackers db
+      pure (map fst pairs)
+  where
+    parseISO :: Text -> Maybe UTCTime
+    parseISO t = parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" (T.unpack t)
+             <|> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" (T.unpack t)
+             <|> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q%Z" (T.unpack t)
 
 createReleaseH :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq {..} = do
