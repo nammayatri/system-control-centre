@@ -75,7 +75,7 @@ const ListRelease: React.FC = () => {
   const [customTo, setCustomTo] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [productFilter, setProductFilter] = useState<string>('');
-  const [sortField, setSortField] = useState<string>('start_time');
+  const [sortField, setSortField] = useState<string>('date_created');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const datePickerRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
