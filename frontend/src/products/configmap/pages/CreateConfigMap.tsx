@@ -2,11 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import Editor from '@monaco-editor/react';
 import { useQuery } from '@tanstack/react-query';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation } from '@tanstack/react-query';
 import { apiClient } from '../../../lib/api-client';
 import { fetchProducts, fetchProductConfigs } from '../../releases/api';
 import { Button } from '../../../shared/ui/button';
 import { toast } from 'sonner';
+import { cn } from '../../../lib/utils';
 import type { ProductConfig } from '../../../api';
 
 function jsonConfigToYaml(raw: string): string {
@@ -122,32 +123,32 @@ const CreateConfigMap: React.FC = () => {
     createMut.mutate(payload);
   };
 
-  const inputClass = "w-full border border-zinc-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-800 focus:border-transparent";
+  const inputClass = "w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
   const FieldLabel = ({ children, required }: { children: React.ReactNode; required?: boolean }) => (
-    <label className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5 block">{children} {required && <span className="text-red-500">*</span>}</label>
+    <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">{children} {required && <span className="text-red-500">*</span>}</label>
   );
 
   return (
     <div className="flex flex-col w-full pb-12 max-w-6xl">
       <form onSubmit={handleSubmit} className="space-y-6">
-        {error && <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-lg text-sm">{error}</div>}
+        {error && <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-xl text-sm">{error}</div>}
 
-        <div className="bg-white rounded-lg border border-border">
-          <div className="px-6 py-4 border-b border-border"><h2 className="text-lg font-bold text-zinc-800">Create ConfigMap</h2></div>
+        <div className="bg-white rounded-xl border border-zinc-200">
+          <div className="px-6 py-4 border-b border-zinc-100"><h2 className="text-lg font-semibold text-zinc-900">Create ConfigMap</h2></div>
           <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-5">
             <div className="space-y-4">
-              <div><FieldLabel required>Product</FieldLabel><select name="product" value={form.product} onChange={handleChange} required className={inputClass}><option value="">Select Product</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
+              <div><FieldLabel required>Product</FieldLabel><select name="product" value={form.product} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select Product</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
               <div><FieldLabel>Description</FieldLabel><input name="description" value={form.description} onChange={handleChange} placeholder="Deploying Hotfix" className={inputClass} /></div>
-              <div><FieldLabel>Priority</FieldLabel><select name="priority" value={form.priority} onChange={handleChange} className={inputClass}>{[0,1,2,3,4,5,6,7,8,9].map(n => <option key={n} value={n}>{n}</option>)}</select></div>
+              <div><FieldLabel>Priority</FieldLabel><select name="priority" value={form.priority} onChange={handleChange} className={cn(inputClass, 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(n => <option key={n} value={n}>{n}</option>)}</select></div>
             </div>
             <div className="space-y-4">
-              <div><FieldLabel required>Name</FieldLabel><select name="name" value={form.name} onChange={handleChange} required disabled={!form.product || namesOptions.length === 0} className={`${inputClass} disabled:bg-zinc-50 disabled:cursor-not-allowed`}><option value="">Select Name</option>{namesOptions.map(n => <option key={n} value={n}>{n}</option>)}</select></div>
+              <div><FieldLabel required>Name</FieldLabel><select name="name" value={form.name} onChange={handleChange} required disabled={!form.product || namesOptions.length === 0} className={cn(inputClass, (!form.product || namesOptions.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}><option value="">Select Name</option>{namesOptions.map(n => <option key={n} value={n}>{n}</option>)}</select></div>
               <div><FieldLabel required>Change Log</FieldLabel><input name="change_log" value={form.change_log} onChange={handleChange} required placeholder="EUL-1.0.0" className={inputClass} /></div>
-              <div><FieldLabel required>Env</FieldLabel><select name="env" value={form.env} onChange={handleChange} required className={inputClass}><option value="UAT">UAT</option><option value="PROD">PROD</option><option value="INTEG_CLUSTER">INTEG_CLUSTER</option></select></div>
+              <div><FieldLabel required>Env</FieldLabel><select name="env" value={form.env} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}><option value="UAT">UAT</option><option value="PROD">PROD</option><option value="INTEG_CLUSTER">INTEG_CLUSTER</option></select></div>
             </div>
             <div className="space-y-4">
               <div><FieldLabel>Schedule Time</FieldLabel><input name="schedule_time" value={form.schedule_time} onChange={handleChange} placeholder="2022-11-01T19:39:35" className={inputClass} /></div>
-              <div><FieldLabel required>Cluster</FieldLabel><input name="cluster" value={form.cluster} disabled className={`${inputClass} bg-zinc-50 text-zinc-400 cursor-not-allowed`} /></div>
+              <div><FieldLabel required>Cluster</FieldLabel><input name="cluster" value={form.cluster} disabled className={cn(inputClass, 'bg-zinc-50 text-zinc-400 cursor-not-allowed')} /></div>
             </div>
           </div>
 
@@ -184,9 +185,9 @@ const CreateConfigMap: React.FC = () => {
           )}
         </div>
 
-        <div className="flex gap-3 pt-2">
-          <Button type="submit" loading={createMut.isPending}>{createMut.isPending ? 'Saving...' : 'Create ConfigMap'}</Button>
+        <div className="flex justify-end gap-3 pt-2">
           <Button type="button" variant="secondary" onClick={() => navigate('/configmap')}>Cancel</Button>
+          <Button type="submit" loading={createMut.isPending}>{createMut.isPending ? 'Saving...' : 'Create ConfigMap'}</Button>
         </div>
       </form>
     </div>

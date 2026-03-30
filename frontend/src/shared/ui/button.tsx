@@ -8,17 +8,17 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variants: Record<string, string> = {
-  primary: 'bg-zinc-900 text-white hover:bg-zinc-800 active:bg-zinc-950 shadow-sm',
-  secondary: 'bg-white text-zinc-700 border border-zinc-300 hover:bg-zinc-50 active:bg-zinc-100 shadow-sm',
-  danger: 'bg-red-600 text-white hover:bg-red-700 active:bg-red-800 shadow-sm',
+  primary: 'bg-zinc-900 text-white hover:bg-zinc-800 active:bg-zinc-950',
+  secondary: 'bg-white text-zinc-700 border border-zinc-300 hover:bg-zinc-50 active:bg-zinc-100',
+  danger: 'bg-red-600 text-white hover:bg-red-700 active:bg-red-800',
   ghost: 'text-zinc-600 hover:bg-zinc-100 active:bg-zinc-200',
   outline: 'border border-zinc-300 text-zinc-700 hover:bg-zinc-50',
-  success: 'bg-emerald-600 text-white hover:bg-emerald-700 active:bg-emerald-800 shadow-sm',
+  success: 'bg-emerald-600 text-white hover:bg-emerald-700 active:bg-emerald-800',
 };
 
 const sizes: Record<string, string> = {
-  sm: 'h-8 px-3 text-xs gap-1.5',
-  md: 'h-9 px-4 text-sm gap-2',
+  sm: 'h-8 px-3 text-[13px] gap-1.5',
+  md: 'h-9 px-4 text-[13px] gap-2',
   lg: 'h-10 px-5 text-sm gap-2',
   icon: 'h-8 w-8 p-0 justify-center',
 };
@@ -28,7 +28,8 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     <button
       ref={ref}
       className={cn(
-        'inline-flex items-center justify-center rounded-lg font-medium transition-all duration-150',
+        'inline-flex items-center justify-center rounded-lg font-medium cursor-pointer',
+        'transition-colors duration-150',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 focus-visible:ring-offset-1',
         'disabled:opacity-50 disabled:pointer-events-none',
         variants[variant],

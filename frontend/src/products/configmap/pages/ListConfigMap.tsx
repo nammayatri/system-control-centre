@@ -3,9 +3,10 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Search, RefreshCw, Calendar, Copy, ChevronLeft, ChevronRight, ChevronDown, X, Plus } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchAPConfigMaps } from '../api';
-import { StatusBadge, statusVariant } from '../../../shared/ui/badge';
+import { StatusBadge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
+import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { cn } from '../../../lib/utils';
 
@@ -95,17 +96,17 @@ const ListConfigMap: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 w-full">
-      <div className="bg-white border border-border rounded-lg shadow-sm">
+      <div className="bg-white border border-zinc-200 rounded-xl">
         {/* Toolbar */}
-        <div className="p-4 flex items-center gap-3 border-b border-border-light">
+        <div className="p-4 flex items-center gap-3 border-b border-zinc-100">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
             <input type="text" placeholder="Search config maps..." value={search} onChange={e => setSearch(e.target.value)}
-              className="pl-9 pr-4 py-2 w-64 border border-zinc-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-zinc-800 focus:border-transparent" />
+              className="pl-9 pr-4 h-9 w-64 border border-zinc-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
           </div>
 
           <div className="relative" ref={datePickerRef}>
-            <button onClick={() => setShowDatePicker(!showDatePicker)} className="flex items-center gap-2 border border-zinc-200 rounded-lg px-3 py-2 bg-white hover:bg-zinc-50 text-sm text-zinc-600">
+            <button onClick={() => setShowDatePicker(!showDatePicker)} className="flex items-center gap-2 border border-zinc-300 rounded-lg px-3 h-9 bg-white hover:bg-zinc-50 text-sm text-zinc-600 cursor-pointer transition-colors duration-150">
               <Calendar className="h-4 w-4 text-zinc-400" />
               <span className="max-w-[200px] truncate">{dateRange.from.toLocaleDateString()} - {dateRange.to.toLocaleDateString()}</span>
               <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
@@ -115,18 +116,18 @@ const ListConfigMap: React.FC = () => {
                 <div className="p-1.5">
                   {TIME_RANGE_OPTIONS.map(opt => (
                     <button key={opt.value} onClick={() => { if (opt.value !== 'custom') { setTimeRange(opt.value); setShowDatePicker(false); } else setTimeRange('custom'); }}
-                      className={cn('w-full text-left px-3 py-1.5 text-sm rounded', timeRange === opt.value ? 'bg-zinc-100 text-zinc-900 font-medium' : 'text-zinc-600 hover:bg-zinc-50')}>
+                      className={cn('w-full text-left px-3 py-1.5 text-sm rounded cursor-pointer transition-colors duration-150', timeRange === opt.value ? 'bg-zinc-100 text-zinc-900 font-medium' : 'text-zinc-600 hover:bg-zinc-50')}>
                       {opt.label}
                     </button>
                   ))}
                 </div>
                 {timeRange === 'custom' && (
                   <div className="border-t border-zinc-100 p-3 space-y-2">
-                    <div><label className="block text-xs font-medium text-zinc-600 mb-1">From</label><input type="datetime-local" value={customFrom} onChange={e => setCustomFrom(e.target.value)} className="w-full border border-zinc-200 rounded px-2 py-1.5 text-sm" /></div>
-                    <div><label className="block text-xs font-medium text-zinc-600 mb-1">To</label><input type="datetime-local" value={customTo} onChange={e => setCustomTo(e.target.value)} className="w-full border border-zinc-200 rounded px-2 py-1.5 text-sm" /></div>
+                    <div><label className="block text-xs font-medium text-zinc-600 mb-1">From</label><input type="datetime-local" value={customFrom} onChange={e => setCustomFrom(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent" /></div>
+                    <div><label className="block text-xs font-medium text-zinc-600 mb-1">To</label><input type="datetime-local" value={customTo} onChange={e => setCustomTo(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent" /></div>
                     <div className="flex gap-2">
-                      <button onClick={handleCustomRangeApply} className="flex-1 bg-zinc-900 text-white px-3 py-1.5 rounded text-sm font-medium">Apply</button>
-                      <button onClick={() => { setTimeRange('last_30_days'); setCustomFrom(''); setCustomTo(''); setShowDatePicker(false); }} className="px-2 py-1.5 border border-zinc-200 rounded"><X className="w-4 h-4" /></button>
+                      <button onClick={handleCustomRangeApply} className="flex-1 bg-zinc-900 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-zinc-800 cursor-pointer transition-colors duration-150">Apply</button>
+                      <button onClick={() => { setTimeRange('last_30_days'); setCustomFrom(''); setCustomTo(''); setShowDatePicker(false); }} className="px-2 py-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 cursor-pointer transition-colors duration-150"><X className="w-4 h-4" /></button>
                     </div>
                   </div>
                 )}
@@ -135,7 +136,7 @@ const ListConfigMap: React.FC = () => {
           </div>
 
           <div className="flex-1" />
-          <button onClick={() => refetch()} className="p-2 border border-zinc-200 rounded-lg hover:bg-zinc-50 text-zinc-500"><RefreshCw className="h-4 w-4" /></button>
+          <button onClick={() => refetch()} className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150"><RefreshCw className="h-4 w-4" /></button>
           <PermissionGate product="config-manager" permission="CONFIG_CREATE">
             <Link to="/configmap/new"><Button size="sm"><Plus className="w-4 h-4" /> Create ConfigMap</Button></Link>
           </PermissionGate>
@@ -143,62 +144,64 @@ const ListConfigMap: React.FC = () => {
 
         {/* Table */}
         <div className="overflow-x-auto">
-          <table className="w-full text-left whitespace-nowrap">
-            <thead>
-              <tr className="bg-zinc-50/80 border-b border-border text-xs text-zinc-500 font-medium">
-                <th className="py-3 px-4 w-12">#</th>
-                <th className="py-3 px-4">Product</th>
-                <th className="py-3 px-4">ID</th>
-                <th className="py-3 px-4">Name</th>
-                <th className="py-3 px-4">Status</th>
-                <th className="py-3 px-4">Created At</th>
-                <th className="py-3 px-4">Start Time</th>
-                <th className="py-3 px-4 w-16 text-center">Action</th>
-              </tr>
-            </thead>
-            <tbody className="text-sm">
-              {isLoading ? (
-                <tr><td colSpan={8} className="py-16 text-center text-zinc-400">Loading...</td></tr>
-              ) : filtered.length === 0 ? (
-                <tr><td colSpan={8} className="py-16 text-center text-zinc-400">No config maps found.</td></tr>
-              ) : (
-                paginatedItems.map((cm, i) => (
-                  <tr key={cm.id} className={cn('border-b border-border-light hover:bg-zinc-50/50 cursor-pointer transition-colors', i % 2 === 1 && 'bg-zinc-50/30')}
-                    onClick={() => navigate(`/configmap/${cm.cluster}&&${cm.id}`)}>
-                    <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + i + 1}</td>
-                    <td className="py-3 px-4 font-medium text-zinc-800">{cm.product}</td>
-                    <td className="py-3 px-4 font-mono text-xs text-zinc-500 max-w-xs truncate" title={cm.id}>{cm.id}</td>
-                    <td className="py-3 px-4 text-zinc-700">{cm.name}</td>
-                    <td className="py-3 px-4"><StatusBadge status={cm.status} /></td>
-                    <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatIST(cm.date_created)}</td>
-                    <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatIST(cm.start_time)}</td>
-                    <td className="py-3 px-4 text-center">
-                      <SimpleTooltip content="Clone">
-                        <button onClick={e => { e.stopPropagation(); navigate(`/configmap/new?clone_id=${cm.id}`); }} className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors">
-                          <Copy className="w-3.5 h-3.5" />
-                        </button>
-                      </SimpleTooltip>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+          {isLoading ? (
+            <TableSkeleton rows={6} cols={8} />
+          ) : (
+            <table className="w-full text-left whitespace-nowrap">
+              <thead>
+                <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+                  <th className="py-3 px-4 w-12">#</th>
+                  <th className="py-3 px-4">Product</th>
+                  <th className="py-3 px-4">ID</th>
+                  <th className="py-3 px-4">Name</th>
+                  <th className="py-3 px-4">Status</th>
+                  <th className="py-3 px-4">Created At</th>
+                  <th className="py-3 px-4">Start Time</th>
+                  <th className="py-3 px-4 w-16 text-center">Action</th>
+                </tr>
+              </thead>
+              <tbody className="text-sm">
+                {filtered.length === 0 ? (
+                  <tr><td colSpan={8} className="py-16 text-center text-zinc-400">No config maps found.</td></tr>
+                ) : (
+                  paginatedItems.map((cm, i) => (
+                    <tr key={cm.id} className={cn('border-b border-zinc-100 hover:bg-zinc-100 cursor-pointer transition-colors duration-150', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}
+                      onClick={() => navigate(`/configmap/${cm.cluster}&&${cm.id}`)}>
+                      <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + i + 1}</td>
+                      <td className="py-3 px-4 font-medium text-zinc-800">{cm.product}</td>
+                      <td className="py-3 px-4 font-mono text-xs text-zinc-500 max-w-xs truncate" title={cm.id}>{cm.id}</td>
+                      <td className="py-3 px-4 text-zinc-700">{cm.name}</td>
+                      <td className="py-3 px-4"><StatusBadge status={cm.status} /></td>
+                      <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatIST(cm.date_created)}</td>
+                      <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatIST(cm.start_time)}</td>
+                      <td className="py-3 px-4 text-center">
+                        <SimpleTooltip content="Clone">
+                          <button onClick={e => { e.stopPropagation(); navigate(`/configmap/new?clone_id=${cm.id}`); }} className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer">
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
+                        </SimpleTooltip>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          )}
         </div>
 
         {/* Pagination */}
         {!isLoading && filtered.length > 0 && (
-          <div className="px-4 py-3 flex items-center justify-between border-t border-border-light">
+          <div className="px-4 py-3 flex items-center justify-between border-t border-zinc-100">
             <div className="flex items-center gap-3">
-              <span className="text-sm text-zinc-500">{startIndex + 1}-{Math.min(startIndex + itemsPerPage, filtered.length)} of {filtered.length}</span>
-              <select value={itemsPerPage} onChange={e => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }} className="border border-zinc-200 rounded px-2 py-1 text-xs text-zinc-600">
+              <span className="text-sm text-zinc-500">Showing {startIndex + 1}-{Math.min(startIndex + itemsPerPage, filtered.length)} of {filtered.length}</span>
+              <select value={itemsPerPage} onChange={e => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }} className="border border-zinc-300 rounded-lg px-2 py-1 text-xs text-zinc-600 cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400">
                 {[10, 25, 50].map(n => <option key={n} value={n}>{n} / page</option>)}
               </select>
             </div>
             <div className="flex items-center gap-1">
-              <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-1.5 border border-zinc-200 rounded hover:bg-zinc-50 disabled:opacity-40"><ChevronLeft className="w-4 h-4" /></button>
+              <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150"><ChevronLeft className="w-4 h-4" /></button>
               <span className="text-xs text-zinc-500 px-3 font-mono">{currentPage} / {totalPages}</span>
-              <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-1.5 border border-zinc-200 rounded hover:bg-zinc-50 disabled:opacity-40"><ChevronRight className="w-4 h-4" /></button>
+              <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150"><ChevronRight className="w-4 h-4" /></button>
             </div>
           </div>
         )}

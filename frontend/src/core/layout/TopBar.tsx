@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
-import { ChevronRight, LogOut, User, Clock } from 'lucide-react';
+import { ChevronRight, LogOut } from 'lucide-react';
 
 function getBreadcrumbs(pathname: string): { label: string; to?: string }[] {
   const parts = pathname.split('/').filter(Boolean);
@@ -47,7 +47,6 @@ const TopBar: React.FC = () => {
   const { user, logout } = useAuth();
   const [showMenu, setShowMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const [lastRefresh] = useState(new Date());
 
   const breadcrumbs = getBreadcrumbs(location.pathname);
 
@@ -62,14 +61,14 @@ const TopBar: React.FC = () => {
   }, []);
 
   return (
-    <div className="h-12 bg-white border-b border-border flex items-center justify-between px-6 shrink-0">
+    <div className="h-14 bg-white border-b border-zinc-200 flex items-center justify-between px-6 shrink-0">
       {/* Breadcrumbs */}
       <div className="flex items-center text-sm">
         {breadcrumbs.map((crumb, i) => (
           <React.Fragment key={i}>
             {i > 0 && <ChevronRight className="w-3.5 h-3.5 mx-1.5 text-zinc-300" />}
             {crumb.to ? (
-              <Link to={crumb.to} className="text-zinc-500 hover:text-zinc-800 transition-colors">
+              <Link to={crumb.to} className="text-zinc-500 hover:text-zinc-800 transition-colors duration-150 cursor-pointer">
                 {crumb.label}
               </Link>
             ) : (
@@ -82,40 +81,29 @@ const TopBar: React.FC = () => {
         )}
       </div>
 
-      {/* Right side */}
-      <div className="flex items-center gap-4">
-        {/* Last refresh */}
-        <div className="flex items-center gap-1.5 text-xs text-zinc-400">
-          <Clock className="w-3 h-3" />
-          <span className="font-mono">
-            {lastRefresh.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
-          </span>
-        </div>
-
-        {/* User menu */}
-        <div className="relative" ref={menuRef}>
-          <button
-            onClick={() => setShowMenu(!showMenu)}
-            className="w-8 h-8 rounded-full bg-zinc-100 border border-zinc-200 flex items-center justify-center text-xs font-bold text-zinc-600 hover:bg-zinc-200 transition-colors uppercase"
-          >
-            {user?.name?.[0] || user?.email?.[0] || '?'}
-          </button>
-          {showMenu && (
-            <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-zinc-200 rounded-lg shadow-lg z-50 py-1">
-              <div className="px-3 py-2 border-b border-zinc-100">
-                <div className="text-sm font-medium text-zinc-800 truncate">{user?.name || 'User'}</div>
-                <div className="text-xs text-zinc-500 truncate">{user?.email}</div>
-              </div>
-              <button
-                onClick={logout}
-                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                Sign out
-              </button>
+      {/* User menu */}
+      <div className="relative" ref={menuRef}>
+        <button
+          onClick={() => setShowMenu(!showMenu)}
+          className="w-8 h-8 rounded-full bg-zinc-100 border border-zinc-200 flex items-center justify-center text-xs font-bold text-zinc-600 hover:bg-zinc-200 transition-colors duration-150 uppercase cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 focus-visible:ring-offset-1"
+        >
+          {user?.name?.[0] || user?.email?.[0] || '?'}
+        </button>
+        {showMenu && (
+          <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-zinc-200 rounded-lg shadow-lg z-50 py-1">
+            <div className="px-3 py-2 border-b border-zinc-100">
+              <div className="text-sm font-medium text-zinc-800 truncate">{user?.name || 'User'}</div>
+              <div className="text-xs text-zinc-500 truncate">{user?.email}</div>
             </div>
-          )}
-        </div>
+            <button
+              onClick={logout}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors duration-150 cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Sign out
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

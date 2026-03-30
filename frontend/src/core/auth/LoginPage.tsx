@@ -1,22 +1,28 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from './AuthContext';
-import { Lock, Mail } from 'lucide-react';
+import { Eye, EyeOff } from 'lucide-react';
 import nyLogo from '../../assets/ny-logo.svg';
 
 const LoginPage: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const { login, isAuthenticated } = useAuth();
   const navigate = useNavigate();
+  const emailRef = useRef<HTMLInputElement>(null);
 
-  // If already authenticated, redirect
-  if (isAuthenticated) {
-    navigate('/releases', { replace: true });
-    return null;
-  }
+  useEffect(() => {
+    if (isAuthenticated) {
+      navigate('/releases', { replace: true });
+    }
+  }, [isAuthenticated, navigate]);
+
+  useEffect(() => {
+    emailRef.current?.focus();
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -37,61 +43,70 @@ const LoginPage: React.FC = () => {
     }
   };
 
+  if (isAuthenticated) return null;
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-zinc-100">
       <div className="w-full max-w-sm">
-        <div className="bg-white rounded-2xl shadow-2xl border border-zinc-200 overflow-hidden">
-          {/* Logo header */}
-          <div className="px-8 pt-8 pb-4 text-center">
-            <div className="flex items-center justify-center gap-3 mb-2">
-              <img src={nyLogo} alt="Namma Yatri" className="h-8 w-auto" />
+        <div className="bg-white rounded-xl shadow-sm border border-zinc-200">
+          {/* Logo + Title */}
+          <div className="px-8 pt-8 pb-2 text-center">
+            <div className="flex items-center justify-center mb-3">
+              <img src={nyLogo} alt="Logo" className="h-8 w-auto" />
             </div>
-            <h1 className="text-lg font-bold text-zinc-800 mt-3">System Control</h1>
-            <p className="text-sm text-zinc-500 mt-1">Sign in to continue</p>
+            <h1 className="text-base font-semibold text-zinc-900">System Control Centre</h1>
+            <p className="text-[13px] text-zinc-500 mt-1">Sign in to your account</p>
           </div>
 
           {/* Form */}
-          <form onSubmit={handleSubmit} className="px-8 pb-8 space-y-4">
-            {error && (
-              <div className="bg-red-50 border border-red-200 text-red-600 px-3 py-2 rounded-lg text-sm">
-                {error}
-              </div>
-            )}
-
+          <form onSubmit={handleSubmit} className="px-8 pb-8 pt-4 space-y-4">
             <div>
-              <label className="block text-xs font-medium text-zinc-600 mb-1.5">Email</label>
-              <div className="relative">
-                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                  placeholder="you@company.com"
-                  className="w-full pl-10 pr-4 py-2.5 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-800 focus:border-transparent"
-                />
-              </div>
+              <label htmlFor="login-email" className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">
+                Email
+              </label>
+              <input
+                ref={emailRef}
+                id="login-email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                disabled={loading}
+                placeholder="you@company.com"
+                className="w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent disabled:bg-zinc-50 disabled:text-zinc-500 transition-shadow duration-150"
+              />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-zinc-600 mb-1.5">Password</label>
+              <label htmlFor="login-password" className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">
+                Password
+              </label>
               <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
                 <input
-                  type="password"
+                  id="login-password"
+                  type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
+                  disabled={loading}
                   placeholder="Enter password"
-                  className="w-full pl-10 pr-4 py-2.5 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-800 focus:border-transparent"
+                  className="w-full h-9 border border-zinc-300 rounded-lg px-3 pr-9 text-sm text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent disabled:bg-zinc-50 disabled:text-zinc-500 transition-shadow duration-150"
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 cursor-pointer transition-colors duration-150"
+                  tabIndex={-1}
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
               </div>
             </div>
 
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-2.5 bg-zinc-900 hover:bg-zinc-800 disabled:bg-zinc-400 text-white rounded-lg font-medium text-sm transition-colors mt-2 flex items-center justify-center gap-2"
+              className="w-full h-10 bg-zinc-900 hover:bg-zinc-800 disabled:opacity-50 disabled:pointer-events-none text-white rounded-lg font-medium text-[13px] transition-colors duration-150 cursor-pointer flex items-center justify-center gap-2"
             >
               {loading ? (
                 <>
@@ -105,12 +120,12 @@ const LoginPage: React.FC = () => {
                 'Sign in'
               )}
             </button>
+
+            {error && (
+              <p className="text-[13px] text-red-500 text-center">{error}</p>
+            )}
           </form>
         </div>
-
-        <p className="text-center text-xs text-zinc-500 mt-6">
-          Juspay 2026. System Control Dashboard.
-        </p>
       </div>
     </div>
   );

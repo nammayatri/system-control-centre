@@ -1,10 +1,11 @@
 import React, { useState, Fragment } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import { apiClient } from '../../../lib/api-client';
 import { StatusBadge, Badge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
+import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { RefreshCw, Copy } from 'lucide-react';
@@ -32,7 +33,6 @@ const tryFormatJson = (data: string): string => { try { return JSON.stringify(JS
 const ConfigMapSummary: React.FC = () => {
   const { clusterId } = useParams<{ clusterId: string }>();
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState('Summary');
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
 
@@ -72,7 +72,14 @@ const ConfigMapSummary: React.FC = () => {
 
   const toggleRow = (idx: number) => { setExpandedRows(prev => { const next = new Set(prev); if (next.has(idx)) next.delete(idx); else next.add(idx); return next; }); };
 
-  if (isLoading) return <div className="p-10 text-center text-zinc-400">Loading ConfigMap...</div>;
+  if (isLoading) {
+    return (
+      <div className="flex flex-col w-full max-w-6xl space-y-6">
+        <CardSkeleton />
+        <CardSkeleton />
+      </div>
+    );
+  }
   if (!data) return <div className="p-10 text-center text-red-500">ConfigMap not found.</div>;
 
   const tabs = ['Summary', 'Event Data', 'Json Data', 'ConfigMap Diff'];
@@ -85,7 +92,7 @@ const ConfigMapSummary: React.FC = () => {
       <div className="flex items-start justify-between mb-5">
         <div>
           <div className="flex items-center gap-3 mb-1">
-            <h1 className="text-lg font-bold text-zinc-800">ConfigMap Details</h1>
+            <h1 className="text-lg font-semibold text-zinc-900">ConfigMap Details</h1>
             <StatusBadge status={data.status} />
           </div>
           <div className="font-mono text-xs text-zinc-500">ID: {data.id}</div>
@@ -126,11 +133,11 @@ const ConfigMapSummary: React.FC = () => {
       </div>
 
       {/* Tabs */}
-      <div className="bg-white rounded-lg border border-border">
-        <div className="flex border-b border-border px-5">
+      <div className="bg-white rounded-xl border border-zinc-200">
+        <div className="flex border-b border-zinc-200 px-5">
           {tabs.map(t => (
             <button key={t} onClick={() => setActiveTab(t)}
-              className={cn('py-3 px-4 text-sm font-medium border-b-2 transition-colors cursor-pointer', activeTab === t ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-400 hover:text-zinc-600')}>
+              className={cn('py-3 px-4 text-sm font-medium border-b-2 transition-colors duration-150 cursor-pointer', activeTab === t ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-400 hover:text-zinc-600')}>
               {t}
             </button>
           ))}
@@ -144,8 +151,8 @@ const ConfigMapSummary: React.FC = () => {
               { title: 'META DATA', rows: [{ label: 'Priority', value: data.priority }, { label: 'Env', value: data.env }, { label: 'Approved', value: data.is_approved === 1 ? 'Yes' : 'No' }, { label: 'Slack Thread Id', value: data.slack_thread_id }] },
               { title: 'K8S INFO', rows: [{ label: 'Id', value: data.id }, { label: 'Cluster', value: data.cluster }] },
             ].map((card, ci) => (
-              <div key={ci} className="bg-zinc-50/50 rounded-lg border border-border-light p-4 text-sm">
-                <h3 className="font-bold text-zinc-500 uppercase text-xs tracking-widest mb-3">{card.title}</h3>
+              <div key={ci} className="bg-zinc-50 rounded-xl border border-zinc-100 p-4 text-sm">
+                <h3 className="font-semibold text-zinc-500 uppercase text-[11px] tracking-widest mb-3">{card.title}</h3>
                 <dl className="space-y-2.5">
                   {card.rows.map((r, ri) => (
                     <div key={ri}>
@@ -162,15 +169,15 @@ const ConfigMapSummary: React.FC = () => {
         {activeTab === 'Event Data' && (
           <div className="overflow-x-auto">
             <table className="w-full text-sm text-left">
-              <thead><tr className="bg-zinc-50 border-b border-border text-xs text-zinc-500 font-medium">
+              <thead><tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
                 <th className="px-3 py-3 w-8"></th>
                 {['#', 'Timestamp', 'Category', 'Label', 'Value'].map(h => <th key={h} className="px-4 py-3">{h}</th>)}
               </tr></thead>
               <tbody>
                 {sortedEvents.map((ev, i) => (
                   <Fragment key={i}>
-                    <tr className={cn('border-b border-border-light hover:bg-zinc-50/50 cursor-pointer', i % 2 === 1 && 'bg-zinc-50/30')} onClick={() => toggleRow(i)}>
-                      <td className="px-3 py-2 text-zinc-400"><span className={`inline-block transition-transform text-xs ${expandedRows.has(i) ? 'rotate-90' : ''}`}>&#9654;</span></td>
+                    <tr className={cn('border-b border-zinc-100 hover:bg-zinc-100 cursor-pointer transition-colors duration-150', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')} onClick={() => toggleRow(i)}>
+                      <td className="px-3 py-2 text-zinc-400"><span className={`inline-block transition-transform duration-200 text-xs ${expandedRows.has(i) ? 'rotate-90' : ''}`}>&#9654;</span></td>
                       <td className="px-4 py-2 text-zinc-400 font-mono text-xs">{i + 1}</td>
                       <td className="px-4 py-2 font-mono text-xs text-zinc-500 whitespace-nowrap">{formatTs(ev.timestamp)}</td>
                       <td className="px-4 py-2"><Badge variant={ev.category === 'BUSINESS' ? 'info' : ev.category === 'NOTIFICATION' ? 'success' : 'default'} size="sm">{ev.category}</Badge></td>
@@ -178,7 +185,7 @@ const ConfigMapSummary: React.FC = () => {
                       <td className="px-4 py-2 text-zinc-500 max-w-sm truncate" title={ev.data}>{ev.data?.slice(0, 40)}{(ev.data?.length || 0) > 40 ? '...' : ''}</td>
                     </tr>
                     {expandedRows.has(i) && (
-                      <tr className="bg-zinc-50"><td colSpan={6} className="px-6 py-3"><pre className="text-xs font-mono bg-zinc-900 text-emerald-400 p-4 rounded-lg overflow-x-auto max-h-60 whitespace-pre-wrap break-all">{tryFormatJson(ev.data)}</pre></td></tr>
+                      <tr className="bg-zinc-50 border-b border-zinc-100"><td colSpan={6} className="px-6 py-3"><pre className="text-xs font-mono bg-zinc-50 text-zinc-800 border border-zinc-200 p-4 rounded-lg overflow-x-auto max-h-60 whitespace-pre-wrap break-all">{tryFormatJson(ev.data)}</pre></td></tr>
                     )}
                   </Fragment>
                 ))}

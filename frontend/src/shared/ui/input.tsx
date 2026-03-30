@@ -13,7 +13,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
     return (
       <div className="space-y-1.5">
         {label && (
-          <label htmlFor={inputId} className="block text-xs font-medium text-zinc-600 uppercase tracking-wider">
+          <label htmlFor={inputId} className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider">
             {label}
             {props.required && <span className="text-red-500 ml-0.5">*</span>}
           </label>
@@ -59,7 +59,7 @@ export const SelectInput = forwardRef<HTMLSelectElement, SelectInputProps>(
     return (
       <div className="space-y-1.5">
         {label && (
-          <label htmlFor={selectId} className="block text-xs font-medium text-zinc-600 uppercase tracking-wider">
+          <label htmlFor={selectId} className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider">
             {label}
             {props.required && <span className="text-red-500 ml-0.5">*</span>}
           </label>
@@ -68,7 +68,7 @@ export const SelectInput = forwardRef<HTMLSelectElement, SelectInputProps>(
           ref={ref}
           id={selectId}
           className={cn(
-            'w-full h-9 rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900',
+            'w-full h-9 rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 cursor-pointer',
             'focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent',
             'disabled:bg-zinc-50 disabled:text-zinc-500 disabled:cursor-not-allowed',
             'transition-shadow duration-150',
@@ -101,7 +101,7 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
     return (
       <div className="space-y-1.5">
         {label && (
-          <label htmlFor={textareaId} className="block text-xs font-medium text-zinc-600 uppercase tracking-wider">
+          <label htmlFor={textareaId} className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider">
             {label}
             {props.required && <span className="text-red-500 ml-0.5">*</span>}
           </label>

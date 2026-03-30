@@ -21,7 +21,6 @@ import nyLogo from '../../assets/ny-logo.svg';
 import { cn } from '../../lib/utils';
 import { PRODUCT_REGISTRY, type ProductDefinition } from '../../products/registry';
 
-// Map icon names to Lucide components
 const iconMap: Record<string, React.ReactNode> = {
   Rocket: <Rocket className="w-4 h-4" />,
   FileText: <FileText className="w-4 h-4" />,
@@ -45,7 +44,6 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
   const { isAdmin, hasPermission } = usePermissions();
 
   const [openSections, setOpenSections] = useState<Record<string, boolean>>(() => {
-    // Auto-open the section containing the current route
     const initial: Record<string, boolean> = {};
     PRODUCT_REGISTRY.forEach((p) => {
       initial[p.slug] = location.pathname.startsWith(p.basePath);
@@ -59,7 +57,6 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
     setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  // Filter products to only show ones user has access to
   const visibleProducts = PRODUCT_REGISTRY.filter((p) =>
     hasPermission(p.slug, `${p.slug === 'config-manager' ? 'CONFIG' : 'RELEASE'}_VIEW`)
   );
@@ -73,8 +70,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
         <button
           onClick={() => !collapsed && toggleSection(key)}
           className={cn(
-            'w-full flex items-center gap-3 px-4 py-2.5 text-sm cursor-pointer transition-colors',
-            'text-zinc-400 hover:text-white hover:bg-[#1a1a1a]',
+            'w-full flex items-center gap-3 px-4 h-10 text-[13px] cursor-pointer transition-colors duration-150',
+            'text-[#a1a1aa] hover:text-white hover:bg-[#171717]',
             collapsed && 'justify-center px-0'
           )}
         >
@@ -97,10 +94,10 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
                 key={item.path}
                 to={item.path}
                 className={cn(
-                  'flex items-center gap-2.5 pl-11 pr-4 py-2 text-sm cursor-pointer transition-all',
+                  'flex items-center gap-2.5 pl-11 pr-4 h-9 text-[13px] cursor-pointer transition-colors duration-150',
                   isActive(item.path)
-                    ? 'text-white bg-[#252525] border-l-2 border-emerald-500'
-                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-[#1a1a1a] border-l-2 border-transparent'
+                    ? 'text-[#fafafa] bg-[#262626] border-l-2 border-emerald-500'
+                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-[#171717] border-l-2 border-transparent'
                 )}
               >
                 {iconMap[item.icon] || null}
@@ -116,7 +113,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
   return (
     <aside
       className={cn(
-        'bg-[#0f0f0f] flex-shrink-0 flex flex-col h-screen transition-all duration-200 border-r border-zinc-800',
+        'bg-[#0a0a0a] flex-shrink-0 flex flex-col h-screen transition-all duration-200 border-r border-zinc-800',
         collapsed ? 'w-[60px]' : 'w-[260px]'
       )}
     >
@@ -125,17 +122,17 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
         'h-14 flex items-center border-b border-zinc-800 shrink-0',
         collapsed ? 'justify-center px-2' : 'px-4 gap-3'
       )}>
-        <img src={nyLogo} alt="NY" className="h-7 w-auto" />
+        <img src={nyLogo} alt="Logo" className="h-7 w-auto" />
         {!collapsed && (
           <span className="text-sm font-semibold text-white tracking-tight">System Control</span>
         )}
       </div>
 
-      {/* Product sections — auto-generated from registry */}
-      <nav className="flex-1 overflow-y-auto py-3">
+      {/* Product sections */}
+      <nav className="flex-1 overflow-y-auto sidebar-scroll py-3">
         {visibleProducts.map(renderProductSection)}
 
-        {/* Admin section — only for superadmin */}
+        {/* Admin section */}
         {isAdmin && (
           <>
             <div className="mx-4 my-3 border-t border-zinc-800" />
@@ -143,8 +140,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
               <button
                 onClick={() => !collapsed && toggleSection('admin')}
                 className={cn(
-                  'w-full flex items-center gap-3 px-4 py-2.5 text-sm cursor-pointer transition-colors',
-                  'text-zinc-400 hover:text-white hover:bg-[#1a1a1a]',
+                  'w-full flex items-center gap-3 px-4 h-10 text-[13px] cursor-pointer transition-colors duration-150',
+                  'text-[#a1a1aa] hover:text-white hover:bg-[#171717]',
                   collapsed && 'justify-center px-0'
                 )}
               >
@@ -170,10 +167,10 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
                       key={item.path}
                       to={item.path}
                       className={cn(
-                        'flex items-center gap-2.5 pl-11 pr-4 py-2 text-sm cursor-pointer transition-all',
+                        'flex items-center gap-2.5 pl-11 pr-4 h-9 text-[13px] cursor-pointer transition-colors duration-150',
                         isActive(item.path)
-                          ? 'text-white bg-[#252525] border-l-2 border-emerald-500'
-                          : 'text-zinc-500 hover:text-zinc-300 hover:bg-[#1a1a1a] border-l-2 border-transparent'
+                          ? 'text-[#fafafa] bg-[#262626] border-l-2 border-emerald-500'
+                          : 'text-zinc-500 hover:text-zinc-300 hover:bg-[#171717] border-l-2 border-transparent'
                       )}
                     >
                       {iconMap[item.icon] || null}
@@ -203,7 +200,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
 
         <button
           onClick={onToggle}
-          className="w-full flex items-center justify-center py-3 text-zinc-600 hover:text-zinc-400 cursor-pointer transition-colors"
+          className="w-full flex items-center justify-center py-3 text-zinc-600 hover:text-zinc-400 cursor-pointer transition-colors duration-150"
         >
           {collapsed ? <PanelLeft className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
         </button>

@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate, Link, useParams, useLocation } from 'react-router-dom';
+import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import Editor from '@monaco-editor/react';
 import { useProductConfigs, useServices } from '../useProducts';
 import { useCreateRelease } from '../hooks';
 import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs } from '../api';
 import type { ProductConfig } from '../../../api';
 import { Button } from '../../../shared/ui/button';
-import { toast } from 'sonner';
+import { cn } from '../../../lib/utils';
+import { Trash2 } from 'lucide-react';
 
 const CreateRelease: React.FC = () => {
   const navigate = useNavigate();
@@ -59,7 +60,7 @@ const CreateRelease: React.FC = () => {
             if (Array.isArray(parsed) && parsed.length > 0) setStages(parsed);
           } catch (e) { console.error('Failed to parse stages', e); }
         }
-      }).catch(err => { setError('Failed to load clone details'); });
+      }).catch(() => { setError('Failed to load clone details'); });
     }
   }, [isClone, id]);
 
@@ -153,29 +154,36 @@ const CreateRelease: React.FC = () => {
   };
 
   const FieldLabel = ({ children, required }: { children: React.ReactNode; required?: boolean }) => (
-    <label className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5 block">
+    <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">
       {children} {required && <span className="text-red-500">*</span>}
     </label>
   );
 
-  const inputClass = "w-full border border-zinc-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-800 focus:border-transparent";
-  const disabledInputClass = "w-full border border-zinc-200 rounded-lg px-3 py-2 text-sm bg-zinc-50 text-zinc-400 cursor-not-allowed";
+  const inputClass = "w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
+  const disabledInputClass = "w-full h-9 border border-zinc-200 rounded-lg px-3 text-sm bg-zinc-50 text-zinc-400 cursor-not-allowed";
+
+  const Toggle = ({ checked, onChange, disabled }: { checked: boolean; onChange: () => void; disabled?: boolean }) => (
+    <button type="button" onClick={onChange} disabled={disabled}
+      className={cn(
+        'relative inline-flex h-6 w-10 items-center rounded-full transition-colors duration-150 cursor-pointer',
+        disabled ? 'bg-zinc-200 cursor-not-allowed' : checked ? 'bg-zinc-900' : 'bg-zinc-300'
+      )}>
+      <span className={cn('inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-150', checked ? 'translate-x-5' : 'translate-x-1')} />
+    </button>
+  );
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12 max-w-6xl">
       <form onSubmit={handleSubmit} className="space-y-6">
-        {error && <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-lg text-sm">{error}</div>}
+        {error && <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-xl text-sm">{error}</div>}
 
         {/* Main Form Card */}
-        <div className="bg-white rounded-lg border border-border">
-          <div className="px-6 py-4 border-b border-border flex justify-between items-center">
-            <h2 className="text-lg font-bold text-zinc-800">{isClone ? 'Clone Release' : 'Create Release'}</h2>
+        <div className="bg-white rounded-xl border border-zinc-200">
+          <div className="px-6 py-4 border-b border-zinc-100 flex justify-between items-center">
+            <h2 className="text-lg font-semibold text-zinc-900">{isClone ? 'Clone Release' : 'Create Release'}</h2>
             <div className="flex items-center gap-3">
               <span className="text-sm text-zinc-600">New Service?</span>
-              <button type="button" onClick={() => setIsNewService(!isNewService)}
-                className={`relative inline-flex h-6 w-10 items-center rounded-full transition-colors ${isNewService ? 'bg-zinc-900' : 'bg-zinc-300'}`}>
-                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isNewService ? 'translate-x-5' : 'translate-x-1'}`} />
-              </button>
+              <Toggle checked={isNewService} onChange={() => setIsNewService(!isNewService)} />
             </div>
           </div>
 
@@ -184,25 +192,25 @@ const CreateRelease: React.FC = () => {
             <div className="space-y-4">
               <div><FieldLabel>Release Tag</FieldLabel><input type="text" disabled value={generatedReleaseTag} className={disabledInputClass} /></div>
               <div><FieldLabel required>New Version</FieldLabel><input type="text" name="new_version" value={formData.new_version} onChange={handleInputChange} required placeholder="Jenkins tag" className={inputClass} /></div>
-              <div><FieldLabel>Mode</FieldLabel><select name="mode" value={formData.mode} onChange={handleInputChange} className={inputClass}><option value="AUTO">AUTO</option><option value="MANUAL">MANUAL</option></select></div>
+              <div><FieldLabel>Mode</FieldLabel><select name="mode" value={formData.mode} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}><option value="AUTO">AUTO</option><option value="MANUAL">MANUAL</option></select></div>
               <div><FieldLabel>Info</FieldLabel><input type="text" name="info" value={formData.info} onChange={handleInputChange} placeholder="Any Valid JSON" className={inputClass} /></div>
-              <div><FieldLabel>Scale Down Days</FieldLabel><select name="custom_pods_scale_down_days" value={formData.custom_pods_scale_down_days} onChange={handleInputChange} className={inputClass}>{[1,2,3,4,5,6].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
-              <label className="flex items-center gap-2.5 cursor-pointer"><input type="checkbox" name="cronjob_suspend" checked={formData.cronjob_suspend} onChange={handleInputChange} className="rounded border-zinc-300" /><span className="text-sm text-zinc-700">Cronjob Suspend</span></label>
-              <label className="flex items-center gap-2.5 cursor-pointer"><input type="checkbox" name="is_art_recorder" checked={formData.is_art_recorder} onChange={handleInputChange} className="rounded border-zinc-300" /><span className="text-sm text-zinc-700">ART Recorder</span></label>
+              <div><FieldLabel>Scale Down Days</FieldLabel><select name="custom_pods_scale_down_days" value={formData.custom_pods_scale_down_days} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>{[1,2,3,4,5,6].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
+              <label className="flex items-center gap-2.5 cursor-pointer"><input type="checkbox" name="cronjob_suspend" checked={formData.cronjob_suspend} onChange={handleInputChange} className="rounded border-zinc-300 accent-zinc-900" /><span className="text-sm text-zinc-700">Cronjob Suspend</span></label>
+              <label className="flex items-center gap-2.5 cursor-pointer"><input type="checkbox" name="is_art_recorder" checked={formData.is_art_recorder} onChange={handleInputChange} className="rounded border-zinc-300 accent-zinc-900" /><span className="text-sm text-zinc-700">ART Recorder</span></label>
             </div>
 
             {/* Col 2 */}
             <div className="space-y-4">
-              <div><FieldLabel required>Product</FieldLabel><select name="product" value={formData.product} onChange={handleInputChange} required className={inputClass}><option value="">Select Product</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
-              <div><FieldLabel required>Env</FieldLabel><select name="env" value={formData.env} onChange={handleInputChange} required className={inputClass}><option value="">Select Env</option><option value="UAT">UAT</option><option value="PROD">PROD</option><option value="INTEG_CLUSTER">INTEG_CLUSTER</option></select></div>
-              <div><FieldLabel>Priority</FieldLabel><select name="priority" value={formData.priority} onChange={handleInputChange} className={inputClass}>{[0,1,2,3,4,5,6,7,8,9].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
+              <div><FieldLabel required>Product</FieldLabel><select name="product" value={formData.product} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select Product</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
+              <div><FieldLabel required>Env</FieldLabel><select name="env" value={formData.env} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select Env</option><option value="UAT">UAT</option><option value="PROD">PROD</option><option value="INTEG_CLUSTER">INTEG_CLUSTER</option></select></div>
+              <div><FieldLabel>Priority</FieldLabel><select name="priority" value={formData.priority} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
               <div><FieldLabel>Description</FieldLabel><input type="text" name="description" value={formData.description} onChange={handleInputChange} placeholder="Deploying webhook Hotfix" className={inputClass} /></div>
               <div><FieldLabel required>Docker Image</FieldLabel><input type="text" name="docker_image" value={formData.docker_image} onChange={handleInputChange} required placeholder="Enter Docker Image" className={inputClass} /></div>
             </div>
 
             {/* Col 3 */}
             <div className="space-y-4">
-              <div><FieldLabel required>Service</FieldLabel><select name="service" value={formData.service} onChange={handleInputChange} required disabled={!formData.product || services.length === 0} className={cn(inputClass, (!formData.product || services.length === 0) && 'bg-zinc-50 cursor-not-allowed')}><option value="">Select Service</option>{services.map(s => <option key={s} value={s}>{s}</option>)}</select></div>
+              <div><FieldLabel required>Service</FieldLabel><select name="service" value={formData.service} onChange={handleInputChange} required disabled={!formData.product || services.length === 0} className={cn(inputClass, (!formData.product || services.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}><option value="">Select Service</option>{services.map(s => <option key={s} value={s}>{s}</option>)}</select></div>
               <div><FieldLabel>Schedule Time</FieldLabel><input type="text" name="schedule_time" value={formData.schedule_time} onChange={handleInputChange} placeholder="2022-11-01T19:39:35" className={inputClass} /></div>
               <div><FieldLabel>Cluster</FieldLabel><input type="text" disabled value={formData.cluster} className={disabledInputClass} /></div>
               <div><FieldLabel required>Change Log</FieldLabel><input type="text" name="change_log" value={formData.change_log} onChange={handleInputChange} required placeholder="EUL-1.0.0" className={inputClass} /></div>
@@ -212,30 +220,49 @@ const CreateRelease: React.FC = () => {
         </div>
 
         {/* Stages Card */}
-        <div className="bg-white rounded-lg border border-border">
-          <div className="px-6 py-4 border-b border-border"><h2 className="text-lg font-bold text-zinc-800">Stages</h2></div>
+        <div className="bg-white rounded-xl border border-zinc-200">
+          <div className="px-6 py-4 border-b border-zinc-100"><h2 className="text-lg font-semibold text-zinc-900">Stages</h2></div>
           <div className="p-6">
-            {stages.map((stage, idx) => (
-              <div key={idx} className="flex gap-4 mb-3 items-end">
-                <div><FieldLabel>Rollout %</FieldLabel><input type="number" value={stage.rollout} onChange={(e) => { const s = [...stages]; s[idx].rollout = parseInt(e.target.value) || 0; setStages(s); }} className={cn(inputClass, 'w-28')} /></div>
-                <div><FieldLabel>Cooloff (min)</FieldLabel><input type="number" value={stage.cooloff} onChange={(e) => { const s = [...stages]; s[idx].cooloff = parseInt(e.target.value) || 0; setStages(s); }} className={cn(inputClass, 'w-28')} /></div>
-                <div><FieldLabel>Pods</FieldLabel><input type="number" value={stage.pods} onChange={(e) => { const s = [...stages]; s[idx].pods = parseInt(e.target.value) || 0; setStages(s); }} className={cn(inputClass, 'w-28')} /></div>
-                {stages.length > 1 && <button type="button" onClick={() => setStages(stages.filter((_, i) => i !== idx))} className="text-red-500 hover:text-red-700 font-bold px-2 py-2 mb-0.5">x</button>}
-              </div>
-            ))}
-            <button type="button" onClick={() => setStages([...stages, { rollout: 100, cooloff: 0, pods: 0 }])} className="text-zinc-600 border border-zinc-300 hover:bg-zinc-50 px-4 py-2 rounded-lg text-sm mt-2">+ Add Stage</button>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead>
+                  <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+                    <th className="py-2 px-3 w-12">#</th>
+                    <th className="py-2 px-3">Rollout %</th>
+                    <th className="py-2 px-3">Cooloff (min)</th>
+                    <th className="py-2 px-3">Pods</th>
+                    <th className="py-2 px-3 w-16"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stages.map((stage, idx) => (
+                    <tr key={idx} className={cn('border-b border-zinc-100', idx % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
+                      <td className="py-2 px-3 text-zinc-400 font-mono text-xs">{idx + 1}</td>
+                      <td className="py-2 px-3"><input type="number" value={stage.rollout} onChange={(e) => { const s = [...stages]; s[idx].rollout = parseInt(e.target.value) || 0; setStages(s); }} className={cn(inputClass, 'w-24')} /></td>
+                      <td className="py-2 px-3"><input type="number" value={stage.cooloff} onChange={(e) => { const s = [...stages]; s[idx].cooloff = parseInt(e.target.value) || 0; setStages(s); }} className={cn(inputClass, 'w-24')} /></td>
+                      <td className="py-2 px-3"><input type="number" value={stage.pods} onChange={(e) => { const s = [...stages]; s[idx].pods = parseInt(e.target.value) || 0; setStages(s); }} className={cn(inputClass, 'w-24')} /></td>
+                      <td className="py-2 px-3">
+                        {stages.length > 1 && (
+                          <button type="button" onClick={() => setStages(stages.filter((_, i) => i !== idx))} className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 cursor-pointer transition-colors duration-150">
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <Button type="button" variant="secondary" size="sm" onClick={() => setStages([...stages, { rollout: 100, cooloff: 0, pods: 0 }])} className="mt-3">+ Add Stage</Button>
           </div>
         </div>
 
         {/* Env Switch */}
         {!isNewService && (
-          <div className="bg-white rounded-lg border border-border">
-            <div className="px-6 py-4 border-b border-border flex items-center gap-3">
-              <h2 className="text-lg font-bold text-zinc-800">Env Switch</h2>
-              <button type="button" onClick={() => formData.service && setIsEnvSwitch(!isEnvSwitch)} disabled={!formData.service}
-                className={`relative inline-flex h-6 w-10 items-center rounded-full transition-colors ${!formData.service ? 'bg-zinc-200 cursor-not-allowed' : isEnvSwitch ? 'bg-zinc-900' : 'bg-zinc-300'}`}>
-                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isEnvSwitch ? 'translate-x-5' : 'translate-x-1'}`} />
-              </button>
+          <div className="bg-white rounded-xl border border-zinc-200">
+            <div className="px-6 py-4 border-b border-zinc-100 flex items-center gap-3">
+              <h2 className="text-lg font-semibold text-zinc-900">Env Switch</h2>
+              <Toggle checked={isEnvSwitch} onChange={() => formData.service && setIsEnvSwitch(!isEnvSwitch)} disabled={!formData.service} />
             </div>
             {isEnvSwitch && (
               <div className="p-6">
@@ -251,24 +278,18 @@ const CreateRelease: React.FC = () => {
 
         {/* Sync Release */}
         {syncCluster && (
-          <div className="bg-white rounded-lg border border-border">
-            <div className="px-6 py-4 border-b border-border flex items-center gap-3">
-              <h2 className="text-lg font-bold text-zinc-800">Sync Release to Other Cloud</h2>
-              <button type="button" onClick={() => setIsReleaseSync(!isReleaseSync)}
-                className={`relative inline-flex h-6 w-10 items-center rounded-full transition-colors ${isReleaseSync ? 'bg-zinc-900' : 'bg-zinc-300'}`}>
-                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isReleaseSync ? 'translate-x-5' : 'translate-x-1'}`} />
-              </button>
+          <div className="bg-white rounded-xl border border-zinc-200">
+            <div className="px-6 py-4 border-b border-zinc-100 flex items-center gap-3">
+              <h2 className="text-lg font-semibold text-zinc-900">Sync Release to Other Cloud</h2>
+              <Toggle checked={isReleaseSync} onChange={() => setIsReleaseSync(!isReleaseSync)} />
               <span className="text-sm text-zinc-500">{isReleaseSync ? `Sync to ${syncCluster}` : 'Single cloud only'}</span>
             </div>
             {isReleaseSync && (
               <div className="p-6 space-y-6">
                 <div>
                   <div className="flex items-center gap-3 mb-3">
-                    <h3 className="text-base font-bold text-zinc-800">Env Switch (Secondary)</h3>
-                    <button type="button" onClick={() => formData.service && setIsSecondaryEnvSwitch(!isSecondaryEnvSwitch)} disabled={!formData.service}
-                      className={`relative inline-flex h-6 w-10 items-center rounded-full transition-colors ${!formData.service ? 'bg-zinc-200 cursor-not-allowed' : isSecondaryEnvSwitch ? 'bg-zinc-900' : 'bg-zinc-300'}`}>
-                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isSecondaryEnvSwitch ? 'translate-x-5' : 'translate-x-1'}`} />
-                    </button>
+                    <h3 className="text-base font-semibold text-zinc-900">Env Switch (Secondary)</h3>
+                    <Toggle checked={isSecondaryEnvSwitch} onChange={() => formData.service && setIsSecondaryEnvSwitch(!isSecondaryEnvSwitch)} disabled={!formData.service} />
                   </div>
                   {isSecondaryEnvSwitch && (
                     secondaryEnvLoading ? <p className="text-xs text-zinc-400 py-4">Loading secondary env vars...</p> : (
@@ -280,16 +301,38 @@ const CreateRelease: React.FC = () => {
                   )}
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-zinc-800 mb-3">Secondary Cluster Stages</h3>
-                  {secondaryStages.map((stage, idx) => (
-                    <div key={idx} className="flex gap-4 mb-3 items-end">
-                      <div><FieldLabel>Rollout %</FieldLabel><input type="number" value={stage.rollout} onChange={(e) => { const s = [...secondaryStages]; s[idx].rollout = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(inputClass, 'w-28')} /></div>
-                      <div><FieldLabel>Cooloff</FieldLabel><input type="number" value={stage.cooloff} onChange={(e) => { const s = [...secondaryStages]; s[idx].cooloff = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(inputClass, 'w-28')} /></div>
-                      <div><FieldLabel>Pods</FieldLabel><input type="number" value={stage.pods} onChange={(e) => { const s = [...secondaryStages]; s[idx].pods = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(inputClass, 'w-28')} /></div>
-                      {secondaryStages.length > 1 && <button type="button" onClick={() => setSecondaryStages(secondaryStages.filter((_, i) => i !== idx))} className="text-red-500 hover:text-red-700 font-bold px-2 py-2 mb-0.5">x</button>}
-                    </div>
-                  ))}
-                  <button type="button" onClick={() => setSecondaryStages([...secondaryStages, { rollout: 100, cooloff: 0, pods: 0 }])} className="text-zinc-600 border border-zinc-300 hover:bg-zinc-50 px-4 py-2 rounded-lg text-sm mt-2">+ Add Stage</button>
+                  <h3 className="text-base font-semibold text-zinc-900 mb-3">Secondary Cluster Stages</h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left">
+                      <thead>
+                        <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+                          <th className="py-2 px-3 w-12">#</th>
+                          <th className="py-2 px-3">Rollout %</th>
+                          <th className="py-2 px-3">Cooloff</th>
+                          <th className="py-2 px-3">Pods</th>
+                          <th className="py-2 px-3 w-16"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {secondaryStages.map((stage, idx) => (
+                          <tr key={idx} className={cn('border-b border-zinc-100', idx % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
+                            <td className="py-2 px-3 text-zinc-400 font-mono text-xs">{idx + 1}</td>
+                            <td className="py-2 px-3"><input type="number" value={stage.rollout} onChange={(e) => { const s = [...secondaryStages]; s[idx].rollout = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(inputClass, 'w-24')} /></td>
+                            <td className="py-2 px-3"><input type="number" value={stage.cooloff} onChange={(e) => { const s = [...secondaryStages]; s[idx].cooloff = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(inputClass, 'w-24')} /></td>
+                            <td className="py-2 px-3"><input type="number" value={stage.pods} onChange={(e) => { const s = [...secondaryStages]; s[idx].pods = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(inputClass, 'w-24')} /></td>
+                            <td className="py-2 px-3">
+                              {secondaryStages.length > 1 && (
+                                <button type="button" onClick={() => setSecondaryStages(secondaryStages.filter((_, i) => i !== idx))} className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 cursor-pointer transition-colors duration-150">
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <Button type="button" variant="secondary" size="sm" onClick={() => setSecondaryStages([...secondaryStages, { rollout: 100, cooloff: 0, pods: 0 }])} className="mt-3">+ Add Stage</Button>
                 </div>
               </div>
             )}
@@ -305,7 +348,5 @@ const CreateRelease: React.FC = () => {
     </div>
   );
 };
-
-import { cn } from '../../../lib/utils';
 
 export default CreateRelease;

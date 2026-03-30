@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Search, Plus, RefreshCw, ChevronDown, Copy, Calendar, ChevronLeft, ChevronRight, X, Activity, CheckCircle2, XCircle, Clock } from 'lucide-react';
+import { Search, Plus, RefreshCw, ChevronDown, Copy, Calendar, ChevronLeft, ChevronRight, X, Activity, CheckCircle2, XCircle, Layers } from 'lucide-react';
 import { useReleases } from '../hooks';
 import { StatusBadge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
+import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { cn } from '../../../lib/utils';
-import type { APRelease, ReleaseStatus } from '../../../api';
+import type { ReleaseStatus } from '../../../api';
 
 type TimeRange = 'last_30_mins' | 'last_1_hour' | 'last_6_hours' | 'today' | 'yesterday' | 'last_2_days' | 'last_7_days' | 'last_30_days' | 'this_month' | 'last_month' | 'custom';
 
@@ -86,7 +87,7 @@ const ListRelease: React.FC = () => {
   }, [search]);
 
   const dateRange = useMemo(() => getDateRange(timeRange, customFrom, customTo), [timeRange, customFrom, customTo]);
-  const { data: releases = [], isLoading, refetch, dataUpdatedAt } = useReleases(dateRange.from.toISOString(), dateRange.to.toISOString());
+  const { data: releases = [], isLoading, refetch } = useReleases(dateRange.from.toISOString(), dateRange.to.toISOString());
 
   // Outside click
   useEffect(() => {
@@ -124,7 +125,6 @@ const ListRelease: React.FC = () => {
     };
   }, [releases]);
 
-  // Products list for filter
   const productOptions = useMemo(() => [...new Set(releases.map(r => r.product).filter(Boolean))], [releases]);
 
   // Filter + sort
@@ -161,29 +161,31 @@ const ListRelease: React.FC = () => {
     else { setSortField(field); setSortDir('desc'); }
   };
 
+  const kpiCards = [
+    { label: 'Total Releases', value: kpis.total, dotColor: 'bg-zinc-400' },
+    { label: 'Active', value: kpis.active, dotColor: 'bg-amber-500' },
+    { label: 'Completed Today', value: kpis.completedToday, dotColor: 'bg-emerald-500' },
+    { label: 'Failed Today', value: kpis.failedToday, dotColor: 'bg-red-500' },
+  ];
+
   return (
     <div className="flex flex-col flex-1 w-full">
       {/* KPI Cards */}
       <div className="grid grid-cols-4 gap-4 mb-6">
-        {[
-          { label: 'Total Releases', value: kpis.total, icon: <Layers className="w-4 h-4" />, color: 'text-zinc-600' },
-          { label: 'Active', value: kpis.active, icon: <Activity className="w-4 h-4" />, color: 'text-amber-600' },
-          { label: 'Completed Today', value: kpis.completedToday, icon: <CheckCircle2 className="w-4 h-4" />, color: 'text-emerald-600' },
-          { label: 'Failed Today', value: kpis.failedToday, icon: <XCircle className="w-4 h-4" />, color: 'text-red-600' },
-        ].map((kpi, i) => (
-          <div key={i} className="bg-white border border-border rounded-lg px-5 py-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider">{kpi.label}</span>
-              <span className={kpi.color}>{kpi.icon}</span>
+        {kpiCards.map((kpi, i) => (
+          <div key={i} className="h-20 bg-white border border-zinc-200 rounded-xl px-5 py-4 flex flex-col justify-between">
+            <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">{kpi.label}</span>
+            <div className="flex items-center gap-2">
+              <span className={cn('w-1.5 h-1.5 rounded-full', kpi.dotColor)} />
+              <span className="text-2xl font-bold text-zinc-900">{kpi.value}</span>
             </div>
-            <div className={cn('text-2xl font-bold font-mono', kpi.color)}>{kpi.value}</div>
           </div>
         ))}
       </div>
 
-      {/* Toolbar */}
-      <div className="bg-white border border-border rounded-lg shadow-sm">
-        <div className="p-4 flex items-center gap-3 border-b border-border-light">
+      {/* Toolbar + Table Card */}
+      <div className="bg-white border border-zinc-200 rounded-xl">
+        <div className="p-4 flex items-center gap-3 border-b border-zinc-100">
           {/* Search */}
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
@@ -192,13 +194,13 @@ const ListRelease: React.FC = () => {
               placeholder="Search releases..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="pl-9 pr-4 py-2 w-64 border border-zinc-200 rounded-lg focus:ring-2 focus:ring-zinc-800 focus:border-transparent text-sm outline-none"
+              className="pl-9 pr-4 h-9 w-64 border border-zinc-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
             />
           </div>
 
           {/* Date Range */}
           <div className="relative" ref={datePickerRef}>
-            <button onClick={() => setShowDatePicker(!showDatePicker)} className="flex items-center gap-2 border border-zinc-200 rounded-lg px-3 py-2 bg-white hover:bg-zinc-50 text-sm text-zinc-600">
+            <button onClick={() => setShowDatePicker(!showDatePicker)} className="flex items-center gap-2 border border-zinc-300 rounded-lg px-3 h-9 bg-white hover:bg-zinc-50 text-sm text-zinc-600 cursor-pointer transition-colors duration-150">
               <Calendar className="h-4 w-4 text-zinc-400" />
               <span className="max-w-[220px] truncate">{formatDateRange()}</span>
               <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
@@ -208,7 +210,7 @@ const ListRelease: React.FC = () => {
                 <div className="p-1.5">
                   {TIME_RANGE_OPTIONS.map((opt) => (
                     <button key={opt.value} onClick={() => { if (opt.value !== 'custom') { setTimeRange(opt.value); setShowDatePicker(false); } else { setTimeRange('custom'); } }}
-                      className={cn('w-full text-left px-3 py-1.5 text-sm rounded', timeRange === opt.value ? 'bg-zinc-100 text-zinc-900 font-medium' : 'text-zinc-600 hover:bg-zinc-50')}>
+                      className={cn('w-full text-left px-3 py-1.5 text-sm rounded cursor-pointer transition-colors duration-150', timeRange === opt.value ? 'bg-zinc-100 text-zinc-900 font-medium' : 'text-zinc-600 hover:bg-zinc-50')}>
                       {opt.label}
                     </button>
                   ))}
@@ -217,16 +219,16 @@ const ListRelease: React.FC = () => {
                   <div className="border-t border-zinc-100 p-3 space-y-2">
                     <div>
                       <label className="block text-xs font-medium text-zinc-600 mb-1">From</label>
-                      <input type="datetime-local" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className="w-full border border-zinc-200 rounded px-2 py-1.5 text-sm" />
+                      <input type="datetime-local" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent" />
                     </div>
                     <div>
                       <label className="block text-xs font-medium text-zinc-600 mb-1">To</label>
-                      <input type="datetime-local" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="w-full border border-zinc-200 rounded px-2 py-1.5 text-sm" />
+                      <input type="datetime-local" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent" />
                     </div>
                     <div className="text-xs text-zinc-400">Max range: 30 days</div>
                     <div className="flex gap-2">
-                      <button onClick={handleCustomRangeApply} className="flex-1 bg-zinc-900 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-zinc-800">Apply</button>
-                      <button onClick={() => { setTimeRange('last_30_days'); setCustomFrom(''); setCustomTo(''); setShowDatePicker(false); }} className="px-2 py-1.5 border border-zinc-200 rounded text-sm hover:bg-zinc-50"><X className="w-4 h-4" /></button>
+                      <button onClick={handleCustomRangeApply} className="flex-1 bg-zinc-900 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-zinc-800 cursor-pointer transition-colors duration-150">Apply</button>
+                      <button onClick={() => { setTimeRange('last_30_days'); setCustomFrom(''); setCustomTo(''); setShowDatePicker(false); }} className="px-2 py-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 cursor-pointer transition-colors duration-150"><X className="w-4 h-4" /></button>
                     </div>
                   </div>
                 )}
@@ -235,20 +237,20 @@ const ListRelease: React.FC = () => {
           </div>
 
           {/* Status Filter */}
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="border border-zinc-200 rounded-lg px-3 py-2 text-sm text-zinc-600 bg-white">
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="border border-zinc-300 rounded-lg px-3 h-9 text-sm text-zinc-600 bg-white cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent">
             <option value="">All Statuses</option>
             {STATUS_FILTER_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
 
           {/* Product Filter */}
-          <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)} className="border border-zinc-200 rounded-lg px-3 py-2 text-sm text-zinc-600 bg-white">
+          <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)} className="border border-zinc-300 rounded-lg px-3 h-9 text-sm text-zinc-600 bg-white cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent">
             <option value="">All Products</option>
             {productOptions.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
 
           <div className="flex-1" />
 
-          <button onClick={() => refetch()} className="p-2 border border-zinc-200 rounded-lg hover:bg-zinc-50 text-zinc-500">
+          <button onClick={() => refetch()} className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400">
             <RefreshCw className="h-4 w-4" />
           </button>
 
@@ -261,87 +263,92 @@ const ListRelease: React.FC = () => {
 
         {/* Table */}
         <div className="overflow-x-auto">
-          <table className="w-full text-left whitespace-nowrap">
-            <thead>
-              <tr className="bg-zinc-50/80 border-b border-border text-xs text-zinc-500 font-medium">
-                <th className="py-3 px-4 w-12">#</th>
-                <th className="py-3 px-4 cursor-pointer hover:text-zinc-700" onClick={() => handleSort('service')}>Service</th>
-                <th className="py-3 px-4 cursor-pointer hover:text-zinc-700" onClick={() => handleSort('id')}>ID</th>
-                <th className="py-3 px-4 cursor-pointer hover:text-zinc-700" onClick={() => handleSort('new_version')}>Version</th>
-                <th className="py-3 px-4">Status</th>
-                <th className="py-3 px-4 cursor-pointer hover:text-zinc-700" onClick={() => handleSort('start_time')}>Start Time</th>
-                <th className="py-3 px-4 w-16 text-center">Action</th>
-              </tr>
-            </thead>
-            <tbody className="text-sm">
-              {isLoading ? (
-                <tr><td colSpan={7} className="py-16 text-center text-zinc-400">Loading releases...</td></tr>
-              ) : filteredReleases.length === 0 ? (
-                <tr><td colSpan={7} className="py-16 text-center text-zinc-400">No releases found</td></tr>
-              ) : (
-                paginatedReleases.map((release, index) => {
-                  const isRevert = release.release_context?.revert === 1;
-                  return (
-                    <tr
-                      key={release.id}
-                      className={cn('border-b border-border-light hover:bg-zinc-50/50 cursor-pointer transition-colors', index % 2 === 1 && 'bg-zinc-50/30')}
-                      onClick={() => navigate(`/releases/${release.release_context?.cluster || 'default'}/${release.id}`)}
-                    >
-                      <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + index + 1}</td>
-                      <td className="py-3 px-4 font-medium text-zinc-800">{release.service}</td>
-                      <td className="py-3 px-4 font-mono text-xs text-zinc-500">{release.id}</td>
-                      <td className="py-3 px-4 font-mono text-xs text-zinc-600">{release.new_version}</td>
-                      <td className="py-3 px-4">
-                        <div className="flex items-center gap-1.5">
-                          <StatusBadge status={release.status} />
-                          {release.env && (
-                            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide bg-sky-50 text-sky-700 border border-sky-200">
-                              {release.env}
-                            </span>
-                          )}
-                          {isRevert && (
-                            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide bg-violet-50 text-violet-700 border border-violet-200">
-                              REVERT
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatISODate(release.start_time)}</td>
-                      <td className="py-3 px-4 text-center">
-                        <SimpleTooltip content="Clone release">
-                          <button
-                            onClick={(e) => { e.stopPropagation(); navigate(`/releases/${release.release_context?.cluster || 'default'}/${release.id}/clone`); }}
-                            className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors"
-                          >
-                            <Copy className="w-3.5 h-3.5" />
-                          </button>
-                        </SimpleTooltip>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
+          {isLoading ? (
+            <TableSkeleton rows={8} cols={7} />
+          ) : (
+            <table className="w-full text-left whitespace-nowrap">
+              <thead>
+                <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+                  <th className="py-3 px-4 w-12">#</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('service')}>Service</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('id')}>ID</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('new_version')}>Version</th>
+                  <th className="py-3 px-4">Status</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('start_time')}>Start Time</th>
+                  <th className="py-3 px-4 w-16 text-center">Action</th>
+                </tr>
+              </thead>
+              <tbody className="text-sm">
+                {filteredReleases.length === 0 ? (
+                  <tr><td colSpan={7} className="py-16 text-center text-zinc-400">No releases found</td></tr>
+                ) : (
+                  paginatedReleases.map((release, index) => {
+                    const isRevert = release.release_context?.revert === 1;
+                    return (
+                      <tr
+                        key={release.id}
+                        className={cn(
+                          'border-b border-zinc-100 hover:bg-zinc-100 cursor-pointer transition-colors duration-150',
+                          index % 2 === 1 ? 'bg-zinc-50' : 'bg-white'
+                        )}
+                        onClick={() => navigate(`/releases/${release.release_context?.cluster || 'default'}/${release.id}`)}
+                      >
+                        <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + index + 1}</td>
+                        <td className="py-3 px-4 font-medium text-zinc-800">{release.service}</td>
+                        <td className="py-3 px-4 font-mono text-xs text-zinc-500">{release.id}</td>
+                        <td className="py-3 px-4 font-mono text-xs text-zinc-600">{release.new_version}</td>
+                        <td className="py-3 px-4">
+                          <div className="flex items-center gap-1.5">
+                            <StatusBadge status={release.status} />
+                            {release.env && (
+                              <span className="px-1.5 py-0.5 rounded-md text-[9px] font-medium uppercase tracking-wide bg-sky-50 text-sky-700 border border-sky-200">
+                                {release.env}
+                              </span>
+                            )}
+                            {isRevert && (
+                              <span className="px-1.5 py-0.5 rounded-md text-[9px] font-medium uppercase tracking-wide bg-violet-50 text-violet-700 border border-violet-200">
+                                REVERT
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatISODate(release.start_time)}</td>
+                        <td className="py-3 px-4 text-center">
+                          <SimpleTooltip content="Clone release">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); navigate(`/releases/${release.release_context?.cluster || 'default'}/${release.id}/clone`); }}
+                              className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                          </SimpleTooltip>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          )}
         </div>
 
         {/* Pagination */}
         {!isLoading && filteredReleases.length > 0 && (
-          <div className="px-4 py-3 flex items-center justify-between border-t border-border-light">
+          <div className="px-4 py-3 flex items-center justify-between border-t border-zinc-100">
             <div className="flex items-center gap-3">
               <span className="text-sm text-zinc-500">
-                {startIndex + 1}-{Math.min(startIndex + itemsPerPage, filteredReleases.length)} of {filteredReleases.length}
+                Showing {startIndex + 1}-{Math.min(startIndex + itemsPerPage, filteredReleases.length)} of {filteredReleases.length} releases
               </span>
-              <select value={itemsPerPage} onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }} className="border border-zinc-200 rounded px-2 py-1 text-xs text-zinc-600">
+              <select value={itemsPerPage} onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }} className="border border-zinc-300 rounded-lg px-2 py-1 text-xs text-zinc-600 cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400">
                 {[10, 25, 50].map(n => <option key={n} value={n}>{n} / page</option>)}
               </select>
             </div>
             <div className="flex items-center gap-1">
-              <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-1.5 border border-zinc-200 rounded hover:bg-zinc-50 disabled:opacity-40">
+              <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150">
                 <ChevronLeft className="w-4 h-4" />
               </button>
               <span className="text-xs text-zinc-500 px-3 font-mono">{currentPage} / {totalPages}</span>
-              <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-1.5 border border-zinc-200 rounded hover:bg-zinc-50 disabled:opacity-40">
+              <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150">
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>
@@ -351,8 +358,5 @@ const ListRelease: React.FC = () => {
     </div>
   );
 };
-
-// Need to import Layers for the KPI card
-import { Layers } from 'lucide-react';
 
 export default ListRelease;
