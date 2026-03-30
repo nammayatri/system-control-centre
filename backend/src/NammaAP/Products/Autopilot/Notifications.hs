@@ -122,18 +122,23 @@ saveThreadTs db rid ts = RTQ.updateReleaseTrackerField db rid "udf3" ts
 
 -- | Release created — starts a NEW thread
 notifyReleaseCreated :: DBEnv -> ReleaseTracker -> IO ()
-notifyReleaseCreated db tracker = whenSlackEnabled db $
+notifyReleaseCreated db tracker = whenSlackEnabled db $ do
+  putStrLn $ "[SLACK-DEBUG] notifyReleaseCreated for " <> T.unpack (product tracker) <> "/" <> T.unpack (service tracker)
   withChannel db (product tracker) (service tracker) $ \channel -> do
+    putStrLn $ "[SLACK-DEBUG] Channel: " <> T.unpack channel
     let msg = T.unlines
           [ "*" <> product tracker <> "* | *" <> service tracker <> "* | " <> env tracker <> " Release"
           , oldVersion tracker <> " → " <> newVersion tracker <> " | " <> createdBy tracker
           , "Status: *CREATED*"
           ]
     mTs <- sendSlackMessage channel msg Nothing
+    putStrLn $ "[SLACK-DEBUG] Thread ts: " <> show mTs
     -- Save thread_ts so subsequent messages reply in this thread
     case mTs of
-      Just ts -> saveThreadTs db (releaseId tracker) ts
-      Nothing -> pure ()
+      Just ts -> do
+        putStrLn $ "[SLACK-DEBUG] Saving thread_ts: " <> T.unpack ts
+        saveThreadTs db (releaseId tracker) ts
+      Nothing -> putStrLn "[SLACK-DEBUG] No ts returned"
 
 -- | Release approved — replies in thread
 notifyReleaseApproved :: DBEnv -> ReleaseTracker -> IO ()

@@ -13,6 +13,7 @@ import {
   abortRelease,
   immediateRevert,
   updateTracker,
+  deleteRelease,
 } from './api';
 import { toast } from 'sonner';
 
@@ -174,6 +175,18 @@ export function useImmediateRevert() {
     onError: (err: any) => {
       toast.error(err?.response?.data?.message || err.message || 'Immediate revert failed');
     },
+  });
+}
+
+export function useDeleteRelease() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (releaseId: string) => deleteRelease(releaseId),
+    onSuccess: () => {
+      toast.success('Release deleted');
+      qc.invalidateQueries({ queryKey: ['releases'] });
+    },
+    onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to delete'),
   });
 }
 

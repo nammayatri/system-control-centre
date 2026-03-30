@@ -11,7 +11,7 @@ import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import Database.Beam
 import Database.Beam.Postgres
-import Database.PostgreSQL.Simple (execute)
+import Database.PostgreSQL.Simple (execute, Only(..))
 import NammaAP.Core.DB.Connection (runDB, withConn)
 import NammaAP.Products.Autopilot.Types
 import NammaAP.Core.Environment (DBEnv)
@@ -384,6 +384,16 @@ findReleaseTrackerByGlobalId db gid = do
             guard_ (rtGlobalId rt ==. val_ (Just gid))
             pure rt
   pure $ fmap fromRow (safeHead rows)
+
+deleteReleaseTracker :: DBEnv -> Text -> IO ()
+deleteReleaseTracker db rid = withConn db $ \conn -> do
+  _ <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only rid)
+  pure ()
+
+deleteReleaseEvents :: DBEnv -> Text -> IO ()
+deleteReleaseEvents db rid = withConn db $ \conn -> do
+  _ <- execute conn "DELETE FROM release_events WHERE re_release_id = ?" (Only rid)
+  pure ()
 
 safeHead :: [a] -> Maybe a
 safeHead [] = Nothing

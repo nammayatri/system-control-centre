@@ -9,6 +9,7 @@ import { Button } from '../../../shared/ui/button';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { toast } from 'sonner';
 import { cn } from '../../../lib/utils';
+import { DEFAULT_ENV, AVAILABLE_ENVS } from '../../../lib/constants';
 import type { ProductConfig } from '../../../api';
 
 function jsonConfigToYaml(raw: string): string {
@@ -62,7 +63,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
   const [error, setError] = useState('');
 
   const [form, setForm] = useState({
-    product: '', name: '', description: '', change_log: '', priority: '0', env: 'UAT', schedule_time: '', cluster: 'BECKN_UAT', file: '', mode: 'AUTO',
+    product: '', name: '', description: '', change_log: '', priority: '0', env: DEFAULT_ENV, schedule_time: '', cluster: 'BECKN_UAT', file: '', mode: 'AUTO',
   });
 
   const createMut = useMutation({
@@ -188,7 +189,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
             <div className="space-y-4">
               <div><FieldLabel required>Name</FieldLabel><select name="name" value={form.name} onChange={handleChange} required disabled={!form.product || namesOptions.length === 0} className={cn(inputClass, (!form.product || namesOptions.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}><option value="">Select Name</option>{namesOptions.map(n => <option key={n} value={n}>{n}</option>)}</select></div>
               <div><FieldLabel required>Change Log</FieldLabel><input name="change_log" value={form.change_log} onChange={handleChange} required placeholder="EUL-1.0.0" className={inputClass} /></div>
-              <div><FieldLabel required>Env</FieldLabel><select name="env" value={form.env} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}><option value="UAT">UAT</option><option value="PROD">PROD</option><option value="INTEG_CLUSTER">INTEG_CLUSTER</option></select></div>
+              <div><FieldLabel required>Env</FieldLabel><select name="env" value={form.env} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}>{AVAILABLE_ENVS.map(e => <option key={e} value={e}>{e}</option>)}</select></div>
             </div>
             {/* RIGHT column */}
             <div className="space-y-4">

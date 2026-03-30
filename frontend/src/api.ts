@@ -554,6 +554,11 @@ export const abortRelease = (id: string) => updateTracker(id, { status: 'Abortin
 export const immediateRevert = (id: string, requestedBy?: string) =>
     revertRelease(id, requestedBy, undefined, true);
 
+export async function deleteRelease(releaseId: string): Promise<any> {
+    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/delete`);
+    return data;
+}
+
 // ── ConfigMap CRUD ─────────────────────────────────────────────────
 
 export async function createConfigMap(payload: any, isUpdate: boolean = false): Promise<any> {

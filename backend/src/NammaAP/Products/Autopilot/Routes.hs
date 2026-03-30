@@ -69,6 +69,7 @@ type CoreAPI =
     :<|> "releases" :> Capture "releaseId" Text :> "discard" :> ReqBody '[JSON] DiscardReleaseReq :> Post '[JSON] APIResponse
     :<|> "releases" :> Capture "releaseId" Text :> "update" :> ReqBody '[JSON] K8sUpdateTrackerReq :> Post '[JSON] APIResponse
     :<|> "releases" :> Capture "releaseId" Text :> "events" :> Get '[JSON] [Value]
+    :<|> "releases" :> Capture "releaseId" Text :> "delete" :> Post '[JSON] APIResponse
     :<|> "tracker" :> "configmap" :> "list" :> QueryParam "from" Text :> QueryParam "to" Text :> Get '[JSON] Value
     :<|> "tracker" :> "configmap" :> Capture "id" Text :> Get '[JSON] Value
     :<|> "tracker" :> "configmap" :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
@@ -98,6 +99,7 @@ coreServer =
     :<|> discardReleaseH
     :<|> updateTrackerH
     :<|> listEventsH
+    :<|> deleteReleaseH
     -- ConfigMap
     :<|> listConfigMapsH
     :<|> getConfigMapH
@@ -504,6 +506,15 @@ discardReleaseH rid DiscardReleaseReq {..} = do
           liftIO $ insertReleaseEvent db rid "BUSINESS" "STATUS_UPDATED"
             (toJSON ("Tracker marked as DISCARDED" <> maybe "" (": " <>) reason))
           pure $ APIResponse "SUCCESS" "Release discarded"
+
+deleteReleaseH :: Text -> Flow APIResponse
+deleteReleaseH rid = do
+  db <- getDBEnv
+  -- Delete events first (FK constraint)
+  liftIO $ deleteReleaseEvents db rid
+  -- Delete the release
+  liftIO $ deleteReleaseTracker db rid
+  pure $ APIResponse "SUCCESS" ("Release deleted: " <> rid)
 
 updateTrackerH :: Text -> K8sUpdateTrackerReq -> Flow APIResponse
 updateTrackerH rid req = do

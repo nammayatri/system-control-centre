@@ -7,6 +7,7 @@ import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs } from '../api';
 import type { ProductConfig } from '../../../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
+import { DEFAULT_ENV, AVAILABLE_ENVS } from '../../../lib/constants';
 import { Trash2 } from 'lucide-react';
 
 const CreateRelease: React.FC = () => {
@@ -19,7 +20,7 @@ const CreateRelease: React.FC = () => {
   const products = [...new Set(productConfigs.map((c: ProductConfig) => c.product).filter(Boolean))];
 
   const [formData, setFormData] = useState({
-    product: '', service: '', env: '', new_version: '', docker_image: '', change_log: '',
+    product: '', service: '', env: DEFAULT_ENV, new_version: '', docker_image: '', change_log: '',
     status: 'CREATED', mode: 'AUTO', priority: '0', info: '', custom_pods_scale_down_days: '1',
     cluster: 'EULER_UAT', scale_down_delay: '1',
     cronjob_suspend: false, description: '', schedule_time: '',
@@ -212,7 +213,7 @@ const CreateRelease: React.FC = () => {
             {/* Col 2 */}
             <div className="space-y-4">
               <div><FieldLabel required>Product</FieldLabel><select name="product" value={formData.product} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select Product</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
-              <div><FieldLabel required>Env</FieldLabel><select name="env" value={formData.env} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select Env</option><option value="UAT">UAT</option><option value="PROD">PROD</option><option value="INTEG_CLUSTER">INTEG_CLUSTER</option></select></div>
+              <div><FieldLabel required>Env</FieldLabel><select name="env" value={formData.env} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select Env</option>{AVAILABLE_ENVS.map(e => <option key={e} value={e}>{e}</option>)}</select></div>
               <div><FieldLabel>Priority</FieldLabel><select name="priority" value={formData.priority} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
               <div><FieldLabel>Description</FieldLabel><input type="text" name="description" value={formData.description} onChange={handleInputChange} placeholder="Deploying webhook Hotfix" className={inputClass} /></div>
               <div><FieldLabel required>Docker Image</FieldLabel><input type="text" name="docker_image" value={formData.docker_image} onChange={handleInputChange} required placeholder="Enter Docker Image" className={inputClass} /></div>

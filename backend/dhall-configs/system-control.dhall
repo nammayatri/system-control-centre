@@ -40,4 +40,8 @@ in  { -- Database
 
     -- Migrations
     , migrationPath = [ "dev/migrations/system-control" ]
+
+    -- Frontend env config (consumed via VITE_* env vars)
+    , availableEnvs = env:VITE_AVAILABLE_ENVS as Text ? "UAT,PROD,INTEG_CLUSTER"
+    , defaultEnv = env:VITE_DEFAULT_ENV as Text ? "UAT"
     }

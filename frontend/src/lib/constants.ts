@@ -17,3 +17,14 @@ export const AUTH_BASE =
 export const TOKEN_KEY = 'sc_token';
 export const USER_KEY = 'sc_user';
 export const PRODUCTS_KEY = 'sc_products';
+
+export const DEFAULT_ENV =
+  window.__ENV__?.VITE_DEFAULT_ENV ||
+  import.meta.env.VITE_DEFAULT_ENV ||
+  'UAT';
+
+export const AVAILABLE_ENVS: string[] = (
+  window.__ENV__?.VITE_AVAILABLE_ENVS ||
+  import.meta.env.VITE_AVAILABLE_ENVS ||
+  'UAT,PROD,INTEG_CLUSTER'
+).split(',');

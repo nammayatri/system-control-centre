@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { useRelease, useReleaseEvents, useApproveRelease, useDiscardRelease, usePauseRelease, useResumeRelease, useAbortRelease, useRevertRelease, useImmediateRevert } from '../hooks';
+import { useRelease, useReleaseEvents, useApproveRelease, useDiscardRelease, usePauseRelease, useResumeRelease, useAbortRelease, useRevertRelease, useImmediateRevert, useDeleteRelease } from '../hooks';
 import type { RolloutHistoryEvent, RolloutEvent } from '../../../api';
 import { StatusBadge, Badge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
@@ -107,6 +107,7 @@ const ReleaseSummary: React.FC = () => {
   const abortMut = useAbortRelease();
   const revertMut = useRevertRelease();
   const immRevertMut = useImmediateRevert();
+  const deleteMut = useDeleteRelease();
 
   const confirmAction = useConfirm();
 
@@ -197,7 +198,7 @@ const ReleaseSummary: React.FC = () => {
 
           <div className="w-px h-6 bg-zinc-200 mx-1" />
           <PermissionGate product="autopilot" permission="RELEASE_DELETE">
-            <SimpleTooltip content="Delete"><Button size="icon" variant="ghost" className="text-red-500 hover:bg-red-50" onClick={() => doAction('delete this release', async () => { /* delete not yet implemented */ })}><Trash2 className="w-4 h-4" /></Button></SimpleTooltip>
+            <SimpleTooltip content="Delete"><Button size="icon" variant="ghost" className="text-red-500 hover:bg-red-50" loading={deleteMut.isPending} onClick={() => doAction('delete this release', async () => { await deleteMut.mutateAsync(id!); navigate('/releases'); }, true)}><Trash2 className="w-4 h-4" /></Button></SimpleTooltip>
           </PermissionGate>
           <SimpleTooltip content="Clone"><Button size="icon" variant="ghost" onClick={() => navigate(`/releases/${clusterId}/${id}/clone`)}><Copy className="w-4 h-4" /></Button></SimpleTooltip>
           <SimpleTooltip content="Refresh"><Button size="icon" variant="ghost" onClick={() => refetch()}><RefreshCw className="w-4 h-4" /></Button></SimpleTooltip>
