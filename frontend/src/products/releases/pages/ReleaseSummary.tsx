@@ -153,41 +153,41 @@ const ReleaseSummary: React.FC = () => {
         </div>
         <div className="flex items-center gap-2">
           {s === 'CREATED' && release.is_approved === 0 && (
-            <PermissionGate product="backend-releases" permission="RELEASE_APPROVE">
+            <PermissionGate product="autopilot" permission="RELEASE_APPROVE">
               <Button size="sm" variant="success" loading={approveMut.isPending} onClick={() => doAction('approve', () => approveMut.mutateAsync({ releaseId: id!, approvedBy: 'admin' }))}><Check className="w-3.5 h-3.5" /> Approve</Button>
             </PermissionGate>
           )}
           {s === 'CREATED' && (
-            <PermissionGate product="backend-releases" permission="RELEASE_DISCARD">
+            <PermissionGate product="autopilot" permission="RELEASE_DISCARD">
               <Button size="sm" variant="ghost" loading={discardMut.isPending} onClick={() => doAction('discard', () => discardMut.mutateAsync({ releaseId: id! }))}><X className="w-3.5 h-3.5" /> Discard</Button>
             </PermissionGate>
           )}
           {(s === 'INPROGRESS' || s === 'RECORDING') && (
-            <PermissionGate product="backend-releases" permission="RELEASE_PAUSE">
+            <PermissionGate product="autopilot" permission="RELEASE_PAUSE">
               <Button size="sm" variant="outline" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
               <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!))}><Square className="w-3.5 h-3.5" /> Abort</Button>
             </PermissionGate>
           )}
           {s === 'PAUSED' && (
-            <PermissionGate product="backend-releases" permission="RELEASE_RESUME">
+            <PermissionGate product="autopilot" permission="RELEASE_RESUME">
               <Button size="sm" variant="success" loading={resumeMut.isPending} onClick={() => doAction('resume', () => resumeMut.mutateAsync(id!))}><Play className="w-3.5 h-3.5" /> Resume</Button>
               <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!))}><Square className="w-3.5 h-3.5" /> Abort</Button>
             </PermissionGate>
           )}
           {s === 'RECORDED' && (
-            <PermissionGate product="backend-releases" permission="RELEASE_REVERT">
+            <PermissionGate product="autopilot" permission="RELEASE_REVERT">
               <Button size="sm" variant="outline" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: 'admin' }))}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
             </PermissionGate>
           )}
           {s === 'COMPLETED' && (
-            <PermissionGate product="backend-releases" permission="RELEASE_REVERT">
+            <PermissionGate product="autopilot" permission="RELEASE_REVERT">
               <Button size="sm" variant="outline" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: 'admin' }))}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
               <Button size="sm" variant="danger" loading={immRevertMut.isPending} onClick={() => doAction('immediate revert', () => immRevertMut.mutateAsync({ releaseId: id!, requestedBy: 'admin' }))}><Zap className="w-3.5 h-3.5" /> Immediate Revert</Button>
             </PermissionGate>
           )}
 
           <div className="w-px h-6 bg-zinc-200 mx-1" />
-          <PermissionGate product="backend-releases" permission="RELEASE_DELETE">
+          <PermissionGate product="autopilot" permission="RELEASE_DELETE">
             <SimpleTooltip content="Delete"><Button size="icon" variant="ghost" className="text-red-500 hover:bg-red-50" onClick={() => doAction('delete this release', async () => { /* delete not yet implemented */ })}><Trash2 className="w-4 h-4" /></Button></SimpleTooltip>
           </PermissionGate>
           <SimpleTooltip content="Clone"><Button size="icon" variant="ghost" onClick={() => navigate(`/releases/${clusterId}/${id}/clone`)}><Copy className="w-4 h-4" /></Button></SimpleTooltip>

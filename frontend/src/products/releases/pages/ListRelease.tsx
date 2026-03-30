@@ -254,7 +254,7 @@ const ListRelease: React.FC = () => {
             <RefreshCw className="h-4 w-4" />
           </button>
 
-          <PermissionGate product="backend-releases" permission="RELEASE_CREATE">
+          <PermissionGate product="autopilot" permission="RELEASE_CREATE">
             <Link to="/releases/new">
               <Button size="sm"><Plus className="w-4 h-4" /> Create Release</Button>
             </Link>

@@ -41,7 +41,7 @@ import ConfigMapSummary from './configmap/pages/ConfigMapSummary';
 import Configurations from './config/pages/Configurations';
 
 const releasesProduct: ProductDefinition = {
-  slug: 'backend-releases',
+  slug: 'autopilot',
   label: 'Backend Releases',
   icon: 'Rocket',
   basePath: '/releases',
