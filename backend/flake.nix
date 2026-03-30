@@ -1,46 +1,61 @@
 {
-  description = "Namma AP release orchestration";
+  description = "System Control Centre — release orchestration with RBAC";
 
-  inputs = {
-    euler-hs.url = "github:nammayatri/euler-hs";
-    common.follows = "euler-hs/common";
-    nixpkgs.follows = "common/nixpkgs";
-    flake-parts.follows = "common/flake-parts";
-    haskell-flake.follows = "common/haskell-flake";
+  nixConfig = {
+    allow-import-from-derivation = true;
   };
 
-  outputs = inputs@{ nixpkgs, flake-parts, ... }:
-    flake-parts.lib.mkFlake { inherit inputs; } {
-      systems = nixpkgs.lib.systems.flakeExposed;
-      imports = [
-        inputs.common.flakeModules.ghc927
-        inputs.haskell-flake.flakeModule
-      ];
-      perSystem = { self', config, pkgs, lib, ... }: {
+  inputs = {
+    common.url = "github:nammayatri/common";
+    nixpkgs.follows = "common/nixpkgs";
+    haskell-flake.follows = "common/haskell-flake";
+
+    euler-hs = {
+      url = "github:nammayatri/euler-hs";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.haskell-flake.follows = "haskell-flake";
+    };
+  };
+
+  outputs = inputs:
+    inputs.common.lib.mkFlake { inherit inputs; } {
+      perSystem = { self', pkgs, lib, config, ... }: {
         haskellProjects.default = {
-          projectFlakeName = "namma-ap";
-          imports = [ inputs.euler-hs.haskellFlakeProjectModules.output ];
-          basePackages = config.haskellProjects.ghc927.outputs.finalPackages;
+          imports = [
+            inputs.euler-hs.haskellFlakeProjectModules.output
+          ];
           settings = {
             int-cast.broken = false;
+            euler-hs = {
+              check = false;
+              jailbreak = true;
+              haddock = false;
+              libraryProfiling = false;
+            };
           };
-          autoWire = [ "packages" "checks" "apps" "devShells" ];
+          autoWire = [ "packages" "checks" "apps" ];
         };
+
+        process-compose = { };
+
+        packages.default = self'.packages.namma-ap;
+
         devShells.default = lib.mkForce (pkgs.mkShell {
-          inputsFrom = [ config.haskellProjects.default.outputs.devShell ];
+          name = "system-control-shell";
+          inputsFrom = [
+            config.haskellProjects.default.outputs.devShell
+          ];
           packages = with pkgs; [
             git
             cacert
-            mariadb
-            mysql80
             pcre
             openssl
             zlib
             zstd
             pkg-config
+            postgresql
           ];
         });
-        packages.default = self'.packages.namma-ap;
       };
     };
 }
