@@ -1,14 +1,37 @@
+# Env / secrets
 .env
+dhall-configs/dev/secrets/
+!dhall-configs/dev/secrets/common.dhall.example
+
+# Build artifacts
 dist-newstyle/
-.direnv/
 .stack-work/
-.cabal-dir/
-.cabal-home/
 result
 *.hi
 *.o
 *.dyn_hi
 *.dyn_o
+*.hp
+*.prof
+
+# Nix / direnv
+.direnv/
+.cabal-dir/
+.cabal-home/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+
+# Editor
 .claude/
-dhall-configs/dev/secrets/
-!dhall-configs/dev/secrets/common.dhall.example
+.hie/
+tags
+TAGS
+
+# Misc
+*.tmp
+*.bak
