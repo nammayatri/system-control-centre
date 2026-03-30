@@ -11,7 +11,8 @@ import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import Database.Beam
 import Database.Beam.Postgres
-import NammaAP.Core.DB.Connection (runDB)
+import Database.PostgreSQL.Simple (execute)
+import NammaAP.Core.DB.Connection (runDB, withConn)
 import NammaAP.Products.Autopilot.Types
 import NammaAP.Core.Environment (DBEnv)
 import NammaAP.Products.Autopilot.Types.Target (TargetState(..))
@@ -387,3 +388,13 @@ findReleaseTrackerByGlobalId db gid = do
 safeHead :: [a] -> Maybe a
 safeHead [] = Nothing
 safeHead (x : _) = Just x
+
+-- | Update udf3 field on a release tracker by ID.
+-- Used to store Slack thread_ts.
+updateReleaseTrackerField :: DBEnv -> Text -> Text -> Text -> IO ()
+updateReleaseTrackerField db rid _fieldName fieldValue =
+  withConn db $ \conn -> do
+    _ <- execute conn
+      "UPDATE release_tracker SET udf3 = ? WHERE id = ?"
+      (fieldValue, rid)
+    pure ()
