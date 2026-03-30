@@ -165,6 +165,8 @@ data ReleaseTracker = ReleaseTracker
   , isInfraApproved :: Bool
   , releaseTag :: Maybe Text
   , scheduleTime :: Maybe UTCTime
+  , dateCreated :: Maybe UTCTime
+  , lastUpdated :: Maybe UTCTime
   , startTime :: Maybe UTCTime
   , endTime :: Maybe UTCTime
   , rolloutStrategy :: [RolloutStep]
