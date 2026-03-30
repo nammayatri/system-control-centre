@@ -1,8 +1,8 @@
-import React, { useState, Fragment } from 'react';
+import React, { useState, Fragment, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
-import { apiClient } from '../../../lib/api-client';
+import { fetchConfigMapDetail, updateConfigMap } from '../api';
 import { StatusBadge, Badge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
@@ -37,21 +37,20 @@ const ConfigMapSummary: React.FC = () => {
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
 
   const id = clusterId?.split('&&')[1] || '';
-  const cluster = clusterId?.split('&&')[0] || '';
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['configmap-detail', id],
-    queryFn: async () => { const res = await apiClient.get(`/tracker/configmap/${id}`); return res.data; },
+    queryFn: () => fetchConfigMapDetail(id),
     enabled: !!id,
     refetchInterval: 10000,
   });
 
   const actionMut = useMutation({
     mutationFn: async (body: Record<string, unknown>) => {
-      await apiClient.put(`/tracker/configmap/${id}`, body);
+      return updateConfigMap(id, body);
     },
     onSuccess: () => { toast.success('Action completed'); refetch(); },
-    onError: (err: any) => { toast.error(err.message || 'Action failed'); },
+    onError: (err: Error) => { toast.error(err.message || 'Action failed'); },
   });
 
   const handleAction = (action: string) => {
@@ -83,7 +82,7 @@ const ConfigMapSummary: React.FC = () => {
   if (!data) return <div className="p-10 text-center text-red-500">ConfigMap not found.</div>;
 
   const tabs = ['Summary', 'Event Data', 'Json Data', 'ConfigMap Diff'];
-  const events: ConfigMapEvent[] = data.events || [];
+  const events: ConfigMapEvent[] = (data.events as ConfigMapEvent[] | undefined) || [];
   const sortedEvents = [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
   return (
@@ -148,7 +147,7 @@ const ConfigMapSummary: React.FC = () => {
             {[
               { title: 'PRODUCT', rows: [{ label: 'Product', value: data.product }, { label: 'Description', value: data.description }, { label: 'Release Manager', value: data.release_manager }, { label: 'Name', value: data.name }, { label: 'Change log', value: data.change_log }] },
               { title: 'TIME SCHEDULE', rows: [{ label: 'Created at', value: data.date_created }, { label: 'Scheduled time', value: data.schedule_time }, { label: 'Last Updated', value: data.last_updated }, { label: 'Start time', value: data.start_time }, { label: 'End time', value: data.end_time }] },
-              { title: 'META DATA', rows: [{ label: 'Priority', value: data.priority }, { label: 'Env', value: data.env }, { label: 'Approved', value: data.is_approved === 1 ? 'Yes' : 'No' }, { label: 'Slack Thread Id', value: data.slack_thread_id }] },
+              { title: 'META DATA', rows: [{ label: 'Priority', value: String(data.priority) }, { label: 'Env', value: data.env }, { label: 'Approved', value: data.is_approved === 1 ? 'Yes' : 'No' }, { label: 'Slack Thread Id', value: data.slack_thread_id }] },
               { title: 'K8S INFO', rows: [{ label: 'Id', value: data.id }, { label: 'Cluster', value: data.cluster }] },
             ].map((card, ci) => (
               <div key={ci} className="bg-zinc-50 rounded-xl border border-zinc-100 p-4 text-sm">

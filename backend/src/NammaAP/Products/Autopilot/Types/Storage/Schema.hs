@@ -44,7 +44,9 @@ data ReleaseConfigT f = ReleaseConfigT
     serviceAcronym :: Columnar f (Maybe Text),
     serviceType :: Columnar f Text,
     releaseConfigBitbucketPath :: Columnar f (Maybe Text),
+    releaseConfigMicroserviceType :: Columnar f (Maybe Text),
     releaseConfigRevertStrategy :: Columnar f (Maybe Text),
+    releaseConfigJiraWebhookUrl :: Columnar f (Maybe Text),
     serviceTargetConfig :: Columnar f (Maybe Text)
   }
   deriving (Generic, Beamable)
@@ -210,7 +212,9 @@ nammaAPDb =
                   serviceAcronym = fieldNamed "service_acronym",
                   serviceType = fieldNamed "service_type",
                   releaseConfigBitbucketPath = fieldNamed "bitbucket_path",
+                  releaseConfigMicroserviceType = fieldNamed "microservice_type",
                   releaseConfigRevertStrategy = fieldNamed "revert_strategy",
+                  releaseConfigJiraWebhookUrl = fieldNamed "jira_webhook_url",
                   serviceTargetConfig = fieldNamed "target_config"
                 },
           releaseTrackers =

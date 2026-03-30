@@ -434,6 +434,22 @@ revertReleaseH rid req = do
         liftIO $ triggerImmediateRevertSync cfg db tracker mTargetState
       pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
 
+revertByGlobalIdH :: Text -> Flow APIResponse
+revertByGlobalIdH gid = do
+  db <- getDBEnv
+  m <- liftIO $ findReleaseTrackerByGlobalId db gid
+  case m of
+    Nothing -> pure $ APIResponse "ERROR" ("No release found with global_id=" <> gid)
+    Just (tracker, _) -> revertReleaseH (releaseId tracker) (RevertReleaseReq Nothing Nothing Nothing Nothing)
+
+immediateRevertByGlobalIdH :: Text -> Flow APIResponse
+immediateRevertByGlobalIdH gid = do
+  db <- getDBEnv
+  m <- liftIO $ findReleaseTrackerByGlobalId db gid
+  case m of
+    Nothing -> pure $ APIResponse "ERROR" ("No release found with global_id=" <> gid)
+    Just (tracker, _) -> revertReleaseH (releaseId tracker) (RevertReleaseReq Nothing Nothing (Just True) Nothing)
+
 discardReleaseH :: Text -> DiscardReleaseReq -> Flow APIResponse
 discardReleaseH rid DiscardReleaseReq {..} = do
   db <- getDBEnv
