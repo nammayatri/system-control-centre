@@ -36,7 +36,7 @@ import Products.Autopilot.K8s.Deployment (buildSetImageCommand, getDeploymentEnv
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getVirtualServiceJson)
-import Products.Autopilot.Notifications (notifyReleaseApproved, notifyReleaseCreated, notifyReleaseReverted)
+import Products.Autopilot.Notifications
 import GHC.Int (Int32)
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ReleaseTracker
@@ -599,15 +599,21 @@ discardReleaseH rid DiscardReleaseReq{..} = do
                             "BUSINESS"
                             "STATUS_UPDATED"
                             (toJSON ("Tracker marked as DISCARDED" <> maybe "" (": " <>) reason))
+                    liftIO $ notifyReleaseDiscarded db updated
                     pure $ APIResponse "SUCCESS" "Release discarded"
 
 deleteReleaseH :: Text -> Flow APIResponse
 deleteReleaseH rid = do
     db <- getDBEnv
+    -- Fetch tracker before deleting so we can notify
+    mTracker <- liftIO $ findReleaseTracker db rid
     -- Delete events first (FK constraint)
     liftIO $ deleteReleaseEvents db rid
     -- Delete the release
     liftIO $ deleteReleaseTracker db rid
+    case mTracker of
+        Just (tracker, _) -> liftIO $ notifyReleaseDeleted db tracker
+        Nothing -> pure ()
     pure $ APIResponse "SUCCESS" ("Release deleted: " <> rid)
 
 updateTrackerH :: Text -> K8sUpdateTrackerReq -> Flow APIResponse
@@ -626,10 +632,18 @@ updateTrackerH rid req = do
                         else do
                             liftIO $ insertReleaseTracker db updatedTracker updatedTargetState
                             liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
+                            -- Send status-specific Slack notifications
+                            case newStatus of
+                                Paused -> liftIO $ notifyReleasePaused db updatedTracker
+                                InProgress -> liftIO $ notifyReleaseResumed db updatedTracker
+                                Aborting -> liftIO $ notifyReleaseAborted db updatedTracker
+                                Completed -> liftIO $ notifyReleaseCompleted db updatedTracker
+                                _ -> liftIO $ notifyReleaseUpdated db updatedTracker ("status changed to " <> newStatusText)
                             pure $ APIResponse "SUCCESS" "Tracker updated"
                 Nothing -> do
                     liftIO $ insertReleaseTracker db updatedTracker updatedTargetState
                     liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
+                    liftIO $ notifyReleaseUpdated db updatedTracker "status/fields updated"
                     pure $ APIResponse "SUCCESS" "Tracker updated"
 
 applyUpdates :: ReleaseTracker -> Maybe TargetState -> K8sUpdateTrackerReq -> (ReleaseTracker, Maybe TargetState)
@@ -777,7 +791,7 @@ createConfigMapH body = do
                 targetState = ConfigState emptyConfigState
             liftIO $ insertReleaseTracker db tracker (Just targetState)
             liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
-            liftIO $ notifyReleaseCreated db tracker
+            liftIO $ notifyConfigMapCreated db tracker
             -- Handle sync to secondary cluster
             let isSync = case body of
                     Object o -> isTruthy "isSync" o
@@ -847,6 +861,7 @@ updateConfigMapH cmId' body = do
         Just (rt, mts) -> do
             let updated = applyCmUpdates rt body
             liftIO $ insertReleaseTracker db updated mts
+            liftIO $ notifyConfigMapUpdated db updated "status updated"
             pure $ APIResponse "SUCCESS" "ConfigMap tracker updated"
 
 -- | Convert a ReleaseTracker (category=BackendConfig) to backward-compatible ConfigMap JSON
@@ -1456,7 +1471,7 @@ immediateRevertH rid req = do
                                     liftIO $ insertReleaseTracker db updated mTargetState
                                     liftIO $ insertReleaseEvent db rid "BUSINESS" "IMMEDIATE_REVERT" (object ["requestedBy" .= (req :: ImmediateRevertReq).requestedBy, "info" .= (req :: ImmediateRevertReq).info])
                                     -- Send Slack notification
-                                    liftIO $ notifyReleaseReverted db updated
+                                    liftIO $ notifyImmediateReverted db updated
                                     -- Optionally trigger sync revert
                                     let shouldSync = fromMaybe False (isRevertSync (req :: ImmediateRevertReq))
                                     when shouldSync $
@@ -1494,6 +1509,7 @@ restartReleaseH rid req = do
                             , "reason" .= (req :: RestartReleaseReq).reason
                             , "previousStatus" .= T.pack (show currentStatus)
                             ])
+                    liftIO $ notifyReleaseRestarted db updated
                     pure $ APIResponse "SUCCESS" "Release restarted"
 
 -- ============================================================================
@@ -1529,6 +1545,7 @@ fastForwardH rid req = do
                             [ "requestedBy" .= (req :: FastForwardReq).requestedBy
                             , "reason" .= (req :: FastForwardReq).reason
                             ])
+                    liftIO $ notifyReleaseFastForwarded db updated
                     pure $ APIResponse "SUCCESS" "Fast forward: cooloff period skipped, runner will advance on next poll"
 
 -- ============================================================================
@@ -1773,6 +1790,9 @@ updateVsEditTrackerH tid UpdateVsEditTrackerReq{..} = do
                     , S.vetUpdatedAt = now
                     }
             liftIO $ updateVsEditTracker db updated
+            case status of
+                Just "APPLIED" -> liftIO $ notifyVsEditApplied db (S.vetProduct existing) (S.vetService existing) (fromMaybe "admin" approvedBy)
+                _ -> pure ()
             pure $ APIResponse "SUCCESS" "VS edit tracker updated"
 
 lockVsEditTrackerH :: VsLockReq -> Flow APIResponse
@@ -1816,6 +1836,7 @@ lockVsEditTrackerH VsLockReq{..} = do
                     , vetUpdatedAt = now
                     }
             liftIO $ insertVsEditTracker db row
+            liftIO $ notifyVsEditLocked db product (fromMaybe "" service) (fromMaybe "admin" lockedBy)
             pure $ APIResponse "SUCCESS" ("VS locked. Tracker ID: " <> tid)
 
 unlockVsEditTrackerH :: VsUnlockReq -> Flow APIResponse
@@ -1831,6 +1852,7 @@ unlockVsEditTrackerH VsUnlockReq{..} = do
                 Just existing -> do
                     let updated = existing { S.vetIsLocked = Just False, S.vetLockExpiry = Just now, S.vetUpdatedAt = now, S.vetStatus = "UNLOCKED" }
                     liftIO $ updateVsEditTracker db updated
+                    liftIO $ notifyVsEditUnlocked db (S.vetProduct existing) (S.vetService existing)
                     pure $ APIResponse "SUCCESS" "VS unlocked"
         Nothing -> do
             let p = fromMaybe "" product
@@ -1842,6 +1864,7 @@ unlockVsEditTrackerH VsUnlockReq{..} = do
                 Just existing -> do
                     let updated = existing { S.vetIsLocked = Just False, S.vetLockExpiry = Just now, S.vetUpdatedAt = now, S.vetStatus = "UNLOCKED" }
                     liftIO $ updateVsEditTracker db updated
+                    liftIO $ notifyVsEditUnlocked db (S.vetProduct existing) (S.vetService existing)
                     pure $ APIResponse "SUCCESS" "VS unlocked"
 
 revertVsEditTrackerH :: Text -> Flow APIResponse
@@ -1860,6 +1883,7 @@ revertVsEditTrackerH tid = do
                             , S.vetUpdatedAt = now
                             }
                     liftIO $ updateVsEditTracker db updated
+                    liftIO $ notifyVsEditReverted db (S.vetProduct existing) (S.vetService existing)
                     pure $ APIResponse "SUCCESS" "VS edit tracker marked as REVERTED"
 
 -- | Fetch the current live VirtualService JSON from K8s

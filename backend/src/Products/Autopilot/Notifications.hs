@@ -16,7 +16,20 @@ module Products.Autopilot.Notifications (
     notifyReleasePaused,
     notifyReleaseResumed,
     notifyReleaseReverted,
+    notifyReleaseDiscarded,
+    notifyReleaseDeleted,
+    notifyReleaseUpdated,
+    notifyReleaseRestarted,
+    notifyReleaseFastForwarded,
+    notifyImmediateReverted,
     notifyPodsScaledDown,
+    notifyVsEditLocked,
+    notifyVsEditApplied,
+    notifyVsEditReverted,
+    notifyVsEditUnlocked,
+    notifyConfigMapCreated,
+    notifyConfigMapUpdated,
+    notifyGenericThreadMessage,
 )
 where
 
@@ -212,5 +225,113 @@ notifyPodsScaledDown :: DBEnv -> ReleaseTracker -> Text -> IO ()
 notifyPodsScaledDown db tracker oldVer = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
         let msg = "*" <> product tracker <> "* | Pods scaled down for version: " <> oldVer
+        _ <- sendSlackMessage channel msg (getThreadTs tracker)
+        pure ()
+
+-- | Release discarded — replies in thread
+notifyReleaseDiscarded :: DBEnv -> ReleaseTracker -> IO ()
+notifyReleaseDiscarded db tracker = whenSlackEnabled db $
+    withChannel db (product tracker) (service tracker) $ \channel -> do
+        let msg = "*" <> product tracker <> "* | *" <> service tracker <> "* | *DISCARDED*"
+        _ <- sendSlackMessage channel msg (getThreadTs tracker)
+        pure ()
+
+-- | Release deleted — replies in thread
+notifyReleaseDeleted :: DBEnv -> ReleaseTracker -> IO ()
+notifyReleaseDeleted db tracker = whenSlackEnabled db $
+    withChannel db (product tracker) (service tracker) $ \channel -> do
+        let msg = "*" <> product tracker <> "* | *" <> service tracker <> "* | *DELETED* | " <> releaseId tracker
+        _ <- sendSlackMessage channel msg (getThreadTs tracker)
+        pure ()
+
+-- | Release updated (description, mode, schedule, etc.) — replies in thread
+notifyReleaseUpdated :: DBEnv -> ReleaseTracker -> Text -> IO ()
+notifyReleaseUpdated db tracker detail = whenSlackEnabled db $
+    withChannel db (product tracker) (service tracker) $ \channel -> do
+        let msg = "*" <> product tracker <> "* | *" <> service tracker <> "* | Updated: " <> detail
+        _ <- sendSlackMessage channel msg (getThreadTs tracker)
+        pure ()
+
+-- | Release restarted — replies in thread
+notifyReleaseRestarted :: DBEnv -> ReleaseTracker -> IO ()
+notifyReleaseRestarted db tracker = whenSlackEnabled db $
+    withChannel db (product tracker) (service tracker) $ \channel -> do
+        let msg = "*" <> product tracker <> "* | *" <> service tracker <> "* | *RESTARTED* — reset to Created"
+        _ <- sendSlackMessage channel msg (getThreadTs tracker)
+        pure ()
+
+-- | Release fast-forwarded — replies in thread
+notifyReleaseFastForwarded :: DBEnv -> ReleaseTracker -> IO ()
+notifyReleaseFastForwarded db tracker = whenSlackEnabled db $
+    withChannel db (product tracker) (service tracker) $ \channel -> do
+        let msg = "*" <> product tracker <> "* | *" <> service tracker <> "* | *FAST FORWARDED* — cooloff skipped"
+        _ <- sendSlackMessage channel msg (getThreadTs tracker)
+        pure ()
+
+-- | Immediate revert — replies in thread
+notifyImmediateReverted :: DBEnv -> ReleaseTracker -> IO ()
+notifyImmediateReverted db tracker = whenSlackEnabled db $
+    withChannel db (product tracker) (service tracker) $ \channel -> do
+        let msg = "*" <> product tracker <> "* | *" <> service tracker <> "* | *IMMEDIATE REVERT* — image swapped back to " <> oldVersion tracker
+        _ <- sendSlackMessage channel msg (getThreadTs tracker)
+        pure ()
+
+-- | VS edit locked — replies in release thread (if exists) or standalone
+notifyVsEditLocked :: DBEnv -> Text -> Text -> Text -> IO ()
+notifyVsEditLocked db prod svc lockedByUser = whenSlackEnabled db $
+    withChannel db prod svc $ \channel -> do
+        let msg = "*" <> prod <> "* | *" <> svc <> "* | VS *LOCKED* for editing by " <> lockedByUser
+        _ <- sendSlackMessage channel msg Nothing
+        pure ()
+
+-- | VS edit applied
+notifyVsEditApplied :: DBEnv -> Text -> Text -> Text -> IO ()
+notifyVsEditApplied db prod svc appliedBy = whenSlackEnabled db $
+    withChannel db prod svc $ \channel -> do
+        let msg = "*" <> prod <> "* | *" <> svc <> "* | VS changes *APPLIED* by " <> appliedBy
+        _ <- sendSlackMessage channel msg Nothing
+        pure ()
+
+-- | VS edit reverted
+notifyVsEditReverted :: DBEnv -> Text -> Text -> IO ()
+notifyVsEditReverted db prod svc = whenSlackEnabled db $
+    withChannel db prod svc $ \channel -> do
+        let msg = "*" <> prod <> "* | *" <> svc <> "* | VS changes *REVERTED*"
+        _ <- sendSlackMessage channel msg Nothing
+        pure ()
+
+-- | VS edit unlocked
+notifyVsEditUnlocked :: DBEnv -> Text -> Text -> IO ()
+notifyVsEditUnlocked db prod svc = whenSlackEnabled db $
+    withChannel db prod svc $ \channel -> do
+        let msg = "*" <> prod <> "* | *" <> svc <> "* | VS *UNLOCKED*"
+        _ <- sendSlackMessage channel msg Nothing
+        pure ()
+
+-- | ConfigMap tracker created — starts thread or standalone
+notifyConfigMapCreated :: DBEnv -> ReleaseTracker -> IO ()
+notifyConfigMapCreated db tracker = whenSlackEnabled db $
+    withChannel db (product tracker) (service tracker) $ \channel -> do
+        let msg = T.unlines
+                [ "*" <> product tracker <> "* | *" <> service tracker <> "* | ConfigMap Release"
+                , "Status: *CREATED* | " <> createdBy tracker
+                ]
+        mTs <- sendSlackMessage channel msg Nothing
+        case mTs of
+            Just ts -> saveThreadTs db (releaseId tracker) ts
+            Nothing -> pure ()
+
+-- | ConfigMap tracker updated — replies in thread
+notifyConfigMapUpdated :: DBEnv -> ReleaseTracker -> Text -> IO ()
+notifyConfigMapUpdated db tracker detail = whenSlackEnabled db $
+    withChannel db (product tracker) (service tracker) $ \channel -> do
+        let msg = "*" <> product tracker <> "* | *" <> service tracker <> "* | ConfigMap " <> detail
+        _ <- sendSlackMessage channel msg (getThreadTs tracker)
+        pure ()
+
+-- | Generic message in a release's thread
+notifyGenericThreadMessage :: DBEnv -> ReleaseTracker -> Text -> IO ()
+notifyGenericThreadMessage db tracker msg = whenSlackEnabled db $
+    withChannel db (product tracker) (service tracker) $ \channel -> do
         _ <- sendSlackMessage channel msg (getThreadTs tracker)
         pure ()
