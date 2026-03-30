@@ -97,7 +97,7 @@ const ServiceConfigs: React.FC = () => {
   const handleDelete = async (cfg: ReleaseConfig) => {
     if (!cfg.id) return;
     const ok = await confirmAction({
-      title: 'Delete Service Config',
+      title: 'Delete Service',
       description: `Are you sure you want to delete the config for "${cfg.service}"? This action cannot be undone.`,
       confirmLabel: 'Delete',
       variant: 'danger',
@@ -122,7 +122,7 @@ const ServiceConfigs: React.FC = () => {
   return (
     <div className="flex flex-col w-full">
       <div className="flex items-center justify-between mb-5">
-        <h1 className="text-lg font-semibold text-zinc-900">Service Configs</h1>
+        <h1 className="text-lg font-semibold text-zinc-900">Services</h1>
         <div className="flex items-center gap-3">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
@@ -187,7 +187,7 @@ const ServiceConfigs: React.FC = () => {
       <Dialog open={modalOpen} onOpenChange={setModalOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{editingConfig ? 'Edit Service Config' : 'Create Service Config'}</DialogTitle>
+            <DialogTitle>{editingConfig ? 'Edit Service' : 'Create Service'}</DialogTitle>
             <DialogDescription>{editingConfig ? 'Update the service configuration.' : 'Add a new service configuration.'}</DialogDescription>
           </DialogHeader>
           <DialogBody>
