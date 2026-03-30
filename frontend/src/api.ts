@@ -696,38 +696,38 @@ export interface VSEditTracker {
 }
 
 export async function fetchVSEdits(params: { from?: string; to?: string; search?: string }): Promise<VSEditTracker[]> {
-    const { data } = await apiClient.get('/vs-edits', { params });
+    const { data } = await apiClient.get('/vs-edit-tracker/list', { params });
     if (!Array.isArray(data)) return [];
     return data;
 }
 
 export async function fetchVSEditDetail(id: string): Promise<VSEditTracker> {
-    const { data } = await apiClient.get(`/vs-edits/${encodeURIComponent(id)}`);
+    const { data } = await apiClient.get(`/vs-edit-tracker/${encodeURIComponent(id)}`);
     return data;
 }
 
 export async function fetchCurrentVS(product: string, service: string): Promise<string> {
-    const { data } = await apiClient.get('/vs-edits/current-vs', { params: { product, service } });
+    const { data } = await apiClient.get('/vs-edit-tracker/current-vs', { params: { product, service } });
     return typeof data === 'string' ? data : JSON.stringify(data, null, 2);
 }
 
-export async function lockAndEditVS(payload: { product: string; service: string; vs_data: string }): Promise<VSEditTracker> {
-    const { data } = await apiClient.post('/vs-edits/lock', payload);
+export async function lockAndEditVS(payload: { product: string; service: string; env: string; vsName: string; lockedBy: string; oldVsData?: string }): Promise<any> {
+    const { data } = await apiClient.post('/vs-edit-tracker/lock', payload);
     return data;
 }
 
-export async function applyVSEdit(id: string): Promise<any> {
-    const { data } = await apiClient.post(`/vs-edits/${encodeURIComponent(id)}/apply`);
+export async function applyVSEdit(id: string, newVsData: string): Promise<any> {
+    const { data } = await apiClient.put(`/vs-edit-tracker/${encodeURIComponent(id)}`, { status: 'APPLIED', newVsData });
     return data;
 }
 
 export async function revertVSEdit(id: string): Promise<any> {
-    const { data } = await apiClient.post(`/vs-edits/${encodeURIComponent(id)}/revert`);
+    const { data } = await apiClient.put(`/vs-edit-tracker/revert/${encodeURIComponent(id)}`);
     return data;
 }
 
 export async function unlockVSEdit(id: string): Promise<any> {
-    const { data } = await apiClient.post(`/vs-edits/${encodeURIComponent(id)}/unlock`);
+    const { data } = await apiClient.post('/vs-edit-tracker/unlock', { trackerId: id });
     return data;
 }
 

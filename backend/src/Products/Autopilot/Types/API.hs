@@ -12,26 +12,39 @@ import GHC.Int (Int32)
 import Products.Autopilot.Types (ReleaseCategory (..), RolloutStep (..))
 
 data UpsertProductReq = UpsertProductReq
-    { id :: Int32
+    { id :: Maybe Int32
     , product :: Text
     , cluster :: Text
     , namespace :: Text
     , vsName :: Text
-    , repoName :: Text
+    , repoName :: Maybe Text
     , productType :: Text
     , productAcronym :: Text
-    , releaseBranch :: Text
+    , releaseBranch :: Maybe Text
     , syncCluster :: Maybe Text
     , needInfraApproval :: Maybe Bool
     }
     deriving (Show, Generic)
 
-instance FromJSON UpsertProductReq
+instance FromJSON UpsertProductReq where
+    parseJSON = withObject "UpsertProductReq" $ \v ->
+        UpsertProductReq
+            <$> v .:? "id"
+            <*> v .: "product"
+            <*> (v .:? "cluster" .!= "")
+            <*> (v .:? "namespace" .!= "default")
+            <*> (v .:? "vsName" >>= \mv -> case mv of Just x -> pure x; Nothing -> v .:? "vs_name" .!= "")
+            <*> (v .:? "repoName" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "repo_name")
+            <*> (v .:? "productType" >>= \mv -> case mv of Just x -> pure x; Nothing -> v .:? "product_type" .!= "SERVICE")
+            <*> (v .:? "productAcronym" >>= \mv -> case mv of Just x -> pure x; Nothing -> v .:? "product_acronym" .!= "")
+            <*> (v .:? "releaseBranch" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "release_branch")
+            <*> (v .:? "syncCluster" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "sync_cluster")
+            <*> (v .:? "needInfraApproval" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "need_infra_approval")
 
 instance ToJSON UpsertProductReq
 
 data UpsertServiceReq = UpsertServiceReq
-    { id :: Int32
+    { id :: Maybe Int32
     , emails :: Maybe Text
     , rolloutStrategyText :: Maybe Text
     , decisionConfigText :: Maybe Text

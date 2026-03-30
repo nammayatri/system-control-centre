@@ -16,7 +16,7 @@ import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
 import Products.Autopilot.RuntimeConfig (isApproveAllReleases)
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
-import Data.Aeson (Value (..), object, toJSON, (.=))
+import Data.Aeson (Value (..), eitherDecode, object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -35,7 +35,7 @@ import Products.Autopilot.Discovery (listServicesFromVirtualService)
 import Products.Autopilot.K8s.Deployment (buildSetImageCommand, getDeploymentEnvs)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
-import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout)
+import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getVirtualServiceJson)
 import Products.Autopilot.Notifications (notifyReleaseApproved, notifyReleaseCreated, notifyReleaseReverted)
 import GHC.Int (Int32)
 import Products.Autopilot.Queries.ProductService
@@ -102,14 +102,15 @@ type CoreAPI =
         :<|> "services" :> "config" :> Capture "id" Int32 :> Get '[JSON] Value
         :<|> "services" :> "config" :> Capture "id" Int32 :> ReqBody '[JSON] UpsertServiceReq :> Put '[JSON] APIResponse
         :<|> "services" :> "config" :> Capture "id" Int32 :> Delete '[JSON] APIResponse
-        -- VS Edit Tracker
+        -- VS Edit Tracker (static paths BEFORE captures to avoid ambiguity)
         :<|> "vs-edit-tracker" :> ReqBody '[JSON] CreateVsEditTrackerReq :> Post '[JSON] Value
         :<|> "vs-edit-tracker" :> "list" :> QueryParam "from" Text :> QueryParam "to" Text :> Get '[JSON] [Value]
-        :<|> "vs-edit-tracker" :> Capture "id" Text :> Get '[JSON] Value
-        :<|> "vs-edit-tracker" :> Capture "id" Text :> ReqBody '[JSON] UpdateVsEditTrackerReq :> Put '[JSON] APIResponse
+        :<|> "vs-edit-tracker" :> "current-vs" :> QueryParam "product" Text :> QueryParam "service" Text :> Get '[JSON] Value
         :<|> "vs-edit-tracker" :> "lock" :> ReqBody '[JSON] VsLockReq :> Post '[JSON] APIResponse
         :<|> "vs-edit-tracker" :> "unlock" :> ReqBody '[JSON] VsUnlockReq :> Post '[JSON] APIResponse
         :<|> "vs-edit-tracker" :> "revert" :> Capture "id" Text :> Put '[JSON] APIResponse
+        :<|> "vs-edit-tracker" :> Capture "id" Text :> Get '[JSON] Value
+        :<|> "vs-edit-tracker" :> Capture "id" Text :> ReqBody '[JSON] UpdateVsEditTrackerReq :> Put '[JSON] APIResponse
 
 coreServer :: ServerT CoreAPI Flow
 coreServer =
@@ -163,19 +164,23 @@ coreServer =
         :<|> getReleaseConfigH
         :<|> updateReleaseConfigH
         :<|> deleteReleaseConfigH
-        -- VS Edit Tracker
+        -- VS Edit Tracker (order must match API type: static paths before captures)
         :<|> createVsEditTrackerH
         :<|> listVsEditTrackersH
-        :<|> getVsEditTrackerH
-        :<|> updateVsEditTrackerH
+        :<|> fetchCurrentVsH
         :<|> lockVsEditTrackerH
         :<|> unlockVsEditTrackerH
         :<|> revertVsEditTrackerH
+        :<|> getVsEditTrackerH
+        :<|> updateVsEditTrackerH
 
 upsertProductH :: UpsertProductReq -> Flow APIResponse
 upsertProductH UpsertProductReq{..} = do
     db <- getDBEnv
-    liftIO $ upsertProduct db id product cluster namespace vsName repoName productType productAcronym releaseBranch syncCluster needInfraApproval
+    let rowId = fromMaybe 0 id
+        repo = fromMaybe "" repoName
+        branch = fromMaybe "master" releaseBranch
+    liftIO $ upsertProduct db rowId product cluster namespace vsName repo productType productAcronym branch syncCluster needInfraApproval
     pure $ APIResponse "SUCCESS" "product_config upserted"
 
 listProductsH :: Flow [ProductResponse]
@@ -259,7 +264,8 @@ listServicesH productName' = do
 upsertServiceH :: UpsertServiceReq -> Flow APIResponse
 upsertServiceH UpsertServiceReq{..} = do
     db <- getDBEnv
-    liftIO $ upsertService db id emails rolloutStrategyText decisionConfigText service product serviceType serviceHost bitbucketPath revertStrategyText
+    let rowId = fromMaybe 0 id
+    liftIO $ upsertService db rowId emails rolloutStrategyText decisionConfigText service product serviceType serviceHost bitbucketPath revertStrategyText
     pure $ APIResponse "SUCCESS" "release_config upserted"
 
 listReleasesH :: Maybe Text -> Maybe Text -> Flow [ReleaseTracker]
@@ -1812,3 +1818,23 @@ revertVsEditTrackerH tid = do
                             }
                     liftIO $ updateVsEditTracker db updated
                     pure $ APIResponse "SUCCESS" "VS edit tracker marked as REVERTED"
+
+-- | Fetch the current live VirtualService JSON from K8s
+fetchCurrentVsH :: Maybe Text -> Maybe Text -> Flow Value
+fetchCurrentVsH mProduct mService = do
+    cfg <- getConfig
+    db <- getDBEnv
+    case (mProduct, mService) of
+        (Just prod, Just svc) -> do
+            -- Look up namespace from product_config
+            mProdCfg <- liftIO $ findProductByNameAndCluster db prod ""
+            let ns = maybe (defaultNamespace cfg) getProductNamespace mProdCfg
+                svcHost = T.toLower (T.replace "_" "-" svc)
+                vsName = svcHost
+            result <- liftIO $ getVirtualServiceJson cfg ns vsName
+            case result of
+                Left err -> pure $ object ["error" .= show err, "message" .= ("Failed to fetch VirtualService" :: Text)]
+                Right vsText -> case eitherDecode (LBS.pack (T.unpack vsText)) of
+                    Right vsJson -> pure vsJson
+                    Left _ -> pure $ object ["data" .= vsText]
+        _ -> pure $ object ["error" .= ("product and service query params required" :: Text)]
