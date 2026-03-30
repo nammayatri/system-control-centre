@@ -115,7 +115,6 @@ export default function LauncherPage() {
 function getProductDescription(slug: string): string {
   switch (slug) {
     case 'autopilot':
-    case 'autopilot':
       return 'Create, approve, and manage backend service releases';
     case 'config-manager':
       return 'Manage ConfigMaps and runtime configurations';
