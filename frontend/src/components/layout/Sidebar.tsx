@@ -19,27 +19,38 @@ import {
 } from 'lucide-react';
 import nyLogo from '../../assets/ny-logo.svg';
 import { cn } from '../../lib/utils';
+import { PRODUCT_REGISTRY, type ProductDefinition } from '../../products/_shared/ProductRegistry';
+
+// Map icon names to Lucide components
+const iconMap: Record<string, React.ReactNode> = {
+  Rocket: <Rocket className="w-4 h-4" />,
+  FileText: <FileText className="w-4 h-4" />,
+  Settings: <Settings className="w-4 h-4" />,
+  Package: <Package className="w-4 h-4" />,
+  Shield: <Shield className="w-4 h-4" />,
+  Users: <Users className="w-4 h-4" />,
+  Layers: <Layers className="w-3.5 h-3.5" />,
+  Plus: <Plus className="w-3.5 h-3.5" />,
+  List: <List className="w-3.5 h-3.5" />,
+};
 
 interface SidebarProps {
   collapsed: boolean;
   onToggle: () => void;
 }
 
-interface NavSection {
-  label: string;
-  icon: React.ReactNode;
-  defaultOpen?: boolean;
-  items: { label: string; to: string; icon?: React.ReactNode }[];
-}
-
 const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
   const location = useLocation();
   const { user } = useAuth();
-  const { isAdmin } = usePermissions();
+  const { isAdmin, hasPermission } = usePermissions();
 
-  const [openSections, setOpenSections] = useState<Record<string, boolean>>({
-    releases: true,
-    configmap: true,
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>(() => {
+    // Auto-open the section containing the current route
+    const initial: Record<string, boolean> = {};
+    PRODUCT_REGISTRY.forEach((p) => {
+      initial[p.slug] = location.pathname.startsWith(p.basePath);
+    });
+    return initial;
   });
 
   const isActive = (path: string) => location.pathname === path || location.pathname.startsWith(path + '/');
@@ -48,60 +59,29 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
     setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const sections: NavSection[] = [
-    {
-      label: 'Releases',
-      icon: <Rocket className="w-4 h-4" />,
-      defaultOpen: true,
-      items: [
-        { label: 'List', to: '/releases', icon: <List className="w-3.5 h-3.5" /> },
-        { label: 'Create', to: '/releases/new', icon: <Plus className="w-3.5 h-3.5" /> },
-      ],
-    },
-    {
-      label: 'Config Map',
-      icon: <FileText className="w-4 h-4" />,
-      items: [
-        { label: 'List', to: '/configmap', icon: <List className="w-3.5 h-3.5" /> },
-        { label: 'Create', to: '/configmap/new', icon: <Plus className="w-3.5 h-3.5" /> },
-      ],
-    },
-    {
-      label: 'Configurations',
-      icon: <Settings className="w-4 h-4" />,
-      items: [
-        { label: 'Server Config', to: '/configurations', icon: <Layers className="w-3.5 h-3.5" /> },
-      ],
-    },
-  ];
+  // Filter products to only show ones user has access to
+  const visibleProducts = PRODUCT_REGISTRY.filter((p) =>
+    hasPermission(p.slug, `${p.slug === 'config-manager' ? 'CONFIG' : 'RELEASE'}_VIEW`)
+  );
 
-  const adminSection: NavSection = {
-    label: 'Admin',
-    icon: <Shield className="w-4 h-4" />,
-    items: [
-      { label: 'Users', to: '/admin/users', icon: <Users className="w-3.5 h-3.5" /> },
-      { label: 'Roles', to: '/admin/roles', icon: <Shield className="w-3.5 h-3.5" /> },
-      { label: 'Products', to: '/admin/products', icon: <Package className="w-3.5 h-3.5" /> },
-    ],
-  };
-
-  const renderSection = (section: NavSection, key: string) => {
-    const isOpen = openSections[key] ?? section.defaultOpen ?? false;
+  const renderProductSection = (product: ProductDefinition) => {
+    const key = product.slug + product.basePath;
+    const isOpen = openSections[key] ?? false;
 
     return (
       <div key={key} className="mb-1">
         <button
           onClick={() => !collapsed && toggleSection(key)}
           className={cn(
-            'w-full flex items-center gap-3 px-4 py-2.5 text-sm transition-colors',
-            'text-zinc-400 hover:text-white hover:bg-sidebar-hover',
+            'w-full flex items-center gap-3 px-4 py-2.5 text-sm cursor-pointer transition-colors',
+            'text-zinc-400 hover:text-white hover:bg-[#1a1a1a]',
             collapsed && 'justify-center px-0'
           )}
         >
-          <span className="text-zinc-500">{section.icon}</span>
+          <span className="text-zinc-500">{iconMap[product.icon] || <Package className="w-4 h-4" />}</span>
           {!collapsed && (
             <>
-              <span className="flex-1 text-left font-medium">{section.label}</span>
+              <span className="flex-1 text-left font-medium">{product.label}</span>
               {isOpen ? (
                 <ChevronDown className="w-3.5 h-3.5 text-zinc-600" />
               ) : (
@@ -112,18 +92,18 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
         </button>
         {!collapsed && isOpen && (
           <div className="mt-0.5 space-y-0.5">
-            {section.items.map((item) => (
+            {product.navItems.map((item) => (
               <Link
-                key={item.to}
-                to={item.to}
+                key={item.path}
+                to={item.path}
                 className={cn(
-                  'flex items-center gap-2.5 pl-11 pr-4 py-2 text-sm transition-all',
-                  isActive(item.to)
-                    ? 'text-white bg-sidebar-active border-l-2 border-blue-500'
-                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-sidebar-hover border-l-2 border-transparent'
+                  'flex items-center gap-2.5 pl-11 pr-4 py-2 text-sm cursor-pointer transition-all',
+                  isActive(item.path)
+                    ? 'text-white bg-[#252525] border-l-2 border-emerald-500'
+                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-[#1a1a1a] border-l-2 border-transparent'
                 )}
               >
-                {item.icon}
+                {iconMap[item.icon] || null}
                 <span>{item.label}</span>
               </Link>
             ))}
@@ -136,7 +116,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
   return (
     <aside
       className={cn(
-        'bg-sidebar flex-shrink-0 flex flex-col h-screen transition-all duration-200 border-r border-zinc-800',
+        'bg-[#0f0f0f] flex-shrink-0 flex flex-col h-screen transition-all duration-200 border-r border-zinc-800',
         collapsed ? 'w-[60px]' : 'w-[260px]'
       )}
     >
@@ -151,21 +131,64 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
         )}
       </div>
 
-      {/* Nav */}
-      <nav className="flex-1 overflow-y-auto sidebar-scroll py-3">
-        {sections.map((s, i) => renderSection(s, s.label.toLowerCase().replace(/\s/g, '')))}
+      {/* Product sections — auto-generated from registry */}
+      <nav className="flex-1 overflow-y-auto py-3">
+        {visibleProducts.map(renderProductSection)}
 
+        {/* Admin section — only for superadmin */}
         {isAdmin && (
           <>
             <div className="mx-4 my-3 border-t border-zinc-800" />
-            {renderSection(adminSection, 'admin')}
+            <div className="mb-1">
+              <button
+                onClick={() => !collapsed && toggleSection('admin')}
+                className={cn(
+                  'w-full flex items-center gap-3 px-4 py-2.5 text-sm cursor-pointer transition-colors',
+                  'text-zinc-400 hover:text-white hover:bg-[#1a1a1a]',
+                  collapsed && 'justify-center px-0'
+                )}
+              >
+                <span className="text-zinc-500"><Shield className="w-4 h-4" /></span>
+                {!collapsed && (
+                  <>
+                    <span className="flex-1 text-left font-medium">Admin</span>
+                    {openSections['admin'] ? (
+                      <ChevronDown className="w-3.5 h-3.5 text-zinc-600" />
+                    ) : (
+                      <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />
+                    )}
+                  </>
+                )}
+              </button>
+              {!collapsed && openSections['admin'] && (
+                <div className="mt-0.5 space-y-0.5">
+                  {[
+                    { label: 'Users', path: '/admin/users', icon: 'Users' },
+                    { label: 'Roles', path: '/admin/roles', icon: 'Shield' },
+                  ].map((item) => (
+                    <Link
+                      key={item.path}
+                      to={item.path}
+                      className={cn(
+                        'flex items-center gap-2.5 pl-11 pr-4 py-2 text-sm cursor-pointer transition-all',
+                        isActive(item.path)
+                          ? 'text-white bg-[#252525] border-l-2 border-emerald-500'
+                          : 'text-zinc-500 hover:text-zinc-300 hover:bg-[#1a1a1a] border-l-2 border-transparent'
+                      )}
+                    >
+                      {iconMap[item.icon] || null}
+                      <span>{item.label}</span>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
           </>
         )}
       </nav>
 
       {/* Bottom */}
       <div className="shrink-0 border-t border-zinc-800">
-        {/* User */}
         {!collapsed && user && (
           <div className="px-4 py-3 flex items-center gap-3">
             <div className="w-7 h-7 rounded-full bg-zinc-700 flex items-center justify-center text-xs font-bold text-white uppercase">
@@ -178,10 +201,9 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
           </div>
         )}
 
-        {/* Collapse toggle */}
         <button
           onClick={onToggle}
-          className="w-full flex items-center justify-center py-3 text-zinc-600 hover:text-zinc-400 transition-colors"
+          className="w-full flex items-center justify-center py-3 text-zinc-600 hover:text-zinc-400 cursor-pointer transition-colors"
         >
           {collapsed ? <PanelLeft className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
         </button>

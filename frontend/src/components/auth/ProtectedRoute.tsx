@@ -6,13 +6,14 @@ import { ShieldAlert } from 'lucide-react';
 
 interface ProtectedRouteProps {
   product?: string;
+  permission?: string;    // specific permission required (e.g., 'RELEASE_CREATE')
   requireAdmin?: boolean;
   children: React.ReactNode;
 }
 
-export function ProtectedRoute({ product, requireAdmin, children }: ProtectedRouteProps) {
+export function ProtectedRoute({ product, permission, requireAdmin, children }: ProtectedRouteProps) {
   const { isAuthenticated, loading } = useAuth();
-  const { isAdmin, userPermissions } = usePermissions();
+  const { isAdmin, hasPermission, userPermissions } = usePermissions();
 
   if (loading) {
     return (
@@ -43,6 +44,18 @@ export function ProtectedRoute({ product, requireAdmin, children }: ProtectedRou
         <h2 className="text-lg font-semibold text-zinc-700 mb-1">Access Denied</h2>
         <p className="text-sm text-zinc-500">
           You do not have access to this product. Contact your admin for permissions.
+        </p>
+      </div>
+    );
+  }
+
+  if (product && permission && !isAdmin && !hasPermission(product, permission)) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-center py-20">
+        <ShieldAlert className="w-12 h-12 text-zinc-300 mb-4" />
+        <h2 className="text-lg font-semibold text-zinc-700 mb-1">Permission Denied</h2>
+        <p className="text-sm text-zinc-500">
+          You do not have the required permission ({permission}) for this action.
         </p>
       </div>
     );
