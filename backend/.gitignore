@@ -5,9 +5,10 @@ dist-newstyle/
 .cabal-dir/
 .cabal-home/
 result
-!scripts/
 *.hi
 *.o
 *.dyn_hi
 *.dyn_o
 .claude/
+dhall-configs/dev/secrets/
+!dhall-configs/dev/secrets/common.dhall.example

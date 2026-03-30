@@ -59,9 +59,17 @@
             git
             cacert
             hpack
+            gnumake
+
+            # Formatting
+            fourmolu
 
             # DB
             postgresql
+
+            # Dhall
+            dhall
+            dhall-json
 
             # System libs
             pcre
@@ -88,16 +96,10 @@
             sc-run()       { bash scripts/run.sh; }
             sc-server()    { cabal run namma-ap-exe; }
             sc-hpack()     { hpack && echo "Regenerated .cabal from package.yaml"; }
-            sc-test-api()  {
-              echo "Testing APIs..."
-              TOKEN=$(curl -s -X POST http://localhost:$PORT/auth/login \
-                -H "Content-Type: application/json" \
-                -d '{"email":"admin@juspay.in","password":"admin123"}' | python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
-              echo "Login: OK (token: ''${TOKEN:0:8}...)"
-              echo "Releases: $(curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:$PORT/releases?from=2024-01-01T00:00:00Z&to=2026-12-31T00:00:00Z" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null)"
-              echo "Products: $(curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:$PORT/admin/products" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('products',[])))" 2>/dev/null)"
-              echo "Done."
-            }
+            sc-format()    { bash scripts/format.sh; }
+            sc-test()      { cabal test; }
+            sc-migrate()   { bash scripts/migrate.sh; }
+            sc-test-api()  { bash scripts/test-api.sh; }
             sc-help() {
               echo ""
               echo "  System Control Centre"
@@ -107,6 +109,9 @@
               echo "  sc-run         Setup DB + build + start server (all-in-one)"
               echo "  sc-server      Start server only (assumes built)"
               echo "  sc-hpack       Regenerate .cabal from package.yaml"
+              echo "  sc-format      Format all Haskell source files"
+              echo "  sc-test        Run test suite"
+              echo "  sc-migrate     Apply SQL migrations"
               echo "  sc-test-api    Test all APIs (server must be running)"
               echo "  sc-help        Show this help"
               echo ""
