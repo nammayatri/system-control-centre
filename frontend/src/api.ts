@@ -177,6 +177,8 @@ type NammaRelease = {
     mode?: string;
     createdBy?: string;
     createdAt?: string | null;
+    dateCreated?: string | null;
+    lastUpdated?: string | null;
     approvedBy?: string | null;
     isApproved?: boolean;
     isInfraApproved?: boolean;
@@ -279,10 +281,10 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     is_infra_approved: r.isInfraApproved ? 1 : 0,
     release_tag: r.releaseTag || '',
     schedule_time: r.scheduleTime || '',
-    date_created: r.createdAt || '',
+    date_created: r.dateCreated || r.createdAt || '',
     start_time: r.startTime || '',
     end_time: r.endTime || '',
-    last_updated: '',
+    last_updated: r.lastUpdated || '',
     description: r.description || '',
     change_log: r.changeLog || '',
     info: r.info || '',
