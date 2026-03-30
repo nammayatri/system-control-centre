@@ -53,54 +53,15 @@ const releasesProduct: ProductDefinition = {
   ],
 };
 
-// ── Product: Config Map ──────────────────────────────────────────
-
-import ListConfigMap from './configmap/pages/ListConfigMap';
-import CreateConfigMap from './configmap/pages/CreateConfigMap';
-import ConfigMapSummary from './configmap/pages/ConfigMapSummary';
-
-const configMapProduct: ProductDefinition = {
-  slug: 'config-manager',
-  label: 'Config Map',
-  icon: 'FileText',
-  basePath: '/configmap',
-  navItems: [
-    { label: 'List', path: '/configmap', icon: 'List' },
-    { label: 'Create', path: '/configmap/new', icon: 'Plus' },
-  ],
-  routes: [
-    { path: '/configmap', component: ListConfigMap },
-    { path: '/configmap/new', component: CreateConfigMap, permission: 'CONFIG_CREATE' },
-    { path: '/configmap/:clusterId', component: ConfigMapSummary },
-  ],
-};
-
-// ── Product: Server Config ───────────────────────────────────────
-
-import Configurations from './config/pages/Configurations';
-
-const configProduct: ProductDefinition = {
-  slug: 'backend-releases',   // uses backend-releases permissions
-  label: 'Configurations',
-  icon: 'Settings',
-  basePath: '/configurations',
-  navItems: [
-    { label: 'Server Config', path: '/configurations', icon: 'Layers' },
-  ],
-  routes: [
-    { path: '/configurations', component: Configurations },
-  ],
-};
-
 // ── Registry ─────────────────────────────────────────────────────
-// Add new products here. Order determines sidebar order.
+// Only two products for now: Backend Releases
+// Admin Console is handled separately in App.tsx (not a product)
 
 export const PRODUCT_REGISTRY: ProductDefinition[] = [
   releasesProduct,
-  configMapProduct,
-  configProduct,
-  // ← Add new products here
-  // myNewProduct,
+  // ← Add new products here when ready
+  // configMapProduct,
+  // configProduct,
 ];
 
 /**

@@ -24,10 +24,9 @@ export default function LauncherPage() {
   // Filter products user has access to
   const accessibleProducts = PRODUCT_REGISTRY.filter((p) => {
     if (isAdmin) return true;
-    // Check if user has any permission for this product
-    return hasPermission(p.slug, 'VIEW') ||
-      hasPermission(p.slug, 'AP_RELEASE_VIEW') ||
-      hasPermission(p.slug, 'CM_CONFIG_VIEW');
+    // Check if user has any VIEW permission for this product
+    const viewPerms = ['VIEW', 'RELEASE_VIEW', 'AP_RELEASE_VIEW', 'CONFIG_VIEW', 'CM_CONFIG_VIEW'];
+    return viewPerms.some(perm => hasPermission(p.slug, perm));
   });
 
   return (
