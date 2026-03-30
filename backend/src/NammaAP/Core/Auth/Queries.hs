@@ -9,23 +9,23 @@ module NammaAP.Core.Auth.Queries
   , deactivateToken
   , deactivateTokensByPerson
   , findProductAccessForPerson
-  , findRolePermissions
-  , findGrantOverrides
-  , findDenyOverrides
-  , findAllPermissionsForProduct
   , computeEffectivePermissions
   , findAllProductsForPerson
   , TokenRow (..)
   ) where
 
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Time.Clock (UTCTime)
 import Data.UUID (UUID)
 import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.FromRow (FromRow (..), field)
+import Database.PostgreSQL.Simple.FromField (FromField (..))
+import Database.PostgreSQL.Simple.Types (PGArray(..))
 import NammaAP.Core.Environment (DBEnv (..))
 import NammaAP.Core.DB.Connection (withConn)
 import NammaAP.Core.Auth.Types
+import NammaAP.Products.Types (allPermissionsText, defaultPermissionsText, ProductSlug, textToProductSlug)
 
 -- ── Person ──────────────────────────────────────────────────────────
 
@@ -97,89 +97,94 @@ deactivateTokensByPerson db pid = withConn db $ \conn -> do
     (Only pid)
   pure ()
 
--- ── Product Access ──────────────────────────────────────────────────
+-- ── Product Access (simplified — no sc_product table) ──────────────
 
 data ProductAccessRow = ProductAccessRow
   { parProductSlug :: Text
-  , parProductName :: Text
   , parRoleId :: UUID
   , parRoleName :: Text
+  , parIsSystemRole :: Bool
+  , parPermissions :: Maybe (PGArray Text)
   } deriving (Show)
 
 instance FromRow ProductAccessRow where
-  fromRow = ProductAccessRow <$> field <*> field <*> field <*> field
+  fromRow = ProductAccessRow <$> field <*> field <*> field <*> field <*> field
+
+-- Custom instance needed for TEXT[] → Maybe [Text]
+-- postgresql-simple handles this via PGArray
 
 findProductAccessForPerson :: DBEnv -> UUID -> IO [ProductAccess]
 findProductAccessForPerson db pid = withConn db $ \conn -> do
   rows <- query conn
-    "SELECT p.slug, p.name, r.id, r.name \
+    "SELECT ppa.product_slug, r.id, r.name, r.is_system_role, r.permissions \
     \FROM sc_person_product_access ppa \
-    \JOIN sc_product p ON p.id = ppa.product_id \
     \JOIN sc_role r ON r.id = ppa.role_id \
     \WHERE ppa.person_id = ?"
     (Only pid)
-  pure $ map (\ProductAccessRow{..} -> ProductAccess parProductSlug parProductName parRoleId parRoleName) rows
+  pure $ map (\ProductAccessRow{..} ->
+    ProductAccess parProductSlug parProductSlug parRoleId parRoleName
+    ) rows
 
--- ── Role Permissions ────────────────────────────────────────────────
+-- ── Permission Computation (uses code-derived defaults) ─────────────
 
-findRolePermissions :: DBEnv -> UUID -> IO [Text]
-findRolePermissions db roleId = withConn db $ \conn -> do
+-- | Get effective permissions for a person on a product.
+-- System roles: permissions derived from Haskell ADTs via defaultPermissionsText
+-- Custom roles: permissions from sc_role.permissions TEXT[] column
+-- Then apply GRANT/DENY overrides from sc_person_permission_override
+computeEffectivePermissions :: DBEnv -> PersonAuth -> Text -> UUID -> IO [Text]
+computeEffectivePermissions db person productSlug roleId = do
+  if personIsSuperadmin person
+    then pure $ allPermissionsText productSlug  -- superadmin gets all (from code)
+    else do
+      -- Get role info
+      basePerms <- getRolePermissions db productSlug roleId
+      -- Get overrides
+      grants <- findGrantOverrides db (personId person) productSlug
+      denies <- findDenyOverrides db (personId person) productSlug
+      -- Compute: base + GRANTs - DENYs
+      let combined = basePerms ++ filter (`notElem` basePerms) grants
+          effective = filter (`notElem` denies) combined
+      pure effective
+
+-- | Get permissions for a role.
+-- System roles (Admin/Manager/Viewer): derived from code
+-- Custom roles: from DB permissions TEXT[] column
+getRolePermissions :: DBEnv -> Text -> UUID -> IO [Text]
+getRolePermissions db productSlug roleId = withConn db $ \conn -> do
   rows <- query conn
-    "SELECT p.action FROM sc_role_permission rp \
-    \JOIN sc_permission p ON p.id = rp.permission_id \
-    \WHERE rp.role_id = ?"
-    (Only roleId) :: IO [Only Text]
-  pure $ map (\(Only a) -> a) rows
+    "SELECT name, is_system_role, permissions FROM sc_role WHERE id = ?"
+    (Only roleId) :: IO [(Text, Bool, Maybe (PGArray Text))]
+  case rows of
+    [(roleName, True, _)] ->
+      -- System role: derive from code
+      pure $ defaultPermissionsText productSlug roleName
+    [(_, False, Just (PGArray perms))] ->
+      -- Custom role: from DB
+      pure perms
+    [(_, False, Nothing)] ->
+      pure []
+    _ -> pure []
 
--- ── Permission Overrides ────────────────────────────────────────────
+-- ── Overrides (simplified — no sc_permission table) ─────────────────
 
 findGrantOverrides :: DBEnv -> UUID -> Text -> IO [Text]
 findGrantOverrides db pid productSlug = withConn db $ \conn -> do
   rows <- query conn
-    "SELECT p.action FROM sc_person_permission_override ppo \
-    \JOIN sc_permission p ON p.id = ppo.permission_id \
-    \JOIN sc_product pr ON pr.id = ppo.product_id \
-    \WHERE ppo.person_id = ? AND pr.slug = ? AND ppo.override_type = 'GRANT'"
+    "SELECT permission_action FROM sc_person_permission_override \
+    \WHERE person_id = ? AND product_slug = ? AND override_type = 'GRANT'"
     (pid, productSlug) :: IO [Only Text]
   pure $ map (\(Only a) -> a) rows
 
 findDenyOverrides :: DBEnv -> UUID -> Text -> IO [Text]
 findDenyOverrides db pid productSlug = withConn db $ \conn -> do
   rows <- query conn
-    "SELECT p.action FROM sc_person_permission_override ppo \
-    \JOIN sc_permission p ON p.id = ppo.permission_id \
-    \JOIN sc_product pr ON pr.id = ppo.product_id \
-    \WHERE ppo.person_id = ? AND pr.slug = ? AND ppo.override_type = 'DENY'"
+    "SELECT permission_action FROM sc_person_permission_override \
+    \WHERE person_id = ? AND product_slug = ? AND override_type = 'DENY'"
     (pid, productSlug) :: IO [Only Text]
   pure $ map (\(Only a) -> a) rows
 
--- ── Helpers ─────────────────────────────────────────────────────────
+-- ── All products for person ────────────────────────────────────────
 
-findAllPermissionsForProduct :: DBEnv -> Text -> IO [Text]
-findAllPermissionsForProduct db productSlug = withConn db $ \conn -> do
-  rows <- query conn
-    "SELECT p.action FROM sc_permission p \
-    \JOIN sc_product pr ON pr.id = p.product_id \
-    \WHERE pr.slug = ?"
-    (Only productSlug) :: IO [Only Text]
-  pure $ map (\(Only a) -> a) rows
-
--- | Compute effective permissions for a person on a product.
--- effective = role_perms + GRANTs - DENYs
--- Superadmins get all permissions.
-computeEffectivePermissions :: DBEnv -> PersonAuth -> Text -> UUID -> IO [Text]
-computeEffectivePermissions db person productSlug roleId = do
-  if personIsSuperadmin person
-    then findAllPermissionsForProduct db productSlug
-    else do
-      rolePerms <- findRolePermissions db roleId
-      grants <- findGrantOverrides db (personId person) productSlug
-      denies <- findDenyOverrides db (personId person) productSlug
-      let combined = rolePerms ++ filter (`notElem` rolePerms) grants
-          effective = filter (`notElem` denies) combined
-      pure effective
-
--- | Get all product access with effective permissions for a person
 findAllProductsForPerson :: DBEnv -> PersonAuth -> IO [PersonProductPerms]
 findAllProductsForPerson db person = do
   accesses <- findProductAccessForPerson db (personId person)

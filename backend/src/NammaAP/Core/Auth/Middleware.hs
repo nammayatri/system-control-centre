@@ -15,7 +15,7 @@ import Network.HTTP.Types (status401, status403, hContentType)
 import qualified Data.Aeson as A
 import NammaAP.Core.Environment (DBEnv)
 import NammaAP.Core.Auth.Queries
-import NammaAP.Core.Auth.Types (PersonAuth (..))
+import NammaAP.Core.Auth.Types (PersonAuth (..), ProductAccess (..))
 import NammaAP.Products.Registry (ProductPermission (..), allProductPermissions)
 
 -- | Public routes that do not require authentication

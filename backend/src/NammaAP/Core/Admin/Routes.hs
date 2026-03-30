@@ -20,8 +20,8 @@ import qualified Data.UUID as UUID
 import Servant
 
 import NammaAP.Core.Admin.Types
-import qualified Data.UUID as UUID
 import NammaAP.Core.Admin.Queries
+import NammaAP.Products.Types (ProductSlug (..), productSlugToText, allPermissionsText, permissionToText, allPermissions)
 import NammaAP.Core.Auth.Types (PersonAuth (..), PersonProductPerms (..))
 import NammaAP.Core.Auth.Queries (findPersonById, findProductAccessForPerson, findAllProductsForPerson, findTokenByValue, TokenRow (..))
 import NammaAP.Products.Autopilot.Types.API (APIResponse (..))
@@ -278,26 +278,18 @@ listProductsH mAuth = do
   case mAdmin of
     Nothing -> pure $ object ["error" .= ("Unauthorized: superadmin required" :: Text)]
     Just _ -> do
-      db <- getDBEnv
-      prods <- liftIO $ listScProducts db
-      pure $ object ["products" .= map productToJson prods]
+      -- Products are derived from ProductSlug ADT — no DB query needed
+      let prods = map (\slug -> object
+            [ "slug" .= productSlugToText slug
+            , "name" .= productSlugToText slug
+            ]) [minBound .. maxBound :: ProductSlug]
+      pure $ object ["products" .= prods]
 
 createProductH :: Maybe Text -> Value -> Flow Value
-createProductH mAuth (Object obj) = do
-  mAdmin <- requireAdmin mAuth
-  case mAdmin of
-    Nothing -> pure $ object ["error" .= ("Unauthorized: superadmin required" :: Text)]
-    Just _ -> do
-      db <- getDBEnv
-      let slug = getStr "slug" obj
-          name = getStr "name" obj
-          desc = getStrM "description" obj
-      if T.null slug || T.null name
-        then pure $ object ["error" .= ("slug and name are required" :: Text)]
-        else do
-          pid <- liftIO $ createScProduct db slug name desc
-          pure $ object ["id" .= pid, "status" .= ("SUCCESS" :: Text)]
-createProductH _ _ = pure $ object ["error" .= ("Invalid request body" :: Text)]
+createProductH _ _ = do
+  -- Products are defined as Haskell ADTs — they cannot be created via API.
+  -- To add a new product, add it to ProductSlug in Products/Types.hs
+  pure $ object ["error" .= ("Products are defined in code, not via API. Add to ProductSlug ADT." :: Text)]
 
 listRolesH :: Text -> Maybe Text -> Flow Value
 listRolesH slug mAuth = do
@@ -349,9 +341,9 @@ listPermissionsH slug mAuth = do
   case mAdmin of
     Nothing -> pure $ object ["error" .= ("Unauthorized: superadmin required" :: Text)]
     Just _ -> do
-      db <- getDBEnv
-      perms <- liftIO $ listPermissionsForProduct db slug
-      pure $ object ["permissions" .= map permToJson perms]
+      -- Permissions are derived from ADTs — no DB query needed
+      let perms = allPermissionsText slug
+      pure $ object ["permissions" .= map (\p -> object ["action" .= p]) perms]
 
 -- ── JSON serializers ────────────────────────────────────────────────
 

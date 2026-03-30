@@ -1,3 +1,6 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeOperators #-}
+
 module NammaAP.Core.Server where
 
 import Control.Monad.Trans.Except (ExceptT (..))

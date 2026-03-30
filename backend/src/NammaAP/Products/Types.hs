@@ -16,7 +16,9 @@ module NammaAP.Products.Types
   , Permission (..)
   , permissionToText
   , allPermissions
+  , allPermissionsText
   , defaultPermissions
+  , defaultPermissionsText
   , isViewPerm
   , IsProduct (..)
   , SystemRole (..)
@@ -62,6 +64,24 @@ permissionToText (ConfigManagerPerm p) = configManagerPermissionToText p
 allPermissions :: ProductSlug -> [Permission]
 allPermissions Autopilot = map AutopilotPerm [minBound .. maxBound]
 allPermissions ConfigManager = map ConfigManagerPerm [minBound .. maxBound]
+
+-- | All permissions as Text for a product (used by auth queries).
+allPermissionsText :: Text -> [Text]
+allPermissionsText slug = case textToProductSlug slug of
+  Just p  -> map permissionToText (allPermissions p)
+  Nothing -> []
+
+-- | Default permissions as Text for a system role on a product (used by auth queries).
+defaultPermissionsText :: Text -> Text -> [Text]
+defaultPermissionsText productSlug roleName = case (textToProductSlug productSlug, textToSystemRole roleName) of
+  (Just p, Just r) -> map permissionToText (defaultPermissions r p)
+  _                -> []
+
+textToSystemRole :: Text -> Maybe SystemRole
+textToSystemRole "Admin"   = Just Admin
+textToSystemRole "Manager" = Just Manager
+textToSystemRole "Viewer"  = Just Viewer
+textToSystemRole _         = Nothing
 
 -- | System roles that cannot be deleted.
 data SystemRole = Admin | Manager | Viewer
