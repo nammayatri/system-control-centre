@@ -116,11 +116,64 @@ instance Table ReleaseEventT where
   data PrimaryKey ReleaseEventT f = ReleaseEventId (Columnar f Int32) deriving (Generic, Beamable)
   primaryKey = ReleaseEventId . reId
 
+data ServerConfigT f = ServerConfigT
+  { scId :: Columnar f Int32,
+    scType :: Columnar f Text,
+    scName :: Columnar f Text,
+    scValue :: Columnar f Text,
+    scLastUpdated :: Columnar f UTCTime,
+    scEnabled :: Columnar f Int32
+  }
+  deriving (Generic, Beamable)
+
+type ServerConfig = ServerConfigT Identity
+deriving instance Show ServerConfig
+
+instance Table ServerConfigT where
+  data PrimaryKey ServerConfigT f = ServerConfigId (Columnar f Int32) deriving (Generic, Beamable)
+  primaryKey = ServerConfigId . scId
+
+data ConfigMapTrackerT f = ConfigMapTrackerT
+  { cmtId :: Columnar f Text,
+    cmtService :: Columnar f Text,
+    cmtStatus :: Columnar f Text,
+    cmtDescription :: Columnar f (Maybe Text),
+    cmtEnv :: Columnar f Text,
+    cmtCluster :: Columnar f Text,
+    cmtProduct :: Columnar f Text,
+    cmtDateCreated :: Columnar f UTCTime,
+    cmtLastUpdated :: Columnar f UTCTime,
+    cmtStartTime :: Columnar f (Maybe UTCTime),
+    cmtEndTime :: Columnar f (Maybe UTCTime),
+    cmtReleaseManager :: Columnar f Text,
+    cmtIsApproved :: Columnar f (Maybe Bool),
+    cmtEvents :: Columnar f (Maybe Text),
+    cmtReleaseTag :: Columnar f (Maybe Text),
+    cmtIsInfraApproved :: Columnar f (Maybe Bool),
+    cmtConfig :: Columnar f (Maybe Text),
+    cmtCommit :: Columnar f (Maybe Text),
+    cmtChangeLog :: Columnar f (Maybe Text),
+    cmtPriority :: Columnar f (Maybe Int32),
+    cmtScheduleTime :: Columnar f (Maybe UTCTime),
+    cmtName :: Columnar f (Maybe Text),
+    cmtFile :: Columnar f (Maybe Text)
+  }
+  deriving (Generic, Beamable)
+
+type ConfigMapTrackerRow = ConfigMapTrackerT Identity
+deriving instance Show ConfigMapTrackerRow
+
+instance Table ConfigMapTrackerT where
+  data PrimaryKey ConfigMapTrackerT f = ConfigMapTrackerId (Columnar f Text) deriving (Generic, Beamable)
+  primaryKey = ConfigMapTrackerId . cmtId
+
 data NammaAPDb f = NammaAPDb
   { productConfig :: f (TableEntity ProductConfigT),
     releaseConfig :: f (TableEntity ReleaseConfigT),
     releaseTrackers :: f (TableEntity ReleaseTrackerT),
-    releaseEvents :: f (TableEntity ReleaseEventT)
+    releaseEvents :: f (TableEntity ReleaseEventT),
+    serverConfigs :: f (TableEntity ServerConfigT),
+    configMapTrackers :: f (TableEntity ConfigMapTrackerT)
   }
   deriving (Generic, Database be)
 
@@ -207,5 +260,44 @@ nammaAPDb =
                   reLabel = fieldNamed "re_label",
                   rePayload = fieldNamed "re_payload",
                   reCreatedAt = fieldNamed "re_created_at"
+                },
+          serverConfigs =
+            setEntityName "server_config"
+              <> modifyTableFields
+                tableModification
+                { scId = fieldNamed "id",
+                  scType = fieldNamed "type",
+                  scName = fieldNamed "name",
+                  scValue = fieldNamed "value",
+                  scLastUpdated = fieldNamed "last_updated",
+                  scEnabled = fieldNamed "enabled"
+                },
+          configMapTrackers =
+            setEntityName "configmap_tracker"
+              <> modifyTableFields
+                tableModification
+                { cmtId = fieldNamed "id",
+                  cmtService = fieldNamed "service",
+                  cmtStatus = fieldNamed "status",
+                  cmtDescription = fieldNamed "description",
+                  cmtEnv = fieldNamed "env",
+                  cmtCluster = fieldNamed "cluster",
+                  cmtProduct = fieldNamed "product",
+                  cmtDateCreated = fieldNamed "date_created",
+                  cmtLastUpdated = fieldNamed "last_updated",
+                  cmtStartTime = fieldNamed "start_time",
+                  cmtEndTime = fieldNamed "end_time",
+                  cmtReleaseManager = fieldNamed "release_manager",
+                  cmtIsApproved = fieldNamed "is_approved",
+                  cmtEvents = fieldNamed "events",
+                  cmtReleaseTag = fieldNamed "release_tag",
+                  cmtIsInfraApproved = fieldNamed "is_infra_approved",
+                  cmtConfig = fieldNamed "config",
+                  cmtCommit = fieldNamed "commit",
+                  cmtChangeLog = fieldNamed "change_log",
+                  cmtPriority = fieldNamed "priority",
+                  cmtScheduleTime = fieldNamed "schedule_time",
+                  cmtName = fieldNamed "name",
+                  cmtFile = fieldNamed "file"
                 }
         }

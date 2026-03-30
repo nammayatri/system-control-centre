@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import Editor from '@monaco-editor/react';
-import { useQuery } from '@tanstack/react-query';
-import { useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import { apiClient } from '../../../lib/api-client';
+import { fetchConfigMapNames, fetchConfigMapData, fetchSecondaryConfigMap } from '../api';
 import { fetchProducts, fetchProductConfigs } from '../../releases/api';
 import { Button } from '../../../shared/ui/button';
+import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { toast } from 'sonner';
 import { cn } from '../../../lib/utils';
 import type { ProductConfig } from '../../../api';
@@ -24,7 +25,7 @@ function jsonConfigToYaml(raw: string): string {
         })
         .join('\n\n');
     }
-  } catch {}
+  } catch { /* not JSON */ }
   return raw;
 }
 
@@ -40,7 +41,12 @@ function yamlConfigToJson(yaml: string): string {
   return yaml;
 }
 
-const CreateConfigMap: React.FC = () => {
+interface CreateConfigMapProps {
+  isUpdate?: boolean;
+  id?: string;
+}
+
+const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id = '' }) => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const cloneId = searchParams.get('clone_id') || '';
@@ -60,14 +66,24 @@ const CreateConfigMap: React.FC = () => {
   });
 
   const createMut = useMutation({
-    mutationFn: async (payload: any) => {
-      const { data } = await apiClient.post('/tracker/configmap', payload);
+    mutationFn: async (payload: Record<string, unknown>) => {
+      const url = `/tracker/configmap${isUpdate ? `/${id}` : ''}`;
+      const { data } = isUpdate
+        ? await apiClient.put(url, payload)
+        : await apiClient.post(url, payload);
       return data;
     },
-    onSuccess: () => { toast.success('ConfigMap created'); navigate('/configmap'); },
-    onError: (err: any) => { setError(err.message || 'Failed to create ConfigMap'); },
+    onSuccess: () => {
+      toast.success(isUpdate ? 'ConfigMap updated' : 'ConfigMap created');
+      navigate('/configmap');
+    },
+    onError: (err: Error) => {
+      setError(err.message || `Failed to ${isUpdate ? 'update' : 'create'} ConfigMap`);
+      toast.error(err.message || `Failed to ${isUpdate ? 'update' : 'create'} ConfigMap`);
+    },
   });
 
+  // Derive sync_cluster from product config
   useEffect(() => {
     if (form.product && productConfigs.length > 0) {
       const config = productConfigs.find((c: ProductConfig) => c.product === form.product);
@@ -75,37 +91,60 @@ const CreateConfigMap: React.FC = () => {
     }
   }, [form.product, productConfigs]);
 
+  // Fetch secondary configmap when name is selected and sync_cluster exists
   useEffect(() => {
     if (form.product && form.name && syncCluster) {
       setSecondaryLoading(true);
-      apiClient.get('/configmap/secondary', { params: { PRODUCT: form.product, NAME: form.name } })
-        .then(res => { const cm = res.data?.configMap || ''; setSecondaryContent(jsonConfigToYaml(typeof cm === 'string' ? cm : JSON.stringify(cm, null, 2))); })
-        .catch(() => setSecondaryContent('')).finally(() => setSecondaryLoading(false));
+      fetchSecondaryConfigMap(form.product, form.name)
+        .then(cm => {
+          const raw = typeof cm === 'string' ? cm : JSON.stringify(cm, null, 2);
+          setSecondaryContent(jsonConfigToYaml(raw));
+        })
+        .catch(() => setSecondaryContent(''))
+        .finally(() => setSecondaryLoading(false));
     }
   }, [form.product, form.name, syncCluster]);
 
+  // Load configmap names when product changes
   useEffect(() => {
     if (!form.product) return;
-    apiClient.get('/configmap', { params: { PRODUCT: form.product } })
-      .then(r => setNamesOptions(Array.isArray(r.data.configMap) ? r.data.configMap : []))
+    fetchConfigMapNames(form.product)
+      .then(names => setNamesOptions(Array.isArray(names) ? names : []))
       .catch(() => setNamesOptions([]));
   }, [form.product]);
 
+  // Load file content when name is selected
   useEffect(() => {
     if (!form.product || !form.name) return;
-    apiClient.get('/configmap', { params: { PRODUCT: form.product, NAME: form.name } })
-      .then(r => { const raw = typeof r.data.configMap === 'string' ? r.data.configMap : ''; setFileContent(jsonConfigToYaml(raw)); })
+    fetchConfigMapData(form.product, form.name)
+      .then(raw => {
+        const content = typeof raw === 'string' ? raw : '';
+        setFileContent(jsonConfigToYaml(content));
+      })
       .catch(() => setFileContent(''));
   }, [form.product, form.name]);
 
+  // For update/clone: pre-populate form
   useEffect(() => {
-    if (!cloneId) return;
-    apiClient.get(`/tracker/configmap/${cloneId}`).then(r => {
+    const fetchId = id || cloneId;
+    if (!fetchId) return;
+    apiClient.get(`/tracker/configmap/${fetchId}`).then(r => {
       const d = r.data;
-      setForm({ product: d.product || '', name: d.name || '', description: d.description || '', change_log: d.change_log || '', priority: String(d.priority || '0'), env: d.env || 'UAT', schedule_time: '', cluster: d.cluster || 'BECKN_UAT', file: d.file || '', mode: d.mode || 'AUTO' });
+      setForm({
+        product: d.product || '',
+        name: d.name || '',
+        description: d.description || '',
+        change_log: d.change_log || '',
+        priority: String(d.priority || '0'),
+        env: d.env || 'UAT',
+        schedule_time: isUpdate ? (d.schedule_time || '') : '',
+        cluster: d.cluster || 'BECKN_UAT',
+        file: d.file || '',
+        mode: d.mode || 'AUTO',
+      });
       setFileContent(jsonConfigToYaml(d.file || ''));
     }).catch(console.error);
-  }, [cloneId]);
+  }, [id, cloneId, isUpdate]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     setForm(f => ({ ...f, [e.target.name]: e.target.value }));
@@ -115,7 +154,8 @@ const CreateConfigMap: React.FC = () => {
     e.preventDefault();
     setError('');
     const payload = {
-      ...form, priority: Number(form.priority),
+      ...form,
+      priority: Number(form.priority),
       file: yamlConfigToJson(fileContent || form.file),
       secondary_file: syncCluster ? yamlConfigToJson(secondaryContent) : undefined,
       isSync: !!syncCluster,
@@ -134,18 +174,23 @@ const CreateConfigMap: React.FC = () => {
         {error && <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-xl text-sm">{error}</div>}
 
         <div className="bg-white rounded-xl border border-zinc-200">
-          <div className="px-6 py-4 border-b border-zinc-100"><h2 className="text-lg font-semibold text-zinc-900">Create ConfigMap</h2></div>
+          <div className="px-6 py-4 border-b border-zinc-100">
+            <h2 className="text-lg font-semibold text-zinc-900">{isUpdate ? 'Update ConfigMap' : cloneId ? 'Clone ConfigMap' : 'Create ConfigMap'}</h2>
+          </div>
           <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-5">
+            {/* LEFT column */}
             <div className="space-y-4">
               <div><FieldLabel required>Product</FieldLabel><select name="product" value={form.product} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select Product</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
               <div><FieldLabel>Description</FieldLabel><input name="description" value={form.description} onChange={handleChange} placeholder="Deploying Hotfix" className={inputClass} /></div>
               <div><FieldLabel>Priority</FieldLabel><select name="priority" value={form.priority} onChange={handleChange} className={cn(inputClass, 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(n => <option key={n} value={n}>{n}</option>)}</select></div>
             </div>
+            {/* CENTER column */}
             <div className="space-y-4">
               <div><FieldLabel required>Name</FieldLabel><select name="name" value={form.name} onChange={handleChange} required disabled={!form.product || namesOptions.length === 0} className={cn(inputClass, (!form.product || namesOptions.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}><option value="">Select Name</option>{namesOptions.map(n => <option key={n} value={n}>{n}</option>)}</select></div>
               <div><FieldLabel required>Change Log</FieldLabel><input name="change_log" value={form.change_log} onChange={handleChange} required placeholder="EUL-1.0.0" className={inputClass} /></div>
               <div><FieldLabel required>Env</FieldLabel><select name="env" value={form.env} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}><option value="UAT">UAT</option><option value="PROD">PROD</option><option value="INTEG_CLUSTER">INTEG_CLUSTER</option></select></div>
             </div>
+            {/* RIGHT column */}
             <div className="space-y-4">
               <div><FieldLabel>Schedule Time</FieldLabel><input name="schedule_time" value={form.schedule_time} onChange={handleChange} placeholder="2022-11-01T19:39:35" className={inputClass} /></div>
               <div><FieldLabel required>Cluster</FieldLabel><input name="cluster" value={form.cluster} disabled className={cn(inputClass, 'bg-zinc-50 text-zinc-400 cursor-not-allowed')} /></div>
@@ -187,7 +232,9 @@ const CreateConfigMap: React.FC = () => {
 
         <div className="flex justify-end gap-3 pt-2">
           <Button type="button" variant="secondary" onClick={() => navigate('/configmap')}>Cancel</Button>
-          <Button type="submit" loading={createMut.isPending}>{createMut.isPending ? 'Saving...' : 'Create ConfigMap'}</Button>
+          <PermissionGate product="config-manager" permission="CONFIG_CREATE">
+            <Button type="submit" loading={createMut.isPending}>{createMut.isPending ? 'Saving...' : isUpdate ? 'Update' : 'Create ConfigMap'}</Button>
+          </PermissionGate>
         </div>
       </form>
     </div>

@@ -176,6 +176,7 @@ type NammaRelease = {
     trackerType?: string;
     mode?: string;
     createdBy?: string;
+    createdAt?: string | null;
     approvedBy?: string | null;
     isApproved?: boolean;
     isInfraApproved?: boolean;
@@ -278,7 +279,7 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     is_infra_approved: r.isInfraApproved ? 1 : 0,
     release_tag: r.releaseTag || '',
     schedule_time: r.scheduleTime || '',
-    date_created: '',
+    date_created: r.createdAt || '',
     start_time: r.startTime || '',
     end_time: r.endTime || '',
     last_updated: '',

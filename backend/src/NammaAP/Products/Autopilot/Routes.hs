@@ -58,6 +58,8 @@ type CoreAPI =
     :<|> "releases" :> Capture "releaseId" Text :> "trigger" :> ReqBody '[JSON] TriggerReleaseReq :> Post '[JSON] APIResponse
     :<|> "releases" :> Capture "releaseId" Text :> "rollback" :> ReqBody '[JSON] TriggerReleaseReq :> Post '[JSON] APIResponse
     :<|> "releases" :> Capture "releaseId" Text :> "revert" :> ReqBody '[JSON] RevertReleaseReq :> Post '[JSON] APIResponse
+    :<|> "release" :> "revert" :> "global" :> Capture "globalId" Text :> Put '[JSON] APIResponse
+    :<|> "release" :> "revert" :> "immediate" :> "global" :> Capture "globalId" Text :> Put '[JSON] APIResponse
     :<|> "releases" :> Capture "releaseId" Text :> "discard" :> ReqBody '[JSON] DiscardReleaseReq :> Post '[JSON] APIResponse
     :<|> "releases" :> Capture "releaseId" Text :> "update" :> ReqBody '[JSON] K8sUpdateTrackerReq :> Post '[JSON] APIResponse
     :<|> "releases" :> Capture "releaseId" Text :> "events" :> Get '[JSON] [Value]
@@ -85,6 +87,8 @@ coreServer =
     :<|> triggerReleaseH
     :<|> rollbackReleaseH
     :<|> revertReleaseH
+    :<|> revertByGlobalIdH
+    :<|> immediateRevertByGlobalIdH
     :<|> discardReleaseH
     :<|> updateTrackerH
     :<|> listEventsH

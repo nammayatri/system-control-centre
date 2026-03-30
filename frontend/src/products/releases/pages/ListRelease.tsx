@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Search, Plus, RefreshCw, ChevronDown, Copy, Calendar, ChevronLeft, ChevronRight, X, Activity, CheckCircle2, XCircle, Layers } from 'lucide-react';
+import { Search, Plus, RefreshCw, ChevronDown, Copy, Calendar, ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { useReleases } from '../hooks';
 import { StatusBadge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
@@ -274,13 +274,14 @@ const ListRelease: React.FC = () => {
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('id')}>ID</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('new_version')}>Version</th>
                   <th className="py-3 px-4">Status</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('date_created')}>Created At</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('start_time')}>Start Time</th>
                   <th className="py-3 px-4 w-16 text-center">Action</th>
                 </tr>
               </thead>
               <tbody className="text-sm">
                 {filteredReleases.length === 0 ? (
-                  <tr><td colSpan={7} className="py-16 text-center text-zinc-400">No releases found</td></tr>
+                  <tr><td colSpan={8} className="py-16 text-center text-zinc-400">No releases found</td></tr>
                 ) : (
                   paginatedReleases.map((release, index) => {
                     const isRevert = release.release_context?.revert === 1;
@@ -312,6 +313,7 @@ const ListRelease: React.FC = () => {
                             )}
                           </div>
                         </td>
+                        <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatISODate(release.date_created)}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatISODate(release.start_time)}</td>
                         <td className="py-3 px-4 text-center">
                           <SimpleTooltip content="Clone release">

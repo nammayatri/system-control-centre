@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Search, RefreshCw, Calendar, Copy, ChevronLeft, ChevronRight, ChevronDown, X, Plus } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
@@ -50,8 +50,18 @@ const getDateRange = (range: TimeRange, customFrom: string, customTo: string) =>
   return { from, to };
 };
 
+function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedValue(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debouncedValue;
+}
+
 const ListConfigMap: React.FC = () => {
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 300);
   const [timeRange, setTimeRange] = useState<TimeRange>('last_30_days');
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [customFrom, setCustomFrom] = useState('');
@@ -74,25 +84,31 @@ const ListConfigMap: React.FC = () => {
     document.addEventListener('mousedown', handler); return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  useEffect(() => { setCurrentPage(1); }, [search]);
+  useEffect(() => { setCurrentPage(1); }, [debouncedSearch]);
 
   const filtered = useMemo(() => {
-    const q = search.toLowerCase();
-    return configMaps.filter(c => c.product?.toLowerCase().includes(q) || c.id?.toLowerCase().includes(q) || c.name?.toLowerCase().includes(q) || c.status?.toLowerCase().includes(q));
-  }, [configMaps, search]);
+    const q = debouncedSearch.toLowerCase();
+    if (!q) return configMaps;
+    return configMaps.filter(c =>
+      c.product?.toLowerCase().includes(q) ||
+      c.id?.toLowerCase().includes(q) ||
+      c.name?.toLowerCase().includes(q) ||
+      c.status?.toLowerCase().includes(q)
+    );
+  }, [configMaps, debouncedSearch]);
 
   const totalPages = Math.ceil(filtered.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
   const paginatedItems = filtered.slice(startIndex, startIndex + itemsPerPage);
 
-  const handleCustomRangeApply = () => {
+  const handleCustomRangeApply = useCallback(() => {
     if (customFrom && customTo) {
       const from = new Date(customFrom); const to = new Date(customTo);
       if (Math.ceil((to.getTime() - from.getTime()) / (1000 * 60 * 60 * 24)) > 30) { alert('Max 30 days'); return; }
       if (from > to) { alert('Invalid range'); return; }
       setTimeRange('custom'); setShowDatePicker(false);
     }
-  };
+  }, [customFrom, customTo]);
 
   return (
     <div className="flex flex-col flex-1 w-full">
@@ -125,6 +141,7 @@ const ListConfigMap: React.FC = () => {
                   <div className="border-t border-zinc-100 p-3 space-y-2">
                     <div><label className="block text-xs font-medium text-zinc-600 mb-1">From</label><input type="datetime-local" value={customFrom} onChange={e => setCustomFrom(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent" /></div>
                     <div><label className="block text-xs font-medium text-zinc-600 mb-1">To</label><input type="datetime-local" value={customTo} onChange={e => setCustomTo(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent" /></div>
+                    <div className="text-xs text-zinc-400">Max range: 30 days</div>
                     <div className="flex gap-2">
                       <button onClick={handleCustomRangeApply} className="flex-1 bg-zinc-900 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-zinc-800 cursor-pointer transition-colors duration-150">Apply</button>
                       <button onClick={() => { setTimeRange('last_30_days'); setCustomFrom(''); setCustomTo(''); setShowDatePicker(false); }} className="px-2 py-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 cursor-pointer transition-colors duration-150"><X className="w-4 h-4" /></button>

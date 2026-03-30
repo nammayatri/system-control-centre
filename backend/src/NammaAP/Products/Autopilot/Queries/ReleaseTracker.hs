@@ -357,6 +357,18 @@ parseJsonTextMaybe (Just t) =
     Left _ -> Nothing
     Right a -> Just a
 
+findReleaseTrackerByGlobalId :: DBEnv -> Text -> IO (Maybe TrackerWithTarget)
+findReleaseTrackerByGlobalId db gid = do
+  rows <-
+    runDB db $
+      runSelectReturningList $
+        select $
+          orderBy_ (desc_ . rtCreatedAt) $ do
+            rt <- all_ (releaseTrackers nammaAPDb)
+            guard_ (rtGlobalId rt ==. val_ (Just gid))
+            pure rt
+  pure $ fmap fromRow (safeHead rows)
+
 safeHead :: [a] -> Maybe a
 safeHead [] = Nothing
 safeHead (x : _) = Just x

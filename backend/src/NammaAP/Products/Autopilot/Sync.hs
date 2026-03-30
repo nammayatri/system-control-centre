@@ -96,7 +96,7 @@ createTrackerForSyncCluster cfg db tracker mts targetCluster = do
   let rawUrl = syncClusterUrl cfg
       normalised = let u = if "http" `T.isPrefixOf` T.pack rawUrl then rawUrl else "http://" <> rawUrl
                    in if last u == '/' then u else u <> "/"
-      url = normalised <> "release"
+      url = normalised <> "releases/create"
       mCtx = getK8sContext mts
       syncUdf2 = case mCtx >>= syncClusterUdf2 of
         Just t | not (T.null t) -> Just t

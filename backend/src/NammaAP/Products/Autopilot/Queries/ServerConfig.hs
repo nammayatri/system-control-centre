@@ -8,40 +8,86 @@ module NammaAP.Products.Autopilot.Queries.ServerConfig
 where
 
 import Data.Text (Text)
-import Database.PostgreSQL.Simple (Only (..), query, query_, execute)
-import NammaAP.Core.DB.Connection (withConn)
+import Data.Time.Clock (getCurrentTime)
+import Database.Beam
+import GHC.Int (Int32)
+import NammaAP.Core.DB.Connection (runDB)
 import NammaAP.Core.Environment (DBEnv)
+import NammaAP.Products.Autopilot.Types.Storage.Schema
 
--- | Fetch a server_config value by name where enabled is truthy.
--- Works with both boolean (true/false) and int (1/0) enabled columns.
+-- | Fetch a server_config value by name where enabled is truthy (1).
 getEnabledServerConfigValue :: DBEnv -> Text -> IO (Maybe Text)
 getEnabledServerConfigValue db name = do
   rows <-
-    withConn db $ \conn ->
-      query
-        conn
-        "select value from server_config where name = ? and enabled::text in ('1', 't', 'true') limit 1"
-        (Only name)
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          sc <- all_ (serverConfigs nammaAPDb)
+          guard_ (scName sc ==. val_ name)
+          guard_ (scEnabled sc ==. val_ 1)
+          pure (scValue sc)
   pure $ case rows of
-    (Only v : _) -> Just v
+    (v : _) -> Just v
     _ -> Nothing
 
 -- | List all server_config rows.
 listAllServerConfigs :: DBEnv -> IO [(Int, Text, Text, Text, Int)]
-listAllServerConfigs db =
-  withConn db $ \conn ->
-    query_ conn "select id, type, name, value, enabled from server_config order by type, name"
+listAllServerConfigs db = do
+  rows <-
+    runDB db $
+      runSelectReturningList $
+        select $
+          orderBy_ (\sc -> (asc_ (scType sc), asc_ (scName sc))) $
+            all_ (serverConfigs nammaAPDb)
+  pure $ map toTuple rows
+  where
+    toTuple :: ServerConfig -> (Int, Text, Text, Text, Int)
+    toTuple sc =
+      ( fromIntegral (scId sc)
+      , scType sc
+      , scName sc
+      , scValue sc
+      , fromIntegral (scEnabled sc)
+      )
 
 -- | Upsert a server_config row by name.
 upsertServerConfig :: DBEnv -> Text -> Text -> Text -> Bool -> IO ()
 upsertServerConfig db name typ value enabled = do
-  let enabledInt = if enabled then (1 :: Int) else 0
-  withConn db $ \conn -> do
-    existing <- query conn "select id from server_config where name = ? limit 1" (Only name) :: IO [Only Int]
-    case existing of
-      (Only existingId : _) -> do
-        _ <- execute conn "update server_config set type = ?, value = ?, enabled = ?, last_updated = CURRENT_TIMESTAMP where id = ?" (typ, value, enabledInt, existingId)
-        pure ()
-      [] -> do
-        _ <- execute conn "insert into server_config (type, name, value, enabled) values (?, ?, ?, ?)" (typ, name, value, enabledInt)
-        pure ()
+  let enabledInt = if enabled then (1 :: Int32) else 0
+  now <- getCurrentTime
+  existing <-
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          sc <- all_ (serverConfigs nammaAPDb)
+          guard_ (scName sc ==. val_ name)
+          pure (scId sc)
+  case existing of
+    (existingId : _) ->
+      runDB db $
+        runUpdate $
+          update
+            (serverConfigs nammaAPDb)
+            ( \sc ->
+                mconcat
+                  [ scType sc <-. val_ typ,
+                    scValue sc <-. val_ value,
+                    scEnabled sc <-. val_ enabledInt,
+                    scLastUpdated sc <-. val_ now
+                  ]
+            )
+            (\sc -> scId sc ==. val_ existingId)
+    [] ->
+      runDB db $
+        runInsert $
+          insert (serverConfigs nammaAPDb) $
+            insertExpressions
+              [ ServerConfigT
+                  { scId = default_,
+                    scType = val_ typ,
+                    scName = val_ name,
+                    scValue = val_ value,
+                    scLastUpdated = val_ now,
+                    scEnabled = val_ enabledInt
+                  }
+              ]

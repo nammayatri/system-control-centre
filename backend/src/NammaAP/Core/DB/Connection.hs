@@ -60,6 +60,8 @@ ensureSchema db = withConn db $ \conn -> do
   _ <- execute_ conn "ALTER TABLE product_config ADD COLUMN IF NOT EXISTS target_config text"
   _ <- execute_ conn "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='product_config' AND column_name='cluster') THEN UPDATE product_config SET target_config = json_build_object('cluster', COALESCE(cluster, ''), 'namespace', COALESCE(namespace, ''), 'vsName', COALESCE(vs_name, ''), 'kubeContext', kube_context, 'syncCluster', sync_cluster, 'vsLockedBy', vs_locked_by, 'vsLockTimestamp', vs_lock_timestamp)::text WHERE target_config IS NULL; ALTER TABLE product_config DROP COLUMN cluster, DROP COLUMN namespace, DROP COLUMN vs_name, DROP COLUMN sync_cluster, DROP COLUMN vs_locked_by, DROP COLUMN vs_lock_timestamp, DROP COLUMN kube_context; END IF; END $$"
   -- Migrate release_config: pack service_host into target_config, then drop old column
+  _ <- execute_ conn "ALTER TABLE release_config ADD COLUMN IF NOT EXISTS microservice_type text null"
+  _ <- execute_ conn "ALTER TABLE release_config ADD COLUMN IF NOT EXISTS jira_webhook_url text null"
   _ <- execute_ conn "ALTER TABLE release_config ADD COLUMN IF NOT EXISTS target_config text"
   _ <- execute_ conn "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='release_config' AND column_name='service_host') THEN UPDATE release_config SET target_config = json_build_object('serviceHost', service_host)::text WHERE target_config IS NULL; ALTER TABLE release_config DROP COLUMN service_host; END IF; END $$"
   pure ()

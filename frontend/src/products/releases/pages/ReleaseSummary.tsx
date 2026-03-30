@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useRelease, useReleaseEvents, useApproveRelease, useDiscardRelease, usePauseRelease, useResumeRelease, useAbortRelease, useRevertRelease, useImmediateRevert } from '../hooks';
 import type { RolloutHistoryEvent, RolloutEvent } from '../../../api';
 import { StatusBadge, Badge } from '../../../shared/ui/badge';
@@ -7,7 +7,7 @@ import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
-import { Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap, Search } from 'lucide-react';
+import { Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap, Search, Trash2, ChevronRight as ChevronRightIcon } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 
 const formatDate = (d?: string) => {
@@ -134,6 +134,15 @@ const ReleaseSummary: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12 max-w-6xl">
+      {/* Breadcrumb */}
+      <div className="flex items-center text-sm text-zinc-500 font-medium mb-4">
+        <Link to="/releases" className="hover:text-zinc-700 transition-colors duration-150">Releases</Link>
+        <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300" />
+        <span className="text-zinc-600">{release.release_context?.cluster || clusterId}</span>
+        <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300" />
+        <span className="font-mono text-xs text-zinc-800 truncate max-w-[200px]">{release.release_tag || id}</span>
+      </div>
+
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <div className="flex items-center gap-3">
@@ -178,6 +187,9 @@ const ReleaseSummary: React.FC = () => {
           )}
 
           <div className="w-px h-6 bg-zinc-200 mx-1" />
+          <PermissionGate product="backend-releases" permission="RELEASE_DELETE">
+            <SimpleTooltip content="Delete"><Button size="icon" variant="ghost" className="text-red-500 hover:bg-red-50" onClick={() => doAction('delete this release', async () => { /* delete not yet implemented */ })}><Trash2 className="w-4 h-4" /></Button></SimpleTooltip>
+          </PermissionGate>
           <SimpleTooltip content="Clone"><Button size="icon" variant="ghost" onClick={() => navigate(`/releases/${clusterId}/${id}/clone`)}><Copy className="w-4 h-4" /></Button></SimpleTooltip>
           <SimpleTooltip content="Refresh"><Button size="icon" variant="ghost" onClick={() => refetch()}><RefreshCw className="w-4 h-4" /></Button></SimpleTooltip>
         </div>
@@ -206,6 +218,7 @@ const ReleaseSummary: React.FC = () => {
                   <InfoField label="ID" value={release.id} mono />
                   <InfoField label="Product" value={release.product} />
                   <InfoField label="Service" value={release.service} />
+                  <InfoField label="Status" value={release.status} />
                   <InfoField label="Env" value={release.env} />
                   <InfoField label="Mode" value={release.mode} />
                   <InfoField label="Tracker Type" value={release.tracker_type} />
@@ -223,6 +236,7 @@ const ReleaseSummary: React.FC = () => {
                 <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Timeline</h3>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-3">
                   <InfoField label="Release Tag" value={release.release_tag} mono />
+                  <InfoField label="Created" value={formatDate(release.date_created)} mono />
                   <InfoField label="Release Manager" value={release.release_manager} />
                   <InfoField label="Schedule Time" value={formatDate(release.schedule_time)} mono />
                   <InfoField label="Start Time" value={formatDate(release.start_time)} mono />
