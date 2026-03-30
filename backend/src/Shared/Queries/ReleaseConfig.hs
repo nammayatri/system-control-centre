@@ -1,21 +1,22 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Shared.Queries.ReleaseConfig
-  ( -- * Service/release config CRUD
-    upsertService
-  , findServiceByProductAndName
-  , listReleaseConfigByProduct
-  , listSchedulerServicesByProduct
+module Shared.Queries.ReleaseConfig (
+    -- * Service/release config CRUD
+    upsertService,
+    findServiceByProductAndName,
+    listReleaseConfigByProduct,
+    listSchedulerServicesByProduct,
 
-  -- * Service config extractors
-  , getServiceHost
-  ) where
+    -- * Service config extractors
+    getServiceHost,
+)
+where
 
 -- Re-export service/release-config queries from the original module
-import Products.Autopilot.Queries.ProductService
-  ( upsertService
-  , findServiceByProductAndName
-  , listReleaseConfigByProduct
-  , listSchedulerServicesByProduct
-  , getServiceHost
-  )
+import Products.Autopilot.Queries.ProductService (
+    findServiceByProductAndName,
+    getServiceHost,
+    listReleaseConfigByProduct,
+    listSchedulerServicesByProduct,
+    upsertService,
+ )

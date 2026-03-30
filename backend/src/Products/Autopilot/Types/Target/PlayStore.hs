@@ -1,20 +1,22 @@
--- | Google Play Store target types
---
--- This module contains all types related to Play Store releases:
--- - PlayStoreDeploymentState: State tracking for Play Store releases
--- - MobileAppAndroidWFStatus: Detailed Play Store-specific workflow stages
--- - ReviewStatus: Play Store review states
-module Products.Autopilot.Types.Target.PlayStore
-  ( -- * Target State
-    PlayStoreDeploymentState (..)
-  , emptyPlayStoreState
+{- | Google Play Store target types
+
+This module contains all types related to Play Store releases:
+- PlayStoreDeploymentState: State tracking for Play Store releases
+- MobileAppAndroidWFStatus: Detailed Play Store-specific workflow stages
+- ReviewStatus: Play Store review states
+-}
+module Products.Autopilot.Types.Target.PlayStore (
+    -- * Target State
+    PlayStoreDeploymentState (..),
+    emptyPlayStoreState,
 
     -- * Workflow Status
-  , MobileAppAndroidWFStatus (..)
+    MobileAppAndroidWFStatus (..),
 
     -- * Review Status
-  , ReviewStatus (..)
-  ) where
+    ReviewStatus (..),
+)
+where
 
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
@@ -24,23 +26,34 @@ import GHC.Generics (Generic)
 -- Play Store Workflow Status
 -- ============================================================================
 
--- | Mobile app Android workflow status (Play Store-specific)
---
--- Tracks Play Store upload, review, and rollout steps.
--- This provides detailed progress within the generic ReleaseWFStatus stages.
+{- | Mobile app Android workflow status (Play Store-specific)
+
+Tracks Play Store upload, review, and rollout steps.
+This provides detailed progress within the generic ReleaseWFStatus stages.
+-}
 data MobileAppAndroidWFStatus
-  = MAInit                      -- ^ Validate APK
-  | MAUploadAPK                 -- ^ Upload APK to Play Console
-  | MASubmitForReview           -- ^ Submit for Play Store review
-  | MAWaitingReview             -- ^ Waiting for review approval
-  | MAStagedRollout             -- ^ Staged rollout (0→25→50→100)
-  | MAMonitorCrashRate          -- ^ Monitor crash and ANR rates
-  | MAPromoteToFull             -- ^ Promote to 100% rollout
-  | MADone                      -- ^ Complete
-  | MAHaltRollout               -- ^ Halt rollout (error state)
-  deriving (Eq, Show, Read, Generic, Ord)
+    = -- | Validate APK
+      MAInit
+    | -- | Upload APK to Play Console
+      MAUploadAPK
+    | -- | Submit for Play Store review
+      MASubmitForReview
+    | -- | Waiting for review approval
+      MAWaitingReview
+    | -- | Staged rollout (0→25→50→100)
+      MAStagedRollout
+    | -- | Monitor crash and ANR rates
+      MAMonitorCrashRate
+    | -- | Promote to 100% rollout
+      MAPromoteToFull
+    | -- | Complete
+      MADone
+    | -- | Halt rollout (error state)
+      MAHaltRollout
+    deriving (Eq, Show, Read, Generic, Ord)
 
 instance ToJSON MobileAppAndroidWFStatus
+
 instance FromJSON MobileAppAndroidWFStatus
 
 -- ============================================================================
@@ -49,60 +62,58 @@ instance FromJSON MobileAppAndroidWFStatus
 
 -- | Play Store review status
 data ReviewStatus
-  = NotSubmitted
-  | UnderReview
-  | Approved
-  | Rejected
-  deriving (Eq, Show, Generic)
+    = NotSubmitted
+    | UnderReview
+    | Approved
+    | Rejected
+    deriving (Eq, Show, Generic)
 
 instance ToJSON ReviewStatus
+
 instance FromJSON ReviewStatus
 
 -- ============================================================================
 -- Play Store Deployment State
 -- ============================================================================
 
--- | Play Store deployment state
---
--- Tracks APK upload, rollout percentage, and health metrics from Play Console
+{- | Play Store deployment state
+
+Tracks APK upload, rollout percentage, and health metrics from Play Console
+-}
 data PlayStoreDeploymentState = PlayStoreDeploymentState
-  { categoryWorkflowStatus :: MobileAppAndroidWFStatus
+    { categoryWorkflowStatus :: MobileAppAndroidWFStatus
     -- ^ Granular Play Store-specific workflow progress
-
-  , apkUploaded :: Maybe Text
+    , apkUploaded :: Maybe Text
     -- ^ Version code of uploaded APK
-
-  , stagedRolloutPercent :: Int
+    , stagedRolloutPercent :: Int
     -- ^ Current rollout percentage (0-100)
-
-  , reviewStatus :: ReviewStatus
+    , reviewStatus :: ReviewStatus
     -- ^ Review status in Play Console
-
-  , crashRate :: Maybe Double
+    , crashRate :: Maybe Double
     -- ^ Current crash rate (0.0 to 1.0)
-
-  , anrRate :: Maybe Double
+    , anrRate :: Maybe Double
     -- ^ Current ANR (Application Not Responding) rate (0.0 to 1.0)
-
-  , activeInstalls :: Maybe Int
+    , activeInstalls :: Maybe Int
     -- ^ Number of active installs
-
-  , averageRating :: Maybe Double
+    , averageRating :: Maybe Double
     -- ^ Average user rating (1.0 to 5.0)
-  } deriving (Eq, Show, Generic)
+    }
+    deriving (Eq, Show, Generic)
 
 instance ToJSON PlayStoreDeploymentState
+
 instance FromJSON PlayStoreDeploymentState
 
 -- | Empty Play Store deployment state (initial state)
 emptyPlayStoreState :: PlayStoreDeploymentState
-emptyPlayStoreState = PlayStoreDeploymentState
-  { categoryWorkflowStatus = MAInit
-  , apkUploaded = Nothing
-  , stagedRolloutPercent = 0
-  , reviewStatus = NotSubmitted
-  , crashRate = Nothing
-  , anrRate = Nothing
-  , activeInstalls = Nothing
-  , averageRating = Nothing
-  }
+emptyPlayStoreState =
+    PlayStoreDeploymentState
+        { categoryWorkflowStatus = MAInit
+        , apkUploaded = Nothing
+        , stagedRolloutPercent = 0
+        , reviewStatus = NotSubmitted
+        , crashRate = Nothing
+        , anrRate = Nothing
+        , activeInstalls = Nothing
+        , averageRating = Nothing
+        }

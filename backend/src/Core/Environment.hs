@@ -1,26 +1,27 @@
 -- | Application environment: state, DB pool, and the Flow monad.
-module Core.Environment
-  ( AppState (..)
-  , DBEnv (..)
-  , Flow
-  , runFlow
-  , getConfig
-  , getDBEnv
-  ) where
+module Core.Environment (
+    AppState (..),
+    DBEnv (..),
+    Flow,
+    runFlow,
+    getConfig,
+    getDBEnv,
+)
+where
 
 import Control.Monad.Reader (ReaderT, asks, runReaderT)
+import Core.Config (Config)
 import Data.Pool (Pool)
 import Database.PostgreSQL.Simple (Connection)
-import Core.Config (Config)
 
 data DBEnv = DBEnv
-  { dbPool :: Pool Connection
-  }
+    { dbPool :: Pool Connection
+    }
 
 data AppState = AppState
-  { config :: Config
-  , dbEnv :: DBEnv
-  }
+    { config :: Config
+    , dbEnv :: DBEnv
+    }
 
 type Flow = ReaderT AppState IO
 

@@ -1,34 +1,35 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 
-module Products.Types
-  ( ProductSlug (..)
-  , productSlugToText
-  , textToProductSlug
-  , Permission (..)
-  , permissionToText
-  , allPermissions
-  , allPermissionsText
-  , defaultPermissions
-  , defaultPermissionsText
-  , isViewPerm
-  , IsProduct (..)
-  , SystemRole (..)
-  , OverrideType (..)
-  , overrideTypeToText
-  , textToOverrideType
-  ) where
+module Products.Types (
+    ProductSlug (..),
+    productSlugToText,
+    textToProductSlug,
+    Permission (..),
+    permissionToText,
+    allPermissions,
+    allPermissionsText,
+    defaultPermissions,
+    defaultPermissionsText,
+    isViewPerm,
+    IsProduct (..),
+    SystemRole (..),
+    OverrideType (..),
+    overrideTypeToText,
+    textToOverrideType,
+)
+where
 
-import Data.Text (Text)
 import Data.Proxy (Proxy)
+import Data.Text (Text)
 import Products.Autopilot.Types.Permission
 
 -- | All known products in the system.
 data ProductSlug
-  = Autopilot
-  deriving (Show, Read, Eq, Ord, Enum, Bounded)
+    = Autopilot
+    deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 productSlugToText :: ProductSlug -> Text
 productSlugToText Autopilot = "autopilot"
@@ -39,8 +40,8 @@ textToProductSlug _ = Nothing
 
 -- | Union of all product permissions.
 data Permission
-  = AutopilotPerm AutopilotPermission
-  deriving (Show, Read, Eq, Ord)
+    = AutopilotPerm AutopilotPermission
+    deriving (Show, Read, Eq, Ord)
 
 permissionToText :: Permission -> Text
 permissionToText (AutopilotPerm p) = autopilotPermissionToText p
@@ -52,27 +53,27 @@ allPermissions Autopilot = map AutopilotPerm [minBound .. maxBound]
 -- | All permissions as Text for a product.
 allPermissionsText :: Text -> [Text]
 allPermissionsText slug = case textToProductSlug slug of
-  Just p  -> map permissionToText (allPermissions p)
-  Nothing -> []
+    Just p -> map permissionToText (allPermissions p)
+    Nothing -> []
 
 -- | Default permissions as Text for a system role on a product.
 defaultPermissionsText :: Text -> Text -> [Text]
 defaultPermissionsText productSlug roleName = case (textToProductSlug productSlug, textToSystemRole roleName) of
-  (Just p, Just r) -> map permissionToText (defaultPermissions r p)
-  _                -> []
+    (Just p, Just r) -> map permissionToText (defaultPermissions r p)
+    _ -> []
 
 textToSystemRole :: Text -> Maybe SystemRole
-textToSystemRole "Admin"   = Just Admin
+textToSystemRole "Admin" = Just Admin
 textToSystemRole "Manager" = Just Manager
-textToSystemRole "Viewer"  = Just Viewer
-textToSystemRole _         = Nothing
+textToSystemRole "Viewer" = Just Viewer
+textToSystemRole _ = Nothing
 
 -- | System roles that cannot be deleted.
 data SystemRole = Admin | Manager | Viewer
-  deriving (Show, Read, Eq, Ord, Enum, Bounded)
+    deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 data OverrideType = Grant | Deny
-  deriving (Show, Read, Eq, Ord)
+    deriving (Show, Read, Eq, Ord)
 
 overrideTypeToText :: OverrideType -> Text
 overrideTypeToText Grant = "GRANT"
@@ -96,7 +97,7 @@ isEditPerm (AutopilotPerm p) = p `elem` [AP_PRODUCT_CONFIG_EDIT, AP_SERVICE_CONF
 
 -- | Product typeclass - each product must implement this.
 class IsProduct (p :: ProductSlug) where
-  routePermissions :: Proxy p -> [(Text, [Text], Permission)]
-  permDescriptions :: Proxy p -> [(Permission, Text)]
-  productRunner :: Proxy p -> Maybe (IO ())
-  productRunner _ = Nothing
+    routePermissions :: Proxy p -> [(Text, [Text], Permission)]
+    permDescriptions :: Proxy p -> [(Permission, Text)]
+    productRunner :: Proxy p -> Maybe (IO ())
+    productRunner _ = Nothing

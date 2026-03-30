@@ -90,35 +90,8 @@
             export NammaAP_DATABASE_URL="postgres://$DB_USER@localhost:5432/''${SC_DB_NAME:-system_control}"
             export PORT=''${PORT:-8012}
 
-            # Commands
-            sc-setup-db()  { bash scripts/setup-db.sh; }
-            sc-build()     { cabal build; }
-            sc-run()       { bash scripts/run.sh; }
-            sc-server()    { cabal run namma-ap-exe; }
-            sc-hpack()     { hpack && echo "Regenerated .cabal from package.yaml"; }
-            sc-format()    { bash scripts/format.sh; }
-            sc-test()      { cabal test; }
-            sc-migrate()   { bash scripts/migrate.sh; }
-            sc-test-api()  { bash scripts/test-api.sh; }
-            sc-help() {
-              echo ""
-              echo "  System Control Centre"
-              echo "  ─────────────────────"
-              echo "  sc-setup-db    Setup local database (create + migrate + seed)"
-              echo "  sc-build       Compile the backend"
-              echo "  sc-run         Setup DB + build + start server (all-in-one)"
-              echo "  sc-server      Start server only (assumes built)"
-              echo "  sc-hpack       Regenerate .cabal from package.yaml"
-              echo "  sc-format      Format all Haskell source files"
-              echo "  sc-test        Run test suite"
-              echo "  sc-migrate     Apply SQL migrations"
-              echo "  sc-test-api    Test all APIs (server must be running)"
-              echo "  sc-help        Show this help"
-              echo ""
-              echo "  DB: $NammaAP_DATABASE_URL"
-              echo "  Port: $PORT"
-              echo ""
-            }
+            # Add bin/ scripts to PATH (works with direnv, unlike shell functions)
+            export PATH="$PWD/bin:$PATH"
 
             sc-help
           '';
