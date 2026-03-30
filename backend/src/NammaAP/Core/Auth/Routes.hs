@@ -53,8 +53,8 @@ loginH body = do
           if not valid
             then pure $ object ["error" .= ("Invalid credentials" :: Text)]
             else do
-              -- Deactivate old tokens
-              liftIO $ deactivateTokensByPerson db (personId person)
+              -- Don't deactivate old tokens — allow multiple sessions
+              -- Old tokens expire naturally (24hr TTL)
               -- Create new token
               tok <- liftIO $ UUID.toText <$> UUID.nextRandom
               now <- liftIO getCurrentTime
