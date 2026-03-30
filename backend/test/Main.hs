@@ -1,7 +1,7 @@
 module Main where
 
 import Data.Text (pack)
-import NammaAP.K8s.Kubectl (isIdempotentSuccess, K8sError (..))
+import Products.Autopilot.K8s.Kubectl (isIdempotentSuccess, K8sError (..))
 
 main :: IO ()
 main = do

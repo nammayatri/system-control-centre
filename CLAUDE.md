@@ -66,8 +66,8 @@ npm run dev                        # starts on :5173
 - NO sc_product or sc_permission tables -- these are derived from Haskell ADTs
 
 ## Key Directories
-- Backend Core: backend/src/NammaAP/Core/ (auth, admin, server, config, DB)
-- Backend Products: backend/src/NammaAP/Products/ (autopilot, config-manager)
+- Backend Core: backend/src/Core/ (auth, admin, server, config, DB)
+- Backend Products: backend/src/Products/ (autopilot, config-manager)
 - Frontend Core: frontend/src/core/ (auth, admin, layout)
 - Frontend Products: frontend/src/products/ (releases, configmap, config)
 - Frontend Shared UI: frontend/src/shared/ui/

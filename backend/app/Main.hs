@@ -1,11 +1,11 @@
 module Main where
 
 import Control.Concurrent.Async (concurrently_)
-import NammaAP.Core.Config (appState, loadConfig)
-import NammaAP.Core.DB.Connection (mkDBEnv)
-import NammaAP.Products.Autopilot.Runner (runnerLoop)
-import NammaAP.Core.Server (serverLoop)
-import NammaAP.Core.Environment (AppState (..))
+import Core.Config (appState, loadConfig)
+import Core.DB.Connection (mkDBEnv)
+import Products.Autopilot.Runner (runnerLoop)
+import Core.Server (serverLoop)
+import Core.Environment (AppState (..))
 
 main :: IO ()
 main = do

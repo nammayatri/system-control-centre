@@ -19,3 +19,27 @@ logs/
 # Misc
 *.tmp
 *.bak
+
+# ── Backend (Haskell / Cabal / Nix) ──
+backend/dist-newstyle/
+backend/.cabal-dir/
+backend/.cabal-home/
+backend/.direnv/
+backend/.envrc
+backend/result
+backend/.ghc.environment.*
+backend/.hie/
+backend/cabal.project.local
+backend/dhall-configs/secrets.dhall
+
+# ── Frontend (Node / Vite) ──
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ── Environment / Secrets ──
+.env
+.env.*
+*.pem
+*.key
+*.log
