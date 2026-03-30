@@ -53,12 +53,15 @@ const UserDetail: React.FC = () => {
   const [overridePermission, setOverridePermission] = useState('');
   const [overrideType, setOverrideType] = useState<'GRANT' | 'DENY'>('GRANT');
 
-  // Queries
-  const { data: user, isLoading } = useQuery({
+  // Queries — response is { user, products, overrides }
+  const { data: userData, isLoading } = useQuery({
     queryKey: ['admin-user', id],
     queryFn: () => fetchUser(id!),
     enabled: !!id,
   });
+  const user = userData?.user;
+  const userProducts = userData?.products || [];
+  const userOverrides = userData?.overrides || [];
 
   const { data: products = [] } = useQuery({
     queryKey: ['admin-products'],
@@ -250,7 +253,7 @@ const UserDetail: React.FC = () => {
             Add Product Access
           </Button>
         </div>
-        {user.products && user.products.length > 0 ? (
+        {userProducts && userProducts.length > 0 ? (
           <div className="overflow-x-auto">
             <table className="w-full text-sm text-left">
               <thead>
@@ -262,7 +265,7 @@ const UserDetail: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {user.products.map((p: any, i: number) => (
+                {userProducts.map((p: any, i: number) => (
                   <tr key={p.slug || i} className={cn('border-b border-zinc-100', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
                     <td className="px-4 py-2.5 font-medium text-zinc-800">{p.slug}</td>
                     <td className="px-4 py-2.5">
@@ -308,7 +311,7 @@ const UserDetail: React.FC = () => {
             Add Override
           </Button>
         </div>
-        {user.overrides && user.overrides.length > 0 ? (
+        {userOverrides && userOverrides.length > 0 ? (
           <div className="overflow-x-auto">
             <table className="w-full text-sm text-left">
               <thead>
@@ -320,7 +323,7 @@ const UserDetail: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {user.overrides.map((o: any, i: number) => (
+                {userOverrides.map((o: any, i: number) => (
                   <tr key={o.id || i} className={cn('border-b border-zinc-100', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
                     <td className="px-4 py-2.5 text-zinc-800">{o.productSlug}</td>
                     <td className="px-4 py-2.5" style={{ fontFamily: 'Fira Code, monospace', fontSize: '12px' }}>
