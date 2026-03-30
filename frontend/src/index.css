@@ -8,50 +8,171 @@
 
 * {
   font-family: 'Fira Sans', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 code, .font-mono, [class*="mono"] {
   font-family: 'Fira Code', ui-monospace, monospace;
 }
 
-/* Scrollbar styling */
-::-webkit-scrollbar { width: 6px; height: 6px; }
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 999px; }
 ::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
-
 .sidebar-scroll::-webkit-scrollbar-thumb { background: #333; }
 .sidebar-scroll::-webkit-scrollbar-thumb:hover { background: #555; }
 
-/* Page transition */
-.page-enter {
-  opacity: 0;
-  transform: translateY(4px);
-}
-.page-enter-active {
-  opacity: 1;
-  transform: translateY(0);
-  transition: opacity 200ms ease, transform 200ms ease;
+/* ── Focus ring ── */
+*:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px #a1a1aa;
 }
 
-/* Subtle button press */
+/* ── Selection ── */
+::selection {
+  background: #e4e4e7;
+  color: #18181b;
+}
+
+/* ── Subtle press on buttons ── */
 button:active:not(:disabled) {
   transform: scale(0.98);
+  transition: transform 80ms ease;
 }
 
-/* Toast slide-in */
-[data-sonner-toast] {
-  animation: toast-slide-in 200ms ease forwards;
+/* ── Table row hover lift ── */
+tr.hoverable:hover td {
+  background-color: #f4f4f5;
+  transition: background-color 120ms ease;
 }
-@keyframes toast-slide-in {
-  from { opacity: 0; transform: translateX(16px); }
+
+/* ── Card subtle border glow on hover ── */
+.card-interactive:hover {
+  border-color: #a1a1aa;
+  transition: border-color 200ms ease;
+}
+
+/* ── Stagger animation for lists ── */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fadeInUp {
+  animation: fadeInUp 250ms ease forwards;
+  opacity: 0;
+}
+.stagger-1 { animation-delay: 0ms; }
+.stagger-2 { animation-delay: 40ms; }
+.stagger-3 { animation-delay: 80ms; }
+.stagger-4 { animation-delay: 120ms; }
+.stagger-5 { animation-delay: 160ms; }
+
+/* ── Page mount animation ── */
+@keyframes pageMount {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.page-mount {
+  animation: pageMount 200ms ease forwards;
+}
+
+/* ── Skeleton shimmer ── */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton-shimmer {
+  background: linear-gradient(90deg, #f4f4f5 25%, #e4e4e7 50%, #f4f4f5 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+/* ── Status dot pulse for active items ── */
+@keyframes statusPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.status-pulse {
+  animation: statusPulse 2s ease-in-out infinite;
+}
+
+/* ── Toast ── */
+[data-sonner-toast] {
+  animation: toastIn 200ms ease forwards;
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(12px); }
   to { opacity: 1; transform: translateX(0); }
 }
 
-/* Reduced motion */
+/* ── Sidebar nav item active indicator ── */
+.nav-active-indicator {
+  position: relative;
+}
+.nav-active-indicator::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 25%;
+  height: 50%;
+  width: 2px;
+  background: #10b981;
+  border-radius: 999px;
+  animation: indicatorIn 150ms ease forwards;
+}
+@keyframes indicatorIn {
+  from { height: 0; top: 50%; }
+  to { height: 50%; top: 25%; }
+}
+
+/* ── Dialog backdrop ── */
+[data-state="open"][role="dialog"] {
+  animation: dialogIn 150ms ease;
+}
+@keyframes dialogIn {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+/* ── Tab underline animation ── */
+.tab-underline {
+  position: relative;
+}
+.tab-underline::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: #18181b;
+  border-radius: 999px;
+  transform: scaleX(0);
+  transition: transform 150ms ease;
+}
+.tab-underline[data-state="active"]::after,
+.tab-underline.active::after {
+  transform: scaleX(1);
+}
+
+/* ── Number counter ── */
+@keyframes countUp {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-count {
+  animation: countUp 300ms ease forwards;
+  animation-delay: 100ms;
+  opacity: 0;
+}
+
+/* ── Reduced motion: disable everything ── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
     transition-duration: 0.01ms !important;
   }
 }
