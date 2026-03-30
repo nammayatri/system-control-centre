@@ -1,4 +1,4 @@
-import { apiClient, authClient } from './utils';
+import { apiClient, authClient } from './lib/api-client';
 
 // ── Rollout types ──────────────────────────────────────────────────
 
