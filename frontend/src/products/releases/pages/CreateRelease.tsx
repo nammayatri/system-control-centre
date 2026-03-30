@@ -4,6 +4,7 @@ import Editor from '@monaco-editor/react';
 import { useProductConfigs, useServices } from '../useProducts';
 import { useCreateRelease } from '../hooks';
 import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs } from '../api';
+import { fetchReleaseConfigs } from '../../../api';
 import type { ProductConfig } from '../../../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
@@ -84,6 +85,32 @@ const CreateRelease: React.FC = () => {
       setSyncCluster(config?.sync_cluster || '');
     } else setSyncCluster('');
   }, [formData.product, productConfigs]);
+
+  // Load rollout stages from service config when service is selected (skip if cloning)
+  useEffect(() => {
+    if (!isClone && formData.product && formData.service) {
+      fetchReleaseConfigs(formData.product).then(configs => {
+        const svcConfig = configs.find(c => c.service === formData.service);
+        if (svcConfig?.rollout_strategy) {
+          try {
+            const parsed = typeof svcConfig.rollout_strategy === 'string'
+              ? JSON.parse(svcConfig.rollout_strategy) : svcConfig.rollout_strategy;
+            // Handle [{cluster, rollouts: [...]}] format
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              const rollouts = parsed[0]?.rollouts || parsed;
+              if (Array.isArray(rollouts) && rollouts.length > 0) {
+                setStages(rollouts.map((r: any) => ({
+                  rollout: r.rollout ?? r.rolloutPercent ?? 0,
+                  cooloff: r.cooloff ?? r.cooloffSeconds ?? 10,
+                  pods: r.pods ?? r.podPercent ?? 1,
+                })));
+              }
+            }
+          } catch {}
+        }
+      }).catch(() => {});
+    }
+  }, [formData.product, formData.service, isClone]);
 
   useEffect(() => { if (!isEnvSwitch) setEnvData(''); }, [isEnvSwitch]);
 
