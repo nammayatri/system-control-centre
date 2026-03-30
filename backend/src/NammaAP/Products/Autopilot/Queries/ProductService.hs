@@ -10,7 +10,7 @@ import NammaAP.Core.DB.Connection (runDB)
 import NammaAP.Core.Environment (DBEnv)
 import NammaAP.Products.Autopilot.Types.Target.Kubernetes (K8sProductConfig(..), K8sServiceConfig(..), defaultK8sProductConfig)
 import NammaAP.Products.Autopilot.Queries.ReleaseTracker (encodeJsonText, parseJsonTextMaybe)
-import NammaAP.Products.Autopilot.Types.Storage.Schema
+import NammaAP.Shared.Types.Storage.Schema
 
 -- | Extract K8s product config from a ProductConfig row
 getK8sProductConfig :: ProductConfig -> K8sProductConfig

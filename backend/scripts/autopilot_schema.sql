@@ -1,8 +1,8 @@
--- Autopilot tables — release orchestration
--- These are the existing tables from ny-autopilot-haskel
+-- Autopilot tables -- release orchestration
+-- All tracker tables have been merged into release_tracker with a 'category' column.
 
 CREATE TABLE IF NOT EXISTS release_tracker (
-  id TEXT NOT NULL,
+  id TEXT NOT NULL PRIMARY KEY,
   status TEXT NOT NULL,
   description TEXT,
   new_version TEXT NOT NULL,
@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS release_tracker (
   is_art_recorder INTEGER,
   cronjob_suspend BOOLEAN,
   ab_hs_status TEXT,
-  tracker_type TEXT,
+  category TEXT DEFAULT 'BackendService',
+  release_wf_status TEXT DEFAULT 'Init',
   workflow_status TEXT,
   approved_by TEXT
 );
@@ -93,89 +94,4 @@ CREATE TABLE IF NOT EXISTS server_config (
   value TEXT NOT NULL,
   last_updated TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   enabled INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS configmap_tracker (
-  id TEXT NOT NULL,
-  service TEXT NOT NULL,
-  status TEXT NOT NULL,
-  description TEXT,
-  env TEXT NOT NULL,
-  cluster TEXT NOT NULL,
-  product TEXT NOT NULL,
-  date_created TIMESTAMPTZ NOT NULL,
-  last_updated TIMESTAMPTZ NOT NULL,
-  start_time TIMESTAMPTZ,
-  end_time TIMESTAMPTZ,
-  release_manager TEXT NOT NULL,
-  is_approved BOOLEAN,
-  events TEXT,
-  release_tag TEXT,
-  is_infra_approved BOOLEAN,
-  config TEXT,
-  commit TEXT,
-  change_log TEXT,
-  priority INTEGER DEFAULT 0,
-  schedule_time TIMESTAMPTZ,
-  name TEXT,
-  file TEXT
-);
-
-CREATE TABLE IF NOT EXISTS workflow_tracker (
-  id TEXT NOT NULL,
-  product TEXT NOT NULL,
-  service TEXT NOT NULL,
-  workflow TEXT,
-  schedule_time TIMESTAMPTZ,
-  release_manager TEXT NOT NULL,
-  tracker_type TEXT,
-  tracker_context TEXT,
-  workflow_context TEXT,
-  events TEXT,
-  status TEXT,
-  approved_by TEXT,
-  cluster TEXT NOT NULL,
-  env TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL,
-  last_updated TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS app_bundle_release (
-  id TEXT NOT NULL,
-  app_name TEXT NOT NULL,
-  platform TEXT NOT NULL,
-  build_id TEXT NOT NULL,
-  release_manager TEXT NOT NULL,
-  status TEXT NOT NULL,
-  rollout_strategy TEXT,
-  release_context TEXT,
-  events TEXT,
-  created_at TIMESTAMPTZ NOT NULL,
-  updated_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS db_tracker (
-  id TEXT NOT NULL,
-  product TEXT NOT NULL,
-  service TEXT NOT NULL,
-  env TEXT NOT NULL,
-  release_manager TEXT NOT NULL,
-  status TEXT NOT NULL,
-  release_tag TEXT,
-  script_path TEXT,
-  rollback_script_path TEXT,
-  events TEXT,
-  date_created TIMESTAMPTZ NOT NULL,
-  last_updated TIMESTAMPTZ NOT NULL,
-  is_approved BOOLEAN
-);
-
-CREATE TABLE IF NOT EXISTS global_tracker (
-  id TEXT NOT NULL,
-  tracker TEXT,
-  status TEXT NOT NULL,
-  is_approved BOOLEAN,
-  sync_strategy TEXT,
-  created_at TIMESTAMPTZ,
-  updated_at TIMESTAMPTZ
 );

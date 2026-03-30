@@ -51,7 +51,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
-import NammaAP.Products.Autopilot.Queries.ServerConfig (getEnabledServerConfigValue)
+import NammaAP.Shared.Queries.ServerConfig (getEnabledServerConfigValue)
 import NammaAP.Core.Config (Config (..))
 import NammaAP.Core.Environment (DBEnv)
 

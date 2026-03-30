@@ -16,7 +16,7 @@ import NammaAP.Products.Autopilot.Types
 import NammaAP.Core.Environment (DBEnv)
 import NammaAP.Products.Autopilot.Types.Target (TargetState(..))
 import NammaAP.Products.Autopilot.Types.Target.Kubernetes
-import NammaAP.Products.Autopilot.Types.Storage.Schema
+import NammaAP.Shared.Types.Storage.Schema
 
 -- | Type alias for tracker + target state pair
 type TrackerWithTarget = (ReleaseTracker, Maybe TargetState)

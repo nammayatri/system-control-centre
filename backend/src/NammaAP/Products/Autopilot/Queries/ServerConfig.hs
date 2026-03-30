@@ -13,7 +13,7 @@ import Database.Beam
 import GHC.Int (Int32)
 import NammaAP.Core.DB.Connection (runDB)
 import NammaAP.Core.Environment (DBEnv)
-import NammaAP.Products.Autopilot.Types.Storage.Schema
+import NammaAP.Shared.Types.Storage.Schema
 
 -- | Fetch a server_config value by name where enabled is truthy (1).
 getEnabledServerConfigValue :: DBEnv -> Text -> IO (Maybe Text)

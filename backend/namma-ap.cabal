@@ -68,6 +68,17 @@ library
       NammaAP.Products.Autopilot.Workflow.Types
       NammaAP.Products.Registry
       NammaAP.Products.Types
+      NammaAP.Shared.Queries.ProductConfig
+      NammaAP.Shared.Queries.ReleaseConfig
+      NammaAP.Shared.Queries.ReleaseEvents
+      NammaAP.Shared.Queries.ReleaseTracker
+      NammaAP.Shared.Queries.ServerConfig
+      NammaAP.Shared.Types.ProductConfig
+      NammaAP.Shared.Types.Release
+      NammaAP.Shared.Types.ReleaseCategory
+      NammaAP.Shared.Types.ReleaseConfig
+      NammaAP.Shared.Types.ServerConfig
+      NammaAP.Shared.Types.Storage.Schema
   other-modules:
       Paths_namma_ap
   hs-source-dirs:

@@ -43,7 +43,7 @@ import qualified NammaAP.Products.Autopilot.Types as NT
 import NammaAP.Products.Autopilot.Types.Target (TargetState(..), emptyConfigState)
 import NammaAP.Products.Autopilot.Types.Target.Kubernetes
 import NammaAP.Products.Autopilot.Types.API
-import qualified NammaAP.Products.Autopilot.Types.Storage.Schema as S
+import qualified NammaAP.Shared.Types.Storage.Schema as S
 import NammaAP.Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
 import Servant
 
