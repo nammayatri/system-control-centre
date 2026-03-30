@@ -19,6 +19,8 @@ globalConfigs :: [ConfigEntry]
 globalConfigs =
   [ ConfigEntry "mailing_enabled" (BoolConfig False) NotificationGroup
       "Enable email notifications" Nothing
+  , ConfigEntry "slack_enabled" (BoolConfig False) NotificationGroup
+      "Enable Slack notifications for release events" Nothing
   ]
 
 -- | Collect from all products

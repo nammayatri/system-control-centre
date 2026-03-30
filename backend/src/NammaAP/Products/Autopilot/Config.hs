@@ -14,8 +14,6 @@ autopilotConfigs =
       "Maintenance mode (JSON with owner and flag)" (Just "autopilot")
   , ConfigEntry "release_start_delay" (IntConfig 0) DeploymentGroup
       "Delay before starting release (seconds)" (Just "autopilot")
-  , ConfigEntry "AUTOSCALER_CONFIG_ENABLED" (BoolConfig False) ScalingGroup
-      "Enable autoscaler configuration" (Just "autopilot")
   , ConfigEntry "sync_cluster_enabled" (BoolConfig False) SyncGroup
       "Enable multi-cloud sync to secondary cluster" (Just "autopilot")
   , ConfigEntry "sync_rollout_strategy_config" (JsonConfig "{}") SyncGroup
