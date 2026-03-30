@@ -66,7 +66,6 @@ library
       NammaAP.Products.Autopilot.Workflow.MobileAppAndroidWorkflow
       NammaAP.Products.Autopilot.Workflow.Recorded
       NammaAP.Products.Autopilot.Workflow.Types
-      NammaAP.Products.ConfigManager.Types.Permission
       NammaAP.Products.Registry
       NammaAP.Products.Types
   other-modules:

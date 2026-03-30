@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   Users, Shield, ChevronLeft,
   PanelLeftClose, PanelLeft,
@@ -51,7 +52,7 @@ const AdminLayout: React.FC = () => {
               key={item.path}
               to={item.path}
               className={cn(
-                'flex items-center gap-2.5 px-4 h-10 text-[13px] cursor-pointer transition-colors duration-150',
+                'flex items-center gap-2.5 px-4 h-10 text-[13px] cursor-pointer transition-all duration-150',
                 collapsed && 'justify-center px-0',
                 isActive(item.path)
                   ? 'text-[#fafafa] bg-[#262626] border-l-2 border-emerald-500'
@@ -79,7 +80,17 @@ const AdminLayout: React.FC = () => {
       <div className="flex-1 flex flex-col h-screen overflow-hidden">
         <TopBar />
         <main className="flex-1 overflow-y-auto px-8 py-6">
-          <Outlet />
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={location.pathname}
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2, ease: 'easeOut' }}
+            >
+              <Outlet />
+            </motion.div>
+          </AnimatePresence>
         </main>
       </div>
     </div>

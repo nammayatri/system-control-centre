@@ -1,15 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Product Registry
--- Every product registers its route-permission mappings here.
--- To add a new product:
---   1. Create a folder under Products/ (e.g., Products/MyProduct/)
---   2. Define routes + handlers in Products/MyProduct/Routes.hs
---   3. Add route-permission mappings in Products/MyProduct/Permissions.hs
---   4. Import and add to `allProductPermissions` below
---   5. Add the product's API type to FullAPI in Server.hs
---   6. Seed permissions in DB: scripts/rbac_seed.sql
---   7. Frontend: add products/my-product/ folder
+-- | Product Registry — route-to-permission mappings for all products.
+-- The product slug MUST match ProductSlug ADT → productSlugToText.
 
 module NammaAP.Products.Registry
   ( allProductPermissions
@@ -18,27 +10,21 @@ module NammaAP.Products.Registry
 
 import Data.Text (Text)
 
--- | A single route-to-permission mapping
 data ProductPermission = ProductPermission
-  { ppMethod :: Text          -- HTTP method: GET, POST, PUT, DELETE
-  , ppPathSegments :: [Text]  -- path segments to match (prefix match)
-  , ppPermission :: Text      -- required permission action
-  , ppProduct :: Text         -- product slug (matches sc_product.slug)
+  { ppMethod :: Text
+  , ppPathSegments :: [Text]
+  , ppPermission :: Text
+  , ppProduct :: Text         -- must match productSlugToText (e.g., "autopilot")
   } deriving (Show)
 
--- | All product permission mappings — import from each product
--- When adding a new product, add its permissions here.
+-- | All route-permission mappings across all products.
 allProductPermissions :: [ProductPermission]
-allProductPermissions = concat
-  [ releasePermissions
-  , configManagerPermissions
-  -- , myNewProductPermissions   ← add new products here
-  ]
+allProductPermissions = autopilotPermissions
 
--- ── Product: backend-releases ─────────────────────────────────────
+-- ── Product: Autopilot (Backend Releases + ConfigMaps + Server Config) ──
 
-releasePermissions :: [ProductPermission]
-releasePermissions =
+autopilotPermissions :: [ProductPermission]
+autopilotPermissions =
   -- Releases
   [ pp "GET"  ["releases"]              "RELEASE_VIEW"
   , pp "POST" ["releases", "create"]    "RELEASE_CREATE"
@@ -51,25 +37,10 @@ releasePermissions =
   , pp "POST" ["server-config"]         "SERVICE_CONFIG_EDIT"
   -- Envs
   , pp "GET"  ["envs"]                  "RELEASE_VIEW"
+  -- ConfigMap (all under autopilot product now)
+  , pp "GET"  ["configmap"]             "RELEASE_VIEW"
+  , pp "GET"  ["tracker", "configmap"]  "RELEASE_VIEW"
+  , pp "POST" ["tracker", "configmap"]  "RELEASE_CREATE"
+  , pp "PUT"  ["tracker", "configmap"]  "RELEASE_UPDATE"
   ]
-  where pp m p perm = ProductPermission m p perm "backend-releases"
-
--- ── Product: config-manager ──────────────────────────────────────
-
-configManagerPermissions :: [ProductPermission]
-configManagerPermissions =
-  [ pp "GET"  ["configmap"]             "CONFIG_VIEW"
-  , pp "GET"  ["tracker", "configmap"]  "CONFIG_VIEW"
-  , pp "POST" ["tracker", "configmap"]  "CONFIG_CREATE"
-  , pp "PUT"  ["tracker", "configmap"]  "CONFIG_UPDATE"
-  ]
-  where pp m p perm = ProductPermission m p perm "config-manager"
-
--- ── Template for new product ─────────────────────────────────────
---
--- myNewProductPermissions :: [ProductPermission]
--- myNewProductPermissions =
---   [ pp "GET"  ["my-endpoint"]        "MY_VIEW"
---   , pp "POST" ["my-endpoint"]        "MY_CREATE"
---   ]
---   where pp m p perm = ProductPermission m p perm "my-product-slug"
+  where pp m p perm = ProductPermission m p perm "autopilot"

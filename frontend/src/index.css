@@ -23,6 +23,31 @@ code, .font-mono, [class*="mono"] {
 .sidebar-scroll::-webkit-scrollbar-thumb { background: #333; }
 .sidebar-scroll::-webkit-scrollbar-thumb:hover { background: #555; }
 
+/* Page transition */
+.page-enter {
+  opacity: 0;
+  transform: translateY(4px);
+}
+.page-enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+
+/* Subtle button press */
+button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+/* Toast slide-in */
+[data-sonner-toast] {
+  animation: toast-slide-in 200ms ease forwards;
+}
+@keyframes toast-slide-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

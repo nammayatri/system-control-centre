@@ -35,6 +35,10 @@ export interface ProductDefinition {
 import ListRelease from './releases/pages/ListRelease';
 import CreateRelease from './releases/pages/CreateRelease';
 import ReleaseSummary from './releases/pages/ReleaseSummary';
+import ListConfigMap from './configmap/pages/ListConfigMap';
+import CreateConfigMap from './configmap/pages/CreateConfigMap';
+import ConfigMapSummary from './configmap/pages/ConfigMapSummary';
+import Configurations from './config/pages/Configurations';
 
 const releasesProduct: ProductDefinition = {
   slug: 'backend-releases',
@@ -42,14 +46,23 @@ const releasesProduct: ProductDefinition = {
   icon: 'Rocket',
   basePath: '/releases',
   navItems: [
-    { label: 'List', path: '/releases', icon: 'List' },
-    { label: 'Create', path: '/releases/new', icon: 'Plus' },
+    { label: 'Releases', path: '/releases', icon: 'List' },
+    { label: 'Create Release', path: '/releases/new', icon: 'Plus' },
+    { label: 'Config Maps', path: '/configmap', icon: 'FileText' },
+    { label: 'Server Config', path: '/configurations', icon: 'Settings' },
   ],
   routes: [
+    // Releases
     { path: '/releases', component: ListRelease },
     { path: '/releases/new', component: CreateRelease, permission: 'RELEASE_CREATE' },
     { path: '/releases/:clusterId/:id', component: ReleaseSummary },
     { path: '/releases/:clusterId/:id/clone', component: CreateRelease, permission: 'RELEASE_CREATE' },
+    // ConfigMap (under same product)
+    { path: '/configmap', component: ListConfigMap },
+    { path: '/configmap/new', component: CreateConfigMap, permission: 'RELEASE_CREATE' },
+    { path: '/configmap/:clusterId', component: ConfigMapSummary },
+    // Server Config
+    { path: '/configurations', component: Configurations },
   ],
 };
 
@@ -60,8 +73,6 @@ const releasesProduct: ProductDefinition = {
 export const PRODUCT_REGISTRY: ProductDefinition[] = [
   releasesProduct,
   // ← Add new products here when ready
-  // configMapProduct,
-  // configProduct,
 ];
 
 /**

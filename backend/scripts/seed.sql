@@ -4,7 +4,7 @@
 -- Superadmin user (password: admin123)
 INSERT INTO sc_person (email, first_name, last_name, password_hash, is_superadmin)
 VALUES ('admin@juspay.in', 'Admin', 'User', 'admin123', true)
-ON CONFLICT (email) DO NOTHING;
+ON CONFLICT (email) DO UPDATE SET is_superadmin = true;
 
 -- System roles for Autopilot product
 -- (permissions field is empty for system roles — they derive from code via defaultPermissions)

@@ -38,23 +38,23 @@ findRoutePermission method pathSegs =
   -- Dynamic path patterns (routes with path parameters)
   let dynamicMatch = case (method, pathSegs) of
         -- Release actions
-        ("GET",  ["releases", _, "events"])  -> Just $ mkPP "RELEASE_VIEW"    "backend-releases"
-        ("GET",  ["releases", _])            -> Just $ mkPP "RELEASE_VIEW"    "backend-releases"
-        ("POST", ["releases", _, "approve"]) -> Just $ mkPP "RELEASE_APPROVE" "backend-releases"
-        ("POST", ["releases", _, "rollback"])-> Just $ mkPP "RELEASE_REVERT"  "backend-releases"
-        ("POST", ["releases", _, "revert"])  -> Just $ mkPP "RELEASE_REVERT"  "backend-releases"
-        ("POST", ["releases", _, "discard"]) -> Just $ mkPP "RELEASE_DISCARD" "backend-releases"
-        ("POST", ["releases", _, "update"])  -> Just $ mkPP "RELEASE_UPDATE"  "backend-releases"
-        ("POST", ["releases", _, "trigger"]) -> Just $ mkPP "RELEASE_CREATE"  "backend-releases"
+        ("GET",  ["releases", _, "events"])  -> Just $ mkPP "RELEASE_VIEW"    "autopilot"
+        ("GET",  ["releases", _])            -> Just $ mkPP "RELEASE_VIEW"    "autopilot"
+        ("POST", ["releases", _, "approve"]) -> Just $ mkPP "RELEASE_APPROVE" "autopilot"
+        ("POST", ["releases", _, "rollback"])-> Just $ mkPP "RELEASE_REVERT"  "autopilot"
+        ("POST", ["releases", _, "revert"])  -> Just $ mkPP "RELEASE_REVERT"  "autopilot"
+        ("POST", ["releases", _, "discard"]) -> Just $ mkPP "RELEASE_DISCARD" "autopilot"
+        ("POST", ["releases", _, "update"])  -> Just $ mkPP "RELEASE_UPDATE"  "autopilot"
+        ("POST", ["releases", _, "trigger"]) -> Just $ mkPP "RELEASE_CREATE"  "autopilot"
         -- Product services
-        ("GET",  ("products" : _ : "services" : _)) -> Just $ mkPP "PRODUCT_CONFIG_VIEW" "backend-releases"
+        ("GET",  ("products" : _ : "services" : _)) -> Just $ mkPP "PRODUCT_CONFIG_VIEW" "autopilot"
         -- Envs
-        ("GET",  ("envs" : "secondary" : _)) -> Just $ mkPP "RELEASE_VIEW"   "backend-releases"
+        ("GET",  ("envs" : "secondary" : _)) -> Just $ mkPP "RELEASE_VIEW"   "autopilot"
         -- ConfigMap secondary
-        ("GET",  ("configmap" : "secondary" : _)) -> Just $ mkPP "CONFIG_VIEW" "config-manager"
+        ("GET",  ("configmap" : "secondary" : _)) -> Just $ mkPP "RELEASE_VIEW" "autopilot"
         -- ConfigMap tracker with ID
-        ("GET",  ["tracker", "configmap", _]) -> Just $ mkPP "CONFIG_VIEW"    "config-manager"
-        ("PUT",  ["tracker", "configmap", _]) -> Just $ mkPP "CONFIG_UPDATE"  "config-manager"
+        ("GET",  ["tracker", "configmap", _]) -> Just $ mkPP "RELEASE_VIEW"    "autopilot"
+        ("PUT",  ["tracker", "configmap", _]) -> Just $ mkPP "RELEASE_UPDATE"  "autopilot"
         _ -> Nothing
   in case dynamicMatch of
     Just pp -> Just pp

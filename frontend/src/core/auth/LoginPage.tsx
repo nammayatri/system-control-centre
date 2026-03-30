@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import { Eye, EyeOff } from 'lucide-react';
+import { motion } from 'framer-motion';
 import nyLogo from '../../assets/ny-logo.svg';
 
 const LoginPage: React.FC = () => {
@@ -16,7 +17,7 @@ const LoginPage: React.FC = () => {
 
   useEffect(() => {
     if (isAuthenticated) {
-      navigate('/releases', { replace: true });
+      navigate('/', { replace: true });
     }
   }, [isAuthenticated, navigate]);
 
@@ -31,7 +32,7 @@ const LoginPage: React.FC = () => {
 
     try {
       await login(email, password);
-      navigate('/releases', { replace: true });
+      navigate('/', { replace: true });
     } catch (err: any) {
       setError(
         err.response?.data?.message ||
@@ -47,7 +48,12 @@ const LoginPage: React.FC = () => {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-zinc-100">
-      <div className="w-full max-w-sm">
+      <motion.div
+        className="w-full max-w-sm"
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.25, ease: 'easeOut' }}
+      >
         <div className="bg-white rounded-xl shadow-sm border border-zinc-200">
           {/* Logo + Title */}
           <div className="px-8 pt-8 pb-2 text-center">
@@ -126,7 +132,7 @@ const LoginPage: React.FC = () => {
             )}
           </form>
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 };

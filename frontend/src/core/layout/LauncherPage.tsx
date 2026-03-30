@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { usePermissions } from '../auth/PermissionsContext';
 import { PRODUCT_REGISTRY } from '../../products/registry';
+import { motion } from 'framer-motion';
 import {
   Rocket, FileText, Settings, Shield, LogOut, Package,
   ChevronRight, Globe, Layers,
@@ -63,9 +64,12 @@ export default function LauncherPage() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {/* Admin Console — only for admins */}
           {isAdmin && (
-            <button
+            <motion.button
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.2, ease: 'easeOut', delay: 0 }}
               onClick={() => navigate('/admin')}
-              className="group bg-white border border-zinc-200 rounded-xl p-5 text-left cursor-pointer transition-colors duration-150 hover:bg-zinc-50"
+              className="group bg-white border border-zinc-200 rounded-xl p-5 text-left cursor-pointer transition-all duration-150 hover:bg-zinc-50 hover:shadow-sm"
             >
               <div className="flex items-start justify-between">
                 <div className="w-12 h-12 rounded-lg bg-zinc-100 flex items-center justify-center text-zinc-600 group-hover:text-zinc-900 transition-colors duration-150">
@@ -77,15 +81,18 @@ export default function LauncherPage() {
               <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
                 Manage users, roles, and product access
               </p>
-            </button>
+            </motion.button>
           )}
 
           {/* Product cards */}
-          {accessibleProducts.map((product) => (
-            <button
+          {accessibleProducts.map((product, i) => (
+            <motion.button
               key={product.slug}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.2, ease: 'easeOut', delay: (isAdmin ? i + 1 : i) * 0.05 }}
               onClick={() => navigate(product.navItems[0]?.path || product.basePath)}
-              className="group bg-white border border-zinc-200 rounded-xl p-5 text-left cursor-pointer transition-colors duration-150 hover:bg-zinc-50"
+              className="group bg-white border border-zinc-200 rounded-xl p-5 text-left cursor-pointer transition-all duration-150 hover:bg-zinc-50 hover:shadow-sm"
             >
               <div className="flex items-start justify-between">
                 <div className="w-12 h-12 rounded-lg bg-zinc-100 flex items-center justify-center text-zinc-600 group-hover:text-zinc-900 transition-colors duration-150">
@@ -97,7 +104,7 @@ export default function LauncherPage() {
               <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
                 {getProductDescription(product.slug)}
               </p>
-            </button>
+            </motion.button>
           ))}
         </div>
       </main>
