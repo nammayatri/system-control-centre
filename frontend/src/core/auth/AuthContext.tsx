@@ -23,11 +23,24 @@ const AuthContext = createContext<AuthContextType>({
   loading: true,
 });
 
+// Load cached data from localStorage for instant UI
+function loadCached(): { user: AuthUser | null; products: ProductAccess[] } {
+  try {
+    const user = JSON.parse(localStorage.getItem('auth_user') || 'null');
+    const products = JSON.parse(localStorage.getItem('auth_products') || '[]');
+    return { user, products };
+  } catch {
+    return { user: null, products: [] };
+  }
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [token, setToken] = useState<string | null>(localStorage.getItem('sc_token'));
-  const [products, setProducts] = useState<ProductAccess[]>([]);
-  const [loading, setLoading] = useState(true);
+  const cached = loadCached();
+  const storedToken = localStorage.getItem('sc_token');
+  const [user, setUser] = useState<AuthUser | null>(storedToken ? cached.user : null);
+  const [token, setToken] = useState<string | null>(storedToken);
+  const [products, setProducts] = useState<ProductAccess[]>(storedToken ? cached.products : []);
+  const [loading, setLoading] = useState(!cached.user && !!storedToken);
 
   const clearAuth = useCallback(() => {
     setUser(null);
@@ -38,9 +51,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem('auth_products');
   }, []);
 
-  // Validate token on mount
+  // Validate token on mount — only logout on 401, not network errors
   useEffect(() => {
-    const storedToken = localStorage.getItem('sc_token');
     if (!storedToken) {
       setLoading(false);
       return;
@@ -51,9 +63,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(data.person);
         setProducts(data.products || []);
         setToken(storedToken);
+        // Update cache
+        localStorage.setItem('auth_user', JSON.stringify(data.person));
+        localStorage.setItem('auth_products', JSON.stringify(data.products || []));
       })
-      .catch(() => {
-        clearAuth();
+      .catch((err) => {
+        // Only clear auth on 401 (invalid/expired token)
+        // Network errors → keep cached data, user stays logged in
+        if (err?.response?.status === 401) {
+          clearAuth();
+        }
+        // Otherwise silently keep cached user — backend might be temporarily down
       })
       .finally(() => setLoading(false));
   }, [clearAuth]);
