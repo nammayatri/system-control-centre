@@ -20,6 +20,7 @@ import {
   fetchReleaseDiff,
   fetchPodHealth,
   fetchResources,
+  TERMINAL_STATUSES,
 } from './api';
 import { toast } from 'sonner';
 
@@ -36,7 +37,12 @@ export function useRelease(id: string | undefined) {
   return useQuery({
     queryKey: ['release', id],
     queryFn: () => fetchReleaseDetails(id!),
-    refetchInterval: 10000,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (!status) return 10000; // still loading, poll
+      if (TERMINAL_STATUSES.includes(status)) return false; // terminal — stop polling
+      return 10000; // active — poll every 10s
+    },
     enabled: !!id,
   });
 }

@@ -308,6 +308,9 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
 
     release_context: {
         cluster: r.releaseContext?.cluster || (r as any).metadata?.cluster || '',
+        namespace: r.releaseContext?.namespace || '',
+        deployment_name: r.releaseContext?.deploymentName || '',
+        vs_name: r.releaseContext?.virtualServiceName || '',
         docker_image: r.releaseContext?.dockerImage || '',
         matches: (r.releaseContext?.matches || []).map(m => ({
             match: m.matchHost || '',

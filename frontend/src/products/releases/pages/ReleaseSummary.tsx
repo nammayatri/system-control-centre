@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   useRelease, useReleaseEvents, useApproveRelease, useDiscardRelease,
@@ -7,7 +7,7 @@ import {
   useFastForwardRelease, useImmediateRevertWithSync,
   useReleaseDiff, usePodHealth, useResources, useUpdateTracker,
 } from '../hooks';
-import type { RolloutHistoryEvent, RolloutEvent } from '../../../api';
+import type { RolloutHistoryEvent, RolloutEvent, RolloutStrategyEvent, PodInfo } from '../../../api';
 import { StatusBadge, Badge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
@@ -16,7 +16,7 @@ import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import {
   Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap,
   Search, Trash2, ChevronRight as ChevronRightIcon, FastForward, RotateCw,
-  ExternalLink, Network, BarChart3, Pencil,
+  ExternalLink, Network, BarChart3, Pencil, Lock, Save,
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
@@ -106,7 +106,6 @@ const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
 };
 
 /** ENV Diff Tab */
-// Pretty-print JSON string for diff viewer
 const prettyJson = (raw: string): string => {
   if (!raw) return '';
   try {
@@ -146,8 +145,51 @@ const EnvDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
   );
 };
 
+/** Deployment Status Card — old vs new version pod counts */
+const DeploymentStatusCard: React.FC<{ release: any; pods: PodInfo[] }> = ({ release, pods }) => {
+  const oldVersion = release.old_version;
+  const newVersion = release.new_version;
+
+  const oldPods = pods.filter(p => p.version === oldVersion);
+  const newPods = pods.filter(p => p.version === newVersion);
+  const otherPods = pods.filter(p => p.version !== oldVersion && p.version !== newVersion);
+
+  return (
+    <div className="border border-zinc-200 rounded-lg p-4 mb-6">
+      <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-3">Deployment Status</h3>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="flex items-center gap-3 border border-zinc-100 rounded-lg px-4 py-3">
+          <span className="w-2 h-2 rounded-full bg-zinc-400 flex-shrink-0" />
+          <div className="min-w-0">
+            <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider">Old Version</div>
+            <div className="text-sm font-mono font-medium text-zinc-800 truncate">{oldVersion || '-'}</div>
+          </div>
+          <div className="ml-auto text-right flex-shrink-0">
+            <span className="text-lg font-bold text-zinc-900">{oldPods.length}</span>
+            <span className="text-xs text-zinc-500 ml-1">{oldPods.length === 1 ? 'pod' : 'pods'} running</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 border border-zinc-100 rounded-lg px-4 py-3">
+          <span className="w-2 h-2 rounded-full bg-emerald-500 flex-shrink-0" />
+          <div className="min-w-0">
+            <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider">New Version</div>
+            <div className="text-sm font-mono font-medium text-zinc-800 truncate">{newVersion || '-'}</div>
+          </div>
+          <div className="ml-auto text-right flex-shrink-0">
+            <span className="text-lg font-bold text-zinc-900">{newPods.length}</span>
+            <span className="text-xs text-zinc-500 ml-1">{newPods.length === 1 ? 'pod' : 'pods'} running</span>
+          </div>
+        </div>
+      </div>
+      {otherPods.length > 0 && (
+        <div className="mt-2 text-xs text-zinc-400">{otherPods.length} pod(s) with unknown/other versions</div>
+      )}
+    </div>
+  );
+};
+
 /** Pod Health Section (in Summary tab) */
-const PodHealthSection: React.FC<{ releaseId: string }> = ({ releaseId }) => {
+const PodHealthSection: React.FC<{ releaseId: string; release: any }> = ({ releaseId, release }) => {
   const { data: podData, isLoading } = usePodHealth(releaseId);
 
   if (isLoading) return <div className="animate-pulse space-y-2"><div className="h-20 bg-zinc-100 rounded" /></div>;
@@ -171,48 +213,53 @@ const PodHealthSection: React.FC<{ releaseId: string }> = ({ releaseId }) => {
   };
 
   return (
-    <div className="border border-zinc-100 rounded-xl p-5 mb-6">
-      <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Pods</h3>
-      <div className="grid grid-cols-4 gap-3 mb-4">
-        {summaryCards.map((card) => (
-          <div key={card.label} className="border border-zinc-100 rounded-lg px-3 py-2">
-            <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider mb-1">{card.label}</div>
-            <div className="flex items-center gap-1.5">
-              <span className={cn('w-1.5 h-1.5 rounded-full', card.color)} />
-              <span className="text-lg font-bold text-zinc-900">{card.value}</span>
+    <>
+      {/* Deployment Status — old vs new version pod counts */}
+      <DeploymentStatusCard release={release} pods={pods} />
+
+      <div className="border border-zinc-200 rounded-lg p-4 mb-6">
+        <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Pods</h3>
+        <div className="grid grid-cols-4 gap-3 mb-4">
+          {summaryCards.map((card) => (
+            <div key={card.label} className="border border-zinc-100 rounded-lg px-3 py-2">
+              <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider mb-1">{card.label}</div>
+              <div className="flex items-center gap-1.5">
+                <span className={cn('w-1.5 h-1.5 rounded-full', card.color)} />
+                <span className="text-lg font-bold text-zinc-900">{card.value}</span>
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
-      {pods.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm text-left border-collapse">
-            <thead>
-              <tr className="bg-zinc-50 border-y border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
-                <th className="py-2 px-3">Name</th>
-                <th className="py-2 px-3">Status</th>
-                <th className="py-2 px-3">Ready</th>
-                <th className="py-2 px-3">Restarts</th>
-                <th className="py-2 px-3">Age</th>
-                <th className="py-2 px-3">Version</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pods.map((pod, idx) => (
-                <tr key={pod.name} className={cn('border-b border-zinc-100', idx % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
-                  <td className="py-2 px-3 font-mono text-xs text-zinc-700">{pod.name}</td>
-                  <td className="py-2 px-3"><Badge variant={podStatusVariant(pod.status)} size="sm">{pod.status}</Badge></td>
-                  <td className="py-2 px-3 text-xs text-zinc-600">{pod.ready}</td>
-                  <td className="py-2 px-3 font-mono text-xs text-zinc-600">{pod.restarts}</td>
-                  <td className="py-2 px-3 text-xs text-zinc-500">{pod.age}</td>
-                  <td className="py-2 px-3 font-mono text-xs text-zinc-600">{pod.version}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          ))}
         </div>
-      )}
-    </div>
+        {pods.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-left border-collapse">
+              <thead>
+                <tr className="bg-zinc-50 border-y border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+                  <th className="py-2 px-3">Name</th>
+                  <th className="py-2 px-3">Status</th>
+                  <th className="py-2 px-3">Ready</th>
+                  <th className="py-2 px-3">Restarts</th>
+                  <th className="py-2 px-3">Age</th>
+                  <th className="py-2 px-3">Version</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pods.map((pod, idx) => (
+                  <tr key={pod.name} className={cn('border-b border-zinc-100', idx % 2 === 1 ? 'bg-zinc-50/50' : 'bg-white')}>
+                    <td className="py-2 px-3 font-mono text-xs text-zinc-700">{pod.name}</td>
+                    <td className="py-2 px-3"><Badge variant={podStatusVariant(pod.status)} size="sm">{pod.status}</Badge></td>
+                    <td className="py-2 px-3 text-xs text-zinc-600">{pod.ready}</td>
+                    <td className="py-2 px-3 font-mono text-xs text-zinc-600">{pod.restarts}</td>
+                    <td className="py-2 px-3 text-xs text-zinc-500">{pod.age}</td>
+                    <td className="py-2 px-3 font-mono text-xs text-zinc-600">{pod.version}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </>
   );
 };
 
@@ -231,7 +278,7 @@ const ResourcesSection: React.FC<{ product: string; service: string }> = ({ prod
   ];
 
   return (
-    <div className="border border-zinc-100 rounded-xl p-5">
+    <div className="border border-zinc-200 rounded-lg p-4">
       <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Resources</h3>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {items.map((item) => (
@@ -245,16 +292,254 @@ const ResourcesSection: React.FC<{ product: string; service: string }> = ({ prod
   );
 };
 
+/** Rollout History (inline in Summary tab) */
+const RolloutHistoryInline: React.FC<{ history: RolloutHistoryEvent[] }> = ({ history }) => {
+  if (!history?.length) return null;
+
+  return (
+    <div className="border border-zinc-200 rounded-lg p-4 mb-6">
+      <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-3">Rollout History</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm text-left border-collapse">
+          <thead>
+            <tr className="bg-zinc-50 border-y border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+              <th className="py-2 px-3">#</th>
+              <th className="py-2 px-3">Start Time</th>
+              <th className="py-2 px-3">Rollout %</th>
+              <th className="py-2 px-3">End Time</th>
+              <th className="py-2 px-3">Decision</th>
+              <th className="py-2 px-3">HS Decision</th>
+              <th className="py-2 px-3">Manual</th>
+              <th className="py-2 px-3">Cooloff</th>
+              <th className="py-2 px-3">Pods</th>
+            </tr>
+          </thead>
+          <tbody>
+            {history.map((h, idx) => (
+              <tr key={idx} className={cn('border-b border-zinc-100', idx % 2 === 1 ? 'bg-zinc-50/50' : 'bg-white')}>
+                <td className="py-2 px-3 text-xs font-medium text-zinc-500">{idx + 1}</td>
+                <td className="py-2 px-3 font-mono text-xs">{formatDate(h.started_at)}</td>
+                <td className="py-2 px-3 font-mono font-medium">{h.rollout}%</td>
+                <td className="py-2 px-3 font-mono text-xs">{formatDate(h.completed_at)}</td>
+                <td className="py-2 px-3">
+                  <Badge variant={h.last_decision === 'Continue' ? 'success' : h.last_decision === 'Abort' ? 'danger' : h.last_decision === 'Wait' ? 'warning' : 'default'} size="sm">
+                    {h.last_decision || '-'}
+                  </Badge>
+                </td>
+                <td className="py-2 px-3">
+                  <Badge variant={h.last_decision_hs === 'Continue' ? 'success' : h.last_decision_hs === 'Abort' ? 'danger' : h.last_decision_hs === 'Wait' ? 'warning' : 'default'} size="sm">
+                    {h.last_decision_hs || '-'}
+                  </Badge>
+                </td>
+                <td className="py-2 px-3 text-sm">{h.manual_override ? 'Yes' : 'No'}</td>
+                <td className="py-2 px-3 font-mono">{h.cooloff}</td>
+                <td className="py-2 px-3 font-mono">{h.pods}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+/** K8s Context Card */
+const K8sContextCard: React.FC<{ releaseContext: any }> = ({ releaseContext }) => {
+  if (!releaseContext) return null;
+
+  const ctx = releaseContext;
+  const hasData = ctx.cluster || ctx.namespace || ctx.deployment_name || ctx.vs_name || ctx.pods_scale_down_status;
+  if (!hasData) return null;
+
+  const fields = [
+    { label: 'Cluster', value: ctx.cluster },
+    { label: 'Namespace', value: ctx.namespace },
+    { label: 'Deployment Name', value: ctx.deployment_name },
+    { label: 'VS Name', value: ctx.vs_name },
+    { label: 'Scale Down Status', value: ctx.pods_scale_down_status },
+    { label: 'Scale Down Delay', value: ctx.pods_scale_down_delay ? `${ctx.pods_scale_down_delay} hrs` : '' },
+    { label: 'Scale Down Timestamp', value: ctx.pods_scale_down_timestamp ? formatDate(ctx.pods_scale_down_timestamp) : '' },
+  ].filter(f => f.value);
+
+  if (fields.length === 0) return null;
+
+  return (
+    <div className="border border-zinc-200 rounded-lg p-4 mb-6">
+      <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-3">K8s Context</h3>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-3">
+        {fields.map(f => (
+          <div key={f.label}>
+            <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">{f.label}</div>
+            <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm font-mono text-xs min-h-[38px] break-all">{f.value}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+/** Editable Rollout Strategy Tab */
+const RolloutStrategyTab: React.FC<{
+  releaseId: string;
+  strategy: RolloutStrategyEvent[];
+  historyLength: number;
+  status: string;
+}> = ({ releaseId, strategy, historyLength, status }) => {
+  const [stages, setStages] = useState<RolloutStrategyEvent[]>([]);
+  const [hasChanges, setHasChanges] = useState(false);
+  const updateMut = useUpdateTracker();
+
+  // Initialize stages from strategy prop
+  useEffect(() => {
+    setStages(strategy.map(s => ({ ...s })));
+    setHasChanges(false);
+  }, [strategy]);
+
+  const isEditable = status === 'CREATED' || status === 'INPROGRESS' || status === 'PAUSED';
+
+  const handleStageChange = (idx: number, field: keyof RolloutStrategyEvent, value: number) => {
+    setStages(prev => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], [field]: value };
+      return next;
+    });
+    setHasChanges(true);
+  };
+
+  const handleSave = async () => {
+    try {
+      await updateMut.mutateAsync({
+        releaseId,
+        updates: {
+          rolloutStrategy: stages.map(s => ({
+            rolloutPercent: s.rollout,
+            cooloffSeconds: s.cooloff,
+            podPercent: s.pods,
+          })),
+        },
+      });
+      setHasChanges(false);
+    } catch {}
+  };
+
+  if (!stages.length) {
+    return (
+      <div className="p-6">
+        <p className="text-sm text-zinc-400">No rollout strategy defined.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">Rollout Strategy</h3>
+        {isEditable && hasChanges && (
+          <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+            <Button size="sm" loading={updateMut.isPending} onClick={handleSave}>
+              <Save className="w-3.5 h-3.5" /> Save Changes
+            </Button>
+          </PermissionGate>
+        )}
+      </div>
+
+      <div className="space-y-3">
+        {stages.map((stage, idx) => {
+          const isLocked = idx < historyLength;
+
+          return (
+            <div
+              key={idx}
+              className={cn(
+                'border rounded-lg p-4 transition-opacity',
+                isLocked
+                  ? 'border-zinc-200 bg-zinc-50 opacity-50'
+                  : 'border-zinc-200 bg-white'
+              )}
+            >
+              <div className="flex items-center gap-3 mb-3">
+                <span className="text-sm font-semibold text-zinc-700">Stage {idx + 1}</span>
+                {isLocked && (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-medium text-zinc-400 uppercase tracking-wider">
+                    <Lock className="w-3 h-3" /> Completed
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1.5 block">Rollout %</label>
+                  {isLocked || !isEditable ? (
+                    <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm font-mono">{stage.rollout}%</div>
+                  ) : (
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={stage.rollout}
+                      onChange={(e) => handleStageChange(idx, 'rollout', parseInt(e.target.value) || 0)}
+                      className="w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+                    />
+                  )}
+                </div>
+                <div>
+                  <label className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1.5 block">Cooloff (seconds)</label>
+                  {isLocked || !isEditable ? (
+                    <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm font-mono">{stage.cooloff}</div>
+                  ) : (
+                    <input
+                      type="number"
+                      min={0}
+                      value={stage.cooloff}
+                      onChange={(e) => handleStageChange(idx, 'cooloff', parseInt(e.target.value) || 0)}
+                      className="w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+                    />
+                  )}
+                </div>
+                <div>
+                  <label className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1.5 block">Pods</label>
+                  {isLocked || !isEditable ? (
+                    <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm font-mono">{stage.pods}</div>
+                  ) : (
+                    <input
+                      type="number"
+                      min={0}
+                      value={stage.pods}
+                      onChange={(e) => handleStageChange(idx, 'pods', parseInt(e.target.value) || 0)}
+                      className="w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+                    />
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {!isEditable && (
+        <p className="text-xs text-zinc-400 mt-4">Rollout strategy is read-only for releases in {status} status.</p>
+      )}
+    </div>
+  );
+};
+
 const ReleaseSummary: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'summary' | 'history' | 'events' | 'env-diff' | 'json'>('summary');
-  const [revertSyncChecked, setRevertSyncChecked] = useState(true);
+  const [activeTab, setActiveTab] = useState<'summary' | 'strategy' | 'events' | 'env-diff' | 'json'>('summary');
   const [editOpen, setEditOpen] = useState(false);
   const [editForm, setEditForm] = useState({ description: '', change_log: '', priority: 0, mode: 'AUTO' });
 
   const { data: release, isLoading, error, refetch } = useRelease(id);
   const { data: events = [] } = useReleaseEvents(id);
+
+  // Revert sync checkbox defaults based on release.udf1
+  const [revertSyncChecked, setRevertSyncChecked] = useState(false);
+  useEffect(() => {
+    if (release) {
+      setRevertSyncChecked(release.udf1 === 'true');
+    }
+  }, [release?.udf1]);
 
   const approveMut = useApproveRelease();
   const discardMut = useDiscardRelease();
@@ -286,7 +571,6 @@ const ReleaseSummary: React.FC = () => {
     try { await fn(); } catch {}
   };
 
-  // Custom confirm for immediate revert with checkbox
   const doImmediateRevert = async () => {
     const ok = await confirmAction({
       title: 'Immediate Revert',
@@ -322,11 +606,19 @@ const ReleaseSummary: React.FC = () => {
 
   const tabs = [
     { key: 'summary' as const, label: 'Summary' },
-    { key: 'history' as const, label: 'Rollout History' },
+    { key: 'strategy' as const, label: 'Rollout Strategy' },
     { key: 'events' as const, label: 'Events' },
     { key: 'env-diff' as const, label: 'ENV Diff' },
     { key: 'json' as const, label: 'JSON Data' },
   ];
+
+  // Build extra info fields conditionally
+  const dockerImage = release.docker_image || release.release_context?.docker_image || '';
+  const category = release.tracker_type || '';
+  const releaseTag = release.release_tag || '';
+  const globalId = release.global_id || '';
+  const newService = release.new_service;
+  const cronjobSuspend = release.cronjob_suspend;
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12 max-w-6xl">
@@ -451,13 +743,16 @@ const ReleaseSummary: React.FC = () => {
         {/* Summary */}
         {activeTab === 'summary' && (
           <div className="p-6">
-            {/* Pod Health */}
-            <PodHealthSection releaseId={id!} />
+            {/* Pod Health + Deployment Status */}
+            <PodHealthSection releaseId={id!} release={release} />
+
+            {/* Rollout History (inline) */}
+            <RolloutHistoryInline history={release.rollout_history} />
 
             {/* Two-column info cards */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
               {/* Release Info */}
-              <div className="border border-zinc-100 rounded-xl p-5">
+              <div className="border border-zinc-200 rounded-lg p-4">
                 <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Release Info</h3>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-3">
                   <InfoField label="ID" value={release.id} mono />
@@ -466,18 +761,22 @@ const ReleaseSummary: React.FC = () => {
                   <InfoField label="Status" value={release.status} />
                   <InfoField label="Env" value={release.env} />
                   <InfoField label="Mode" value={release.mode} />
-                  <InfoField label="Tracker Type" value={release.tracker_type} />
+                  <InfoField label="Category" value={category} />
                   <InfoField label="Old Version" value={release.old_version} mono />
                   <InfoField label="New Version" value={release.new_version} mono />
-                  <InfoField label="Docker Image" value={release.release_context?.docker_image || release.docker_image || ''} mono />
+                  <InfoField label="Docker Image" value={dockerImage} mono />
                   <InfoField label="Cluster" value={release.release_context?.cluster || ''} />
                   <InfoField label="Approved" value={release.is_approved ? 'Yes' : 'No'} />
                   <InfoField label="Infra Approved" value={release.is_infra_approved ? 'Yes' : 'No'} />
+                  {releaseTag && <InfoField label="Release Tag" value={releaseTag} mono />}
+                  {globalId && <InfoField label="Global ID" value={globalId} mono />}
+                  {newService === 'Yes' && <InfoField label="New Service" value="Yes" />}
+                  {cronjobSuspend && <InfoField label="Cronjob Suspend" value="Yes" />}
                 </div>
               </div>
 
               {/* Timeline */}
-              <div className="border border-zinc-100 rounded-xl p-5">
+              <div className="border border-zinc-200 rounded-lg p-4">
                 <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Timeline</h3>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-3">
                   <InfoField label="Release Tag" value={release.release_tag} mono />
@@ -495,8 +794,11 @@ const ReleaseSummary: React.FC = () => {
               </div>
             </div>
 
+            {/* K8s Context */}
+            <K8sContextCard releaseContext={release.release_context} />
+
             {/* Details - full width */}
-            <div className="border border-zinc-100 rounded-xl p-5 mb-6">
+            <div className="border border-zinc-200 rounded-lg p-4 mb-6">
               <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Details</h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-3">
                 <InfoField label="Description" value={release.description} />
@@ -510,49 +812,14 @@ const ReleaseSummary: React.FC = () => {
           </div>
         )}
 
-        {/* History */}
-        {activeTab === 'history' && (
-          <div className="p-6">
-            {release.rollout_strategy?.length > 0 && (
-              <div className="mb-6">
-                <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-3">Rollout Strategy</h3>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm text-left border-collapse">
-                    <thead><tr className="bg-zinc-50 border-y border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
-                      <th className="py-2 px-4">Stage</th><th className="py-2 px-4">Rollout %</th><th className="py-2 px-4">Cooloff (mins)</th><th className="py-2 px-4">Pods</th>
-                    </tr></thead>
-                    <tbody>{release.rollout_strategy.map((stage, idx) => (
-                      <tr key={idx} className={cn('border-b border-zinc-100', idx % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
-                        <td className="py-2 px-4 font-medium">{idx + 1}</td><td className="py-2 px-4 font-mono">{stage.rollout}%</td><td className="py-2 px-4 font-mono">{stage.cooloff}</td><td className="py-2 px-4 font-mono">{stage.pods}</td>
-                      </tr>
-                    ))}</tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-            <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-3">Rollout History</h3>
-            {release.rollout_history?.length > 0 ? (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left border-collapse">
-                  <thead><tr className="bg-zinc-50 border-y border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
-                    <th className="py-2 px-3">Start Time</th><th className="py-2 px-3">Rollout %</th><th className="py-2 px-3">End Time</th><th className="py-2 px-3">Decision</th><th className="py-2 px-3">HS Decision</th><th className="py-2 px-3">Manual</th><th className="py-2 px-3">Cooloff</th><th className="py-2 px-3">Pods</th>
-                  </tr></thead>
-                  <tbody>{release.rollout_history.map((h: RolloutHistoryEvent, idx: number) => (
-                    <tr key={idx} className={cn('border-b border-zinc-100', idx % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
-                      <td className="py-2 px-3 font-mono text-xs">{formatDate(h.started_at)}</td>
-                      <td className="py-2 px-3 font-mono font-medium">{h.rollout}%</td>
-                      <td className="py-2 px-3 font-mono text-xs">{formatDate(h.completed_at)}</td>
-                      <td className="py-2 px-3"><Badge variant={h.last_decision === 'Continue' ? 'success' : h.last_decision === 'Abort' ? 'danger' : h.last_decision === 'Wait' ? 'warning' : 'default'} size="sm">{h.last_decision || '-'}</Badge></td>
-                      <td className="py-2 px-3"><Badge variant={h.last_decision_hs === 'Continue' ? 'success' : h.last_decision_hs === 'Abort' ? 'danger' : h.last_decision_hs === 'Wait' ? 'warning' : 'default'} size="sm">{h.last_decision_hs || '-'}</Badge></td>
-                      <td className="py-2 px-3 text-sm">{h.manual_override ? 'Yes' : 'No'}</td>
-                      <td className="py-2 px-3 font-mono">{h.cooloff}</td>
-                      <td className="py-2 px-3 font-mono">{h.pods}</td>
-                    </tr>
-                  ))}</tbody>
-                </table>
-              </div>
-            ) : <p className="text-sm text-zinc-400">No rollout history yet.</p>}
-          </div>
+        {/* Rollout Strategy (editable) */}
+        {activeTab === 'strategy' && (
+          <RolloutStrategyTab
+            releaseId={id!}
+            strategy={release.rollout_strategy}
+            historyLength={release.rollout_history?.length || 0}
+            status={release.status}
+          />
         )}
 
         {/* Events */}
