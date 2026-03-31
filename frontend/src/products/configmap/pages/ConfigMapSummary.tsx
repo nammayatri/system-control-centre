@@ -98,30 +98,30 @@ const ConfigMapSummary: React.FC = () => {
         </div>
         <div className="flex items-center gap-2">
           {data.status === 'CREATED' && data.is_approved === 0 && (
-            <PermissionGate product="config-manager" permission="CONFIG_APPROVE">
+            <PermissionGate product="autopilot" permission="CONFIG_APPROVE">
               <Button size="sm" variant="success" onClick={() => handleAction('Approve')} loading={actionMut.isPending}>Approve</Button>
             </PermissionGate>
           )}
           {data.status === 'INPROGRESS' && (
-            <PermissionGate product="config-manager" permission="CONFIG_EDIT">
+            <PermissionGate product="autopilot" permission="CONFIG_EDIT">
               <Button size="sm" variant="outline" onClick={() => handleAction('Pause')}>Pause</Button>
               <Button size="sm" variant="outline" onClick={() => handleAction('Fast Forward')}>Fast Forward</Button>
               <Button size="sm" variant="danger" onClick={() => handleAction('Abort')}>Abort</Button>
             </PermissionGate>
           )}
           {data.status === 'PAUSED' && (
-            <PermissionGate product="config-manager" permission="CONFIG_EDIT">
+            <PermissionGate product="autopilot" permission="CONFIG_EDIT">
               <Button size="sm" variant="success" onClick={() => handleAction('Resume')}>Continue</Button>
               <Button size="sm" variant="danger" onClick={() => handleAction('Abort')}>Abort</Button>
             </PermissionGate>
           )}
           {data.status === 'CREATED' && data.is_approved !== 0 && (
-            <PermissionGate product="config-manager" permission="CONFIG_DISCARD">
+            <PermissionGate product="autopilot" permission="CONFIG_DISCARD">
               <Button size="sm" variant="ghost" onClick={() => handleAction('Discard')}>Discard</Button>
             </PermissionGate>
           )}
           {['COMPLETED'].includes(data.status) && (
-            <PermissionGate product="config-manager" permission="CONFIG_REVERT">
+            <PermissionGate product="autopilot" permission="CONFIG_REVERT">
               <Button size="sm" variant="outline" onClick={() => handleAction('Revert')}><RefreshCw className="w-3.5 h-3.5" /> Revert</Button>
             </PermissionGate>
           )}

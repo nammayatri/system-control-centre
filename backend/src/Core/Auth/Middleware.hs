@@ -46,7 +46,7 @@ findRoutePermission method pathSegs =
             ("POST", ["releases", _, "rollback"]) -> Just $ mkPP "RELEASE_REVERT" "autopilot"
             ("POST", ["releases", _, "revert"]) -> Just $ mkPP "RELEASE_REVERT" "autopilot"
             ("POST", ["releases", _, "discard"]) -> Just $ mkPP "RELEASE_DISCARD" "autopilot"
-            ("POST", ["releases", _, "delete"]) -> Just $ mkPP "RELEASE_DISCARD" "autopilot"
+            ("POST", ["releases", _, "delete"]) -> Just $ mkPP "RELEASE_DELETE" "autopilot"
             ("POST", ["releases", _, "update"]) -> Just $ mkPP "RELEASE_UPDATE" "autopilot"
             ("POST", ["releases", _, "trigger"]) -> Just $ mkPP "RELEASE_CREATE" "autopilot"
             -- Diff, pods, immediate revert, restart, fast-forward

@@ -233,7 +233,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
 
         <div className="flex justify-end gap-3 pt-2">
           <Button type="button" variant="secondary" onClick={() => navigate('/configmap')}>Cancel</Button>
-          <PermissionGate product="config-manager" permission="CONFIG_CREATE">
+          <PermissionGate product="autopilot" permission="CONFIG_CREATE">
             <Button type="submit" loading={createMut.isPending}>{createMut.isPending ? 'Saving...' : isUpdate ? 'Update' : 'Create ConfigMap'}</Button>
           </PermissionGate>
         </div>

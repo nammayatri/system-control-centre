@@ -274,7 +274,7 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     product: r.product,
     status: toLegacyStatus(r.status),
     env: r.env,
-    tracker_type: r.trackerType || 'Service',
+    tracker_type: (r as any).category || r.trackerType || 'BackendService',
     mode: (r.mode || 'AUTO').toUpperCase(),
     release_manager: r.createdBy || '',
     is_approved: r.isApproved ? 1 : 0,
@@ -298,13 +298,13 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     udf2: r.udf2 || '',
     udf3: r.udf3 || '',
 
-    new_version: r.releaseContext?.newVersion || '',
-    old_version: r.releaseContext?.oldVersion || '',
-    docker_image: r.releaseContext?.dockerImage || '',
+    new_version: (r as any).newVersion || r.releaseContext?.newVersion || '',
+    old_version: (r as any).oldVersion || r.releaseContext?.oldVersion || '',
+    docker_image: (r as any).metadata?.['docker-image'] || r.releaseContext?.dockerImage || '',
     discription: '',
 
     release_context: {
-        cluster: r.releaseContext?.cluster || '',
+        cluster: r.releaseContext?.cluster || (r as any).metadata?.cluster || 'default',
         docker_image: r.releaseContext?.dockerImage || '',
         matches: (r.releaseContext?.matches || []).map(m => ({
             match: m.matchHost || '',
@@ -478,7 +478,7 @@ export async function updateConfigMap(id: string, updates: Record<string, any>):
 export async function createRelease(isNewService: boolean, payload: any): Promise<any> {
     const trackerType =
         payload.trackerType ||
-        (payload.serviceType === 'SCHEDULER' ? 'Scheduler' : 'Service');
+        (payload.serviceType === 'SCHEDULER' ? 'BackendScheduler' : 'BackendService');
     const requestBody = {
         product: payload.product,
         service: Array.isArray(payload.service) ? payload.service[0] : payload.service,
@@ -564,12 +564,12 @@ export async function deleteRelease(releaseId: string): Promise<any> {
 }
 
 export async function restartRelease(releaseId: string): Promise<any> {
-    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/restart`);
+    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/restart`, {});
     return data;
 }
 
 export async function fastForwardRelease(releaseId: string): Promise<any> {
-    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/fast-forward`);
+    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/fast-forward`, {});
     return data;
 }
 
@@ -596,7 +596,7 @@ export async function fetchReleaseDiff(releaseId: string): Promise<ReleaseDiff> 
 export interface PodInfo {
     name: string;
     status: string;
-    ready: string;
+    ready: boolean;
     restarts: number;
     age: string;
     version: string;

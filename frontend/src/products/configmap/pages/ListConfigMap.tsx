@@ -154,7 +154,7 @@ const ListConfigMap: React.FC = () => {
 
           <div className="flex-1" />
           <button onClick={() => refetch()} className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150"><RefreshCw className="h-4 w-4" /></button>
-          <PermissionGate product="config-manager" permission="CONFIG_CREATE">
+          <PermissionGate product="autopilot" permission="CONFIG_CREATE">
             <Link to="/configmap/new"><Button size="sm"><Plus className="w-4 h-4" /> Create ConfigMap</Button></Link>
           </PermissionGate>
         </div>

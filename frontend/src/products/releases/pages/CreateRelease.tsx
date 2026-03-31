@@ -169,7 +169,7 @@ const CreateRelease: React.FC = () => {
     e.preventDefault();
     setError('');
     const selectedProductConfig = productConfigs.find((c: ProductConfig) => c.product === formData.product);
-    const trackerType = selectedProductConfig?.product_type === 'SCHEDULER' ? 'Scheduler' : 'Service';
+    const trackerType = selectedProductConfig?.product_type === 'SCHEDULER' ? 'BackendScheduler' : 'BackendService';
 
     const payload = {
       product: formData.product, service: [formData.service], env: formData.env,
