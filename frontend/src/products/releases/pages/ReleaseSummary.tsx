@@ -526,7 +526,7 @@ const RolloutStrategyTab: React.FC<{
 const ReleaseSummary: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'summary' | 'strategy' | 'events' | 'env-diff' | 'json'>('summary');
+  const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'env-diff' | 'json'>('summary');
   const [editOpen, setEditOpen] = useState(false);
   const [editForm, setEditForm] = useState({ description: '', change_log: '', priority: 0, mode: 'AUTO' });
 
@@ -606,7 +606,6 @@ const ReleaseSummary: React.FC = () => {
 
   const tabs = [
     { key: 'summary' as const, label: 'Summary' },
-    { key: 'strategy' as const, label: 'Rollout Strategy' },
     { key: 'events' as const, label: 'Events' },
     { key: 'env-diff' as const, label: 'ENV Diff' },
     { key: 'json' as const, label: 'JSON Data' },
@@ -749,6 +748,14 @@ const ReleaseSummary: React.FC = () => {
             {/* Rollout History (inline) */}
             <RolloutHistoryInline history={release.rollout_history} />
 
+            {/* Rollout Strategy (inline editable) */}
+            <RolloutStrategyTab
+              releaseId={id!}
+              strategy={release.rollout_strategy}
+              historyLength={release.rollout_history?.length || 0}
+              status={s}
+            />
+
             {/* Two-column info cards */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
               {/* Release Info */}
@@ -810,16 +817,6 @@ const ReleaseSummary: React.FC = () => {
             {/* Resources */}
             <ResourcesSection product={release.product} service={release.service} />
           </div>
-        )}
-
-        {/* Rollout Strategy (editable) */}
-        {activeTab === 'strategy' && (
-          <RolloutStrategyTab
-            releaseId={id!}
-            strategy={release.rollout_strategy}
-            historyLength={release.rollout_history?.length || 0}
-            status={release.status}
-          />
         )}
 
         {/* Events */}
