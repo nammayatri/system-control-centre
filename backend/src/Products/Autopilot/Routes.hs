@@ -1413,10 +1413,12 @@ parseSinglePod (Object podObj) =
         ageVal = case getObj' "metadata" podObj >>= getTxt' "creationTimestamp" of
             Just ts -> ts
             Nothing -> ""
-        -- Get version from container image tag
-        versionVal = case getObj' "spec" podObj >>= getArr' "containers" of
-            Just (c : _) -> extractImageTag c
-            _ -> ""
+        -- Get version from pod label (preferred) or container image tag (fallback)
+        versionVal = case getObj' "metadata" podObj >>= getObj' "labels" >>= getTxt' "version" of
+            Just v -> v
+            Nothing -> case getObj' "spec" podObj >>= getArr' "containers" of
+                Just (c : _) -> extractImageTag c
+                _ -> ""
      in object
             [ "name" .= nameVal
             , "status" .= phaseVal

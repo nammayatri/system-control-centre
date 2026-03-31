@@ -378,7 +378,7 @@ const K8sContextCard: React.FC<{ releaseContext: any }> = ({ releaseContext }) =
   );
 };
 
-/** Editable Rollout Strategy Tab */
+/** Editable Rollout Strategy (inline in Summary) */
 const RolloutStrategyTab: React.FC<{
   releaseId: string;
   strategy: RolloutStrategyEvent[];
@@ -386,16 +386,17 @@ const RolloutStrategyTab: React.FC<{
   status: string;
 }> = ({ releaseId, strategy, historyLength, status }) => {
   const [stages, setStages] = useState<RolloutStrategyEvent[]>([]);
+  const [isEditing, setIsEditing] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
   const updateMut = useUpdateTracker();
 
-  // Initialize stages from strategy prop
   useEffect(() => {
     setStages(strategy.map(s => ({ ...s })));
     setHasChanges(false);
+    setIsEditing(false);
   }, [strategy]);
 
-  const isEditable = status === 'CREATED' || status === 'INPROGRESS' || status === 'PAUSED';
+  const canEdit = status === 'CREATED' || status === 'INPROGRESS' || status === 'PAUSED';
 
   const handleStageChange = (idx: number, field: keyof RolloutStrategyEvent, value: number) => {
     setStages(prev => {
@@ -403,6 +404,20 @@ const RolloutStrategyTab: React.FC<{
       next[idx] = { ...next[idx], [field]: value };
       return next;
     });
+    setHasChanges(true);
+  };
+
+  const addStage = () => {
+    const lastStage = stages[stages.length - 1];
+    setStages(prev => [...prev, { rollout: Math.min((lastStage?.rollout || 0) + 25, 100), cooloff: lastStage?.cooloff || 60, pods: lastStage?.pods || 1 }]);
+    setHasChanges(true);
+  };
+
+  const removeStage = (idx: number) => {
+    if (idx < historyLength) return; // can't remove completed stages
+    const futureStages = stages.filter((_, i) => i >= historyLength);
+    if (futureStages.length <= 1) return; // keep at least 1 future stage
+    setStages(prev => prev.filter((_, i) => i !== idx));
     setHasChanges(true);
   };
 
@@ -419,105 +434,114 @@ const RolloutStrategyTab: React.FC<{
         },
       });
       setHasChanges(false);
-    } catch {}
+      setIsEditing(false);
+      toast.success('Rollout strategy updated');
+    } catch { toast.error('Failed to update strategy'); }
   };
 
-  if (!stages.length) {
-    return (
-      <div className="p-6">
-        <p className="text-sm text-zinc-400">No rollout strategy defined.</p>
-      </div>
-    );
-  }
+  const handleCancel = () => {
+    setStages(strategy.map(s => ({ ...s })));
+    setHasChanges(false);
+    setIsEditing(false);
+  };
+
+  if (!stages.length) return null;
 
   return (
-    <div className="p-6">
+    <div className="border border-zinc-200 rounded-lg p-4 mb-6">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">Rollout Strategy</h3>
-        {isEditable && hasChanges && (
-          <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
-            <Button size="sm" loading={updateMut.isPending} onClick={handleSave}>
-              <Save className="w-3.5 h-3.5" /> Save Changes
-            </Button>
-          </PermissionGate>
-        )}
+        <div className="flex items-center gap-2">
+          {canEdit && !isEditing && (
+            <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+              <Button size="sm" variant="outline" onClick={() => setIsEditing(true)}>
+                <Pencil className="w-3.5 h-3.5" /> Update Stages
+              </Button>
+            </PermissionGate>
+          )}
+          {isEditing && hasChanges && (
+            <>
+              <Button size="sm" variant="outline" onClick={handleCancel}>Cancel</Button>
+              <Button size="sm" loading={updateMut.isPending} onClick={handleSave}>
+                <Save className="w-3.5 h-3.5" /> Save
+              </Button>
+            </>
+          )}
+          {isEditing && !hasChanges && (
+            <Button size="sm" variant="outline" onClick={handleCancel}>Done</Button>
+          )}
+        </div>
       </div>
 
-      <div className="space-y-3">
+      <div className="space-y-2">
         {stages.map((stage, idx) => {
           const isLocked = idx < historyLength;
+          const canRemove = isEditing && !isLocked && stages.filter((_, i) => i >= historyLength).length > 1;
 
           return (
             <div
               key={idx}
               className={cn(
-                'border rounded-lg p-4 transition-opacity',
-                isLocked
-                  ? 'border-zinc-200 bg-zinc-50 opacity-50'
-                  : 'border-zinc-200 bg-white'
+                'border rounded-lg p-3 flex items-center gap-4',
+                isLocked ? 'border-zinc-100 bg-zinc-50 opacity-60' : 'border-zinc-200 bg-white'
               )}
             >
-              <div className="flex items-center gap-3 mb-3">
-                <span className="text-sm font-semibold text-zinc-700">Stage {idx + 1}</span>
-                {isLocked && (
-                  <span className="inline-flex items-center gap-1 text-[10px] font-medium text-zinc-400 uppercase tracking-wider">
-                    <Lock className="w-3 h-3" /> Completed
-                  </span>
-                )}
+              <div className="flex items-center gap-2 w-20 shrink-0">
+                <span className="text-xs font-bold text-zinc-500">Stage {idx + 1}</span>
+                {isLocked && <Lock className="w-3 h-3 text-zinc-400" />}
               </div>
 
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1.5 block">Rollout %</label>
-                  {isLocked || !isEditable ? (
-                    <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm font-mono">{stage.rollout}%</div>
-                  ) : (
-                    <input
-                      type="number"
-                      min={0}
-                      max={100}
-                      value={stage.rollout}
+              <div className="flex items-center gap-4 flex-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-zinc-400 uppercase">Rollout</span>
+                  {isEditing && !isLocked ? (
+                    <input type="number" min={0} max={100} value={stage.rollout}
                       onChange={(e) => handleStageChange(idx, 'rollout', parseInt(e.target.value) || 0)}
-                      className="w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
-                    />
+                      className="w-16 h-7 border border-zinc-300 rounded px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-zinc-400" />
+                  ) : (
+                    <span className="text-sm font-mono font-medium">{stage.rollout}%</span>
                   )}
                 </div>
-                <div>
-                  <label className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1.5 block">Cooloff (seconds)</label>
-                  {isLocked || !isEditable ? (
-                    <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm font-mono">{stage.cooloff}</div>
-                  ) : (
-                    <input
-                      type="number"
-                      min={0}
-                      value={stage.cooloff}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-zinc-400 uppercase">Cooloff</span>
+                  {isEditing && !isLocked ? (
+                    <input type="number" min={0} value={stage.cooloff}
                       onChange={(e) => handleStageChange(idx, 'cooloff', parseInt(e.target.value) || 0)}
-                      className="w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
-                    />
+                      className="w-16 h-7 border border-zinc-300 rounded px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-zinc-400" />
+                  ) : (
+                    <span className="text-sm font-mono">{stage.cooloff}s</span>
                   )}
                 </div>
-                <div>
-                  <label className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1.5 block">Pods</label>
-                  {isLocked || !isEditable ? (
-                    <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm font-mono">{stage.pods}</div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-zinc-400 uppercase">Pods</span>
+                  {isEditing && !isLocked ? (
+                    <input type="number" min={1} value={stage.pods}
+                      onChange={(e) => handleStageChange(idx, 'pods', parseInt(e.target.value) || 1)}
+                      className="w-14 h-7 border border-zinc-300 rounded px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-zinc-400" />
                   ) : (
-                    <input
-                      type="number"
-                      min={0}
-                      value={stage.pods}
-                      onChange={(e) => handleStageChange(idx, 'pods', parseInt(e.target.value) || 0)}
-                      className="w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
-                    />
+                    <span className="text-sm font-mono">{stage.pods}</span>
                   )}
                 </div>
               </div>
+
+              {canRemove && (
+                <button onClick={() => removeStage(idx)} className="p-1 rounded text-red-400 hover:text-red-600 hover:bg-red-50 cursor-pointer">
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
           );
         })}
       </div>
 
-      {!isEditable && (
-        <p className="text-xs text-zinc-400 mt-4">Rollout strategy is read-only for releases in {status} status.</p>
+      {isEditing && (
+        <button onClick={addStage} className="mt-2 w-full border border-dashed border-zinc-300 rounded-lg py-2 text-xs text-zinc-500 hover:bg-zinc-50 hover:border-zinc-400 cursor-pointer transition-colors">
+          + Add Stage
+        </button>
+      )}
+
+      {!canEdit && (
+        <p className="text-xs text-zinc-400 mt-3">Strategy is read-only for {status} releases.</p>
       )}
     </div>
   );
