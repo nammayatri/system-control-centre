@@ -634,16 +634,19 @@ discardReleaseH rid DiscardReleaseReq{..} = do
 deleteReleaseH :: Text -> Flow APIResponse
 deleteReleaseH rid = do
     db <- getDBEnv
-    -- Fetch tracker before deleting so we can notify
     mTracker <- liftIO $ findReleaseTracker db rid
-    -- Delete events first (FK constraint)
-    liftIO $ deleteReleaseEvents db rid
-    -- Delete the release
-    liftIO $ deleteReleaseTracker db rid
     case mTracker of
-        Just (tracker, _) -> liftIO $ notifyReleaseDeleted db tracker
-        Nothing -> pure ()
-    pure $ APIResponse "SUCCESS" ("Release deleted: " <> rid)
+        Nothing -> pure $ APIResponse "ERROR" "Release not found"
+        Just (tracker, _) -> do
+            -- Block deletion of active releases (InProgress, Aborting, Reverting, Paused, Restarting)
+            let activeStatuses = [InProgress, Aborting, Reverting, Paused, Restarting]
+            if NT.status tracker `elem` activeStatuses
+                then pure $ APIResponse "ERROR" ("Cannot delete release in " <> T.pack (show (NT.status tracker)) <> " status. Abort or complete it first.")
+                else do
+                    liftIO $ deleteReleaseEvents db rid
+                    liftIO $ deleteReleaseTracker db rid
+                    liftIO $ notifyReleaseDeleted db tracker
+                    pure $ APIResponse "SUCCESS" ("Release deleted: " <> rid)
 
 updateTrackerH :: Text -> K8sUpdateTrackerReq -> Flow APIResponse
 updateTrackerH rid req = do
