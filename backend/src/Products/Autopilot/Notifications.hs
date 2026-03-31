@@ -178,9 +178,12 @@ getThreadTs tracker = udf3 tracker
 saveThreadTs :: DBEnv -> Text -> Text -> IO ()
 saveThreadTs db rid ts = RTQ.updateReleaseTrackerField db rid "udf3" ts
 
--- | Header line for release: PRODUCT | SERVICE | ENV Release
-releaseHeader :: ReleaseTracker -> Text
-releaseHeader t = "*" <> product t <> "* | *" <> service t <> "* | " <> env t <> " Release"
+-- | Header line for release: clickable link → PRODUCT | SERVICE | ENV Release
+releaseHeaderWithLink :: ReleaseTracker -> IO Text
+releaseHeaderWithLink t = do
+    base <- getDashboardUrl
+    let url = base <> "/releases/_/" <> releaseId t
+    pure $ "<" <> url <> "|" <> product t <> " | " <> service t <> " | " <> env t <> " Release>"
 
 -- | Version line: PRODUCT | oldVer -> newVer | manager | newVer
 releaseVersionLine :: ReleaseTracker -> Text
@@ -193,11 +196,11 @@ releaseVersionLine t =
 notifyReleaseCreated :: DBEnv -> ReleaseTracker -> IO ()
 notifyReleaseCreated db tracker = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
-        link <- releaseLink (releaseId tracker) "View Release"
+        header <- releaseHeaderWithLink tracker
         let blocks =
-                [ sectionBlock (releaseHeader tracker)
+                [ sectionBlock header
                 , sectionBlock (releaseVersionLine tracker)
-                , contextBlock ["`CREATED`", link]
+                , contextBlock ["`CREATED`"]
                 ]
             fallback = product tracker <> " | " <> service tracker <> " | CREATED"
         mTs <- sendSlackRich channel fallback colorCreated blocks Nothing
