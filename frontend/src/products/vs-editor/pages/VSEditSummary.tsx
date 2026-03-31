@@ -93,7 +93,7 @@ const VSEditSummary: React.FC = () => {
               <Button size="sm" variant="success" loading={applyMut.isPending} onClick={() => doAction('Apply', () => applyMut.mutateAsync())}>
                 <Play className="w-3.5 h-3.5" /> Apply
               </Button>
-              <Button size="sm" variant="danger" loading={revertMut.isPending} onClick={() => doAction('Revert', () => revertMut.mutateAsync(), true)}>
+              <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={() => doAction('Revert', () => revertMut.mutateAsync(), true)}>
                 <RotateCcw className="w-3.5 h-3.5" /> Revert
               </Button>
               <Button size="sm" variant="outline" loading={unlockMut.isPending} onClick={() => doAction('Unlock', () => unlockMut.mutateAsync())}>

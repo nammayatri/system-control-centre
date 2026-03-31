@@ -292,7 +292,7 @@ const ListRelease: React.FC = () => {
                           'border-b border-zinc-100 hover:bg-zinc-100 cursor-pointer transition-colors duration-150',
                           index % 2 === 1 ? 'bg-zinc-50' : 'bg-white'
                         )}
-                        onClick={() => navigate(`/releases/${release.release_context?.cluster || 'default'}/${release.id}`)}
+                        onClick={() => navigate(`/releases/${release.id}`)}
                       >
                         <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + index + 1}</td>
                         <td className="py-3 px-4 font-medium text-zinc-800">{release.service}</td>
@@ -318,7 +318,7 @@ const ListRelease: React.FC = () => {
                         <td className="py-3 px-4 text-center">
                           <SimpleTooltip content="Clone release">
                             <button
-                              onClick={(e) => { e.stopPropagation(); navigate(`/releases/${release.release_context?.cluster || 'default'}/${release.id}/clone`); }}
+                              onClick={(e) => { e.stopPropagation(); navigate(`/releases/${release.id}/clone`); }}
                               className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
                             >
                               <Copy className="w-3.5 h-3.5" />

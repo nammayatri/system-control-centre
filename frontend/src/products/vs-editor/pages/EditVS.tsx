@@ -148,7 +148,7 @@ const EditVS: React.FC = () => {
             <div className="flex items-center gap-2">
               {!isLocked && (
                 <PermissionGate product="autopilot" permission="RELEASE_CREATE">
-                  <Button size="sm" variant="outline" loading={lockMut.isPending} onClick={handleLock}>
+                  <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" loading={lockMut.isPending} onClick={handleLock}>
                     <Lock className="w-3.5 h-3.5" /> Lock & Edit
                   </Button>
                 </PermissionGate>
@@ -159,7 +159,7 @@ const EditVS: React.FC = () => {
                     <Button size="sm" variant="success" loading={applyMut.isPending} onClick={handleApply}>
                       <Play className="w-3.5 h-3.5" /> Apply
                     </Button>
-                    <Button size="sm" variant="danger" loading={revertMut.isPending} onClick={handleRevert}>
+                    <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={handleRevert}>
                       <RotateCcw className="w-3.5 h-3.5" /> Revert
                     </Button>
                   </PermissionGate>

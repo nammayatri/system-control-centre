@@ -63,12 +63,12 @@ const releasesProduct: ProductDefinition = {
     // Releases
     { path: '/releases', component: ListRelease },
     { path: '/releases/new', component: CreateRelease, permission: 'RELEASE_CREATE' },
-    { path: '/releases/:clusterId/:id', component: ReleaseSummary },
-    { path: '/releases/:clusterId/:id/clone', component: CreateRelease, permission: 'RELEASE_CREATE' },
+    { path: '/releases/:id', component: ReleaseSummary },
+    { path: '/releases/:id/clone', component: CreateRelease, permission: 'RELEASE_CREATE' },
     // ConfigMap (under same product)
     { path: '/configmap', component: ListConfigMap },
     { path: '/configmap/new', component: CreateConfigMap, permission: 'RELEASE_CREATE' },
-    { path: '/configmap/:clusterId', component: ConfigMapSummary },
+    { path: '/configmap/:id', component: ConfigMapSummary },
     // Product Config
     { path: '/product-config', component: ProductConfigs },
     // Service Config

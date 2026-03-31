@@ -8,7 +8,7 @@ import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
-import { RefreshCw, Copy } from 'lucide-react';
+import { RefreshCw, Copy, Check, Pause, Play, X, Square, RotateCcw, RotateCw, FastForward } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
 
@@ -31,12 +31,12 @@ const formatTs = (ts: string) => { if (!ts) return '-'; const d = new Date(ts); 
 const tryFormatJson = (data: string): string => { try { return JSON.stringify(JSON.parse(data), null, 2); } catch { return data; } };
 
 const ConfigMapSummary: React.FC = () => {
-  const { clusterId } = useParams<{ clusterId: string }>();
+  const { id: rawId } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('Summary');
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
 
-  const id = clusterId?.split('&&')[1] || '';
+  const id = rawId?.includes('&&') ? rawId.split('&&')[1] : rawId || '';
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['configmap-detail', id],
@@ -99,30 +99,30 @@ const ConfigMapSummary: React.FC = () => {
         <div className="flex items-center gap-2">
           {data.status === 'CREATED' && data.is_approved === 0 && (
             <PermissionGate product="autopilot" permission="CONFIG_APPROVE">
-              <Button size="sm" variant="success" onClick={() => handleAction('Approve')} loading={actionMut.isPending}>Approve</Button>
+              <Button size="sm" variant="success" onClick={() => handleAction('Approve')} loading={actionMut.isPending}><Check className="w-3.5 h-3.5" /> Approve</Button>
             </PermissionGate>
           )}
           {data.status === 'INPROGRESS' && (
             <PermissionGate product="autopilot" permission="CONFIG_EDIT">
-              <Button size="sm" variant="outline" onClick={() => handleAction('Pause')}>Pause</Button>
-              <Button size="sm" variant="outline" onClick={() => handleAction('Fast Forward')}>Fast Forward</Button>
-              <Button size="sm" variant="danger" onClick={() => handleAction('Abort')}>Abort</Button>
+              <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" onClick={() => handleAction('Pause')} loading={actionMut.isPending}><Pause className="w-3.5 h-3.5" /> Pause</Button>
+              <Button size="sm" variant="outline" className="border-amber-300 bg-amber-600 text-white hover:bg-amber-700" onClick={() => handleAction('Fast Forward')} loading={actionMut.isPending}><FastForward className="w-3.5 h-3.5" /> Fast Forward</Button>
+              <Button size="sm" variant="danger" onClick={() => handleAction('Abort')} loading={actionMut.isPending}><Square className="w-3.5 h-3.5" /> Abort</Button>
             </PermissionGate>
           )}
           {data.status === 'PAUSED' && (
             <PermissionGate product="autopilot" permission="CONFIG_EDIT">
-              <Button size="sm" variant="success" onClick={() => handleAction('Resume')}>Continue</Button>
-              <Button size="sm" variant="danger" onClick={() => handleAction('Abort')}>Abort</Button>
+              <Button size="sm" className="bg-blue-600 text-white hover:bg-blue-700" onClick={() => handleAction('Resume')} loading={actionMut.isPending}><Play className="w-3.5 h-3.5" /> Resume</Button>
+              <Button size="sm" variant="danger" onClick={() => handleAction('Abort')} loading={actionMut.isPending}><Square className="w-3.5 h-3.5" /> Abort</Button>
             </PermissionGate>
           )}
           {data.status === 'CREATED' && data.is_approved !== 0 && (
             <PermissionGate product="autopilot" permission="CONFIG_DISCARD">
-              <Button size="sm" variant="ghost" onClick={() => handleAction('Discard')}>Discard</Button>
+              <Button size="sm" variant="outline" className="border-red-300 text-red-700 hover:bg-red-50" onClick={() => handleAction('Discard')} loading={actionMut.isPending}><X className="w-3.5 h-3.5" /> Discard</Button>
             </PermissionGate>
           )}
           {['COMPLETED'].includes(data.status) && (
             <PermissionGate product="autopilot" permission="CONFIG_REVERT">
-              <Button size="sm" variant="outline" onClick={() => handleAction('Revert')}><RefreshCw className="w-3.5 h-3.5" /> Revert</Button>
+              <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" onClick={() => handleAction('Revert')} loading={actionMut.isPending}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
             </PermissionGate>
           )}
           <SimpleTooltip content="Clone">

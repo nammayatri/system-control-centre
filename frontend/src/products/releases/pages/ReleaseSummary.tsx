@@ -230,7 +230,7 @@ const ResourcesSection: React.FC<{ product: string; service: string }> = ({ prod
 };
 
 const ReleaseSummary: React.FC = () => {
-  const { id, clusterId } = useParams<{ clusterId: string; id: string }>();
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<'summary' | 'history' | 'events' | 'env-diff'>('summary');
   const [revertSyncChecked, setRevertSyncChecked] = useState(true);
@@ -310,7 +310,7 @@ const ReleaseSummary: React.FC = () => {
       <div className="flex items-center text-sm text-zinc-500 font-medium mb-4">
         <Link to="/releases" className="hover:text-zinc-700 transition-colors duration-150">Releases</Link>
         <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300" />
-        <span className="text-zinc-600">{release.release_context?.cluster || clusterId}</span>
+        <span className="text-zinc-600">{release.release_context?.cluster || release.env || ''}</span>
         <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300" />
         <span className="font-mono text-xs text-zinc-800 truncate max-w-[200px]">{release.release_tag || id}</span>
       </div>
@@ -331,30 +331,30 @@ const ReleaseSummary: React.FC = () => {
           )}
           {s === 'CREATED' && (
             <PermissionGate product="autopilot" permission="RELEASE_DISCARD">
-              <Button size="sm" variant="ghost" loading={discardMut.isPending} onClick={() => doAction('discard', () => discardMut.mutateAsync({ releaseId: id! }))}><X className="w-3.5 h-3.5" /> Discard</Button>
+              <Button size="sm" variant="outline" className="border-red-300 text-red-700 hover:bg-red-50" loading={discardMut.isPending} onClick={() => doAction('discard', () => discardMut.mutateAsync({ releaseId: id! }), true)}><X className="w-3.5 h-3.5" /> Discard</Button>
             </PermissionGate>
           )}
           {(s === 'INPROGRESS') && (
             <>
               <PermissionGate product="autopilot" permission="RELEASE_PAUSE">
-                <Button size="sm" variant="outline" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
-                <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!))}><Square className="w-3.5 h-3.5" /> Abort</Button>
+                <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
+                <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
               </PermissionGate>
               <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
-                <Button size="sm" variant="outline" loading={fastForwardMut.isPending} onClick={() => doAction('fast forward (skip current cooloff and advance to next rollout step)', () => fastForwardMut.mutateAsync(id!))}><FastForward className="w-3.5 h-3.5" /> Fast Forward</Button>
+                <Button size="sm" variant="outline" className="border-amber-300 bg-amber-600 text-white hover:bg-amber-700" loading={fastForwardMut.isPending} onClick={() => doAction('fast forward (skip current cooloff and advance to next rollout step)', () => fastForwardMut.mutateAsync(id!))}><FastForward className="w-3.5 h-3.5" /> Fast Forward</Button>
               </PermissionGate>
             </>
           )}
           {s === 'PAUSED' && (
             <PermissionGate product="autopilot" permission="RELEASE_RESUME">
-              <Button size="sm" variant="success" loading={resumeMut.isPending} onClick={() => doAction('resume', () => resumeMut.mutateAsync(id!))}><Play className="w-3.5 h-3.5" /> Resume</Button>
-              <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!))}><Square className="w-3.5 h-3.5" /> Abort</Button>
+              <Button size="sm" className="bg-blue-600 text-white hover:bg-blue-700" loading={resumeMut.isPending} onClick={() => doAction('resume', () => resumeMut.mutateAsync(id!))}><Play className="w-3.5 h-3.5" /> Resume</Button>
+              <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
             </PermissionGate>
           )}
           {s === 'COMPLETED' && (
             <>
               <PermissionGate product="autopilot" permission="RELEASE_REVERT">
-                <Button size="sm" variant="outline" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: 'admin' }))}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
+                <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: 'admin' }), true)}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
               </PermissionGate>
               <PermissionGate product="autopilot" permission="RELEASE_REVERT">
                 <div className="flex items-center gap-2">
@@ -369,7 +369,7 @@ const ReleaseSummary: React.FC = () => {
           )}
           {(s === 'ABORTED' || s === 'USER_ABORTED' || s === 'GCLT_ABORTED' || s === 'REVERTED') && (
             <PermissionGate product="autopilot" permission="RELEASE_CREATE">
-              <Button size="sm" variant="outline" loading={restartMut.isPending} onClick={() => doAction('restart', () => restartMut.mutateAsync(id!))}><RotateCw className="w-3.5 h-3.5" /> Restart</Button>
+              <Button size="sm" variant="outline" className="border-blue-300 text-blue-700 hover:bg-blue-50" loading={restartMut.isPending} onClick={() => doAction('restart', () => restartMut.mutateAsync(id!))}><RotateCw className="w-3.5 h-3.5" /> Restart</Button>
             </PermissionGate>
           )}
 
@@ -377,7 +377,7 @@ const ReleaseSummary: React.FC = () => {
           <PermissionGate product="autopilot" permission="RELEASE_DELETE">
             <SimpleTooltip content="Delete"><Button size="icon" variant="ghost" className="text-red-500 hover:bg-red-50" loading={deleteMut.isPending} onClick={() => doAction('delete this release', async () => { await deleteMut.mutateAsync(id!); navigate('/releases'); }, true)}><Trash2 className="w-4 h-4" /></Button></SimpleTooltip>
           </PermissionGate>
-          <SimpleTooltip content="Clone"><Button size="icon" variant="ghost" onClick={() => navigate(`/releases/${clusterId}/${id}/clone`)}><Copy className="w-4 h-4" /></Button></SimpleTooltip>
+          <SimpleTooltip content="Clone"><Button size="icon" variant="ghost" onClick={() => navigate(`/releases/${id}/clone`)}><Copy className="w-4 h-4" /></Button></SimpleTooltip>
           <SimpleTooltip content="Refresh"><Button size="icon" variant="ghost" onClick={() => refetch()}><RefreshCw className="w-4 h-4" /></Button></SimpleTooltip>
         </div>
       </div>
