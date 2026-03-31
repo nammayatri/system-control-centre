@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | Backend service workflow (K8s deployment)
@@ -24,6 +25,12 @@ import Products.Autopilot.RuntimeConfig (isScaleDownPodsOnCompletion)
 import Core.Environment (DBEnv)
 import Core.Utils.FlowMonad (getConfig, getDBEnv)
 import qualified Data.Text as T
+import Data.Aeson (Value (..), eitherDecode)
+import qualified Data.Aeson as A
+import qualified Data.Aeson.Key as K
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Text.Encoding as TE
 import Products.Autopilot.K8s.Deployment (
     buildApplyFileCommand,
     buildCloneDeploymentCommand,
@@ -35,7 +42,7 @@ import Products.Autopilot.K8s.Deployment (
     serviceExists,
  )
 import Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
-import Products.Autopilot.K8s.Execute (K8sError (..), executeWithRetry, runCmd)
+import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout)
 import Products.Autopilot.Notifications (
     notifyPodsScaledDown,
@@ -282,7 +289,7 @@ checkDeploymentHealth cfg ctx = do
         liftIO $
             putStrLn "    WARNING: Not all replicas ready yet"
 
--- | Monitor health: poll replica status for stabilisation period
+-- | Monitor health: poll replica status + pod health for stabilisation period
 monitorHealth :: StateFlow ()
 monitorHealth = do
     rt <- getRT
@@ -294,8 +301,8 @@ monitorHealth = do
     liftIO $ putStrLn "  Monitoring pod health metrics"
 
     updateK8sStatus BSStabilize
-    liftIO $ putStrLn "  Stabilization period (30s)"
-    let checks = 6 :: Int -- 6 * 5s = 30s
+    liftIO $ putStrLn "  Stabilization period (60s)"
+    let checks = 12 :: Int -- 12 * 5s = 60s
     forM_ [1 .. checks] $ \i -> do
         liftIO $ threadDelay 5000000 -- 5 seconds
         (ready, _available, desired) <-
@@ -312,7 +319,104 @@ monitorHealth = do
                     <> "/"
                     <> show desired
 
+        -- Enhanced health check: check pod status, restart count, CrashLoopBackOff
+        podHealth <- liftIO $ checkPodHealthDetailed cfg ctx
+        case podHealth of
+            Left errMsg -> do
+                liftIO $ putStrLn $ "    Pod health check FAILED: " <> T.unpack errMsg
+                error ("Pod health check failed: " <> T.unpack errMsg)
+            Right msg ->
+                liftIO $ putStrLn $ "    Pod health: " <> T.unpack msg
+
     liftIO $ putStrLn "Health monitoring complete"
+
+-- | Detailed pod health check: restart count, CrashLoopBackOff, ImagePullBackOff
+-- Returns Left errorMessage if pods are unhealthy, Right statusMessage if OK.
+checkPodHealthDetailed :: Config -> K8sReleaseContext -> IO (Either T.Text T.Text)
+checkPodHealthDetailed cfg ctx = do
+    let svcHost = serviceName ctx
+        version = newVersion ctx
+        ns = namespace ctx
+        cmd = unwords
+            [ kubectlBin cfg
+            , "-n", T.unpack ns
+            , "get pods"
+            , "-l", "app=" <> T.unpack svcHost <> ",version=" <> T.unpack version
+            , "-o", "json"
+            ]
+    result <- runCmd cmd
+    case result of
+        Left _ -> pure (Right "Could not fetch pod status (non-fatal)")
+        Right (K8sResult jsonStr) ->
+            case A.decodeStrict' (TE.encodeUtf8 jsonStr) :: Maybe Value of
+                Nothing -> pure (Right "Could not parse pod JSON (non-fatal)")
+                Just podJson -> pure (analyzePodHealth podJson)
+
+-- | Analyze pod health from kubectl JSON output
+analyzePodHealth :: Value -> Either T.Text T.Text
+analyzePodHealth (Object root) =
+    case KM.lookup (K.fromText "items") root of
+        Just (Array items) ->
+            let podResults = map checkSinglePod (foldr (:) [] items)
+                errors = [e | Left e <- podResults]
+            in if null errors
+                then Right ("All " <> T.pack (show (length podResults)) <> " pod(s) healthy")
+                else Left (T.intercalate "; " errors)
+        _ -> Right "No pods found (non-fatal)"
+analyzePodHealth _ = Right "Unexpected JSON format (non-fatal)"
+
+-- | Check a single pod for unhealthy conditions
+checkSinglePod :: Value -> Either T.Text T.Text
+checkSinglePod (Object podObj) =
+    let podName = case KM.lookup (K.fromText "metadata") podObj >>= getObj' "name" of
+            Just n -> n
+            Nothing -> "unknown-pod"
+        statusObj = KM.lookup (K.fromText "status") podObj
+        phase = statusObj >>= \case
+            Object s -> case KM.lookup (K.fromText "phase") s of
+                Just (String p) -> Just p
+                _ -> Nothing
+            _ -> Nothing
+        containerStatuses = statusObj >>= \case
+            Object s -> case KM.lookup (K.fromText "containerStatuses") s of
+                Just (Array cs) -> Just (foldr (:) [] cs)
+                _ -> Nothing
+            _ -> Nothing
+        -- Check for bad container states
+        containerErrors = case containerStatuses of
+            Nothing -> []
+            Just cs -> concatMap (checkContainer podName) cs
+    in case phase of
+        Just "Failed" -> Left (podName <> ": pod phase is Failed")
+        _ ->
+            if null containerErrors
+                then Right (podName <> ": OK")
+                else Left (T.intercalate "; " containerErrors)
+  where
+    getObj' key (Object o) = case KM.lookup (K.fromText key) o of
+        Just (String t) -> Just t
+        _ -> Nothing
+    getObj' _ _ = Nothing
+
+    checkContainer podName (Object cObj) =
+        let restartCount = case KM.lookup (K.fromText "restartCount") cObj of
+                Just (Number n) -> round n :: Int
+                _ -> 0
+            waitingReason = case KM.lookup (K.fromText "state") cObj of
+                Just (Object stateObj) -> case KM.lookup (K.fromText "waiting") stateObj of
+                    Just (Object waitObj) -> case KM.lookup (K.fromText "reason") waitObj of
+                        Just (String r) -> Just r
+                        _ -> Nothing
+                    _ -> Nothing
+                _ -> Nothing
+            errs = []
+                <> [podName <> ": CrashLoopBackOff detected" | waitingReason == Just "CrashLoopBackOff"]
+                <> [podName <> ": ImagePullBackOff detected" | waitingReason == Just "ImagePullBackOff"]
+                <> [podName <> ": ErrImagePull detected" | waitingReason == Just "ErrImagePull"]
+                <> [podName <> ": restartCount=" <> T.pack (show restartCount) <> " exceeds threshold (3)" | restartCount > 3]
+        in errs
+    checkContainer _ _ = []
+checkSinglePod _ = Right "unknown"
 
 -- | Cleanup old version: scale down (and optionally delete) old deployment
 cleanupOldVersion :: StateFlow ()

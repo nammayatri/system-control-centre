@@ -11,6 +11,7 @@ module Products.Autopilot.RuntimeConfig
     , isPromQueryCheckEnabled
     , isSyncClusterEnabled
     , isMultiReleasePerProduct
+    , isUnderMaintenance
       -- Delays / numeric
     , getReleaseWatchDelay
     , getReleaseStartDelay
@@ -34,8 +35,13 @@ module Products.Autopilot.RuntimeConfig
 where
 
 import Core.Environment (DBEnv)
+import Data.Aeson (Value (..), eitherDecode)
+import qualified Data.Aeson.Key as K
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Shared.Config.Runtime
     ( getConfigBool
     , getConfigDouble
@@ -70,6 +76,24 @@ isSyncClusterEnabled db = getConfigBool db "sync_cluster_enabled" False
 
 isMultiReleasePerProduct :: DBEnv -> IO Bool
 isMultiReleasePerProduct db = getConfigBool db "multi_release_per_product" False
+
+-- | Check if autopilot is under maintenance.
+-- Reads "ap_under_maintenance" from server_config. The value is a JSON object
+-- like {"owner":"someone","ap_under_maintenance":false}. Returns True if the
+-- "ap_under_maintenance" field is true.
+isUnderMaintenance :: DBEnv -> IO Bool
+isUnderMaintenance db = do
+    v <- getEnabledServerConfigValue db "ap_under_maintenance"
+    pure $ case v of
+        Nothing -> False
+        Just raw ->
+            case eitherDecode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Either String Value of
+                Right (Object obj) ->
+                    case KM.lookup (K.fromText "ap_under_maintenance") obj of
+                        Just (Bool b) -> b
+                        _ -> False
+                -- If it's not JSON, treat as a simple boolean string
+                _ -> T.toLower (T.strip raw) `elem` ["true", "1", "yes"]
 
 -- ── Delays / numeric configs ───────────────────────────────────────
 

@@ -1,18 +1,20 @@
 module Products.Autopilot.Runner where
 
 import Control.Concurrent (threadDelay)
-import Control.Monad (forever)
+import Control.Monad (forever, forM_)
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
-import Products.Autopilot.RuntimeConfig (getReleaseWatchDelay, isMultiReleasePerProduct)
+import Products.Autopilot.RuntimeConfig (getReleaseWatchDelay, isMultiReleasePerProduct, getPodsScaleDownDelayFromConfig)
 import Core.Environment (AppState, DBEnv)
 import Core.Utils.FlowMonad
-import Data.Aeson (Value (..), toJSON, object, (.=))
+import Data.Aeson (toJSON, object, (.=))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
-import Products.Autopilot.K8s.VirtualService (getPrimarySubsetFromVirtualService)
+import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand)
+import Products.Autopilot.K8s.Execute (runCmd)
+import Products.Autopilot.K8s.VirtualService (getPrimarySubsetFromVirtualService, applyVirtualServiceRollout)
 import Products.Autopilot.Notifications (notifyReleaseAborted)
 import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductVsLockedBy)
 import Products.Autopilot.Queries.ReleaseTracker
@@ -20,6 +22,7 @@ import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (..), K8sReleaseContext (..), PodsScaleDownStatus (..))
+import qualified Products.Autopilot.Types.Target.Kubernetes as K8s
 import Products.Autopilot.Workflow.Factory (executeReleaseWorkflow)
 import Products.Autopilot.Workflow.Types (ReleaseState (..), WorkFlowError)
 import Prelude hiding (product)
@@ -28,7 +31,7 @@ runnerLoop :: AppState -> IO ()
 runnerLoop st = runFlow st loop
   where
     loop = forever $ do
-        _cfg <- getConfig
+        cfg <- getConfig
         db <- getDBEnv
         now <- liftIO getCurrentTime
 
@@ -50,9 +53,10 @@ runnerLoop st = runFlow st loop
         -- cleanupJobs <- liftIO $ findCleanupScheduledTrackers db now
         -- mapM_ runScheduledCleanup cleanupJobs
 
-        -- TODO: Step 5: Handle scale-down (needs reimplementation)
-        -- scaleDownCandidates <- ...
-        -- mapM_ runScheduledCleanup (filter isScaleDownReady scaleDownCandidates)
+        -- Step 5: Handle scale-down of old deployments after delay
+        scaleDownDelay <- liftIO $ getPodsScaleDownDelayFromConfig db
+        completedTrackers <- liftIO $ findCompletedTrackersForScaleDown db now scaleDownDelay
+        forM_ completedTrackers $ \twt -> liftIO $ scaleDownOldDeployment db cfg twt
 
         pollDelay <- liftIO $ getReleaseWatchDelay db
         liftIO $ threadDelay (pollDelay * 1000000)
@@ -110,12 +114,15 @@ trigger db (rt, mts) = do
             result <- dispatchWorkflow rtInProgress mts
             case result of
                 Left err -> do
+                    cfg <- getConfig
                     let errStatus = case status rt of
                             Aborting -> UserAborted
                             _ -> Aborted
                         abortedTracker = rtInProgress{status = errStatus, releaseWFStatus = RollingBack}
                     liftIO $ insertReleaseTracker db abortedTracker mts
                     liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
+                    -- Restore VS traffic to old version on failure
+                    liftIO $ restoreVsTrafficOnFailure cfg db rt mts
                     liftIO $ notifyReleaseAborted db abortedTracker
                 Right _finalState -> do
                     liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
@@ -198,3 +205,80 @@ validateRunningVersion cfg db rt mts = do
                                 else pure $ Just $
                                     "Running version (" <> runningVersion <> ") does not match tracker oldVersion (" <> trackerOldVer <> ")"
         _ -> pure Nothing -- Non-K8s releases: skip validation
+
+-- ============================================================================
+-- Failure Recovery: Restore VS Traffic
+-- ============================================================================
+
+{- | Restore VirtualService traffic to old version on release failure.
+Routes 100% traffic back to old version and scales down new deployment to 0.
+Best-effort: errors are logged but do not propagate.
+-}
+restoreVsTrafficOnFailure :: Config -> DBEnv -> ReleaseTracker -> Maybe TargetState -> IO ()
+restoreVsTrafficOnFailure cfg db rt mts = do
+    case mts of
+        Just (K8sState k8s) -> do
+            let ctx = context k8s
+                oldVer = K8s.oldVersion ctx
+                isNewSvc = newService k8s
+            -- Only restore VS if there is an old version to restore to
+            if isNewSvc || T.null oldVer || oldVer == "new" || oldVer == "unknown"
+                then putStrLn $ "[restoreVsTrafficOnFailure] Skipping VS restore for " <> T.unpack (releaseId rt) <> " (new service or no old version)"
+                else do
+                    putStrLn $ "[restoreVsTrafficOnFailure] Restoring VS traffic to old version for " <> T.unpack (releaseId rt)
+                    -- Route 100% back to old version, 0% to new
+                    vsResult <- applyVirtualServiceRollout cfg ctx 100 0
+                    case vsResult of
+                        Left err -> putStrLn $ "[restoreVsTrafficOnFailure] WARNING: Failed to restore VS: " <> show err
+                        Right _ -> putStrLn $ "[restoreVsTrafficOnFailure] VS traffic restored to old version"
+                    -- Scale down new deployment to 0 replicas
+                    let newDepName = deploymentName ctx
+                        ns = namespace ctx
+                    scaleResult <- runCmd (buildScaleNamedDeploymentCommand cfg ns newDepName 0)
+                    case scaleResult of
+                        Left err -> putStrLn $ "[restoreVsTrafficOnFailure] WARNING: Failed to scale down new deployment: " <> show err
+                        Right _ -> putStrLn $ "[restoreVsTrafficOnFailure] New deployment scaled down to 0"
+                    -- Log the restore event
+                    insertReleaseEvent db (releaseId rt) "BUSINESS" "VS_TRAFFIC_RESTORED"
+                        (object
+                            [ "action" .= ("restore_on_failure" :: T.Text)
+                            , "oldVersion" .= (oldVer :: T.Text)
+                            , "newDeployment" .= (newDepName :: T.Text)
+                            ])
+        _ -> pure () -- Non-K8s releases: nothing to restore
+
+-- ============================================================================
+-- Scale-Down of Old Deployments After Delay
+-- ============================================================================
+
+{- | Scale down the old version's deployment for a completed/aborted release.
+Updates the tracker's podsScaleDownStatus to ScaleDownCompleted.
+-}
+scaleDownOldDeployment :: DBEnv -> Config -> TrackerWithTarget -> IO ()
+scaleDownOldDeployment db cfg (rt, mts) = do
+    case mts of
+        Just (K8sState k8s) -> do
+            let ctx = context k8s
+                oldVer = K8s.oldVersion ctx
+                svcName = serviceName ctx
+                ns = namespace ctx
+                oldDepName = svcName <> "-" <> oldVer
+            if T.null oldVer || oldVer == "new" || oldVer == "unknown"
+                then pure ()
+                else do
+                    putStrLn $ "[scaleDownOldDeployment] Scaling down old deployment: " <> T.unpack oldDepName <> " for release " <> T.unpack (releaseId rt)
+                    result <- runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName 0)
+                    case result of
+                        Left err -> putStrLn $ "[scaleDownOldDeployment] WARNING: Failed to scale down: " <> show err
+                        Right _ -> putStrLn $ "[scaleDownOldDeployment] Old deployment scaled down successfully"
+                    -- Update tracker with scale-down completed status
+                    let updatedCtx = ctx{podsScaleDownStatus = Just ScaleDownCompleted}
+                        updatedK8s = k8s{context = updatedCtx}
+                        updatedMts = Just (K8sState updatedK8s)
+                    insertReleaseTracker db rt updatedMts
+                    insertReleaseEvent db (releaseId rt) "BUSINESS" "OLD_PODS_SCALED_DOWN"
+                        (object
+                            [ "oldDeployment" .= (oldDepName :: T.Text)
+                            , "namespace" .= (ns :: T.Text)
+                            ])
+        _ -> pure ()

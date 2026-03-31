@@ -10,11 +10,12 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, getCurrentTime)
 import Database.Beam
 import Database.Beam.Postgres
 import Database.PostgreSQL.Simple (Only (..), execute)
 import Products.Autopilot.Types
+import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes
 import Shared.Types.Storage.Schema
@@ -399,6 +400,45 @@ deleteReleaseEvents db rid = withConn db $ \conn -> do
 safeHead :: [a] -> Maybe a
 safeHead [] = Nothing
 safeHead (x : _) = Just x
+
+{- | Find completed/aborted trackers whose old deployment is due for scale-down.
+A tracker is eligible if:
+- status IN (Completed, Aborted, UserAborted)
+- end_time + delay hours < now
+- old_version is not empty/unknown/new
+- podsScaleDownStatus is NOT already ScaleDownCompleted
+When delay is 0, all completed trackers with end_time set are immediately eligible.
+-}
+findCompletedTrackersForScaleDown :: DBEnv -> UTCTime -> Double -> IO [TrackerWithTarget]
+findCompletedTrackersForScaleDown db now delayHours = do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $
+                    orderBy_ (asc_ . rtUpdatedAt) $ do
+                        rt <- all_ (releaseTrackers nammaAPDb)
+                        guard_ (rtStatus rt `in_` [val_ "Completed", val_ "Aborted", val_ "UserAborted"])
+                        pure rt
+    let parsed = map fromRow rows
+        isEligible (tracker, mts) =
+            let oldVer = NT.oldVersion tracker
+                hasOldVersion = not (T.null oldVer) && T.toLower oldVer /= "unknown" && oldVer /= "new"
+                endTimeOk = case NT.endTime tracker of
+                    Just et -> addDelay et <= now
+                    Nothing ->
+                        -- Fallback: use lastUpdated if endTime not set
+                        case NT.lastUpdated tracker of
+                            Just lu -> addDelay lu <= now
+                            Nothing -> False
+                notAlreadyScaledDown = case mts of
+                    Just (K8sState k8s) ->
+                        case podsScaleDownStatus (context k8s) of
+                            Just ScaleDownCompleted -> False
+                            _ -> True
+                    _ -> False -- Non-K8s: not applicable
+            in hasOldVersion && endTimeOk && notAlreadyScaledDown
+        addDelay t = addUTCTime (realToFrac (delayHours * 3600) :: NominalDiffTime) t
+    pure (filter isEligible parsed)
 
 {- | Update udf3 field on a release tracker by ID.
 Used to store Slack thread_ts.

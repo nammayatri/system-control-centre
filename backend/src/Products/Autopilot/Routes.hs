@@ -14,7 +14,9 @@ import Control.Exception (SomeException, try)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
-import Products.Autopilot.RuntimeConfig (isApproveAllReleases)
+import Data.Char (isAlphaNum)
+import Products.Autopilot.RuntimeConfig (isApproveAllReleases, isUnderMaintenance)
+import Products.Autopilot.K8s.Deployment (deploymentExists)
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
 import Data.Aeson (Value (..), eitherDecode, object, toJSON, (.=))
 import qualified Data.Aeson as A
@@ -297,10 +299,29 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
     case (p, s) of
         (Nothing, _) -> pure $ APIResponse "ERROR" "Product not configured"
         (_, Nothing) -> pure $ APIResponse "ERROR" "Service not configured for product"
-        (Just pCfg, Just sCfg) ->
-            if maybe False (/= getProductCluster pCfg) requestedCluster
+        (Just pCfg, Just sCfg) -> do
+            -- Safety check: old_version == new_version
+            if oldVersion == newVersion
+                then pure $ APIResponse "ERROR" "old_version and new_version cannot be the same"
+            -- Safety check: maintenance mode
+            else do
+              maintenance <- liftIO $ isUnderMaintenance db
+              if maintenance
+                then pure $ APIResponse "ERROR" "System is under maintenance. Release creation is disabled."
+              -- Safety check: version format (K8s label: [a-z0-9]([-a-z0-9]*[a-z0-9])?)
+              else if not (isValidK8sVersion newVersion)
+                then pure $ APIResponse "ERROR" ("Invalid version format for K8s label: " <> newVersion <> ". Must match [a-z0-9]([-a-z0-9]*[a-z0-9])?")
+              -- Existing cluster check
+              else if maybe False (/= getProductCluster pCfg) requestedCluster
                 then pure $ APIResponse "ERROR" "Requested cluster does not match product config"
-                else do
+              else do
+                -- Safety check: duplicate deployment in K8s
+                let targetSvcHostForCheck = fromMaybe service (getServiceHost sCfg)
+                    newDepNameCheck = targetSvcHostForCheck <> "-" <> newVersion
+                depAlreadyExists <- liftIO $ deploymentExists cfg (getProductNamespace pCfg) newDepNameCheck
+                if depAlreadyExists && not (fromMaybe False newService)
+                    then pure $ APIResponse "ERROR" ("Deployment with version " <> newVersion <> " already exists: " <> newDepNameCheck)
+                    else do
                     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
                     let targetSvcHost = fromMaybe service (getServiceHost sCfg)
                         metadataDockerImage =
@@ -500,71 +521,77 @@ revertReleaseH rid req = do
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
-            now <- liftIO getCurrentTime
-            newRid <- liftIO (UUID.toText <$> UUID.nextRandom)
             let oldCtx = case mTargetState of
                     Just (K8sState k8s) -> context k8s
                     _ -> defaultK8sReleaseContext
                 ctxOldVersion = oldCtx.oldVersion
                 ctxNewVersion = oldCtx.newVersion
                 ctxServiceName = oldCtx.serviceName
-                trackerCreatedBy = NT.createdBy tracker
-                isImmediate = fromMaybe False (immediate req)
-                origUdf1 = maybe False (\t -> T.toLower t == "true") (NT.udf1 tracker)
-                shouldSyncRevert = fromMaybe False ((req :: RevertReleaseReq).isRevertSync) && origUdf1
-                revertedContext =
-                    oldCtx
-                        { deploymentName = ctxServiceName <> "-" <> ctxOldVersion
-                        , oldVersion = ctxNewVersion
-                        , newVersion = ctxOldVersion
-                        , abRunId = Nothing
-                        , abStatus = Nothing
-                        , cleanupAt = Nothing
-                        , cleanupTargetDeployment = Nothing
-                        , cleanupStatus = Nothing
-                        , podsScaleDownDelay = Nothing
-                        , podsScaleDownTimestamp = Nothing
-                        , podsScaleDownStatus = Nothing
-                        , revert = Just 1
-                        , prevAbHsDecision = Nothing
-                        , postMonitoringDecisionMap = Nothing
-                        }
-                revertedTargetState = K8sState $ emptyK8sState{context = revertedContext}
-                revertedTracker =
-                    (tracker :: ReleaseTracker)
-                        { NT.releaseId = newRid
-                        , NT.status = Created
-                        , NT.releaseWFStatus = Init
-                        , NT.createdBy = fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)
-                        , NT.approvedBy = if isImmediate then Just (fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)) else Nothing
-                        , NT.isApproved = isImmediate
-                        , NT.scheduleTime = Just now
-                        , NT.startTime = Nothing
-                        , NT.endTime = Nothing
-                        , NT.rolloutHistory = []
-                        , NT.releaseTag = fmap (<> "_REVERT") (NT.releaseTag tracker)
-                        , NT.info = (req :: RevertReleaseReq).info
-                        , NT.udf1 = if shouldSyncRevert then Just "true" else Nothing
-                        }
-            liftIO $ insertReleaseTracker db revertedTracker (Just revertedTargetState)
-            liftIO $
-                insertReleaseEvent
-                    db
-                    newRid
-                    "BUSINESS"
-                    "REVERT_TRACKER_CREATED"
-                    ( object
-                        [ "originalId" .= rid
-                        , "shouldSyncRevert" .= shouldSyncRevert
-                        , "isImmediate" .= isImmediate
-                        , "origUdf1" .= (origUdf1 :: Bool)
-                        ]
-                    )
-            liftIO $ notifyReleaseReverted db revertedTracker
-            when (isImmediate && shouldSyncRevert) $
-                liftIO $
-                    triggerImmediateRevertSync cfg db tracker mTargetState
-            pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
+            -- Safety check: verify old deployment exists before creating revert
+            let oldDepName = ctxServiceName <> "-" <> ctxOldVersion
+            oldDepExists <- liftIO $ deploymentExists cfg (oldCtx.namespace) oldDepName
+            if not oldDepExists && not (T.null ctxOldVersion) && ctxOldVersion /= "new" && ctxOldVersion /= "unknown"
+                then pure $ APIResponse "ERROR" ("Old deployment not found in K8s: " <> oldDepName <> ". Cannot revert.")
+                else do
+                    now <- liftIO getCurrentTime
+                    newRid <- liftIO (UUID.toText <$> UUID.nextRandom)
+                    let trackerCreatedBy = NT.createdBy tracker
+                        isImmediate = fromMaybe False (immediate req)
+                        origUdf1 = maybe False (\t -> T.toLower t == "true") (NT.udf1 tracker)
+                        shouldSyncRevert = fromMaybe False ((req :: RevertReleaseReq).isRevertSync) && origUdf1
+                        revertedContext =
+                            oldCtx
+                                { deploymentName = ctxServiceName <> "-" <> ctxOldVersion
+                                , oldVersion = ctxNewVersion
+                                , newVersion = ctxOldVersion
+                                , abRunId = Nothing
+                                , abStatus = Nothing
+                                , cleanupAt = Nothing
+                                , cleanupTargetDeployment = Nothing
+                                , cleanupStatus = Nothing
+                                , podsScaleDownDelay = Nothing
+                                , podsScaleDownTimestamp = Nothing
+                                , podsScaleDownStatus = Nothing
+                                , revert = Just 1
+                                , prevAbHsDecision = Nothing
+                                , postMonitoringDecisionMap = Nothing
+                                }
+                        revertedTargetState = K8sState $ emptyK8sState{context = revertedContext}
+                        revertedTracker =
+                            (tracker :: ReleaseTracker)
+                                { NT.releaseId = newRid
+                                , NT.status = Created
+                                , NT.releaseWFStatus = Init
+                                , NT.createdBy = fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)
+                                , NT.approvedBy = if isImmediate then Just (fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)) else Nothing
+                                , NT.isApproved = isImmediate
+                                , NT.scheduleTime = Just now
+                                , NT.startTime = Nothing
+                                , NT.endTime = Nothing
+                                , NT.rolloutHistory = []
+                                , NT.releaseTag = fmap (<> "_REVERT") (NT.releaseTag tracker)
+                                , NT.info = (req :: RevertReleaseReq).info
+                                , NT.udf1 = if shouldSyncRevert then Just "true" else Nothing
+                                }
+                    liftIO $ insertReleaseTracker db revertedTracker (Just revertedTargetState)
+                    liftIO $
+                        insertReleaseEvent
+                            db
+                            newRid
+                            "BUSINESS"
+                            "REVERT_TRACKER_CREATED"
+                            ( object
+                                [ "originalId" .= rid
+                                , "shouldSyncRevert" .= shouldSyncRevert
+                                , "isImmediate" .= isImmediate
+                                , "origUdf1" .= (origUdf1 :: Bool)
+                                ]
+                            )
+                    liftIO $ notifyReleaseReverted db revertedTracker
+                    when (isImmediate && shouldSyncRevert) $
+                        liftIO $
+                            triggerImmediateRevertSync cfg db tracker mTargetState
+                    pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
 
 revertByGlobalIdH :: Text -> Flow APIResponse
 revertByGlobalIdH gid = do
@@ -1914,3 +1941,20 @@ fetchCurrentVsH mProduct _mService = do
                                     Left _ -> pure $ object ["data" .= vsText]
         _ -> pure $ object ["error" .= ("product query param required" :: Text)]
         _ -> pure $ object ["error" .= ("product and service query params required" :: Text)]
+
+-- ============================================================================
+-- Validation Helpers
+-- ============================================================================
+
+-- | Validate that a version string matches the K8s label format: [a-z0-9]([-a-z0-9]*[a-z0-9])?
+-- Empty strings are rejected. The check is case-insensitive (lowered before validation).
+isValidK8sVersion :: Text -> Bool
+isValidK8sVersion ver
+    | T.null ver = False
+    | otherwise =
+        let lowered = T.toLower ver
+            chars = T.unpack lowered
+            isValidChar c = isAlphaNum c || c == '-'
+            startsOk = isAlphaNum (head chars)
+            endsOk = isAlphaNum (last chars)
+        in all isValidChar chars && startsOk && endsOk
