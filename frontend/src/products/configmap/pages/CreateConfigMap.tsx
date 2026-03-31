@@ -9,6 +9,7 @@ import { Button } from '../../../shared/ui/button';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { toast } from 'sonner';
 import { cn } from '../../../lib/utils';
+import ReactDiffViewer from 'react-diff-viewer-continued';
 import { DEFAULT_ENV, AVAILABLE_ENVS } from '../../../lib/constants';
 import type { ProductConfig } from '../../../api';
 
@@ -59,6 +60,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
   const [fileContent, setFileContent] = useState('');
   const [secondaryContent, setSecondaryContent] = useState('');
   const [secondaryLoading, setSecondaryLoading] = useState(false);
+  const [showDiff, setShowDiff] = useState(false);
   const [syncCluster, setSyncCluster] = useState('');
   const [error, setError] = useState('');
 
@@ -202,22 +204,43 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
           {(!!fileContent || syncCluster) && (
             <div className="px-6 pb-6">
               {syncCluster ? (
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <div className="text-sm font-semibold text-zinc-700 mb-2">Primary ConfigMap</div>
-                    <div className="border border-zinc-200 rounded-lg overflow-hidden">
-                      <Editor height="55vh" defaultLanguage="yaml" theme="light" value={fileContent} onChange={(val) => setFileContent(val || '')}
-                        options={{ minimap: { enabled: true }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
-                    </div>
+                <>
+                  <div className="flex items-center gap-3 mb-3">
+                    <label className="flex items-center gap-2 text-sm text-zinc-600 cursor-pointer">
+                      <input type="checkbox" checked={showDiff} onChange={() => setShowDiff(!showDiff)} className="rounded border-zinc-300 accent-zinc-900" />
+                      Compare with Secondary (Diff View)
+                    </label>
                   </div>
-                  <div>
-                    <div className="text-sm font-semibold text-zinc-700 mb-2">Secondary ConfigMap {secondaryLoading && <span className="text-zinc-400 font-normal ml-2">Loading...</span>}</div>
+                  {showDiff && fileContent && secondaryContent ? (
                     <div className="border border-zinc-200 rounded-lg overflow-hidden">
-                      <Editor height="55vh" defaultLanguage="yaml" theme="light" value={secondaryContent} onChange={(val) => setSecondaryContent(val || '')}
-                        options={{ minimap: { enabled: true }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
+                      <ReactDiffViewer
+                        oldValue={fileContent}
+                        newValue={secondaryContent}
+                        splitView={true}
+                        leftTitle="Primary"
+                        rightTitle="Secondary"
+                        useDarkTheme={false}
+                      />
                     </div>
-                  </div>
-                </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <div className="text-sm font-semibold text-zinc-700 mb-2">Primary ConfigMap</div>
+                        <div className="border border-zinc-200 rounded-lg overflow-hidden">
+                          <Editor height="55vh" defaultLanguage="yaml" theme="light" value={fileContent} onChange={(val) => setFileContent(val || '')}
+                            options={{ minimap: { enabled: true }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-sm font-semibold text-zinc-700 mb-2">Secondary ConfigMap {secondaryLoading && <span className="text-zinc-400 font-normal ml-2">Loading...</span>}</div>
+                        <div className="border border-zinc-200 rounded-lg overflow-hidden">
+                          <Editor height="55vh" defaultLanguage="yaml" theme="light" value={secondaryContent} onChange={(val) => setSecondaryContent(val || '')}
+                            options={{ minimap: { enabled: true }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
               ) : (
                 <>
                   <div className="text-sm font-semibold text-zinc-700 mb-2">Config File Content</div>

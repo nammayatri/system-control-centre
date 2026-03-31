@@ -5,7 +5,7 @@ import {
   usePauseRelease, useResumeRelease, useAbortRelease, useRevertRelease,
   useImmediateRevert, useDeleteRelease, useRestartRelease,
   useFastForwardRelease, useImmediateRevertWithSync,
-  useReleaseDiff, usePodHealth, useResources,
+  useReleaseDiff, usePodHealth, useResources, useUpdateTracker,
 } from '../hooks';
 import type { RolloutHistoryEvent, RolloutEvent } from '../../../api';
 import { StatusBadge, Badge } from '../../../shared/ui/badge';
@@ -16,9 +16,12 @@ import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import {
   Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap,
   Search, Trash2, ChevronRight as ChevronRightIcon, FastForward, RotateCw,
+  ExternalLink, Network, BarChart3, Pencil,
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody, DialogFooter } from '../../../shared/ui/dialog';
+import { toast } from 'sonner';
 import ReactDiffViewer from 'react-diff-viewer-continued';
 
 const formatDate = (d?: string) => {
@@ -245,8 +248,10 @@ const ResourcesSection: React.FC<{ product: string; service: string }> = ({ prod
 const ReleaseSummary: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'summary' | 'history' | 'events' | 'env-diff'>('summary');
+  const [activeTab, setActiveTab] = useState<'summary' | 'history' | 'events' | 'env-diff' | 'json'>('summary');
   const [revertSyncChecked, setRevertSyncChecked] = useState(true);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editForm, setEditForm] = useState({ description: '', change_log: '', priority: 0, mode: 'AUTO' });
 
   const { data: release, isLoading, error, refetch } = useRelease(id);
   const { data: events = [] } = useReleaseEvents(id);
@@ -262,8 +267,13 @@ const ReleaseSummary: React.FC = () => {
   const restartMut = useRestartRelease();
   const fastForwardMut = useFastForwardRelease();
   const immRevertSyncMut = useImmediateRevertWithSync();
+  const updateTrackerMut = useUpdateTracker();
 
   const confirmAction = useConfirm();
+
+  const KIBANA_URL = import.meta.env.VITE_KIBANA_URL || '';
+  const KIALI_URL = import.meta.env.VITE_KIALI_URL || '';
+  const GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || '';
 
   const doAction = async (label: string, fn: () => Promise<any>, isDanger = false) => {
     const ok = await confirmAction({
@@ -315,6 +325,7 @@ const ReleaseSummary: React.FC = () => {
     { key: 'history' as const, label: 'Rollout History' },
     { key: 'events' as const, label: 'Events' },
     { key: 'env-diff' as const, label: 'ENV Diff' },
+    { key: 'json' as const, label: 'JSON Data' },
   ];
 
   return (
@@ -326,6 +337,22 @@ const ReleaseSummary: React.FC = () => {
         <span className="text-zinc-600">{release.release_context?.cluster || release.env || ''}</span>
         <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300" />
         <span className="font-mono text-xs text-zinc-800 truncate max-w-[200px]">{release.release_tag || id}</span>
+        <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+          <button
+            onClick={() => {
+              setEditForm({
+                description: release.description || '',
+                change_log: release.change_log || '',
+                priority: release.priority || 0,
+                mode: release.mode || 'AUTO',
+              });
+              setEditOpen(true);
+            }}
+            className="p-1 rounded text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
+          >
+            <Pencil className="w-3.5 h-3.5" />
+          </button>
+        </PermissionGate>
       </div>
 
       {/* Header */}
@@ -335,6 +362,21 @@ const ReleaseSummary: React.FC = () => {
           <StatusBadge status={release.status} />
           {release.release_context?.revert === 1 && <Badge variant="purple" dot>REVERT</Badge>}
           {release.ab_hs_status && release.ab_hs_status !== 'Uninitiated' && <Badge variant="info">AB: {release.ab_hs_status}</Badge>}
+          {KIBANA_URL && (
+            <a href={KIBANA_URL} target="_blank" rel="noopener" className="text-xs text-zinc-500 border border-zinc-200 rounded px-2 py-1 hover:bg-zinc-50 inline-flex items-center gap-1">
+              <ExternalLink className="w-3 h-3" /> Logs
+            </a>
+          )}
+          {KIALI_URL && (
+            <a href={KIALI_URL} target="_blank" rel="noopener" className="text-xs text-zinc-500 border border-zinc-200 rounded px-2 py-1 hover:bg-zinc-50 inline-flex items-center gap-1">
+              <Network className="w-3 h-3" /> Mesh
+            </a>
+          )}
+          {GRAFANA_URL && (
+            <a href={GRAFANA_URL} target="_blank" rel="noopener" className="text-xs text-zinc-500 border border-zinc-200 rounded px-2 py-1 hover:bg-zinc-50 inline-flex items-center gap-1">
+              <BarChart3 className="w-3 h-3" /> Metrics
+            </a>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {s === 'CREATED' && release.is_approved === 0 && (
@@ -518,11 +560,92 @@ const ReleaseSummary: React.FC = () => {
 
         {/* ENV Diff */}
         {activeTab === 'env-diff' && <EnvDiffTab releaseId={id!} />}
+
+        {/* JSON Data */}
+        {activeTab === 'json' && (
+          <div className="p-6">
+            <pre className="bg-zinc-50 border border-zinc-200 rounded-lg p-4 text-xs font-mono text-zinc-700 overflow-auto max-h-[600px] whitespace-pre-wrap">
+              {JSON.stringify(release, null, 2)}
+            </pre>
+          </div>
+        )}
       </div>
 
       <div className="flex justify-end pt-5">
         <Button variant="secondary" onClick={() => navigate('/releases')}>Back to Releases</Button>
       </div>
+
+      {/* Edit Release Dialog */}
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Release</DialogTitle>
+          </DialogHeader>
+          <DialogBody className="space-y-4">
+            <div>
+              <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">Description</label>
+              <textarea
+                value={editForm.description}
+                onChange={(e) => setEditForm(f => ({ ...f, description: e.target.value }))}
+                rows={2}
+                className="w-full border border-zinc-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">Change Log</label>
+              <textarea
+                value={editForm.change_log}
+                onChange={(e) => setEditForm(f => ({ ...f, change_log: e.target.value }))}
+                rows={2}
+                className="w-full border border-zinc-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">Priority</label>
+              <input
+                type="number"
+                min={0}
+                max={9}
+                value={editForm.priority}
+                onChange={(e) => setEditForm(f => ({ ...f, priority: parseInt(e.target.value) || 0 }))}
+                className="w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">Mode</label>
+              <select
+                value={editForm.mode}
+                onChange={(e) => setEditForm(f => ({ ...f, mode: e.target.value }))}
+                className="w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+              >
+                <option value="AUTO">AUTO</option>
+                <option value="MANUAL">MANUAL</option>
+              </select>
+            </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" size="sm" onClick={() => setEditOpen(false)}>Cancel</Button>
+            <Button
+              size="sm"
+              loading={updateTrackerMut.isPending}
+              onClick={async () => {
+                await updateTrackerMut.mutateAsync({
+                  releaseId: id!,
+                  updates: {
+                    description: editForm.description,
+                    change_log: editForm.change_log,
+                    priority: editForm.priority,
+                    mode: editForm.mode,
+                  },
+                });
+                setEditOpen(false);
+              }}
+            >
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

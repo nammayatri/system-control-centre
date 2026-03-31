@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Search, Plus, RefreshCw, ChevronDown, Copy, Calendar, ChevronLeft, ChevronRight, X } from 'lucide-react';
+import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { useReleases } from '../hooks';
 import { StatusBadge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
@@ -8,6 +8,7 @@ import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { cn } from '../../../lib/utils';
+import { toast } from 'sonner';
 import type { ReleaseStatus } from '../../../api';
 
 type TimeRange = 'last_30_mins' | 'last_1_hour' | 'last_6_hours' | 'today' | 'yesterday' | 'last_2_days' | 'last_7_days' | 'last_30_days' | 'this_month' | 'last_month' | 'custom';
@@ -276,7 +277,7 @@ const ListRelease: React.FC = () => {
                   <th className="py-3 px-4">Status</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('date_created')}>Created At</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('start_time')}>Start Time</th>
-                  <th className="py-3 px-4 w-16 text-center">Action</th>
+                  <th className="py-3 px-4 w-24 text-center">Actions</th>
                 </tr>
               </thead>
               <tbody className="text-sm">
@@ -296,7 +297,17 @@ const ListRelease: React.FC = () => {
                       >
                         <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + index + 1}</td>
                         <td className="py-3 px-4 font-medium text-zinc-800">{release.service}</td>
-                        <td className="py-3 px-4 font-mono text-xs text-zinc-500">{release.id}</td>
+                        <td className="py-3 px-4 font-mono text-xs text-zinc-500">
+                          <span className="inline-flex items-center gap-1 group/id">
+                            {release.id}
+                            <button
+                              onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(release.id); toast.success('Release ID copied'); }}
+                              className="opacity-0 group-hover/id:opacity-100 p-0.5 rounded text-zinc-300 hover:text-zinc-600 transition-opacity duration-150 cursor-pointer"
+                            >
+                              <Clipboard className="w-3 h-3" />
+                            </button>
+                          </span>
+                        </td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">{release.new_version}</td>
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-1.5">
@@ -316,14 +327,24 @@ const ListRelease: React.FC = () => {
                         <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatISODate(release.date_created)}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatISODate(release.start_time)}</td>
                         <td className="py-3 px-4 text-center">
-                          <SimpleTooltip content="Clone release">
-                            <button
-                              onClick={(e) => { e.stopPropagation(); navigate(`/releases/${release.id}/clone`); }}
-                              className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
-                            >
-                              <Copy className="w-3.5 h-3.5" />
-                            </button>
-                          </SimpleTooltip>
+                          <div className="inline-flex items-center gap-0.5">
+                            <SimpleTooltip content="Clone release">
+                              <button
+                                onClick={(e) => { e.stopPropagation(); navigate(`/releases/${release.id}/clone`); }}
+                                className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
+                              >
+                                <Copy className="w-3.5 h-3.5" />
+                              </button>
+                            </SimpleTooltip>
+                            <SimpleTooltip content="Copy release ID">
+                              <button
+                                onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(release.id); toast.success('Release ID copied'); }}
+                                className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
+                              >
+                                <Clipboard className="w-3.5 h-3.5" />
+                              </button>
+                            </SimpleTooltip>
+                          </div>
                         </td>
                       </tr>
                     );
