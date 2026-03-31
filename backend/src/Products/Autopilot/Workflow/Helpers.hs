@@ -37,9 +37,13 @@ import Control.Monad.Trans.Class (lift)
 import Core.Config (Config (..))
 import Core.Environment (DBEnv)
 import Core.Utils.FlowMonad (Flow, getDBEnv)
-import Data.Aeson (toJSON)
+import Data.Aeson (Value (..), eitherDecode, encode, toJSON)
+import qualified Data.Aeson.Key as K
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (NominalDiffTime, addUTCTime, getCurrentTime)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
@@ -123,26 +127,43 @@ updateRT f = modify $ \rs -> rs{releaseTracker = f (releaseTracker rs)}
 -- | Capture deployment YAML snapshot and store as release event
 captureDeploymentSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()
 captureDeploymentSnapshot cfg db releaseId ns depName label = do
-    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack depName, "-o", "yaml"])
+    -- Use JSON output so we can strip metadata noise before storing
+    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack depName, "-o", "json"])
     case result of
-        Right (K8sResult yaml) -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON yaml)
-        Left _ -> pure () -- silently skip if can't capture
+        Right (K8sResult jsonStr) -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON (stripK8sNoise jsonStr))
+        Left _ -> pure ()
 
 -- | Capture VirtualService JSON snapshot and store as release event
 captureVSSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()
 captureVSSnapshot cfg db releaseId ns vsName label = do
     result <- getVirtualServiceJson cfg ns vsName
     case result of
-        Right vsJson -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON vsJson)
-        Left _ -> pure () -- silently skip if can't capture
+        Right vsJson -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON (stripK8sNoise vsJson))
+        Left _ -> pure ()
 
 -- | Capture ConfigMap snapshot and store as release event
 captureConfigMapSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()
 captureConfigMapSnapshot cfg db releaseId ns cmName label = do
-    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get configmap", T.unpack cmName, "-o", "yaml"])
+    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get configmap", T.unpack cmName, "-o", "json"])
     case result of
-        Right (K8sResult yaml) -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON yaml)
-        Left _ -> pure () -- silently skip if can't capture
+        Right (K8sResult jsonStr) -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON (stripK8sNoise jsonStr))
+        Left _ -> pure ()
+
+-- | Strip K8s metadata noise: annotations, resourceVersion, uid, generation, status, managedFields
+-- Keeps only name, namespace, labels in metadata. Like production autopilot's getContentWithoutExtraMetadata.
+stripK8sNoise :: Text -> Text
+stripK8sNoise raw =
+    case eitherDecode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Either String Value of
+        Left _ -> raw -- not JSON, return as-is
+        Right (Object obj) ->
+            let cleaned = KM.delete (K.fromText "status") obj
+                cleanMeta = case KM.lookup (K.fromText "metadata") cleaned of
+                    Just (Object meta) ->
+                        let keep = KM.filterWithKey (\k _ -> K.toText k `elem` ["name", "namespace", "labels"]) meta
+                        in KM.insert (K.fromText "metadata") (Object keep) cleaned
+                    _ -> cleaned
+            in TE.decodeUtf8 (LBS.toStrict (encode (Object cleanMeta)))
+        Right other -> TE.decodeUtf8 (LBS.toStrict (encode other))
 
 -- ============================================================================
 -- ReleaseWFStatus-based Helpers
