@@ -260,10 +260,10 @@ export function useImmediateRevertWithSync() {
   });
 }
 
-export function useReleaseDiff(id: string | undefined) {
+export function useReleaseDiff(id: string | undefined, type?: string) {
   return useQuery({
-    queryKey: ['release-diff', id],
-    queryFn: () => fetchReleaseDiff(id!),
+    queryKey: ['release-diff', id, type],
+    queryFn: () => fetchReleaseDiff(id!, type),
     enabled: !!id,
   });
 }

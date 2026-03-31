@@ -4,7 +4,7 @@ import Editor from '@monaco-editor/react';
 import { useProductConfigs, useServices } from '../useProducts';
 import { useCreateRelease } from '../hooks';
 import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs } from '../api';
-import { fetchReleaseConfigs } from '../../../api';
+import { fetchReleaseConfigs, fetchConfigMapData } from '../../../api';
 import type { ProductConfig } from '../../../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
@@ -30,6 +30,8 @@ const CreateRelease: React.FC = () => {
   const [error, setError] = useState('');
   const [isEnvSwitch, setIsEnvSwitch] = useState(false);
   const [envData, setEnvData] = useState('');
+  const [isConfigMapSwitch, setIsConfigMapSwitch] = useState(false);
+  const [configMapData, setConfigMapData] = useState('');
   const [clonedService, setClonedService] = useState('');
   const [stages, setStages] = useState([
     { rollout: 5, cooloff: 10, pods: 2 },
@@ -68,6 +70,7 @@ const CreateRelease: React.FC = () => {
           mode: data.mode, new_version: data.new_version || '', change_log: data.change_log || ''
         }));
         if (data.udf2) { setIsEnvSwitch(true); setEnvData(data.udf2); }
+        if (data.udf3) { setIsConfigMapSwitch(true); setConfigMapData(data.udf3); }
         if (data.rollout_strategy) {
           try {
             const parsed = typeof data.rollout_strategy === 'string' ? JSON.parse(data.rollout_strategy) : data.rollout_strategy;
@@ -113,6 +116,7 @@ const CreateRelease: React.FC = () => {
   }, [formData.product, formData.service, isClone]);
 
   useEffect(() => { if (!isEnvSwitch) setEnvData(''); }, [isEnvSwitch]);
+  useEffect(() => { if (!isConfigMapSwitch) setConfigMapData(''); }, [isConfigMapSwitch]);
 
   // Fetch envs
   useEffect(() => {
@@ -120,6 +124,22 @@ const CreateRelease: React.FC = () => {
       fetchEnvs(formData.product, formData.env, formData.service).then(res => setEnvData(JSON.stringify(res, null, 2))).catch(console.error);
     }
   }, [isEnvSwitch, formData.product, formData.service, formData.env]);
+
+  // Fetch configmap
+  useEffect(() => {
+    if (isConfigMapSwitch && formData.product && formData.service) {
+      fetchConfigMapData(formData.product, formData.service)
+        .then(res => {
+          try {
+            const parsed = typeof res === 'string' ? JSON.parse(res) : res;
+            setConfigMapData(JSON.stringify(parsed, null, 2));
+          } catch {
+            setConfigMapData(typeof res === 'string' ? res : JSON.stringify(res, null, 2));
+          }
+        })
+        .catch(() => setConfigMapData(''));
+    }
+  }, [isConfigMapSwitch, formData.product, formData.service]);
 
   // Secondary envs
   useEffect(() => {
@@ -181,7 +201,9 @@ const CreateRelease: React.FC = () => {
       description: formData.description, schedule_time: formData.schedule_time,
       cluster: formData.cluster, new_service: isNewService, rollout_strategy: stages,
       is_approved: formData.env === 'INTEG_CLUSTER' ? 1 : 0,
-      udf2: isEnvSwitch ? envData : null, isReleaseSync,
+      udf2: isEnvSwitch ? envData : null,
+      udf3: isConfigMapSwitch ? configMapData : null,
+      isReleaseSync,
       syncClusterUdf2: isReleaseSync && isSecondaryEnvSwitch ? secondaryEnvData : null,
       syncClusterRolloutStrategy: isReleaseSync ? secondaryStages.map(s => ({ rolloutPercent: s.rollout, cooloffSeconds: s.cooloff, podPercent: s.pods })) : null,
       release_manager: "local_admin", release_tag: generatedReleaseTag, trackerType,
@@ -322,6 +344,25 @@ const CreateRelease: React.FC = () => {
                 <FieldLabel>Environment Variables JSON</FieldLabel>
                 <div className="border border-zinc-200 rounded-lg overflow-hidden mt-1">
                   <Editor height="320px" defaultLanguage="json" theme="light" value={envData} onChange={(val) => setEnvData(val || '')}
+                    options={{ minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ConfigMap Switch */}
+        {!isNewService && (
+          <div className="bg-white rounded-xl border border-zinc-200">
+            <div className="px-6 py-4 border-b border-zinc-100 flex items-center gap-3">
+              <h2 className="text-lg font-semibold text-zinc-900">Get ConfigMap</h2>
+              <Toggle checked={isConfigMapSwitch} onChange={() => formData.service && setIsConfigMapSwitch(!isConfigMapSwitch)} disabled={!formData.service} />
+            </div>
+            {isConfigMapSwitch && (
+              <div className="p-6">
+                <FieldLabel>ConfigMap Data</FieldLabel>
+                <div className="border border-zinc-200 rounded-lg overflow-hidden mt-1">
+                  <Editor height="320px" defaultLanguage="json" theme="light" value={configMapData} onChange={(val) => setConfigMapData(val || '')}
                     options={{ minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
                 </div>
               </div>

@@ -592,8 +592,10 @@ export interface ReleaseDiff {
     message: string;
 }
 
-export async function fetchReleaseDiff(releaseId: string): Promise<ReleaseDiff> {
-    const { data } = await apiClient.get(`/releases/${encodeURIComponent(releaseId)}/diff`);
+export async function fetchReleaseDiff(releaseId: string, type?: string): Promise<ReleaseDiff> {
+    const params: Record<string, string> = {};
+    if (type) params.type = type;
+    const { data } = await apiClient.get(`/releases/${encodeURIComponent(releaseId)}/diff`, { params });
     return data;
 }
 

@@ -23,6 +23,7 @@ import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody, DialogFooter } from '../../../shared/ui/dialog';
 import { toast } from 'sonner';
 import ReactDiffViewer from 'react-diff-viewer-continued';
+import YAML from 'yaml';
 
 const formatDate = (d?: string) => {
   if (!d) return '-';
@@ -106,41 +107,68 @@ const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
 };
 
 /** ENV Diff Tab */
-const prettyJson = (raw: string): string => {
+const prettyYaml = (raw: string): string => {
   if (!raw) return '';
   try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
+    const parsed = JSON.parse(raw);
+    return YAML.stringify(parsed, { indent: 2 });
   } catch {
+    // If already YAML or not parseable, return as-is
     return raw;
   }
 };
 
+type DiffType = 'deployment' | 'vs' | 'configmap';
+const DIFF_TYPE_LABELS: Record<DiffType, string> = {
+  deployment: 'Deployment',
+  vs: 'VirtualService',
+  configmap: 'ConfigMap',
+};
+
 const EnvDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
-  const { data: diff, isLoading, error } = useReleaseDiff(releaseId);
-
-  if (isLoading) return <div className="p-6"><div className="animate-pulse space-y-3"><div className="h-4 bg-zinc-100 rounded w-1/3" /><div className="h-64 bg-zinc-100 rounded" /></div></div>;
-  if (error || !diff) return <div className="p-6"><p className="text-sm text-zinc-400">No diff data available.</p></div>;
-  if (!diff.oldfile && !diff.newfile) return <div className="p-6"><p className="text-sm text-zinc-400">No diff data available.</p>{diff.message && <p className="text-xs text-zinc-400 mt-1">{diff.message}</p>}</div>;
-
-  const oldFormatted = prettyJson(diff.oldfile);
-  const newFormatted = prettyJson(diff.newfile);
+  const [diffType, setDiffType] = useState<DiffType>('deployment');
+  const { data: diff, isLoading, error } = useReleaseDiff(releaseId, diffType);
 
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">Deployment Diff</h3>
-        {diff.message && <span className="text-xs text-zinc-400">{diff.message}</span>}
+        <div className="flex items-center gap-2">
+          {(Object.keys(DIFF_TYPE_LABELS) as DiffType[]).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setDiffType(t)}
+              className={cn(
+                'px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors duration-150 cursor-pointer',
+                diffType === t
+                  ? 'bg-zinc-900 text-white border-zinc-900'
+                  : 'bg-white text-zinc-600 border-zinc-300 hover:bg-zinc-50'
+              )}
+            >
+              {DIFF_TYPE_LABELS[t]}
+            </button>
+          ))}
+        </div>
+        {diff?.message && <span className="text-xs text-zinc-400">{diff.message}</span>}
       </div>
-      <div className="border border-zinc-200 rounded-lg overflow-hidden">
-        <ReactDiffViewer
-          oldValue={oldFormatted}
-          newValue={newFormatted}
-          splitView={true}
-          leftTitle="Before"
-          rightTitle="After"
-          useDarkTheme={false}
-        />
-      </div>
+      {isLoading ? (
+        <div className="animate-pulse space-y-3"><div className="h-4 bg-zinc-100 rounded w-1/3" /><div className="h-64 bg-zinc-100 rounded" /></div>
+      ) : error || !diff ? (
+        <p className="text-sm text-zinc-400">No diff data available.</p>
+      ) : !diff.oldfile && !diff.newfile ? (
+        <div><p className="text-sm text-zinc-400">No {DIFF_TYPE_LABELS[diffType]} diff data available.</p>{diff.message && <p className="text-xs text-zinc-400 mt-1">{diff.message}</p>}</div>
+      ) : (
+        <div className="border border-zinc-200 rounded-lg overflow-hidden">
+          <ReactDiffViewer
+            oldValue={prettyYaml(diff.oldfile)}
+            newValue={prettyYaml(diff.newfile)}
+            splitView={true}
+            leftTitle={`${DIFF_TYPE_LABELS[diffType]} — Before`}
+            rightTitle={`${DIFF_TYPE_LABELS[diffType]} — After`}
+            useDarkTheme={false}
+          />
+        </div>
+      )}
     </div>
   );
 };
