@@ -32,10 +32,10 @@ import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
-import Products.Autopilot.K8s.Deployment (buildSetImageCommand, getDeploymentEnvs)
+import Products.Autopilot.K8s.Deployment (getDeploymentEnvs)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
-import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getVirtualServiceJson)
+import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import Products.Autopilot.Notifications
 import GHC.Int (Int32)
 import Products.Autopilot.Queries.ProductService
@@ -48,6 +48,7 @@ import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Target (TargetState (..), emptyConfigState)
 import Products.Autopilot.Types.Target.Kubernetes
+import qualified Products.Autopilot.Types.Target.Kubernetes as K8s
 import Servant
 import Shared.Config.Registry (allConfigEntries, findConfigEntry, validateConfigValue)
 import Shared.Config.Types (ConfigEntry (..), ConfigGroup (..), configGroupToText, configTypeDefault, configTypeTag)
@@ -1448,35 +1449,31 @@ immediateRevertH rid req = do
                     case mCtx of
                         Nothing -> pure $ APIResponse "ERROR" "No K8s context available for revert"
                         Just ctx -> do
-                            -- Build a context for setting the old image back on the new deployment
-                            let revertCtx = (ctx :: K8sReleaseContext)
-                                    { oldVersion = ctx.newVersion
-                                    , newVersion = ctx.oldVersion
-                                    }
-                            -- Set image back to old version
-                            let setImageCmd = buildSetImageCommand cfg revertCtx
+                            -- Production behavior: swap image on the NEW deployment (which VS already points to)
+                            -- Do NOT touch VirtualService — old deployment may be scaled down already
+                            let ns = T.unpack ((\(K8sReleaseContext{namespace = n}) -> n) ctx)
+                                newDepName = T.unpack (deploymentName ctx)
+                                oldImage = T.unpack (NT.oldVersion tracker)
+                                cName = T.unpack ((\(K8sReleaseContext{containerName = c}) -> c) ctx)
+                            -- Step 1: Set image to old version on the new deployment
+                            let setImageCmd = unwords [kubectlBin cfg, "set", "image", "deployment/" <> newDepName, cName <> "=" <> oldImage, "-n", ns]
                             imgResult <- liftIO $ executeWithRetry cfg setImageCmd
                             case imgResult of
                                 Left (K8sError err) -> pure $ APIResponse "ERROR" ("Failed to set image: " <> err)
                                 Right _ -> do
-                                    -- Update VS to route 100% to old version
-                                    vsResult <- liftIO $ applyVirtualServiceRollout cfg ctx 100 0
-                                    case vsResult of
-                                        Left (K8sError err) -> do
-                                            liftIO $ putStrLn $ "[IMMEDIATE-REVERT] VS update failed: " <> T.unpack err
-                                            pure ()
-                                        Right _ -> pure ()
-                                    -- Update tracker status to Reverted
+                                    -- Step 2: Rollout restart to force pod restart with old image
+                                    let restartCmd = unwords [kubectlBin cfg, "rollout", "restart", "deployment/" <> newDepName, "-n", ns]
+                                    _ <- liftIO $ executeWithRetry cfg restartCmd
+                                    -- Step 3: Update tracker status
                                     let updated = (tracker :: ReleaseTracker){NT.status = Reverted}
                                     liftIO $ insertReleaseTracker db updated mTargetState
                                     liftIO $ insertReleaseEvent db rid "BUSINESS" "IMMEDIATE_REVERT" (object ["requestedBy" .= (req :: ImmediateRevertReq).requestedBy, "info" .= (req :: ImmediateRevertReq).info])
-                                    -- Send Slack notification
                                     liftIO $ notifyImmediateReverted db updated
-                                    -- Optionally trigger sync revert
+                                    -- Step 4: Optionally trigger sync revert
                                     let shouldSync = fromMaybe False (isRevertSync (req :: ImmediateRevertReq))
                                     when shouldSync $
                                         liftIO $ triggerImmediateRevertSync cfg db tracker mTargetState
-                                    pure $ APIResponse "SUCCESS" "Immediate revert completed"
+                                    pure $ APIResponse "SUCCESS" "Immediate revert: image swapped + pods restarting"
 
 -- ============================================================================
 -- Restart Release (POST /releases/:id/restart)
