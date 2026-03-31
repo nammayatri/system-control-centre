@@ -80,7 +80,7 @@ getK8sCtx = do
     rs <- gets id
     case targetState rs of
         Just (K8sState k8s) -> pure (context k8s)
-        _ -> error "BackendCronJobWorkflow: missing K8sState in targetState"
+        _ -> liftIO $ fail "BackendCronJobWorkflow: missing K8sState in targetState"
 
 -- | Check if cronjob_suspend flag is set
 getCronJobSuspend :: StateFlow Bool
@@ -96,7 +96,7 @@ runK8sIO action = do
     result <- liftIO action
     case result of
         Right a -> pure a
-        Left (K8sError err) -> error ("K8s error: " <> T.unpack err)
+        Left (K8sError err) -> liftIO $ fail ("K8s error: " <> T.unpack err)
 
 -- ============================================================================
 -- Workflow Step Implementations

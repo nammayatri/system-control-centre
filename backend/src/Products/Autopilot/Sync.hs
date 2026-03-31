@@ -117,7 +117,7 @@ createTrackerForSyncCluster cfg db tracker mts targetCluster = do
     let rawUrl = syncClusterUrl cfg
         normalised =
             let u = if "http" `T.isPrefixOf` T.pack rawUrl then rawUrl else "http://" <> rawUrl
-             in if last u == '/' then u else u <> "/"
+             in if not (null u) && Prelude.last u == '/' then u else u <> "/"
         url = normalised <> "releases/create"
         mCtx = getK8sContext mts
         syncUdf2 = case mCtx >>= syncClusterUdf2 of
@@ -317,7 +317,7 @@ revertTrackerSyncCluster cfg db tracker mts gid = do
     let rawUrl = syncClusterUrl cfg
         normalised =
             let u = if "http" `T.isPrefixOf` T.pack rawUrl then rawUrl else "http://" <> rawUrl
-             in if last u == '/' then u else u <> "/"
+             in if not (null u) && Prelude.last u == '/' then u else u <> "/"
         url = normalised <> "release/revert/global/" <> T.unpack gid
         mCtx = getK8sContext mts
         (authArgs, authMode) = buildSyncAuthArgs cfg mCtx
@@ -416,7 +416,7 @@ triggerImmediateRevertSync cfg db tracker mts = do
                     let rawUrl = syncUrl
                         normalised =
                             let u = if "http" `T.isPrefixOf` T.pack rawUrl then rawUrl else "http://" <> rawUrl
-                             in if last u == '/' then u else u <> "/"
+                             in if not (null u) && Prelude.last u == '/' then u else u <> "/"
                         url = normalised <> "release/revert/immediate/global/" <> T.unpack gid
                         mCtx = getK8sContext mts
                         (authArgs, authMode) = buildSyncAuthArgs cfg mCtx

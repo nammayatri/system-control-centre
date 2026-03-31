@@ -24,17 +24,17 @@ import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..))
 
 getVirtualServiceJson :: Config -> Text -> Text -> IO (Either K8sError Text)
 getVirtualServiceJson cfg ns vsName = do
-    res <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get virtualservice", T.unpack vsName, "-o json"])
+    res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get virtualservice", shellQuote vsName, "-o json"])
     pure $ case res of Left err -> Left err; Right (K8sResult out) -> Right out
 
 getVirtualServiceJsonInContext :: Config -> Text -> Text -> Text -> IO (Either K8sError Text)
 getVirtualServiceJsonInContext cfg kubeContext ns vsName = do
-    let cmd = withKubectx kubeContext (unwords [kubectlBin cfg, "-n", T.unpack ns, "get virtualservice", T.unpack vsName, "-o json"])
+    let cmd = withKubectx kubeContext (unwords [kubectlBin cfg, "-n", shellQuote ns, "get virtualservice", shellQuote vsName, "-o json"])
     res <- runCmd cmd
     case res of
         Right (K8sResult out) -> pure (Right out)
         Left _ -> do
-            fallback <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get virtualservice", T.unpack vsName, "-o json"])
+            fallback <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get virtualservice", shellQuote vsName, "-o json"])
             pure $ case fallback of Left err -> Left err; Right (K8sResult out) -> Right out
 
 applyVirtualServiceRollout :: Config -> K8sReleaseContext -> Int -> Int -> IO (Either K8sError K8sResult)
@@ -59,7 +59,7 @@ applyVirtualServiceRolloutSingle cfg ctx vsName oldW newW = do
                     case buildRolloutPatch v of
                         Nothing -> pure (Left (K8sError "VirtualService missing spec.http"))
                         Just patchJson ->
-                            runCmd (unwords ["echo", shellQuote patchJson, "|", kubectlBin cfg, "-n", T.unpack (namespace ctx), "patch virtualservice", T.unpack vsName, "--type merge -p \"$(cat)\""])
+                            runCmd (unwords ["echo", shellQuote patchJson, "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "patch virtualservice", shellQuote vsName, "--type merge -p \"$(cat)\""])
   where
     buildRolloutPatch (Object root) = do
         spec <- getObj "spec" root

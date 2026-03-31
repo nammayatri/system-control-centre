@@ -26,6 +26,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
+import System.Timeout (timeout)
 
 data K8sError = K8sError Text deriving (Eq, Show)
 
@@ -42,11 +43,12 @@ shellQuote t = "'" <> T.unpack (T.replace "'" "'\"'\"'" t) <> "'"
 
 runCmd :: String -> IO (Either K8sError K8sResult)
 runCmd cmd = do
-    res <- try (readProcessWithExitCode "sh" ["-c", cmd] "") :: IO (Either SomeException (ExitCode, String, String))
-    case res of
-        Left e -> pure (Left (K8sError (T.pack (show e))))
-        Right (ExitSuccess, out, _) -> pure (Right (K8sResult (T.pack out)))
-        Right (ExitFailure _, _, err) -> pure (Left (K8sError (T.pack err)))
+    result <- timeout (300 * 1000000) $ try (readProcessWithExitCode "sh" ["-c", cmd] "") :: IO (Maybe (Either SomeException (ExitCode, String, String)))
+    case result of
+        Nothing -> pure (Left (K8sError "kubectl command timed out after 5 minutes"))
+        Just (Left e) -> pure (Left (K8sError (T.pack (show e))))
+        Just (Right (ExitSuccess, out, _)) -> pure (Right (K8sResult (T.pack out)))
+        Just (Right (ExitFailure _, _, err)) -> pure (Left (K8sError (T.pack err)))
 
 executeWithRetry :: Config -> String -> IO (Either K8sError K8sResult)
 executeWithRetry cfg cmd = go 1

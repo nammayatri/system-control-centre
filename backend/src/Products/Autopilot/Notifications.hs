@@ -44,7 +44,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Network.HTTP.Client (RequestBody (..), httpLbs, method, newManager, parseRequest, requestBody, requestHeaders, responseBody)
+import Network.HTTP.Client (RequestBody (..), httpLbs, method, newManager, parseRequest, requestBody, requestHeaders, responseBody, responseTimeout, responseTimeoutMicro)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Products.Autopilot.Queries.ProductService (findServiceByProductAndName)
 import qualified Products.Autopilot.Queries.ReleaseTracker as RTQ
@@ -125,6 +125,7 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
                                 , ("Content-Type", "application/json; charset=utf-8")
                                 ]
                             , requestBody = RequestBodyLBS (encode bodyObj)
+                            , responseTimeout = responseTimeoutMicro 10000000  -- 10 second timeout
                             }
                 resp <- httpLbs req manager
                 let mTs = do

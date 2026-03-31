@@ -97,8 +97,8 @@ validateConfig = do
 
     fileContent <- getFileContent
     case fileContent of
-        Nothing -> error "No file/config content in metadata"
-        Just fc | T.null (T.strip fc) -> error "Empty file/config content"
+        Nothing -> liftIO $ fail "No file/config content in metadata"
+        Just fc | T.null (T.strip fc) -> liftIO $ fail "Empty file/config content"
         Just _ -> pure ()
 
     liftIO $ putStrLn "Config validation passed"
@@ -113,7 +113,7 @@ resolveConfigContent = do
 
     fileContent <- getFileContent
     case fileContent of
-        Nothing -> error "No file content (should have been caught in validation)"
+        Nothing -> liftIO $ fail "No file content (should have been caught in validation)"
         Just fc -> do
             -- Resolve namespace from product config
             db <- lift getDBEnv
@@ -147,10 +147,10 @@ resolveConfigContent = do
                     liftIO $ putStrLn $ "  Fetching existing ConfigMap: " <> cmName'
                     getRes <- liftIO $ runCmd getCmd
                     case getRes of
-                        Left (K8sError err) -> error $ "Failed to fetch existing ConfigMap: " <> T.unpack err
+                        Left (K8sError err) -> liftIO $ fail $ "Failed to fetch existing ConfigMap: " <> T.unpack err
                         Right (K8sResult existingJson) -> do
                             case patchConfigMapJson existingJson fc of
-                                Left err -> error $ T.unpack err
+                                Left err -> liftIO $ fail $ T.unpack err
                                 Right patchedContent -> do
                                     let resolved =
                                             Object $
@@ -173,12 +173,12 @@ applyConfigMap = do
     rs <- gets id
     case workflowMetadata rs of
         Just (Object wm) -> do
-            let ns = case KM.lookup "namespace" wm of
-                    Just (String n) -> T.unpack n
-                    _ -> error "Missing namespace in workflow metadata"
-                content = case KM.lookup "resolvedContent" wm of
-                    Just (String c) -> c
-                    _ -> error "Missing resolvedContent in workflow metadata"
+            ns <- case KM.lookup "namespace" wm of
+                    Just (String n) -> pure (T.unpack n)
+                    _ -> liftIO $ fail "Missing namespace in workflow metadata"
+            content <- case KM.lookup "resolvedContent" wm of
+                    Just (String c) -> pure c
+                    _ -> liftIO $ fail "Missing resolvedContent in workflow metadata"
             result <- liftIO $ replaceFromStdin cfg ns content
             case result of
                 Right () -> do
@@ -194,8 +194,8 @@ applyConfigMap = do
                     db <- lift getDBEnv
                     liftIO $ captureConfigMapSnapshot cfg db (releaseId rt) (T.pack ns) (service rt) "CONFIGMAP_AFTER"
                     liftIO $ putStrLn "ConfigMap applied successfully"
-                Left err -> error $ "kubectl replace failed: " <> T.unpack err
-        _ -> error "Missing workflow metadata (resolveConfigContent did not run?)"
+                Left err -> liftIO $ fail $ "kubectl replace failed: " <> T.unpack err
+        _ -> liftIO $ fail "Missing workflow metadata (resolveConfigContent did not run?)"
 
 -- | Mark workflow as complete
 notifyComplete :: StateFlow ()

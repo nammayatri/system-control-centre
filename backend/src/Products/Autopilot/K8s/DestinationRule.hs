@@ -40,7 +40,7 @@ ensureDestinationRuleSubset cfg ctx = do
                                     case buildSubsetPatch drValue vsValue of
                                         Nothing -> pure (Left (K8sError "DestinationRule missing spec.subsets"))
                                         Just patchJson ->
-                                            runCmd (unwords ["echo", shellQuote patchJson, "|", kubectlBin cfg, "-n", T.unpack (namespace ctx), "patch destinationrule", T.unpack drName, "--type merge -p \"$(cat)\""])
+                                            runCmd (unwords ["echo", shellQuote patchJson, "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "patch destinationrule", shellQuote drName, "--type merge -p \"$(cat)\""])
   where
     buildSubsetPatch (Object root) vsValue = do
         spec <- getObj "spec" root
@@ -85,12 +85,12 @@ resolveDestinationRuleName cfg ctx = do
 
 getDestinationRuleJson :: Config -> Text -> Text -> IO (Either K8sError Text)
 getDestinationRuleJson cfg ns drName = do
-    res <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get destinationrule", T.unpack drName, "-o json"])
+    res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get destinationrule", shellQuote drName, "-o json"])
     pure $ case res of Left err -> Left err; Right (K8sResult out) -> Right out
 
 listDestinationRuleNames :: Config -> Text -> IO (Either K8sError [Text])
 listDestinationRuleNames cfg ns = do
-    res <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get destinationrule -o name"])
+    res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get destinationrule -o name"])
     pure $ case res of
         Left err -> Left err
         Right (K8sResult out) -> Right (map stripPrefix (filter (not . T.null) (T.lines out)))
@@ -149,4 +149,4 @@ createMinimalDestinationRule cfg ctx = do
                     , "    labels:"
                     , "      version: \"" <> newV <> "\""
                     ]
-    runCmd (unwords ["echo", shellQuote yaml, "|", kubectlBin cfg, "-n", ns, "apply -f -"])
+    runCmd (unwords ["echo", shellQuote yaml, "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "apply -f -"])

@@ -36,16 +36,17 @@ import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..))
 
 buildSetImageCommand :: Config -> K8sReleaseContext -> String
 buildSetImageCommand cfg ctx =
-    let ns = T.unpack (namespace ctx)
+    let nsQ = shellQuote (namespace ctx)
         dep = T.unpack (deploymentName ctx)
+        depQ = shellQuote (deploymentName ctx)
         container = T.unpack (containerName ctx)
         explicitDockerImage = maybe "" T.unpack (dockerImage ctx)
         oldV = T.unpack (oldVersion ctx)
         newV = T.unpack (newVersion ctx)
-        currentImageCmd = unwords [kubectlBin cfg, "-n", ns, "get deployment", dep, "-o jsonpath='{.spec.template.spec.containers[?(@.name==\"" <> container <> "\")].image}'"]
+        currentImageCmd = unwords [kubectlBin cfg, "-n", nsQ, "get deployment", depQ, "-o jsonpath='{.spec.template.spec.containers[?(@.name==\"" <> container <> "\")].image}'"]
         rewriteImageCmd = "img=$(" <> currentImageCmd <> "); if echo \"$img\" | sed -E \"s/-" <> oldV <> "$/-" <> newV <> "/\" >/dev/null; then newimg=$(echo \"$img\" | sed -E \"s/-" <> oldV <> "$/-" <> newV <> "/\"); else newimg=$(echo \"$img\" | sed -E \"s/(.*-)[^-:]+$/\\1" <> newV <> "/\"); fi; "
-        rewriteAndSetCmd = rewriteImageCmd <> unwords [kubectlBin cfg, "-n", ns, "set image deployment/" <> dep, container <> "=\"$newimg\""]
-        metadataTagOrImageSetCmd = "img=$(" <> currentImageCmd <> "); if echo \"" <> explicitDockerImage <> "\" | grep -q '/'; then newimg=\"" <> explicitDockerImage <> "\"; elif echo \"$img\" | grep -q ':'; then repo=${img%:*}; newimg=\"$repo:" <> explicitDockerImage <> "\"; else newimg=$(echo \"$img\" | sed -E \"s/(.*-)[^-:]+$/\\1" <> explicitDockerImage <> "/\"); fi; " <> unwords [kubectlBin cfg, "-n", ns, "set image deployment/" <> dep, container <> "=\"$newimg\""]
+        rewriteAndSetCmd = rewriteImageCmd <> unwords [kubectlBin cfg, "-n", nsQ, "set image deployment/" <> dep, container <> "=\"$newimg\""]
+        metadataTagOrImageSetCmd = "img=$(" <> currentImageCmd <> "); if echo \"" <> explicitDockerImage <> "\" | grep -q '/'; then newimg=\"" <> explicitDockerImage <> "\"; elif echo \"$img\" | grep -q ':'; then repo=${img%:*}; newimg=\"$repo:" <> explicitDockerImage <> "\"; else newimg=$(echo \"$img\" | sed -E \"s/(.*-)[^-:]+$/\\1" <> explicitDockerImage <> "/\"); fi; " <> unwords [kubectlBin cfg, "-n", nsQ, "set image deployment/" <> dep, container <> "=\"$newimg\""]
      in if null explicitDockerImage then rewriteAndSetCmd else metadataTagOrImageSetCmd
 
 buildCloneDeploymentCommand :: Config -> K8sReleaseContext -> String
@@ -59,7 +60,7 @@ buildCloneDeploymentCommand cfg ctx =
         -- Strip env vars with unsupported fieldRef paths (e.g. metadata.labels[...])
         stripUnsupportedEnvs = "(.spec.template.spec.containers[].env) |= [.[]? | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]"
         patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[] | select(.name == $container) | .image) |= (if ($dockerImage != \"\") then (if ($dockerImage | test(\"/\")) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | " <> stripUnsupportedEnvs <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
-     in unwords [kubectlBin cfg, "-n", ns, "get deployment", sourceDep, "-o json | jq", "--arg targetDep", "'" <> targetDep <> "'", "--arg container", "'" <> container <> "'", "--arg newTag", "'" <> newTag <> "'", "--arg oldTag", "'" <> T.unpack (oldVersion ctx) <> "'", "--arg dockerImage", "'" <> explicitDockerImage <> "'", "'" <> patchFilter <> "'", "|", kubectlBin cfg, "-n", ns, "apply -f -"]
+     in unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "get deployment", shellQuote (T.pack sourceDep), "-o json | jq", "--arg targetDep", shellQuote (T.pack targetDep), "--arg container", shellQuote (containerName ctx), "--arg newTag", shellQuote (newVersion ctx), "--arg oldTag", shellQuote (oldVersion ctx), "--arg dockerImage", shellQuote (T.pack explicitDockerImage), "'" <> patchFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "apply -f -"]
 
 {- | Clone deployment with env vars injected from udf2 (env switch).
 Matches ny-autopilot's updateDeploymentWithNewEnvs: replaces the
@@ -77,23 +78,23 @@ buildCloneDeploymentWithEnvsCommand cfg ctx envsJson =
         -- Strip env vars with unsupported fieldRef paths (e.g. metadata.labels[...])
         stripUnsupportedEnvs = "(.spec.template.spec.containers[].env) |= [.[]? | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]"
         patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[] | select(.name == $container) | .image) |= (if ($dockerImage != \"\") then (if ($dockerImage | test(\"/\")) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | (.spec.template.spec.containers[] | select(.name == $container) | .env) = ($envs | fromjson) | " <> stripUnsupportedEnvs <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
-     in unwords [kubectlBin cfg, "-n", ns, "get deployment", sourceDep, "-o json | jq", "--arg targetDep", "'" <> targetDep <> "'", "--arg container", "'" <> container <> "'", "--arg newTag", "'" <> newTag <> "'", "--arg oldTag", "'" <> T.unpack (oldVersion ctx) <> "'", "--arg dockerImage", "'" <> explicitDockerImage <> "'", "--arg envs", "'" <> T.unpack envsJson <> "'", "'" <> patchFilter <> "'", "|", kubectlBin cfg, "-n", ns, "apply -f -"]
+     in unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "get deployment", shellQuote (T.pack sourceDep), "-o json | jq", "--arg targetDep", shellQuote (T.pack targetDep), "--arg container", shellQuote (containerName ctx), "--arg newTag", shellQuote (newVersion ctx), "--arg oldTag", shellQuote (oldVersion ctx), "--arg dockerImage", shellQuote (T.pack explicitDockerImage), "--arg envs", shellQuote envsJson, "'" <> patchFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "apply -f -"]
 
 buildScaleDeploymentCommand :: Config -> K8sReleaseContext -> Int -> String
 buildScaleDeploymentCommand cfg ctx replicas =
-    unwords [kubectlBin cfg, "-n", T.unpack (namespace ctx), "scale deployment", T.unpack (deploymentName ctx), "--replicas=" <> show replicas]
+    unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "scale deployment", shellQuote (deploymentName ctx), "--replicas=" <> show replicas]
 
 buildScaleNamedDeploymentCommand :: Config -> Text -> Text -> Int -> String
 buildScaleNamedDeploymentCommand cfg ns depName replicas =
-    unwords [kubectlBin cfg, "-n", T.unpack ns, "scale deployment", T.unpack depName, "--replicas=" <> show replicas]
+    unwords [kubectlBin cfg, "-n", shellQuote ns, "scale deployment", shellQuote depName, "--replicas=" <> show replicas]
 
 buildDeleteDeploymentCommand :: Config -> Text -> Text -> String
 buildDeleteDeploymentCommand cfg ns depName =
-    unwords [kubectlBin cfg, "-n", T.unpack ns, "delete deployment", T.unpack depName, "--ignore-not-found=true"]
+    unwords [kubectlBin cfg, "-n", shellQuote ns, "delete deployment", shellQuote depName, "--ignore-not-found=true"]
 
 buildRolloutStatusCommand :: Config -> K8sReleaseContext -> String
 buildRolloutStatusCommand cfg ctx =
-    unwords [kubectlBin cfg, "-n", T.unpack (namespace ctx), "rollout status deployment", T.unpack (deploymentName ctx), "--timeout=300s"]
+    unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "rollout status deployment", shellQuote (deploymentName ctx), "--timeout=300s"]
 
 {- | Patch envs on an existing deployment using kubectl patch.
 Used when env switch (udf2) is set but deployment already exists (not cloned).
@@ -105,19 +106,19 @@ buildPatchDeploymentEnvsCommand cfg ctx envsJson =
         container = T.unpack (containerName ctx)
         -- Use jq to build a strategic merge patch, filtering out unsupported fieldRef paths
         stripAndPatch = "($envs | fromjson | [.[] | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]) as $filtered | {\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"" <> container <> "\",\"env\":$filtered}]}}}}"
-     in unwords [kubectlBin cfg, "-n", ns, "patch deployment", dep, "--type=strategic", "-p", "\"$(echo null | jq --arg envs", "'" <> T.unpack envsJson <> "'", "'" <> stripAndPatch <> "'" <> ")\""]
+     in unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "patch deployment", shellQuote (deploymentName ctx), "--type=strategic", "-p", "\"$(echo null | jq --arg envs", shellQuote envsJson, "'" <> stripAndPatch <> "'" <> ")\""]
 
 buildCreateServiceCommand :: Config -> K8sReleaseContext -> String
 buildCreateServiceCommand cfg ctx =
-    unwords [kubectlBin cfg, "-n", T.unpack (namespace ctx), "create service clusterip", T.unpack (serviceName ctx), "--tcp=80:80"]
+    unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "create service clusterip", shellQuote (serviceName ctx), "--tcp=80:80"]
 
 buildConfigMapApplyCommand :: Config -> K8sReleaseContext -> String
 buildConfigMapApplyCommand cfg ctx =
-    unwords [kubectlBin cfg, "-n", T.unpack (namespace ctx), "create configmap", T.unpack (serviceName ctx) <> "-release", "--from-literal=release.image=" <> T.unpack (newVersion ctx), "--dry-run=client -o yaml |", kubectlBin cfg, "apply -f -"]
+    unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "create configmap", shellQuote (serviceName ctx <> "-release"), "--from-literal=release.image=" <> shellQuote (newVersion ctx), "--dry-run=client -o yaml |", kubectlBin cfg, "apply -f -"]
 
 buildApplyFileCommand :: Config -> Text -> String
 buildApplyFileCommand cfg filePath =
-    unwords [kubectlBin cfg, "apply -f", T.unpack filePath]
+    unwords [kubectlBin cfg, "apply -f", shellQuote filePath]
 
 buildRolloutCommands :: Config -> K8sReleaseContext -> RolloutStep -> [String]
 buildRolloutCommands cfg ctx step =
@@ -131,17 +132,17 @@ buildRolloutCommands cfg ctx step =
 
 deploymentExists :: Config -> Text -> Text -> IO Bool
 deploymentExists cfg ns depName = do
-    res <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack depName, "-o name"])
+    res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get deployment", shellQuote depName, "-o name"])
     pure $ case res of Right _ -> True; Left _ -> False
 
 serviceExists :: Config -> Text -> Text -> IO Bool
 serviceExists cfg ns svcName = do
-    res <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get service", T.unpack svcName, "-o name"])
+    res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get service", shellQuote svcName, "-o name"])
     pure $ case res of Right _ -> True; Left _ -> False
 
 getDeploymentReplicaStatus :: Config -> Text -> Text -> IO (Either K8sError (Int, Int, Int))
 getDeploymentReplicaStatus cfg ns depName = do
-    res <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack depName, "-o jsonpath='{.status.readyReplicas} {.status.availableReplicas} {.spec.replicas}'"])
+    res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get deployment", shellQuote depName, "-o jsonpath='{.status.readyReplicas} {.status.availableReplicas} {.spec.replicas}'"])
     pure $ case res of
         Left err -> Left err
         Right (K8sResult out) ->
@@ -166,7 +167,7 @@ getDeploymentEnvs cfg ns vsName svcHost = do
             -- Step 2: Construct full deployment name: <service_host>-<version>
             let fullDepName = T.unpack svcHost <> "-" <> T.unpack runningVersion
             -- Step 3: kubectl get deployment <full-name> to fetch envs
-            res <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", fullDepName, "-o jsonpath='{.spec.template.spec.containers[0].env}'"])
+            res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get deployment", shellQuote (T.pack fullDepName), "-o jsonpath='{.spec.template.spec.containers[0].env}'"])
             pure $ case res of
                 Left err -> Left err
                 Right (K8sResult out) -> parseEnvJson out
@@ -183,7 +184,7 @@ and returns its subset (the version tag like "4fa110").
 -}
 getRunningVersionFromVS :: Config -> Text -> Text -> Text -> IO (Either K8sError Text)
 getRunningVersionFromVS cfg ns vsName svcHost = do
-    res <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get virtualservice", T.unpack vsName, "-o json"])
+    res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get virtualservice", shellQuote vsName, "-o json"])
     pure $ case res of
         Left err -> Left err
         Right (K8sResult out) ->

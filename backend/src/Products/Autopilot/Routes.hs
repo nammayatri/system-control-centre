@@ -36,7 +36,7 @@ import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
 import Products.Autopilot.K8s.Deployment (getDeploymentEnvs)
-import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
+import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import Products.Autopilot.Notifications
@@ -830,7 +830,7 @@ createConfigMapH body = do
                 let rawUrl = syncClusterUrl cfg
                     normalised =
                         let u = if "http" `T.isPrefixOf` T.pack rawUrl then rawUrl else "http://" <> rawUrl
-                         in if last u == '/' then u else u <> "/"
+                         in if not (null u) && Prelude.last u == '/' then u else u <> "/"
                     baseAuth = syncClusterBaseAuth cfg
                     authArgs = if null baseAuth then [] else ["-H", "Authorization: Basic " <> baseAuth]
                     secondaryFile = case body of
@@ -1142,7 +1142,7 @@ fetchSecondaryConfigMapH mProduct mName = do
         else do
             let normalised =
                     let u = if "http" `T.isPrefixOf` T.pack rawUrl then rawUrl else "http://" <> rawUrl
-                     in if last u == '/' then u else u <> "/"
+                     in if not (null u) && Prelude.last u == '/' then u else u <> "/"
                 baseAuth = syncClusterBaseAuth cfg
                 authArgs = if null baseAuth then [] else ["-H", "Authorization: Basic " <> baseAuth]
                 queryParams = case (mProduct, mName) of
@@ -1200,7 +1200,7 @@ fetchSecondaryEnvsH mProduct mEnv mService = do
                 else do
                     let normalised =
                             let u = if "http" `T.isPrefixOf` T.pack rawUrl then rawUrl else "http://" <> rawUrl
-                             in if last u == '/' then u else u <> "/"
+                             in if not (null u) && Prelude.last u == '/' then u else u <> "/"
                         baseAuth = syncClusterBaseAuth cfg
                         authArgs = if null baseAuth then [] else ["-H", "Authorization: Basic " <> baseAuth]
                         getUrl = normalised <> "envs?product=" <> T.unpack product' <> "&env=" <> T.unpack env' <> "&service=" <> T.unpack service'
@@ -1484,18 +1484,18 @@ immediateRevertH rid req = do
                         Just ctx -> do
                             -- Production behavior: swap image on the NEW deployment (which VS already points to)
                             -- Do NOT touch VirtualService — old deployment may be scaled down already
-                            let ns = T.unpack ((\(K8sReleaseContext{namespace = n}) -> n) ctx)
-                                newDepName = T.unpack (deploymentName ctx)
-                                oldImage = T.unpack (NT.oldVersion tracker)
-                                cName = T.unpack ((\(K8sReleaseContext{containerName = c}) -> c) ctx)
+                            let nsQ = shellQuote ((\(K8sReleaseContext{K8s.namespace = n}) -> n) ctx)
+                                depQ = shellQuote (deploymentName ctx)
+                                oldImageQ = shellQuote (NT.oldVersion tracker)
+                                cNameQ = shellQuote ((\(K8sReleaseContext{K8s.containerName = c}) -> c) ctx)
                             -- Step 1: Set image to old version on the new deployment
-                            let setImageCmd = unwords [kubectlBin cfg, "set", "image", "deployment/" <> newDepName, cName <> "=" <> oldImage, "-n", ns]
+                            let setImageCmd = unwords [kubectlBin cfg, "set", "image", "deployment/" <> depQ, cNameQ <> "=" <> oldImageQ, "-n", nsQ]
                             imgResult <- liftIO $ executeWithRetry cfg setImageCmd
                             case imgResult of
                                 Left (K8sError err) -> pure $ APIResponse "ERROR" ("Failed to set image: " <> err)
                                 Right _ -> do
                                     -- Step 2: Rollout restart to force pod restart with old image
-                                    let restartCmd = unwords [kubectlBin cfg, "rollout", "restart", "deployment/" <> newDepName, "-n", ns]
+                                    let restartCmd = unwords [kubectlBin cfg, "rollout", "restart", "deployment/" <> depQ, "-n", nsQ]
                                     _ <- liftIO $ executeWithRetry cfg restartCmd
                                     -- Step 3: Update tracker status
                                     let updated = (tracker :: ReleaseTracker){NT.status = Reverted}
@@ -1955,6 +1955,6 @@ isValidK8sVersion ver
         let lowered = T.toLower ver
             chars = T.unpack lowered
             isValidChar c = isAlphaNum c || c == '-'
-            startsOk = isAlphaNum (head chars)
-            endsOk = isAlphaNum (last chars)
+            startsOk = case chars of (c:_) -> isAlphaNum c; [] -> False
+            endsOk = case chars of [] -> False; _ -> isAlphaNum (Prelude.last chars)
         in all isValidChar chars && startsOk && endsOk

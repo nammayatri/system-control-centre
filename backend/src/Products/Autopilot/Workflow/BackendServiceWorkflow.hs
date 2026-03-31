@@ -106,7 +106,7 @@ getK8sCtx = do
     rs <- gets id
     case targetState rs of
         Just (K8sState k8s) -> pure (context k8s)
-        _ -> error "BackendServiceWorkflow: missing K8sState in targetState"
+        _ -> liftIO $ fail "BackendServiceWorkflow: missing K8sState in targetState"
 
 -- | Check if this is a new service release (no existing deployment)
 isNewServiceRelease :: StateFlow Bool
@@ -122,7 +122,7 @@ runK8sIO action = do
     result <- liftIO action
     case result of
         Right a -> pure a
-        Left (K8sError err) -> error ("K8s error: " <> T.unpack err)
+        Left (K8sError err) -> liftIO $ fail ("K8s error: " <> T.unpack err)
 
 -- ============================================================================
 -- Workflow Step Implementations
@@ -205,7 +205,7 @@ prepareK8sResources = do
                             pure ()
                         Nothing -> do
                             liftIO $ putStrLn $ "  ERROR: New service requires deployFilePath"
-                            error "New service release requires deployFilePath to create deployment from scratch"
+                            liftIO $ fail "New service release requires deployFilePath to create deployment from scratch"
                 else do
                     liftIO $ putStrLn $ "  Cloning deployment to " <> T.unpack (deploymentName ctx)
                     _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg ctx)
@@ -324,7 +324,7 @@ monitorHealth = do
         case podHealth of
             Left errMsg -> do
                 liftIO $ putStrLn $ "    Pod health check FAILED: " <> T.unpack errMsg
-                error ("Pod health check failed: " <> T.unpack errMsg)
+                liftIO $ fail ("Pod health check failed: " <> T.unpack errMsg)
             Right msg ->
                 liftIO $ putStrLn $ "    Pod health: " <> T.unpack msg
 
