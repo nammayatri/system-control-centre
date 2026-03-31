@@ -27,6 +27,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
+import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import qualified Data.UUID as UUID
@@ -1253,18 +1254,23 @@ releaseDiffH rid mType = do
                 findSnapshot label = find (\e -> S.reLabel e == label) snapshotEvents
                 mBefore = findSnapshot beforeLabel
                 mAfter = findSnapshot afterLabel
+            let payloadToText :: Value -> Text
+                payloadToText (String s) = case eitherDecode (LBS.pack (T.unpack s)) :: Either String Value of
+                    Right v -> TE.decodeUtf8 (LBS.toStrict (A.encode v))
+                    Left _ -> s
+                payloadToText other = TE.decodeUtf8 (LBS.toStrict (A.encode other))
             case (mBefore, mAfter) of
                 (Just beforeEvt, Just afterEvt) ->
                     pure $ object
-                        [ "oldfile" .= S.rePayload beforeEvt
-                        , "newfile" .= S.rePayload afterEvt
+                        [ "oldfile" .= payloadToText (S.rePayload beforeEvt)
+                        , "newfile" .= payloadToText (S.rePayload afterEvt)
                         , "message" .= diffLabel
                         ]
                 (Just beforeEvt, Nothing) ->
                     pure $ object
-                        [ "oldfile" .= S.rePayload beforeEvt
+                        [ "oldfile" .= payloadToText (S.rePayload beforeEvt)
                         , "newfile" .= ("" :: Text)
-                        , "message" .= (diffLabel <> " (after not yet captured)")
+                        , "message" .= (diffLabel <> " (in progress — after snapshot pending)")
                         ]
                 _ -> do
                     -- Fall back to live K8s diff (original behavior)

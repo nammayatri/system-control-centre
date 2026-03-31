@@ -103,26 +103,39 @@ const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
 };
 
 /** ENV Diff Tab */
+// Pretty-print JSON string for diff viewer
+const prettyJson = (raw: string): string => {
+  if (!raw) return '';
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+};
+
 const EnvDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
   const { data: diff, isLoading, error } = useReleaseDiff(releaseId);
 
   if (isLoading) return <div className="p-6"><div className="animate-pulse space-y-3"><div className="h-4 bg-zinc-100 rounded w-1/3" /><div className="h-64 bg-zinc-100 rounded" /></div></div>;
-  if (error || !diff) return <div className="p-6"><p className="text-sm text-zinc-400">No ENV difference found.</p></div>;
-  if (!diff.oldfile && !diff.newfile) return <div className="p-6"><p className="text-sm text-zinc-400">No ENV difference found.</p>{diff.message && <p className="text-xs text-zinc-400 mt-1">{diff.message}</p>}</div>;
+  if (error || !diff) return <div className="p-6"><p className="text-sm text-zinc-400">No diff data available.</p></div>;
+  if (!diff.oldfile && !diff.newfile) return <div className="p-6"><p className="text-sm text-zinc-400">No diff data available.</p>{diff.message && <p className="text-xs text-zinc-400 mt-1">{diff.message}</p>}</div>;
+
+  const oldFormatted = prettyJson(diff.oldfile);
+  const newFormatted = prettyJson(diff.newfile);
 
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">ENV Diff</h3>
+        <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">Deployment Diff</h3>
         {diff.message && <span className="text-xs text-zinc-400">{diff.message}</span>}
       </div>
       <div className="border border-zinc-200 rounded-lg overflow-hidden">
         <ReactDiffViewer
-          oldValue={diff.oldfile || ''}
-          newValue={diff.newfile || ''}
+          oldValue={oldFormatted}
+          newValue={newFormatted}
           splitView={true}
-          leftTitle="Old ENV"
-          rightTitle="New ENV"
+          leftTitle="Before"
+          rightTitle="After"
           useDarkTheme={false}
         />
       </div>
