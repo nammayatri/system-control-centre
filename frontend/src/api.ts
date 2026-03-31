@@ -38,6 +38,9 @@ export interface Matches {
 
 export interface ReleaseContext {
     cluster: string;
+    namespace: string;
+    deployment_name: string;
+    vs_name: string;
     docker_image: string;
     matches: Matches[];
     pods_scale_down_delay: number;
