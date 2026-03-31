@@ -304,7 +304,7 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     discription: '',
 
     release_context: {
-        cluster: r.releaseContext?.cluster || (r as any).metadata?.cluster || 'default',
+        cluster: r.releaseContext?.cluster || (r as any).metadata?.cluster || '',
         docker_image: r.releaseContext?.dockerImage || '',
         matches: (r.releaseContext?.matches || []).map(m => ({
             match: m.matchHost || '',
