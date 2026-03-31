@@ -21,11 +21,11 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.Config (Config (..))
-import Products.Autopilot.RuntimeConfig (isScaleDownPodsOnCompletion)
+import Products.Autopilot.RuntimeConfig (isScaleDownPodsOnCompletion, isHpaEnabledForProduct, getHpaMinMaxFactor)
 import Core.Environment (DBEnv)
 import Core.Utils.FlowMonad (getConfig, getDBEnv)
 import qualified Data.Text as T
-import Data.Aeson (Value (..), eitherDecode)
+import Data.Aeson (Value (..), eitherDecode, toJSON)
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -42,8 +42,10 @@ import Products.Autopilot.K8s.Deployment (
     serviceExists,
  )
 import Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
+import Products.Autopilot.K8s.HPA (hpaExists, buildCloneHpaCommand)
+import Products.Autopilot.Queries.ReleaseTracker (insertReleaseEvent)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
-import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout)
+import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getVirtualServiceJson)
 import Products.Autopilot.Notifications (
     notifyPodsScaledDown,
     notifyReleaseCompleted,
@@ -164,6 +166,18 @@ validatePreconditions = do
     when isNew $
         liftIO $ putStrLn "  New service release: skipping old version validation"
 
+    -- Check internal VS (if exists) and log if found
+    let internalVsName = serviceName ctx <> "-internal-vs"
+    internalResult <- liftIO $ getVirtualServiceJson cfg (namespace ctx) internalVsName
+    case internalResult of
+        Left _ -> pure ()  -- No internal VS, that's fine
+        Right _ -> do
+            db <- getDB
+            rt <- getRT
+            liftIO $ putStrLn $ "  Internal VS found: " <> T.unpack internalVsName
+            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "INTERNAL_VS_FOUND"
+                (toJSON internalVsName)
+
     liftIO $ putStrLn "  Cluster reachable, namespace exists"
     liftIO $ putStrLn "Preconditions validated"
 
@@ -227,6 +241,31 @@ prepareK8sResources = do
     _ <- runK8sIO $ ensureDestinationRule cfg ctx
     updateK8sField (\k8s -> k8s{destinationRuleApplied = True})
 
+    -- 5. Clone HPA if exists for old version
+    when (not isNew) $ do
+        hpaEnabled <- liftIO $ isHpaEnabledForProduct db (product rt)
+        when hpaEnabled $ do
+            let oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
+            hpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
+            when hpaFound $ do
+                liftIO $ putStrLn $ "  Cloning HPA from " <> T.unpack oldHpaName
+                hpaMinMaxFactor <- liftIO $ getHpaMinMaxFactor db
+                -- Get current replicas from old deployment to calculate HPA min/max
+                oldReplicaResult <- liftIO $ getDeploymentReplicaStatus cfg (namespace ctx) (serviceName ctx <> "-" <> oldVersion ctx)
+                let (_, _, desiredReplicas) = case oldReplicaResult of
+                        Right v -> v
+                        Left _ -> (1, 1, 1)
+                    hpaMin = max 1 desiredReplicas
+                    hpaMax = max hpaMin (round (fromIntegral desiredReplicas * hpaMinMaxFactor))
+                cloneResult <- liftIO $ runCmd (buildCloneHpaCommand cfg (namespace ctx) (serviceName ctx) (oldVersion ctx) (newVersion ctx) oldHpaName hpaMin hpaMax)
+                case cloneResult of
+                    Right _ -> do
+                        liftIO $ putStrLn "  HPA cloned successfully"
+                        updateK8sField (\k8s -> k8s{hpaCreated = True})
+                        liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "HPA_CLONED"
+                            (toJSON (serviceName ctx <> "-" <> newVersion ctx <> "-hpa"))
+                    Left (K8sError err) -> liftIO $ putStrLn $ "  [HPA] Clone failed (non-fatal): " <> T.unpack err
+
     liftIO $ putStrLn "K8s resources prepared"
 
 -- | Progressive rollout: shift traffic old -> new in steps
@@ -289,7 +328,7 @@ checkDeploymentHealth cfg ctx = do
         liftIO $
             putStrLn "    WARNING: Not all replicas ready yet"
 
--- | Monitor health: poll replica status + pod health for stabilisation period
+-- | Monitor health: poll pods until all are Running+Ready, max 5 minutes
 monitorHealth :: StateFlow ()
 monitorHealth = do
     rt <- getRT
@@ -298,37 +337,54 @@ monitorHealth = do
     liftIO $ putStrLn $ "Monitoring health for " <> T.unpack (product rt)
 
     updateK8sStatus BSMonitoring
-    liftIO $ putStrLn "  Monitoring pod health metrics"
+    liftIO $ putStrLn "  Waiting for pods to be ready (max 5 min, polling every 10s)"
 
     updateK8sStatus BSStabilize
-    liftIO $ putStrLn "  Stabilization period (60s)"
-    let checks = 12 :: Int -- 12 * 5s = 60s
-    forM_ [1 .. checks] $ \i -> do
-        liftIO $ threadDelay 5000000 -- 5 seconds
-        (ready, _available, desired) <-
-            runK8sIO $
-                getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
-        liftIO $
+    let maxAttempts = 30 :: Int -- 30 * 10s = 300s = 5 minutes
+    waitResult <- liftIO $ waitForPodsReady cfg ctx maxAttempts
+    case waitResult of
+        Left errMsg -> do
+            liftIO $ putStrLn $ "  Pod readiness check FAILED: " <> T.unpack errMsg
+            liftIO $ fail ("Pod readiness check failed: " <> T.unpack errMsg)
+        Right () ->
+            liftIO $ putStrLn "  All pods ready"
+
+    liftIO $ putStrLn "Health monitoring complete"
+
+-- | Poll pods until all are Running+Ready or timeout/failure
+waitForPodsReady :: Config -> K8sReleaseContext -> Int -> IO (Either T.Text ())
+waitForPodsReady cfg ctx maxAttempts = go 0
+  where
+    go attempt
+        | attempt >= maxAttempts = pure (Left "Timeout waiting for pods to be ready (5 min)")
+        | otherwise = do
+            threadDelay 10000000 -- 10 seconds
+            (readyCount, _available, desired) <- do
+                result <- getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
+                case result of
+                    Left _ -> pure (0, 0, 1)
+                    Right vals -> pure vals
             putStrLn $
-                "    Check "
-                    <> show i
+                "    Poll "
+                    <> show (attempt + 1)
                     <> "/"
-                    <> show checks
+                    <> show maxAttempts
                     <> ": ready="
-                    <> show ready
+                    <> show readyCount
                     <> "/"
                     <> show desired
 
-        -- Enhanced health check: check pod status, restart count, CrashLoopBackOff
-        podHealth <- liftIO $ checkPodHealthDetailed cfg ctx
-        case podHealth of
-            Left errMsg -> do
-                liftIO $ putStrLn $ "    Pod health check FAILED: " <> T.unpack errMsg
-                liftIO $ fail ("Pod health check failed: " <> T.unpack errMsg)
-            Right msg ->
-                liftIO $ putStrLn $ "    Pod health: " <> T.unpack msg
-
-    liftIO $ putStrLn "Health monitoring complete"
+            -- Check for pod-level failures (CrashLoopBackOff, ImagePullBackOff, etc.)
+            podHealth <- checkPodHealthDetailed cfg ctx
+            case podHealth of
+                Left errMsg -> do
+                    putStrLn $ "    Pod health check FAILED: " <> T.unpack errMsg
+                    pure (Left errMsg)
+                Right msg -> do
+                    putStrLn $ "    Pod health: " <> T.unpack msg
+                    if readyCount >= desired && desired > 0
+                        then pure (Right ())
+                        else go (attempt + 1)
 
 -- | Detailed pod health check: restart count, CrashLoopBackOff, ImagePullBackOff
 -- Returns Left errorMessage if pods are unhealthy, Right statusMessage if OK.

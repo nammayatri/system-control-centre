@@ -45,9 +45,9 @@ runnerLoop st = runFlow st loop
         let picked = pickJobs multiRelease eligible
         mapM_ (trigger db) picked
 
-        -- TODO: Step 3: Handle aborting trackers (needs reimplementation)
-        -- aborting <- liftIO $ findAbortingReleaseTrackers db
-        -- mapM_ runRollbackOnly aborting
+        -- Step 3: Handle aborting trackers
+        abortingTrackers <- liftIO $ findAbortingReleaseTrackers db
+        forM_ abortingTrackers $ \(rt, mts) -> liftIO $ handleAbortingRelease cfg db rt mts
 
         -- TODO: Step 4: Handle cleanup jobs (needs reimplementation)
         -- cleanupJobs <- liftIO $ findCleanupScheduledTrackers db now
@@ -246,6 +246,24 @@ restoreVsTrafficOnFailure cfg db rt mts = do
                             , "newDeployment" .= (newDepName :: T.Text)
                             ])
         _ -> pure () -- Non-K8s releases: nothing to restore
+
+-- ============================================================================
+-- Abort Handling
+-- ============================================================================
+
+{- | Handle an aborting release: restore VS traffic, mark as UserAborted, notify.
+Best-effort: errors in VS restore are logged but do not prevent status transition.
+-}
+handleAbortingRelease :: Config -> DBEnv -> ReleaseTracker -> Maybe TargetState -> IO ()
+handleAbortingRelease cfg db rt mts = do
+    putStrLn $ "[handleAbortingRelease] Processing abort for " <> T.unpack (releaseId rt)
+    -- Restore VS traffic to old version
+    restoreVsTrafficOnFailure cfg db rt mts
+    -- Mark as UserAborted
+    let aborted = rt{status = UserAborted}
+    insertReleaseTracker db aborted mts
+    insertReleaseEvent db (releaseId rt) "BUSINESS" "ABORT_HANDLED" (toJSON ("User abort processed" :: String))
+    notifyReleaseAborted db aborted
 
 -- ============================================================================
 -- Scale-Down of Old Deployments After Delay

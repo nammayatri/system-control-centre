@@ -30,6 +30,7 @@ autopilotPermissions =
     -- Releases
     [ pp "GET" ["releases"] "RELEASE_VIEW"
     , pp "POST" ["releases", "create"] "RELEASE_CREATE"
+    , pp "GET" ["releases", ":id", "rollout-history"] "RELEASE_VIEW"
     , -- Products & services
       pp "GET" ["products"] "PRODUCT_CONFIG_VIEW"
     , pp "POST" ["products"] "PRODUCT_CONFIG_EDIT"

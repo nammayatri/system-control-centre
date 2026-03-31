@@ -94,6 +94,7 @@ type CoreAPI =
         :<|> "releases" :> Capture "releaseId" Text :> "restart" :> ReqBody '[JSON] RestartReleaseReq :> Post '[JSON] APIResponse
         :<|> "releases" :> Capture "releaseId" Text :> "fast-forward" :> ReqBody '[JSON] FastForwardReq :> Post '[JSON] APIResponse
         :<|> "resources" :> QueryParam "PRODUCT" Text :> QueryParam "SERVICE" Text :> Get '[JSON] Value
+        :<|> "releases" :> Capture "releaseId" Text :> "rollout-history" :> Get '[JSON] Value
         -- Product Config CRUD
         :<|> "products" :> "config" :> Get '[JSON] [ProductConfigResponse]
         :<|> "products" :> "config" :> ReqBody '[JSON] UpsertProductReq :> Post '[JSON] APIResponse
@@ -156,6 +157,7 @@ coreServer =
         :<|> restartReleaseH
         :<|> fastForwardH
         :<|> fetchResourcesH
+        :<|> rolloutHistoryH
         -- Product Config CRUD
         :<|> listProductConfigsH
         :<|> createProductConfigH
@@ -750,6 +752,14 @@ listEventsH rid = do
                     ]
             )
             events
+
+rolloutHistoryH :: Text -> Flow Value
+rolloutHistoryH rid = do
+    db <- getDBEnv
+    m <- liftIO $ findReleaseTracker db rid
+    case m of
+        Nothing -> pure $ object ["error" .= ("Release not found" :: Text)]
+        Just (tracker, _) -> pure $ toJSON (NT.rolloutHistory tracker)
 
 listConfigMapsH :: Maybe Text -> Maybe Text -> Flow Value
 listConfigMapsH mFrom mTo = do

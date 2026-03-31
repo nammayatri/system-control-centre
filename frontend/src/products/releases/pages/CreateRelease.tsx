@@ -25,6 +25,7 @@ const CreateRelease: React.FC = () => {
     status: 'CREATED', mode: 'AUTO', priority: '0', info: '', custom_pods_scale_down_days: '1',
     cluster: 'EULER_UAT', scale_down_delay: '1',
     cronjob_suspend: false, description: '', schedule_time: '',
+    deploy_file_path: '', vs_file_path: '', dr_file_path: '',
   });
   const [isNewService, setIsNewService] = useState(false);
   const [error, setError] = useState('');
@@ -200,6 +201,9 @@ const CreateRelease: React.FC = () => {
       cronjob_suspend: formData.cronjob_suspend,
       description: formData.description, schedule_time: formData.schedule_time,
       cluster: formData.cluster, new_service: isNewService, rollout_strategy: stages,
+      deploy_file_path: isNewService && formData.deploy_file_path ? formData.deploy_file_path : null,
+      vs_file_path: isNewService && formData.vs_file_path ? formData.vs_file_path : null,
+      dr_file_path: isNewService && formData.dr_file_path ? formData.dr_file_path : null,
       is_approved: formData.env === 'INTEG_CLUSTER' ? 1 : 0,
       udf2: isEnvSwitch ? envData : null,
       udf3: isConfigMapSwitch ? configMapData : null,
@@ -292,6 +296,18 @@ const CreateRelease: React.FC = () => {
               <div><FieldLabel>Scale Down Delay (hrs)</FieldLabel><input type="text" name="scale_down_delay" value={formData.scale_down_delay} onChange={handleInputChange} placeholder="1" className={inputClass} /></div>
             </div>
           </div>
+
+          {/* New Service File Paths */}
+          {isNewService && (
+            <div className="px-6 pb-6 pt-2 border-t border-zinc-100">
+              <h3 className="text-sm font-semibold text-zinc-700 mb-3">New Service YAML Paths</h3>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-4">
+                <div><FieldLabel>Deploy File Path</FieldLabel><input type="text" name="deploy_file_path" value={formData.deploy_file_path} onChange={handleInputChange} placeholder="/path/to/deployment.yaml" className={inputClass} /></div>
+                <div><FieldLabel>VirtualService File Path</FieldLabel><input type="text" name="vs_file_path" value={formData.vs_file_path} onChange={handleInputChange} placeholder="/path/to/virtualservice.yaml" className={inputClass} /></div>
+                <div><FieldLabel>DestinationRule File Path</FieldLabel><input type="text" name="dr_file_path" value={formData.dr_file_path} onChange={handleInputChange} placeholder="/path/to/destinationrule.yaml" className={inputClass} /></div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Stages Card */}
