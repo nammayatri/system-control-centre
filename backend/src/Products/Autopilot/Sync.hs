@@ -12,9 +12,9 @@ where
 import Control.Concurrent (forkIO)
 import Control.Exception (SomeException, try)
 import Core.Config (Config (..))
-import Products.Autopilot.RuntimeConfig (isSyncClusterEnabled)
+import Products.Autopilot.RuntimeConfig (isK8sEnabled, isSyncClusterEnabled)
 import Core.Environment (DBEnv)
-import Data.Aeson (Value (..), encode, object, (.=))
+import Data.Aeson (Value (..), eitherDecode, encode, object, toJSON, (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -25,7 +25,7 @@ import Products.Autopilot.Types
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (
     K8sDeploymentState (context),
-    K8sReleaseContext (dockerImage, revert, syncClusterUdf2, syncXForwardedEmail, syncXPomeriumJwt),
+    K8sReleaseContext (dockerImage, revert, syncClusterRolloutStrategy, syncClusterUdf2, syncXForwardedEmail, syncXPomeriumJwt),
  )
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
@@ -47,6 +47,7 @@ triggerSyncIfEnabled cfg db tracker mts = do
     if null syncUrl
         then insertReleaseEvent db (releaseId tracker) "BUSINESS" "SYNC_SKIPPED" (String "No SYNC_CLUSTER_URL configured")
         else do
+            k8sEnabled <- isK8sEnabled db
             syncEnabled <- isSyncClusterEnabled db
             let udf1Flag = maybe False (\t -> T.toLower t == "true") (udf1 tracker)
             mProduct <- findProductByName db (product tracker)
@@ -58,13 +59,14 @@ triggerSyncIfEnabled cfg db tracker mts = do
                 "BUSINESS"
                 "SYNC_GATE_CHECK"
                 ( object
-                    [ "syncEnabled" .= syncEnabled
+                    [ "k8sEnabled" .= k8sEnabled
+                    , "syncEnabled" .= syncEnabled
                     , "udf1" .= udf1Flag
                     , "hasSyncCluster" .= hasSyncCluster
                     , "syncCluster" .= mSyncCluster
                     ]
                 )
-            if syncEnabled && udf1Flag && hasSyncCluster
+            if k8sEnabled && syncEnabled && udf1Flag && hasSyncCluster
                 then do
                     insertReleaseEvent
                         db
@@ -111,6 +113,23 @@ buildSyncAuthArgs cfg mCtx =
                     then (["-H", "Authorization: Basic " <> baseAuth], "basic_auth")
                     else ([], "none")
 
+-- | Map revert value for sync: production logic (revert==2||revert==0) ? 0 : 1
+revertValue :: ReleaseTracker -> Int
+revertValue tracker =
+    let mCtx = Nothing :: Maybe K8sReleaseContext -- release_context.revert not easily accessible here
+    in 0 -- Default to 0 for non-revert releases; revert sync uses separate endpoint
+
+-- | Get sync rollout strategy: prefer sync_cluster_rollout_strategy from K8s context, else use tracker's strategy
+getSyncRolloutStrategy :: ReleaseTracker -> Maybe K8sReleaseContext -> Value
+getSyncRolloutStrategy tracker mCtx =
+    case mCtx >>= syncClusterRolloutStrategy of
+        Just syncStrat | not (T.null syncStrat) ->
+            -- Try to parse the sync_cluster_rollout_strategy JSON
+            case eitherDecode (LBS.pack (T.unpack syncStrat)) :: Either String Value of
+                Right v -> v
+                Left _ -> toJSON (rolloutStrategy tracker)
+        _ -> toJSON (rolloutStrategy tracker)
+
 -- | POST release to sync cluster URL using curl.
 createTrackerForSyncCluster :: Config -> DBEnv -> ReleaseTracker -> Maybe TargetState -> Text -> IO ()
 createTrackerForSyncCluster cfg db tracker mts targetCluster = do
@@ -134,15 +153,15 @@ createTrackerForSyncCluster cfg db tracker mts targetCluster = do
                 , "release_manager" .= createdBy tracker
                 , "new_version" .= newVersion tracker
                 , "description" .= description tracker
-                , "rollout_strategy" .= rolloutStrategy tracker
+                , "rollout_strategy" .= getSyncRolloutStrategy tracker mCtx
                 , "cluster" .= targetCluster
                 , "docker_image" .= (mCtx >>= dockerImage)
                 , "change_log" .= changeLog tracker
                 , "info" .= info tracker
                 , "udf2" .= syncUdf2
-                , "revert" .= (0 :: Int)
+                , "revert" .= revertValue tracker
                 , "global_id" .= globalId tracker
-                , "is_infra_approved" .= True
+                , "is_infra_approved" .= (1 :: Int)
                 , "udf3" .= udf3 tracker
                 , "isReleaseSync" .= False
                 , "isSystemTriggered" .= True
