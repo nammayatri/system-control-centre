@@ -73,7 +73,7 @@ const ConfigMapSummary: React.FC = () => {
 
   if (isLoading) {
     return (
-      <div className="flex flex-col w-full max-w-6xl space-y-6">
+      <div className="flex flex-col w-full space-y-6">
         <CardSkeleton />
         <CardSkeleton />
       </div>
@@ -86,7 +86,7 @@ const ConfigMapSummary: React.FC = () => {
   const sortedEvents = [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
   return (
-    <div className="flex flex-col w-full max-w-6xl">
+    <div className="flex flex-col w-full">
       {/* Header */}
       <div className="flex items-start justify-between mb-5">
         <div>

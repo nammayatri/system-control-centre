@@ -5,6 +5,10 @@
   --font-mono: 'Fira Code', ui-monospace, monospace;
 }
 
+html {
+  font-size: 15px;
+}
+
 * {
   font-family: 'Fira Sans', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;

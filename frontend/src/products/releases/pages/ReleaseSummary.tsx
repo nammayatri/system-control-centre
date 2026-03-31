@@ -638,7 +638,7 @@ const ReleaseSummary: React.FC = () => {
 
   if (isLoading && !release) {
     return (
-      <div className="flex flex-col flex-1 w-full pb-12 max-w-6xl space-y-6">
+      <div className="flex flex-col flex-1 w-full pb-12 w-full space-y-6">
         <CardSkeleton />
         <CardSkeleton />
       </div>
@@ -672,7 +672,7 @@ const ReleaseSummary: React.FC = () => {
   const cronjobSuspend = release.cronjob_suspend;
 
   return (
-    <div className="flex flex-col flex-1 w-full pb-12 max-w-6xl">
+    <div className="flex flex-col flex-1 w-full pb-12 w-full">
       {/* Breadcrumb */}
       <div className="flex items-center text-sm text-zinc-500 font-medium mb-4">
         <Link to="/releases" className="hover:text-zinc-700 transition-colors duration-150">Releases</Link>

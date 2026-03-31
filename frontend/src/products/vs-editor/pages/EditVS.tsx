@@ -106,7 +106,7 @@ const EditVS: React.FC = () => {
   const inputClass = "w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
 
   return (
-    <div className="flex flex-col flex-1 w-full pb-12 max-w-6xl">
+    <div className="flex flex-col flex-1 w-full pb-12">
       <div className="flex items-center justify-between mb-5">
         <h1 className="text-lg font-semibold text-zinc-900">VS Editor</h1>
       </div>

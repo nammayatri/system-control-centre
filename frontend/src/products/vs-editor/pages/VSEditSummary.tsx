@@ -60,7 +60,7 @@ const VSEditSummary: React.FC = () => {
     try { await fn(); } catch {}
   };
 
-  if (isLoading) return <div className="flex flex-col flex-1 w-full pb-12 max-w-6xl space-y-6"><CardSkeleton /><CardSkeleton /></div>;
+  if (isLoading) return <div className="flex flex-col flex-1 w-full pb-12 space-y-6"><CardSkeleton /><CardSkeleton /></div>;
   if (error || !edit) return <div className="p-8 text-center text-red-500">VS Edit not found</div>;
 
   const InfoField = ({ label, value, mono }: { label: string; value?: string; mono?: boolean }) => (
@@ -73,7 +73,7 @@ const VSEditSummary: React.FC = () => {
   const isEditable = edit.status === 'LOCKED' || edit.status === 'CREATED' || edit.status === 'VS_APPLIED';
 
   return (
-    <div className="flex flex-col flex-1 w-full pb-12 max-w-6xl">
+    <div className="flex flex-col flex-1 w-full pb-12">
       {/* Breadcrumb */}
       <div className="flex items-center text-sm text-zinc-500 font-medium mb-4">
         <Link to="/vs-editor" className="hover:text-zinc-700 transition-colors duration-150">VS Edits</Link>
