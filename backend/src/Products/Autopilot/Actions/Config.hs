@@ -23,9 +23,7 @@ module Products.Autopilot.Actions.Config
 import Control.Applicative ((<|>))
 import Control.Monad.IO.Class (liftIO)
 import Core.Utils.FlowMonad (Flow, getDBEnv)
-import Data.Aeson (Value (..), object, toJSON, (.=))
-import qualified Data.Aeson.Key as K
-import qualified Data.Aeson.KeyMap as KM
+import Data.Aeson (Value (..), toJSON)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -74,7 +72,7 @@ getProductConfigH pid = do
     db <- getDBEnv
     m <- liftIO $ findProductConfigById db pid
     case m of
-        Nothing -> pure $ object ["error" .= ("Product config not found" :: Text)]
+        Nothing -> pure $ toJSON $ ErrorResponse "Product config not found" Nothing
         Just p -> pure $ toJSON (toProductConfigResponse p)
 
 updateProductConfigH :: Int32 -> UpsertProductReq -> Flow APIResponse
@@ -126,7 +124,7 @@ getReleaseConfigH rid = do
     db <- getDBEnv
     m <- liftIO $ findReleaseConfigById db rid
     case m of
-        Nothing -> pure $ object ["error" .= ("Release config not found" :: Text)]
+        Nothing -> pure $ toJSON $ ErrorResponse "Release config not found" Nothing
         Just r -> pure $ toJSON (toReleaseConfigResponse r)
 
 updateReleaseConfigH :: Int32 -> UpsertServiceReq -> Flow APIResponse
@@ -142,7 +140,7 @@ deleteReleaseConfigH rid = do
 -- Server Config
 -- ============================================================================
 
-listServerConfigH :: Flow Value
+listServerConfigH :: Flow ServerConfigResponse
 listServerConfigH = do
     db <- getDBEnv
     rows <- liftIO $ listAllServerConfigs db
@@ -153,14 +151,14 @@ listServerConfigH = do
         mergedConfigs = map (mergeEntry dbMap) allConfigEntries
         -- Also include DB rows that are NOT in registry (unknown/legacy configs)
         registryKeys = map ceKey allConfigEntries
-        extraDbConfigs = [mkUnknownObj row | row@(_, _, n, _, _, _) <- rows, n `notElem` registryKeys]
+        extraDbConfigs = [mkUnknownEntry row | row@(_, _, n, _, _, _) <- rows, n `notElem` registryKeys]
         allConfigs = mergedConfigs ++ extraDbConfigs
         -- Group by group name
         grouped = Map.toAscList $ Map.fromListWith (++) [(g, [c]) | (g, c) <- allConfigs]
-        groupObjs = map (\(gName, cs) -> object ["name" .= gName, "configs" .= cs]) grouped
+        groupObjs = map (\(gName, cs) -> ServerConfigGroup gName cs) grouped
     -- Also return flat configs list for backward compat
-    let flatConfigs = map toFlatObj rows
-    pure $ object ["groups" .= groupObjs, "configs" .= flatConfigs]
+    let flatConfigs = map toFlatItem rows
+    pure $ ServerConfigResponse groupObjs flatConfigs
   where
     mergeEntry dbMap entry =
         let key = ceKey entry
@@ -172,59 +170,59 @@ listServerConfigH = do
          in case Map.lookup key dbMap of
                 Just (_rowId, _typ, _name, val, enabled, dbProd) ->
                     ( groupName
-                    , object
-                        [ "key" .= key
-                        , "value" .= val
-                        , "type" .= typTag
-                        , "default" .= defVal
-                        , "description" .= desc
-                        , "product" .= (dbProd <|> prod)
-                        , "enabled" .= (enabled == 1)
-                        , "id" .= _rowId
-                        ]
+                    , ServerConfigEntry
+                        { sceKey = key
+                        , sceValue = val
+                        , sceType = typTag
+                        , sceDefault = defVal
+                        , sceDescription = desc
+                        , sceProduct = dbProd <|> prod
+                        , sceEnabled = enabled == 1
+                        , sceId = _rowId
+                        }
                     )
                 Nothing ->
                     ( groupName
-                    , object
-                        [ "key" .= key
-                        , "value" .= defVal
-                        , "type" .= typTag
-                        , "default" .= defVal
-                        , "description" .= desc
-                        , "product" .= prod
-                        , "enabled" .= True
-                        , "id" .= (0 :: Int)
-                        ]
+                    , ServerConfigEntry
+                        { sceKey = key
+                        , sceValue = defVal
+                        , sceType = typTag
+                        , sceDefault = defVal
+                        , sceDescription = desc
+                        , sceProduct = prod
+                        , sceEnabled = True
+                        , sceId = 0
+                        }
                     )
-    mkUnknownObj (_rowId, typ, name, val, enabled, prod) =
+    mkUnknownEntry (_rowId, typ, name, val, enabled, prod) =
         ( "General" :: Text
-        , object
-            [ "key" .= name
-            , "value" .= val
-            , "type" .= typ
-            , "default" .= ("" :: Text)
-            , "description" .= ("" :: Text)
-            , "product" .= prod
-            , "enabled" .= (enabled == 1)
-            , "id" .= _rowId
-            ]
+        , ServerConfigEntry
+            { sceKey = name
+            , sceValue = val
+            , sceType = typ
+            , sceDefault = ""
+            , sceDescription = ""
+            , sceProduct = prod
+            , sceEnabled = enabled == 1
+            , sceId = _rowId
+            }
         )
-    toFlatObj (_rowId, typ, name, val, enabled, prod) =
-        object
-            [ "id" .= _rowId
-            , "type" .= typ
-            , "name" .= name
-            , "value" .= val
-            , "enabled" .= enabled
-            , "product" .= prod
-            ]
+    toFlatItem (_rowId, typ, name, val, enabled, prod) =
+        ServerConfigFlatItem
+            { scfId = _rowId
+            , scfType = typ
+            , scfName = name
+            , scfValue = val
+            , scfEnabled = enabled
+            , scfProduct = prod
+            }
 
-upsertServerConfigH :: Value -> Flow APIResponse
-upsertServerConfigH (Object obj) = do
+upsertServerConfigH :: UpsertServerConfigReq -> Flow APIResponse
+upsertServerConfigH req = do
     db <- getDBEnv
-    let name = getStr "name" obj
-        value = fromMaybe "" (getStrM "value" obj)
-        enabled = maybe True (\t -> t == "1" || T.toLower t == "true") (getStrM "enabled" obj)
+    let name = uscName req
+        value = fromMaybe "" (uscValue req)
+        enabled = maybe True (\t -> t == "1" || T.toLower t == "true") (uscEnabled req)
     if T.null name
         then pure $ APIResponse "ERROR" "name is required"
         else case findConfigEntry name of
@@ -239,14 +237,5 @@ upsertServerConfigH (Object obj) = do
                             product_ = ceProduct entry
                         liftIO $ upsertServerConfig db name typ value enabled product_
                         pure $ APIResponse "SUCCESS" ("server_config upserted: " <> name)
-upsertServerConfigH _ = pure $ APIResponse "ERROR" "Invalid JSON body"
 
--- ============================================================================
--- Local Helpers
--- ============================================================================
-
-getStr :: Text -> KM.KeyMap Value -> Text
-getStr k obj = case KM.lookup (K.fromText k) obj of Just (String t) -> t; _ -> ""
-
-getStrM :: Text -> KM.KeyMap Value -> Maybe Text
-getStrM k obj = case KM.lookup (K.fromText k) obj of Just (String t) | not (T.null t) -> Just t; _ -> Nothing
+-- (Local helpers removed -- using typed request types instead)

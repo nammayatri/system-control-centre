@@ -17,7 +17,7 @@ module Products.Autopilot.Actions.VSEdit
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
-import Data.Aeson (Value (..), eitherDecode, object, (.=))
+import Data.Aeson (Value (..), eitherDecode, object, toJSON, (.=))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -37,28 +37,28 @@ import qualified Shared.Types.Storage.Schema as S
 -- VS Edit Tracker CRUD
 -- ============================================================================
 
-vsEditTrackerToJson :: S.VsEditTracker -> Value
-vsEditTrackerToJson t =
-    object
-        [ "id" .= S.vetId t
-        , "product" .= S.vetProduct t
-        , "service" .= S.vetService t
-        , "env" .= S.vetEnv t
-        , "vs_name" .= S.vetVsName t
-        , "old_vs_data" .= S.vetOldVsData t
-        , "new_vs_data" .= S.vetNewVsData t
-        , "status" .= S.vetStatus t
-        , "created_by" .= S.vetCreatedBy t
-        , "approved_by" .= S.vetApprovedBy t
-        , "is_locked" .= S.vetIsLocked t
-        , "locked_by" .= S.vetLockedBy t
-        , "locked_at" .= S.vetLockedAt t
-        , "lock_expiry" .= S.vetLockExpiry t
-        , "monitoring_end_time" .= S.vetMonitoringEndTime t
-        , "info" .= S.vetInfo t
-        , "created_at" .= S.vetCreatedAt t
-        , "updated_at" .= S.vetUpdatedAt t
-        ]
+vsEditTrackerToResponse :: S.VsEditTracker -> VsEditTrackerResponse
+vsEditTrackerToResponse t =
+    VsEditTrackerResponse
+        { vetRespId = S.vetId t
+        , vetRespProduct = S.vetProduct t
+        , vetRespService = S.vetService t
+        , vetRespEnv = S.vetEnv t
+        , vetRespVsName = S.vetVsName t
+        , vetRespOldVsData = S.vetOldVsData t
+        , vetRespNewVsData = S.vetNewVsData t
+        , vetRespStatus = S.vetStatus t
+        , vetRespCreatedBy = S.vetCreatedBy t
+        , vetRespApprovedBy = S.vetApprovedBy t
+        , vetRespIsLocked = S.vetIsLocked t
+        , vetRespLockedBy = S.vetLockedBy t
+        , vetRespLockedAt = S.vetLockedAt t
+        , vetRespLockExpiry = S.vetLockExpiry t
+        , vetRespMonitoringEndTime = S.vetMonitoringEndTime t
+        , vetRespInfo = S.vetInfo t
+        , vetRespCreatedAt = S.vetCreatedAt t
+        , vetRespUpdatedAt = S.vetUpdatedAt t
+        }
 
 createVsEditTrackerH :: CreateVsEditTrackerReq -> Flow Value
 createVsEditTrackerH CreateVsEditTrackerReq{..} = do
@@ -69,11 +69,11 @@ createVsEditTrackerH CreateVsEditTrackerReq{..} = do
     mLock <- liftIO $ findActiveLock db product vsName env now
     case mLock of
         Just existing ->
-            pure $ object
-                [ "error" .= ("VS is already locked by " <> fromMaybe "unknown" (S.vetLockedBy existing) :: Text)
-                , "locked_by" .= S.vetLockedBy existing
-                , "lock_expiry" .= S.vetLockExpiry existing
-                ]
+            pure $ toJSON $ VsLockErrorResponse
+                { vleError = "VS is already locked by " <> fromMaybe "unknown" (S.vetLockedBy existing)
+                , vleLockedBy = S.vetLockedBy existing
+                , vleLockExpiry = S.vetLockExpiry existing
+                }
         Nothing -> do
             let lockExpiry = addUTCTime (15 * 60) now -- 15 min default
                 row = S.VsEditTrackerT
@@ -97,9 +97,9 @@ createVsEditTrackerH CreateVsEditTrackerReq{..} = do
                     , vetUpdatedAt = now
                     }
             liftIO $ insertVsEditTracker db row
-            pure $ vsEditTrackerToJson row
+            pure $ toJSON $ vsEditTrackerToResponse row
 
-listVsEditTrackersH :: Maybe Text -> Maybe Text -> Flow [Value]
+listVsEditTrackersH :: Maybe Text -> Maybe Text -> Flow [VsEditTrackerResponse]
 listVsEditTrackersH mFrom mTo = do
     db <- getDBEnv
     let tryParse t = case parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" (T.unpack t) of
@@ -108,15 +108,15 @@ listVsEditTrackersH mFrom mTo = do
         from = mFrom >>= tryParse
         to = mTo >>= tryParse
     rows <- liftIO $ listVsEditTrackers db from to
-    pure $ map vsEditTrackerToJson rows
+    pure $ map vsEditTrackerToResponse rows
 
 getVsEditTrackerH :: Text -> Flow Value
 getVsEditTrackerH tid = do
     db <- getDBEnv
     m <- liftIO $ findVsEditTrackerById db tid
     case m of
-        Nothing -> pure $ object ["error" .= ("VS edit tracker not found" :: Text)]
-        Just t -> pure $ vsEditTrackerToJson t
+        Nothing -> pure $ toJSON $ ErrorResponse "VS edit tracker not found" Nothing
+        Just t -> pure $ toJSON $ vsEditTrackerToResponse t
 
 updateVsEditTrackerH :: Text -> UpdateVsEditTrackerReq -> Flow APIResponse
 updateVsEditTrackerH tid UpdateVsEditTrackerReq{..} = do
@@ -246,17 +246,17 @@ fetchCurrentVsH mProduct _mService = do
         Just prod -> do
             mProdCfg <- liftIO $ findProductByNameAndCluster db prod ""
             case mProdCfg of
-                Nothing -> pure $ object ["error" .= ("No product_config found for " <> prod), "message" .= ("Configure product first" :: Text)]
+                Nothing -> pure $ toJSON $ ErrorResponse ("No product_config found for " <> prod) (Just "Configure product first")
                 Just pCfg -> do
                     let ns = getProductNamespace pCfg
                         vsN = getProductVsName pCfg
                     if T.null vsN
-                        then pure $ object ["error" .= ("No vsName configured for product " <> prod), "message" .= ("Set vsName in product config" :: Text)]
+                        then pure $ toJSON $ ErrorResponse ("No vsName configured for product " <> prod) (Just "Set vsName in product config")
                         else do
                             result <- liftIO $ getVirtualServiceJson cfg ns vsN
                             case result of
-                                Left err -> pure $ object ["error" .= show err, "message" .= ("Failed to fetch VirtualService" :: Text)]
+                                Left err -> pure $ toJSON $ ErrorResponse (T.pack (show err)) (Just "Failed to fetch VirtualService")
                                 Right vsText -> case eitherDecode (LBS.pack (T.unpack vsText)) of
                                     Right vsJson -> pure vsJson
                                     Left _ -> pure $ object ["data" .= vsText]
-        _ -> pure $ object ["error" .= ("product query param required" :: Text)]
+        _ -> pure $ toJSON $ ErrorResponse "product query param required" Nothing

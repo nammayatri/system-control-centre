@@ -1,6 +1,26 @@
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+
 module Products.Autopilot.Types.API where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object, withObject, (.:), (.:?), (.=))
+import Data.Aeson
+    ( FromJSON (..)
+    , Options (..)
+    , ToJSON (..)
+    , Value (..)
+    , defaultOptions
+    , genericParseJSON
+    , genericToJSON
+    , object
+    , withObject
+    , (.:)
+    , (.:?)
+    , (.=)
+    )
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, (.!=))
@@ -10,6 +30,27 @@ import Data.Time.Clock (UTCTime)
 import GHC.Generics (Generic)
 import GHC.Int (Int32)
 import Products.Autopilot.Types (ReleaseCategory (..), RolloutStep (..))
+import Servant (FromHttpApiData)
+
+-- ============================================================================
+-- Newtypes for type-safe IDs
+-- ============================================================================
+
+newtype ReleaseId = ReleaseId { unReleaseId :: Text }
+    deriving stock (Show, Eq)
+    deriving newtype (FromJSON, ToJSON, FromHttpApiData)
+
+newtype ProductSlug = ProductSlug { unProductSlug :: Text }
+    deriving stock (Show, Eq)
+    deriving newtype (FromJSON, ToJSON, FromHttpApiData)
+
+newtype ServiceSlug = ServiceSlug { unServiceSlug :: Text }
+    deriving stock (Show, Eq)
+    deriving newtype (FromJSON, ToJSON, FromHttpApiData)
+
+-- ============================================================================
+-- Request Types
+-- ============================================================================
 
 data UpsertProductReq = UpsertProductReq
     { id :: Maybe Int32
@@ -26,6 +67,7 @@ data UpsertProductReq = UpsertProductReq
     }
     deriving (Show, Generic)
 
+-- Manual FromJSON to accept both camelCase and snake_case from frontend
 instance FromJSON UpsertProductReq where
     parseJSON = withObject "UpsertProductReq" $ \v ->
         UpsertProductReq
@@ -41,7 +83,8 @@ instance FromJSON UpsertProductReq where
             <*> (v .:? "syncCluster" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "sync_cluster")
             <*> (v .:? "needInfraApproval" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "need_infra_approval")
 
-instance ToJSON UpsertProductReq
+instance ToJSON UpsertProductReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
 data UpsertServiceReq = UpsertServiceReq
     { id :: Maybe Int32
@@ -57,9 +100,11 @@ data UpsertServiceReq = UpsertServiceReq
     }
     deriving (Show, Generic)
 
-instance FromJSON UpsertServiceReq
+instance FromJSON UpsertServiceReq where
+    parseJSON = genericParseJSON defaultOptions { omitNothingFields = True }
 
-instance ToJSON UpsertServiceReq
+instance ToJSON UpsertServiceReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
 data K8sCreateReleaseReq = K8sCreateReleaseReq
     { product :: Text
@@ -100,6 +145,7 @@ data K8sCreateReleaseReq = K8sCreateReleaseReq
     }
     deriving (Show, Generic)
 
+-- Complex manual parser needed for legacy field names and special parsing logic
 instance FromJSON K8sCreateReleaseReq where
     parseJSON = withObject "K8sCreateReleaseReq" $ \o -> do
         product <- o .: "product"
@@ -253,18 +299,22 @@ data ApproveReleaseReq = ApproveReleaseReq
     }
     deriving (Show, Generic)
 
-instance FromJSON ApproveReleaseReq
+instance FromJSON ApproveReleaseReq where
+    parseJSON = genericParseJSON defaultOptions { omitNothingFields = True }
 
-instance ToJSON ApproveReleaseReq
+instance ToJSON ApproveReleaseReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
 data TriggerReleaseReq = TriggerReleaseReq
     { reason :: Maybe Text
     }
     deriving (Show, Generic)
 
-instance FromJSON TriggerReleaseReq
+instance FromJSON TriggerReleaseReq where
+    parseJSON = genericParseJSON defaultOptions { omitNothingFields = True }
 
-instance ToJSON TriggerReleaseReq
+instance ToJSON TriggerReleaseReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
 data RevertReleaseReq = RevertReleaseReq
     { requestedBy :: Maybe Text
@@ -274,9 +324,11 @@ data RevertReleaseReq = RevertReleaseReq
     }
     deriving (Show, Generic)
 
-instance FromJSON RevertReleaseReq
+instance FromJSON RevertReleaseReq where
+    parseJSON = genericParseJSON defaultOptions { omitNothingFields = True }
 
-instance ToJSON RevertReleaseReq
+instance ToJSON RevertReleaseReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
 data K8sUpdateTrackerReq = K8sUpdateTrackerReq
     { status :: Maybe Text
@@ -298,39 +350,22 @@ data K8sUpdateTrackerReq = K8sUpdateTrackerReq
     }
     deriving (Show, Generic)
 
-instance FromJSON K8sUpdateTrackerReq
+instance FromJSON K8sUpdateTrackerReq where
+    parseJSON = genericParseJSON defaultOptions { omitNothingFields = True }
 
-instance ToJSON K8sUpdateTrackerReq
+instance ToJSON K8sUpdateTrackerReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
 data DiscardReleaseReq = DiscardReleaseReq
     { reason :: Maybe Text
     }
     deriving (Show, Generic)
 
-instance FromJSON DiscardReleaseReq
+instance FromJSON DiscardReleaseReq where
+    parseJSON = genericParseJSON defaultOptions { omitNothingFields = True }
 
-instance ToJSON DiscardReleaseReq
-
-data APIResponse = APIResponse
-    { status :: Text
-    , message :: Text
-    }
-    deriving (Show, Generic)
-
-instance ToJSON APIResponse
-
-data ProductResponse = ProductResponse
-    { product :: Text
-    , cluster :: Text
-    , namespace :: Text
-    , vsName :: Text
-    , productType :: Text
-    , productAcronym :: Text
-    , syncCluster :: Maybe Text
-    }
-    deriving (Show, Generic)
-
-instance ToJSON ProductResponse
+instance ToJSON DiscardReleaseReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
 data ImmediateRevertReq = ImmediateRevertReq
     { requestedBy :: Maybe Text
@@ -339,9 +374,11 @@ data ImmediateRevertReq = ImmediateRevertReq
     }
     deriving (Show, Generic)
 
-instance FromJSON ImmediateRevertReq
+instance FromJSON ImmediateRevertReq where
+    parseJSON = genericParseJSON defaultOptions { omitNothingFields = True }
 
-instance ToJSON ImmediateRevertReq
+instance ToJSON ImmediateRevertReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
 data RestartReleaseReq = RestartReleaseReq
     { requestedBy :: Maybe Text
@@ -349,9 +386,11 @@ data RestartReleaseReq = RestartReleaseReq
     }
     deriving (Show, Generic)
 
-instance FromJSON RestartReleaseReq
+instance FromJSON RestartReleaseReq where
+    parseJSON = genericParseJSON defaultOptions { omitNothingFields = True }
 
-instance ToJSON RestartReleaseReq
+instance ToJSON RestartReleaseReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
 data FastForwardReq = FastForwardReq
     { requestedBy :: Maybe Text
@@ -359,63 +398,15 @@ data FastForwardReq = FastForwardReq
     }
     deriving (Show, Generic)
 
-instance FromJSON FastForwardReq
+instance FromJSON FastForwardReq where
+    parseJSON = genericParseJSON defaultOptions { omitNothingFields = True }
 
-instance ToJSON FastForwardReq
+instance ToJSON FastForwardReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
-data ServiceResponse = ServiceResponse
-    { service :: Text
-    , serviceHost :: Maybe Text
-    , serviceType :: Text
-    , source :: Text
-    }
-    deriving (Show, Generic)
-
-instance ToJSON ServiceResponse
-
--- ── Product Config CRUD types ──────────────────────────────────────
-
-data ProductConfigResponse = ProductConfigResponse
-    { id :: Int32
-    , product :: Text
-    , repoName :: Text
-    , productType :: Text
-    , productAcronym :: Text
-    , releaseBranch :: Text
-    , needInfraApproval :: Maybe Bool
-    , cluster :: Maybe Text
-    , namespace :: Maybe Text
-    , vsName :: Maybe Text
-    , syncCluster :: Maybe Text
-    }
-    deriving (Show, Generic)
-
-instance ToJSON ProductConfigResponse
-
--- ── Release Config CRUD types ──────────────────────────────────────
-
-data ReleaseConfigResponse = ReleaseConfigResponse
-    { id :: Int32
-    , serviceName :: Text
-    , serviceProduct :: Text
-    , serviceType :: Text
-    , emails :: Maybe Text
-    , rolloutStrategy :: Maybe Text
-    , decisionConfig :: Maybe Text
-    , flags :: Maybe Text
-    , slackWebhookUrls :: Maybe Text
-    , serviceAcronym :: Maybe Text
-    , bitbucketPath :: Maybe Text
-    , microserviceType :: Maybe Text
-    , revertStrategy :: Maybe Text
-    , jiraWebhookUrl :: Maybe Text
-    , serviceHost :: Maybe Text
-    }
-    deriving (Show, Generic)
-
-instance ToJSON ReleaseConfigResponse
-
--- ── VS Edit Tracker types ──────────────────────────────────────────
+-- ============================================================================
+-- VS Edit Tracker Request Types
+-- ============================================================================
 
 data CreateVsEditTrackerReq = CreateVsEditTrackerReq
     { product :: Text
@@ -428,9 +419,11 @@ data CreateVsEditTrackerReq = CreateVsEditTrackerReq
     }
     deriving (Show, Generic)
 
-instance FromJSON CreateVsEditTrackerReq
+instance FromJSON CreateVsEditTrackerReq where
+    parseJSON = genericParseJSON defaultOptions { omitNothingFields = True }
 
-instance ToJSON CreateVsEditTrackerReq
+instance ToJSON CreateVsEditTrackerReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
 data UpdateVsEditTrackerReq = UpdateVsEditTrackerReq
     { newVsData :: Maybe Text
@@ -440,10 +433,13 @@ data UpdateVsEditTrackerReq = UpdateVsEditTrackerReq
     }
     deriving (Show, Generic)
 
-instance FromJSON UpdateVsEditTrackerReq
+instance FromJSON UpdateVsEditTrackerReq where
+    parseJSON = genericParseJSON defaultOptions { omitNothingFields = True }
 
-instance ToJSON UpdateVsEditTrackerReq
+instance ToJSON UpdateVsEditTrackerReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
+-- Manual FromJSON for VsLockReq to accept both camelCase and snake_case
 data VsLockReq = VsLockReq
     { product :: Text
     , service :: Maybe Text
@@ -466,8 +462,10 @@ instance FromJSON VsLockReq where
             <*> (v .:? "oldVsData" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "old_vs_data" >>= \mv2 -> case mv2 of Just x2 -> pure (Just x2); Nothing -> v .:? "vs_data")
             <*> (v .:? "lockDurationMinutes" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "lock_duration_minutes")
 
-instance ToJSON VsLockReq
+instance ToJSON VsLockReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
+-- Manual FromJSON for VsUnlockReq to accept both camelCase and snake_case
 data VsUnlockReq = VsUnlockReq
     { trackerId :: Maybe Text
     , product :: Maybe Text
@@ -484,4 +482,508 @@ instance FromJSON VsUnlockReq where
             <*> (v .:? "vsName" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "vs_name")
             <*> v .:? "env"
 
-instance ToJSON VsUnlockReq
+instance ToJSON VsUnlockReq where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
+
+-- ============================================================================
+-- Generic Response Type
+-- ============================================================================
+
+data APIResponse = APIResponse
+    { status :: Text
+    , message :: Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON APIResponse where
+    toJSON = genericToJSON defaultOptions
+
+instance FromJSON APIResponse where
+    parseJSON = genericParseJSON defaultOptions
+
+-- ============================================================================
+-- Product & Service Response Types
+-- ============================================================================
+
+data ProductResponse = ProductResponse
+    { product :: Text
+    , cluster :: Text
+    , namespace :: Text
+    , vsName :: Text
+    , productType :: Text
+    , productAcronym :: Text
+    , syncCluster :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ProductResponse where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
+
+data ServiceResponse = ServiceResponse
+    { service :: Text
+    , serviceHost :: Maybe Text
+    , serviceType :: Text
+    , source :: Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ServiceResponse where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
+
+-- ============================================================================
+-- Product Config CRUD Response
+-- ============================================================================
+
+data ProductConfigResponse = ProductConfigResponse
+    { id :: Int32
+    , product :: Text
+    , repoName :: Text
+    , productType :: Text
+    , productAcronym :: Text
+    , releaseBranch :: Text
+    , needInfraApproval :: Maybe Bool
+    , cluster :: Maybe Text
+    , namespace :: Maybe Text
+    , vsName :: Maybe Text
+    , syncCluster :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ProductConfigResponse where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
+
+-- ============================================================================
+-- Release Config CRUD Response
+-- ============================================================================
+
+data ReleaseConfigResponse = ReleaseConfigResponse
+    { id :: Int32
+    , serviceName :: Text
+    , serviceProduct :: Text
+    , serviceType :: Text
+    , emails :: Maybe Text
+    , rolloutStrategy :: Maybe Text
+    , decisionConfig :: Maybe Text
+    , flags :: Maybe Text
+    , slackWebhookUrls :: Maybe Text
+    , serviceAcronym :: Maybe Text
+    , bitbucketPath :: Maybe Text
+    , microserviceType :: Maybe Text
+    , revertStrategy :: Maybe Text
+    , jiraWebhookUrl :: Maybe Text
+    , serviceHost :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ReleaseConfigResponse where
+    toJSON = genericToJSON defaultOptions { omitNothingFields = True }
+
+-- ============================================================================
+-- Pod Health Response Types
+-- ============================================================================
+
+data PodInfo = PodInfo
+    { piName :: Text
+    , piStatus :: Text
+    , piReady :: Bool
+    , piRestarts :: Int
+    , piAge :: Text
+    , piVersion :: Text
+    }
+    deriving (Show, Generic)
+
+-- JSON output: strip "pi" prefix, lowercase first char -> "name", "status", etc.
+instance ToJSON PodInfo where
+    toJSON (PodInfo n s r rst a v) =
+        object
+            [ "name" .= n
+            , "status" .= s
+            , "ready" .= r
+            , "restarts" .= rst
+            , "age" .= a
+            , "version" .= v
+            ]
+
+data PodSummary = PodSummary
+    { psTotal :: Int
+    , psRunning :: Int
+    , psPending :: Int
+    , psFailed :: Int
+    , psUnknown :: Int
+    }
+    deriving (Show, Generic)
+
+instance ToJSON PodSummary where
+    toJSON (PodSummary t r p f u) =
+        object
+            [ "total" .= t
+            , "running" .= r
+            , "pending" .= p
+            , "failed" .= f
+            , "unknown" .= u
+            ]
+
+data PodHealthResponse = PodHealthResponse
+    { podsResult :: [PodInfo]
+    , summaryResult :: PodSummary
+    }
+    deriving (Show, Generic)
+
+instance ToJSON PodHealthResponse where
+    toJSON (PodHealthResponse pods summary) =
+        object
+            [ "pods" .= pods
+            , "summary" .= summary
+            ]
+
+-- ============================================================================
+-- Diff Response Type
+-- ============================================================================
+
+data DiffResponse = DiffResponse
+    { drOldfile :: Text
+    , drNewfile :: Text
+    , drMessage :: Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON DiffResponse where
+    toJSON (DiffResponse o n m) =
+        object
+            [ "oldfile" .= o
+            , "newfile" .= n
+            , "message" .= m
+            ]
+
+-- ============================================================================
+-- Resources Response Type
+-- ============================================================================
+
+data ResourceSpec = ResourceSpec
+    { rsCpu :: Maybe Text
+    , rsMemory :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ResourceSpec where
+    toJSON (ResourceSpec c m) =
+        object
+            [ "cpu" .= c
+            , "memory" .= m
+            ]
+
+instance FromJSON ResourceSpec where
+    parseJSON = withObject "ResourceSpec" $ \v ->
+        ResourceSpec
+            <$> v .:? "cpu"
+            <*> v .:? "memory"
+
+data ResourcesResponse = ResourcesResponse
+    { rrRequests :: Maybe ResourceSpec
+    , rrLimits :: Maybe ResourceSpec
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ResourcesResponse where
+    toJSON (ResourcesResponse req lim) =
+        object
+            [ "requests" .= req
+            , "limits" .= lim
+            ]
+
+instance FromJSON ResourcesResponse where
+    parseJSON = withObject "ResourcesResponse" $ \v ->
+        ResourcesResponse
+            <$> v .:? "requests"
+            <*> v .:? "limits"
+
+-- ============================================================================
+-- VS Edit Tracker Response Type
+-- ============================================================================
+
+data VsEditTrackerResponse = VsEditTrackerResponse
+    { vetRespId :: Text
+    , vetRespProduct :: Text
+    , vetRespService :: Text
+    , vetRespEnv :: Text
+    , vetRespVsName :: Text
+    , vetRespOldVsData :: Maybe Text
+    , vetRespNewVsData :: Maybe Text
+    , vetRespStatus :: Text
+    , vetRespCreatedBy :: Text
+    , vetRespApprovedBy :: Maybe Text
+    , vetRespIsLocked :: Maybe Bool
+    , vetRespLockedBy :: Maybe Text
+    , vetRespLockedAt :: Maybe UTCTime
+    , vetRespLockExpiry :: Maybe UTCTime
+    , vetRespMonitoringEndTime :: Maybe UTCTime
+    , vetRespInfo :: Maybe Text
+    , vetRespCreatedAt :: UTCTime
+    , vetRespUpdatedAt :: UTCTime
+    }
+    deriving (Show, Generic)
+
+-- JSON output uses snake_case field names matching frontend expectations
+instance ToJSON VsEditTrackerResponse where
+    toJSON v =
+        object
+            [ "id" .= vetRespId v
+            , "product" .= vetRespProduct v
+            , "service" .= vetRespService v
+            , "env" .= vetRespEnv v
+            , "vs_name" .= vetRespVsName v
+            , "old_vs_data" .= vetRespOldVsData v
+            , "new_vs_data" .= vetRespNewVsData v
+            , "status" .= vetRespStatus v
+            , "created_by" .= vetRespCreatedBy v
+            , "approved_by" .= vetRespApprovedBy v
+            , "is_locked" .= vetRespIsLocked v
+            , "locked_by" .= vetRespLockedBy v
+            , "locked_at" .= vetRespLockedAt v
+            , "lock_expiry" .= vetRespLockExpiry v
+            , "monitoring_end_time" .= vetRespMonitoringEndTime v
+            , "info" .= vetRespInfo v
+            , "created_at" .= vetRespCreatedAt v
+            , "updated_at" .= vetRespUpdatedAt v
+            ]
+
+-- ============================================================================
+-- Server Config Response Types
+-- ============================================================================
+
+data ServerConfigEntry = ServerConfigEntry
+    { sceKey :: Text
+    , sceValue :: Text
+    , sceType :: Text
+    , sceDefault :: Text
+    , sceDescription :: Text
+    , sceProduct :: Maybe Text
+    , sceEnabled :: Bool
+    , sceId :: Int
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ServerConfigEntry where
+    toJSON e =
+        object
+            [ "key" .= sceKey e
+            , "value" .= sceValue e
+            , "type" .= sceType e
+            , "default" .= sceDefault e
+            , "description" .= sceDescription e
+            , "product" .= sceProduct e
+            , "enabled" .= sceEnabled e
+            , "id" .= sceId e
+            ]
+
+data ServerConfigGroup = ServerConfigGroup
+    { scgName :: Text
+    , scgConfigs :: [ServerConfigEntry]
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ServerConfigGroup where
+    toJSON g =
+        object
+            [ "name" .= scgName g
+            , "configs" .= scgConfigs g
+            ]
+
+data ServerConfigFlatItem = ServerConfigFlatItem
+    { scfId :: Int
+    , scfType :: Text
+    , scfName :: Text
+    , scfValue :: Text
+    , scfEnabled :: Int
+    , scfProduct :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ServerConfigFlatItem where
+    toJSON i =
+        object
+            [ "id" .= scfId i
+            , "type" .= scfType i
+            , "name" .= scfName i
+            , "value" .= scfValue i
+            , "enabled" .= scfEnabled i
+            , "product" .= scfProduct i
+            ]
+
+data ServerConfigResponse = ServerConfigResponse
+    { scrGroups :: [ServerConfigGroup]
+    , scrConfigs :: [ServerConfigFlatItem]
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ServerConfigResponse where
+    toJSON r =
+        object
+            [ "groups" .= scrGroups r
+            , "configs" .= scrConfigs r
+            ]
+
+-- ============================================================================
+-- ConfigMap Tracker Response Type
+-- ============================================================================
+
+data ConfigMapResponse = ConfigMapResponse
+    { cmrId :: Text
+    , cmrService :: Text
+    , cmrProduct :: Text
+    , cmrName :: Maybe Text
+    , cmrStatus :: Text
+    , cmrDescription :: Text
+    , cmrEnv :: Text
+    , cmrCluster :: Text
+    , cmrDateCreated :: Maybe UTCTime
+    , cmrLastUpdated :: Maybe UTCTime
+    , cmrStartTime :: Maybe UTCTime
+    , cmrEndTime :: Maybe UTCTime
+    , cmrReleaseManager :: Text
+    , cmrIsApproved :: Int
+    , cmrIsInfraApproved :: Int
+    , cmrEvents :: [Value]
+    , cmrReleaseTag :: Maybe Text
+    , cmrConfig :: Maybe Text
+    , cmrFile :: Maybe Text
+    , cmrCommit :: Maybe Text
+    , cmrChangeLog :: Text
+    , cmrPriority :: Int32
+    , cmrScheduleTime :: Maybe UTCTime
+    , cmrSlackThreadId :: Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ConfigMapResponse where
+    toJSON r =
+        object
+            [ "id" .= cmrId r
+            , "service" .= cmrService r
+            , "product" .= cmrProduct r
+            , "name" .= cmrName r
+            , "status" .= cmrStatus r
+            , "description" .= cmrDescription r
+            , "env" .= cmrEnv r
+            , "cluster" .= cmrCluster r
+            , "date_created" .= cmrDateCreated r
+            , "last_updated" .= cmrLastUpdated r
+            , "start_time" .= cmrStartTime r
+            , "end_time" .= cmrEndTime r
+            , "release_manager" .= cmrReleaseManager r
+            , "is_approved" .= cmrIsApproved r
+            , "is_infra_approved" .= cmrIsInfraApproved r
+            , "events" .= cmrEvents r
+            , "release_tag" .= cmrReleaseTag r
+            , "config" .= cmrConfig r
+            , "file" .= cmrFile r
+            , "commit" .= cmrCommit r
+            , "change_log" .= cmrChangeLog r
+            , "priority" .= cmrPriority r
+            , "schedule_time" .= cmrScheduleTime r
+            , "slack_thread_id" .= cmrSlackThreadId r
+            ]
+
+data ConfigMapListResponse = ConfigMapListResponse
+    { cmlList :: [ConfigMapResponse]
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ConfigMapListResponse where
+    toJSON r = object ["list" .= cmlList r]
+
+-- ============================================================================
+-- ConfigMap K8s Lookup Response
+-- ============================================================================
+
+data ConfigMapK8sResponse = ConfigMapK8sResponse
+    { cmkConfigMap :: Value
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ConfigMapK8sResponse where
+    toJSON r = object ["configMap" .= cmkConfigMap r]
+
+instance FromJSON ConfigMapK8sResponse where
+    parseJSON = withObject "ConfigMapK8sResponse" $ \v ->
+        ConfigMapK8sResponse <$> v .: "configMap"
+
+-- ============================================================================
+-- Release Event Response Type
+-- ============================================================================
+
+data ReleaseEventResponse = ReleaseEventResponse
+    { reCategory :: Text
+    , reLabel :: Text
+    , reData :: Value
+    , reTimestamp :: UTCTime
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ReleaseEventResponse where
+    toJSON e =
+        object
+            [ "category" .= reCategory e
+            , "label" .= reLabel e
+            , "data" .= reData e
+            , "timestamp" .= reTimestamp e
+            ]
+
+-- ============================================================================
+-- Error Response Type (for typed 404s etc.)
+-- ============================================================================
+
+data ErrorResponse = ErrorResponse
+    { errError :: Text
+    , errMessage :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON ErrorResponse where
+    toJSON (ErrorResponse e m) =
+        object $ ["error" .= e] <> maybe [] (\msg -> ["message" .= msg]) m
+
+-- ============================================================================
+-- VS Lock Error Response
+-- ============================================================================
+
+data VsLockErrorResponse = VsLockErrorResponse
+    { vleError :: Text
+    , vleLockedBy :: Maybe Text
+    , vleLockExpiry :: Maybe UTCTime
+    }
+    deriving (Show, Generic)
+
+instance ToJSON VsLockErrorResponse where
+    toJSON v =
+        object
+            [ "error" .= vleError v
+            , "locked_by" .= vleLockedBy v
+            , "lock_expiry" .= vleLockExpiry v
+            ]
+
+-- ============================================================================
+-- Upsert Server Config Request Type
+-- ============================================================================
+
+data UpsertServerConfigReq = UpsertServerConfigReq
+    { uscName :: Text
+    , uscValue :: Maybe Text
+    , uscEnabled :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance FromJSON UpsertServerConfigReq where
+    parseJSON = withObject "UpsertServerConfigReq" $ \v ->
+        UpsertServerConfigReq
+            <$> (v .: "name")
+            <*> v .:? "value"
+            <*> v .:? "enabled"
+
+instance ToJSON UpsertServerConfigReq where
+    toJSON r =
+        object
+            [ "name" .= uscName r
+            , "value" .= uscValue r
+            , "enabled" .= uscEnabled r
+            ]

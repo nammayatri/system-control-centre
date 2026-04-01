@@ -25,6 +25,7 @@ import Products.Autopilot.K8s.Deployment (getDeploymentEnvs)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Queries.ProductService
+import Products.Autopilot.Types.API (ResourcesResponse (..), ResourceSpec (..), ConfigMapK8sResponse (..))
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
@@ -32,15 +33,16 @@ import System.Process (readProcessWithExitCode)
 -- Resources Endpoint (GET /resources?PRODUCT=&SERVICE=)
 -- ============================================================================
 
-fetchResourcesH :: Maybe Text -> Maybe Text -> Flow Value
+fetchResourcesH :: Maybe Text -> Maybe Text -> Flow ResourcesResponse
 fetchResourcesH mProduct mService = do
     cfg <- getConfig
     db <- getDBEnv
+    let emptyResources = ResourcesResponse Nothing Nothing
     case (mProduct, mService) of
         (Just productName, Just serviceName') -> do
             p <- liftIO $ findProductByName db productName
             case p of
-                Nothing -> pure $ object ["error" .= ("Product not found" :: Text)]
+                Nothing -> pure emptyResources
                 Just pCfg -> do
                     svc <- liftIO $ findServiceByProductAndName db productName serviceName'
                     let svcHost = case svc of
@@ -51,19 +53,19 @@ fetchResourcesH mProduct mService = do
                     -- Get the running version from VS
                     versionResult <- liftIO $ getPrimarySubsetFromVirtualService cfg ns vsName' svcHost
                     case versionResult of
-                        Left err -> pure $ object ["error" .= err]
-                        Right Nothing -> pure $ object ["error" .= ("No running version found" :: Text)]
+                        Left _ -> pure emptyResources
+                        Right Nothing -> pure emptyResources
                         Right (Just runningVersion) -> do
                             let fullDepName = svcHost <> "-" <> runningVersion
                             resResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack fullDepName, "-o jsonpath='{.spec.template.spec.containers[0].resources}'"])
                             case resResult of
-                                Left (K8sError err) -> pure $ object ["error" .= err]
+                                Left (K8sError _) -> pure emptyResources
                                 Right (K8sResult out) ->
                                     let cleaned = T.strip (T.dropWhile (== '\'') (T.dropWhileEnd (== '\'') (T.strip out)))
-                                     in case A.decodeStrict' (encodeUtf8 cleaned) :: Maybe Value of
+                                     in case A.decodeStrict' (encodeUtf8 cleaned) :: Maybe ResourcesResponse of
                                             Just v -> pure v
-                                            Nothing -> pure $ object ["requests" .= object [], "limits" .= object []]
-        _ -> pure $ object ["error" .= ("PRODUCT and SERVICE query params required" :: Text)]
+                                            Nothing -> pure emptyResources
+        _ -> pure emptyResources
 
 -- ============================================================================
 -- Envs Endpoints
@@ -166,41 +168,43 @@ fetchSecondaryEnvsH mProduct mEnv mService = do
 -- ConfigMap K8s Lookup
 -- ============================================================================
 
-fetchConfigMapFromK8sH :: Maybe Text -> Maybe Text -> Flow Value
+fetchConfigMapFromK8sH :: Maybe Text -> Maybe Text -> Flow ConfigMapK8sResponse
 fetchConfigMapFromK8sH mProduct mName = do
     cfg <- getConfig
     db <- getDBEnv
+    let emptyList = ConfigMapK8sResponse (A.toJSON ([] :: [Text]))
     case mProduct of
-        Nothing -> pure $ object ["configMap" .= A.toJSON ([] :: [Text])]
+        Nothing -> pure emptyList
         Just productName -> do
             p <- liftIO $ findProductByName db productName
             case p of
-                Nothing -> pure $ object ["configMap" .= A.toJSON ([] :: [Text])]
+                Nothing -> pure emptyList
                 Just pCfg -> do
                     let ns = getProductNamespace pCfg
                     case mName of
                         Nothing -> do
                             res <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get configmap", "-o jsonpath='{.items[*].metadata.name}'"])
                             case res of
-                                Left _ -> pure $ object ["configMap" .= A.toJSON ([] :: [Text])]
+                                Left _ -> pure emptyList
                                 Right (K8sResult out) ->
                                     let cleaned = T.strip (T.dropWhile (== '\'') (T.dropWhileEnd (== '\'') (T.strip out)))
                                         names = filter (not . T.null) (T.words cleaned)
-                                     in pure $ object ["configMap" .= names]
+                                     in pure $ ConfigMapK8sResponse (A.toJSON names)
                         Just name' -> do
                             res <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get configmap", T.unpack name', "-o jsonpath='{.data}'"])
                             case res of
-                                Left _ -> pure $ object ["configMap" .= ("" :: Text)]
+                                Left _ -> pure $ ConfigMapK8sResponse (A.toJSON ("" :: Text))
                                 Right (K8sResult out) ->
                                     let cleaned = T.strip (T.dropWhile (== '\'') (T.dropWhileEnd (== '\'') (T.strip out)))
-                                     in pure $ object ["configMap" .= cleaned]
+                                     in pure $ ConfigMapK8sResponse (A.toJSON cleaned)
 
-fetchSecondaryConfigMapH :: Maybe Text -> Maybe Text -> Flow Value
+fetchSecondaryConfigMapH :: Maybe Text -> Maybe Text -> Flow ConfigMapK8sResponse
 fetchSecondaryConfigMapH mProduct mName = do
     cfg <- getConfig
     let rawUrl = syncClusterUrl cfg
+        emptyList = ConfigMapK8sResponse (A.toJSON ([] :: [Text]))
     if null rawUrl
-        then pure $ object ["configMap" .= A.toJSON ([] :: [Text])]
+        then pure emptyList
         else do
             let normalised =
                     let u = if "http" `T.isPrefixOf` T.pack rawUrl then rawUrl else "http://" <> rawUrl
@@ -217,12 +221,12 @@ fetchSecondaryConfigMapH mProduct mName = do
             getResult <- liftIO (try (readProcessWithExitCode "curl" getCurlArgs "") :: IO (Either SomeException (ExitCode, String, String)))
             case getResult of
                 Right (ExitSuccess, out, _) | not (null out) ->
-                    case A.decodeStrict' (encodeUtf8 (T.pack out)) :: Maybe Value of
+                    case A.decodeStrict' (encodeUtf8 (T.pack out)) :: Maybe ConfigMapK8sResponse of
                         Just v -> pure v
                         Nothing -> do
                             liftIO $ putStrLn $ "[SYNC-CONFIGMAP] Response not valid JSON"
-                            pure $ object ["configMap" .= A.toJSON ([] :: [Text])]
+                            pure emptyList
                 Right (ExitFailure code, _, err) -> do
                     liftIO $ putStrLn $ "[SYNC-CONFIGMAP] GET failed (exit=" <> show code <> "): " <> err
-                    pure $ object ["configMap" .= A.toJSON ([] :: [Text])]
-                _ -> pure $ object ["configMap" .= A.toJSON ([] :: [Text])]
+                    pure emptyList
+                _ -> pure emptyList

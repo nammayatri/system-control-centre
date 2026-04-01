@@ -34,25 +34,25 @@ type CoreAPI =
         :<|> "release" :> "revert" :> "immediate" :> "global" :> Capture "globalId" Text :> Put '[JSON] APIResponse
         :<|> "releases" :> Capture "releaseId" Text :> "discard" :> ReqBody '[JSON] DiscardReleaseReq :> Post '[JSON] APIResponse
         :<|> "releases" :> Capture "releaseId" Text :> "update" :> ReqBody '[JSON] K8sUpdateTrackerReq :> Post '[JSON] APIResponse
-        :<|> "releases" :> Capture "releaseId" Text :> "events" :> Get '[JSON] [Value]
+        :<|> "releases" :> Capture "releaseId" Text :> "events" :> Get '[JSON] [ReleaseEventResponse]
         :<|> "releases" :> Capture "releaseId" Text :> "delete" :> Post '[JSON] APIResponse
-        :<|> "tracker" :> "configmap" :> "list" :> QueryParam "from" Text :> QueryParam "to" Text :> Get '[JSON] Value
+        :<|> "tracker" :> "configmap" :> "list" :> QueryParam "from" Text :> QueryParam "to" Text :> Get '[JSON] ConfigMapListResponse
         :<|> "tracker" :> "configmap" :> Capture "id" Text :> Get '[JSON] Value
         :<|> "tracker" :> "configmap" :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
         :<|> "tracker" :> "configmap" :> Capture "id" Text :> ReqBody '[JSON] Value :> Put '[JSON] APIResponse
-        :<|> "configmap" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] Value
-        :<|> "configmap" :> "secondary" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] Value
-        :<|> "server-config" :> Get '[JSON] Value
-        :<|> "server-config" :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
+        :<|> "configmap" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] ConfigMapK8sResponse
+        :<|> "configmap" :> "secondary" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] ConfigMapK8sResponse
+        :<|> "server-config" :> Get '[JSON] ServerConfigResponse
+        :<|> "server-config" :> ReqBody '[JSON] UpsertServerConfigReq :> Post '[JSON] APIResponse
         :<|> "envs" :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
         :<|> "envs" :> "secondary" :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
         -- New endpoints
-        :<|> "releases" :> Capture "releaseId" Text :> "diff" :> QueryParam "type" Text :> Get '[JSON] Value
-        :<|> "releases" :> Capture "releaseId" Text :> "pods" :> "health" :> Get '[JSON] Value
+        :<|> "releases" :> Capture "releaseId" Text :> "diff" :> QueryParam "type" Text :> Get '[JSON] DiffResponse
+        :<|> "releases" :> Capture "releaseId" Text :> "pods" :> "health" :> Get '[JSON] PodHealthResponse
         :<|> "releases" :> Capture "releaseId" Text :> "revert" :> "immediate" :> ReqBody '[JSON] ImmediateRevertReq :> Post '[JSON] APIResponse
         :<|> "releases" :> Capture "releaseId" Text :> "restart" :> ReqBody '[JSON] RestartReleaseReq :> Post '[JSON] APIResponse
         :<|> "releases" :> Capture "releaseId" Text :> "fast-forward" :> ReqBody '[JSON] FastForwardReq :> Post '[JSON] APIResponse
-        :<|> "resources" :> QueryParam "PRODUCT" Text :> QueryParam "SERVICE" Text :> Get '[JSON] Value
+        :<|> "resources" :> QueryParam "PRODUCT" Text :> QueryParam "SERVICE" Text :> Get '[JSON] ResourcesResponse
         :<|> "releases" :> Capture "releaseId" Text :> "rollout-history" :> Get '[JSON] Value
         -- Product Config CRUD
         :<|> "products" :> "config" :> Get '[JSON] [ProductConfigResponse]
@@ -68,7 +68,7 @@ type CoreAPI =
         :<|> "services" :> "config" :> Capture "id" Int32 :> Delete '[JSON] APIResponse
         -- VS Edit Tracker (static paths BEFORE captures to avoid ambiguity)
         :<|> "vs-edit-tracker" :> ReqBody '[JSON] CreateVsEditTrackerReq :> Post '[JSON] Value
-        :<|> "vs-edit-tracker" :> "list" :> QueryParam "from" Text :> QueryParam "to" Text :> Get '[JSON] [Value]
+        :<|> "vs-edit-tracker" :> "list" :> QueryParam "from" Text :> QueryParam "to" Text :> Get '[JSON] [VsEditTrackerResponse]
         :<|> "vs-edit-tracker" :> "current-vs" :> QueryParam "product" Text :> QueryParam "service" Text :> Get '[JSON] Value
         :<|> "vs-edit-tracker" :> "lock" :> ReqBody '[JSON] VsLockReq :> Post '[JSON] APIResponse
         :<|> "vs-edit-tracker" :> "unlock" :> ReqBody '[JSON] VsUnlockReq :> Post '[JSON] APIResponse

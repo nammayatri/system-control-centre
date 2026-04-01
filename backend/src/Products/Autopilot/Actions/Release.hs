@@ -641,19 +641,19 @@ updateK8sContext :: Maybe TargetState -> (K8sReleaseContext -> K8sReleaseContext
 updateK8sContext (Just (K8sState k8s)) f = Just $ K8sState $ k8s{context = f (context k8s)}
 updateK8sContext other _ = other
 
-listEventsH :: Text -> Flow [Value]
+listEventsH :: Text -> Flow [ReleaseEventResponse]
 listEventsH rid = do
     db <- getDBEnv
     events <- liftIO $ listReleaseEvents db rid
     pure $
         fmap
             ( \e ->
-                object
-                    [ "category" .= S.reCategory e
-                    , "label" .= S.reLabel e
-                    , "data" .= S.rePayload e
-                    , "timestamp" .= S.reCreatedAt e
-                    ]
+                ReleaseEventResponse
+                    { reCategory = S.reCategory e
+                    , reLabel = S.reLabel e
+                    , reData = S.rePayload e
+                    , reTimestamp = S.reCreatedAt e
+                    }
             )
             events
 
@@ -669,13 +669,13 @@ rolloutHistoryH rid = do
 -- Diff Endpoint (GET /releases/:id/diff)
 -- ============================================================================
 
-releaseDiffH :: Text -> Maybe Text -> Flow Value
+releaseDiffH :: Text -> Maybe Text -> Flow DiffResponse
 releaseDiffH rid mType = do
     cfg <- getConfig
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
-        Nothing -> pure $ object ["oldfile" .= ("" :: Text), "newfile" .= ("" :: Text), "message" .= ("Release not found" :: Text)]
+        Nothing -> pure $ DiffResponse "" "" "Release not found"
         Just (tracker, mTargetState) -> do
             -- Check for stored SNAPSHOT events first
             events <- liftIO $ listReleaseEvents db rid
@@ -695,17 +695,15 @@ releaseDiffH rid mType = do
                 payloadToText other = TE.decodeUtf8 (LBS.toStrict (A.encode other))
             case (mBefore, mAfter) of
                 (Just beforeEvt, Just afterEvt) ->
-                    pure $ object
-                        [ "oldfile" .= payloadToText (S.rePayload beforeEvt)
-                        , "newfile" .= payloadToText (S.rePayload afterEvt)
-                        , "message" .= diffLabel
-                        ]
+                    pure $ DiffResponse
+                        (payloadToText (S.rePayload beforeEvt))
+                        (payloadToText (S.rePayload afterEvt))
+                        diffLabel
                 (Just beforeEvt, Nothing) ->
-                    pure $ object
-                        [ "oldfile" .= payloadToText (S.rePayload beforeEvt)
-                        , "newfile" .= ("" :: Text)
-                        , "message" .= (diffLabel <> " (in progress -- after snapshot pending)")
-                        ]
+                    pure $ DiffResponse
+                        (payloadToText (S.rePayload beforeEvt))
+                        ""
+                        (diffLabel <> " (in progress -- after snapshot pending)")
                 _ -> do
                     -- Fall back to live K8s diff (original behavior)
                     let mCtx = case mTargetState of
@@ -713,7 +711,7 @@ releaseDiffH rid mType = do
                             _ -> Nothing
                     case mCtx of
                         Nothing ->
-                            pure $ object ["oldfile" .= ("" :: Text), "newfile" .= ("" :: Text), "message" .= ("No K8s context available" :: Text)]
+                            pure $ DiffResponse "" "" "No K8s context available"
                         Just ctx -> do
                             let ns = ctx.namespace
                                 svcHost = ctx.serviceName
@@ -729,7 +727,7 @@ releaseDiffH rid mType = do
                                     let oldEnvText = case oldEnvResult of
                                             Right (K8sResult out) -> cleanJsonpath out
                                             Left _ -> ""
-                                    pure $ object ["oldfile" .= oldEnvText, "newfile" .= udf2Envs, "message" .= ("Diff from env switch (udf2)" :: Text)]
+                                    pure $ DiffResponse oldEnvText udf2Envs "Diff from env switch (udf2)"
                                 _ -> do
                                     -- Fetch new deployment envs from K8s
                                     newEnvResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack newDep, "-o jsonpath='{.spec.template.spec.containers[0].env}'"])
@@ -740,8 +738,8 @@ releaseDiffH rid mType = do
                                             Right (K8sResult out) -> cleanJsonpath out
                                             Left _ -> ""
                                     if T.null oldEnvText && T.null newEnvText
-                                        then pure $ object ["oldfile" .= ("" :: Text), "newfile" .= ("" :: Text), "message" .= ("No diff data available" :: Text)]
-                                        else pure $ object ["oldfile" .= oldEnvText, "newfile" .= newEnvText, "message" .= ("Deployment env diff" :: Text)]
+                                        then pure $ DiffResponse "" "" "No diff data available"
+                                        else pure $ DiffResponse oldEnvText newEnvText "Deployment env diff"
   where
     cleanJsonpath :: Text -> Text
     cleanJsonpath out = T.strip (T.dropWhile (== '\'') (T.dropWhileEnd (== '\'') (T.strip out)))
@@ -750,54 +748,48 @@ releaseDiffH rid mType = do
 -- Pod Health Endpoint (GET /releases/:id/pods/health)
 -- ============================================================================
 
-podHealthH :: Text -> Flow Value
+podHealthH :: Text -> Flow PodHealthResponse
 podHealthH rid = do
     cfg <- getConfig
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
-        Nothing -> pure $ object ["error" .= ("Release not found" :: Text)]
+        Nothing -> pure emptyPodHealth
         Just (_tracker, mTargetState) -> do
             let mCtx = case mTargetState of
                     Just (K8sState k8s) -> Just (context k8s)
                     _ -> Nothing
             case mCtx of
-                Nothing -> pure $ object ["error" .= ("No K8s context available" :: Text)]
+                Nothing -> pure emptyPodHealth
                 Just ctx -> do
                     let ns = ctx.namespace
                         svcHost = ctx.serviceName
                     podResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get pods -l app=" <> T.unpack svcHost, "-o json"])
                     case podResult of
-                        Left (K8sError err) -> pure $ object ["error" .= err]
+                        Left (K8sError _) -> pure emptyPodHealth
                         Right (K8sResult out) ->
                             case A.decodeStrict' (encodeUtf8 out) :: Maybe Value of
-                                Nothing -> pure $ object ["error" .= ("Failed to parse pod JSON" :: Text)]
+                                Nothing -> pure emptyPodHealth
                                 Just podJson -> pure $ parsePodHealth podJson
 
-parsePodHealth :: Value -> Value
+emptyPodHealth :: PodHealthResponse
+emptyPodHealth = PodHealthResponse [] (PodSummary 0 0 0 0 0)
+
+parsePodHealth :: Value -> PodHealthResponse
 parsePodHealth (Object root) =
     case KM.lookup (K.fromText "items") root of
         Just (Array items) ->
             let pods = map parseSinglePod (foldr (:) [] items)
                 total = length pods
-                running = length (filter (\p -> getStr' "status" p == "Running") pods)
-                pending = length (filter (\p -> getStr' "status" p == "Pending") pods)
-                failed = length (filter (\p -> getStr' "status" p == "Failed") pods)
-                unknown = total - running - pending - failed
-             in object
-                    [ "pods" .= pods
-                    , "summary" .= object
-                        [ "total" .= total
-                        , "running" .= running
-                        , "pending" .= pending
-                        , "failed" .= failed
-                        , "unknown" .= unknown
-                        ]
-                    ]
-        _ -> object ["pods" .= ([] :: [Value]), "summary" .= object ["total" .= (0 :: Int), "running" .= (0 :: Int), "pending" .= (0 :: Int), "failed" .= (0 :: Int), "unknown" .= (0 :: Int)]]
-parsePodHealth _ = object ["pods" .= ([] :: [Value]), "summary" .= object ["total" .= (0 :: Int), "running" .= (0 :: Int), "pending" .= (0 :: Int), "failed" .= (0 :: Int), "unknown" .= (0 :: Int)]]
+                running = length (filter (\p -> piStatus p == "Running") pods)
+                pending = length (filter (\p -> piStatus p == "Pending") pods)
+                failed = length (filter (\p -> piStatus p == "Failed") pods)
+                unknown' = total - running - pending - failed
+             in PodHealthResponse pods (PodSummary total running pending failed unknown')
+        _ -> emptyPodHealth
+parsePodHealth _ = emptyPodHealth
 
-parseSinglePod :: Value -> Value
+parseSinglePod :: Value -> PodInfo
 parseSinglePod (Object podObj) =
     let nameVal = case getObj' "metadata" podObj >>= getTxt' "name" of
             Just n -> n
@@ -823,15 +815,8 @@ parseSinglePod (Object podObj) =
             Nothing -> case getObj' "spec" podObj >>= getArr' "containers" of
                 Just (c : _) -> extractImageTag c
                 _ -> ""
-     in object
-            [ "name" .= nameVal
-            , "status" .= phaseVal
-            , "ready" .= readyVal
-            , "restarts" .= restartsVal
-            , "age" .= ageVal
-            , "version" .= versionVal
-            ]
-parseSinglePod _ = object ["name" .= ("" :: Text), "status" .= ("Unknown" :: Text), "ready" .= False, "restarts" .= (0 :: Int), "age" .= ("" :: Text), "version" .= ("" :: Text)]
+     in PodInfo nameVal phaseVal readyVal restartsVal ageVal versionVal
+parseSinglePod _ = PodInfo "" "Unknown" False 0 "" ""
 
 isContainerReady :: Value -> Bool
 isContainerReady (Object cs) = case KM.lookup (K.fromText "ready") cs of
@@ -865,9 +850,7 @@ getArr' key obj = case KM.lookup (K.fromText key) obj of Just (Array a) -> Just 
 getTxt' :: Text -> KM.KeyMap Value -> Maybe Text
 getTxt' key obj = case KM.lookup (K.fromText key) obj of Just (String t) -> Just t; _ -> Nothing
 
-getStr' :: Text -> Value -> Text
-getStr' key (Object obj) = case KM.lookup (K.fromText key) obj of Just (String t) -> t; _ -> ""
-getStr' _ _ = ""
+-- (getStr' removed -- pod parsing now uses typed PodInfo)
 
 -- ============================================================================
 -- Immediate Revert (POST /releases/:id/revert/immediate)

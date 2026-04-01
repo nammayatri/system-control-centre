@@ -42,7 +42,7 @@ import System.Process (readProcessWithExitCode)
 -- ConfigMap Tracker Handlers
 -- ============================================================================
 
-listConfigMapsH :: Maybe Text -> Maybe Text -> Flow Value
+listConfigMapsH :: Maybe Text -> Maybe Text -> Flow ConfigMapListResponse
 listConfigMapsH mFrom mTo = do
     db <- getDBEnv
     now <- liftIO getCurrentTime
@@ -52,7 +52,7 @@ listConfigMapsH mFrom mTo = do
         from = fromMaybe (addUTCTime (-2592000) now) (mFrom >>= tryParse)
         to = fromMaybe now (mTo >>= tryParse)
     pairs <- liftIO $ findReleaseTrackersByCategory db "BackendConfig" from to
-    pure $ object ["list" .= map (toConfigMapJson . fst) pairs]
+    pure $ ConfigMapListResponse (map (toConfigMapResponse . fst) pairs)
 
 getConfigMapH :: Text -> Flow Value
 getConfigMapH cmId' = do
@@ -60,7 +60,7 @@ getConfigMapH cmId' = do
     m <- liftIO $ findReleaseTracker db cmId'
     case m of
         Nothing -> pure Null
-        Just (rt, _) -> pure (toConfigMapJson rt)
+        Just (rt, _) -> pure $ toJSON (toConfigMapResponse rt)
 
 createConfigMapH :: Value -> Flow APIResponse
 createConfigMapH body = do
@@ -191,9 +191,9 @@ updateConfigMapH cmId' body = do
 -- Internal Helpers
 -- ============================================================================
 
--- | Convert a ReleaseTracker (category=BackendConfig) to backward-compatible ConfigMap JSON
-toConfigMapJson :: ReleaseTracker -> Value
-toConfigMapJson rt =
+-- | Convert a ReleaseTracker (category=BackendConfig) to typed ConfigMapResponse
+toConfigMapResponse :: ReleaseTracker -> ConfigMapResponse
+toConfigMapResponse rt =
     let meta = case NT.metadata rt of
             Just (Object o) -> o
             _ -> KM.empty
@@ -211,32 +211,32 @@ toConfigMapJson rt =
             Aborted -> "ABORTED"
             UserAborted -> "ABORTED"
             _ -> T.pack (show (NT.status rt))
-     in object
-            [ "id" .= NT.releaseId rt
-            , "service" .= NT.service rt
-            , "product" .= NT.product rt
-            , "name" .= nameVal
-            , "status" .= statusText
-            , "description" .= fromMaybe "" (NT.description rt)
-            , "env" .= NT.env rt
-            , "cluster" .= clusterVal
-            , "date_created" .= NT.dateCreated rt
-            , "last_updated" .= NT.lastUpdated rt
-            , "start_time" .= NT.startTime rt
-            , "end_time" .= NT.endTime rt
-            , "release_manager" .= NT.createdBy rt
-            , "is_approved" .= (if NT.isApproved rt then (1 :: Int) else 0)
-            , "is_infra_approved" .= (if NT.isInfraApproved rt then (1 :: Int) else 0)
-            , "events" .= ([] :: [Value])
-            , "release_tag" .= NT.releaseTag rt
-            , "config" .= configVal
-            , "file" .= fileVal
-            , "commit" .= getMetaStr "commit"
-            , "change_log" .= fromMaybe "" (NT.changeLog rt)
-            , "priority" .= NT.priority rt
-            , "schedule_time" .= NT.scheduleTime rt
-            , "slack_thread_id" .= ("" :: Text)
-            ]
+     in ConfigMapResponse
+            { cmrId = NT.releaseId rt
+            , cmrService = NT.service rt
+            , cmrProduct = NT.product rt
+            , cmrName = nameVal
+            , cmrStatus = statusText
+            , cmrDescription = fromMaybe "" (NT.description rt)
+            , cmrEnv = NT.env rt
+            , cmrCluster = clusterVal
+            , cmrDateCreated = NT.dateCreated rt
+            , cmrLastUpdated = NT.lastUpdated rt
+            , cmrStartTime = NT.startTime rt
+            , cmrEndTime = NT.endTime rt
+            , cmrReleaseManager = NT.createdBy rt
+            , cmrIsApproved = if NT.isApproved rt then 1 else 0
+            , cmrIsInfraApproved = if NT.isInfraApproved rt then 1 else 0
+            , cmrEvents = []
+            , cmrReleaseTag = NT.releaseTag rt
+            , cmrConfig = configVal
+            , cmrFile = fileVal
+            , cmrCommit = getMetaStr "commit"
+            , cmrChangeLog = fromMaybe "" (NT.changeLog rt)
+            , cmrPriority = NT.priority rt
+            , cmrScheduleTime = NT.scheduleTime rt
+            , cmrSlackThreadId = ""
+            }
 
 extractCmFields :: Value -> Either Text (Text, Text, Text, Text, Maybe Text, Maybe Text, Maybe Text, Text, Int, Maybe UTCTime, Maybe Text)
 extractCmFields (Object obj) =
