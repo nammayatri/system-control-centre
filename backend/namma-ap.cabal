@@ -47,6 +47,11 @@ library
       Products.Autopilot.Queries.ReleaseTracker
       Products.Autopilot.Queries.ServerConfig
       Products.Autopilot.Queries.VsEditTracker
+      Products.Autopilot.Actions.Config
+      Products.Autopilot.Actions.ConfigMap
+      Products.Autopilot.Actions.K8sResource
+      Products.Autopilot.Actions.Release
+      Products.Autopilot.Actions.VSEdit
       Products.Autopilot.Routes
       Products.Autopilot.Runner
       Products.Autopilot.RuntimeConfig
@@ -76,6 +81,8 @@ library
       Products.Types
       Shared.Config.Registry
       Shared.Config.Types
+      Shared.Error
+      Shared.JSON
       Shared.Queries.ProductConfig
       Shared.Queries.ReleaseConfig
       Shared.Queries.ReleaseEvents
