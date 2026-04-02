@@ -75,6 +75,9 @@ listReleaseTrackersByDateRange db fromTime toTime = do
                         rt <- all_ (releaseTrackers nammaAPDb)
                         guard_ (rtCreatedAt rt >=. val_ fromTime)
                         guard_ (rtCreatedAt rt <=. val_ toTime)
+                        -- Exclude VS edits and ConfigMap changes (shown in their own sections)
+                        guard_ (rtCategory rt /=. val_ "VSEdit")
+                        guard_ (rtCategory rt /=. val_ "BackendConfig")
                         pure rt
     pure (map fromRow rows)
 
