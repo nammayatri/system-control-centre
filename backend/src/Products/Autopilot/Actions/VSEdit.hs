@@ -86,7 +86,7 @@ mkVsEditRow tid product' service' env' vsName' oldVsData' createdBy' status' now
         , rtApprovedBy = Nothing
         , rtIsApproved = Nothing
         , rtIsInfraApproved = Nothing
-        , rtReleaseTag = Nothing
+        , rtReleaseTag = Just ("VSEDIT_" <> product' <> "_" <> T.pack (show now))
         , rtScheduleTime = Nothing
         , rtStartTime = Just now
         , rtEndTime = Nothing
