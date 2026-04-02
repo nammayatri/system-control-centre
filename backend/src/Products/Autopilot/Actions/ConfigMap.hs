@@ -15,7 +15,9 @@ import Control.Concurrent (forkIO)
 import Control.Exception (SomeException, try)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
+import Data.List (find)
 import Core.Config (Config (..))
+import Core.Environment (DBEnv)
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
@@ -35,6 +37,7 @@ import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Target (TargetState (..), emptyConfigState)
+import qualified Shared.Types.Storage.Schema as S
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
@@ -215,12 +218,12 @@ updateConfigMapH cmId' body = do
 handleConfigMapRevert :: DBEnv -> ReleaseTracker -> Maybe TargetState -> Text -> Flow APIResponse
 handleConfigMapRevert db rt mts cmId' = do
     events <- liftIO $ listReleaseEvents db cmId'
-    let mBeforeSnap = find (\e -> reCategory e == "SNAPSHOT" && reLabel e == "CONFIGMAP_BEFORE") events
+    let mBeforeSnap = find (\e -> S.reCategory e == "SNAPSHOT" && S.reLabel e == "CONFIGMAP_BEFORE") events
     case mBeforeSnap of
         Nothing -> pure $ APIResponse "ERROR" "No CONFIGMAP_BEFORE snapshot found to revert to"
         Just beforeEvt -> do
             newRid <- liftIO (UUID.toText <$> UUID.nextRandom)
-            let oldConfig = case rePayload beforeEvt of
+            let oldConfig = case S.rePayload beforeEvt of
                     String s -> Just s
                     _ -> Nothing
                 -- Create a new tracker as a revert copy

@@ -58,6 +58,7 @@ import Products.Autopilot.K8s.Deployment (
  )
 import Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
 import Products.Autopilot.K8s.HPA (hpaExists, buildCloneHpaCommand)
+import Products.Autopilot.Queries.ProductService (withVsLock)
 import Products.Autopilot.Queries.ReleaseTracker (insertReleaseEvent, findReleaseTracker, insertReleaseTracker)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getVirtualServiceJson)
@@ -146,6 +147,21 @@ runK8sIO action = do
     case result of
         Right a -> pure a
         Left (K8sError err) -> liftIO $ fail ("K8s error: " <> T.unpack err)
+
+-- | Apply VS rollout with a pessimistic lock around the operation.
+-- Acquires vs_locked_by before the kubectl call, releases after (success or fail).
+-- If the lock is already held, fails with an error (caller should retry).
+runVsRolloutWithLock :: Config -> K8sReleaseContext -> Int -> Int -> StateFlow ()
+runVsRolloutWithLock cfg ctx oldW newW = do
+    db <- getDB
+    rt <- getRT
+    let lockOwner = "release:" <> releaseId rt
+    result <- liftIO $ withVsLock db (appGroup rt) lockOwner $
+        applyVirtualServiceRollout cfg ctx oldW newW
+    case result of
+        Left err -> liftIO $ fail ("VS lock failed: " <> T.unpack err)
+        Right (Left (K8sError k8sErr)) -> liftIO $ fail ("K8s error: " <> T.unpack k8sErr)
+        Right (Right _) -> pure ()
 
 -- ============================================================================
 -- Workflow Step Implementations
@@ -327,7 +343,7 @@ progressiveRollout = do
         then do
             -- New service: route 100% traffic to new version directly (no old version)
             liftIO $ putStrLn "  New service: routing 100% traffic to new version"
-            _ <- runK8sIO $ applyVirtualServiceRollout cfg ctx 0 100
+            runVsRolloutWithLock cfg ctx 0 100
             updateK8sField (\k8s -> k8s{trafficPercentage = 100})
             -- Record rollout history for the 100% step
             now <- liftIO getCurrentTime
@@ -349,7 +365,7 @@ progressiveRollout = do
                 firstNewW = rolloutPercent firstStep
                 firstOldW = max 0 (100 - firstNewW)
             liftIO $ putStrLn $ "  Initial rollout step: new=" <> show firstNewW <> "%, cooloff=" <> show (cooloffSeconds firstStep) <> "min"
-            _ <- runK8sIO $ applyVirtualServiceRollout cfg ctx firstOldW firstNewW
+            runVsRolloutWithLock cfg ctx firstOldW firstNewW
             updateK8sField (\k8s -> k8s{trafficPercentage = firstNewW})
 
             -- Record rollout history for first step
@@ -396,8 +412,8 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
             -- Production line 462: isTrackerInTerminalState!
             case status freshRT of
                 Aborting -> do
-                    liftIO $ putStrLn "  [rolloutLoop] Tracker is ABORTING, stopping rollout"
-                    liftIO $ fail "Release aborted by user during rollout"
+                    liftIO $ putStrLn $ "  [rolloutLoop] Release " <> T.unpack (releaseId freshRT) <> " is aborting, exiting workflow. Runner will handle cleanup."
+                    liftIO $ fail "Release aborted by user — runner will restore traffic"
                 UserAborted -> do
                     liftIO $ putStrLn "  [rolloutLoop] Tracker is USER_ABORTED, stopping rollout"
                     liftIO $ fail "Release user-aborted during rollout"
@@ -488,8 +504,8 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                                             liftIO $ putStrLn $ "  Rollout step " <> show (currentIndex + 1) <> "/" <> show totalSteps
                                                 <> ": new=" <> show nextNewW <> "%, cooloff=" <> show (cooloffSeconds nextStep) <> "min"
 
-                                            -- Apply VS rollout
-                                            _ <- runK8sIO $ applyVirtualServiceRollout cfg ctx nextOldW nextNewW
+                                            -- Apply VS rollout with lock
+                                            runVsRolloutWithLock cfg ctx nextOldW nextNewW
                                             updateK8sField (\k8s -> k8s{trafficPercentage = nextNewW})
 
                                             -- Record new rollout history entry

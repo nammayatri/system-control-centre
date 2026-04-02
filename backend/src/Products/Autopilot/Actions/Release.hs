@@ -410,14 +410,18 @@ triggerReleaseH rid TriggerReleaseReq{..} = do
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
-            if isTerminalStatus (NT.status tracker)
-                then pure $ APIResponse "ERROR" ("Cannot trigger from terminal status: " <> T.pack (show (NT.status tracker)))
+            let oldStatus = NT.status tracker
+            if isTerminalStatus oldStatus
+                then pure $ APIResponse "ERROR" ("Cannot trigger from terminal status: " <> T.pack (show oldStatus))
                 else do
                     now <- liftIO getCurrentTime
                     let updated = (tracker :: ReleaseTracker){NT.scheduleTime = Just now, NT.status = Created}
-                    liftIO $ insertReleaseTracker db updated mTargetState
-                    liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_TRIGGERED" (toJSON reason)
-                    pure $ APIResponse "SUCCESS" "Release scheduled for execution"
+                    ok <- liftIO $ conditionalUpdateTracker db updated mTargetState (releaseStatusToText oldStatus)
+                    if ok
+                        then do
+                            liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_TRIGGERED" (toJSON reason)
+                            pure $ APIResponse "SUCCESS" "Release scheduled for execution"
+                        else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
 rollbackReleaseH :: Text -> TriggerReleaseReq -> Flow APIResponse
 rollbackReleaseH rid TriggerReleaseReq{..} = do
@@ -426,13 +430,17 @@ rollbackReleaseH rid TriggerReleaseReq{..} = do
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
-            if not (validateStatusTransition (NT.status tracker) Aborting)
-                then pure $ APIResponse "ERROR" ("Cannot rollback from status: " <> T.pack (show (NT.status tracker)))
+            let oldStatus = NT.status tracker
+            if not (validateStatusTransition oldStatus Aborting)
+                then pure $ APIResponse "ERROR" ("Cannot rollback from status: " <> T.pack (show oldStatus))
                 else do
                     let updated = (tracker :: ReleaseTracker){NT.status = Aborting, NT.releaseWFStatus = RollingBack}
-                    liftIO $ insertReleaseTracker db updated mTargetState
-                    liftIO $ insertReleaseEvent db rid "BUSINESS" "ROLLBACK_REQUESTED" (toJSON reason)
-                    pure $ APIResponse "SUCCESS" "Rollback marked"
+                    ok <- liftIO $ conditionalUpdateTracker db updated mTargetState (releaseStatusToText oldStatus)
+                    if ok
+                        then do
+                            liftIO $ insertReleaseEvent db rid "BUSINESS" "ROLLBACK_REQUESTED" (toJSON reason)
+                            pure $ APIResponse "SUCCESS" "Rollback marked"
+                        else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
 revertReleaseH :: Text -> RevertReleaseReq -> Flow APIResponse
 revertReleaseH rid req = do
@@ -543,21 +551,25 @@ discardReleaseH rid DiscardReleaseReq{..} = do
     m <- liftIO $ findReleaseTracker db rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
-        Just (tracker, mTargetState) ->
-            if not (validateStatusTransition (NT.status tracker) Discarded)
-                then pure $ APIResponse "ERROR" ("Cannot discard from status: " <> T.pack (show (NT.status tracker)))
+        Just (tracker, mTargetState) -> do
+            let oldStatus = NT.status tracker
+            if not (validateStatusTransition oldStatus Discarded)
+                then pure $ APIResponse "ERROR" ("Cannot discard from status: " <> T.pack (show oldStatus))
                 else do
                     let updated = (tracker :: ReleaseTracker){NT.status = Discarded}
-                    liftIO $ insertReleaseTracker db updated mTargetState
-                    liftIO $
-                        insertReleaseEvent
-                            db
-                            rid
-                            "BUSINESS"
-                            "STATUS_UPDATED"
-                            (toJSON ("Tracker marked as DISCARDED" <> maybe "" (": " <>) reason))
-                    liftIO $ notifyReleaseDiscarded db updated
-                    pure $ APIResponse "SUCCESS" "Release discarded"
+                    ok <- liftIO $ conditionalUpdateTracker db updated mTargetState (releaseStatusToText oldStatus)
+                    if ok
+                        then do
+                            liftIO $
+                                insertReleaseEvent
+                                    db
+                                    rid
+                                    "BUSINESS"
+                                    "STATUS_UPDATED"
+                                    (toJSON ("Tracker marked as DISCARDED" <> maybe "" (": " <>) reason))
+                            liftIO $ notifyReleaseDiscarded db updated
+                            pure $ APIResponse "SUCCESS" "Release discarded"
+                        else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
 deleteReleaseH :: Text -> Flow APIResponse
 deleteReleaseH rid = do
@@ -584,35 +596,55 @@ updateTrackerH rid req = do
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
-            let (updatedTracker, updatedTargetState) = applyUpdates tracker mTargetState req
-            case (req :: K8sUpdateTrackerReq).status of
-                Just newStatusText -> do
-                    let newStatus = parseReleaseStatus newStatusText
-                    if newStatus == NT.status tracker
-                        then do
-                            -- Same status: just update other fields (no transition needed)
-                            liftIO $ insertReleaseTracker db updatedTracker updatedTargetState
-                            liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
-                            liftIO $ notifyReleaseUpdated db updatedTracker "fields updated"
-                            pure $ APIResponse "SUCCESS" "Tracker updated"
-                    else if not (validateStatusTransition (NT.status tracker) newStatus)
-                        then pure $ APIResponse "ERROR" ("Invalid status transition: " <> T.pack (show (NT.status tracker)) <> " -> " <> newStatusText)
-                        else do
-                            liftIO $ insertReleaseTracker db updatedTracker updatedTargetState
-                            liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
-                            -- Send status-specific Slack notifications
-                            case newStatus of
-                                Paused -> liftIO $ notifyReleasePaused db updatedTracker
-                                InProgress -> liftIO $ notifyReleaseResumed db updatedTracker
-                                Aborting -> liftIO $ notifyReleaseAborted db updatedTracker
-                                Completed -> liftIO $ notifyReleaseCompleted db updatedTracker
-                                _ -> liftIO $ notifyReleaseUpdated db updatedTracker ("status changed to " <> newStatusText)
-                            pure $ APIResponse "SUCCESS" "Tracker updated"
-                Nothing -> do
-                    liftIO $ insertReleaseTracker db updatedTracker updatedTargetState
-                    liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
-                    liftIO $ notifyReleaseUpdated db updatedTracker "status/fields updated"
-                    pure $ APIResponse "SUCCESS" "Tracker updated"
+            let oldStatus = NT.status tracker
+                oldStatusText = releaseStatusToText oldStatus
+            -- Guard: when release is InProgress, only allow pause/abort status transitions.
+            -- Other field modifications would race with the running workflow.
+            let isAllowedInProgress = case (req :: K8sUpdateTrackerReq).status of
+                    Just s  -> let ns = parseReleaseStatus s in ns == Paused || ns == Aborting
+                    Nothing -> False
+            if oldStatus == InProgress && not isAllowedInProgress
+                then pure $ APIResponse "ERROR" "Cannot modify release while in progress. Pause it first."
+                else do
+                    let (updatedTracker, updatedTargetState) = applyUpdates tracker mTargetState req
+                    case (req :: K8sUpdateTrackerReq).status of
+                        Just newStatusText -> do
+                            let newStatus = parseReleaseStatus newStatusText
+                            if newStatus == oldStatus
+                                then do
+                                    -- Same status: just update other fields, but guard against concurrent status change
+                                    ok <- liftIO $ conditionalUpdateTracker db updatedTracker updatedTargetState oldStatusText
+                                    if ok
+                                        then do
+                                            liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
+                                            liftIO $ notifyReleaseUpdated db updatedTracker "fields updated"
+                                            pure $ APIResponse "SUCCESS" "Tracker updated"
+                                        else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
+                            else if not (validateStatusTransition oldStatus newStatus)
+                                then pure $ APIResponse "ERROR" ("Invalid status transition: " <> T.pack (show oldStatus) <> " -> " <> newStatusText)
+                                else do
+                                    ok <- liftIO $ conditionalUpdateTracker db updatedTracker updatedTargetState oldStatusText
+                                    if ok
+                                        then do
+                                            liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
+                                            -- Send status-specific Slack notifications
+                                            case newStatus of
+                                                Paused -> liftIO $ notifyReleasePaused db updatedTracker
+                                                InProgress -> liftIO $ notifyReleaseResumed db updatedTracker
+                                                Aborting -> liftIO $ notifyReleaseAborted db updatedTracker
+                                                Completed -> liftIO $ notifyReleaseCompleted db updatedTracker
+                                                _ -> liftIO $ notifyReleaseUpdated db updatedTracker ("status changed to " <> newStatusText)
+                                            pure $ APIResponse "SUCCESS" "Tracker updated"
+                                        else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
+                        Nothing -> do
+                            -- No status change requested, but guard against concurrent status change
+                            ok <- liftIO $ conditionalUpdateTracker db updatedTracker updatedTargetState oldStatusText
+                            if ok
+                                then do
+                                    liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
+                                    liftIO $ notifyReleaseUpdated db updatedTracker "status/fields updated"
+                                    pure $ APIResponse "SUCCESS" "Tracker updated"
+                                else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
 applyUpdates :: ReleaseTracker -> Maybe TargetState -> K8sUpdateTrackerReq -> (ReleaseTracker, Maybe TargetState)
 applyUpdates tracker mts req =

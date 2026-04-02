@@ -33,8 +33,8 @@ import qualified Data.UUID.V4 as UUID
 import Products.Autopilot.K8s.Execute (K8sError (..), runCmd, shellQuote)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import Products.Autopilot.Notifications
-import Products.Autopilot.Queries.ProductService
-import Products.Autopilot.Queries.ReleaseTracker (insertReleaseTrackerRow, insertReleaseEvent, listReleaseEvents)
+import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductNamespace, getProductVsName, tryAcquireVsLock, updateVsLockedBy)
+import Products.Autopilot.Queries.ReleaseTracker (insertReleaseTrackerRow, conditionalUpdateTrackerRow, insertReleaseEvent, listReleaseEvents)
 import Products.Autopilot.Workflow.Helpers (stripK8sNoiseValue)
 import Products.Autopilot.Queries.VsEditTracker
 import Products.Autopilot.Types.API
@@ -132,24 +132,21 @@ createVsEditTrackerH CreateVsEditTrackerReq{..} = do
     db <- getDBEnv
     now <- liftIO getCurrentTime
     tid <- liftIO (UUID.toText <$> UUID.nextRandom)
-    -- Check for existing active lock via deployment_config
-    mLock <- liftIO $ findActiveLockFromConfig db appGroup
-    case mLock of
-        Just existing ->
-            pure $ toJSON $ VsLockErrorResponse
-                { vleError = "VS is already locked by " <> fromMaybe "unknown" (S.dcVsLockedBy existing)
-                , vleLockedBy = S.dcVsLockedBy existing
-                , vleLockExpiry = Nothing
-                }
-        Nothing -> do
+    -- Atomically acquire VS lock (single UPDATE WHERE vs_locked_by IS NULL)
+    acquired <- liftIO $ tryAcquireVsLock db appGroup createdBy
+    if not acquired
+        then pure $ toJSON $ VsLockErrorResponse
+            { vleError = "VS is already locked"
+            , vleLockedBy = Nothing
+            , vleLockExpiry = Nothing
+            }
+        else do
             let row = mkVsEditRow tid appGroup service env vsName oldVsData (Just createdBy) "CREATED" now
             liftIO $ insertReleaseTrackerRow db row
             -- Capture old VS data as SNAPSHOT event
             case oldVsData of
                 Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_OLD" (String d)
                 Nothing -> pure ()
-            -- Set vs_locked_by in deployment_config
-            liftIO $ updateVsLockedBy db appGroup (Just createdBy)
             liftIO $ notifyVsEditCreated db tid appGroup service (Just createdBy)
             pure $ toJSON $ releaseRowToVsResponse row
 
@@ -183,8 +180,9 @@ updateVsEditTrackerH tid UpdateVsEditTrackerReq{..} = do
     case m of
         Nothing -> pure $ APIResponse "ERROR" "VS edit tracker not found"
         Just existing -> do
-            let updated = existing
-                    { S.rtStatus = fromMaybe (S.rtStatus existing) status
+            let oldStatusText = S.rtStatus existing
+                updated = existing
+                    { S.rtStatus = fromMaybe oldStatusText status
                     , S.rtApprovedBy = case approvedBy of
                         Just a -> Just a
                         Nothing -> S.rtApprovedBy existing
@@ -200,8 +198,10 @@ updateVsEditTrackerH tid UpdateVsEditTrackerReq{..} = do
                     case newVsData of
                         Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_NEW" (String d)
                         Nothing -> pure ()
-                    liftIO $ insertReleaseTrackerRow db updated
-                    pure $ APIResponse "SUCCESS" "VS edit saved"
+                    ok <- liftIO $ conditionalUpdateTrackerRow db updated oldStatusText
+                    if ok
+                        then pure $ APIResponse "SUCCESS" "VS edit saved"
+                        else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
 
                 Just "APPLIED" -> do
                     -- Get the new VS data from SNAPSHOT events
@@ -227,30 +227,39 @@ updateVsEditTrackerH tid UpdateVsEditTrackerReq{..} = do
                                             case result of
                                                 Left err -> pure $ APIResponse "ERROR" ("K8s apply failed: " <> err)
                                                 Right () -> do
-                                                    liftIO $ insertReleaseTrackerRow db updated
-                                                    -- Unlock VS after successful apply
-                                                    liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing
-                                                    liftIO $ notifyVsEditApplied db tid (S.rtAppGroup existing) (S.rtService existing) (fromMaybe "admin" approvedBy)
-                                                    pure $ APIResponse "SUCCESS" "VS edit applied to K8s"
+                                                    ok <- liftIO $ conditionalUpdateTrackerRow db updated oldStatusText
+                                                    if ok
+                                                        then do
+                                                            -- Unlock VS after successful apply
+                                                            liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing
+                                                            liftIO $ notifyVsEditApplied db tid (S.rtAppGroup existing) (S.rtService existing) (fromMaybe "admin" approvedBy)
+                                                            pure $ APIResponse "SUCCESS" "VS edit applied to K8s"
+                                                        else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
 
                 Just "DISCARDED" -> do
-                    liftIO $ insertReleaseTrackerRow db updated
-                    -- Clear lock if present
-                    liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing
-                    liftIO $ notifyVsEditDiscarded db tid (S.rtAppGroup existing) (S.rtService existing)
-                    pure $ APIResponse "SUCCESS" "VS edit discarded"
+                    ok <- liftIO $ conditionalUpdateTrackerRow db updated oldStatusText
+                    if ok
+                        then do
+                            -- Clear lock if present
+                            liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing
+                            liftIO $ notifyVsEditDiscarded db tid (S.rtAppGroup existing) (S.rtService existing)
+                            pure $ APIResponse "SUCCESS" "VS edit discarded"
+                        else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
 
                 _ -> do
                     -- Generic update (approval, info change, etc.)
-                    liftIO $ insertReleaseTrackerRow db updated
-                    case newVsData of
-                        Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_NEW" (String d)
-                        Nothing -> pure ()
-                    -- Notification for approval
-                    case approvedBy of
-                        Just ab -> liftIO $ notifyVsEditApproved db tid (S.rtAppGroup existing) (S.rtService existing) ab
-                        Nothing -> pure ()
-                    pure $ APIResponse "SUCCESS" "VS edit tracker updated"
+                    ok <- liftIO $ conditionalUpdateTrackerRow db updated oldStatusText
+                    if ok
+                        then do
+                            case newVsData of
+                                Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_NEW" (String d)
+                                Nothing -> pure ()
+                            -- Notification for approval
+                            case approvedBy of
+                                Just ab -> liftIO $ notifyVsEditApproved db tid (S.rtAppGroup existing) (S.rtService existing) ab
+                                Nothing -> pure ()
+                            pure $ APIResponse "SUCCESS" "VS edit tracker updated"
+                        else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
 
 lockVsEditTrackerH :: VsLockReq -> Flow APIResponse
 lockVsEditTrackerH VsLockReq{..} = do
@@ -265,12 +274,11 @@ lockVsEditTrackerH VsLockReq{..} = do
         resolvedEnv = fromMaybe (envName cfg) env
         resolvedService = fromMaybe "" service
         resolvedLockedBy = fromMaybe "admin" lockedBy
-    -- Check for existing active lock via deployment_config
-    mLock <- liftIO $ findActiveLockFromConfig db appGroup
-    case mLock of
-        Just existing ->
-            pure $ APIResponse "ERROR" ("VS already locked by " <> fromMaybe "unknown" (S.dcVsLockedBy existing))
-        Nothing -> do
+    -- Atomically acquire VS lock (single UPDATE WHERE vs_locked_by IS NULL)
+    acquired <- liftIO $ tryAcquireVsLock db appGroup resolvedLockedBy
+    if not acquired
+        then pure $ APIResponse "ERROR" "VS is already locked"
+        else do
             tid <- liftIO (UUID.toText <$> UUID.nextRandom)
             let durationSecs = fromIntegral (fromMaybe 15 lockDurationMinutes) * 60
                 lockExpiry = addUTCTime durationSecs now
@@ -281,8 +289,6 @@ lockVsEditTrackerH VsLockReq{..} = do
             case oldVsData of
                 Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_OLD" (String d)
                 Nothing -> pure ()
-            -- Set vs_locked_by in deployment_config
-            liftIO $ updateVsLockedBy db appGroup (Just resolvedLockedBy)
             liftIO $ notifyVsEditLocked db tid appGroup (fromMaybe "" service) (fromMaybe "admin" lockedBy)
             pure $ APIResponse "SUCCESS" ("VS locked. Tracker ID: " <> tid)
 

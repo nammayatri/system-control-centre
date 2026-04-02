@@ -89,7 +89,9 @@ isEligibleToRun db ongoing (rt, mts) = case category rt of
             hasOngoingSameProduct = any (\(o, _) -> appGroup o == appGroup rt && env o == env rt) ongoing
         pure (not vsLocked && (skipOngoingCheck || not hasOngoingSameProduct))
 
--- | Trigger a release - dispatch to appropriate workflow using new Factory
+-- | Trigger a release - dispatch to appropriate workflow using new Factory.
+-- Uses conditionalUpdateTrackerRow to atomically claim the release only if still CREATED,
+-- preventing double-pick by concurrent runner instances.
 trigger :: DBEnv -> TrackerWithTarget -> Flow ()
 trigger db (rt, mts) = do
     cfg <- getConfig
@@ -108,25 +110,42 @@ trigger db (rt, mts) = do
             liftIO $ notifyReleaseAborted db discarded
             pure ()
         Nothing -> do
-            -- Mark InProgress BEFORE dispatching to prevent re-pickup on next poll
+            -- Atomically claim: DELETE WHERE status='CREATED' + INSERT with INPROGRESS
+            -- If another runner already changed the status, this returns False.
+            now <- liftIO getCurrentTime
             let rtInProgress = rt{status = InProgress}
-            liftIO $ insertReleaseTracker db rtInProgress mts
-            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "RUNNER_PICKED" (toJSON rt)
-            result <- dispatchWorkflow rtInProgress mts
-            case result of
-                Left err -> do
-                    cfg <- getConfig
-                    let errStatus = case status rt of
-                            Aborting -> UserAborted
-                            _ -> Aborted
-                        abortedTracker = rtInProgress{status = errStatus, releaseWFStatus = RollingBack}
-                    liftIO $ insertReleaseTracker db abortedTracker mts
-                    liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
-                    -- Restore VS traffic to old version on failure
-                    liftIO $ restoreVsTrafficOnFailure cfg db rt mts
-                    liftIO $ notifyReleaseAborted db abortedTracker
-                Right _finalState -> do
-                    liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
+                row = toRow now now rtInProgress mts
+            claimed <- liftIO $ conditionalUpdateTrackerRow db row "CREATED"
+            if not claimed
+                then liftIO $ putStrLn $ "[RUNNER] Release " <> T.unpack (releaseId rt) <> " already claimed by another runner, skipping"
+                else do
+                    liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "RUNNER_PICKED" (toJSON rt)
+                    result <- dispatchWorkflow rtInProgress mts
+                    case result of
+                        Left err -> do
+                            cfg' <- getConfig
+                            -- Re-read tracker from DB to get the current status (user may have set ABORTING)
+                            freshM <- liftIO $ findReleaseTracker db (releaseId rt)
+                            let currentStatus = case freshM of
+                                    Just (freshRT, _) -> status freshRT
+                                    Nothing           -> status rtInProgress
+                                isUserAbort = currentStatus == Aborting || currentStatus == UserAborted
+                            if isUserAbort
+                                then do
+                                    -- User abort: leave status as ABORTING so that handleAbortingRelease
+                                    -- (Step 3 of runLoop) picks it up and is the SOLE handler for
+                                    -- VS restoration + status transition. This prevents duplicate kubectl calls.
+                                    liftIO $ putStrLn $ "[RUNNER] Workflow exited due to user abort — deferring to handleAbortingRelease: " <> T.unpack (releaseId rt)
+                                    liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "WORKFLOW_ABORT_EXIT" (toJSON (show err))
+                                else do
+                                    -- Non-abort failure: handle VS restoration here
+                                    let abortedTracker = rtInProgress{status = Aborted, releaseWFStatus = RollingBack}
+                                    liftIO $ insertReleaseTracker db abortedTracker mts
+                                    liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
+                                    liftIO $ restoreVsTrafficOnFailure cfg' db rt mts
+                                    liftIO $ notifyReleaseAborted db abortedTracker
+                        Right _finalState -> do
+                            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
 
 -- | Dispatch to the new workflow factory
 dispatchWorkflow :: ReleaseTracker -> Maybe TargetState -> Flow (Either WorkFlowError ReleaseState)

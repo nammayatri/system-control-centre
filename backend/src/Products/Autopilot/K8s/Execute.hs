@@ -7,6 +7,7 @@ module Products.Autopilot.K8s.Execute (
     runCmd,
     executeWithRetry,
     isIdempotentSuccess,
+    isConflictError,
     shellQuote,
     jsonToText,
     withKubectx,
@@ -70,5 +71,12 @@ executeWithRetry cfg cmd = go 1
 isIdempotentSuccess :: K8sError -> Bool
 isIdempotentSuccess (K8sError e) =
     any (`isInfixOf` lowerMsg) ["alreadyexists", "already exists", "unchanged", "configured"]
+  where
+    lowerMsg = map toLower (T.unpack e)
+
+-- | Detect K8s 409 Conflict error (resourceVersion mismatch during replace)
+isConflictError :: K8sError -> Bool
+isConflictError (K8sError e) =
+    any (`isInfixOf` lowerMsg) ["conflict", "the object has been modified", "please apply your changes to the latest version"]
   where
     lowerMsg = map toLower (T.unpack e)

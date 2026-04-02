@@ -1,10 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Products.Autopilot.Queries.ProductService where
 
-import Core.DB.Connection (runDB)
+import qualified Control.Exception
+import Core.DB.Connection (runDB, withConn)
 import Core.Environment (DBEnv)
+import Database.Beam.Postgres (runBeamPostgres)
+import Database.PostgreSQL.Simple (withTransaction)
 import Data.Maybe (fromMaybe)
+import qualified Data.Text
 import Data.Text (Text)
 import Database.Beam
 import GHC.Int (Int32)
@@ -161,12 +166,13 @@ upsertProduct db rowId productName' cluster' namespace' vsName' productType' pro
                 , dcDecisionConfig = Nothing
                 , dcSlackChannel = Nothing
                 }
-    runDB db $ do
-        runDelete $
-            delete (deploymentConfig nammaAPDb) (\p -> dcAppGroup p ==. val_ productName' &&. isNothing_ (dcService p))
-        runInsert $
-            insert (deploymentConfig nammaAPDb) $
-                insertValues [row]
+    withConn db $ \conn ->
+        withTransaction conn $ do
+            runBeamPostgres conn $ runDelete $
+                delete (deploymentConfig nammaAPDb) (\p -> dcAppGroup p ==. val_ productName' &&. isNothing_ (dcService p))
+            runBeamPostgres conn $ runInsert $
+                insert (deploymentConfig nammaAPDb) $
+                    insertValues [row]
 
 upsertService ::
     DBEnv ->
@@ -202,12 +208,13 @@ upsertService db rowId rolloutStrategy decisionConfig serviceName' product' sTyp
                 , dcDecisionConfig = decisionConfig
                 , dcSlackChannel = Nothing
                 }
-    runDB db $ do
-        runDelete $
-            delete (deploymentConfig nammaAPDb) (\s -> dcAppGroup s ==. val_ product' &&. dcService s ==. val_ (Just serviceName'))
-        runInsert $
-            insert (deploymentConfig nammaAPDb) $
-                insertValues [row]
+    withConn db $ \conn ->
+        withTransaction conn $ do
+            runBeamPostgres conn $ runDelete $
+                delete (deploymentConfig nammaAPDb) (\s -> dcAppGroup s ==. val_ product' &&. dcService s ==. val_ (Just serviceName'))
+            runBeamPostgres conn $ runInsert $
+                insert (deploymentConfig nammaAPDb) $
+                    insertValues [row]
 
 -- ============================================================================
 -- CRUD by ID (used by Config actions)
@@ -275,3 +282,48 @@ updateVsLockedBy db productName' mLockedBy =
                     [ dcVsLockedBy p <-. val_ mLockedBy
                     ])
                 (\p -> dcAppGroup p ==. val_ productName' &&. isNothing_ (dcService p))
+
+-- | Atomically acquire VS lock using PostgreSQL UPDATE ... WHERE vs_locked_by IS NULL.
+-- This is a single atomic SQL statement — no race condition possible.
+-- Returns the number of rows updated (1 = lock acquired, 0 = already locked).
+tryAcquireVsLock :: DBEnv -> Text -> Text -> IO Bool
+tryAcquireVsLock db productName' lockOwner = do
+    -- Atomic: UPDATE SET vs_locked_by = owner WHERE app_group = X AND service IS NULL AND vs_locked_by IS NULL
+    -- If already locked, 0 rows updated. If not locked, 1 row updated. No race condition.
+    runDB db $
+        runUpdate $
+            update (deploymentConfig nammaAPDb)
+                (\p -> dcVsLockedBy p <-. val_ (Just lockOwner))
+                (\p -> dcAppGroup p ==. val_ productName'
+                    &&. isNothing_ (dcService p)
+                    &&. isNothing_ (dcVsLockedBy p))
+    -- Check if we actually got the lock
+    rows <- runDB db $
+        runSelectReturningList $
+            select $ do
+                p <- all_ (deploymentConfig nammaAPDb)
+                guard_ (dcAppGroup p ==. val_ productName')
+                guard_ (isNothing_ (dcService p))
+                guard_ (dcVsLockedBy p ==. val_ (Just lockOwner))
+                pure p
+    pure (not (null rows))
+
+-- | Acquire VS lock, run an action, then release the lock.
+-- Uses atomic UPDATE WHERE vs_locked_by IS NULL — no race condition.
+-- If the lock is already held, returns Left with error.
+-- On success or failure of the action, the lock is always released (via finally).
+withVsLock :: forall a. DBEnv -> Text -> Text -> IO a -> IO (Either Text a)
+withVsLock db productName' lockOwner action = do
+    acquired <- tryAcquireVsLock db productName' lockOwner
+    if not acquired
+        then pure (Left "VS is locked by another release/editor")
+        else
+            -- Use finally to guarantee lock release even on async exceptions
+            Control.Exception.finally
+                ( do
+                    result <- Control.Exception.try action :: IO (Either Control.Exception.SomeException a)
+                    case result of
+                        Right v -> pure (Right v)
+                        Left ex -> pure (Left (Data.Text.pack (show ex)))
+                )
+                (updateVsLockedBy db productName' Nothing)

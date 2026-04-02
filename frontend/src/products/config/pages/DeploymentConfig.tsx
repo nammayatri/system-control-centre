@@ -643,25 +643,121 @@ const DeploymentConfig: React.FC = () => {
                   <option value="CUSTOM">CUSTOM</option>
                 </select>
               </div>
+              {/* Rollout Strategy Editor */}
               <div>
-                <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Rollout Strategy (JSON)</label>
-                <textarea
-                  value={serviceForm.rollout_strategy || ''}
-                  onChange={e => setServiceForm(prev => ({ ...prev, rollout_strategy: e.target.value }))}
-                  rows={4}
-                  className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
-                  placeholder='[{"rolloutPercent": 5, "cooloffSeconds": 300, "podPercent": 2}]'
-                />
+                <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Rollout Strategy</label>
+                {(() => {
+                  let stages: Array<{rolloutPercent: number; cooloffSeconds: number; podPercent: number}> = [];
+                  try { stages = JSON.parse(serviceForm.rollout_strategy || '[]'); } catch { stages = []; }
+                  if (!Array.isArray(stages)) stages = [];
+
+                  const updateStages = (newStages: typeof stages) => {
+                    setServiceForm(prev => ({ ...prev, rollout_strategy: JSON.stringify(newStages) }));
+                  };
+
+                  return (
+                    <div className="border border-zinc-200 rounded-lg overflow-hidden">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="bg-zinc-50 text-zinc-500 uppercase tracking-wider">
+                            <th className="px-2 py-1.5 text-left">Rollout %</th>
+                            <th className="px-2 py-1.5 text-left">Cooloff (min)</th>
+                            <th className="px-2 py-1.5 text-left">Pods %</th>
+                            <th className="px-2 py-1.5 w-8"></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {stages.map((s, i) => (
+                            <tr key={i} className="border-t border-zinc-100">
+                              <td className="px-2 py-1">
+                                <input type="number" min={1} max={100} value={s.rolloutPercent}
+                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, rolloutPercent: parseInt(e.target.value) || 0 } : st))}
+                                  className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
+                              </td>
+                              <td className="px-2 py-1">
+                                <input type="number" min={0} max={90} value={s.cooloffSeconds}
+                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, cooloffSeconds: parseInt(e.target.value) || 0 } : st))}
+                                  className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
+                              </td>
+                              <td className="px-2 py-1">
+                                <input type="number" min={1} max={500} value={s.podPercent}
+                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, podPercent: parseInt(e.target.value) || 0 } : st))}
+                                  className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
+                              </td>
+                              <td className="px-2 py-1">
+                                <button type="button" onClick={() => updateStages(stages.filter((_, idx) => idx !== i))}
+                                  className="text-red-400 hover:text-red-600 cursor-pointer text-sm">&times;</button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <button type="button"
+                        onClick={() => updateStages([...stages, { rolloutPercent: 100, cooloffSeconds: 0, podPercent: 100 }])}
+                        className="w-full py-1.5 text-xs text-zinc-400 hover:text-zinc-600 border-t border-zinc-100 cursor-pointer">
+                        + Add Stage
+                      </button>
+                    </div>
+                  );
+                })()}
               </div>
+              {/* Revert Strategy Editor */}
               <div>
-                <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Revert Strategy (JSON)</label>
-                <textarea
-                  value={serviceForm.revert_strategy || ''}
-                  onChange={e => setServiceForm(prev => ({ ...prev, revert_strategy: e.target.value }))}
-                  rows={3}
-                  className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
-                  placeholder='Optional revert configuration JSON'
-                />
+                <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Revert Strategy</label>
+                {(() => {
+                  let stages: Array<{rolloutPercent: number; cooloffSeconds: number; podPercent: number}> = [];
+                  try { stages = JSON.parse(serviceForm.revert_strategy || '[]'); } catch { stages = []; }
+                  if (!Array.isArray(stages)) stages = [];
+
+                  const updateStages = (newStages: typeof stages) => {
+                    setServiceForm(prev => ({ ...prev, revert_strategy: JSON.stringify(newStages) }));
+                  };
+
+                  return (
+                    <div className="border border-zinc-200 rounded-lg overflow-hidden">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="bg-zinc-50 text-zinc-500 uppercase tracking-wider">
+                            <th className="px-2 py-1.5 text-left">Rollout %</th>
+                            <th className="px-2 py-1.5 text-left">Cooloff (min)</th>
+                            <th className="px-2 py-1.5 text-left">Pods %</th>
+                            <th className="px-2 py-1.5 w-8"></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {stages.map((s, i) => (
+                            <tr key={i} className="border-t border-zinc-100">
+                              <td className="px-2 py-1">
+                                <input type="number" min={1} max={100} value={s.rolloutPercent}
+                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, rolloutPercent: parseInt(e.target.value) || 0 } : st))}
+                                  className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
+                              </td>
+                              <td className="px-2 py-1">
+                                <input type="number" min={0} max={90} value={s.cooloffSeconds}
+                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, cooloffSeconds: parseInt(e.target.value) || 0 } : st))}
+                                  className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
+                              </td>
+                              <td className="px-2 py-1">
+                                <input type="number" min={1} max={500} value={s.podPercent}
+                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, podPercent: parseInt(e.target.value) || 0 } : st))}
+                                  className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
+                              </td>
+                              <td className="px-2 py-1">
+                                <button type="button" onClick={() => updateStages(stages.filter((_, idx) => idx !== i))}
+                                  className="text-red-400 hover:text-red-600 cursor-pointer text-sm">&times;</button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <button type="button"
+                        onClick={() => updateStages([...stages, { rolloutPercent: 100, cooloffSeconds: 0, podPercent: 100 }])}
+                        className="w-full py-1.5 text-xs text-zinc-400 hover:text-zinc-600 border-t border-zinc-100 cursor-pointer">
+                        + Add Stage
+                      </button>
+                    </div>
+                  );
+                })()}
               </div>
               <div>
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Decision Config (JSON)</label>

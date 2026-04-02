@@ -47,27 +47,44 @@ applyVirtualServiceRollout cfg ctx oldW newW = do
                 Nothing -> pure (Right (K8sResult "external-vs-updated"))
                 Just internalVs -> applyVirtualServiceRolloutSingle cfg ctx internalVs oldW newW
 
+-- | Apply VS rollout with optimistic concurrency.
+-- Reads the full VS (with resourceVersion), surgically modifies only the target
+-- service's routes, then kubectl replace. On 409 Conflict (another release
+-- modified the VS between our read and write), re-reads and retries up to 3 times.
 applyVirtualServiceRolloutSingle :: Config -> K8sReleaseContext -> Text -> Int -> Int -> IO (Either K8sError K8sResult)
-applyVirtualServiceRolloutSingle cfg ctx vsName oldW newW = do
-    vsRes <- getVirtualServiceJson cfg (namespace ctx) vsName
-    case vsRes of
-        Left err -> pure (Left err)
-        Right body ->
-            case A.decodeStrict' (encodeUtf8 body) :: Maybe Value of
-                Nothing -> pure (Left (K8sError "Failed to decode virtualservice JSON"))
-                Just v ->
-                    case buildRolloutPatch v of
-                        Nothing -> pure (Left (K8sError "VirtualService missing spec.http"))
-                        Just patchJson ->
-                            runCmd (unwords ["echo", shellQuote patchJson, "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "patch virtualservice", shellQuote vsName, "--type merge -p \"$(cat)\""])
+applyVirtualServiceRolloutSingle cfg ctx vsName oldW newW = go 1
   where
-    buildRolloutPatch (Object root) = do
+    maxRetries = 3 :: Int
+    go attempt = do
+        vsRes <- getVirtualServiceJson cfg (namespace ctx) vsName
+        case vsRes of
+            Left err -> pure (Left err)
+            Right body ->
+                case A.decodeStrict' (encodeUtf8 body) :: Maybe Value of
+                    Nothing -> pure (Left (K8sError "Failed to decode virtualservice JSON"))
+                    Just v ->
+                        case buildUpdatedVS v of
+                            Nothing -> pure (Left (K8sError "VirtualService missing spec.http"))
+                            Just updatedJson -> do
+                                -- kubectl replace checks resourceVersion for conflict detection
+                                result <- runCmd (unwords ["echo", shellQuote updatedJson, "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "replace -f -"])
+                                case result of
+                                    Right ok -> pure (Right ok)
+                                    Left err
+                                        | isConflictError err && attempt < maxRetries -> do
+                                            putStrLn $ "[VS-ROLLOUT] Conflict on attempt " <> show attempt <> ", retrying..."
+                                            go (attempt + 1)
+                                        | otherwise -> pure (Left err)
+    -- | Build the full updated VS JSON (preserving resourceVersion and all non-target routes).
+    -- Only modifies routes where destination.host matches the service being deployed.
+    buildUpdatedVS (Object root) = do
         spec <- getObj "spec" root
         httpRules <- getArr "http" spec
         let updatedHttp = map updateHttpRule httpRules
-            patchVal = Object (KM.fromList [(K.fromText "spec", Object (KM.fromList [(K.fromText "http", A.toJSON updatedHttp)]))])
-        pure (jsonToText patchVal)
-    buildRolloutPatch _ = Nothing
+            newSpec = KM.insert (K.fromText "http") (A.toJSON updatedHttp) spec
+            newRoot = KM.insert (K.fromText "spec") (Object newSpec) root
+        pure (jsonToText (Object newRoot))
+    buildUpdatedVS _ = Nothing
 
     updateHttpRule (Object httpObj) =
         case KM.lookup (K.fromText "route") httpObj of

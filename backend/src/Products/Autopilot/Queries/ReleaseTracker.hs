@@ -1,6 +1,50 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Products.Autopilot.Queries.ReleaseTracker where
+module Products.Autopilot.Queries.ReleaseTracker
+    ( -- * Insert / Update
+      insertReleaseTracker
+    , conditionalUpdateTracker
+    , conditionalUpdateTrackerRow
+    , insertReleaseTrackerRow
+    -- * Queries
+    , findReleaseTracker
+    , listReleaseEvents
+    , listReleaseTrackers
+    , listReleaseTrackersByDateRange
+    , findRunnableReleaseTrackers
+    , findCleanupScheduledTrackers
+    , findAbortingReleaseTrackers
+    , findOngoingReleaseTrackers
+    , findTrackersWithStatusAndTime
+    , findApprovedReleasesWithStatus
+    , findReleaseTrackersByCategory
+    , findReleaseTrackerByGlobalId
+    , findCompletedTrackersForScaleDown
+    -- * Events
+    , insertReleaseEvent
+    -- * Delete
+    , deleteReleaseTracker
+    , deleteReleaseEvents
+    -- * Misc / Update helpers
+    , updateReleaseTrackerUdf3
+    -- * Row conversion
+    , toRow
+    , fromRow
+    -- * Parsing / Encoding helpers
+    , parseReleaseCategory
+    , parseReleaseWFStatus
+    , parseReleaseStatus
+    , parseMode
+    , releaseStatusToText
+    , modeToText
+    , parseDecisionEngineHSStatus
+    , encodeJsonText
+    , parseJsonTextOr
+    , parseJsonTextMaybe
+    -- * Internal
+    , safeHead
+    , TrackerWithTarget
+    ) where
 
 import Core.DB.Connection (runDB, withConn)
 import Core.Environment (DBEnv)
@@ -32,6 +76,39 @@ insertReleaseTracker db rt mts = do
         withTransaction conn $ do
             execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (releaseId rt))
             runBeamPostgres conn $ runInsert $ insert (releaseTrackers nammaAPDb) $ insertValues [row]
+
+-- | Atomically update a release tracker only if its current status matches the expected value.
+-- Uses DELETE ... WHERE id = ? AND status = ? to prevent concurrent modifications.
+-- Returns True if the update succeeded, False if the status was changed by another thread.
+conditionalUpdateTracker :: DBEnv -> ReleaseTracker -> Maybe TargetState -> Text -> IO Bool
+conditionalUpdateTracker db rt mts expectedStatus = do
+    now <- getCurrentTime
+    let row = toRow now now rt mts
+    withConn db $ \conn ->
+        withTransaction conn $ do
+            rowsDeleted <- execute conn
+                "DELETE FROM release_tracker WHERE id = ? AND status = ?"
+                (releaseId rt, expectedStatus)
+            if rowsDeleted == 0
+                then pure False
+                else do
+                    runBeamPostgres conn $ runInsert $ insert (releaseTrackers nammaAPDb) $ insertValues [row]
+                    pure True
+
+-- | Like 'conditionalUpdateTracker' but accepts a raw 'ReleaseTrackerRow'.
+-- Returns True if the update succeeded, False if the status was changed by another thread.
+conditionalUpdateTrackerRow :: DBEnv -> ReleaseTrackerRow -> Text -> IO Bool
+conditionalUpdateTrackerRow db row expectedStatus =
+    withConn db $ \conn ->
+        withTransaction conn $ do
+            rowsDeleted <- execute conn
+                "DELETE FROM release_tracker WHERE id = ? AND status = ?"
+                (rtId row, expectedStatus)
+            if rowsDeleted == 0
+                then pure False
+                else do
+                    runBeamPostgres conn $ runInsert $ insert (releaseTrackers nammaAPDb) $ insertValues [row]
+                    pure True
 
 findReleaseTracker :: DBEnv -> Text -> IO (Maybe TrackerWithTarget)
 findReleaseTracker db rid = do

@@ -780,6 +780,56 @@ const ReleaseSummary: React.FC = () => {
         {/* Summary */}
         {activeTab === 'summary' && (
           <div className="p-6">
+            {/* Info Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+              {[
+                {
+                  title: 'TIME SCHEDULE',
+                  rows: [
+                    { label: 'Created at', value: formatDate(release.date_created) },
+                    { label: 'Scheduled time', value: formatDate(release.schedule_time) },
+                    { label: 'Last Updated', value: formatDate(release.last_updated) },
+                    { label: 'Start time', value: formatDate(release.start_time) },
+                    { label: 'End time', value: formatDate(release.end_time) },
+                  ],
+                },
+                {
+                  title: 'META DATA',
+                  rows: [
+                    { label: 'Priority', value: String(release.priority ?? 0) },
+                    { label: 'Env', value: release.env },
+                    { label: 'Mode', value: release.mode },
+                    { label: 'Approved', value: release.is_approved ? 'Yes' : 'No' },
+                    { label: 'Approved By', value: release.release_manager },
+                    { label: 'Info', value: release.info },
+                  ],
+                },
+                {
+                  title: 'K8S INFO',
+                  rows: [
+                    { label: 'Release ID', value: release.id },
+                    { label: 'Cluster', value: release.release_context?.cluster },
+                    { label: 'Category', value: category },
+                    { label: 'Rollout Strategy', value: release.rollout_strategy ? (Array.isArray(release.rollout_strategy) ? `${release.rollout_strategy.length} stages` : 'Custom') : '-' },
+                    { label: 'Pods Scale Down Status', value: release.release_context?.pods_scale_down_status },
+                    { label: 'Global ID', value: release.global_id },
+                  ],
+                },
+              ].map((card, ci) => (
+                <div key={ci} className="bg-zinc-50 rounded-xl border border-zinc-100 p-4 text-sm">
+                  <h3 className="font-semibold text-zinc-500 uppercase text-[11px] tracking-widest mb-3">{card.title}</h3>
+                  <dl className="space-y-2.5">
+                    {card.rows.map((r, ri) => (
+                      <div key={ri}>
+                        <dt className="text-zinc-400 text-xs">{r.label}</dt>
+                        <dd className={cn('text-zinc-800 font-medium mt-0.5 break-all', r.label === 'Release ID' && 'font-mono text-xs')}>{r.value || '-'}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              ))}
+            </div>
+
             {/* Pod Health + Deployment Status */}
             <PodHealthSection releaseId={id!} release={release} />
 
