@@ -330,8 +330,8 @@ const RolloutHistoryInline: React.FC<{ history: RolloutHistoryEvent[] }> = ({ hi
               <th className="py-2 px-3">End Time</th>
               <th className="py-2 px-3">Decision</th>
               <th className="py-2 px-3">HS Decision</th>
-              <th className="py-2 px-3">Manual</th>
-              <th className="py-2 px-3">Cooloff</th>
+              <th className="py-2 px-3">Manual Override</th>
+              <th className="py-2 px-3">Cooloff (min)</th>
               <th className="py-2 px-3">Pods</th>
             </tr>
           </thead>
@@ -352,8 +352,12 @@ const RolloutHistoryInline: React.FC<{ history: RolloutHistoryEvent[] }> = ({ hi
                     {h.last_decision_hs || '-'}
                   </Badge>
                 </td>
-                <td className="py-2 px-3 text-sm">{h.manual_override ? 'Yes' : 'No'}</td>
-                <td className="py-2 px-3 font-mono">{h.cooloff}</td>
+                <td className="py-2 px-3">
+                  <Badge variant={h.manual_override ? 'warning' : 'default'} size="sm">
+                    {h.manual_override ? 'Yes' : 'No'}
+                  </Badge>
+                </td>
+                <td className="py-2 px-3 font-mono">{h.cooloff}m</td>
                 <td className="py-2 px-3 font-mono">{h.pods}</td>
               </tr>
             ))}
@@ -494,65 +498,78 @@ const RolloutStrategyTab: React.FC<{
         </div>
       </div>
 
-      <div className="space-y-2">
-        {stages.map((stage, idx) => {
-          const isLocked = idx < historyLength;
-          const canRemove = isEditing && !isLocked && stages.filter((_, i) => i >= historyLength).length > 1;
+      <div className="overflow-hidden rounded-lg border border-zinc-200">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+              <th className="py-2.5 px-4 text-left w-20">#</th>
+              <th className="py-2.5 px-4 text-left">Rollout %</th>
+              <th className="py-2.5 px-4 text-left">Cooloff (min)</th>
+              <th className="py-2.5 px-4 text-left">Pods</th>
+              <th className="py-2.5 px-4 text-left w-32">Progress</th>
+              {isEditing && <th className="py-2.5 px-4 w-12"></th>}
+            </tr>
+          </thead>
+          <tbody>
+            {stages.map((stage, idx) => {
+              const isLocked = idx < historyLength;
+              const canRemove = isEditing && !isLocked && stages.filter((_, i) => i >= historyLength).length > 1;
 
-          return (
-            <div
-              key={idx}
-              className={cn(
-                'border rounded-lg p-3 flex items-center gap-4',
-                isLocked ? 'border-zinc-100 bg-zinc-50 opacity-60' : 'border-zinc-200 bg-white'
-              )}
-            >
-              <div className="flex items-center gap-2 w-20 shrink-0">
-                <span className="text-xs font-bold text-zinc-500">Stage {idx + 1}</span>
-                {isLocked && <Lock className="w-3 h-3 text-zinc-400" />}
-              </div>
-
-              <div className="flex items-center gap-4 flex-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-zinc-400 uppercase">Rollout</span>
-                  {isEditing && !isLocked ? (
-                    <input type="number" min={0} max={100} value={stage.rollout}
-                      onChange={(e) => handleStageChange(idx, 'rollout', parseInt(e.target.value) || 0)}
-                      className="w-16 h-7 border border-zinc-300 rounded px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-zinc-400" />
-                  ) : (
-                    <span className="text-sm font-mono font-medium">{stage.rollout}%</span>
+              return (
+                <tr key={idx} className={cn('border-b border-zinc-100 transition-colors', isLocked ? 'bg-zinc-50/60' : 'bg-white hover:bg-zinc-50/40')}>
+                  <td className="py-2.5 px-4">
+                    <div className="flex items-center gap-1.5">
+                      {isLocked && <Lock className="w-3 h-3 text-zinc-400" />}
+                      <span className={cn('text-xs font-bold', isLocked ? 'text-zinc-400' : 'text-zinc-600')}>Stage {idx + 1}</span>
+                    </div>
+                  </td>
+                  <td className="py-2.5 px-4">
+                    {isEditing && !isLocked ? (
+                      <input type="number" min={1} max={100} value={stage.rollout}
+                        onChange={(e) => handleStageChange(idx, 'rollout', parseInt(e.target.value) || 0)}
+                        className="w-20 h-8 border border-zinc-300 rounded-lg px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400" />
+                    ) : (
+                      <span className="text-sm font-mono font-semibold text-zinc-800">{stage.rollout}%</span>
+                    )}
+                  </td>
+                  <td className="py-2.5 px-4">
+                    {isEditing && !isLocked ? (
+                      <input type="number" min={0} value={stage.cooloff}
+                        onChange={(e) => handleStageChange(idx, 'cooloff', parseInt(e.target.value) || 0)}
+                        className="w-20 h-8 border border-zinc-300 rounded-lg px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400" />
+                    ) : (
+                      <span className="text-sm font-mono text-zinc-600">{stage.cooloff}m</span>
+                    )}
+                  </td>
+                  <td className="py-2.5 px-4">
+                    {isEditing && !isLocked ? (
+                      <input type="number" min={1} value={stage.pods}
+                        onChange={(e) => handleStageChange(idx, 'pods', parseInt(e.target.value) || 1)}
+                        className="w-16 h-8 border border-zinc-300 rounded-lg px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400" />
+                    ) : (
+                      <span className="text-sm font-mono text-zinc-600">{stage.pods}</span>
+                    )}
+                  </td>
+                  <td className="py-2.5 px-4">
+                    <div className="w-full bg-zinc-100 rounded-full h-2">
+                      <div className={cn('h-2 rounded-full transition-all duration-300', isLocked ? 'bg-green-500' : 'bg-blue-500')}
+                        style={{ width: `${stage.rollout}%` }} />
+                    </div>
+                  </td>
+                  {isEditing && (
+                    <td className="py-2.5 px-4">
+                      {canRemove && (
+                        <button onClick={() => removeStage(idx)} className="p-1.5 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 cursor-pointer transition-colors">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </td>
                   )}
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-zinc-400 uppercase">Cooloff (min)</span>
-                  {isEditing && !isLocked ? (
-                    <input type="number" min={0} value={stage.cooloff}
-                      onChange={(e) => handleStageChange(idx, 'cooloff', parseInt(e.target.value) || 0)}
-                      className="w-16 h-7 border border-zinc-300 rounded px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-zinc-400" />
-                  ) : (
-                    <span className="text-sm font-mono">{stage.cooloff}m</span>
-                  )}
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-zinc-400 uppercase">Pods</span>
-                  {isEditing && !isLocked ? (
-                    <input type="number" min={1} value={stage.pods}
-                      onChange={(e) => handleStageChange(idx, 'pods', parseInt(e.target.value) || 1)}
-                      className="w-14 h-7 border border-zinc-300 rounded px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-zinc-400" />
-                  ) : (
-                    <span className="text-sm font-mono">{stage.pods}</span>
-                  )}
-                </div>
-              </div>
-
-              {canRemove && (
-                <button onClick={() => removeStage(idx)} className="p-1 rounded text-red-400 hover:text-red-600 hover:bg-red-50 cursor-pointer">
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-          );
-        })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
 
       {isEditing && (

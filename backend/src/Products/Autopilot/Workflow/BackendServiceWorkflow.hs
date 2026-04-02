@@ -383,33 +383,43 @@ progressiveRollout = do
             [] -> [RolloutStep 100 0 1]
             ss -> ss
           totalSteps = length strategy
+          existingHistory = rolloutHistory rt
+          alreadyStarted = not (null existingHistory)
 
-      -- Apply first step immediately (production line 359: getInitialCoolOffAndRoutingPercentage)
-      let firstStep = head strategy
-          firstNewW = rolloutPercent firstStep
-          firstOldW = max 0 (100 - firstNewW)
-      liftIO $ putStrLn $ "  Initial rollout step: new=" <> show firstNewW <> "%, cooloff=" <> show (cooloffSeconds firstStep) <> "min"
-      runVsRolloutWithLock cfg ctx firstOldW firstNewW
-      updateK8sField (\k8s -> k8s{trafficPercentage = firstNewW})
+      -- Resume from existing history if workflow was restarted (e.g., after VS lock failure)
+      if alreadyStarted
+        then do
+          let currentIndex = length existingHistory
+          liftIO $ putStrLn $ "  Resuming rollout from step " <> show currentIndex <> "/" <> show totalSteps
+          now <- liftIO getCurrentTime
+          rolloutLoop cfg ctx db strategy currentIndex totalSteps now
+        else do
+          -- Apply first step immediately (production line 359: getInitialCoolOffAndRoutingPercentage)
+          let firstStep = head strategy
+              firstNewW = rolloutPercent firstStep
+              firstOldW = max 0 (100 - firstNewW)
+          liftIO $ putStrLn $ "  Initial rollout step: new=" <> show firstNewW <> "%, cooloff=" <> show (cooloffSeconds firstStep) <> "min"
+          runVsRolloutWithLock cfg ctx firstOldW firstNewW
+          updateK8sField (\k8s -> k8s{trafficPercentage = firstNewW})
 
-      -- Record rollout history for first step
-      stepStartTime <- liftIO getCurrentTime
-      let firstHist = mkRolloutHistory firstNewW (cooloffSeconds firstStep) (podPercent firstStep) stepStartTime Nothing
-      updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [firstHist]}
-      currentRT <- getRT
-      liftIO $ insertReleaseTracker db currentRT (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = firstNewW})))
-      liftIO $ notifyReleaseProgress db currentRT firstNewW
-      liftIO $
-        insertReleaseEvent
-          db
-          (releaseId currentRT)
-          "BUSINESS"
-          "ROLLOUT_STEP"
-          (toJSON $ "Routing " <> show firstNewW <> "% to " <> T.unpack (newVersion ctx))
+          -- Record rollout history for first step
+          stepStartTime <- liftIO getCurrentTime
+          let firstHist = mkRolloutHistory firstNewW (cooloffSeconds firstStep) (podPercent firstStep) stepStartTime Nothing
+          updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [firstHist]}
+          currentRT <- getRT
+          liftIO $ insertReleaseTracker db currentRT (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = firstNewW})))
+          liftIO $ notifyReleaseProgress db currentRT firstNewW
+          liftIO $
+            insertReleaseEvent
+              db
+              (releaseId currentRT)
+              "BUSINESS"
+              "ROLLOUT_STEP"
+              (toJSON $ "Routing " <> show firstNewW <> "% to " <> T.unpack (newVersion ctx))
 
-      -- Production while-loop: iterate through remaining steps with re-entrant checks
-      -- index starts at 1 (0-based), first step already applied
-      rolloutLoop cfg ctx db strategy 1 totalSteps stepStartTime
+          -- Production while-loop: iterate through remaining steps with re-entrant checks
+          -- index starts at 1 (0-based), first step already applied
+          rolloutLoop cfg ctx db strategy 1 totalSteps stepStartTime
 
   liftIO $ putStrLn "Progressive rollout complete"
 
