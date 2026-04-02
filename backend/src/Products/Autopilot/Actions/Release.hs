@@ -626,7 +626,7 @@ updateTrackerH rid req = do
                                     ok <- liftIO $ conditionalUpdateTracker db updatedTracker updatedTargetState oldStatusText
                                     if ok
                                         then do
-                                            liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
+                                            liftIO $ insertReleaseEvent db rid "BUSINESS" "STATUS_UPDATED" (toJSON updatedTracker)
                                             -- Send status-specific Slack notifications
                                             case newStatus of
                                                 Paused -> liftIO $ notifyReleasePaused db updatedTracker

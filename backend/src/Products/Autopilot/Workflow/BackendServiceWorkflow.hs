@@ -75,6 +75,7 @@ import Products.Autopilot.Types.Release
     , RolloutStep (..)
     , RolloutHistory (..)
     , Mode (..)
+    , Decision (..)
     )
 import Products.Autopilot.Types.Target (
     BackendServiceWFStatus (..),
@@ -445,7 +446,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                             let curHistory = rolloutHistory freshRT
                             when (not (null curHistory)) $ do
                                 let lastH = last curHistory
-                                    updatedLast = lastH{historyCompletedAt = Just now}
+                                    updatedLast = lastH{historyCompletedAt = Just now, historyDecision = Just Continue}
                                     updatedHistory = init curHistory <> [updatedLast]
                                 updateRT $ \r -> r{rolloutHistory = updatedHistory}
                                 currentRT <- getRT
@@ -492,7 +493,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                                             let curHistory = rolloutHistory freshRT
                                             when (not (null curHistory)) $ do
                                                 let lastH = last curHistory
-                                                    updatedLast = lastH{historyCompletedAt = Just now}
+                                                    updatedLast = lastH{historyCompletedAt = Just now, historyDecision = Just Continue}
                                                     updatedHistory = init curHistory <> [updatedLast]
                                                 updateRT $ \r -> r{rolloutHistory = updatedHistory}
 

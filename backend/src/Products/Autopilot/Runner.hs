@@ -38,10 +38,10 @@ runnerLoop st = runFlow st loop
         -- Step 1: Find runnable trackers (CREATED + RECORDING, approved, schedule due)
         jobs <- liftIO $ findRunnableReleaseTrackers db now
         ongoing <- liftIO $ findOngoingReleaseTrackers db
-        eligible <- liftIO $ filterM (isEligibleToRun db ongoing) jobs
+        multiRelease <- liftIO $ isMultiReleasePerProduct db
+        eligible <- liftIO $ filterM (isEligibleToRun db multiRelease ongoing) jobs
 
         -- Step 2: Pick jobs respecting single-release constraint and priority
-        multiRelease <- liftIO $ isMultiReleasePerProduct db
         let picked = pickJobs multiRelease eligible
         mapM_ (trigger db) picked
 
@@ -67,9 +67,11 @@ runnerLoop st = runFlow st loop
         rest <- filterM f xs
         pure (if ok then x : rest else rest)
 
-isEligibleToRun :: DBEnv -> [TrackerWithTarget] -> TrackerWithTarget -> IO Bool
-isEligibleToRun db ongoing (rt, mts) = case category rt of
-    BackendService -> k8sEligible False
+isEligibleToRun :: DBEnv -> Bool -> [TrackerWithTarget] -> TrackerWithTarget -> IO Bool
+isEligibleToRun db multiRelease ongoing (rt, mts) = case category rt of
+    -- BackendService: skip ongoing check if multi_release_per_product is enabled
+    -- VS lock (withVsLock) handles concurrent VS access safely
+    BackendService -> k8sEligible multiRelease
     BackendScheduler -> k8sEligible True
     BackendCronJob -> k8sEligible True
     BackendJob -> k8sEligible True
