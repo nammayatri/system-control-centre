@@ -28,7 +28,8 @@ The system follows a two-layer architecture: **Core** (authentication, RBAC, adm
                     |                           |
                     |  Products/                |
                     |    Autopilot/             |
-                    |      Routes, Queries      |
+                    |      Actions/ (5 modules) |
+                    |      Routes (API wiring)  |
                     |      Workflows            |
                     |      Runner (background)  |
                     +------------+--------------+
@@ -42,6 +43,86 @@ The system follows a two-layer architecture: **Core** (authentication, RBAC, adm
 **Two layers only:**
 - **Core/** -- RBAC framework (auth, admin, server, config, DB). Never changes for new products.
 - **Products/** -- Each product is self-contained (routes, queries, K8s, workflows, types).
+
+## Module Structure
+
+The Autopilot backend was refactored from a single Routes.hs into domain-specific Action modules. Routes.hs now contains only the Servant API type definitions and handler wiring.
+
+```
+Products/Autopilot/
+├── Actions/
+│   ├── Release.hs      (988 lines — release lifecycle: CRUD, approve, trigger, revert, abort, restart, fast-forward, diff, pods, rollout history)
+│   ├── ConfigMap.hs     (304 lines — configmap tracker CRUD, K8s configmap fetch)
+│   ├── VSEdit.hs        (262 lines — VS editor: lock/unlock, apply, revert, list)
+│   ├── Config.hs        (241 lines — product config, service config, server config, discovery)
+│   └── K8sResource.hs   (232 lines — env vars, K8s resources, configmap K8s endpoints)
+├── Routes.hs            (142 lines — API type + wiring only)
+├── Queries.hs           (DB queries via Beam ORM)
+├── Workflows/           (category-specific deployment workflows)
+├── Runner.hs            (background polling loop)
+├── Types/
+│   ├── API.hs           (typed request/response types, newtypes)
+│   ├── Permission.hs    (permission ADT)
+│   ├── Schema.hs        (Beam table definitions)
+│   └── Release.hs       (status, category, workflow status ADTs)
+└── ...
+```
+
+## Type Safety
+
+### Typed Response Types
+
+48 of 57 endpoints return typed Haskell response types (the remaining 9 return dynamic K8s JSON from kubectl). 16 typed response types are defined in `Products/Autopilot/Types/API.hs`:
+
+`APIResponse`, `ProductResponse`, `ServiceResponse`, `ProductConfigResponse`, `ReleaseConfigResponse`, `PodHealthResponse`, `DiffResponse`, `ResourcesResponse`, `VsEditTrackerResponse`, `ServerConfigResponse`, `ConfigMapResponse`, `ConfigMapListResponse`, `ConfigMapK8sResponse`, `ReleaseEventResponse`, `ErrorResponse`, `VsLockErrorResponse`
+
+### Newtypes for IDs
+
+3 newtypes prevent accidental parameter swaps in Servant route handlers:
+
+```haskell
+newtype ReleaseId   = ReleaseId   { unReleaseId   :: Text }
+newtype ProductSlug = ProductSlug { unProductSlug :: Text }
+newtype ServiceSlug = ServiceSlug { unServiceSlug :: Text }
+```
+
+### Shared Utilities
+
+- **`Shared/JSON.hs`** -- Generic JSON deriving with shared options (camelCase field labels, tag encoding) used across all response types.
+- **`Shared/Error.hs`** -- Typed error ADT ready for migration from ad-hoc Text errors to structured error responses.
+
+## Performance
+
+### Database Indexes
+
+16 indexes across all tables, defined in `dev/migrations/system-control/0005-add-indexes.sql`:
+
+| Table | Index | Columns |
+|-------|-------|---------|
+| release_tracker | idx_rt_status | status |
+| release_tracker | idx_rt_product_env | product, env |
+| release_tracker | idx_rt_created_at | date_created DESC |
+| release_tracker | idx_rt_is_approved | is_approved |
+| release_tracker | idx_rt_global_id | global_id (partial, WHERE NOT NULL) |
+| release_tracker | idx_rt_updated_at | last_updated DESC |
+| release_events | idx_re_release_id | re_release_id |
+| sc_person | idx_person_email | email |
+| sc_role | idx_role_product | product_slug |
+| sc_person_product_access | idx_access_person | person_id |
+| sc_person_permission_override | idx_override_person | person_id, product_slug |
+| sc_registration_token | idx_token_value | token |
+| product_config | idx_pc_product | product |
+| release_config | idx_rc_product_service | product, service |
+| server_config | idx_sc_name | name |
+| vs_edit_tracker | idx_vet_product_vs | product, vs_name, env |
+
+### Connection Pool
+
+Configured in `Core/DB/Connection.hs` via `Data.Pool.createPool`:
+
+- **Stripes:** 4
+- **Idle timeout:** 30 seconds
+- **Max connections per stripe:** 20
 
 ## Quick Start
 
@@ -506,7 +587,7 @@ All admin endpoints require superadmin status. Non-superadmins receive `"Unautho
 
 ## Database Schema
 
-12 tables across two domains: Autopilot (release management) and RBAC (access control).
+12 tables across two domains: Autopilot (release management) and RBAC (access control). 16 performance indexes are defined in `dev/migrations/system-control/0005-add-indexes.sql` (see [Performance](#performance) section for the full list).
 
 ### 1. release_tracker
 
@@ -581,7 +662,6 @@ Kubernetes deployment configuration per product (cluster, namespace, VirtualServ
 | product_acronym | text | NOT NULL | Short acronym for the product |
 | release_branch | text | NOT NULL | Default release branch (e.g., "main", "master") |
 | need_infra_approval | boolean | YES | Whether infrastructure team must approve releases |
-| need_infra_approval1 | boolean | YES | Secondary infrastructure approval flag |
 | target_config | text | YES | JSON: cluster, namespace, vsName, syncCluster fields |
 
 ### 4. release_config
@@ -822,6 +902,12 @@ These configs are read from the `server_config` database table at runtime and ca
 
 ## Frontend Features
 
+### Layout
+
+- Full-width layout (no `max-w-6xl` container constraint)
+- Base font size: 15px
+- Professional flat design (no gradients, glassmorphism, or decorative effects)
+
 ### Release List Page
 
 - Date range presets: Last 30 mins, Last 1 hour, Last 6 hours, Today, Yesterday, Last 2 days, Last 7 days, Last 30 days, This month, Last month, Custom range
@@ -842,8 +928,8 @@ These configs are read from the `server_config` database table at runtime and ca
 - Default 5 stages (5%, 25%, 50%, 75%, 100%)
 - Release sync toggle (udf1 = "true" for multi-cloud sync)
 - Secondary cluster rollout strategy with separate stage editor
-- Env switch: Monaco editor for custom environment variables
-- ConfigMap switch: Monaco editor for ConfigMap data
+- **Env Switch toggle**: Monaco editor for custom environment variables (injected into deployment)
+- **ConfigMap toggle**: Monaco editor for ConfigMap data (applied during release)
 - New service paths: deploy file path, VS file path, DR file path
 - Clone mode: pre-fills from existing release (accessed via /releases/:id/clone)
 
@@ -855,7 +941,7 @@ These configs are read from the `server_config` database table at runtime and ca
 - Tabbed interface:
   - **Overview tab**: Release details (mode, priority, schedule, timestamps, release tag, description, changelog), inline rollout history with editable rollout strategy, deployment status with pod health, observability links (Grafana, Kibana), edit dialog for metadata updates
   - **Events tab**: Searchable event timeline with expandable JSON payloads
-  - **Diff tab**: YAML diff viewer (react-diff-viewer) for deployment, VirtualService, and ConfigMap before/after snapshots
+  - **Diff tab**: YAML diff viewer (react-diff-viewer) with type switcher (Deployment / VirtualService / ConfigMap) for before/after snapshots
   - **JSON tab**: Raw release tracker JSON
 
 ### ConfigMap Pages
@@ -906,7 +992,7 @@ Run with `cabal test` or `sc-test` in the Nix shell.
 6. **Release tag generation tests** -- validates tag format (PRODUCT_YYYYMMDD_VERSION_SERVICE_MODE_ENV_PRIORITY), revert tag suffix, and component extraction
 7. **Terminal/aborted status helper tests** -- validates `isTerminalStatus` and `isAbortedStatus` for all status values
 
-### Integration Tests (59 assertions)
+### Integration Tests (44 assertions)
 
 Run with `bash scripts/test-api.sh` or `sc-test-api` (requires server to be running).
 
