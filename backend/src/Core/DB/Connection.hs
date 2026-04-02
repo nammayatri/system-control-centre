@@ -16,7 +16,7 @@ import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL, execute
 
 mkDBEnv :: Config -> IO DBEnv
 mkDBEnv cfg = do
-    pool <- createPool (connectPostgreSQL (mkConnString cfg)) close 1 60 10
+    pool <- createPool (connectPostgreSQL (mkConnString cfg)) close 4 30 20
     let db = DBEnv pool
     ensureSchema db
     pure db
