@@ -13,7 +13,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, getCurrentTime)
 import Database.Beam
 import Database.Beam.Postgres
-import Database.PostgreSQL.Simple (Only (..), execute)
+import Database.PostgreSQL.Simple (Only (..), execute, withTransaction)
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.Target (TargetState (..))
@@ -27,12 +27,11 @@ insertReleaseTracker :: DBEnv -> ReleaseTracker -> Maybe TargetState -> IO ()
 insertReleaseTracker db rt mts = do
     now <- getCurrentTime
     let row = toRow now now rt mts
-    runDB db $ do
-        runDelete $
-            delete (releaseTrackers nammaAPDb) (\r -> rtId r ==. val_ (releaseId rt))
-        runInsert $
-            insert (releaseTrackers nammaAPDb) $
-                insertValues [row]
+    -- Atomic: DELETE+INSERT in a single transaction (if INSERT fails, DELETE is rolled back)
+    withConn db $ \conn ->
+        withTransaction conn $ do
+            execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (releaseId rt))
+            runBeamPostgres conn $ runInsert $ insert (releaseTrackers nammaAPDb) $ insertValues [row]
 
 findReleaseTracker :: DBEnv -> Text -> IO (Maybe TrackerWithTarget)
 findReleaseTracker db rid = do

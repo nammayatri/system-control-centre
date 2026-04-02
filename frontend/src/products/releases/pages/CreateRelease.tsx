@@ -1,21 +1,37 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import { useProductConfigs, useServices } from '../useProducts';
-import { useCreateRelease } from '../hooks';
+import { useCreateRelease, useUpdateTracker } from '../hooks';
 import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs } from '../api';
 import { fetchReleaseConfigs, fetchConfigMapData } from '../../../api';
 import type { ProductConfig } from '../../../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
 import { DEFAULT_ENV, AVAILABLE_ENVS } from '../../../lib/constants';
-import { Trash2 } from 'lucide-react';
+import { Trash2, Lock } from 'lucide-react';
+
+// Valid status transitions for update mode
+const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
+  'CREATED': ['CREATED', 'INPROGRESS', 'DISCARDED'],
+  'INPROGRESS': ['INPROGRESS', 'PAUSED', 'ABORTING', 'COMPLETED'],
+  'PAUSED': ['PAUSED', 'INPROGRESS', 'ABORTING'],
+  'ABORTING': ['ABORTING'],
+  'ABORTED': ['ABORTED'],
+  'USER_ABORTED': ['USER_ABORTED'],
+  'GCLT_ABORTED': ['GCLT_ABORTED'],
+  'COMPLETED': ['COMPLETED'],
+  'REVERTED': ['REVERTED'],
+  'DISCARDED': ['DISCARDED'],
+};
 
 const CreateRelease: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { id } = useParams<{ id?: string }>();
   const isClone = location.pathname.endsWith('/clone') && !!id;
+  const isUpdate = !!id && location.pathname.endsWith('/edit');
 
   const { data: productConfigs = [] } = useProductConfigs();
   const products = [...new Set(productConfigs.map((c: ProductConfig) => c.product).filter(Boolean))];
@@ -53,9 +69,56 @@ const CreateRelease: React.FC = () => {
     { rollout: 100, cooloff: 10, pods: 2 },
   ]);
   const [syncCluster, setSyncCluster] = useState('');
+  const [rolloutHistoryLength, setRolloutHistoryLength] = useState(0);
 
   const { data: services = [] } = useServices(formData.product, isNewService);
   const createMutation = useCreateRelease();
+  const updateMutation = useUpdateTracker();
+
+  // Fetch existing release for update mode
+  const { data: existingRelease } = useQuery({
+    queryKey: ['release', id],
+    queryFn: () => fetchReleaseDetails(id!),
+    enabled: isUpdate && !!id,
+  });
+
+  // Pre-fill form when editing
+  useEffect(() => {
+    if (existingRelease && isUpdate) {
+      setFormData({
+        product: existingRelease.product || '',
+        service: existingRelease.service || '',
+        env: existingRelease.env || DEFAULT_ENV,
+        old_version: existingRelease.old_version || '',
+        new_version: existingRelease.new_version || '',
+        docker_image: existingRelease.docker_image || existingRelease.release_context?.docker_image || '',
+        change_log: existingRelease.change_log || '',
+        status: existingRelease.status || 'CREATED',
+        mode: existingRelease.mode || 'AUTO',
+        priority: String(existingRelease.priority ?? 0),
+        info: existingRelease.info || '',
+        custom_pods_scale_down_days: String(existingRelease.custom_pod_scaledown_days ?? 1),
+        cluster: existingRelease.release_context?.cluster || 'EULER_UAT',
+        scale_down_delay: String(existingRelease.release_context?.pods_scale_down_delay ?? 1),
+        cronjob_suspend: existingRelease.cronjob_suspend || false,
+        description: existingRelease.description || '',
+        schedule_time: existingRelease.schedule_time || '',
+        deploy_file_path: existingRelease.release_context?.deploy_file_path || '',
+        vs_file_path: existingRelease.release_context?.vs_file_path || '',
+        dr_file_path: existingRelease.release_context?.dr_file_path || '',
+      });
+      setIsNewService(existingRelease.new_service === 'Yes');
+      setRolloutHistoryLength(existingRelease.rollout_history?.length || 0);
+      if (existingRelease.udf2) { setIsEnvSwitch(true); setEnvData(existingRelease.udf2); }
+      if (existingRelease.rollout_strategy) {
+        try {
+          const parsed = typeof existingRelease.rollout_strategy === 'string'
+            ? JSON.parse(existingRelease.rollout_strategy) : existingRelease.rollout_strategy;
+          if (Array.isArray(parsed) && parsed.length > 0) setStages(parsed);
+        } catch (e) { console.error('Failed to parse stages', e); }
+      }
+    }
+  }, [existingRelease, isUpdate]);
 
   // Clone fetch
   useEffect(() => {
@@ -71,7 +134,6 @@ const CreateRelease: React.FC = () => {
           mode: data.mode, new_version: data.new_version || '', change_log: data.change_log || ''
         }));
         if (data.udf2) { setIsEnvSwitch(true); setEnvData(data.udf2); }
-        if (data.udf3) { setIsConfigMapSwitch(true); setConfigMapData(data.udf3); }
         if (data.rollout_strategy) {
           try {
             const parsed = typeof data.rollout_strategy === 'string' ? JSON.parse(data.rollout_strategy) : data.rollout_strategy;
@@ -90,9 +152,9 @@ const CreateRelease: React.FC = () => {
     } else setSyncCluster('');
   }, [formData.product, productConfigs]);
 
-  // Load rollout stages from service config when service is selected (skip if cloning)
+  // Load rollout stages from service config when service is selected (skip if cloning or updating)
   useEffect(() => {
-    if (!isClone && formData.product && formData.service) {
+    if (!isClone && !isUpdate && formData.product && formData.service) {
       fetchReleaseConfigs(formData.product).then(configs => {
         const svcConfig = configs.find(c => c.service === formData.service);
         if (svcConfig?.rollout_strategy) {
@@ -114,7 +176,7 @@ const CreateRelease: React.FC = () => {
         }
       }).catch(() => {});
     }
-  }, [formData.product, formData.service, isClone]);
+  }, [formData.product, formData.service, isClone, isUpdate]);
 
   useEffect(() => { if (!isEnvSwitch) setEnvData(''); }, [isEnvSwitch]);
   useEffect(() => { if (!isConfigMapSwitch) setConfigMapData(''); }, [isConfigMapSwitch]);
@@ -159,11 +221,11 @@ const CreateRelease: React.FC = () => {
 
   // Auto-fill cluster & set cloned service
   useEffect(() => {
-    if (formData.product) {
+    if (formData.product && !isUpdate) {
       const config = productConfigs.find((c: ProductConfig) => c.product === formData.product);
       if (config) setFormData(prev => ({ ...prev, cluster: config.cluster }));
     }
-  }, [formData.product, productConfigs]);
+  }, [formData.product, productConfigs, isUpdate]);
 
   useEffect(() => {
     if (clonedService && services.includes(clonedService)) {
@@ -186,9 +248,46 @@ const CreateRelease: React.FC = () => {
   const autoGeneratedReleaseTag = `${productTag}_${dateStr}_${versionTag}_${serviceTag}_${formData.mode}_${formData.env || 'ENV'}_${formData.priority}`;
   const generatedReleaseTag = manualReleaseTag || autoGeneratedReleaseTag;
 
+  // Valid status options for update mode
+  const statusOptions = isUpdate && formData.status
+    ? (VALID_STATUS_TRANSITIONS[formData.status] || [formData.status])
+    : ['CREATED'];
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    if (isUpdate && id) {
+      // Update mode: only send editable fields + future stages
+      const futureStages = stages.slice(rolloutHistoryLength);
+      try {
+        await updateMutation.mutateAsync({
+          releaseId: id,
+          updates: {
+            status: formData.status,
+            mode: formData.mode,
+            description: formData.description,
+            change_log: formData.change_log,
+            priority: parseInt(formData.priority, 10) || 0,
+            schedule_time: formData.schedule_time || null,
+            docker_image: formData.docker_image,
+            pods_scale_down_delay: parseFloat(formData.scale_down_delay) || 1.0,
+            info: formData.info,
+            next_route_strategy: futureStages.map(s => ({
+              rolloutPercent: s.rollout,
+              cooloffSeconds: s.cooloff,
+              podPercent: s.pods,
+            })),
+          },
+        });
+        navigate(`/releases/${id}`);
+      } catch (err: any) {
+        setError(err.message || 'Failed to update release');
+      }
+      return;
+    }
+
+    // Create mode
     const selectedProductConfig = productConfigs.find((c: ProductConfig) => c.product === formData.product);
     const trackerType = selectedProductConfig?.product_type === 'SCHEDULER' ? 'BackendScheduler' : 'BackendService';
 
@@ -229,7 +328,7 @@ const CreateRelease: React.FC = () => {
   );
 
   const inputClass = "w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
-  const disabledInputClass = "w-full h-9 border border-zinc-200 rounded-lg px-3 text-sm bg-zinc-50 text-zinc-400 cursor-not-allowed";
+  const disabledInputClass = "w-full h-9 border border-zinc-200 rounded-lg px-3 text-sm bg-zinc-100 text-zinc-500 cursor-not-allowed";
 
   const Toggle = ({ checked, onChange, disabled }: { checked: boolean; onChange: () => void; disabled?: boolean }) => (
     <button type="button" onClick={onChange} disabled={disabled}
@@ -241,6 +340,12 @@ const CreateRelease: React.FC = () => {
     </button>
   );
 
+  const isSubmitting = isUpdate ? updateMutation.isPending : createMutation.isPending;
+  const pageTitle = isUpdate ? 'Update Release' : isClone ? 'Clone Release' : 'Create Release';
+  const submitLabel = isUpdate
+    ? (updateMutation.isPending ? 'Updating...' : 'Update Release')
+    : (createMutation.isPending ? 'Creating...' : 'Create Release');
+
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
       <form onSubmit={handleSubmit} className="space-y-6">
@@ -249,11 +354,13 @@ const CreateRelease: React.FC = () => {
         {/* Main Form Card */}
         <div className="bg-white rounded-xl border border-zinc-200">
           <div className="px-6 py-4 border-b border-zinc-100 flex justify-between items-center">
-            <h2 className="text-lg font-semibold text-zinc-900">{isClone ? 'Clone Release' : 'Create Release'}</h2>
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-zinc-600">New Service?</span>
-              <Toggle checked={isNewService} onChange={() => setIsNewService(!isNewService)} />
-            </div>
+            <h2 className="text-lg font-semibold text-zinc-900">{pageTitle}</h2>
+            {!isUpdate && (
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-zinc-600">New Service?</span>
+                <Toggle checked={isNewService} onChange={() => setIsNewService(!isNewService)} />
+              </div>
+            )}
           </div>
 
           <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-5">
@@ -261,20 +368,42 @@ const CreateRelease: React.FC = () => {
             <div className="space-y-4">
               <div>
                 <FieldLabel>Release Tag</FieldLabel>
-                <input
-                  type="text"
-                  value={manualReleaseTag || autoGeneratedReleaseTag}
-                  onChange={(e) => setManualReleaseTag(e.target.value)}
-                  placeholder="Auto-generated from fields"
-                  className={cn(inputClass, !manualReleaseTag && 'text-zinc-400')}
-                />
-                {manualReleaseTag && (
-                  <button type="button" onClick={() => setManualReleaseTag('')} className="text-[10px] text-zinc-400 hover:text-zinc-600 mt-0.5 cursor-pointer">Reset to auto-generated</button>
+                {isUpdate ? (
+                  <input type="text" value={existingRelease?.release_tag || ''} disabled className={disabledInputClass} />
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      value={manualReleaseTag || autoGeneratedReleaseTag}
+                      onChange={(e) => setManualReleaseTag(e.target.value)}
+                      placeholder="Auto-generated from fields"
+                      className={cn(inputClass, !manualReleaseTag && 'text-zinc-400')}
+                    />
+                    {manualReleaseTag && (
+                      <button type="button" onClick={() => setManualReleaseTag('')} className="text-[10px] text-zinc-400 hover:text-zinc-600 mt-0.5 cursor-pointer">Reset to auto-generated</button>
+                    )}
+                  </>
                 )}
               </div>
-              <div><FieldLabel required>New Version</FieldLabel><input type="text" name="new_version" value={formData.new_version} onChange={handleInputChange} required placeholder="Jenkins tag" className={inputClass} /></div>
-              <div><FieldLabel>Old Version</FieldLabel><input type="text" name="old_version" value={formData.old_version} onChange={handleInputChange} placeholder="Auto-resolved from K8s if empty" className={inputClass} /></div>
-              <div><FieldLabel>Mode</FieldLabel><select name="mode" value={formData.mode} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}><option value="AUTO">AUTO</option><option value="MANUAL">MANUAL</option></select></div>
+              <div>
+                <FieldLabel required={!isUpdate}>New Version</FieldLabel>
+                <input type="text" name="new_version" value={formData.new_version} onChange={handleInputChange}
+                  required={!isUpdate} placeholder="Jenkins tag"
+                  disabled={isUpdate} className={isUpdate ? disabledInputClass : inputClass} />
+              </div>
+              <div>
+                <FieldLabel>Old Version</FieldLabel>
+                <input type="text" name="old_version" value={formData.old_version} onChange={handleInputChange}
+                  placeholder="Auto-resolved from K8s if empty"
+                  disabled={isUpdate} className={isUpdate ? disabledInputClass : inputClass} />
+              </div>
+              <div>
+                <FieldLabel>Mode</FieldLabel>
+                <select name="mode" value={formData.mode} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>
+                  <option value="AUTO">AUTO</option>
+                  <option value="MANUAL">MANUAL</option>
+                </select>
+              </div>
               <div><FieldLabel>Info</FieldLabel><input type="text" name="info" value={formData.info} onChange={handleInputChange} placeholder="Any Valid JSON" className={inputClass} /></div>
               <div><FieldLabel>Scale Down Days</FieldLabel><select name="custom_pods_scale_down_days" value={formData.custom_pods_scale_down_days} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>{[1,2,3,4,5,6].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
               <label className="flex items-center gap-2.5 cursor-pointer"><input type="checkbox" name="cronjob_suspend" checked={formData.cronjob_suspend} onChange={handleInputChange} className="rounded border-zinc-300 accent-zinc-900" /><span className="text-sm text-zinc-700">Cronjob Suspend</span></label>
@@ -282,25 +411,73 @@ const CreateRelease: React.FC = () => {
 
             {/* Col 2 */}
             <div className="space-y-4">
-              <div><FieldLabel required>Product</FieldLabel><select name="product" value={formData.product} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select Product</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
-              <div><FieldLabel required>Env</FieldLabel><select name="env" value={formData.env} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select Env</option>{AVAILABLE_ENVS.map(e => <option key={e} value={e}>{e}</option>)}</select></div>
+              <div>
+                <FieldLabel required={!isUpdate}>Product</FieldLabel>
+                {isUpdate ? (
+                  <input type="text" value={formData.product} disabled className={disabledInputClass} />
+                ) : (
+                  <select name="product" value={formData.product} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}>
+                    <option value="">Select Product</option>
+                    {products.map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                )}
+              </div>
+              <div>
+                <FieldLabel required={!isUpdate}>Env</FieldLabel>
+                {isUpdate ? (
+                  <input type="text" value={formData.env} disabled className={disabledInputClass} />
+                ) : (
+                  <select name="env" value={formData.env} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}>
+                    <option value="">Select Env</option>
+                    {AVAILABLE_ENVS.map(e => <option key={e} value={e}>{e}</option>)}
+                  </select>
+                )}
+              </div>
               <div><FieldLabel>Priority</FieldLabel><select name="priority" value={formData.priority} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
               <div><FieldLabel>Description</FieldLabel><input type="text" name="description" value={formData.description} onChange={handleInputChange} placeholder="Deploying webhook Hotfix" className={inputClass} /></div>
-              <div><FieldLabel required>Docker Image</FieldLabel><input type="text" name="docker_image" value={formData.docker_image} onChange={handleInputChange} required placeholder="Enter Docker Image" className={inputClass} /></div>
+              <div>
+                <FieldLabel required={!isUpdate}>Docker Image</FieldLabel>
+                <input type="text" name="docker_image" value={formData.docker_image} onChange={handleInputChange}
+                  required={!isUpdate} placeholder="Enter Docker Image" className={inputClass} />
+              </div>
+              {isUpdate && (
+                <div>
+                  <FieldLabel>Status</FieldLabel>
+                  <select name="status" value={formData.status} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>
+                    {statusOptions.map(st => <option key={st} value={st}>{st}</option>)}
+                  </select>
+                </div>
+              )}
             </div>
 
             {/* Col 3 */}
             <div className="space-y-4">
-              <div><FieldLabel required>Service</FieldLabel><select name="service" value={formData.service} onChange={handleInputChange} required disabled={!formData.product || services.length === 0} className={cn(inputClass, (!formData.product || services.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}><option value="">Select Service</option>{services.map(s => <option key={s} value={s}>{s}</option>)}</select></div>
+              <div>
+                <FieldLabel required={!isUpdate}>Service</FieldLabel>
+                {isUpdate ? (
+                  <input type="text" value={formData.service} disabled className={disabledInputClass} />
+                ) : (
+                  <select name="service" value={formData.service} onChange={handleInputChange} required
+                    disabled={!formData.product || services.length === 0}
+                    className={cn(inputClass, (!formData.product || services.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}>
+                    <option value="">Select Service</option>
+                    {services.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                )}
+              </div>
               <div><FieldLabel>Schedule Time</FieldLabel><input type="text" name="schedule_time" value={formData.schedule_time} onChange={handleInputChange} placeholder="2022-11-01T19:39:35" className={inputClass} /></div>
               <div><FieldLabel>Cluster</FieldLabel><input type="text" disabled value={formData.cluster} className={disabledInputClass} /></div>
-              <div><FieldLabel required>Change Log</FieldLabel><input type="text" name="change_log" value={formData.change_log} onChange={handleInputChange} required placeholder="EUL-1.0.0" className={inputClass} /></div>
+              <div>
+                <FieldLabel required={!isUpdate}>Change Log</FieldLabel>
+                <input type="text" name="change_log" value={formData.change_log} onChange={handleInputChange}
+                  required={!isUpdate} placeholder="EUL-1.0.0" className={inputClass} />
+              </div>
               <div><FieldLabel>Scale Down Delay (hrs)</FieldLabel><input type="text" name="scale_down_delay" value={formData.scale_down_delay} onChange={handleInputChange} placeholder="1" className={inputClass} /></div>
             </div>
           </div>
 
           {/* New Service File Paths */}
-          {isNewService && (
+          {isNewService && !isUpdate && (
             <div className="px-6 pb-6 pt-2 border-t border-zinc-100">
               <h3 className="text-sm font-semibold text-zinc-700 mb-3">New Service YAML Paths</h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-4">
@@ -314,7 +491,14 @@ const CreateRelease: React.FC = () => {
 
         {/* Stages Card */}
         <div className="bg-white rounded-xl border border-zinc-200">
-          <div className="px-6 py-4 border-b border-zinc-100"><h2 className="text-lg font-semibold text-zinc-900">Stages</h2></div>
+          <div className="px-6 py-4 border-b border-zinc-100">
+            <h2 className="text-lg font-semibold text-zinc-900">Stages</h2>
+            {isUpdate && rolloutHistoryLength > 0 && (
+              <p className="text-xs text-zinc-500 mt-1">
+                Stages 1-{rolloutHistoryLength} are locked (already executed). Only future stages can be edited.
+              </p>
+            )}
+          </div>
           <div className="p-6">
             <div className="overflow-x-auto">
               <table className="w-full text-sm text-left">
@@ -328,21 +512,46 @@ const CreateRelease: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {stages.map((stage, idx) => (
-                    <tr key={idx} className={cn('border-b border-zinc-100', idx % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
-                      <td className="py-2 px-3 text-zinc-400 font-mono text-xs">{idx + 1}</td>
-                      <td className="py-2 px-3"><input type="number" value={stage.rollout} onChange={(e) => { const s = [...stages]; s[idx].rollout = parseInt(e.target.value) || 0; setStages(s); }} className={cn(inputClass, 'w-24')} /></td>
-                      <td className="py-2 px-3"><input type="number" value={stage.cooloff} onChange={(e) => { const s = [...stages]; s[idx].cooloff = parseInt(e.target.value) || 0; setStages(s); }} className={cn(inputClass, 'w-24')} /></td>
-                      <td className="py-2 px-3"><input type="number" value={stage.pods} onChange={(e) => { const s = [...stages]; s[idx].pods = parseInt(e.target.value) || 0; setStages(s); }} className={cn(inputClass, 'w-24')} /></td>
-                      <td className="py-2 px-3">
-                        {stages.length > 1 && (
-                          <button type="button" onClick={() => setStages(stages.filter((_, i) => i !== idx))} className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 cursor-pointer transition-colors duration-150">
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                  {stages.map((stage, idx) => {
+                    const isLocked = isUpdate && idx < rolloutHistoryLength;
+                    return (
+                      <tr key={idx} className={cn(
+                        'border-b border-zinc-100',
+                        idx % 2 === 1 ? 'bg-zinc-50' : 'bg-white',
+                        isLocked && 'opacity-50'
+                      )}>
+                        <td className="py-2 px-3 text-zinc-400 font-mono text-xs flex items-center gap-1.5">
+                          {isLocked && <Lock className="w-3 h-3 text-zinc-400" />}
+                          {idx + 1}
+                        </td>
+                        <td className="py-2 px-3">
+                          <input type="number" value={stage.rollout}
+                            disabled={isLocked}
+                            onChange={(e) => { const s = [...stages]; s[idx].rollout = parseInt(e.target.value) || 0; setStages(s); }}
+                            className={cn(isLocked ? disabledInputClass : inputClass, 'w-24')} />
+                        </td>
+                        <td className="py-2 px-3">
+                          <input type="number" value={stage.cooloff}
+                            disabled={isLocked}
+                            onChange={(e) => { const s = [...stages]; s[idx].cooloff = parseInt(e.target.value) || 0; setStages(s); }}
+                            className={cn(isLocked ? disabledInputClass : inputClass, 'w-24')} />
+                        </td>
+                        <td className="py-2 px-3">
+                          <input type="number" value={stage.pods}
+                            disabled={isLocked}
+                            onChange={(e) => { const s = [...stages]; s[idx].pods = parseInt(e.target.value) || 0; setStages(s); }}
+                            className={cn(isLocked ? disabledInputClass : inputClass, 'w-24')} />
+                        </td>
+                        <td className="py-2 px-3">
+                          {!isLocked && stages.filter((_, i) => !isUpdate || i >= rolloutHistoryLength).length > 1 && (
+                            <button type="button" onClick={() => setStages(stages.filter((_, i) => i !== idx))} className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 cursor-pointer transition-colors duration-150">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -389,7 +598,7 @@ const CreateRelease: React.FC = () => {
         )}
 
         {/* Sync Release */}
-        {syncCluster && (
+        {syncCluster && !isUpdate && (
           <div className="bg-white rounded-xl border border-zinc-200">
             <div className="px-6 py-4 border-b border-zinc-100 flex items-center gap-3">
               <h2 className="text-lg font-semibold text-zinc-900">Sync Release to Other Cloud</h2>
@@ -453,8 +662,8 @@ const CreateRelease: React.FC = () => {
 
         {/* Action Buttons */}
         <div className="flex justify-end gap-3 pt-2">
-          <Button type="button" variant="secondary" onClick={() => navigate('/releases')}>Cancel</Button>
-          <Button type="submit" loading={createMutation.isPending}>{createMutation.isPending ? 'Creating...' : 'Create Release'}</Button>
+          <Button type="button" variant="secondary" onClick={() => isUpdate ? navigate(`/releases/${id}`) : navigate('/releases')}>Cancel</Button>
+          <Button type="submit" loading={isSubmitting}>{submitLabel}</Button>
         </div>
       </form>
     </div>

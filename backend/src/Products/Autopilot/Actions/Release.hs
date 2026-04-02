@@ -793,7 +793,7 @@ podHealthH rid = do
                 Just ctx -> do
                     let ns = ctx.namespace
                         svcHost = ctx.serviceName
-                    podResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get pods -l app=" <> T.unpack svcHost, "-o json"])
+                    podResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get pods -l", "app=" <> shellQuote svcHost, "-o json"])
                     case podResult of
                         Left (K8sError _) -> pure emptyPodHealth
                         Right (K8sResult out) ->
@@ -907,7 +907,9 @@ immediateRevertH rid req = do
                             -- Do NOT touch VirtualService -- old deployment may be scaled down already
                             let nsQ = shellQuote ((\(K8sReleaseContext{K8s.namespace = n}) -> n) ctx)
                                 depQ = shellQuote (deploymentName ctx)
-                                oldImageQ = shellQuote (NT.oldVersion tracker)
+                                -- Use docker image from context (full registry path), fallback to fetching from old deployment
+                                oldImage = fromMaybe (NT.oldVersion tracker) (K8s.dockerImage ctx)
+                                oldImageQ = shellQuote oldImage
                                 cNameQ = shellQuote ((\(K8sReleaseContext{K8s.containerName = c}) -> c) ctx)
                             -- Step 1: Set image to old version on the new deployment
                             let setImageCmd = unwords [kubectlBin cfg, "set", "image", "deployment/" <> depQ, cNameQ <> "=" <> oldImageQ, "-n", nsQ]

@@ -20,7 +20,6 @@ import {
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody, DialogFooter } from '../../../shared/ui/dialog';
 import { toast } from 'sonner';
 import ReactDiffViewer from 'react-diff-viewer-continued';
 import YAML from 'yaml';
@@ -591,8 +590,7 @@ const ReleaseSummary: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'env-diff' | 'json'>('summary');
-  const [editOpen, setEditOpen] = useState(false);
-  const [editForm, setEditForm] = useState({ description: '', change_log: '', priority: 0, mode: 'AUTO' });
+  // Edit dialog removed — now uses full /releases/:id/edit page
 
   const { data: release, isLoading, error, refetch } = useRelease(id);
   const { data: events = [] } = useReleaseEvents(id);
@@ -692,22 +690,16 @@ const ReleaseSummary: React.FC = () => {
         <span className="text-zinc-600">{release.release_context?.cluster || release.env || ''}</span>
         <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300" />
         <span className="font-mono text-xs text-zinc-800 truncate max-w-[200px]">{release.release_tag || id}</span>
-        <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
-          <button
-            onClick={() => {
-              setEditForm({
-                description: release.description || '',
-                change_log: release.change_log || '',
-                priority: release.priority || 0,
-                mode: release.mode || 'AUTO',
-              });
-              setEditOpen(true);
-            }}
-            className="p-1 rounded text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
-          >
-            <Pencil className="w-3.5 h-3.5" />
-          </button>
-        </PermissionGate>
+        {(s === 'CREATED' || s === 'INPROGRESS' || s === 'PAUSED') && (
+          <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+            <button
+              onClick={() => navigate(`/releases/${id}/edit`)}
+              className="p-1 rounded text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+            </button>
+          </PermissionGate>
+        )}
       </div>
 
       {/* Header */}
@@ -907,77 +899,6 @@ const ReleaseSummary: React.FC = () => {
         <Button variant="secondary" onClick={() => navigate('/releases')}>Back to Releases</Button>
       </div>
 
-      {/* Edit Release Dialog */}
-      <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Edit Release</DialogTitle>
-          </DialogHeader>
-          <DialogBody className="space-y-4">
-            <div>
-              <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">Description</label>
-              <textarea
-                value={editForm.description}
-                onChange={(e) => setEditForm(f => ({ ...f, description: e.target.value }))}
-                rows={2}
-                className="w-full border border-zinc-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
-              />
-            </div>
-            <div>
-              <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">Change Log</label>
-              <textarea
-                value={editForm.change_log}
-                onChange={(e) => setEditForm(f => ({ ...f, change_log: e.target.value }))}
-                rows={2}
-                className="w-full border border-zinc-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
-              />
-            </div>
-            <div>
-              <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">Priority</label>
-              <input
-                type="number"
-                min={0}
-                max={9}
-                value={editForm.priority}
-                onChange={(e) => setEditForm(f => ({ ...f, priority: parseInt(e.target.value) || 0 }))}
-                className="w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
-              />
-            </div>
-            <div>
-              <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">Mode</label>
-              <select
-                value={editForm.mode}
-                onChange={(e) => setEditForm(f => ({ ...f, mode: e.target.value }))}
-                className="w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
-              >
-                <option value="AUTO">AUTO</option>
-                <option value="MANUAL">MANUAL</option>
-              </select>
-            </div>
-          </DialogBody>
-          <DialogFooter>
-            <Button variant="secondary" size="sm" onClick={() => setEditOpen(false)}>Cancel</Button>
-            <Button
-              size="sm"
-              loading={updateTrackerMut.isPending}
-              onClick={async () => {
-                await updateTrackerMut.mutateAsync({
-                  releaseId: id!,
-                  updates: {
-                    description: editForm.description,
-                    change_log: editForm.change_log,
-                    priority: editForm.priority,
-                    mode: editForm.mode,
-                  },
-                });
-                setEditOpen(false);
-              }}
-            >
-              Save
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 };

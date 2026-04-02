@@ -64,6 +64,7 @@ const releasesProduct: ProductDefinition = {
     { path: '/releases', component: ListRelease },
     { path: '/releases/new', component: CreateRelease, permission: 'RELEASE_CREATE' },
     { path: '/releases/:id', component: ReleaseSummary },
+    { path: '/releases/:id/edit', component: CreateRelease, permission: 'RELEASE_UPDATE' },
     { path: '/releases/:id/clone', component: CreateRelease, permission: 'RELEASE_CREATE' },
     // ConfigMap (under same product)
     { path: '/configmap', component: ListConfigMap },

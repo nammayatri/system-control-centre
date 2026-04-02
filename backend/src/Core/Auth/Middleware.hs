@@ -55,6 +55,9 @@ findRoutePermission method pathSegs =
             ("POST", ["releases", _, "revert", "immediate"]) -> Just $ mkPP "RELEASE_REVERT" "autopilot"
             ("POST", ["releases", _, "restart"]) -> Just $ mkPP "RELEASE_CREATE" "autopilot"
             ("POST", ["releases", _, "fast-forward"]) -> Just $ mkPP "RELEASE_UPDATE" "autopilot"
+            ("GET", ["releases", _, "rollout-history"]) -> Just $ mkPP "RELEASE_VIEW" "autopilot"
+            ("GET", ["releases", _, "logslink"]) -> Just $ mkPP "RELEASE_VIEW" "autopilot"
+            ("DELETE", ["server-config", _]) -> Just $ mkPP "SERVICE_CONFIG_EDIT" "autopilot"
             -- Product services
             ("GET", ("products" : _ : "services" : _)) -> Just $ mkPP "PRODUCT_CONFIG_VIEW" "autopilot"
             -- Envs
@@ -101,7 +104,7 @@ authMiddleware db app req respond = do
             ("auth" : _) -> handleAuth db app req respond Nothing
             -- All other routes: validate token + check product permission
             _ -> case findRoutePermission method pathSegs of
-                Nothing -> app req respond -- Unknown routes pass through (will 404 via Servant)
+                Nothing -> handleAuth db app req respond Nothing -- Unknown routes: validate token (no specific permission)
                 Just pp -> handleAuth db app req respond (Just pp)
 
 -- | Core auth handler: validates token, optionally checks permission
