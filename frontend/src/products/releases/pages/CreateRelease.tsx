@@ -12,17 +12,17 @@ import { cn } from '../../../lib/utils';
 import { DEFAULT_ENV, AVAILABLE_ENVS } from '../../../lib/constants';
 import { Trash2, Lock } from 'lucide-react';
 
-// Valid status transitions for update mode (PascalCase canonical)
+// Valid status transitions for update mode (UPPERCASE canonical)
 const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
-  'Created': ['Created', 'InProgress', 'Discarded'],
-  'InProgress': ['InProgress', 'Paused', 'Aborting', 'Completed'],
-  'Paused': ['Paused', 'InProgress', 'Aborting'],
-  'Aborting': ['Aborting'],
-  'Aborted': ['Aborted'],
-  'UserAborted': ['UserAborted'],
-  'Completed': ['Completed'],
-  'Reverted': ['Reverted'],
-  'Discarded': ['Discarded'],
+  'CREATED': ['CREATED', 'INPROGRESS', 'DISCARDED'],
+  'INPROGRESS': ['INPROGRESS', 'PAUSED', 'ABORTING', 'COMPLETED'],
+  'PAUSED': ['PAUSED', 'INPROGRESS', 'ABORTING'],
+  'ABORTING': ['ABORTING'],
+  'ABORTED': ['ABORTED'],
+  'USER_ABORTED': ['USER_ABORTED'],
+  'COMPLETED': ['COMPLETED'],
+  'REVERTED': ['REVERTED'],
+  'DISCARDED': ['DISCARDED'],
 };
 
 const CreateRelease: React.FC = () => {
@@ -37,7 +37,7 @@ const CreateRelease: React.FC = () => {
 
   const [formData, setFormData] = useState({
     appGroup: '', service: '', env: DEFAULT_ENV, old_version: '', new_version: '', docker_image: '', change_log: '',
-    status: 'Created', mode: 'AUTO', priority: '0', info: '', custom_pods_scale_down_days: '1',
+    status: 'CREATED', mode: 'AUTO', priority: '0', info: '', custom_pods_scale_down_days: '1',
     cluster: 'EULER_UAT', scale_down_delay: '1',
     cronjob_suspend: false, description: '', schedule_time: '',
     // deploy_file_path, vs_file_path, dr_file_path removed (backend still accepts via API)
@@ -92,7 +92,7 @@ const CreateRelease: React.FC = () => {
         new_version: existingRelease.new_version || '',
         docker_image: existingRelease.docker_image || existingRelease.release_context?.docker_image || '',
         change_log: existingRelease.change_log || '',
-        status: existingRelease.status || 'Created',
+        status: existingRelease.status || 'CREATED',
         mode: existingRelease.mode || 'AUTO',
         priority: String(existingRelease.priority ?? 0),
         info: existingRelease.info || '',
@@ -246,7 +246,7 @@ const CreateRelease: React.FC = () => {
   // Valid status options for update mode
   const statusOptions = isUpdate && formData.status
     ? (VALID_STATUS_TRANSITIONS[formData.status] || [formData.status])
-    : ['Created'];
+    : ['CREATED'];
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

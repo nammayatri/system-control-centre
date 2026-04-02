@@ -89,7 +89,7 @@ findRunnableReleaseTrackers db now = do
                 select $
                     orderBy_ (asc_ . rtCreatedAt) $ do
                         rt <- all_ (releaseTrackers nammaAPDb)
-                        guard_ (rtStatus rt `in_` [val_ "Created"])
+                        guard_ (rtStatus rt `in_` [val_ "CREATED"])
                         pure rt
     let parsed = map fromRow rows
         isDue (tracker, _) = case scheduleTime tracker of
@@ -106,7 +106,7 @@ findCleanupScheduledTrackers db now = do
                 select $
                     orderBy_ (asc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers nammaAPDb)
-                        guard_ (rtStatus rt `in_` [val_ "Completed", val_ "Aborted", val_ "UserAborted", val_ "GcltAborted"])
+                        guard_ (rtStatus rt `in_` [val_ "COMPLETED", val_ "ABORTED", val_ "USER_ABORTED"])
                         pure rt
     let parsed = map fromRow rows
         isDue (_, mts) =
@@ -130,7 +130,7 @@ findAbortingReleaseTrackers db = do
                 select $
                     orderBy_ (asc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers nammaAPDb)
-                        guard_ (rtStatus rt ==. val_ "Aborting")
+                        guard_ (rtStatus rt ==. val_ "ABORTING")
                         pure rt
     pure (map fromRow rows)
 
@@ -142,7 +142,7 @@ findOngoingReleaseTrackers db = do
                 select $
                     orderBy_ (desc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers nammaAPDb)
-                        guard_ (rtStatus rt `in_` [val_ "InProgress", val_ "Paused", val_ "Aborting", val_ "Reverting", val_ "Restarting"])
+                        guard_ (rtStatus rt `in_` [val_ "INPROGRESS", val_ "PAUSED", val_ "ABORTING", val_ "REVERTING", val_ "RESTARTING"])
                         pure rt
     pure (map fromRow rows)
 
@@ -216,9 +216,9 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
         , rtPriority = priority
         , rtEnv = env
         , rtCategory = T.pack (show category)
-        , rtStatus = T.pack (show status)
+        , rtStatus = releaseStatusToText status
         , rtReleaseWFStatus = T.pack (show releaseWFStatus)
-        , rtMode = Just (T.pack (show mode))
+        , rtMode = Just (modeToText mode)
         , rtCreatedBy = createdBy
         , rtApprovedBy = approvedBy
         , rtIsApproved = Just isApproved
@@ -362,6 +362,26 @@ parseMode (Just t) =
         "AUTO" -> Auto
         _ -> Auto
 
+-- | Convert ReleaseStatus to UPPERCASE Text for DB storage
+releaseStatusToText :: ReleaseStatus -> Text
+releaseStatusToText Created = "CREATED"
+releaseStatusToText InProgress = "INPROGRESS"
+releaseStatusToText Completed = "COMPLETED"
+releaseStatusToText Aborted = "ABORTED"
+releaseStatusToText UserAborted = "USER_ABORTED"
+releaseStatusToText Discarded = "DISCARDED"
+releaseStatusToText Discarding = "DISCARDING"
+releaseStatusToText Paused = "PAUSED"
+releaseStatusToText Aborting = "ABORTING"
+releaseStatusToText Reverting = "REVERTING"
+releaseStatusToText Reverted = "REVERTED"
+releaseStatusToText Restarting = "RESTARTING"
+
+-- | Convert Mode to UPPERCASE Text for DB storage
+modeToText :: Mode -> Text
+modeToText Auto = "AUTO"
+modeToText Manual = "MANUAL"
+
 parseDecisionEngineHSStatus :: Maybe Text -> DecisionEngineHSStatus
 parseDecisionEngineHSStatus Nothing = Uninitiated
 parseDecisionEngineHSStatus (Just t) =
@@ -435,7 +455,7 @@ findCompletedTrackersForScaleDown db now delayHours = do
                 select $
                     orderBy_ (asc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers nammaAPDb)
-                        guard_ (rtStatus rt `in_` [val_ "Completed", val_ "Aborted", val_ "UserAborted"])
+                        guard_ (rtStatus rt `in_` [val_ "COMPLETED", val_ "ABORTED", val_ "USER_ABORTED"])
                         pure rt
     let parsed = map fromRow rows
         isEligible (tracker, mts) =

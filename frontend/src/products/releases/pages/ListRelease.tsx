@@ -28,8 +28,8 @@ const TIME_RANGE_OPTIONS = [
 ];
 
 const STATUS_FILTER_OPTIONS: ReleaseStatus[] = [
-  'Created', 'InProgress', 'Paused', 'Completed', 'Aborted', 'UserAborted',
-  'Reverted', 'Reverting', 'Discarded', 'Discarding', 'Aborting', 'Restarting',
+  'CREATED', 'INPROGRESS', 'PAUSED', 'COMPLETED', 'ABORTED', 'USER_ABORTED',
+  'REVERTED', 'REVERTING', 'DISCARDED', 'DISCARDING', 'ABORTING', 'RESTARTING',
 ];
 
 const getDateRange = (range: TimeRange, customFrom: string, customTo: string): { from: Date; to: Date } => {
@@ -120,9 +120,9 @@ const ListRelease: React.FC = () => {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     return {
       total: releases.length,
-      active: releases.filter(r => ['InProgress', 'Restarting'].includes(r.status)).length,
-      completedToday: releases.filter(r => r.status === 'Completed' && r.end_time && new Date(r.end_time) >= today).length,
-      failedToday: releases.filter(r => ['Aborted', 'UserAborted'].includes(r.status) && r.end_time && new Date(r.end_time) >= today).length,
+      active: releases.filter(r => ['INPROGRESS', 'RESTARTING'].includes(r.status)).length,
+      completedToday: releases.filter(r => r.status === 'COMPLETED' && r.end_time && new Date(r.end_time) >= today).length,
+      failedToday: releases.filter(r => ['ABORTED', 'USER_ABORTED'].includes(r.status) && r.end_time && new Date(r.end_time) >= today).length,
     };
   }, [releases]);
 
@@ -240,7 +240,7 @@ const ListRelease: React.FC = () => {
           {/* Status Filter */}
           <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="border border-zinc-300 rounded-lg px-3 h-9 text-sm text-zinc-600 bg-white cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent">
             <option value="">All Statuses</option>
-            {STATUS_FILTER_OPTIONS.map(s => <option key={s} value={s}>{s.replace(/([A-Z])/g, ' $1').trim()}</option>)}
+            {STATUS_FILTER_OPTIONS.map(s => <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
           </select>
 
           {/* Product Filter */}

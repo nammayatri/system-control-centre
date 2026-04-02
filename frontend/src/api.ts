@@ -58,28 +58,28 @@ export interface ReleaseContext {
     sync_x_pomerium_jwt: string;
 }
 
-// ── All statuses (PascalCase — canonical, matching Haskell ADT) ─────
+// ── All statuses (UPPERCASE — canonical) ─────
 
 export type ReleaseStatus =
-    | 'Created'
-    | 'InProgress'
-    | 'Completed'
-    | 'Aborted'
-    | 'UserAborted'
-    | 'Discarded'
-    | 'Discarding'
-    | 'Paused'
-    | 'Aborting'
-    | 'Reverting'
-    | 'Reverted'
-    | 'Restarting';
+    | 'CREATED'
+    | 'INPROGRESS'
+    | 'COMPLETED'
+    | 'ABORTED'
+    | 'USER_ABORTED'
+    | 'DISCARDED'
+    | 'DISCARDING'
+    | 'PAUSED'
+    | 'ABORTING'
+    | 'REVERTING'
+    | 'REVERTED'
+    | 'RESTARTING';
 
 export const TERMINAL_STATUSES: ReleaseStatus[] = [
-    'Aborted', 'UserAborted', 'Completed', 'Discarded', 'Reverted'
+    'ABORTED', 'USER_ABORTED', 'COMPLETED', 'DISCARDED', 'REVERTED'
 ];
 
 export const ABORTED_STATUSES: ReleaseStatus[] = [
-    'Aborted', 'UserAborted', 'Aborting'
+    'ABORTED', 'USER_ABORTED', 'ABORTING'
 ];
 
 // ── Main release type ──────────────────────────────────────────────
@@ -162,6 +162,7 @@ export interface ProductConfig {
     product_type: string;
     sync_cluster?: string | null;
     need_infra_approval?: number;
+    vs_locked_by?: string | null;
 }
 
 // ── Namma AP backend → frontend normalizer ─────────────────────────
@@ -246,29 +247,24 @@ type NammaRelease = {
     };
 };
 
-/** PascalCase from backend is canonical — pass through directly.
- *  Legacy statuses (GcltAborted, Recording, etc.) are mapped to canonical equivalents. */
-const normalizePascalStatus = (status?: string): ReleaseStatus => {
-    switch (status) {
-        case 'Created': return 'Created';
-        case 'InProgress': return 'InProgress';
-        case 'Completed': return 'Completed';
-        case 'Aborted': return 'Aborted';
-        case 'UserAborted': return 'UserAborted';
-        case 'Discarded': return 'Discarded';
-        case 'Discarding': return 'Discarding';
-        case 'Paused': return 'Paused';
-        case 'Aborting': return 'Aborting';
-        case 'Reverting': return 'Reverting';
-        case 'Reverted': return 'Reverted';
-        case 'Restarting': return 'Restarting';
-        // Legacy statuses from old DB rows (backend parser normalizes these,
-        // but handle here too for safety)
-        case 'GcltAborted': return 'Aborted';
-        case 'Recording': return 'InProgress';
-        case 'Recorded': return 'Completed';
-        case 'VsApplied': return 'InProgress';
-        default: return (status || 'Created') as ReleaseStatus;
+/** Backend returns UPPERCASE statuses. Pass through directly.
+ *  Safety: normalize any unexpected casing to UPPERCASE. */
+const normalizeStatus = (status?: string): ReleaseStatus => {
+    const upper = (status || 'CREATED').toUpperCase().replace(/\s+/g, '_');
+    switch (upper) {
+        case 'CREATED': return 'CREATED';
+        case 'INPROGRESS': return 'INPROGRESS';
+        case 'COMPLETED': return 'COMPLETED';
+        case 'ABORTED': return 'ABORTED';
+        case 'USER_ABORTED': case 'USERABORTED': return 'USER_ABORTED';
+        case 'DISCARDED': return 'DISCARDED';
+        case 'DISCARDING': return 'DISCARDING';
+        case 'PAUSED': return 'PAUSED';
+        case 'ABORTING': return 'ABORTING';
+        case 'REVERTING': return 'REVERTING';
+        case 'REVERTED': return 'REVERTED';
+        case 'RESTARTING': return 'RESTARTING';
+        default: return (upper || 'CREATED') as ReleaseStatus;
     }
 };
 
@@ -276,7 +272,7 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     id: r.releaseId,
     service: r.service,
     appGroup: r.appGroup || r.product || '',
-    status: normalizePascalStatus(r.status),
+    status: normalizeStatus(r.status),
     env: r.env,
     tracker_type: (r as any).category || r.trackerType || 'BackendService',
     mode: (r.mode || 'AUTO').toUpperCase(),
@@ -359,25 +355,26 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
 // ── Status color helpers (matching rescript dashboard) ──────────────
 
 export function statusColor(status: ReleaseStatus | string): string {
-    switch (status) {
-        case 'Completed':
+    const upper = (status || '').toUpperCase().replace(/\s+/g, '_');
+    switch (upper) {
+        case 'COMPLETED':
             return 'bg-green-600 text-white';
-        case 'InProgress':
-        case 'Restarting':
+        case 'INPROGRESS':
+        case 'RESTARTING':
             return 'bg-orange-500 text-white';
-        case 'Paused':
+        case 'PAUSED':
             return 'bg-yellow-500 text-white';
-        case 'Created':
+        case 'CREATED':
             return 'bg-blue-600 text-white';
-        case 'Discarded':
-        case 'Discarding':
+        case 'DISCARDED':
+        case 'DISCARDING':
             return 'bg-gray-500 text-white';
-        case 'Reverting':
-        case 'Reverted':
+        case 'REVERTING':
+        case 'REVERTED':
             return 'bg-blue-500 text-white';
-        case 'Aborted':
-        case 'UserAborted':
-        case 'Aborting':
+        case 'ABORTED':
+        case 'USER_ABORTED':
+        case 'ABORTING':
             return 'bg-red-500 text-white';
         default:
             return 'bg-red-500 text-white';
@@ -555,9 +552,9 @@ export async function updateTracker(releaseId: string, updates: Record<string, a
 }
 
 // Convenience wrappers matching rescript dashboard actions
-export const pauseRelease = (id: string) => updateTracker(id, { status: 'Paused' });
-export const resumeRelease = (id: string) => updateTracker(id, { status: 'InProgress' });
-export const abortRelease = (id: string) => updateTracker(id, { status: 'Aborting' });
+export const pauseRelease = (id: string) => updateTracker(id, { status: 'PAUSED' });
+export const resumeRelease = (id: string) => updateTracker(id, { status: 'INPROGRESS' });
+export const abortRelease = (id: string) => updateTracker(id, { status: 'ABORTING' });
 export const immediateRevert = (id: string, requestedBy?: string) =>
     revertRelease(id, requestedBy, undefined, true);
 

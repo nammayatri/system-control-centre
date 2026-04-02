@@ -17,8 +17,9 @@ module Products.Autopilot.Types.Release (
 )
 where
 
-import Data.Aeson (FromJSON, ToJSON, Value)
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, withText)
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Time.Clock (UTCTime)
 import GHC.Generics (Generic)
 import GHC.Int (Int32)
@@ -38,9 +39,16 @@ instance FromJSON Decision
 data Mode = Auto | Manual
     deriving (Eq, Show, Read, Generic)
 
-instance ToJSON Mode
+instance ToJSON Mode where
+    toJSON Auto = "AUTO"
+    toJSON Manual = "MANUAL"
 
-instance FromJSON Mode
+instance FromJSON Mode where
+    parseJSON = withText "Mode" $ \t ->
+        case T.toUpper t of
+            "AUTO" -> pure Auto
+            "MANUAL" -> pure Manual
+            _ -> pure Auto
 
 -- ============================================================================
 -- Release Status (user-facing lifecycle states)
@@ -85,9 +93,44 @@ data ReleaseStatus
       Restarting
     deriving (Eq, Show, Read, Generic)
 
-instance ToJSON ReleaseStatus
+instance ToJSON ReleaseStatus where
+    toJSON Created = "CREATED"
+    toJSON InProgress = "INPROGRESS"
+    toJSON Completed = "COMPLETED"
+    toJSON Aborted = "ABORTED"
+    toJSON UserAborted = "USER_ABORTED"
+    toJSON Discarded = "DISCARDED"
+    toJSON Discarding = "DISCARDING"
+    toJSON Paused = "PAUSED"
+    toJSON Aborting = "ABORTING"
+    toJSON Reverting = "REVERTING"
+    toJSON Reverted = "REVERTED"
+    toJSON Restarting = "RESTARTING"
 
-instance FromJSON ReleaseStatus
+instance FromJSON ReleaseStatus where
+    parseJSON = withText "ReleaseStatus" $ \t ->
+        case T.toUpper t of
+            "CREATED" -> pure Created
+            "INPROGRESS" -> pure InProgress
+            "COMPLETED" -> pure Completed
+            "ABORTED" -> pure Aborted
+            "USER_ABORTED" -> pure UserAborted
+            "USERABORTED" -> pure UserAborted
+            "DISCARDED" -> pure Discarded
+            "DISCARDING" -> pure Discarding
+            "PAUSED" -> pure Paused
+            "ABORTING" -> pure Aborting
+            "REVERTING" -> pure Reverting
+            "REVERTED" -> pure Reverted
+            "RESTARTING" -> pure Restarting
+            -- Legacy status mappings
+            "RECORDING" -> pure InProgress
+            "RECORDED" -> pure Completed
+            "GCLT_ABORTED" -> pure Aborted
+            "GCLTABORTED" -> pure Aborted
+            "VS_APPLIED" -> pure InProgress
+            "VSAPPLIED" -> pure InProgress
+            _ -> pure Created
 
 -- ============================================================================
 -- Status Helpers

@@ -23,8 +23,8 @@ export interface ListViewProps {
   product: string;        // product slug for permission checks
 }
 
-/** Common status type (PascalCase — canonical, matching Haskell ADT) */
-export type BaseStatus = 'Created' | 'InProgress' | 'Completed' | 'Aborted' | 'Paused' | 'Discarded';
+/** Common status type (UPPERCASE — canonical) */
+export type BaseStatus = 'CREATED' | 'INPROGRESS' | 'COMPLETED' | 'ABORTED' | 'PAUSED' | 'DISCARDED';
 
 /** Date range filter — common across all list views */
 export interface DateRange {
