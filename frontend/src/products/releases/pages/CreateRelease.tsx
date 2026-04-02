@@ -33,10 +33,10 @@ const CreateRelease: React.FC = () => {
   const isUpdate = !!id && location.pathname.endsWith('/edit');
 
   const { data: productConfigs = [] } = useProductConfigs();
-  const products = [...new Set(productConfigs.map((c: ProductConfig) => c.product).filter(Boolean))];
+  const products = [...new Set(productConfigs.map((c: ProductConfig) => c.appGroup).filter(Boolean))];
 
   const [formData, setFormData] = useState({
-    product: '', service: '', env: DEFAULT_ENV, old_version: '', new_version: '', docker_image: '', change_log: '',
+    appGroup: '', service: '', env: DEFAULT_ENV, old_version: '', new_version: '', docker_image: '', change_log: '',
     status: 'Created', mode: 'AUTO', priority: '0', info: '', custom_pods_scale_down_days: '1',
     cluster: 'EULER_UAT', scale_down_delay: '1',
     cronjob_suspend: false, description: '', schedule_time: '',
@@ -70,7 +70,7 @@ const CreateRelease: React.FC = () => {
   const [syncCluster, setSyncCluster] = useState('');
   const [rolloutHistoryLength, setRolloutHistoryLength] = useState(0);
 
-  const { data: services = [] } = useServices(formData.product, isNewService);
+  const { data: services = [] } = useServices(formData.appGroup, isNewService);
   const createMutation = useCreateRelease();
   const updateMutation = useUpdateTracker();
 
@@ -85,7 +85,7 @@ const CreateRelease: React.FC = () => {
   useEffect(() => {
     if (existingRelease && isUpdate) {
       setFormData({
-        product: existingRelease.product || '',
+        appGroup: existingRelease.appGroup || '',
         service: existingRelease.service || '',
         env: existingRelease.env || DEFAULT_ENV,
         old_version: existingRelease.old_version || '',
@@ -122,7 +122,7 @@ const CreateRelease: React.FC = () => {
       fetchReleaseDetails(id).then(data => {
         setClonedService(data.service);
         setFormData(prev => ({
-          ...prev, product: data.product, service: data.service,
+          ...prev, appGroup: data.appGroup, service: data.service,
           cluster: data.release_context?.cluster || 'EULER_UAT', env: data.env,
           priority: String(data.priority || '0'),
           docker_image: data.release_context?.docker_image || data.docker_image || '',
@@ -141,16 +141,16 @@ const CreateRelease: React.FC = () => {
 
   // Sync cluster
   useEffect(() => {
-    if (formData.product) {
-      const config = productConfigs.find((c: ProductConfig) => c.product === formData.product);
+    if (formData.appGroup) {
+      const config = productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup);
       setSyncCluster(config?.sync_cluster || '');
     } else setSyncCluster('');
-  }, [formData.product, productConfigs]);
+  }, [formData.appGroup, productConfigs]);
 
   // Load rollout stages from service config when service is selected (skip if cloning or updating)
   useEffect(() => {
-    if (!isClone && !isUpdate && formData.product && formData.service) {
-      fetchReleaseConfigs(formData.product).then(configs => {
+    if (!isClone && !isUpdate && formData.appGroup && formData.service) {
+      fetchReleaseConfigs(formData.appGroup).then(configs => {
         const svcConfig = configs.find(c => c.service === formData.service);
         if (svcConfig?.rollout_strategy) {
           try {
@@ -171,22 +171,22 @@ const CreateRelease: React.FC = () => {
         }
       }).catch(() => {});
     }
-  }, [formData.product, formData.service, isClone, isUpdate]);
+  }, [formData.appGroup, formData.service, isClone, isUpdate]);
 
   useEffect(() => { if (!isEnvSwitch) setEnvData(''); }, [isEnvSwitch]);
   useEffect(() => { if (!isConfigMapSwitch) setConfigMapData(''); }, [isConfigMapSwitch]);
 
   // Fetch envs
   useEffect(() => {
-    if (isEnvSwitch && formData.product && formData.service && formData.env) {
-      fetchEnvs(formData.product, formData.env, formData.service).then(res => setEnvData(JSON.stringify(res, null, 2))).catch(console.error);
+    if (isEnvSwitch && formData.appGroup && formData.service && formData.env) {
+      fetchEnvs(formData.appGroup, formData.env, formData.service).then(res => setEnvData(JSON.stringify(res, null, 2))).catch(console.error);
     }
-  }, [isEnvSwitch, formData.product, formData.service, formData.env]);
+  }, [isEnvSwitch, formData.appGroup, formData.service, formData.env]);
 
   // Fetch configmap
   useEffect(() => {
-    if (isConfigMapSwitch && formData.product && formData.service) {
-      fetchConfigMapData(formData.product, formData.service)
+    if (isConfigMapSwitch && formData.appGroup && formData.service) {
+      fetchConfigMapData(formData.appGroup, formData.service)
         .then(res => {
           try {
             const parsed = typeof res === 'string' ? JSON.parse(res) : res;
@@ -197,18 +197,18 @@ const CreateRelease: React.FC = () => {
         })
         .catch(() => setConfigMapData(''));
     }
-  }, [isConfigMapSwitch, formData.product, formData.service]);
+  }, [isConfigMapSwitch, formData.appGroup, formData.service]);
 
   // Secondary envs
   useEffect(() => {
-    if (isReleaseSync && isSecondaryEnvSwitch && formData.product && formData.service && formData.env) {
+    if (isReleaseSync && isSecondaryEnvSwitch && formData.appGroup && formData.service && formData.env) {
       setSecondaryEnvLoading(true);
-      fetchSecondaryEnvs(formData.product, formData.env, formData.service)
+      fetchSecondaryEnvs(formData.appGroup, formData.env, formData.service)
         .then(res => setSecondaryEnvData(JSON.stringify(res, null, 2)))
         .catch(() => setSecondaryEnvData(''))
         .finally(() => setSecondaryEnvLoading(false));
     }
-  }, [isReleaseSync, isSecondaryEnvSwitch, formData.product, formData.service, formData.env]);
+  }, [isReleaseSync, isSecondaryEnvSwitch, formData.appGroup, formData.service, formData.env]);
 
   useEffect(() => {
     if (!isReleaseSync) { setIsSecondaryEnvSwitch(false); setSecondaryEnvData(''); }
@@ -216,11 +216,11 @@ const CreateRelease: React.FC = () => {
 
   // Auto-fill cluster & set cloned service
   useEffect(() => {
-    if (formData.product && !isUpdate) {
-      const config = productConfigs.find((c: ProductConfig) => c.product === formData.product);
+    if (formData.appGroup && !isUpdate) {
+      const config = productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup);
       if (config) setFormData(prev => ({ ...prev, cluster: config.cluster }));
     }
-  }, [formData.product, productConfigs, isUpdate]);
+  }, [formData.appGroup, productConfigs, isUpdate]);
 
   useEffect(() => {
     if (clonedService && services.includes(clonedService)) {
@@ -237,7 +237,7 @@ const CreateRelease: React.FC = () => {
 
   const [manualReleaseTag, setManualReleaseTag] = useState('');
   const dateStr = new Date().toISOString().split('T')[0].replace(/-/g, '');
-  const productTag = formData.product || 'PRODUCT';
+  const productTag = formData.appGroup || 'PRODUCT';
   const serviceTag = formData.service || 'SERVICE';
   const versionTag = formData.new_version || 'VERSION';
   const autoGeneratedReleaseTag = `${productTag}_${dateStr}_${versionTag}_${serviceTag}_${formData.mode}_${formData.env || 'ENV'}_${formData.priority}`;
@@ -283,11 +283,11 @@ const CreateRelease: React.FC = () => {
     }
 
     // Create mode
-    const selectedProductConfig = productConfigs.find((c: ProductConfig) => c.product === formData.product);
+    const selectedProductConfig = productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup);
     const trackerType = selectedProductConfig?.product_type === 'SCHEDULER' ? 'BackendScheduler' : 'BackendService';
 
     const payload = {
-      product: formData.product, service: [formData.service], env: formData.env,
+      appGroup: formData.appGroup, service: [formData.service], env: formData.env,
       old_version: formData.old_version || 'unknown',
       new_version: formData.new_version, docker_image: formData.docker_image,
       change_log: formData.change_log, status: formData.status, mode: formData.mode,
@@ -400,9 +400,9 @@ const CreateRelease: React.FC = () => {
               <div>
                 <FieldLabel required={!isUpdate}>Product</FieldLabel>
                 {isUpdate ? (
-                  <input type="text" value={formData.product} disabled className={disabledInputClass} />
+                  <input type="text" value={formData.appGroup} disabled className={disabledInputClass} />
                 ) : (
-                  <select name="product" value={formData.product} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}>
+                  <select name="product" value={formData.appGroup} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}>
                     <option value="">Select Product</option>
                     {products.map(p => <option key={p} value={p}>{p}</option>)}
                   </select>
@@ -444,8 +444,8 @@ const CreateRelease: React.FC = () => {
                   <input type="text" value={formData.service} disabled className={disabledInputClass} />
                 ) : (
                   <select name="service" value={formData.service} onChange={handleInputChange} required
-                    disabled={!formData.product || services.length === 0}
-                    className={cn(inputClass, (!formData.product || services.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}>
+                    disabled={!formData.appGroup || services.length === 0}
+                    className={cn(inputClass, (!formData.appGroup || services.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}>
                     <option value="">Select Service</option>
                     {services.map(s => <option key={s} value={s}>{s}</option>)}
                   </select>

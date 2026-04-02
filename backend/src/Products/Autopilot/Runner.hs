@@ -25,7 +25,7 @@ import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (..), K8sR
 import qualified Products.Autopilot.Types.Target.Kubernetes as K8s
 import Products.Autopilot.Workflow.Factory (executeReleaseWorkflow)
 import Products.Autopilot.Workflow.Types (ReleaseState (..), WorkFlowError)
-import Prelude hiding (product)
+import Prelude
 
 runnerLoop :: AppState -> IO ()
 runnerLoop st = runFlow st loop
@@ -84,9 +84,9 @@ isEligibleToRun db ongoing (rt, mts) = case category rt of
         let k8sCluster = case mts of
                 Just (K8sState k8s) -> cluster (context k8s)
                 _ -> ""
-        p <- findProductByNameAndCluster db (product rt) k8sCluster
+        p <- findProductByNameAndCluster db (appGroup rt) k8sCluster
         let vsLocked = maybe False (isJust . getProductVsLockedBy) p
-            hasOngoingSameProduct = any (\(o, _) -> product o == product rt && env o == env rt) ongoing
+            hasOngoingSameProduct = any (\(o, _) -> appGroup o == appGroup rt && env o == env rt) ongoing
         pure (not vsLocked && (skipOngoingCheck || not hasOngoingSameProduct))
 
 -- | Trigger a release - dispatch to appropriate workflow using new Factory
@@ -154,7 +154,7 @@ pickJobs multi jobs
   where
     go _ [] = []
     go counts ((rt, mts) : rest) =
-        let key = product rt <> ":" <> env rt
+        let key = appGroup rt <> ":" <> env rt
             picked = Map.findWithDefault 0 key counts
          in if picked >= 1
                 then go counts rest

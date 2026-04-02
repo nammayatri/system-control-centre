@@ -70,7 +70,7 @@ import Products.Autopilot.Notifications (
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
 import Products.Autopilot.Types.Release
     ( ReleaseStatus (..)
-    , ReleaseTracker (product, releaseId, rolloutStrategy, rolloutHistory, status, mode, endTime)
+    , ReleaseTracker (appGroup, releaseId, rolloutStrategy, rolloutHistory, status, mode, endTime)
     , RolloutStep (..)
     , RolloutHistory (..)
     , Mode (..)
@@ -95,7 +95,7 @@ import Products.Autopilot.Workflow.Types (
     ReleaseWorkFlow,
     StateFlow,
  )
-import Prelude hiding (product)
+import Prelude
 
 -- ============================================================================
 -- Workflow Definition
@@ -156,7 +156,7 @@ validatePreconditions :: StateFlow ()
 validatePreconditions = do
     rt <- getRT
     cfg <- getCfg
-    liftIO $ putStrLn $ "Validating preconditions for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Validating preconditions for " <> T.unpack (appGroup rt)
 
     -- Initialise or update K8s deployment state
     rs <- gets id
@@ -217,7 +217,7 @@ prepareK8sResources = do
     ctx <- getK8sCtx
     db <- getDB
     isNew <- isNewServiceRelease
-    liftIO $ putStrLn $ "Preparing K8s resources for " <> T.unpack (product rt) <> if isNew then " (NEW SERVICE)" else ""
+    liftIO $ putStrLn $ "Preparing K8s resources for " <> T.unpack (appGroup rt) <> if isNew then " (NEW SERVICE)" else ""
 
     -- BEFORE snapshots are captured at release creation time (createReleaseH)
     -- so diffs are available before the workflow starts.
@@ -268,7 +268,7 @@ prepareK8sResources = do
 
     -- 5. Clone HPA if exists for old version
     when (not isNew) $ do
-        hpaEnabled <- liftIO $ isHpaEnabledForProduct db (product rt)
+        hpaEnabled <- liftIO $ isHpaEnabledForProduct db (appGroup rt)
         when hpaEnabled $ do
             let oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
             hpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
@@ -309,7 +309,7 @@ progressiveRollout = do
     cfg <- getCfg
     ctx <- getK8sCtx
     isNew <- isNewServiceRelease
-    liftIO $ putStrLn $ "Starting progressive rollout for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Starting progressive rollout for " <> T.unpack (appGroup rt)
 
     updateK8sStatus BSFlipVirtualService
     updateK8sField (\k8s -> k8s{virtualServiceApplied = True})
@@ -563,7 +563,7 @@ monitorHealth = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    liftIO $ putStrLn $ "Monitoring health for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Monitoring health for " <> T.unpack (appGroup rt)
 
     updateK8sStatus BSMonitoring
     liftIO $ putStrLn "  Waiting for pods to be ready (max 5 min, polling every 10s)"
@@ -719,7 +719,7 @@ cleanupOldVersion = do
     ctx <- getK8sCtx
     isNew <- isNewServiceRelease
     db <- getDB
-    liftIO $ putStrLn $ "Cleaning up old version for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Cleaning up old version for " <> T.unpack (appGroup rt)
 
     updateK8sStatus BSScaleDownOld
 
@@ -777,7 +777,7 @@ notifyComplete = do
     updateK8sStatus BSDone
 
     liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
-    liftIO $ putStrLn $ "   Service: " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "   Service: " <> T.unpack (appGroup rt)
     liftIO $ putStrLn $ "   Category: BackendService"
     liftIO $ putStrLn $ "   Status: Completed"
 

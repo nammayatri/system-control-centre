@@ -61,7 +61,14 @@ npm run dev                        # starts on :5173
 - Compile with -Wall -- non-exhaustive patterns catch missing cases
 
 ## DB Schema
-- Autopilot tables: release_tracker, product_config, release_config, release_events, etc.
+- Autopilot tables: deployment_config, release_tracker, release_events, server_config
+- deployment_config: unified product+service config (product-level rows have service IS NULL)
+  - Column `app_group` (was `product` before 0007 migration) identifies the group
+  - server_config.product still uses `product` (unchanged)
+- release_tracker: `app_group` column (was `product`), `events` and `is_art_recorder` columns dropped
+- Haskell domain type: `ReleaseTracker { appGroup :: Text }` maps to DB `app_group`
+- API accepts both `"appGroup"` and `"product"` in JSON for backward compatibility
+- VS edit data (old/new VS) stored as SNAPSHOT events in release_events, not udf fields
 - RBAC tables: sc_person, sc_role, sc_person_product_access, sc_person_permission_override, sc_registration_token, sc_audit_log
 - NO sc_product or sc_permission tables -- these are derived from Haskell ADTs
 

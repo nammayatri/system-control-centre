@@ -24,8 +24,6 @@ data DeploymentConfigT f = DeploymentConfigT
     , dcVsName :: Columnar f (Maybe Text)
     , dcAppGroupAcronym :: Columnar f (Maybe Text)
     , dcAppGroupType :: Columnar f (Maybe Text)
-    , dcRepoName :: Columnar f (Maybe Text)
-    , dcReleaseBranch :: Columnar f (Maybe Text)
     , dcSyncCluster :: Columnar f (Maybe Text)
     , dcNeedInfraApproval :: Columnar f (Maybe Bool)
     , dcVsLockedBy :: Columnar f (Maybe Text)
@@ -33,13 +31,10 @@ data DeploymentConfigT f = DeploymentConfigT
     -- Service-level fields (service IS NOT NULL)
     , dcServiceHost :: Columnar f (Maybe Text)
     , dcServiceType :: Columnar f (Maybe Text)
-    , dcServiceAcronym :: Columnar f (Maybe Text)
     , dcRolloutStrategy :: Columnar f (Maybe Text)
     , dcRevertStrategy :: Columnar f (Maybe Text)
     , dcDecisionConfig :: Columnar f (Maybe Text)
-    , dcBitbucketPath :: Columnar f (Maybe Text)
     , dcSlackChannel :: Columnar f (Maybe Text)
-    , dcEmails :: Columnar f (Maybe Text)
     }
     deriving (Generic, Beamable)
 
@@ -156,21 +151,16 @@ nammaAPDb =
                             , dcVsName = fieldNamed "vs_name"
                             , dcAppGroupAcronym = fieldNamed "product_acronym"
                             , dcAppGroupType = fieldNamed "product_type"
-                            , dcRepoName = fieldNamed "repo_name"
-                            , dcReleaseBranch = fieldNamed "release_branch"
                             , dcSyncCluster = fieldNamed "sync_cluster"
                             , dcNeedInfraApproval = fieldNamed "need_infra_approval"
                             , dcVsLockedBy = fieldNamed "vs_locked_by"
                             , dcVsLockTimestamp = fieldNamed "vs_lock_timestamp"
                             , dcServiceHost = fieldNamed "service_host"
                             , dcServiceType = fieldNamed "service_type"
-                            , dcServiceAcronym = fieldNamed "service_acronym"
                             , dcRolloutStrategy = fieldNamed "rollout_strategy"
                             , dcRevertStrategy = fieldNamed "revert_strategy"
                             , dcDecisionConfig = fieldNamed "decision_config"
-                            , dcBitbucketPath = fieldNamed "bitbucket_path"
                             , dcSlackChannel = fieldNamed "slack_channel"
-                            , dcEmails = fieldNamed "emails"
                             }
             , releaseTrackers =
                 setEntityName "release_tracker"

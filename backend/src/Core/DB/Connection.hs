@@ -58,21 +58,16 @@ ensureSchema db = withConn db $ \conn -> do
         \vs_name text null, \
         \product_acronym text null, \
         \product_type text null, \
-        \repo_name text null, \
-        \release_branch text null, \
         \sync_cluster text null, \
         \need_infra_approval boolean null, \
         \vs_locked_by text null, \
         \vs_lock_timestamp timestamptz null, \
         \service_host text null, \
         \service_type text null, \
-        \service_acronym text null, \
         \rollout_strategy text null, \
         \revert_strategy text null, \
         \decision_config text null, \
-        \bitbucket_path text null, \
-        \slack_channel text null, \
-        \emails text null)"
+        \slack_channel text null)"
     -- Unique constraint: (app_group, COALESCE(service, ''))
     _ <- execute_ conn "DO $$ BEGIN \
         \IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_deployment_config') THEN \

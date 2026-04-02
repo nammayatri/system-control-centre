@@ -126,7 +126,7 @@ const ListRelease: React.FC = () => {
     };
   }, [releases]);
 
-  const productOptions = useMemo(() => [...new Set(releases.map(r => r.product).filter(Boolean))], [releases]);
+  const productOptions = useMemo(() => [...new Set(releases.map(r => r.appGroup).filter(Boolean))], [releases]);
 
   // Filter + sort
   const filteredReleases = useMemo(() => {
@@ -134,7 +134,7 @@ const ListRelease: React.FC = () => {
       const q = debouncedSearch.toLowerCase();
       const matchesSearch = !q || r.service?.toLowerCase().includes(q) || r.new_version?.toLowerCase().includes(q) || r.id?.toLowerCase().includes(q) || r.status?.toLowerCase().includes(q);
       const matchesStatus = !statusFilter || r.status === statusFilter;
-      const matchesProduct = !productFilter || r.product === productFilter;
+      const matchesProduct = !productFilter || r.appGroup === productFilter;
       return matchesSearch && matchesStatus && matchesProduct;
     });
 
@@ -245,7 +245,7 @@ const ListRelease: React.FC = () => {
 
           {/* Product Filter */}
           <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)} className="border border-zinc-300 rounded-lg px-3 h-9 text-sm text-zinc-600 bg-white cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent">
-            <option value="">All Products</option>
+            <option value="">All Groups</option>
             {productOptions.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
 
@@ -271,7 +271,7 @@ const ListRelease: React.FC = () => {
               <thead>
                 <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
                   <th className="py-3 px-4 w-12">#</th>
-                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('product')}>Product</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('appGroup')}>App Group</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('service')}>Service</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('new_version')}>Version</th>
                   <th className="py-3 px-4">Status</th>
@@ -296,7 +296,7 @@ const ListRelease: React.FC = () => {
                         onClick={() => navigate(`/releases/${release.id}`)}
                       >
                         <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + index + 1}</td>
-                        <td className="py-3 px-4 text-xs text-zinc-600">{release.product}</td>
+                        <td className="py-3 px-4 text-xs text-zinc-600">{release.appGroup}</td>
                         <td className="py-3 px-4 font-medium text-zinc-800">{release.service}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">{release.new_version}</td>
                         <td className="py-3 px-4">

@@ -81,7 +81,7 @@ const ListVSEdit: React.FC = () => {
     if (!debouncedSearch) return edits;
     const q = debouncedSearch.toLowerCase();
     return edits.filter((e: VSEditTracker) =>
-      e.product?.toLowerCase().includes(q) ||
+      e.appGroup?.toLowerCase().includes(q) ||
       e.service?.toLowerCase().includes(q) ||
       e.vs_name?.toLowerCase().includes(q) ||
       e.status?.toLowerCase().includes(q) ||
@@ -187,7 +187,7 @@ const ListVSEdit: React.FC = () => {
                       onClick={() => navigate(`/vs-editor/${edit.id}`)}
                     >
                       <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + index + 1}</td>
-                      <td className="py-3 px-4 font-medium text-zinc-800">{edit.product}</td>
+                      <td className="py-3 px-4 font-medium text-zinc-800">{edit.appGroup}</td>
                       <td className="py-3 px-4 text-zinc-700">{edit.service}</td>
                       <td className="py-3 px-4 font-mono text-xs text-zinc-600">{edit.vs_name}</td>
                       <td className="py-3 px-4"><StatusBadge status={edit.status} /></td>

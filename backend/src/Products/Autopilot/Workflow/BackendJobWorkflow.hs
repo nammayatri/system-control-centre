@@ -36,7 +36,7 @@ import Products.Autopilot.Notifications (
  )
 
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
-import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (product, releaseId, status))
+import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (appGroup, releaseId, status))
 import Products.Autopilot.Types.Target (
     BackendServiceWFStatus (..),
     K8sDeploymentState (..),
@@ -55,7 +55,7 @@ import Products.Autopilot.Workflow.Types (
     ReleaseWorkFlow,
     StateFlow,
  )
-import Prelude hiding (product)
+import Prelude
 
 -- ============================================================================
 -- Workflow Definition
@@ -106,7 +106,7 @@ validatePreconditions :: StateFlow ()
 validatePreconditions = do
     rt <- getRT
     cfg <- getCfg
-    liftIO $ putStrLn $ "Validating preconditions for job " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Validating preconditions for job " <> T.unpack (appGroup rt)
 
     -- Initialise or update K8s deployment state
     rs <- gets id
@@ -142,7 +142,7 @@ createJob = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    liftIO $ putStrLn $ "Creating job for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Creating job for " <> T.unpack (appGroup rt)
 
     updateK8sStatus BSCreateDeployment
 
@@ -211,7 +211,7 @@ monitorJobStatus = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    liftIO $ putStrLn $ "Monitoring job status for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Monitoring job status for " <> T.unpack (appGroup rt)
 
     updateK8sStatus BSMonitoring
 
@@ -308,7 +308,7 @@ notifyComplete = do
             liftIO $ putStrLn $ "Job " <> T.unpack (releaseId rt) <> " was aborted"
         _ -> do
             liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
-            liftIO $ putStrLn $ "   Service: " <> T.unpack (product rt)
+            liftIO $ putStrLn $ "   Service: " <> T.unpack (appGroup rt)
             liftIO $ putStrLn $ "   Category: BackendJob"
             liftIO $ putStrLn $ "   Status: Completed"
 

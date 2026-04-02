@@ -58,10 +58,8 @@ data UpsertProductReq = UpsertProductReq
     , cluster :: Text
     , namespace :: Text
     , vsName :: Text
-    , repoName :: Maybe Text
     , productType :: Text
     , productAcronym :: Text
-    , releaseBranch :: Maybe Text
     , syncCluster :: Maybe Text
     , needInfraApproval :: Maybe Bool
     }
@@ -72,14 +70,12 @@ instance FromJSON UpsertProductReq where
     parseJSON = withObject "UpsertProductReq" $ \v ->
         UpsertProductReq
             <$> v .:? "id"
-            <*> v .: "product"
+            <*> (v .:? "appGroup" >>= \mv -> case mv of Just x -> pure x; Nothing -> v .: "product")
             <*> (v .:? "cluster" .!= "")
             <*> (v .:? "namespace" .!= "default")
             <*> (v .:? "vsName" >>= \mv -> case mv of Just x -> pure x; Nothing -> v .:? "vs_name" .!= "")
-            <*> (v .:? "repoName" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "repo_name")
             <*> (v .:? "productType" >>= \mv -> case mv of Just x -> pure x; Nothing -> v .:? "product_type" .!= "SERVICE")
             <*> (v .:? "productAcronym" >>= \mv -> case mv of Just x -> pure x; Nothing -> v .:? "product_acronym" .!= "")
-            <*> (v .:? "releaseBranch" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "release_branch")
             <*> (v .:? "syncCluster" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "sync_cluster")
             <*> (v .:? "needInfraApproval" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "need_infra_approval")
 
@@ -88,14 +84,12 @@ instance ToJSON UpsertProductReq where
 
 data UpsertServiceReq = UpsertServiceReq
     { id :: Maybe Int32
-    , emails :: Maybe Text
     , rolloutStrategyText :: Maybe Text
     , decisionConfigText :: Maybe Text
-    , product :: Text
+    , appGroup :: Text
     , service :: Text
     , serviceType :: Text
     , serviceHost :: Maybe Text
-    , bitbucketPath :: Maybe Text
     , revertStrategyText :: Maybe Text
     }
     deriving (Show, Generic)
@@ -407,7 +401,7 @@ instance ToJSON FastForwardReq where
 -- ============================================================================
 
 data CreateVsEditTrackerReq = CreateVsEditTrackerReq
-    { product :: Text
+    { appGroup :: Text
     , service :: Text
     , env :: Text
     , vsName :: Text
@@ -439,7 +433,7 @@ instance ToJSON UpdateVsEditTrackerReq where
 
 -- Manual FromJSON for VsLockReq to accept both camelCase and snake_case
 data VsLockReq = VsLockReq
-    { product :: Text
+    { appGroup :: Text
     , service :: Maybe Text
     , vsName :: Maybe Text
     , env :: Maybe Text
@@ -452,7 +446,7 @@ data VsLockReq = VsLockReq
 instance FromJSON VsLockReq where
     parseJSON = withObject "VsLockReq" $ \v ->
         VsLockReq
-            <$> v .: "product"
+            <$> (v .:? "appGroup" >>= \mv -> case mv of Just x -> pure x; Nothing -> v .: "product")
             <*> v .:? "service"
             <*> (v .:? "vsName" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "vs_name")
             <*> v .:? "env"
@@ -466,7 +460,7 @@ instance ToJSON VsLockReq where
 -- Manual FromJSON for VsUnlockReq to accept both camelCase and snake_case
 data VsUnlockReq = VsUnlockReq
     { trackerId :: Maybe Text
-    , product :: Maybe Text
+    , appGroup :: Maybe Text
     , vsName :: Maybe Text
     , env :: Maybe Text
     }
@@ -476,7 +470,7 @@ instance FromJSON VsUnlockReq where
     parseJSON = withObject "VsUnlockReq" $ \v ->
         VsUnlockReq
             <$> (v .:? "trackerId" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "tracker_id")
-            <*> v .:? "product"
+            <*> (v .:? "appGroup" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "product")
             <*> (v .:? "vsName" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "vs_name")
             <*> v .:? "env"
 
@@ -504,7 +498,7 @@ instance FromJSON APIResponse where
 -- ============================================================================
 
 data ProductResponse = ProductResponse
-    { product :: Text
+    { appGroup :: Text
     , cluster :: Text
     , namespace :: Text
     , vsName :: Text
@@ -534,11 +528,9 @@ instance ToJSON ServiceResponse where
 
 data ProductConfigResponse = ProductConfigResponse
     { id :: Int32
-    , product :: Text
-    , repoName :: Text
+    , appGroup :: Text
     , productType :: Text
     , productAcronym :: Text
-    , releaseBranch :: Text
     , needInfraApproval :: Maybe Bool
     , cluster :: Maybe Text
     , namespace :: Maybe Text
@@ -559,13 +551,10 @@ data ReleaseConfigResponse = ReleaseConfigResponse
     , serviceName :: Text
     , serviceProduct :: Text
     , serviceType :: Text
-    , emails :: Maybe Text
     , rolloutStrategy :: Maybe Text
     , decisionConfig :: Maybe Text
     , flags :: Maybe Text
     , slackWebhookUrls :: Maybe Text
-    , serviceAcronym :: Maybe Text
-    , bitbucketPath :: Maybe Text
     , microserviceType :: Maybe Text
     , revertStrategy :: Maybe Text
     , jiraWebhookUrl :: Maybe Text
@@ -701,7 +690,7 @@ instance FromJSON ResourcesResponse where
 
 data VsEditTrackerResponse = VsEditTrackerResponse
     { vetRespId :: Text
-    , vetRespProduct :: Text
+    , vetRespAppGroup :: Text
     , vetRespService :: Text
     , vetRespEnv :: Text
     , vetRespVsName :: Text
@@ -726,7 +715,8 @@ instance ToJSON VsEditTrackerResponse where
     toJSON v =
         object
             [ "id" .= vetRespId v
-            , "product" .= vetRespProduct v
+            , "appGroup" .= vetRespAppGroup v
+            , "product" .= vetRespAppGroup v  -- backward compat
             , "service" .= vetRespService v
             , "env" .= vetRespEnv v
             , "vs_name" .= vetRespVsName v
@@ -828,7 +818,7 @@ instance ToJSON ServerConfigResponse where
 data ConfigMapResponse = ConfigMapResponse
     { cmrId :: Text
     , cmrService :: Text
-    , cmrProduct :: Text
+    , cmrAppGroup :: Text
     , cmrName :: Maybe Text
     , cmrStatus :: Text
     , cmrDescription :: Text
@@ -858,7 +848,8 @@ instance ToJSON ConfigMapResponse where
         object
             [ "id" .= cmrId r
             , "service" .= cmrService r
-            , "product" .= cmrProduct r
+            , "appGroup" .= cmrAppGroup r
+            , "product" .= cmrAppGroup r  -- backward compat
             , "name" .= cmrName r
             , "status" .= cmrStatus r
             , "description" .= cmrDescription r

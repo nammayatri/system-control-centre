@@ -28,12 +28,12 @@ interface GroupWithServices {
 // ── Empty forms ──────────────────────────────────────────────────────
 
 const EMPTY_GROUP_FORM: Partial<ProductConfig> = {
-  product: '', cluster: '', namespace: '', vs_name: '',
+  appGroup: '', cluster: '', namespace: '', vs_name: '',
   product_acronym: '', product_type: 'SERVICE', sync_cluster: '', need_infra_approval: 0,
 };
 
 const EMPTY_SERVICE_FORM: Partial<ReleaseConfig> = {
-  product: '', service: '', host: '', rollout_strategy: '',
+  appGroup: '', service: '', host: '', rollout_strategy: '',
   slack_channel: '', serviceType: 'SERVICE', emails: '',
 };
 
@@ -140,13 +140,13 @@ const DeploymentConfig: React.FC = () => {
     const q = search.toLowerCase();
     return groupConfigs
       .map((group: ProductConfig) => {
-        const services = serviceConfigs.filter((s: ReleaseConfig) => s.product === group.product);
+        const services = serviceConfigs.filter((s: ReleaseConfig) => s.appGroup === group.appGroup);
         return { group, services };
       })
       .filter(({ group, services }) => {
         if (!q) return true;
         const groupMatch =
-          group.product.toLowerCase().includes(q) ||
+          group.appGroup.toLowerCase().includes(q) ||
           group.namespace.toLowerCase().includes(q) ||
           group.vs_name.toLowerCase().includes(q) ||
           (group.product_acronym || '').toLowerCase().includes(q) ||
@@ -162,11 +162,11 @@ const DeploymentConfig: React.FC = () => {
 
   // ── Expand / collapse ────────────────────────────────────────────
 
-  const toggleGroup = (product: string) => {
+  const toggleGroup = (appGroupVal: string) => {
     setExpandedGroups(prev => {
       const next = new Set(prev);
-      if (next.has(product)) next.delete(product);
-      else next.add(product);
+      if (next.has(appGroupVal)) next.delete(appGroupVal);
+      else next.add(appGroupVal);
       return next;
     });
   };
@@ -189,7 +189,7 @@ const DeploymentConfig: React.FC = () => {
     if (!cfg.id) return;
     const ok = await confirmAction({
       title: 'Delete Deployment Group',
-      description: `Are you sure you want to delete "${cfg.product}"? This will not delete associated services but they will become orphaned.`,
+      description: `Are you sure you want to delete "${cfg.appGroup}"? This will not delete associated services but they will become orphaned.`,
       confirmLabel: 'Delete',
       variant: 'danger',
     });
@@ -208,7 +208,7 @@ const DeploymentConfig: React.FC = () => {
 
   const openCreateService = (parentProduct: string) => {
     setEditingService(null);
-    setServiceForm({ ...EMPTY_SERVICE_FORM, product: parentProduct });
+    setServiceForm({ ...EMPTY_SERVICE_FORM, appGroup: parentProduct });
     setServiceModalOpen(true);
   };
 
@@ -241,7 +241,7 @@ const DeploymentConfig: React.FC = () => {
 
   const inputClass = "w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
   const productOptions = useMemo(() =>
-    [...new Set(groupConfigs.map((c: ProductConfig) => c.product).filter(Boolean))],
+    [...new Set(groupConfigs.map((c: ProductConfig) => c.appGroup).filter(Boolean))],
     [groupConfigs]
   );
 
@@ -300,21 +300,21 @@ const DeploymentConfig: React.FC = () => {
               </thead>
               <tbody className="text-sm">
                 {groupedData.map(({ group, services }, gIdx) => {
-                  const isExpanded = expandedGroups.has(group.product);
+                  const isExpanded = expandedGroups.has(group.appGroup);
                   return (
-                    <React.Fragment key={group.id || group.product}>
+                    <React.Fragment key={group.id || group.appGroup}>
                       {/* Group row */}
                       <tr
                         className={cn(
                           'border-b border-zinc-200 hover:bg-zinc-50/80 transition-colors duration-150 cursor-pointer',
                           gIdx % 2 === 1 ? 'bg-zinc-50/30' : 'bg-white'
                         )}
-                        onClick={() => toggleGroup(group.product)}
+                        onClick={() => toggleGroup(group.appGroup)}
                       >
                         <td className="py-3 px-4">
                           <button
                             className="p-0.5 rounded text-zinc-400 hover:text-zinc-600 transition-colors"
-                            onClick={e => { e.stopPropagation(); toggleGroup(group.product); }}
+                            onClick={e => { e.stopPropagation(); toggleGroup(group.appGroup); }}
                           >
                             {isExpanded
                               ? <ChevronDown className="w-4 h-4" />
@@ -323,7 +323,7 @@ const DeploymentConfig: React.FC = () => {
                           </button>
                         </td>
                         <td className="py-3 px-4">
-                          <span className="font-semibold text-zinc-900">{group.product}</span>
+                          <span className="font-semibold text-zinc-900">{group.appGroup}</span>
                           <span className="ml-2 text-xs text-zinc-400">
                             {services.length} service{services.length !== 1 ? 's' : ''}
                           </span>
@@ -429,7 +429,7 @@ const DeploymentConfig: React.FC = () => {
                               <div className="border-l-2 border-zinc-200 h-5 mr-3"></div>
                               <PermissionGate product="autopilot" permission="RELEASE_CREATE">
                                 <button
-                                  onClick={() => openCreateService(group.product)}
+                                  onClick={() => openCreateService(group.appGroup)}
                                   className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-600 transition-colors duration-150 cursor-pointer"
                                 >
                                   <Plus className="w-3.5 h-3.5" />
@@ -464,8 +464,8 @@ const DeploymentConfig: React.FC = () => {
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Group Name *</label>
                 <input
                   type="text"
-                  value={groupForm.product || ''}
-                  onChange={e => setGroupForm(prev => ({ ...prev, product: e.target.value }))}
+                  value={groupForm.appGroup || ''}
+                  onChange={e => setGroupForm(prev => ({ ...prev, appGroup: e.target.value }))}
                   className={inputClass}
                   placeholder="e.g. BECKN"
                   disabled={!!editingGroup}
@@ -565,7 +565,7 @@ const DeploymentConfig: React.FC = () => {
             <DialogDescription>
               {editingService
                 ? 'Update the service configuration.'
-                : `Add a new service${serviceForm.product ? ` to ${serviceForm.product}` : ''}.`
+                : `Add a new service${serviceForm.appGroup ? ` to ${serviceForm.appGroup}` : ''}.`
               }
             </DialogDescription>
           </DialogHeader>
@@ -575,8 +575,8 @@ const DeploymentConfig: React.FC = () => {
                 <div>
                   <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Group *</label>
                   <select
-                    value={serviceForm.product || ''}
-                    onChange={e => setServiceForm(prev => ({ ...prev, product: e.target.value }))}
+                    value={serviceForm.appGroup || ''}
+                    onChange={e => setServiceForm(prev => ({ ...prev, appGroup: e.target.value }))}
                     className={cn(inputClass, 'cursor-pointer')}
                     disabled={!!editingService}
                   >

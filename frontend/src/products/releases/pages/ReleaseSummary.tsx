@@ -801,7 +801,7 @@ const ReleaseSummary: React.FC = () => {
                 <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Release Info</h3>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-3">
                   <InfoField label="ID" value={release.id} mono />
-                  <InfoField label="Product" value={release.product} />
+                  <InfoField label="Product" value={release.appGroup} />
                   <InfoField label="Service" value={release.service} />
                   <InfoField label="Status" value={release.status} />
                   <InfoField label="Env" value={release.env} />
@@ -857,7 +857,7 @@ const ReleaseSummary: React.FC = () => {
             </div>
 
             {/* Resources */}
-            <ResourcesSection product={release.product} service={release.service} />
+            <ResourcesSection product={release.appGroup} service={release.service} />
           </div>
         )}
 

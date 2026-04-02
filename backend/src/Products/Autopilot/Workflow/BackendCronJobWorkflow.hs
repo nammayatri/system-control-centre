@@ -28,7 +28,7 @@ import Products.Autopilot.Notifications (
  )
 
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
-import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (product, releaseId, status))
+import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (appGroup, releaseId, status))
 import Products.Autopilot.Types.Target (
     BackendServiceWFStatus (..),
     K8sDeploymentState (..),
@@ -47,7 +47,7 @@ import Products.Autopilot.Workflow.Types (
     ReleaseWorkFlow,
     StateFlow,
  )
-import Prelude hiding (product)
+import Prelude
 
 -- ============================================================================
 -- Workflow Definition
@@ -107,7 +107,7 @@ validatePreconditions :: StateFlow ()
 validatePreconditions = do
     rt <- getRT
     cfg <- getCfg
-    liftIO $ putStrLn $ "Validating preconditions for cronjob " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Validating preconditions for cronjob " <> T.unpack (appGroup rt)
 
     -- Initialise or update K8s deployment state
     rs <- gets id
@@ -143,7 +143,7 @@ getCronJobSpec = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    liftIO $ putStrLn $ "Getting CronJob spec for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Getting CronJob spec for " <> T.unpack (appGroup rt)
 
     updateK8sStatus BSCreateDeployment
 
@@ -170,7 +170,7 @@ updateCronJobImage = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    liftIO $ putStrLn $ "Updating CronJob image for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Updating CronJob image for " <> T.unpack (appGroup rt)
 
     updateK8sStatus BSFlipVirtualService -- Reuse status for "deploying" phase
 
@@ -202,7 +202,7 @@ handleCronJobSuspend = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    liftIO $ putStrLn $ "Handling CronJob post-deploy for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Handling CronJob post-deploy for " <> T.unpack (appGroup rt)
 
     updateK8sStatus BSMonitoring
 
@@ -235,7 +235,7 @@ notifyComplete = do
     updateK8sStatus BSDone
 
     liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
-    liftIO $ putStrLn $ "   Service: " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "   Service: " <> T.unpack (appGroup rt)
     liftIO $ putStrLn $ "   Category: BackendCronJob"
     liftIO $ putStrLn $ "   Status: Completed"
 

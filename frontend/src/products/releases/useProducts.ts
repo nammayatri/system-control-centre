@@ -17,11 +17,11 @@ export function useProductConfigs() {
   });
 }
 
-export function useServices(product: string, isNewService?: boolean) {
+export function useServices(appGroup: string, isNewService?: boolean) {
   return useQuery({
-    queryKey: ['services', product, isNewService],
-    queryFn: () => fetchServices(product, isNewService ?? false),
-    enabled: !!product,
+    queryKey: ['services', appGroup, isNewService],
+    queryFn: () => fetchServices(appGroup, isNewService ?? false),
+    enabled: !!appGroup,
     staleTime: 120000,
   });
 }

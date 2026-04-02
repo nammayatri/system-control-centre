@@ -29,7 +29,7 @@ import Products.Autopilot.Types.Target.Kubernetes (
  )
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
-import Prelude hiding (product)
+import Prelude
 
 -- | Extract K8s context from a Maybe TargetState
 getK8sContext :: Maybe TargetState -> Maybe K8sReleaseContext
@@ -50,7 +50,7 @@ triggerSyncIfEnabled cfg db tracker mts = do
             k8sEnabled <- isK8sEnabled db
             syncEnabled <- isSyncClusterEnabled db
             let udf1Flag = maybe False (\t -> T.toLower t == "true") (udf1 tracker)
-            mProduct <- findProductByName db (product tracker)
+            mProduct <- findProductByName db (appGroup tracker)
             let mSyncCluster = mProduct >>= getProductSyncCluster
                 hasSyncCluster = maybe False (not . T.null) mSyncCluster
             insertReleaseEvent
@@ -145,7 +145,7 @@ createTrackerForSyncCluster cfg db tracker mts targetCluster = do
         body =
             object
                 [ "release_tag" .= releaseTag tracker
-                , "product" .= product tracker
+                , "product" .= appGroup tracker
                 , "service" .= [service tracker]
                 , "env" .= env tracker
                 , "mode" .= show (mode tracker)
@@ -295,7 +295,7 @@ triggerRevertSyncIfEnabled cfg db tracker mts = do
         then pure ()
         else do
             syncEnabled <- isSyncClusterEnabled db
-            mProduct <- findProductByName db (product tracker)
+            mProduct <- findProductByName db (appGroup tracker)
             let mSyncCluster = mProduct >>= getProductSyncCluster
                 hasSyncCluster = maybe False (not . T.null) mSyncCluster
             insertReleaseEvent
@@ -426,7 +426,7 @@ triggerImmediateRevertSync cfg db tracker mts = do
         then pure ()
         else do
             syncEnabled <- isSyncClusterEnabled db
-            mProduct <- findProductByName db (product tracker)
+            mProduct <- findProductByName db (appGroup tracker)
             let mSyncCluster = mProduct >>= getProductSyncCluster
                 hasSyncCluster = maybe False (not . T.null) mSyncCluster
                 gid = maybe "" id mGlobalId

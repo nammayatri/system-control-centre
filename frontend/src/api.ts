@@ -96,7 +96,7 @@ export interface APRelease {
     discription: string;
     docker_image?: string;
     old_version: string;
-    product: string;
+    appGroup: string;
     is_approved: number;
     is_infra_approved: number;
     mode: string;
@@ -113,7 +113,7 @@ export interface APRelease {
     udf3: string;
     global_id: string;
     new_service: string;
-    is_art_recorder: number;
+    // is_art_recorder removed (column dropped)
     cronjob_suspend: boolean;
     ab_hs_status: string;
     tracker_type: string;
@@ -127,7 +127,7 @@ export interface APRelease {
 // ── ConfigMap type ─────────────────────────────────────────────────
 
 export interface APConfigMap {
-    product: string;
+    appGroup: string;
     id: string;
     name: string;
     status: string;
@@ -152,7 +152,7 @@ export interface APConfigMap {
 
 export interface ProductConfig {
     id?: number;
-    product: string;
+    appGroup: string;
     cluster: string;
     namespace: string;
     vs_name: string;
@@ -169,7 +169,8 @@ export interface ProductConfig {
 type NammaRelease = {
     releaseId: string;
     service: string;
-    product: string;
+    appGroup?: string;
+    product?: string;  // backward compat
     status: string;
     env: string;
     trackerType?: string;
@@ -274,7 +275,7 @@ const normalizePascalStatus = (status?: string): ReleaseStatus => {
 const normalizeRelease = (r: NammaRelease): APRelease => ({
     id: r.releaseId,
     service: r.service,
-    product: r.product,
+    appGroup: r.appGroup || r.product || '',
     status: normalizePascalStatus(r.status),
     env: r.env,
     tracker_type: (r as any).category || r.trackerType || 'BackendService',
@@ -294,7 +295,7 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     priority: r.priority ?? 0,
     global_id: r.globalId || '',
     new_service: r.newService ? 'Yes' : 'No',
-    is_art_recorder: r.isArtRecorder ?? 0,
+    // is_art_recorder removed
     cronjob_suspend: r.cronjobSuspend ?? false,
     ab_hs_status: r.abHsStatus || 'Uninitiated',
     udf1: r.udf1 || '',
@@ -413,7 +414,7 @@ export async function fetchProductConfigs(): Promise<ProductConfig[]> {
     if (!Array.isArray(data)) return [];
     return data.map((p: any) => ({
         id: p.id,
-        product: p.product,
+        appGroup: p.appGroup || p.product || '',
         cluster: p.cluster,
         namespace: p.namespace,
         vs_name: p.vsName || '',
@@ -428,32 +429,32 @@ export async function fetchProductConfigs(): Promise<ProductConfig[]> {
 
 export async function fetchProducts(): Promise<string[]> {
     const configs = await fetchProductConfigs();
-    const unique = [...new Set(configs.map(c => c.product).filter(Boolean))];
+    const unique = [...new Set(configs.map(c => c.appGroup).filter(Boolean))];
     return unique;
 }
 
-export async function fetchServices(product: string, isNewService: boolean): Promise<string[]> {
-    if (!product) return [];
-    const { data } = await apiClient.get(`/products/${encodeURIComponent(product)}/services`);
+export async function fetchServices(appGroup: string, isNewService: boolean): Promise<string[]> {
+    if (!appGroup) return [];
+    const { data } = await apiClient.get(`/products/${encodeURIComponent(appGroup)}/services`);
     const services = Array.isArray(data) ? data : [];
     const names = services.map((s: any) => s.service).filter(Boolean);
     return [...new Set(names)];
 }
 
-export async function fetchEnvs(product: string, env: string, service: string): Promise<any> {
-    if (!product || !env || !service) return [];
+export async function fetchEnvs(appGroup: string, env: string, service: string): Promise<any> {
+    if (!appGroup || !env || !service) return [];
     try {
-        const { data } = await apiClient.get('/envs', { params: { product, env, service } });
+        const { data } = await apiClient.get('/envs', { params: { product: appGroup, env, service } });
         return Array.isArray(data) ? data : [];
     } catch {
         return [];
     }
 }
 
-export async function fetchSecondaryEnvs(product: string, env: string, service: string): Promise<any> {
-    if (!product || !env || !service) return [];
+export async function fetchSecondaryEnvs(appGroup: string, env: string, service: string): Promise<any> {
+    if (!appGroup || !env || !service) return [];
     try {
-        const { data } = await apiClient.get('/envs/secondary', { params: { product, env, service } });
+        const { data } = await apiClient.get('/envs/secondary', { params: { product: appGroup, env, service } });
         return Array.isArray(data) ? data : [];
     } catch {
         return [];
@@ -482,7 +483,7 @@ export async function createRelease(isNewService: boolean, payload: any): Promis
         payload.trackerType ||
         (payload.serviceType === 'SCHEDULER' ? 'BackendScheduler' : 'BackendService');
     const requestBody = {
-        product: payload.product,
+        appGroup: payload.appGroup || payload.product,
         service: Array.isArray(payload.service) ? payload.service[0] : payload.service,
         env: payload.env || 'UAT',
         requestedCluster: payload.cluster || null,
@@ -514,7 +515,7 @@ export async function createRelease(isNewService: boolean, payload: any): Promis
         priority: payload.priority ?? 0,
         global_id: payload.global_id || null,
         new_service: payload.new_service || false,
-        is_art_recorder: payload.is_art_recorder ?? 0,
+        // is_art_recorder removed
         cronjob_suspend: payload.cronjob_suspend || false,
         change_log: payload.change_log || null,
         udf1: payload.udf1 || null,
@@ -642,7 +643,7 @@ export async function fetchResources(product: string, service: string): Promise<
 
 export async function createProductConfig(payload: Partial<ProductConfig>): Promise<any> {
     const body = {
-        product: payload.product,
+        appGroup: payload.appGroup,
         cluster: payload.cluster,
         namespace: payload.namespace,
         vsName: payload.vs_name,
@@ -660,7 +661,7 @@ export async function createProductConfig(payload: Partial<ProductConfig>): Prom
 export async function updateProductConfig(id: number, payload: Partial<ProductConfig>): Promise<any> {
     const body = {
         id,
-        product: payload.product,
+        appGroup: payload.appGroup,
         cluster: payload.cluster,
         namespace: payload.namespace,
         vsName: payload.vs_name,
@@ -684,7 +685,7 @@ export async function deleteProductConfig(id: number): Promise<any> {
 
 export interface ReleaseConfig {
     id?: number;
-    product: string;
+    appGroup: string;
     service: string;
     host: string;
     rollout_strategy: string;
@@ -694,14 +695,14 @@ export interface ReleaseConfig {
     emails?: string;
 }
 
-export async function fetchReleaseConfigs(product?: string): Promise<ReleaseConfig[]> {
-    const params = product ? { product } : {};
+export async function fetchReleaseConfigs(appGroup?: string): Promise<ReleaseConfig[]> {
+    const params = appGroup ? { product: appGroup } : {};
     const { data } = await apiClient.get('/services/config', { params });
     if (!Array.isArray(data)) return [];
     // Map backend field names to frontend interface
     return data.map((d: any) => ({
         id: d.id,
-        product: d.serviceProduct || d.product || '',
+        appGroup: d.serviceProduct || d.appGroup || d.product || '',
         service: d.serviceName || d.service || '',
         host: d.serviceHost || d.host || '',
         rollout_strategy: d.rolloutStrategy || d.rollout_strategy || '',
@@ -715,7 +716,7 @@ export async function fetchReleaseConfigs(product?: string): Promise<ReleaseConf
 export async function createReleaseConfig(payload: Partial<ReleaseConfig>): Promise<any> {
     const body = {
         id: payload.id,
-        product: payload.product,
+        appGroup: payload.appGroup,
         service: payload.service,
         serviceType: payload.serviceType || 'SERVICE',
         serviceHost: payload.host,
@@ -730,7 +731,7 @@ export async function createReleaseConfig(payload: Partial<ReleaseConfig>): Prom
 export async function updateReleaseConfig(id: number, payload: Partial<ReleaseConfig>): Promise<any> {
     const body = {
         id,
-        product: payload.product,
+        appGroup: payload.appGroup,
         service: payload.service,
         serviceType: payload.serviceType || 'SERVICE',
         serviceHost: payload.host,
@@ -751,7 +752,7 @@ export async function deleteReleaseConfig(id: number): Promise<any> {
 
 export interface VSEditTracker {
     id: string;
-    product: string;
+    appGroup: string;
     service: string;
     vs_name: string;
     status: string;

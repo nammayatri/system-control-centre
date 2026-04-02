@@ -38,7 +38,7 @@ import Products.Autopilot.Workflow.Types (
     ReleaseWorkFlow,
     StateFlow,
  )
-import Prelude hiding (product)
+import Prelude
 
 -- ============================================================================
 -- Mobile App Android Workflow
@@ -79,7 +79,7 @@ Play Store sub-stage: MAInit
 validateAPK :: StateFlow ()
 validateAPK = do
     rt <- getRT
-    liftIO $ putStrLn $ "🔍 Validating APK for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "🔍 Validating APK for " <> T.unpack (appGroup rt)
 
     -- Initialize Play Store deployment state with MAInit
     let playStoreState = emptyPlayStoreState{categoryWorkflowStatus = MAInit}
@@ -104,7 +104,7 @@ Play Store sub-stages: MAUploadAPK, MASubmitForReview
 uploadToPlayStore :: StateFlow ()
 uploadToPlayStore = do
     rt <- getRT
-    liftIO $ putStrLn $ "📤 Uploading APK to Play Store for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "📤 Uploading APK to Play Store for " <> T.unpack (appGroup rt)
 
     -- Upload APK
     updatePlayStoreStatus MAUploadAPK
@@ -139,7 +139,7 @@ Play Store sub-stage: MAStagedRollout
 stagedRollout :: StateFlow ()
 stagedRollout = do
     rt <- getRT
-    liftIO $ putStrLn $ "🚀 Starting staged rollout for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "🚀 Starting staged rollout for " <> T.unpack (appGroup rt)
 
     updatePlayStoreStatus MAStagedRollout
 
@@ -194,7 +194,7 @@ Play Store sub-stage: MAMonitorCrashRate
 monitorCrashRates :: StateFlow ()
 monitorCrashRates = do
     rt <- getRT
-    liftIO $ putStrLn $ "👀 Monitoring crash rates for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "👀 Monitoring crash rates for " <> T.unpack (appGroup rt)
 
     updatePlayStoreStatus MAMonitorCrashRate
 
@@ -224,7 +224,7 @@ Play Store sub-stage: MAPromoteToFull
 promoteToFull :: StateFlow ()
 promoteToFull = do
     rt <- getRT
-    liftIO $ putStrLn $ "🎯 Promoting to full release for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "🎯 Promoting to full release for " <> T.unpack (appGroup rt)
 
     updatePlayStoreStatus MAPromoteToFull
     liftIO $ putStrLn "  ✓ Promoting to 100% rollout"
@@ -244,7 +244,7 @@ notifyRelease = do
     updatePlayStoreStatus MADone
 
     liftIO $ putStrLn $ "🎉 Release " <> T.unpack (releaseId rt) <> " completed successfully!"
-    liftIO $ putStrLn $ "   App: " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "   App: " <> T.unpack (appGroup rt)
     liftIO $ putStrLn $ "   Category: MobileAppAndroid"
     liftIO $ putStrLn $ "   Status: Completed"
 

@@ -28,7 +28,7 @@ const EditVS: React.FC = () => {
     staleTime: 300000,
   });
 
-  const products = [...new Set(productConfigs.map((c: ProductConfig) => c.product).filter(Boolean))];
+  const products = [...new Set(productConfigs.map((c: ProductConfig) => c.appGroup).filter(Boolean))];
 
   const { data: services = [] } = useQuery({
     queryKey: ['services', product],

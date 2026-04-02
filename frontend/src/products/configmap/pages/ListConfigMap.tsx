@@ -90,7 +90,7 @@ const ListConfigMap: React.FC = () => {
     const q = debouncedSearch.toLowerCase();
     if (!q) return configMaps;
     return configMaps.filter(c =>
-      c.product?.toLowerCase().includes(q) ||
+      c.appGroup?.toLowerCase().includes(q) ||
       c.id?.toLowerCase().includes(q) ||
       c.name?.toLowerCase().includes(q) ||
       c.status?.toLowerCase().includes(q)
@@ -185,7 +185,7 @@ const ListConfigMap: React.FC = () => {
                     <tr key={cm.id} className={cn('border-b border-zinc-100 hover:bg-zinc-100 cursor-pointer transition-colors duration-150', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}
                       onClick={() => navigate(`/configmap/${cm.cluster}&&${cm.id}`)}>
                       <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + i + 1}</td>
-                      <td className="py-3 px-4 font-medium text-zinc-800">{cm.product}</td>
+                      <td className="py-3 px-4 font-medium text-zinc-800">{cm.appGroup}</td>
                       <td className="py-3 px-4 font-mono text-xs text-zinc-500 max-w-xs truncate" title={cm.id}>{cm.id}</td>
                       <td className="py-3 px-4 text-zinc-700">{cm.name}</td>
                       <td className="py-3 px-4"><StatusBadge status={cm.status} /></td>

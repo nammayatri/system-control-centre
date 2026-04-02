@@ -208,7 +208,7 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
         { rtId = releaseId
         , rtOldVersion = oldVersion
         , rtNewVersion = newVersion
-        , rtProduct = product
+        , rtAppGroup = appGroup
         , rtService = service
         , rtPriority = priority
         , rtEnv = env
@@ -244,7 +244,7 @@ fromRow ReleaseTrackerT{..} =
     let tracker =
             ReleaseTracker
                 { releaseId = rtId
-                , product = rtProduct
+                , appGroup = rtAppGroup
                 , service = rtService
                 , env = rtEnv
                 , category = parseReleaseCategory rtCategory

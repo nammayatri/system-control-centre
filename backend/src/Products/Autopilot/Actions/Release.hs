@@ -88,9 +88,7 @@ upsertProductH :: UpsertProductReq -> Flow APIResponse
 upsertProductH UpsertProductReq{..} = do
     db <- getDBEnv
     let rowId = fromMaybe 0 id
-        repo = fromMaybe "" repoName
-        branch = fromMaybe "master" releaseBranch
-    liftIO $ upsertProduct db rowId product cluster namespace vsName repo productType productAcronym branch syncCluster needInfraApproval
+    liftIO $ upsertProduct db rowId appGroup cluster namespace vsName productType productAcronym syncCluster needInfraApproval
     pure $ APIResponse "SUCCESS" "product_config upserted"
 
 listProductsH :: Flow [ProductResponse]
@@ -101,12 +99,12 @@ listProductsH = do
         map
             ( \p ->
                 ProductResponse
-                    { product = S.dcProduct p
+                    { appGroup = S.dcAppGroup p
                     , cluster = getProductCluster p
                     , namespace = getProductNamespace p
                     , vsName = getProductVsName p
-                    , productType = fromMaybe "SERVICE" (S.dcProductType p)
-                    , productAcronym = fromMaybe "" (S.dcProductAcronym p)
+                    , productType = fromMaybe "SERVICE" (S.dcAppGroupType p)
+                    , productAcronym = fromMaybe "" (S.dcAppGroupAcronym p)
                     , syncCluster = getProductSyncCluster p
                     }
             )
@@ -120,7 +118,7 @@ listServicesH productName' = do
     case products of
         [] -> pure []
         _ ->
-            if any (\p -> S.dcProductType p == Just "SCHEDULER") products
+            if any (\p -> S.dcAppGroupType p == Just "SCHEDULER") products
                 then do
                     services <- liftIO $ listSchedulerServicesByProduct db productName'
                     pure $
@@ -175,7 +173,7 @@ upsertServiceH :: UpsertServiceReq -> Flow APIResponse
 upsertServiceH UpsertServiceReq{..} = do
     db <- getDBEnv
     let rowId = fromMaybe 0 id
-    liftIO $ upsertService db rowId emails rolloutStrategyText decisionConfigText service product serviceType serviceHost bitbucketPath revertStrategyText
+    liftIO $ upsertService db rowId rolloutStrategyText decisionConfigText service appGroup serviceType serviceHost revertStrategyText
     pure $ APIResponse "SUCCESS" "release_config upserted"
 
 -- ============================================================================
@@ -206,8 +204,8 @@ createReleaseH :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIRes
 createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
     cfg <- getConfig
     db <- getDBEnv
-    p <- liftIO $ findProductByName db product
-    s <- liftIO $ findServiceByProductAndName db product service
+    p <- liftIO $ findProductByName db appGroup
+    s <- liftIO $ findServiceByProductAndName db appGroup service
     case (p, s) of
         (Nothing, _) -> pure $ APIResponse "ERROR" "Product not configured"
         (_, Nothing) -> pure $ APIResponse "ERROR" "Service not configured for product"
@@ -321,11 +319,11 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                 let datePart = T.pack (formatTime defaultTimeLocale "%Y%m%d" now)
                                     modeText = case reqMode of Auto -> "AUTO"; Manual -> "MANUAL"
                                     priText = T.pack (show (fromMaybe 0 priority))
-                                 in Just (T.intercalate "_" [product, datePart, newVersion, service, modeText, env, priText])
+                                 in Just (T.intercalate "_" [appGroup, datePart, newVersion, service, modeText, env, priText])
                         tracker =
                             ReleaseTracker
                                 { releaseId = rid
-                                , product = product
+                                , appGroup = appGroup
                                 , service = service
                                 , env = env
                                 , category = trackerType
@@ -363,7 +361,6 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                 emptyK8sState
                                     { context = derivedContext
                                     , newService = fromMaybe False newService
-                                    , isArtRecorder = fromMaybe 0 isArtRecorder
                                     , cronjobSuspend = fromMaybe False cronjobSuspend
                                     }
                     liftIO $ insertReleaseTracker db tracker (Just targetState)

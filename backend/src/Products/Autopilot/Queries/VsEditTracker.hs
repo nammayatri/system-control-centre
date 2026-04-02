@@ -20,7 +20,7 @@ findActiveLockFromConfig db product' = do
             runSelectReturningList $
                 select $ do
                     p <- all_ (deploymentConfig nammaAPDb)
-                    guard_ (dcProduct p ==. val_ product')
+                    guard_ (dcAppGroup p ==. val_ product')
                     guard_ (isNothing_ (dcService p))
                     guard_ (isNothing_ (dcVsLockedBy p) ==. val_ False)
                     pure p

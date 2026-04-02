@@ -110,7 +110,7 @@ const VSEditSummary: React.FC = () => {
         <div className="p-6">
           <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-3">
             <InfoField label="ID" value={edit.id} mono />
-            <InfoField label="Product" value={edit.product} />
+            <InfoField label="Product" value={edit.appGroup} />
             <InfoField label="Service" value={edit.service} />
             <InfoField label="VS Name" value={edit.vs_name} />
             <InfoField label="Status" value={edit.status} />

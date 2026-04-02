@@ -100,7 +100,7 @@ newtype ServiceSlug = ServiceSlug { unServiceSlug :: Text }
 | Table | Index | Columns |
 |-------|-------|---------|
 | release_tracker | idx_rt_status | status |
-| release_tracker | idx_rt_product_env | product, env |
+| release_tracker | idx_rt_app_group_env | app_group, env |
 | release_tracker | idx_rt_created_at | date_created DESC |
 | release_tracker | idx_rt_is_approved | is_approved |
 | release_tracker | idx_rt_global_id | global_id (partial, WHERE NOT NULL) |

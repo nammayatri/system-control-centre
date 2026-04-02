@@ -45,7 +45,7 @@ findProductByName db pName = do
             runSelectReturningList $
                 select $ do
                     p <- all_ (deploymentConfig nammaAPDb)
-                    guard_ (dcProduct p ==. val_ pName)
+                    guard_ (dcAppGroup p ==. val_ pName)
                     guard_ (isNothing_ (dcService p))
                     pure p
     pure $ case rows of
@@ -70,7 +70,7 @@ listProductsByName db pName =
         runSelectReturningList $
             select $ do
                 p <- all_ (deploymentConfig nammaAPDb)
-                guard_ (dcProduct p ==. val_ pName)
+                guard_ (dcAppGroup p ==. val_ pName)
                 guard_ (isNothing_ (dcService p))
                 pure p
 
@@ -94,7 +94,7 @@ findServiceByProductAndName db pName sName = do
             runSelectReturningList $
                 select $ do
                     s <- all_ (deploymentConfig nammaAPDb)
-                    guard_ (dcProduct s ==. val_ pName)
+                    guard_ (dcAppGroup s ==. val_ pName)
                     guard_ (dcService s ==. val_ (Just sName))
                     pure s
     pure $ case rows of
@@ -107,7 +107,7 @@ listReleaseConfigByProduct db pName =
         runSelectReturningList $
             select $ do
                 s <- all_ (deploymentConfig nammaAPDb)
-                guard_ (dcProduct s ==. val_ pName)
+                guard_ (dcAppGroup s ==. val_ pName)
                 guard_ (isNothing_ (dcService s) ==. val_ False)
                 pure s
 
@@ -117,7 +117,7 @@ listSchedulerServicesByProduct db pName =
         runSelectReturningList $
             select $ do
                 s <- all_ (deploymentConfig nammaAPDb)
-                guard_ (dcProduct s ==. val_ pName)
+                guard_ (dcAppGroup s ==. val_ pName)
                 guard_ (isNothing_ (dcService s) ==. val_ False)
                 guard_ (dcServiceType s ==. val_ (Just "SCHEDULER"))
                 pure s
@@ -135,42 +135,35 @@ upsertProduct ::
     Text ->
     Text ->
     Text ->
-    Text ->
-    Text ->
     Maybe Text ->
     Maybe Bool ->
     IO ()
-upsertProduct db rowId productName' cluster' namespace' vsName' repoName productType' productAcronym' releaseBranch syncCluster' needInfraApproval = do
+upsertProduct db rowId productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval = do
     let row :: DeploymentConfig
         row =
             DeploymentConfigT
                 { dcId = rowId
-                , dcProduct = productName'
+                , dcAppGroup = productName'
                 , dcService = Nothing
                 , dcCluster = Just cluster'
                 , dcNamespace = Just namespace'
                 , dcVsName = Just vsName'
-                , dcProductAcronym = Just productAcronym'
-                , dcProductType = Just productType'
-                , dcRepoName = Just repoName
-                , dcReleaseBranch = Just releaseBranch
+                , dcAppGroupAcronym = Just productAcronym'
+                , dcAppGroupType = Just productType'
                 , dcSyncCluster = syncCluster'
                 , dcNeedInfraApproval = needInfraApproval
                 , dcVsLockedBy = Nothing
                 , dcVsLockTimestamp = Nothing
                 , dcServiceHost = Nothing
                 , dcServiceType = Nothing
-                , dcServiceAcronym = Nothing
                 , dcRolloutStrategy = Nothing
                 , dcRevertStrategy = Nothing
                 , dcDecisionConfig = Nothing
-                , dcBitbucketPath = Nothing
                 , dcSlackChannel = Nothing
-                , dcEmails = Nothing
                 }
     runDB db $ do
         runDelete $
-            delete (deploymentConfig nammaAPDb) (\p -> dcProduct p ==. val_ productName' &&. isNothing_ (dcService p))
+            delete (deploymentConfig nammaAPDb) (\p -> dcAppGroup p ==. val_ productName' &&. isNothing_ (dcService p))
         runInsert $
             insert (deploymentConfig nammaAPDb) $
                 insertValues [row]
@@ -180,45 +173,38 @@ upsertService ::
     Int32 ->
     Maybe Text ->
     Maybe Text ->
-    Maybe Text ->
     Text ->
     Text ->
     Text ->
-    Maybe Text ->
     Maybe Text ->
     Maybe Text ->
     IO ()
-upsertService db rowId emails rolloutStrategy decisionConfig serviceName' product' sType serviceHost' bitbucketPath revertStrategy = do
+upsertService db rowId rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy = do
     let row :: DeploymentConfig
         row =
             DeploymentConfigT
                 { dcId = rowId
-                , dcProduct = product'
+                , dcAppGroup = product'
                 , dcService = Just serviceName'
                 , dcCluster = Nothing
                 , dcNamespace = Nothing
                 , dcVsName = Nothing
-                , dcProductAcronym = Nothing
-                , dcProductType = Nothing
-                , dcRepoName = Nothing
-                , dcReleaseBranch = Nothing
+                , dcAppGroupAcronym = Nothing
+                , dcAppGroupType = Nothing
                 , dcSyncCluster = Nothing
                 , dcNeedInfraApproval = Nothing
                 , dcVsLockedBy = Nothing
                 , dcVsLockTimestamp = Nothing
                 , dcServiceHost = serviceHost'
                 , dcServiceType = Just sType
-                , dcServiceAcronym = Nothing
                 , dcRolloutStrategy = rolloutStrategy
                 , dcRevertStrategy = revertStrategy
                 , dcDecisionConfig = decisionConfig
-                , dcBitbucketPath = bitbucketPath
                 , dcSlackChannel = Nothing
-                , dcEmails = emails
                 }
     runDB db $ do
         runDelete $
-            delete (deploymentConfig nammaAPDb) (\s -> dcProduct s ==. val_ product' &&. dcService s ==. val_ (Just serviceName'))
+            delete (deploymentConfig nammaAPDb) (\s -> dcAppGroup s ==. val_ product' &&. dcService s ==. val_ (Just serviceName'))
         runInsert $
             insert (deploymentConfig nammaAPDb) $
                 insertValues [row]
@@ -288,4 +274,4 @@ updateVsLockedBy db productName' mLockedBy =
                 (\p -> mconcat
                     [ dcVsLockedBy p <-. val_ mLockedBy
                     ])
-                (\p -> dcProduct p ==. val_ productName' &&. isNothing_ (dcService p))
+                (\p -> dcAppGroup p ==. val_ productName' &&. isNothing_ (dcService p))

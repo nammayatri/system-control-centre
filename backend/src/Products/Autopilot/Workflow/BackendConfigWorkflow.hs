@@ -40,7 +40,7 @@ import Products.Autopilot.Workflow.Types (
     ReleaseWorkFlow,
     StateFlow,
  )
-import Prelude hiding (product)
+import Prelude
 
 -- ============================================================================
 -- Workflow Definition
@@ -92,7 +92,7 @@ updateConfigStatus newStatus = do
 validateConfig :: StateFlow ()
 validateConfig = do
     rt <- getRT
-    liftIO $ putStrLn $ "Validating config for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Validating config for " <> T.unpack (appGroup rt)
     updateConfigStatus BCInit
 
     fileContent <- getFileContent
@@ -108,7 +108,7 @@ resolveConfigContent :: StateFlow ()
 resolveConfigContent = do
     rt <- getRT
     cfg <- getCfg
-    liftIO $ putStrLn $ "Resolving config content for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Resolving config content for " <> T.unpack (appGroup rt)
     updateConfigStatus BCApplyConfigMap
 
     fileContent <- getFileContent
@@ -117,7 +117,7 @@ resolveConfigContent = do
         Just fc -> do
             -- Resolve namespace from product config
             db <- lift getDBEnv
-            p <- liftIO $ findProductByName db (product rt)
+            p <- liftIO $ findProductByName db (appGroup rt)
             let ns = case p of
                     Just pCfg -> T.unpack (getProductNamespace pCfg)
                     Nothing -> case metadata rt of
@@ -168,7 +168,7 @@ applyConfigMap :: StateFlow ()
 applyConfigMap = do
     rt <- getRT
     cfg <- getCfg
-    liftIO $ putStrLn $ "Applying ConfigMap for " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Applying ConfigMap for " <> T.unpack (appGroup rt)
 
     rs <- gets id
     case workflowMetadata rs of

@@ -80,7 +80,7 @@ createConfigMapH body = do
                 tracker =
                     ReleaseTracker
                         { releaseId = rid
-                        , product = product'
+                        , appGroup = product'
                         , service = fromMaybe service' name'
                         , env = env'
                         , category = BackendConfig
@@ -214,7 +214,7 @@ toConfigMapResponse rt =
      in ConfigMapResponse
             { cmrId = NT.releaseId rt
             , cmrService = NT.service rt
-            , cmrProduct = NT.product rt
+            , cmrAppGroup = NT.appGroup rt
             , cmrName = nameVal
             , cmrStatus = statusText
             , cmrDescription = fromMaybe "" (NT.description rt)
@@ -241,7 +241,7 @@ toConfigMapResponse rt =
 extractCmFields :: Value -> Either Text (Text, Text, Text, Text, Maybe Text, Maybe Text, Maybe Text, Text, Int, Maybe UTCTime, Maybe Text)
 extractCmFields (Object obj) =
     Right
-        ( getStr "product" obj
+        ( fromMaybe (getStr "product" obj) (getStrM "appGroup" obj)
         , getStr "service" obj
         , fromMaybe "UAT" (getStrM "env" obj)
         , fromMaybe "" (getStrM "cluster" obj)

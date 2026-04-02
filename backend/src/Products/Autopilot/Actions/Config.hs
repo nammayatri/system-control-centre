@@ -52,11 +52,9 @@ toProductConfigResponse :: S.DeploymentConfig -> ProductConfigResponse
 toProductConfigResponse p =
     ProductConfigResponse
         { id = S.dcId p
-        , product = S.dcProduct p
-        , repoName = fromMaybe "" (S.dcRepoName p)
-        , productType = fromMaybe "SERVICE" (S.dcProductType p)
-        , productAcronym = fromMaybe "" (S.dcProductAcronym p)
-        , releaseBranch = fromMaybe "master" (S.dcReleaseBranch p)
+        , appGroup = S.dcAppGroup p
+        , productType = fromMaybe "SERVICE" (S.dcAppGroupType p)
+        , productAcronym = fromMaybe "" (S.dcAppGroupAcronym p)
         , needInfraApproval = S.dcNeedInfraApproval p
         , cluster = S.dcCluster p
         , namespace = S.dcNamespace p
@@ -101,15 +99,12 @@ toReleaseConfigResponse r =
     ReleaseConfigResponse
         { id = S.dcId r
         , serviceName = fromMaybe "" (S.dcService r)
-        , serviceProduct = S.dcProduct r
+        , serviceProduct = S.dcAppGroup r
         , serviceType = fromMaybe "SERVICE" (S.dcServiceType r)
-        , emails = S.dcEmails r
         , rolloutStrategy = S.dcRolloutStrategy r
         , decisionConfig = S.dcDecisionConfig r
         , flags = Nothing
         , slackWebhookUrls = S.dcSlackChannel r
-        , serviceAcronym = S.dcServiceAcronym r
-        , bitbucketPath = S.dcBitbucketPath r
         , microserviceType = Nothing
         , revertStrategy = S.dcRevertStrategy r
         , jiraWebhookUrl = Nothing

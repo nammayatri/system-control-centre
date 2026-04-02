@@ -65,7 +65,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
   const [error, setError] = useState('');
 
   const [form, setForm] = useState({
-    product: '', name: '', description: '', change_log: '', priority: '0', env: DEFAULT_ENV, schedule_time: '', cluster: 'BECKN_UAT', file: '', mode: 'AUTO',
+    appGroup: '', name: '', description: '', change_log: '', priority: '0', env: DEFAULT_ENV, schedule_time: '', cluster: 'BECKN_UAT', file: '', mode: 'AUTO',
   });
 
   const createMut = useMutation({
@@ -88,17 +88,17 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
 
   // Derive sync_cluster from product config
   useEffect(() => {
-    if (form.product && productConfigs.length > 0) {
-      const config = productConfigs.find((c: ProductConfig) => c.product === form.product);
+    if (form.appGroup && productConfigs.length > 0) {
+      const config = productConfigs.find((c: ProductConfig) => c.appGroup === form.appGroup);
       setSyncCluster(config?.sync_cluster || '');
     }
-  }, [form.product, productConfigs]);
+  }, [form.appGroup, productConfigs]);
 
   // Fetch secondary configmap when name is selected and sync_cluster exists
   useEffect(() => {
-    if (form.product && form.name && syncCluster) {
+    if (form.appGroup && form.name && syncCluster) {
       setSecondaryLoading(true);
-      fetchSecondaryConfigMap(form.product, form.name)
+      fetchSecondaryConfigMap(form.appGroup, form.name)
         .then(cm => {
           const raw = typeof cm === 'string' ? cm : JSON.stringify(cm, null, 2);
           setSecondaryContent(jsonConfigToYaml(raw));
@@ -106,26 +106,26 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
         .catch(() => setSecondaryContent(''))
         .finally(() => setSecondaryLoading(false));
     }
-  }, [form.product, form.name, syncCluster]);
+  }, [form.appGroup, form.name, syncCluster]);
 
   // Load configmap names when product changes
   useEffect(() => {
-    if (!form.product) return;
-    fetchConfigMapNames(form.product)
+    if (!form.appGroup) return;
+    fetchConfigMapNames(form.appGroup)
       .then(names => setNamesOptions(Array.isArray(names) ? names : []))
       .catch(() => setNamesOptions([]));
-  }, [form.product]);
+  }, [form.appGroup]);
 
   // Load file content when name is selected
   useEffect(() => {
-    if (!form.product || !form.name) return;
-    fetchConfigMapData(form.product, form.name)
+    if (!form.appGroup || !form.name) return;
+    fetchConfigMapData(form.appGroup, form.name)
       .then(raw => {
         const content = typeof raw === 'string' ? raw : '';
         setFileContent(jsonConfigToYaml(content));
       })
       .catch(() => setFileContent(''));
-  }, [form.product, form.name]);
+  }, [form.appGroup, form.name]);
 
   // For update/clone: pre-populate form
   useEffect(() => {
@@ -134,7 +134,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
     apiClient.get(`/tracker/configmap/${fetchId}`).then(r => {
       const d = r.data;
       setForm({
-        product: d.product || '',
+        appGroup: d.appGroup || '',
         name: d.name || '',
         description: d.description || '',
         change_log: d.change_log || '',
@@ -183,13 +183,13 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
           <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-5">
             {/* LEFT column */}
             <div className="space-y-4">
-              <div><FieldLabel required>Product</FieldLabel><select name="product" value={form.product} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select Product</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
+              <div><FieldLabel required>Product</FieldLabel><select name="appGroup" value={form.appGroup} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select App Group</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
               <div><FieldLabel>Description</FieldLabel><input name="description" value={form.description} onChange={handleChange} placeholder="Deploying Hotfix" className={inputClass} /></div>
               <div><FieldLabel>Priority</FieldLabel><select name="priority" value={form.priority} onChange={handleChange} className={cn(inputClass, 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(n => <option key={n} value={n}>{n}</option>)}</select></div>
             </div>
             {/* CENTER column */}
             <div className="space-y-4">
-              <div><FieldLabel required>Name</FieldLabel><select name="name" value={form.name} onChange={handleChange} required disabled={!form.product || namesOptions.length === 0} className={cn(inputClass, (!form.product || namesOptions.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}><option value="">Select Name</option>{namesOptions.map(n => <option key={n} value={n}>{n}</option>)}</select></div>
+              <div><FieldLabel required>Name</FieldLabel><select name="name" value={form.name} onChange={handleChange} required disabled={!form.appGroup || namesOptions.length === 0} className={cn(inputClass, (!form.appGroup || namesOptions.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}><option value="">Select Name</option>{namesOptions.map(n => <option key={n} value={n}>{n}</option>)}</select></div>
               <div><FieldLabel required>Change Log</FieldLabel><input name="change_log" value={form.change_log} onChange={handleChange} required placeholder="EUL-1.0.0" className={inputClass} /></div>
               <div><FieldLabel required>Env</FieldLabel><select name="env" value={form.env} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}>{AVAILABLE_ENVS.map(e => <option key={e} value={e}>{e}</option>)}</select></div>
             </div>

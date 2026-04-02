@@ -42,7 +42,7 @@ import Products.Autopilot.Notifications (
  )
 
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
-import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (product, releaseId, rolloutStrategy, status), RolloutStep (..))
+import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (appGroup, releaseId, rolloutStrategy, status), RolloutStep (..))
 import Products.Autopilot.Types.Target (
     BackendServiceWFStatus (..),
     K8sDeploymentState (..),
@@ -62,7 +62,7 @@ import Products.Autopilot.Workflow.Types (
     ReleaseWorkFlow,
     StateFlow,
  )
-import Prelude hiding (product)
+import Prelude
 
 -- ============================================================================
 -- Workflow Definition
@@ -115,7 +115,7 @@ validatePreconditions :: StateFlow ()
 validatePreconditions = do
     rt <- getRT
     cfg <- getCfg
-    liftIO $ putStrLn $ "Validating preconditions for scheduler " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Validating preconditions for scheduler " <> T.unpack (appGroup rt)
 
     -- Initialise or update K8s deployment state
     rs <- gets id
@@ -160,7 +160,7 @@ prepareK8sResources = do
     cfg <- getCfg
     ctx <- getK8sCtx
     db <- getDB
-    liftIO $ putStrLn $ "Preparing K8s resources for scheduler " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Preparing K8s resources for scheduler " <> T.unpack (appGroup rt)
 
     -- Capture BEFORE snapshot (old deployment)
     let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
@@ -199,7 +199,7 @@ podCountRollout = do
     cfg <- getCfg
     ctx <- getK8sCtx
     db <- getDB
-    liftIO $ putStrLn $ "Starting pod-count rollout for scheduler " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Starting pod-count rollout for scheduler " <> T.unpack (appGroup rt)
 
     updateK8sStatus BSProgressiveRollout
 
@@ -277,7 +277,7 @@ monitorHealth = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    liftIO $ putStrLn $ "Monitoring health for scheduler " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Monitoring health for scheduler " <> T.unpack (appGroup rt)
 
     updateK8sStatus BSMonitoring
     liftIO $ putStrLn "  Monitoring pod health metrics"
@@ -309,7 +309,7 @@ cleanupOldVersion = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    liftIO $ putStrLn $ "Cleaning up old version for scheduler " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "Cleaning up old version for scheduler " <> T.unpack (appGroup rt)
 
     updateK8sStatus BSScaleDownOld
     let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
@@ -347,7 +347,7 @@ notifyComplete = do
     updateK8sStatus BSDone
 
     liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
-    liftIO $ putStrLn $ "   Service: " <> T.unpack (product rt)
+    liftIO $ putStrLn $ "   Service: " <> T.unpack (appGroup rt)
     liftIO $ putStrLn $ "   Category: BackendScheduler"
     liftIO $ putStrLn $ "   Status: Completed"
 
