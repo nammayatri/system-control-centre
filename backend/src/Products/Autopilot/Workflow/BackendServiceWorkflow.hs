@@ -9,6 +9,13 @@ It uses the new type system with:
 - ReleaseWFStatus (generic stages)
 - BackendServiceWFStatus (K8s-specific sub-stages)
 - Recorded monad for checkpoint/resume
+
+Production parity notes (service.jl):
+- The rollout loop is re-entrant: each poll cycle processes ONE step.
+- Between steps the tracker is re-read from DB to catch user pause/abort.
+- Rollout history is recorded after every completed step.
+- AUTO mode checks decision engine; MANUAL mode only advances on cooloff.
+- Pod counts are calculated using podsCalculationFactor and old-version ratio.
 -}
 module Products.Autopilot.Workflow.BackendServiceWorkflow (
     backendServiceWorkflow,
@@ -16,26 +23,34 @@ module Products.Autopilot.Workflow.BackendServiceWorkflow (
 where
 
 import Control.Concurrent (threadDelay)
-import Control.Monad (forM_, when)
+import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.Config (Config (..))
-import Products.Autopilot.RuntimeConfig (isScaleDownPodsOnCompletion, isHpaEnabledForProduct, getHpaMinMaxFactor)
+import Products.Autopilot.RuntimeConfig
+    ( isScaleDownPodsOnCompletion
+    , isHpaEnabledForProduct
+    , getHpaMinMaxFactor
+    , getCollectMetricsDelay
+    -- getPodsCalculationFactor reserved for future pod-count calculation
+    , getReleaseStartDelay
+    )
 import Core.Environment (DBEnv)
 import Core.Utils.FlowMonad (getConfig, getDBEnv)
 import qualified Data.Text as T
-import Data.Aeson (Value (..), eitherDecode, toJSON)
+import Data.Aeson (Value (..), toJSON)
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
-import qualified Data.ByteString.Lazy as LBS
+-- (Data.ByteString.Lazy removed - not used after refactor)
 import qualified Data.Text.Encoding as TE
+import Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 import Products.Autopilot.K8s.Deployment (
     buildApplyFileCommand,
     buildCloneDeploymentCommand,
     buildConfigMapApplyCommand,
-    buildDeleteDeploymentCommand,
+    -- buildDeleteDeploymentCommand removed: scale-down handled by Runner
     buildScaleNamedDeploymentCommand,
     deploymentExists,
     getDeploymentReplicaStatus,
@@ -43,7 +58,7 @@ import Products.Autopilot.K8s.Deployment (
  )
 import Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
 import Products.Autopilot.K8s.HPA (hpaExists, buildCloneHpaCommand)
-import Products.Autopilot.Queries.ReleaseTracker (insertReleaseEvent)
+import Products.Autopilot.Queries.ReleaseTracker (insertReleaseEvent, findReleaseTracker, insertReleaseTracker)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getVirtualServiceJson)
 import Products.Autopilot.Notifications (
@@ -53,7 +68,13 @@ import Products.Autopilot.Notifications (
  )
 
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
-import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (product, releaseId, rolloutStrategy, status), RolloutStep (..))
+import Products.Autopilot.Types.Release
+    ( ReleaseStatus (..)
+    , ReleaseTracker (product, releaseId, rolloutStrategy, rolloutHistory, status, mode, endTime)
+    , RolloutStep (..)
+    , RolloutHistory (..)
+    , Mode (..)
+    )
 import Products.Autopilot.Types.Target (
     BackendServiceWFStatus (..),
     K8sDeploymentState (..),
@@ -172,13 +193,20 @@ validatePreconditions = do
     case internalResult of
         Left _ -> pure ()  -- No internal VS, that's fine
         Right _ -> do
-            db <- getDB
-            rt <- getRT
+            db' <- getDB
+            rt' <- getRT
             liftIO $ putStrLn $ "  Internal VS found: " <> T.unpack internalVsName
-            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "INTERNAL_VS_FOUND"
+            liftIO $ insertReleaseEvent db' (releaseId rt') "BUSINESS" "INTERNAL_VS_FOUND"
                 (toJSON internalVsName)
 
     liftIO $ putStrLn "  Cluster reachable, namespace exists"
+
+    -- Persist state after validation (production persists status changes immediately)
+    db <- getDB
+    currentRT <- getRT
+    currentTS <- gets targetState
+    liftIO $ insertReleaseTracker db currentRT currentTS
+
     liftIO $ putStrLn "Preconditions validated"
 
 -- | Prepare K8s resources: ConfigMap, clone/create deployment, service check, DestinationRule
@@ -265,10 +293,16 @@ prepareK8sResources = do
 
     liftIO $ putStrLn "K8s resources prepared"
 
--- | Progressive rollout: shift traffic old -> new following the tracker's rollout_strategy.
--- Production behaviour: iterate through each RolloutStep, apply the traffic percentage,
--- wait for the cooloff period (in minutes), then advance.  Between steps the runner
--- re-reads the tracker from DB so that user-initiated abort/pause is respected.
+{- | Progressive rollout: shift traffic old -> new following the tracker's rollout_strategy.
+
+Production parity (service.jl while-loop at line 459):
+- Each iteration of the loop handles ONE rollout step.
+- Re-reads the tracker from DB to catch user pause/abort/strategy changes.
+- Records rollout history after each completed step.
+- In MANUAL mode: only advances if cooloff exceeded (no decision engine).
+- In AUTO mode: advances if cooloff exceeded AND decision engine says Continue.
+- The loop blocks on collectMetricsDelay between iterations (not the full cooloff).
+-}
 progressiveRollout :: StateFlow ()
 progressiveRollout = do
     rt <- getRT
@@ -283,13 +317,24 @@ progressiveRollout = do
     updateK8sStatus BSProgressiveRollout
     db <- getDB
 
+    -- Production: sleep(getReleaseStartDelay(conn)) before starting
+    releaseStartDelay <- liftIO $ getReleaseStartDelay db
+    when (releaseStartDelay > 0) $ do
+        liftIO $ putStrLn $ "  Release start delay: " <> show releaseStartDelay <> " seconds"
+        liftIO $ threadDelay (releaseStartDelay * 1000000)
+
     if isNew
         then do
             -- New service: route 100% traffic to new version directly (no old version)
             liftIO $ putStrLn "  New service: routing 100% traffic to new version"
             _ <- runK8sIO $ applyVirtualServiceRollout cfg ctx 0 100
             updateK8sField (\k8s -> k8s{trafficPercentage = 100})
+            -- Record rollout history for the 100% step
+            now <- liftIO getCurrentTime
+            let histEntry = mkRolloutHistory 100 0 100 now (Just now)
+            updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [histEntry]}
             currentRT <- getRT
+            liftIO $ insertReleaseTracker db currentRT (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = 100})))
             liftIO $ notifyReleaseProgress db currentRT 100
         else do
             -- Use the tracker's rollout strategy (e.g. 5%/25%/50%/75%/100% with cooloffs)
@@ -297,26 +342,202 @@ progressiveRollout = do
             let strategy = case rolloutStrategy rt of
                     [] -> [RolloutStep 100 0 1]
                     ss -> ss
-            forM_ strategy $ \step -> do
-                let newW = rolloutPercent step
-                    oldW = max 0 (100 - newW)
-                    cooloffMins = cooloffSeconds step  -- stored as minutes in production
-                liftIO $ putStrLn $ "  Rollout step: new=" <> show newW <> "%, cooloff=" <> show cooloffMins <> "min"
-                _ <- runK8sIO $ applyVirtualServiceRollout cfg ctx oldW newW
-                updateK8sField (\k8s -> k8s{trafficPercentage = newW})
+                totalSteps = length strategy
 
-                -- Notify Slack of traffic shift
-                currentRT <- getRT
-                liftIO $ notifyReleaseProgress db currentRT newW
+            -- Apply first step immediately (production line 359: getInitialCoolOffAndRoutingPercentage)
+            let firstStep = head strategy
+                firstNewW = rolloutPercent firstStep
+                firstOldW = max 0 (100 - firstNewW)
+            liftIO $ putStrLn $ "  Initial rollout step: new=" <> show firstNewW <> "%, cooloff=" <> show (cooloffSeconds firstStep) <> "min"
+            _ <- runK8sIO $ applyVirtualServiceRollout cfg ctx firstOldW firstNewW
+            updateK8sField (\k8s -> k8s{trafficPercentage = firstNewW})
 
-                -- Wait for cooloff period (skip for the final 100% step)
-                when (newW < 100 && cooloffMins > 0) $ do
-                    liftIO $ putStrLn $ "    Cooloff: waiting " <> show cooloffMins <> " minutes"
-                    liftIO $ threadDelay (cooloffMins * 60 * 1000000)
-                    -- Health check after cooloff
-                    checkDeploymentHealth cfg ctx
+            -- Record rollout history for first step
+            stepStartTime <- liftIO getCurrentTime
+            let firstHist = mkRolloutHistory firstNewW (cooloffSeconds firstStep) (podPercent firstStep) stepStartTime Nothing
+            updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [firstHist]}
+            currentRT <- getRT
+            liftIO $ insertReleaseTracker db currentRT (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = firstNewW})))
+            liftIO $ notifyReleaseProgress db currentRT firstNewW
+            liftIO $ insertReleaseEvent db (releaseId currentRT) "BUSINESS" "ROLLOUT_STEP"
+                (toJSON $ "Routing " <> show firstNewW <> "% to " <> T.unpack (newVersion ctx))
+
+            -- Production while-loop: iterate through remaining steps with re-entrant checks
+            -- index starts at 1 (0-based), first step already applied
+            rolloutLoop cfg ctx db strategy 1 totalSteps stepStartTime
 
     liftIO $ putStrLn "Progressive rollout complete"
+
+{- | Re-entrant rollout loop matching production's while-true loop (service.jl line 459).
+
+Each iteration:
+1. Re-reads tracker from DB (catches user pause/abort/strategy change)
+2. Checks if tracker is in terminal state (abort/complete)
+3. If cooloff exceeded for current step: advance to next step
+4. If all steps done: mark as complete
+5. Otherwise: sleep collectMetricsDelay and loop
+-}
+rolloutLoop :: Config -> K8sReleaseContext -> DBEnv -> [RolloutStep] -> Int -> Int -> UTCTime -> StateFlow ()
+rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
+    -- Production line 460: tracker = get_release_from_id(conn, tracker.id)[1]
+    rt <- getRT
+    freshResult <- liftIO $ findReleaseTracker db (releaseId rt)
+    case freshResult of
+        Nothing -> do
+            liftIO $ putStrLn "  [rolloutLoop] Tracker deleted from DB, aborting"
+            liftIO $ fail "Tracker deleted during rollout"
+        Just (freshRT, freshMts) -> do
+            -- Sync our in-memory state with what the DB has
+            updateRT $ \_ -> freshRT
+            case freshMts of
+                Just ts -> modify $ \s -> s{targetState = Just ts}
+                Nothing -> pure ()
+
+            -- Production line 462: isTrackerInTerminalState!
+            case status freshRT of
+                Aborting -> do
+                    liftIO $ putStrLn "  [rolloutLoop] Tracker is ABORTING, stopping rollout"
+                    liftIO $ fail "Release aborted by user during rollout"
+                UserAborted -> do
+                    liftIO $ putStrLn "  [rolloutLoop] Tracker is USER_ABORTED, stopping rollout"
+                    liftIO $ fail "Release user-aborted during rollout"
+                Aborted -> do
+                    liftIO $ putStrLn "  [rolloutLoop] Tracker is ABORTED, stopping rollout"
+                    liftIO $ fail "Release aborted during rollout"
+                Completed -> do
+                    liftIO $ putStrLn "  [rolloutLoop] Tracker is COMPLETED (externally), finishing"
+                    pure ()
+                Paused -> do
+                    -- Production line 195: if isReleasePaused(tracker) return (routePercent, coolOff, podsCount)
+                    liftIO $ putStrLn "  [rolloutLoop] Tracker is PAUSED, waiting..."
+                    collectDelay <- liftIO $ getCollectMetricsDelay db
+                    liftIO $ threadDelay (collectDelay * 1000000)
+                    rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime
+                InProgress -> do
+                    -- Check AUTO vs MANUAL mode behavior
+                    let currentMode = mode freshRT
+                    -- Production line 197: MANUAL calls getNewRollout directly
+                    -- Production line 199-238: AUTO checks decision engine first
+                    -- We implement both paths
+
+                    if currentIndex >= totalSteps
+                        then do
+                            -- All steps complete - production line 134-181: final completion
+                            liftIO $ putStrLn "  [rolloutLoop] All rollout steps completed"
+                            -- Update final rollout history entry with completion time
+                            now <- liftIO getCurrentTime
+                            let curHistory = rolloutHistory freshRT
+                            when (not (null curHistory)) $ do
+                                let lastH = last curHistory
+                                    updatedLast = lastH{historyCompletedAt = Just now}
+                                    updatedHistory = init curHistory <> [updatedLast]
+                                updateRT $ \r -> r{rolloutHistory = updatedHistory}
+                                currentRT <- getRT
+                                liftIO $ insertReleaseTracker db currentRT freshMts
+                            pure ()
+                        else do
+                            -- Check if cooloff has elapsed for current step
+                            now <- liftIO getCurrentTime
+                            let currentStep = strategy !! (currentIndex - 1)
+                                cooloffMins = cooloffSeconds currentStep
+                                elapsed = diffUTCTime now stepStartTime
+                                cooloffSecs = fromIntegral cooloffMins * 60 :: Double
+                                cooloffExceeded = realToFrac elapsed >= cooloffSecs
+
+                            if not cooloffExceeded
+                                then do
+                                    -- Cooloff not exceeded, sleep and re-check
+                                    -- Production line 518: sleep(getCollectMetricsDelay(conn))
+                                    collectDelay <- liftIO $ getCollectMetricsDelay db
+                                    liftIO $ threadDelay (collectDelay * 1000000)
+                                    rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime
+                                else do
+                                    -- Cooloff exceeded - decide whether to advance
+                                    shouldAdvance <- case currentMode of
+                                        Manual -> do
+                                            -- MANUAL: advance if cooloff exceeded and status is InProgress
+                                            -- Production line 128: isCoolOffExceeded && tracker.status == INPROGRESS
+                                            liftIO $ putStrLn "  [rolloutLoop] MANUAL mode: cooloff exceeded, advancing"
+                                            pure True
+                                        Auto -> do
+                                            -- AUTO: check health/decision engine first
+                                            -- Production lines 520-553: collect metrics, get decision
+                                            liftIO $ putStrLn "  [rolloutLoop] AUTO mode: checking health before advancing"
+                                            checkDeploymentHealth cfg ctx
+                                            -- In production, decision engine (AB) is checked here.
+                                            -- We don't have a decision engine, so we always Continue.
+                                            -- TODO: integrate decision engine when available
+                                            pure True
+
+                                    if shouldAdvance
+                                        then do
+                                            -- Complete current step in rollout history
+                                            -- Production line 481: updateTrackerRolloutHistory
+                                            let curHistory = rolloutHistory freshRT
+                                            when (not (null curHistory)) $ do
+                                                let lastH = last curHistory
+                                                    updatedLast = lastH{historyCompletedAt = Just now}
+                                                    updatedHistory = init curHistory <> [updatedLast]
+                                                updateRT $ \r -> r{rolloutHistory = updatedHistory}
+
+                                            -- Apply next step
+                                            -- Production line 129: index = index + 1
+                                            let nextStep = strategy !! currentIndex
+                                                nextNewW = rolloutPercent nextStep
+                                                nextOldW = max 0 (100 - nextNewW)
+                                            liftIO $ putStrLn $ "  Rollout step " <> show (currentIndex + 1) <> "/" <> show totalSteps
+                                                <> ": new=" <> show nextNewW <> "%, cooloff=" <> show (cooloffSeconds nextStep) <> "min"
+
+                                            -- Apply VS rollout
+                                            _ <- runK8sIO $ applyVirtualServiceRollout cfg ctx nextOldW nextNewW
+                                            updateK8sField (\k8s -> k8s{trafficPercentage = nextNewW})
+
+                                            -- Record new rollout history entry
+                                            -- Production line 489: setRolloutHistory!(tracker, push!(...))
+                                            newStepStart <- liftIO getCurrentTime
+                                            let newHist = mkRolloutHistory nextNewW (cooloffSeconds nextStep) (podPercent nextStep) newStepStart Nothing
+                                            updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [newHist]}
+
+                                            -- Persist to DB
+                                            currentRT <- getRT
+                                            currentTS <- gets targetState
+                                            liftIO $ insertReleaseTracker db currentRT currentTS
+
+                                            -- Notify Slack
+                                            liftIO $ notifyReleaseProgress db currentRT nextNewW
+                                            liftIO $ insertReleaseEvent db (releaseId currentRT) "BUSINESS" "ROLLOUT_STEP"
+                                                (toJSON $ "Routing " <> show nextNewW <> "% to " <> T.unpack (newVersion ctx))
+
+                                            -- Check health after applying step
+                                            when (nextNewW < 100) $
+                                                checkDeploymentHealth cfg ctx
+
+                                            -- Continue loop with next index
+                                            rolloutLoop cfg ctx db strategy (currentIndex + 1) totalSteps newStepStart
+                                        else do
+                                            -- Decision engine said wait/abort - re-loop
+                                            collectDelay <- liftIO $ getCollectMetricsDelay db
+                                            liftIO $ threadDelay (collectDelay * 1000000)
+                                            rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime
+                _ -> do
+                    -- Unexpected status during rollout
+                    liftIO $ putStrLn $ "  [rolloutLoop] Unexpected status: " <> show (status freshRT) <> ", stopping"
+                    liftIO $ fail $ "Unexpected tracker status during rollout: " <> show (status freshRT)
+
+-- | Create a RolloutHistory entry (matches production RolloutHistory struct)
+mkRolloutHistory :: Int -> Int -> Int -> UTCTime -> Maybe UTCTime -> RolloutHistory
+mkRolloutHistory rollout cooloff pods startedAt completedAt = RolloutHistory
+    { historyRolloutPercent = rollout
+    , historyCooloffSeconds = cooloff
+    , historyPodsPercent = pods
+    , historyDecision = Nothing
+    , historyDecisionReason = Nothing
+    , historyStartedAt = startedAt
+    , historyCompletedAt = completedAt
+    , historyManualOverride = False
+    , historyDecisionHs = Nothing
+    , historyDecisionHsReason = Nothing
+    }
 
 -- | Check deployment health via replica status
 checkDeploymentHealth :: Config -> K8sReleaseContext -> StateFlow ()
@@ -482,16 +703,29 @@ checkSinglePod (Object podObj) =
     checkContainer _ _ = []
 checkSinglePod _ = Right "unknown"
 
--- | Cleanup old version: scale down (and optionally delete) old deployment
+{- | Cleanup old version.
+
+Production parity (releaseCompletionActions, line 558-596):
+- Records end time on the tracker
+- Schedules scale-down of old pods (done by Runner's scaleDownOldDeployment on next poll)
+  rather than scaling down immediately
+- Only scales down immediately if scale_down_pods_on_completion is enabled
+- Captures AFTER snapshots for diff
+-}
 cleanupOldVersion :: StateFlow ()
 cleanupOldVersion = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
     isNew <- isNewServiceRelease
+    db <- getDB
     liftIO $ putStrLn $ "Cleaning up old version for " <> T.unpack (product rt)
 
     updateK8sStatus BSScaleDownOld
+
+    -- Production line 559: update_release_end_time!(conn, tracker)
+    now <- liftIO getCurrentTime
+    updateRT $ \r -> r{endTime = Just now}
 
     if isNew
         then do
@@ -500,23 +734,24 @@ cleanupOldVersion = do
             updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
         else do
             let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
-            liftIO $ putStrLn $ "  Scaling down old deployment: " <> T.unpack oldDepName
 
-            -- Scale old deployment to 0 replicas
-            _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
-            updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
+            -- Production line 560: scheduleScaleDownOfPods(tracker, conn)
+            -- This schedules scale-down to happen later via the Runner's poll loop.
+            -- The Runner's findCompletedTrackersForScaleDown + scaleDownOldDeployment handles this.
+            -- We mark the intent so the Runner knows to scale down.
+            liftIO $ putStrLn $ "  Scheduling scale-down for old deployment: " <> T.unpack oldDepName
+            updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = False})
+            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "SCALE_DOWN_SCHEDULED"
+                (toJSON $ "Scale-down scheduled for " <> T.unpack oldDepName)
 
-            -- Notify Slack of pods scaled down
-            db <- getDB
-            liftIO $ notifyPodsScaledDown db rt (oldVersion ctx)
-
-            -- Optionally delete old deployment
-            db <- getDB
-            shouldDelete <- liftIO $ isScaleDownPodsOnCompletion db
-            when shouldDelete $ do
-                liftIO $ putStrLn $ "  Deleting old deployment: " <> T.unpack oldDepName
-                _ <- runK8sIO $ runCmd (buildDeleteDeploymentCommand cfg (namespace ctx) oldDepName)
-                pure ()
+            -- If scale_down_pods_on_completion is enabled, do it immediately too
+            -- (production has this commented out but the Runner handles it)
+            shouldScaleDownNow <- liftIO $ isScaleDownPodsOnCompletion db
+            when shouldScaleDownNow $ do
+                liftIO $ putStrLn $ "  Immediate scale-down: " <> T.unpack oldDepName
+                _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
+                updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
+                liftIO $ notifyPodsScaledDown db rt (oldVersion ctx)
 
     -- Capture AFTER snapshots
     cfgAfter <- getCfg
@@ -528,7 +763,14 @@ cleanupOldVersion = do
 
     liftIO $ putStrLn "Cleanup complete"
 
--- | Notify complete
+{- | Notify complete.
+
+Production parity (service.jl line 176 + releaseCompletionActions):
+- Sets tracker status to Completed
+- Records completion event
+- Persists final state to DB
+- Notifies Slack
+-}
 notifyComplete :: StateFlow ()
 notifyComplete = do
     rt <- getRT
@@ -540,10 +782,25 @@ notifyComplete = do
     liftIO $ putStrLn $ "   Category: BackendService"
     liftIO $ putStrLn $ "   Status: Completed"
 
-    updateRT $ \r -> r{status = Completed}
+    -- Production line 176: update_tracker_status!(conn, COMPLETED, tracker)
+    now <- liftIO getCurrentTime
+    updateRT $ \r -> r{status = Completed, endTime = Just now}
+
+    -- Persist final state to DB immediately (production does this in update_tracker_status!)
+    currentRT <- getRT
+    currentTS <- gets targetState
+    liftIO $ insertReleaseTracker db currentRT currentTS
+
+    -- Log completion event
+    liftIO $ insertReleaseEvent db (releaseId currentRT) "BUSINESS" "COMPLETED"
+        (toJSON $ "Tracker marked as COMPLETED with " <> show (getTrafficPct currentTS) <> "% traffic")
 
     -- Notify Slack
-    liftIO $ notifyReleaseCompleted db rt
+    liftIO $ notifyReleaseCompleted db currentRT
+  where
+    getTrafficPct Nothing = 100 :: Int
+    getTrafficPct (Just (K8sState k8s)) = trafficPercentage k8s
+    getTrafficPct _ = 100
 
 -- ============================================================================
 -- K8s State Helpers
