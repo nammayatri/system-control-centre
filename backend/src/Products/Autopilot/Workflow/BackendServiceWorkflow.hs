@@ -759,7 +759,6 @@ cleanupOldVersion = do
     rtAfter <- getRT
     ctxAfter <- getK8sCtx
     liftIO $ captureDeploymentSnapshot cfgAfter dbAfter (releaseId rtAfter) (namespace ctxAfter) (deploymentName ctxAfter) "DEPLOYMENT_AFTER"
-    liftIO $ captureVSSnapshot cfgAfter dbAfter (releaseId rtAfter) (namespace ctxAfter) (virtualServiceName ctxAfter) "VS_AFTER"
 
     liftIO $ putStrLn "Cleanup complete"
 

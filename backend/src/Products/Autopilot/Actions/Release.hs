@@ -71,7 +71,7 @@ import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.Queries.VsEditTracker ()
 import Products.Autopilot.Sync (triggerImmediateRevertSync)
-import Products.Autopilot.Workflow.Helpers (captureDeploymentSnapshot, captureDeploymentPreview, captureVSSnapshot)
+import Products.Autopilot.Workflow.Helpers (captureDeploymentSnapshot, captureDeploymentPreview)
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.API
@@ -374,7 +374,6 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                         vsN = getProductVsName pCfg
                         oldDepName = targetSvcHost <> "-" <> resolvedOldVersion
                     liftIO $ captureDeploymentSnapshot cfg db rid ns oldDepName "DEPLOYMENT_BEFORE"
-                    liftIO $ captureVSSnapshot cfg db rid ns vsN "VS_BEFORE"
                     -- Generate preview AFTER: take old deployment, replace version + image
                     liftIO $ captureDeploymentPreview cfg db rid ns oldDepName newVersion
                         (fromMaybe "" metadataDockerImage) "DEPLOYMENT_AFTER"
@@ -517,7 +516,6 @@ revertReleaseH rid req = do
                         revertVsN = virtualServiceName oldCtx
                         revertNewDep = ctxServiceName <> "-" <> NT.newVersion tracker
                     liftIO $ captureDeploymentSnapshot cfg db newRid revertNs revertNewDep "DEPLOYMENT_BEFORE"
-                    liftIO $ captureVSSnapshot cfg db newRid revertNs revertVsN "VS_BEFORE"
                     liftIO $ captureDeploymentPreview cfg db newRid revertNs revertNewDep
                         (NT.oldVersion tracker) (fromMaybe "" (K8s.dockerImage oldCtx)) "DEPLOYMENT_AFTER"
                     liftIO $ notifyReleaseReverted db revertedTracker
@@ -729,8 +727,6 @@ releaseDiffH rid mType = do
             let snapshotEvents = filter (\e -> S.reCategory e == "SNAPSHOT") events
                 diffType = fromMaybe "deployment" mType
                 (beforeLabel, afterLabel, diffLabel) = case diffType of
-                    "vs" -> ("VS_BEFORE", "VS_AFTER", "VirtualService diff" :: Text)
-                    "configmap" -> ("CONFIGMAP_BEFORE", "CONFIGMAP_AFTER", "ConfigMap diff")
                     _ -> ("DEPLOYMENT_BEFORE", "DEPLOYMENT_AFTER", "Deployment diff")
                 findSnapshot label = find (\e -> S.reLabel e == label) snapshotEvents
                 mBefore = findSnapshot beforeLabel
