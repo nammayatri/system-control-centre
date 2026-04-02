@@ -129,11 +129,9 @@ const formatDiff = (raw: string): string => {
   return raw;
 };
 
-type DiffType = 'deployment' | 'vs' | 'configmap';
+type DiffType = 'deployment';
 const DIFF_TYPE_LABELS: Record<DiffType, string> = {
   deployment: 'Deployment',
-  vs: 'VirtualService',
-  configmap: 'ConfigMap',
 };
 
 const EnvDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
@@ -143,23 +141,7 @@ const EnvDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          {(Object.keys(DIFF_TYPE_LABELS) as DiffType[]).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setDiffType(t)}
-              className={cn(
-                'px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors duration-150 cursor-pointer',
-                diffType === t
-                  ? 'bg-zinc-900 text-white border-zinc-900'
-                  : 'bg-white text-zinc-600 border-zinc-300 hover:bg-zinc-50'
-              )}
-            >
-              {DIFF_TYPE_LABELS[t]}
-            </button>
-          ))}
-        </div>
+        <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">Deployment Diff</h3>
         {diff?.message && <span className="text-xs text-zinc-400">{diff.message}</span>}
       </div>
       {isLoading ? (
