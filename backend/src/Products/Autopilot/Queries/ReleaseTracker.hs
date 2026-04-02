@@ -87,7 +87,7 @@ findRunnableReleaseTrackers db now = do
                 select $
                     orderBy_ (asc_ . rtCreatedAt) $ do
                         rt <- all_ (releaseTrackers nammaAPDb)
-                        guard_ (rtStatus rt `in_` [val_ "Created", val_ "Recording"])
+                        guard_ (rtStatus rt `in_` [val_ "Created"])
                         pure rt
     let parsed = map fromRow rows
         isDue (tracker, _) = case scheduleTime tracker of
@@ -140,7 +140,7 @@ findOngoingReleaseTrackers db = do
                 select $
                     orderBy_ (desc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers nammaAPDb)
-                        guard_ (rtStatus rt `in_` [val_ "InProgress", val_ "Paused", val_ "Aborting", val_ "Reverting", val_ "Recording", val_ "Restarting"])
+                        guard_ (rtStatus rt `in_` [val_ "InProgress", val_ "Paused", val_ "Aborting", val_ "Reverting", val_ "Restarting"])
                         pure rt
     pure (map fromRow rows)
 
@@ -327,9 +327,9 @@ parseReleaseStatus t =
         "REVERTED" -> Reverted
         "RESTARTING" -> Restarting
         "DISCARDING" -> Discarding
-        -- Legacy status mappings (backward compat for existing DB rows)
-        "RECORDING" -> InProgress -- K8s ART recorder flow → treat as in-progress
-        "RECORDED" -> Reverted -- K8s ART recording done (was reverted) → Reverted
+        -- Legacy status mappings (backward compat for old production DB rows)
+        "RECORDING" -> InProgress -- ART recording (deprecated) → InProgress
+        "RECORDED" -> Completed  -- ART recorded (deprecated) → Completed
         "GCLT_ABORTED" -> Aborted -- K8s health check abort → generic Aborted
         "GCLTABORTED" -> Aborted
         "VS_APPLIED" -> InProgress -- K8s VirtualService applied → treat as in-progress

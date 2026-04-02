@@ -53,7 +53,7 @@ import Products.Autopilot.Notifications (
  )
 
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
-import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (product, releaseId, status))
+import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (product, releaseId, rolloutStrategy, status), RolloutStep (..))
 import Products.Autopilot.Types.Target (
     BackendServiceWFStatus (..),
     K8sDeploymentState (..),

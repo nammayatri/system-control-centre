@@ -21,6 +21,9 @@ module Products.Autopilot.Workflow.Helpers (
     captureVSSnapshot,
     captureConfigMapSnapshot,
 
+    -- * K8s Noise Stripping
+    stripK8sNoiseValue,
+
     -- * Utility Functions
     continueIf,
     scheduleAfter,
@@ -38,7 +41,7 @@ import Control.Monad.Trans.Class (lift)
 import Core.Config (Config (..))
 import Core.Environment (DBEnv)
 import Core.Utils.FlowMonad (Flow, getDBEnv)
-import Data.Aeson (Value (..), eitherDecode, encode, toJSON)
+import Data.Aeson (Value (..), eitherDecode, encode)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Vector as V
@@ -47,6 +50,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (NominalDiffTime, addUTCTime, getCurrentTime)
+import qualified Data.Yaml as Yaml
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import qualified Products.Autopilot.Queries.ReleaseTracker as DB
@@ -126,45 +130,37 @@ updateRT f = modify $ \rs -> rs{releaseTracker = f (releaseTracker rs)}
 -- Snapshot Capture Functions
 -- ============================================================================
 
--- | Capture deployment YAML snapshot and store as release event
+-- | Capture deployment YAML snapshot and store as release event.
+-- Fetches YAML from K8s, parses to Value, strips noise, re-encodes as clean YAML text.
+-- This matches production autopilot behavior (YAML.write(YAML.load_file(...))).
 captureDeploymentSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()
 captureDeploymentSnapshot cfg db releaseId ns depName label = do
-    -- Use JSON output so we can strip metadata noise before storing
-    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack depName, "-o", "json"])
+    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack depName, "-o", "yaml"])
     case result of
-        Right (K8sResult jsonStr) -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON (stripK8sNoise jsonStr))
+        Right (K8sResult yamlStr) ->
+            case Yaml.decodeEither' (TE.encodeUtf8 yamlStr) :: Either Yaml.ParseException Value of
+                Right val -> do
+                    let cleaned = stripK8sNoiseValue val
+                        cleanYaml = TE.decodeUtf8 (Yaml.encode cleaned)
+                    DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String cleanYaml)
+                Left _ -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String yamlStr)
         Left _ -> pure ()
 
 -- | Generate a preview of what the deployment will look like after changes.
--- Fetches old deployment JSON, modifies specific fields (name, version labels, image),
--- stores as event. This makes the diff available at creation time.
+-- Fetches old deployment YAML, strips noise, modifies fields (name, version, image),
+-- re-encodes as clean YAML text. Matches production autopilot behavior.
 captureDeploymentPreview :: Config -> DBEnv -> Text -> Text -> Text -> Text -> Text -> Text -> IO ()
 captureDeploymentPreview cfg db releaseId ns oldDepName newVer newImage label = do
-    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack oldDepName, "-o", "json"])
+    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack oldDepName, "-o", "yaml"])
     case result of
-        Right (K8sResult jsonStr) -> do
-            let cleaned = stripK8sNoise jsonStr
-            case eitherDecode (LBS.fromStrict (TE.encodeUtf8 cleaned)) :: Either String Value of
-                Right (Object obj) -> do
-                    -- Extract service host from old deployment name (e.g. "test-svc" from "test-svc-e2e-v1")
-                    let svcHost = T.intercalate "-" (init (T.splitOn "-" oldDepName))
-                        newDepName = svcHost <> "-" <> newVer
-                        -- Update metadata.name
-                        obj1 = updateNestedText ["metadata", "name"] newDepName obj
-                        -- Update metadata.labels.version
-                        obj2 = updateNestedText ["metadata", "labels", "version"] newVer obj1
-                        -- Update spec.selector.matchLabels.version
-                        obj3 = updateNestedText ["spec", "selector", "matchLabels", "version"] newVer obj2
-                        -- Update spec.template.metadata.labels.version
-                        obj4 = updateNestedText ["spec", "template", "metadata", "labels", "version"] newVer obj3
-                        -- Update container image if provided
-                        obj5 = if T.null newImage then obj4
-                               else updateContainerImage newImage obj4
-                        result' = TE.decodeUtf8 (LBS.toStrict (encode (Object obj5)))
-                    DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON result')
-                _ -> do
-                    -- Can't parse, store as-is
-                    DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON cleaned)
+        Right (K8sResult yamlStr) ->
+            case Yaml.decodeEither' (TE.encodeUtf8 yamlStr) :: Either Yaml.ParseException Value of
+                Right val -> do
+                    let cleaned = stripK8sNoiseValue val
+                        preview = modifyDeploymentForPreview cleaned oldDepName newVer newImage
+                        previewYaml = TE.decodeUtf8 (Yaml.encode preview)
+                    DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String previewYaml)
+                Left _ -> pure ()
         Left _ -> pure ()
 
 -- | Update a nested text field in a JSON object
@@ -199,23 +195,37 @@ updateContainerImage img obj =
             _ -> obj
         _ -> obj
 
--- | Capture VirtualService JSON snapshot and store as release event
+-- | Capture VirtualService YAML snapshot and store as release event.
+-- VirtualService is fetched as JSON (existing API), parsed, stripped, re-encoded as YAML.
 captureVSSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()
 captureVSSnapshot cfg db releaseId ns vsName label = do
     result <- getVirtualServiceJson cfg ns vsName
     case result of
-        Right vsJson -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON (stripK8sNoise vsJson))
+        Right vsJson ->
+            case eitherDecode (LBS.fromStrict (TE.encodeUtf8 vsJson)) :: Either String Value of
+                Right val -> do
+                    let cleaned = stripK8sNoiseValue val
+                        cleanYaml = TE.decodeUtf8 (Yaml.encode cleaned)
+                    DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String cleanYaml)
+                Left _ -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String vsJson)
         Left _ -> pure ()
 
--- | Capture ConfigMap snapshot and store as release event
+-- | Capture ConfigMap YAML snapshot and store as release event.
+-- Fetches YAML, strips noise, stores as clean YAML text.
 captureConfigMapSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()
 captureConfigMapSnapshot cfg db releaseId ns cmName label = do
-    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get configmap", T.unpack cmName, "-o", "json"])
+    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get configmap", T.unpack cmName, "-o", "yaml"])
     case result of
-        Right (K8sResult jsonStr) -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON (stripK8sNoise jsonStr))
+        Right (K8sResult yamlStr) ->
+            case Yaml.decodeEither' (TE.encodeUtf8 yamlStr) :: Either Yaml.ParseException Value of
+                Right val -> do
+                    let cleaned = stripK8sNoiseValue val
+                        cleanYaml = TE.decodeUtf8 (Yaml.encode cleaned)
+                    DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String cleanYaml)
+                Left _ -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String yamlStr)
         Left _ -> pure ()
 
--- | Strip K8s metadata noise: annotations, resourceVersion, uid, generation, status, managedFields
+-- | Strip K8s metadata noise from raw JSON text (backward compat, used by older callers).
 -- Keeps only name, namespace, labels in metadata. Like production autopilot's getContentWithoutExtraMetadata.
 stripK8sNoise :: Text -> Text
 stripK8sNoise raw =
@@ -230,6 +240,34 @@ stripK8sNoise raw =
                     _ -> cleaned
             in TE.decodeUtf8 (LBS.toStrict (encode (Object cleanMeta)))
         Right other -> TE.decodeUtf8 (LBS.toStrict (encode other))
+
+-- | Strip K8s noise from a parsed Value directly.
+-- Removes status, strips metadata to only name/namespace/labels.
+-- Works on the Value tree so callers can parse once and re-encode to any format (YAML/JSON).
+stripK8sNoiseValue :: Value -> Value
+stripK8sNoiseValue (Object obj) =
+    let cleaned = KM.delete (K.fromText "status") obj
+        cleanMeta = case KM.lookup (K.fromText "metadata") cleaned of
+            Just (Object meta) ->
+                let keep = KM.filterWithKey (\k _ -> K.toText k `elem` ["name", "namespace", "labels"]) meta
+                in KM.insert (K.fromText "metadata") (Object keep) cleaned
+            _ -> cleaned
+    in Object cleanMeta
+stripK8sNoiseValue other = other
+
+-- | Modify a deployment Value for preview: update name, version labels, image.
+-- Used to produce the "after" YAML for diff comparison.
+modifyDeploymentForPreview :: Value -> Text -> Text -> Text -> Value
+modifyDeploymentForPreview (Object obj) oldDepName newVer newImage =
+    let svcHost = T.intercalate "-" (init (T.splitOn "-" oldDepName))
+        newDepName = svcHost <> "-" <> newVer
+        obj1 = updateNestedText ["metadata", "name"] newDepName obj
+        obj2 = updateNestedText ["metadata", "labels", "version"] newVer obj1
+        obj3 = updateNestedText ["spec", "selector", "matchLabels", "version"] newVer obj2
+        obj4 = updateNestedText ["spec", "template", "metadata", "labels", "version"] newVer obj3
+        obj5 = if T.null newImage then obj4 else updateContainerImage newImage obj4
+    in Object obj5
+modifyDeploymentForPreview other _ _ _ = other
 
 -- ============================================================================
 -- ReleaseWFStatus-based Helpers

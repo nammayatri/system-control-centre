@@ -21,7 +21,7 @@ const CreateRelease: React.FC = () => {
   const products = [...new Set(productConfigs.map((c: ProductConfig) => c.product).filter(Boolean))];
 
   const [formData, setFormData] = useState({
-    product: '', service: '', env: DEFAULT_ENV, new_version: '', docker_image: '', change_log: '',
+    product: '', service: '', env: DEFAULT_ENV, old_version: '', new_version: '', docker_image: '', change_log: '',
     status: 'CREATED', mode: 'AUTO', priority: '0', info: '', custom_pods_scale_down_days: '1',
     cluster: 'EULER_UAT', scale_down_delay: '1',
     cronjob_suspend: false, description: '', schedule_time: '',
@@ -194,6 +194,7 @@ const CreateRelease: React.FC = () => {
 
     const payload = {
       product: formData.product, service: [formData.service], env: formData.env,
+      old_version: formData.old_version || 'unknown',
       new_version: formData.new_version, docker_image: formData.docker_image,
       change_log: formData.change_log, status: formData.status, mode: formData.mode,
       priority: parseInt(formData.priority, 10) || 0, info: formData.info,
@@ -272,6 +273,7 @@ const CreateRelease: React.FC = () => {
                 )}
               </div>
               <div><FieldLabel required>New Version</FieldLabel><input type="text" name="new_version" value={formData.new_version} onChange={handleInputChange} required placeholder="Jenkins tag" className={inputClass} /></div>
+              <div><FieldLabel>Old Version</FieldLabel><input type="text" name="old_version" value={formData.old_version} onChange={handleInputChange} placeholder="Auto-resolved from K8s if empty" className={inputClass} /></div>
               <div><FieldLabel>Mode</FieldLabel><select name="mode" value={formData.mode} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}><option value="AUTO">AUTO</option><option value="MANUAL">MANUAL</option></select></div>
               <div><FieldLabel>Info</FieldLabel><input type="text" name="info" value={formData.info} onChange={handleInputChange} placeholder="Any Valid JSON" className={inputClass} /></div>
               <div><FieldLabel>Scale Down Days</FieldLabel><select name="custom_pods_scale_down_days" value={formData.custom_pods_scale_down_days} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>{[1,2,3,4,5,6].map(d => <option key={d} value={d}>{d}</option>)}</select></div>

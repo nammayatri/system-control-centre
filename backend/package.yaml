@@ -70,6 +70,7 @@ dependencies:
   - wai
   - wai-cors
   - warp
+  - yaml
 
 default-extensions:
   - OverloadedStrings

@@ -107,28 +107,27 @@ const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
 };
 
 /** ENV Diff Tab */
-const prettyYaml = (raw: string): string => {
+// Backend now returns YAML directly (matching production autopilot behavior).
+// No JSON-to-YAML conversion needed -- just pass through, with fallback for legacy JSON data.
+const formatDiff = (raw: string): string => {
   if (!raw) return '';
-  try {
-    // Handle double-encoded JSON (string inside string)
-    let data = raw;
+  // If it looks like JSON (legacy data before YAML migration), convert it
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
-      const firstParse = JSON.parse(data);
-      if (typeof firstParse === 'string') {
-        data = firstParse; // was double-encoded
-      } else {
-        return YAML.stringify(firstParse, { indent: 2 });
-      }
-    } catch { /* not JSON, try as-is */ }
-    // Second attempt after unwrapping
-    try {
+      let data = raw;
+      // Handle double-encoded JSON
+      try {
+        const firstParse = JSON.parse(data);
+        if (typeof firstParse === 'string') data = firstParse;
+        else return YAML.stringify(firstParse, { indent: 2 });
+      } catch { /* not JSON wrapper */ }
       const parsed = JSON.parse(data);
       return YAML.stringify(parsed, { indent: 2 });
-    } catch { /* not JSON either */ }
-    return data;
-  } catch {
-    return raw;
+    } catch { /* not JSON, fall through */ }
   }
+  // Already YAML from backend, return as-is
+  return raw;
 };
 
 type DiffType = 'deployment' | 'vs' | 'configmap';
@@ -173,8 +172,8 @@ const EnvDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
       ) : (
         <div className="border border-zinc-200 rounded-lg overflow-hidden">
           <ReactDiffViewer
-            oldValue={prettyYaml(diff.oldfile)}
-            newValue={prettyYaml(diff.newfile)}
+            oldValue={formatDiff(diff.oldfile)}
+            newValue={formatDiff(diff.newfile)}
             splitView={true}
             leftTitle={`${DIFF_TYPE_LABELS[diffType]} — Before`}
             rightTitle={`${DIFF_TYPE_LABELS[diffType]} — After`}
@@ -544,13 +543,13 @@ const RolloutStrategyTab: React.FC<{
                   )}
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-zinc-400 uppercase">Cooloff</span>
+                  <span className="text-[10px] text-zinc-400 uppercase">Cooloff (min)</span>
                   {isEditing && !isLocked ? (
                     <input type="number" min={0} value={stage.cooloff}
                       onChange={(e) => handleStageChange(idx, 'cooloff', parseInt(e.target.value) || 0)}
                       className="w-16 h-7 border border-zinc-300 rounded px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-zinc-400" />
                   ) : (
-                    <span className="text-sm font-mono">{stage.cooloff}s</span>
+                    <span className="text-sm font-mono">{stage.cooloff}m</span>
                   )}
                 </div>
                 <div className="flex items-center gap-1.5">
@@ -834,12 +833,16 @@ const ReleaseSummary: React.FC = () => {
                   <InfoField label="Env" value={release.env} />
                   <InfoField label="Mode" value={release.mode} />
                   <InfoField label="Category" value={category} />
+                  <InfoField label="Release Manager" value={release.release_manager || '-'} />
                   <InfoField label="Old Version" value={release.old_version} mono />
                   <InfoField label="New Version" value={release.new_version} mono />
                   <InfoField label="Docker Image" value={dockerImage} mono />
                   <InfoField label="Cluster" value={release.release_context?.cluster || ''} />
+                  <InfoField label="Priority" value={String(release.priority ?? 0)} />
                   <InfoField label="Approved" value={release.is_approved ? 'Yes' : 'No'} />
                   <InfoField label="Infra Approved" value={release.is_infra_approved ? 'Yes' : 'No'} />
+                  {release.description && <InfoField label="Description" value={release.description} />}
+                  {release.change_log && <InfoField label="Change Log" value={release.change_log} />}
                   {releaseTag && <InfoField label="Release Tag" value={releaseTag} mono />}
                   {globalId && <InfoField label="Global ID" value={globalId} mono />}
                   {newService === 'Yes' && <InfoField label="New Service" value="Yes" />}

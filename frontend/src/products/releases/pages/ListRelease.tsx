@@ -30,6 +30,7 @@ const TIME_RANGE_OPTIONS = [
 const STATUS_FILTER_OPTIONS: ReleaseStatus[] = [
   'CREATED', 'INPROGRESS', 'PAUSED', 'COMPLETED', 'ABORTED', 'USER_ABORTED',
   'GCLT_ABORTED', 'REVERTED', 'REVERTING', 'DISCARDED', 'DISCARDING', 'ABORTING', 'VS_APPLIED', 'RESTARTING',
+  'RECORDING', 'RECORDED',
 ];
 
 const getDateRange = (range: TimeRange, customFrom: string, customTo: string): { from: Date; to: Date } => {
@@ -271,12 +272,12 @@ const ListRelease: React.FC = () => {
               <thead>
                 <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
                   <th className="py-3 px-4 w-12">#</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('product')}>Product</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('service')}>Service</th>
-                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('id')}>ID</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('new_version')}>Version</th>
                   <th className="py-3 px-4">Status</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('release_manager')}>Release Manager</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('date_created')}>Created At</th>
-                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('start_time')}>Start Time</th>
                   <th className="py-3 px-4 w-24 text-center">Actions</th>
                 </tr>
               </thead>
@@ -296,18 +297,8 @@ const ListRelease: React.FC = () => {
                         onClick={() => navigate(`/releases/${release.id}`)}
                       >
                         <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + index + 1}</td>
+                        <td className="py-3 px-4 text-xs text-zinc-600">{release.product}</td>
                         <td className="py-3 px-4 font-medium text-zinc-800">{release.service}</td>
-                        <td className="py-3 px-4 font-mono text-xs text-zinc-500">
-                          <span className="inline-flex items-center gap-1 group/id">
-                            {release.id}
-                            <button
-                              onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(release.id); toast.success('Release ID copied'); }}
-                              className="opacity-0 group-hover/id:opacity-100 p-0.5 rounded text-zinc-300 hover:text-zinc-600 transition-opacity duration-150 cursor-pointer"
-                            >
-                              <Clipboard className="w-3 h-3" />
-                            </button>
-                          </span>
-                        </td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">{release.new_version}</td>
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-1.5">
@@ -324,8 +315,8 @@ const ListRelease: React.FC = () => {
                             )}
                           </div>
                         </td>
+                        <td className="py-3 px-4 text-xs text-zinc-600">{release.release_manager || '-'}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatISODate(release.date_created)}</td>
-                        <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatISODate(release.start_time)}</td>
                         <td className="py-3 px-4 text-center">
                           <div className="inline-flex items-center gap-0.5">
                             <SimpleTooltip content="Clone release">

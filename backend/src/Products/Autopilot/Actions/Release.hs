@@ -700,9 +700,7 @@ releaseDiffH rid mType = do
                 mBefore = findSnapshot beforeLabel
                 mAfter = findSnapshot afterLabel
             let payloadToText :: Value -> Text
-                payloadToText (String s) = case eitherDecode (LBS.pack (T.unpack s)) :: Either String Value of
-                    Right v -> TE.decodeUtf8 (LBS.toStrict (A.encode v))
-                    Left _ -> s
+                payloadToText (String s) = s  -- Already YAML text from snapshot capture, return as-is
                 payloadToText other = TE.decodeUtf8 (LBS.toStrict (A.encode other))
             case (mBefore, mAfter) of
                 (Just beforeEvt, Just afterEvt) ->

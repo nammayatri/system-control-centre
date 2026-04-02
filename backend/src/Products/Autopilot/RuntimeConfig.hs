@@ -23,7 +23,6 @@ module Products.Autopilot.RuntimeConfig
     , getMaxJobCompletionHours
     , getRevertCooloff
     , getLockExpiryDelayMinutes
-    , getDefaultRecordingTime
     , getMaxK8sRetries
       -- HPA
     , isHpaEnabledForProduct
@@ -127,8 +126,6 @@ getRevertCooloff db = getConfigInt db "revert_cooloff" 1
 getLockExpiryDelayMinutes :: DBEnv -> IO Int
 getLockExpiryDelayMinutes db = getConfigInt db "lock_expiry_delay_minutes" 15
 
-getDefaultRecordingTime :: DBEnv -> IO Double
-getDefaultRecordingTime db = getConfigDouble db "default_recording_time" 20.0
 
 getMaxK8sRetries :: DBEnv -> IO Int
 getMaxK8sRetries db = getConfigInt db "max_k8s_retries" 3

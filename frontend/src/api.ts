@@ -76,10 +76,12 @@ export type ReleaseStatus =
     | 'RESTARTING'
     | 'GCLT_ABORTED'
     | 'DISCARDING'
-    | 'VS_APPLIED';
+    | 'VS_APPLIED'
+    | 'RECORDING'
+    | 'RECORDED';
 
 export const TERMINAL_STATUSES: ReleaseStatus[] = [
-    'ABORTED', 'USER_ABORTED', 'COMPLETED', 'DISCARDED', 'GCLT_ABORTED', 'REVERTED'
+    'ABORTED', 'USER_ABORTED', 'COMPLETED', 'DISCARDED', 'GCLT_ABORTED', 'REVERTED', 'RECORDED'
 ];
 
 export const ABORTED_STATUSES: ReleaseStatus[] = [
@@ -262,8 +264,8 @@ const toLegacyStatus = (status?: string): ReleaseStatus => {
         case 'UserAborted': return 'USER_ABORTED';
         case 'GcltAborted': return 'GCLT_ABORTED';
         case 'Discarded': return 'DISCARDED';
-        case 'Recording': return 'INPROGRESS';
-        case 'Recorded': return 'COMPLETED';
+        case 'Recording': return 'RECORDING';
+        case 'Recorded': return 'RECORDED';
         case 'Restarting': return 'RESTARTING';
         case 'Discarding': return 'DISCARDING';
         case 'VsApplied': return 'VS_APPLIED';
