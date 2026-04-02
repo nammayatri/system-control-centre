@@ -290,11 +290,11 @@ const DeploymentConfig: React.FC = () => {
                   <th className="py-3 px-4 w-10"></th>
                   <th className="py-3 px-4">Name</th>
                   <th className="py-3 px-4">Namespace</th>
-                  <th className="py-3 px-4">VS Name / Host</th>
-                  <th className="py-3 px-4">Cluster</th>
+                  <th className="py-3 px-4">VS / Host</th>
+                  <th className="py-3 px-4">Cluster / Slack</th>
                   <th className="py-3 px-4">Acronym</th>
                   <th className="py-3 px-4">Type</th>
-                  <th className="py-3 px-4">Details</th>
+                  <th className="py-3 px-4">Sync / Rollout</th>
                   <th className="py-3 px-4 w-24 text-center">Actions</th>
                 </tr>
               </thead>
@@ -328,17 +328,17 @@ const DeploymentConfig: React.FC = () => {
                             {services.length} service{services.length !== 1 ? 's' : ''}
                           </span>
                         </td>
-                        <td className="py-3 px-4 font-mono text-xs text-zinc-600">{group.namespace}</td>
+                        <td className="py-3 px-4 font-mono text-xs text-zinc-600">{group.namespace || '-'}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">{group.vs_name || '-'}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">{group.cluster || '-'}</td>
                         <td className="py-3 px-4 text-zinc-600">{group.product_acronym || '-'}</td>
                         <td className="py-3 px-4">
                           <Badge variant={typeBadgeVariant(group.product_type)} size="sm">
-                            {group.product_type}
+                            {group.product_type || '-'}
                           </Badge>
                         </td>
                         <td className="py-3 px-4 text-xs text-zinc-500">
-                          {group.sync_cluster ? `Sync: ${group.sync_cluster}` : '-'}
+                          {group.sync_cluster || '-'}
                         </td>
                         <td className="py-3 px-4 text-center">
                           <div className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
@@ -360,20 +360,6 @@ const DeploymentConfig: React.FC = () => {
                         </td>
                       </tr>
 
-                      {/* Group details row (expanded) */}
-                      {isExpanded && (
-                        <tr className="bg-zinc-50/40 border-b border-zinc-100">
-                          <td className="py-2 px-4"></td>
-                          <td colSpan={8} className="py-2 px-4">
-                            <div className="flex items-center gap-6 text-xs text-zinc-500">
-                              <span><span className="font-medium text-zinc-600">Sync Cluster:</span> {group.sync_cluster || 'None'}</span>
-                              <span><span className="font-medium text-zinc-600">VS Lock:</span> {group.vs_locked_by ? `Locked by ${group.vs_locked_by}` : 'Unlocked'}</span>
-                              <span><span className="font-medium text-zinc-600">Infra Approval:</span> {group.need_infra_approval ? 'Required' : 'Not required'}</span>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-
                       {/* Service rows (expanded) */}
                       {isExpanded && services.map((svc, sIdx) => (
                         <tr
@@ -390,8 +376,9 @@ const DeploymentConfig: React.FC = () => {
                               <span className="text-zinc-700">{svc.service}</span>
                             </div>
                           </td>
-                          <td className="py-2.5 px-4 font-mono text-xs text-zinc-600" colSpan={2}>{svc.host || '-'}</td>
-                          <td className="py-2.5 px-4 font-mono text-xs text-zinc-400">{svc.slack_channel || '-'}</td>
+                          <td className="py-2.5 px-4 text-xs text-zinc-400">-</td>
+                          <td className="py-2.5 px-4 font-mono text-xs text-zinc-600">{svc.host || '-'}</td>
+                          <td className="py-2.5 px-4 font-mono text-xs text-zinc-500">{svc.slack_channel || '-'}</td>
                           <td className="py-2.5 px-4">
                             {svc.serviceType ? (
                               <Badge variant={typeBadgeVariant(svc.serviceType)} size="sm">
