@@ -191,11 +191,8 @@ prepareK8sResources = do
     isNew <- isNewServiceRelease
     liftIO $ putStrLn $ "Preparing K8s resources for " <> T.unpack (product rt) <> if isNew then " (NEW SERVICE)" else ""
 
-    -- Capture BEFORE snapshots
-    when (not isNew) $ do
-        let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
-        liftIO $ captureDeploymentSnapshot cfg db (releaseId rt) (namespace ctx) oldDepName "DEPLOYMENT_BEFORE"
-    liftIO $ captureVSSnapshot cfg db (releaseId rt) (namespace ctx) (virtualServiceName ctx) "VS_BEFORE"
+    -- BEFORE snapshots are captured at release creation time (createReleaseH)
+    -- so diffs are available before the workflow starts.
 
     -- 1. Apply ConfigMap
     updateK8sStatus BSApplyConfigMap

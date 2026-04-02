@@ -68,6 +68,7 @@ import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.Queries.VsEditTracker ()
 import Products.Autopilot.Sync (triggerImmediateRevertSync)
+import Products.Autopilot.Workflow.Helpers (captureDeploymentSnapshot, captureVSSnapshot)
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.API
@@ -362,6 +363,12 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                     }
                     liftIO $ insertReleaseTracker db tracker (Just targetState)
                     liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
+                    -- Capture BEFORE snapshots at creation time (so diff is available immediately)
+                    let ns = getProductNamespace pCfg
+                        vsN = getProductVsName pCfg
+                        oldDepName = targetSvcHost <> "-" <> resolvedOldVersion
+                    liftIO $ captureDeploymentSnapshot cfg db rid ns oldDepName "DEPLOYMENT_BEFORE"
+                    liftIO $ captureVSSnapshot cfg db rid ns vsN "VS_BEFORE"
                     liftIO $ notifyReleaseCreated db tracker
                     pure $ APIResponse "SUCCESS" ("Tracker created: " <> rid)
 
