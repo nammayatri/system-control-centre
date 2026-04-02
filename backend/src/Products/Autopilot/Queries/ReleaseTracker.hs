@@ -178,7 +178,7 @@ findRunnableReleaseTrackers db now = do
         select $
           orderBy_ (asc_ . rtCreatedAt) $ do
             rt <- all_ (releaseTrackers nammaAPDb)
-            guard_ (rtStatus rt `in_` [val_ "CREATED"])
+            guard_ (rtStatus rt `in_` [val_ "CREATED", val_ "INPROGRESS"])
             pure rt
   let parsed = map fromRow rows
       isDue (tracker, _) = case scheduleTime tracker of

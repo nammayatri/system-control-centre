@@ -480,8 +480,9 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
               pure ()
             else do
               -- Check if cooloff has elapsed for current step
+              -- Reads from rollout strategy (fast-forward sets strategy cooloff to 0)
               now <- liftIO getCurrentTime
-              let currentStep = strategy !! (currentIndex - 1)
+              let currentStep = (rolloutStrategy freshRT) !! (currentIndex - 1)
                   cooloffMins = cooloffSeconds currentStep
                   elapsed = diffUTCTime now stepStartTime
                   cooloffSecs = fromIntegral cooloffMins * 60 :: Double

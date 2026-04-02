@@ -1028,18 +1028,26 @@ fastForwardH rid req = do
             if currentStatus /= InProgress
                 then pure $ APIResponse "ERROR" ("Cannot fast-forward from status: " <> T.pack (show currentStatus) <> ". Must be InProgress")
                 else do
-                    -- Mark the current rollout history step as completed by zeroing out the cooloff
-                    let history = NT.rolloutHistory tracker
+                    -- Fast-forward: set the rollout strategy's cooloff to 0 for current step
+                    -- so the workflow's isCoolOffExceeded check passes immediately.
+                    -- Also mark historyManualOverride = True on the history entry.
+                    let currentStepIdx = length (NT.rolloutHistory tracker) - 1
+                        strategy = NT.rolloutStrategy tracker
+                        updatedStrategy = case strategy of
+                            [] -> []
+                            steps ->
+                                zipWith (\i s -> if i == currentStepIdx then s{cooloffSeconds = 0} else s) [0..] steps
+                        history = NT.rolloutHistory tracker
                         updatedHistory = case history of
                             [] -> []
                             steps ->
                                 let lastIdx = length steps - 1
                                     updateStep i step =
                                         if i == lastIdx
-                                            then step{historyCooloffSeconds = 0}
+                                            then step{historyCooloffSeconds = 0, historyManualOverride = True}
                                             else step
                                  in zipWith updateStep [0 ..] steps
-                        updated = (tracker :: ReleaseTracker){NT.rolloutHistory = updatedHistory}
+                        updated = (tracker :: ReleaseTracker){NT.rolloutHistory = updatedHistory, NT.rolloutStrategy = updatedStrategy}
                     liftIO $ insertReleaseTracker db updated mTargetState
                     liftIO $ insertReleaseEvent db rid "BUSINESS" "FAST_FORWARD"
                         (object

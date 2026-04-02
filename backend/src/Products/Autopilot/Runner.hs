@@ -118,16 +118,30 @@ trigger db (rt, mts) = do
       liftIO $ notifyReleaseAborted db discarded
       pure ()
     Nothing -> do
-      -- Atomically claim: DELETE WHERE status='CREATED' + INSERT with INPROGRESS
-      -- If another runner already changed the status, this returns False.
       now <- liftIO getCurrentTime
-      let rtInProgress = rt{status = InProgress, startTime = Just now}
-          row = toRow now now rtInProgress mts
-      claimed <- liftIO $ conditionalUpdateTrackerRow db row "CREATED"
-      if not claimed
-        then liftIO $ putStrLn $ "[RUNNER] Release " <> T.unpack (releaseId rt) <> " already claimed by another runner, skipping"
+      let currentStatus = NT.status rt
+      -- Handle both CREATED (new) and INPROGRESS (resume after restart)
+      rtInProgress <- if currentStatus == InProgress
+        then do
+          -- Already INPROGRESS — resume workflow (server may have restarted)
+          liftIO $ putStrLn $ "[RUNNER] Resuming INPROGRESS release: " <> T.unpack (releaseId rt)
+          liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "RUNNER_RESUMED" (toJSON ("Resuming after restart" :: T.Text))
+          pure rt
         else do
-          liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "RUNNER_PICKED" (toJSON rt)
+          -- CREATED — atomically claim and mark INPROGRESS
+          let rtNew = rt{status = InProgress, startTime = Just now}
+              row = toRow now now rtNew mts
+          claimed <- liftIO $ conditionalUpdateTrackerRow db row "CREATED"
+          if not claimed
+            then do
+              liftIO $ putStrLn $ "[RUNNER] Release " <> T.unpack (releaseId rt) <> " already claimed by another runner, skipping"
+              pure rt{status = Discarded}  -- marker to skip
+            else do
+              liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "RUNNER_PICKED" (toJSON rt)
+              pure rtNew
+      if NT.status rtInProgress == Discarded
+        then pure ()  -- skip, already claimed by another runner
+        else do
           result <- dispatchWorkflow rtInProgress mts
           case result of
             Left err -> do
