@@ -4,6 +4,7 @@ module Products.Autopilot.Queries.ServerConfig (
     getEnabledServerConfigValue,
     getEnabledServerConfigValueForProduct,
     listAllServerConfigs,
+    listServerConfigsByProduct,
     upsertServerConfig,
     deleteServerConfig,
 )
@@ -52,15 +53,24 @@ getEnabledServerConfigValueForProduct db name mProduct = do
             _ -> Nothing
     pure $ productMatch <|> globalMatch <|> anyMatch
 
--- | List all server_config rows (now includes product column).
+-- | List server_config rows, optionally filtered by product.
+-- If product given: returns product-specific + global (NULL) configs.
+-- If no product: returns all configs.
 listAllServerConfigs :: DBEnv -> IO [(Int, Text, Text, Text, Int, Maybe Text)]
-listAllServerConfigs db = do
+listAllServerConfigs db = listServerConfigsByProduct db Nothing
+
+listServerConfigsByProduct :: DBEnv -> Maybe Text -> IO [(Int, Text, Text, Text, Int, Maybe Text)]
+listServerConfigsByProduct db mProduct = do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $
-                    orderBy_ (\sc -> (asc_ (scType sc), asc_ (scName sc))) $
-                        all_ (serverConfigs nammaAPDb)
+                    orderBy_ (\sc -> (asc_ (scType sc), asc_ (scName sc))) $ do
+                        sc <- all_ (serverConfigs nammaAPDb)
+                        case mProduct of
+                            Just p -> guard_ (scProduct sc ==. val_ (Just p) ||. scProduct sc ==. val_ Nothing)
+                            Nothing -> pure ()
+                        pure sc
     pure $ map toTuple rows
   where
     toTuple :: ServerConfig -> (Int, Text, Text, Text, Int, Maybe Text)

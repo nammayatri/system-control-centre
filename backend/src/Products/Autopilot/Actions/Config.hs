@@ -32,7 +32,7 @@ import qualified Data.Text as T
 import GHC.Int (Int32)
 import Products.Autopilot.Actions.Release (upsertProductH, upsertServiceH)
 import Products.Autopilot.Queries.ProductService
-import Products.Autopilot.Queries.ServerConfig (listAllServerConfigs, upsertServerConfig, deleteServerConfig)
+import Products.Autopilot.Queries.ServerConfig (listServerConfigsByProduct, upsertServerConfig, deleteServerConfig)
 import Products.Autopilot.Queries.VsEditTracker (findProductConfigById, deleteProductConfig, listAllReleaseConfigs, findReleaseConfigById, deleteReleaseConfig)
 import Products.Autopilot.Types.API
 import Shared.Config.Registry (allConfigEntries, findConfigEntry, validateConfigValue)
@@ -141,10 +141,10 @@ deleteReleaseConfigH rid = do
 -- Server Config
 -- ============================================================================
 
-listServerConfigH :: Flow ServerConfigResponse
-listServerConfigH = do
+listServerConfigH :: Maybe Text -> Flow ServerConfigResponse
+listServerConfigH mProduct = do
     db <- getDBEnv
-    rows <- liftIO $ listAllServerConfigs db
+    rows <- liftIO $ listServerConfigsByProduct db mProduct
     -- Build a map of DB rows by name
     let dbMap :: Map.Map Text (Int, Text, Text, Text, Int, Maybe Text)
         dbMap = Map.fromList [(n, row) | row@(_, _, n, _, _, _) <- rows]

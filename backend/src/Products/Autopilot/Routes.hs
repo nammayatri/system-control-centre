@@ -42,7 +42,7 @@ type CoreAPI =
         :<|> "tracker" :> "configmap" :> Capture "id" Text :> ReqBody '[JSON] Value :> Put '[JSON] APIResponse
         :<|> "configmap" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] ConfigMapK8sResponse
         :<|> "configmap" :> "secondary" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] ConfigMapK8sResponse
-        :<|> "server-config" :> Get '[JSON] ServerConfigResponse
+        :<|> "server-config" :> QueryParam "product" Text :> Get '[JSON] ServerConfigResponse
         :<|> "server-config" :> ReqBody '[JSON] UpsertServerConfigReq :> Post '[JSON] APIResponse
         :<|> "server-config" :> Capture "id" Int32 :> Delete '[JSON] APIResponse
         :<|> "envs" :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
