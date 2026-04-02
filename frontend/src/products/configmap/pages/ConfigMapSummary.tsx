@@ -8,6 +8,7 @@ import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
+import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { RefreshCw, Copy, Check, Pause, Play, X, Square, RotateCcw, RotateCw, FastForward } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
@@ -53,8 +54,16 @@ const ConfigMapSummary: React.FC = () => {
     onError: (err: Error) => { toast.error(err.message || 'Action failed'); },
   });
 
-  const handleAction = (action: string) => {
-    if (!confirm(`Are you sure you want to ${action}?`)) return;
+  const confirmAction = useConfirm();
+  const handleAction = async (action: string) => {
+    const isDanger = ['Abort', 'Discard', 'Revert'].includes(action);
+    const ok = await confirmAction({
+      title: `${action} ConfigMap Release`,
+      description: `Are you sure you want to ${action.toLowerCase()} this ConfigMap release?`,
+      confirmLabel: `Yes, ${action}`,
+      variant: isDanger ? 'danger' : 'primary',
+    });
+    if (!ok) return;
     let body: Record<string, unknown> = {};
     switch (action) {
       case 'Approve': body = { is_approved: 1 }; break;
