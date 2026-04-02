@@ -42,39 +42,39 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Shared.Config.Runtime
-    ( getConfigBool
-    , getConfigDouble
-    , getConfigInt
+    ( getConfigBoolForProduct
+    , getConfigDoubleForProduct
+    , getConfigIntForProduct
     , isMailingEnabled
     , isSlackEnabled
     )
-import Shared.Queries.ServerConfig (getEnabledServerConfigValue)
+import Products.Autopilot.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 
 -- ── Feature flags ──────────────────────────────────────────────────
 
 isK8sEnabled :: DBEnv -> IO Bool
-isK8sEnabled db = getConfigBool db "k8s_enabled" True
+isK8sEnabled db = getConfigBoolForProduct db "k8s_enabled" (Just "autopilot") True
 
 isWatcherEnabled :: DBEnv -> IO Bool
-isWatcherEnabled db = getConfigBool db "watcher_enabled" True
+isWatcherEnabled db = getConfigBoolForProduct db "watcher_enabled" (Just "autopilot") True
 
 isApproveAllReleases :: DBEnv -> IO Bool
-isApproveAllReleases db = getConfigBool db "approve_all_releases" False
+isApproveAllReleases db = getConfigBoolForProduct db "approve_all_releases" (Just "autopilot") False
 
 isScaleDownPodsOnCompletion :: DBEnv -> IO Bool
-isScaleDownPodsOnCompletion db = getConfigBool db "scale_down_pods_on_completion" True
+isScaleDownPodsOnCompletion db = getConfigBoolForProduct db "scale_down_pods_on_completion" (Just "autopilot") True
 
 isGcltEnabled :: DBEnv -> IO Bool
-isGcltEnabled db = getConfigBool db "global_changelog_tracker_enabled" False
+isGcltEnabled db = getConfigBoolForProduct db "global_changelog_tracker_enabled" (Just "autopilot") False
 
 isPromQueryCheckEnabled :: DBEnv -> IO Bool
-isPromQueryCheckEnabled db = getConfigBool db "prom_query_check_enabled" False
+isPromQueryCheckEnabled db = getConfigBoolForProduct db "prom_query_check_enabled" (Just "autopilot") False
 
 isSyncClusterEnabled :: DBEnv -> IO Bool
-isSyncClusterEnabled db = getConfigBool db "sync_cluster_enabled" False
+isSyncClusterEnabled db = getConfigBoolForProduct db "sync_cluster_enabled" (Just "autopilot") False
 
 isMultiReleasePerProduct :: DBEnv -> IO Bool
-isMultiReleasePerProduct db = getConfigBool db "multi_release_per_product" False
+isMultiReleasePerProduct db = getConfigBoolForProduct db "multi_release_per_product" (Just "autopilot") False
 
 -- | Check if autopilot is under maintenance.
 -- Reads "ap_under_maintenance" from server_config. The value is a JSON object
@@ -82,7 +82,7 @@ isMultiReleasePerProduct db = getConfigBool db "multi_release_per_product" False
 -- "ap_under_maintenance" field is true.
 isUnderMaintenance :: DBEnv -> IO Bool
 isUnderMaintenance db = do
-    v <- getEnabledServerConfigValue db "ap_under_maintenance"
+    v <- getEnabledServerConfigValueForProduct db "ap_under_maintenance" (Just "autopilot")
     pure $ case v of
         Nothing -> False
         Just raw ->
@@ -97,48 +97,48 @@ isUnderMaintenance db = do
 -- ── Delays / numeric configs ───────────────────────────────────────
 
 getReleaseWatchDelay :: DBEnv -> IO Int
-getReleaseWatchDelay db = getConfigInt db "release_watch_delay" 20
+getReleaseWatchDelay db = getConfigIntForProduct db "release_watch_delay" (Just "autopilot") 20
 
 getReleaseStartDelay :: DBEnv -> IO Int
-getReleaseStartDelay db = getConfigInt db "release_start_delay" 2
+getReleaseStartDelay db = getConfigIntForProduct db "release_start_delay" (Just "autopilot") 2
 
 getCollectMetricsDelay :: DBEnv -> IO Int
-getCollectMetricsDelay db = getConfigInt db "collect_metrics_delay" 60
+getCollectMetricsDelay db = getConfigIntForProduct db "collect_metrics_delay" (Just "autopilot") 60
 
 getPodsCreationDelay :: DBEnv -> IO Int
-getPodsCreationDelay db = getConfigInt db "pods_creation_delay" 60
+getPodsCreationDelay db = getConfigIntForProduct db "pods_creation_delay" (Just "autopilot") 60
 
 getPodsScaleDownDelayFromConfig :: DBEnv -> IO Double
-getPodsScaleDownDelayFromConfig db = getConfigDouble db "pods_scale_down_delay_config" 0.0
+getPodsScaleDownDelayFromConfig db = getConfigDoubleForProduct db "pods_scale_down_delay_config" (Just "autopilot") 0.0
 
 getPodsCalculationFactor :: DBEnv -> IO Double
-getPodsCalculationFactor db = getConfigDouble db "pods_calculation_factor" 1.2
+getPodsCalculationFactor db = getConfigDoubleForProduct db "pods_calculation_factor" (Just "autopilot") 1.2
 
 getHpaMinMaxFactor :: DBEnv -> IO Double
-getHpaMinMaxFactor db = getConfigDouble db "hpa_min_max_ratio" 1.0
+getHpaMinMaxFactor db = getConfigDoubleForProduct db "hpa_min_max_ratio" (Just "autopilot") 1.0
 
 getMaxJobCompletionHours :: DBEnv -> IO Int
-getMaxJobCompletionHours db = getConfigInt db "max_job_completion_hours" 3
+getMaxJobCompletionHours db = getConfigIntForProduct db "max_job_completion_hours" (Just "autopilot") 3
 
 getRevertCooloff :: DBEnv -> IO Int
-getRevertCooloff db = getConfigInt db "revert_cooloff" 1
+getRevertCooloff db = getConfigIntForProduct db "revert_cooloff" (Just "autopilot") 1
 
 getLockExpiryDelayMinutes :: DBEnv -> IO Int
-getLockExpiryDelayMinutes db = getConfigInt db "lock_expiry_delay_minutes" 15
+getLockExpiryDelayMinutes db = getConfigIntForProduct db "lock_expiry_delay_minutes" (Just "autopilot") 15
 
 
 getMaxK8sRetries :: DBEnv -> IO Int
-getMaxK8sRetries db = getConfigInt db "max_k8s_retries" 3
+getMaxK8sRetries db = getConfigIntForProduct db "max_k8s_retries" (Just "autopilot") 3
 
 -- ── HPA configs ────────────────────────────────────────────────────
 
 isHpaEnabledForProduct :: DBEnv -> Text -> IO Bool
 isHpaEnabledForProduct db productName = do
-    dbConfig <- getEnabledServerConfigValue db "scaling_with_hpa_enabled"
+    dbConfig <- getEnabledServerConfigValueForProduct db "scaling_with_hpa_enabled" (Just "autopilot")
     let dbProducts = case dbConfig of
             Just val -> map T.strip (T.splitOn "," (T.filter (\c -> c /= '[' && c /= ']' && c /= '"') val))
             Nothing -> []
     pure $ T.toUpper productName `elem` map T.toUpper (filter (not . T.null) dbProducts)
 
 getHpaTemplate :: DBEnv -> IO (Maybe Text)
-getHpaTemplate db = getEnabledServerConfigValue db "hpa_template"
+getHpaTemplate db = getEnabledServerConfigValueForProduct db "hpa_template" (Just "autopilot")

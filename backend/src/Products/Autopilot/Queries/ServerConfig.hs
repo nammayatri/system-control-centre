@@ -2,12 +2,14 @@
 
 module Products.Autopilot.Queries.ServerConfig (
     getEnabledServerConfigValue,
+    getEnabledServerConfigValueForProduct,
     listAllServerConfigs,
     upsertServerConfig,
     deleteServerConfig,
 )
 where
 
+import Control.Applicative ((<|>))
 import Core.DB.Connection (runDB, withConn)
 import Core.Environment (DBEnv)
 import Data.Text (Text)
@@ -17,11 +19,21 @@ import Database.PostgreSQL.Simple (execute)
 import GHC.Int (Int32)
 import Shared.Types.Storage.Schema
 
-{- | Fetch a server_config value by name where enabled is truthy (1).
-Backward compatible: does not filter by product.
+{- | Fetch a server_config value by name, with product-scoped lookup.
+Priority: product-specific value > global (product IS NULL) value.
+If no product param given, falls back to first enabled match (backward compat).
 -}
 getEnabledServerConfigValue :: DBEnv -> Text -> IO (Maybe Text)
-getEnabledServerConfigValue db name = do
+getEnabledServerConfigValue db name = getEnabledServerConfigValueForProduct db name Nothing
+
+{- | Product-aware config lookup.
+Queries all enabled rows matching the name, then picks:
+1. Product-specific match (if product param given and match exists)
+2. Global match (product IS NULL)
+3. Any match (first found)
+-}
+getEnabledServerConfigValueForProduct :: DBEnv -> Text -> Maybe Text -> IO (Maybe Text)
+getEnabledServerConfigValueForProduct db name mProduct = do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -29,10 +41,16 @@ getEnabledServerConfigValue db name = do
                     sc <- all_ (serverConfigs nammaAPDb)
                     guard_ (scName sc ==. val_ name)
                     guard_ (scEnabled sc ==. val_ 1)
-                    pure (scValue sc)
-    pure $ case rows of
-        (v : _) -> Just v
-        _ -> Nothing
+                    pure (scProduct sc, scValue sc)
+    -- Priority: product-specific > global (NULL) > any
+    let productMatch = case mProduct of
+            Just p -> lookup (Just p) rows
+            Nothing -> Nothing
+        globalMatch = lookup Nothing rows
+        anyMatch = case rows of
+            ((_, v) : _) -> Just v
+            _ -> Nothing
+    pure $ productMatch <|> globalMatch <|> anyMatch
 
 -- | List all server_config rows (now includes product column).
 listAllServerConfigs :: DBEnv -> IO [(Int, Text, Text, Text, Int, Maybe Text)]
