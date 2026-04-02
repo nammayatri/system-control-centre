@@ -618,11 +618,17 @@ updateTrackerH rid req = do
         Just (tracker, mTargetState) -> do
             let oldStatus = NT.status tracker
                 oldStatusText = releaseStatusToText oldStatus
-            -- Guard: when release is InProgress, only allow pause/abort status transitions.
-            -- Other field modifications would race with the running workflow.
-            let isAllowedInProgress = case (req :: K8sUpdateTrackerReq).status of
+            -- Guard: when release is InProgress, allow:
+            -- 1. Pause/abort status transitions
+            -- 2. Rollout strategy updates (for editing future stages)
+            -- Block other field modifications that would race with the running workflow.
+            let isStatusTransition = case (req :: K8sUpdateTrackerReq).status of
                     Just s -> let ns = parseReleaseStatus s in ns == Paused || ns == Aborting
                     Nothing -> False
+                isStrategyUpdate = case (req :: K8sUpdateTrackerReq).rolloutStrategy of
+                    Just _ -> True
+                    Nothing -> False
+                isAllowedInProgress = isStatusTransition || isStrategyUpdate
             if oldStatus == InProgress && not isAllowedInProgress
                 then pure $ APIResponse "ERROR" "Cannot modify release while in progress. Pause it first."
                 else do
