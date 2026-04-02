@@ -527,19 +527,19 @@ const CreateRelease: React.FC = () => {
                         <td className="py-2 px-3">
                           <input type="number" value={stage.rollout}
                             disabled={isLocked}
-                            onChange={(e) => { const s = [...stages]; s[idx].rollout = parseInt(e.target.value) || 0; setStages(s); }}
+                            onChange={(e) => setStages(prev => prev.map((s, i) => i === idx ? { ...s, rollout: parseInt(e.target.value) || 0 } : s))}
                             className={cn(isLocked ? disabledInputClass : inputClass, 'w-24')} />
                         </td>
                         <td className="py-2 px-3">
                           <input type="number" value={stage.cooloff}
                             disabled={isLocked}
-                            onChange={(e) => { const s = [...stages]; s[idx].cooloff = parseInt(e.target.value) || 0; setStages(s); }}
+                            onChange={(e) => setStages(prev => prev.map((s, i) => i === idx ? { ...s, cooloff: parseInt(e.target.value) || 0 } : s))}
                             className={cn(isLocked ? disabledInputClass : inputClass, 'w-24')} />
                         </td>
                         <td className="py-2 px-3">
                           <input type="number" value={stage.pods}
                             disabled={isLocked}
-                            onChange={(e) => { const s = [...stages]; s[idx].pods = parseInt(e.target.value) || 0; setStages(s); }}
+                            onChange={(e) => setStages(prev => prev.map((s, i) => i === idx ? { ...s, pods: parseInt(e.target.value) || 0 } : s))}
                             className={cn(isLocked ? disabledInputClass : inputClass, 'w-24')} />
                         </td>
                         <td className="py-2 px-3">
