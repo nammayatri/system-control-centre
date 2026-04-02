@@ -267,13 +267,13 @@ const CreateRelease: React.FC = () => {
             status: formData.status,
             mode: formData.mode,
             description: formData.description,
-            change_log: formData.change_log,
+            changeLog: formData.change_log,
             priority: parseInt(formData.priority, 10) || 0,
-            schedule_time: formData.schedule_time || null,
-            docker_image: formData.docker_image,
-            pods_scale_down_delay: parseFloat(formData.scale_down_delay) || 1.0,
+            scheduleTime: formData.schedule_time || null,
+            dockerImage: formData.docker_image,
+            podsScaleDownDelay: parseFloat(formData.scale_down_delay) || 1.0,
             info: formData.info,
-            next_route_strategy: futureStages.map(s => ({
+            rolloutStrategy: stages.map(s => ({
               rolloutPercent: s.rollout,
               cooloffSeconds: s.cooloff,
               podPercent: s.pods,
