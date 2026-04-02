@@ -43,3 +43,7 @@ frontend/.vite/
 *.pem
 *.key
 *.log
+
+# ── Context (not for git) ──
+CONTEXT.md
+backend/CONTEXT.md
