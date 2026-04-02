@@ -56,6 +56,8 @@ data ReleaseCategory
       WebApplication
     | -- | Infrastructure as code (Terraform, CloudFormation)
       Infrastructure
+    | -- | VirtualService edits (VS lock/unlock/apply/revert)
+      VSEdit
     deriving (Eq, Show, Read, Generic, Ord)
 
 instance ToJSON ReleaseCategory
@@ -73,6 +75,7 @@ getDefaultDeploymentTarget MobileAppAndroid = "play-store"
 getDefaultDeploymentTarget MobileAppIOS = "app-store"
 getDefaultDeploymentTarget WebApplication = "s3-cdn"
 getDefaultDeploymentTarget Infrastructure = "terraform"
+getDefaultDeploymentTarget VSEdit = "kubernetes"
 
 -- | Migrate old TrackerType to new ReleaseCategory
 migrateTrackerTypeToCategory :: Text -> ReleaseCategory

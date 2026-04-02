@@ -1,8 +1,9 @@
--- | Shared ProductConfig type - re-exported from Schema
+-- | Shared DeploymentConfig type - re-exported from Schema
+-- (Previously ProductConfig, now unified as DeploymentConfig)
 module Shared.Types.ProductConfig (
-    ProductConfigT (..),
-    ProductConfig,
+    DeploymentConfigT (..),
+    DeploymentConfig,
 )
 where
 
-import Shared.Types.Storage.Schema (ProductConfig, ProductConfigT (..))
+import Shared.Types.Storage.Schema (DeploymentConfig, DeploymentConfigT (..))

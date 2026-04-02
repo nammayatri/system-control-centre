@@ -78,6 +78,7 @@ isEligibleToRun db ongoing (rt, mts) = case category rt of
     MobileAppIOS -> pure True
     WebApplication -> pure True
     Infrastructure -> pure True
+    VSEdit -> pure True
   where
     k8sEligible skipOngoingCheck = do
         let k8sCluster = case mts of

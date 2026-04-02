@@ -105,6 +105,8 @@ getWorkflowForCategory = \case
     WebApplication -> notImplementedWorkflow "WebApplication"
     -- Infrastructure workflow
     Infrastructure -> notImplementedWorkflow "Infrastructure"
+    -- VS Edit (handled by Actions/VSEdit.hs, not the runner workflow)
+    VSEdit -> notImplementedWorkflow "VSEdit"
 
 -- | Placeholder for not-yet-implemented workflows
 notImplementedWorkflow :: Text -> WorkflowExecutor

@@ -15,16 +15,13 @@ module Shared.Queries.ReleaseConfig (
 )
 where
 
--- Re-export service/release-config queries from the original module
+-- Re-export service/release-config queries from the unified module
 import Products.Autopilot.Queries.ProductService (
     findServiceByProductAndName,
     getServiceHost,
     listReleaseConfigByProduct,
     listSchedulerServicesByProduct,
     upsertService,
- )
-
-import Products.Autopilot.Queries.VsEditTracker (
     listAllReleaseConfigs,
     findReleaseConfigById,
     deleteReleaseConfig,

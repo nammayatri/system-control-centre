@@ -101,12 +101,12 @@ listProductsH = do
         map
             ( \p ->
                 ProductResponse
-                    { product = S.productName p
+                    { product = S.dcProduct p
                     , cluster = getProductCluster p
                     , namespace = getProductNamespace p
                     , vsName = getProductVsName p
-                    , productType = S.productType p
-                    , productAcronym = S.productAcronym p
+                    , productType = fromMaybe "SERVICE" (S.dcProductType p)
+                    , productAcronym = fromMaybe "" (S.dcProductAcronym p)
                     , syncCluster = getProductSyncCluster p
                     }
             )
@@ -120,12 +120,12 @@ listServicesH productName' = do
     case products of
         [] -> pure []
         _ ->
-            if any (\p -> S.productType p == "SCHEDULER") products
+            if any (\p -> S.dcProductType p == Just "SCHEDULER") products
                 then do
                     services <- liftIO $ listSchedulerServicesByProduct db productName'
                     pure $
                         map
-                            (\s -> ServiceResponse (S.serviceName s) (getServiceHost s) (S.serviceType s) "DB")
+                            (\s -> ServiceResponse (fromMaybe "" (S.dcService s)) (getServiceHost s) (fromMaybe "SERVICE" (S.dcServiceType s)) "DB")
                             services
                 else do
                     cfgServices <- liftIO $ listReleaseConfigByProduct db productName'
@@ -136,9 +136,9 @@ listServicesH productName' = do
                              in configured == v || vsHost == configured
                         toResponse h =
                             case find (\s -> maybe False (`hostMatches` h) (getServiceHost s)) cfgServices of
-                                Just svc -> ServiceResponse (S.serviceName svc) (getServiceHost svc) (S.serviceType svc) "VIRTUAL_SERVICE"
+                                Just svc -> ServiceResponse (fromMaybe "" (S.dcService svc)) (getServiceHost svc) (fromMaybe "SERVICE" (S.dcServiceType svc)) "VIRTUAL_SERVICE"
                                 Nothing -> ServiceResponse h (Just h) "SERVICE" "VIRTUAL_SERVICE"
-                        pickServices :: [S.ProductConfig] -> IO (Either Text [Text])
+                        pickServices :: [S.DeploymentConfig] -> IO (Either Text [Text])
                         pickServices [] = pure (Right [])
                         pickServices (pCfg : rest) = do
                             res <- listServicesFromVirtualService cfg (getProductNamespace pCfg) (getProductVsName pCfg)
@@ -157,17 +157,17 @@ listServicesH productName' = do
                     case res of
                         Left _ ->
                             -- Fallback: if VirtualService discovery fails (e.g., no K8s locally),
-                            -- return services directly from release_config
+                            -- return services directly from deployment_config
                             pure $
                                 map
-                                    (\s -> ServiceResponse (S.serviceName s) (getServiceHost s) (S.serviceType s) "DB")
+                                    (\s -> ServiceResponse (fromMaybe "" (S.dcService s)) (getServiceHost s) (fromMaybe "SERVICE" (S.dcServiceType s)) "DB")
                                     cfgServices
                         Right hosts
                             | null hosts ->
                                 -- If K8s returned empty, also fallback to DB
                                 pure $
                                     map
-                                        (\s -> ServiceResponse (S.serviceName s) (getServiceHost s) (S.serviceType s) "DB")
+                                        (\s -> ServiceResponse (fromMaybe "" (S.dcService s)) (getServiceHost s) (fromMaybe "SERVICE" (S.dcServiceType s)) "DB")
                                         cfgServices
                             | otherwise -> pure $ map toResponse hosts
 
@@ -335,7 +335,7 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                 , createdBy = createdBy
                                 , approvedBy = approvedBy
                                 , isApproved = initialApproval
-                                , isInfraApproved = fromMaybe (fromMaybe False (S.productNeedInfraApproval pCfg >>= \need -> if need then Just False else Just True)) isInfraApproved
+                                , isInfraApproved = fromMaybe (fromMaybe False (S.dcNeedInfraApproval pCfg >>= \need -> if need then Just False else Just True)) isInfraApproved
                                 , releaseTag = autoTag
                                 , dateCreated = Nothing -- DB sets via DEFAULT now()
                                 , lastUpdated = Nothing -- DB sets via DEFAULT now()

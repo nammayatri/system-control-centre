@@ -13,52 +13,43 @@ import Database.Beam
 import Database.Beam.Schema.Tables (fieldNamed, setEntityName)
 import GHC.Int (Int32)
 
-data ProductConfigT f = ProductConfigT
-    { productConfigId :: Columnar f Int32
-    , productName :: Columnar f Text
-    , productRepoName :: Columnar f Text
-    , productType :: Columnar f Text
-    , productAcronym :: Columnar f Text
-    , productReleaseBranch :: Columnar f Text
-    , productNeedInfraApproval :: Columnar f (Maybe Bool)
-    , productTargetConfig :: Columnar f (Maybe Text)
+-- | Unified deployment config: product-level (service IS NULL) or service-level (service IS NOT NULL)
+data DeploymentConfigT f = DeploymentConfigT
+    { dcId :: Columnar f Int32
+    , dcProduct :: Columnar f Text
+    , dcService :: Columnar f (Maybe Text)
+    -- Product-level fields (service IS NULL)
+    , dcCluster :: Columnar f (Maybe Text)
+    , dcNamespace :: Columnar f (Maybe Text)
+    , dcVsName :: Columnar f (Maybe Text)
+    , dcProductAcronym :: Columnar f (Maybe Text)
+    , dcProductType :: Columnar f (Maybe Text)
+    , dcRepoName :: Columnar f (Maybe Text)
+    , dcReleaseBranch :: Columnar f (Maybe Text)
+    , dcSyncCluster :: Columnar f (Maybe Text)
+    , dcNeedInfraApproval :: Columnar f (Maybe Bool)
+    , dcVsLockedBy :: Columnar f (Maybe Text)
+    , dcVsLockTimestamp :: Columnar f (Maybe UTCTime)
+    -- Service-level fields (service IS NOT NULL)
+    , dcServiceHost :: Columnar f (Maybe Text)
+    , dcServiceType :: Columnar f (Maybe Text)
+    , dcServiceAcronym :: Columnar f (Maybe Text)
+    , dcRolloutStrategy :: Columnar f (Maybe Text)
+    , dcRevertStrategy :: Columnar f (Maybe Text)
+    , dcDecisionConfig :: Columnar f (Maybe Text)
+    , dcBitbucketPath :: Columnar f (Maybe Text)
+    , dcSlackChannel :: Columnar f (Maybe Text)
+    , dcEmails :: Columnar f (Maybe Text)
     }
     deriving (Generic, Beamable)
 
-type ProductConfig = ProductConfigT Identity
+type DeploymentConfig = DeploymentConfigT Identity
 
-deriving instance Show ProductConfig
+deriving instance Show DeploymentConfig
 
-instance Table ProductConfigT where
-    data PrimaryKey ProductConfigT f = ProductConfigId (Columnar f Int32) deriving (Generic, Beamable)
-    primaryKey = ProductConfigId . productConfigId
-
-data ReleaseConfigT f = ReleaseConfigT
-    { releaseConfigId :: Columnar f Int32
-    , releaseConfigEmails :: Columnar f (Maybe Text)
-    , releaseConfigRolloutStrategy :: Columnar f (Maybe Text)
-    , releaseConfigDecisionConfig :: Columnar f (Maybe Text)
-    , serviceName :: Columnar f Text
-    , serviceProduct :: Columnar f Text
-    , releaseConfigFlags :: Columnar f (Maybe Text)
-    , releaseConfigSlackWebhookUrls :: Columnar f (Maybe Text)
-    , serviceAcronym :: Columnar f (Maybe Text)
-    , serviceType :: Columnar f Text
-    , releaseConfigBitbucketPath :: Columnar f (Maybe Text)
-    , releaseConfigMicroserviceType :: Columnar f (Maybe Text)
-    , releaseConfigRevertStrategy :: Columnar f (Maybe Text)
-    , releaseConfigJiraWebhookUrl :: Columnar f (Maybe Text)
-    , serviceTargetConfig :: Columnar f (Maybe Text)
-    }
-    deriving (Generic, Beamable)
-
-type ReleaseConfig = ReleaseConfigT Identity
-
-deriving instance Show ReleaseConfig
-
-instance Table ReleaseConfigT where
-    data PrimaryKey ReleaseConfigT f = ReleaseConfigIdKey (Columnar f Int32) deriving (Generic, Beamable)
-    primaryKey = ReleaseConfigIdKey . releaseConfigId
+instance Table DeploymentConfigT where
+    data PrimaryKey DeploymentConfigT f = DeploymentConfigId (Columnar f Int32) deriving (Generic, Beamable)
+    primaryKey = DeploymentConfigId . dcId
 
 data ReleaseTrackerT f = ReleaseTrackerT
     { rtId :: Columnar f Text
@@ -141,43 +132,11 @@ instance Table ServerConfigT where
     data PrimaryKey ServerConfigT f = ServerConfigId (Columnar f Int32) deriving (Generic, Beamable)
     primaryKey = ServerConfigId . scId
 
-data VsEditTrackerT f = VsEditTrackerT
-    { vetId :: Columnar f Text
-    , vetProduct :: Columnar f Text
-    , vetService :: Columnar f Text
-    , vetEnv :: Columnar f Text
-    , vetVsName :: Columnar f Text
-    , vetOldVsData :: Columnar f (Maybe Text)
-    , vetNewVsData :: Columnar f (Maybe Text)
-    , vetStatus :: Columnar f Text
-    , vetCreatedBy :: Columnar f Text
-    , vetApprovedBy :: Columnar f (Maybe Text)
-    , vetIsLocked :: Columnar f (Maybe Bool)
-    , vetLockedBy :: Columnar f (Maybe Text)
-    , vetLockedAt :: Columnar f (Maybe UTCTime)
-    , vetLockExpiry :: Columnar f (Maybe UTCTime)
-    , vetMonitoringEndTime :: Columnar f (Maybe UTCTime)
-    , vetInfo :: Columnar f (Maybe Text)
-    , vetCreatedAt :: Columnar f UTCTime
-    , vetUpdatedAt :: Columnar f UTCTime
-    }
-    deriving (Generic, Beamable)
-
-type VsEditTracker = VsEditTrackerT Identity
-
-deriving instance Show VsEditTracker
-
-instance Table VsEditTrackerT where
-    data PrimaryKey VsEditTrackerT f = VsEditTrackerId (Columnar f Text) deriving (Generic, Beamable)
-    primaryKey = VsEditTrackerId . vetId
-
 data NammaAPDb f = NammaAPDb
-    { productConfig :: f (TableEntity ProductConfigT)
-    , releaseConfig :: f (TableEntity ReleaseConfigT)
+    { deploymentConfig :: f (TableEntity DeploymentConfigT)
     , releaseTrackers :: f (TableEntity ReleaseTrackerT)
     , releaseEvents :: f (TableEntity ReleaseEventT)
     , serverConfigs :: f (TableEntity ServerConfigT)
-    , vsEditTrackers :: f (TableEntity VsEditTrackerT)
     }
     deriving (Generic, Database be)
 
@@ -185,38 +144,33 @@ nammaAPDb :: DatabaseSettings be NammaAPDb
 nammaAPDb =
     defaultDbSettings
         `withDbModification` dbModification
-            { productConfig =
-                setEntityName "product_config"
+            { deploymentConfig =
+                setEntityName "deployment_config"
                     <> modifyTableFields
                         tableModification
-                            { productConfigId = fieldNamed "id"
-                            , productName = fieldNamed "product"
-                            , productRepoName = fieldNamed "repo_name"
-                            , productType = fieldNamed "product_type"
-                            , productAcronym = fieldNamed "product_acronym"
-                            , productReleaseBranch = fieldNamed "release_branch"
-                            , productNeedInfraApproval = fieldNamed "need_infra_approval"
-                            , productTargetConfig = fieldNamed "target_config"
-                            }
-            , releaseConfig =
-                setEntityName "release_config"
-                    <> modifyTableFields
-                        tableModification
-                            { releaseConfigId = fieldNamed "id"
-                            , releaseConfigEmails = fieldNamed "emails"
-                            , releaseConfigRolloutStrategy = fieldNamed "rollout_strategy"
-                            , releaseConfigDecisionConfig = fieldNamed "decision_config"
-                            , serviceName = fieldNamed "service"
-                            , serviceProduct = fieldNamed "product"
-                            , releaseConfigFlags = fieldNamed "flags"
-                            , releaseConfigSlackWebhookUrls = fieldNamed "slack_webhook_urls"
-                            , serviceAcronym = fieldNamed "service_acronym"
-                            , serviceType = fieldNamed "service_type"
-                            , releaseConfigBitbucketPath = fieldNamed "bitbucket_path"
-                            , releaseConfigMicroserviceType = fieldNamed "microservice_type"
-                            , releaseConfigRevertStrategy = fieldNamed "revert_strategy"
-                            , releaseConfigJiraWebhookUrl = fieldNamed "jira_webhook_url"
-                            , serviceTargetConfig = fieldNamed "target_config"
+                            { dcId = fieldNamed "id"
+                            , dcProduct = fieldNamed "product"
+                            , dcService = fieldNamed "service"
+                            , dcCluster = fieldNamed "cluster"
+                            , dcNamespace = fieldNamed "namespace"
+                            , dcVsName = fieldNamed "vs_name"
+                            , dcProductAcronym = fieldNamed "product_acronym"
+                            , dcProductType = fieldNamed "product_type"
+                            , dcRepoName = fieldNamed "repo_name"
+                            , dcReleaseBranch = fieldNamed "release_branch"
+                            , dcSyncCluster = fieldNamed "sync_cluster"
+                            , dcNeedInfraApproval = fieldNamed "need_infra_approval"
+                            , dcVsLockedBy = fieldNamed "vs_locked_by"
+                            , dcVsLockTimestamp = fieldNamed "vs_lock_timestamp"
+                            , dcServiceHost = fieldNamed "service_host"
+                            , dcServiceType = fieldNamed "service_type"
+                            , dcServiceAcronym = fieldNamed "service_acronym"
+                            , dcRolloutStrategy = fieldNamed "rollout_strategy"
+                            , dcRevertStrategy = fieldNamed "revert_strategy"
+                            , dcDecisionConfig = fieldNamed "decision_config"
+                            , dcBitbucketPath = fieldNamed "bitbucket_path"
+                            , dcSlackChannel = fieldNamed "slack_channel"
+                            , dcEmails = fieldNamed "emails"
                             }
             , releaseTrackers =
                 setEntityName "release_tracker"
@@ -277,28 +231,5 @@ nammaAPDb =
                             , scLastUpdated = fieldNamed "last_updated"
                             , scEnabled = fieldNamed "enabled"
                             , scProduct = fieldNamed "product"
-                            }
-            , vsEditTrackers =
-                setEntityName "vs_edit_tracker"
-                    <> modifyTableFields
-                        tableModification
-                            { vetId = fieldNamed "id"
-                            , vetProduct = fieldNamed "product"
-                            , vetService = fieldNamed "service"
-                            , vetEnv = fieldNamed "env"
-                            , vetVsName = fieldNamed "vs_name"
-                            , vetOldVsData = fieldNamed "old_vs_data"
-                            , vetNewVsData = fieldNamed "new_vs_data"
-                            , vetStatus = fieldNamed "status"
-                            , vetCreatedBy = fieldNamed "created_by"
-                            , vetApprovedBy = fieldNamed "approved_by"
-                            , vetIsLocked = fieldNamed "is_locked"
-                            , vetLockedBy = fieldNamed "locked_by"
-                            , vetLockedAt = fieldNamed "locked_at"
-                            , vetLockExpiry = fieldNamed "lock_expiry"
-                            , vetMonitoringEndTime = fieldNamed "monitoring_end_time"
-                            , vetInfo = fieldNamed "info"
-                            , vetCreatedAt = fieldNamed "created_at"
-                            , vetUpdatedAt = fieldNamed "updated_at"
                             }
             }

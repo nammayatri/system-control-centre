@@ -46,11 +46,91 @@ mkConnString Config{..} =
 
 ensureSchema :: DBEnv -> IO ()
 ensureSchema db = withConn db $ \conn -> do
+    -- ========================================================================
+    -- deployment_config (NEW — replaces product_config + release_config)
+    -- ========================================================================
+    _ <- execute_ conn "CREATE TABLE IF NOT EXISTS deployment_config (\
+        \id serial primary key, \
+        \product text not null, \
+        \service text null, \
+        \cluster text null, \
+        \namespace text null, \
+        \vs_name text null, \
+        \product_acronym text null, \
+        \product_type text null, \
+        \repo_name text null, \
+        \release_branch text null, \
+        \sync_cluster text null, \
+        \need_infra_approval boolean null, \
+        \vs_locked_by text null, \
+        \vs_lock_timestamp timestamptz null, \
+        \service_host text null, \
+        \service_type text null, \
+        \service_acronym text null, \
+        \rollout_strategy text null, \
+        \revert_strategy text null, \
+        \decision_config text null, \
+        \bitbucket_path text null, \
+        \slack_channel text null, \
+        \emails text null)"
+    -- Unique constraint: (product, COALESCE(service, ''))
+    _ <- execute_ conn "DO $$ BEGIN \
+        \IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_deployment_config') THEN \
+        \CREATE UNIQUE INDEX IF NOT EXISTS uq_deployment_config ON deployment_config (product, COALESCE(service, '')); \
+        \END IF; END $$"
+
+    -- ========================================================================
+    -- Migrate data from old tables (if they exist) into deployment_config
+    -- ========================================================================
+    -- Migrate product_config -> deployment_config (product-level rows, DISTINCT ON handles dups)
+    _ <- execute_ conn "DO $$ BEGIN \
+        \IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='product_config') THEN \
+        \INSERT INTO deployment_config (product, product_type, product_acronym, repo_name, release_branch, need_infra_approval, \
+        \cluster, namespace, vs_name, sync_cluster) \
+        \SELECT DISTINCT ON (p.product) p.product, p.product_type, p.product_acronym, p.repo_name, p.release_branch, p.need_infra_approval, \
+        \COALESCE((p.target_config::json->>'cluster')::text, ''), \
+        \COALESCE((p.target_config::json->>'namespace')::text, ''), \
+        \COALESCE((p.target_config::json->>'vsName')::text, ''), \
+        \(p.target_config::json->>'syncCluster')::text \
+        \FROM product_config p \
+        \WHERE NOT EXISTS (SELECT 1 FROM deployment_config d WHERE d.product = p.product AND d.service IS NULL) \
+        \ORDER BY p.product, p.id; \
+        \END IF; END $$"
+
+    -- Migrate release_config -> deployment_config (service-level rows)
+    _ <- execute_ conn "DO $$ BEGIN \
+        \IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='release_config') THEN \
+        \INSERT INTO deployment_config (product, service, service_type, emails, rollout_strategy, revert_strategy, \
+        \decision_config, slack_channel, bitbucket_path, service_host, service_acronym) \
+        \SELECT r.product, r.service, r.service_type, r.emails, r.rollout_strategy, r.revert_strategy, \
+        \r.decision_config, r.slack_webhook_urls, r.bitbucket_path, \
+        \COALESCE((r.target_config::json->>'serviceHost')::text, ''), \
+        \r.service_acronym \
+        \FROM release_config r \
+        \WHERE NOT EXISTS (SELECT 1 FROM deployment_config d WHERE d.product = r.product AND d.service = r.service); \
+        \END IF; END $$"
+
+    -- ========================================================================
+    -- Old tables (kept for backward compat — not used by new code)
+    -- ========================================================================
     _ <- execute_ conn "CREATE TABLE IF NOT EXISTS product_config (id serial primary key, product text not null, repo_name text not null, product_type text not null, product_acronym text not null, release_branch text not null, need_infra_approval boolean null, target_config text null)"
     _ <- execute_ conn "CREATE TABLE IF NOT EXISTS release_config (id serial primary key, emails text null, rollout_strategy text null, decision_config text null, service text not null, product text not null, flags text null, slack_webhook_urls text null, service_acronym text null, service_type text null, bitbucket_path text null, revert_strategy text null, target_config text null)"
+    _ <- execute_ conn "ALTER TABLE release_config ADD COLUMN IF NOT EXISTS microservice_type text null"
+    _ <- execute_ conn "ALTER TABLE release_config ADD COLUMN IF NOT EXISTS jira_webhook_url text null"
+    _ <- execute_ conn "ALTER TABLE release_config ADD COLUMN IF NOT EXISTS target_config text"
+    _ <- execute_ conn "ALTER TABLE product_config ADD COLUMN IF NOT EXISTS target_config text"
+    _ <- execute_ conn "CREATE TABLE IF NOT EXISTS vs_edit_tracker (id text primary key, product text not null, service text not null, env text not null, vs_name text not null, old_vs_data text, new_vs_data text, status text not null default 'CREATED', created_by text not null, approved_by text, is_locked boolean default false, locked_by text, locked_at timestamptz, lock_expiry timestamptz, monitoring_end_time timestamptz, info text, created_at timestamptz not null default now(), updated_at timestamptz not null default now())"
+
+    -- ========================================================================
+    -- server_config
+    -- ========================================================================
     _ <- execute_ conn "CREATE TABLE IF NOT EXISTS server_config (id integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, type varchar(255) not null default '', name varchar(255) not null, value text not null default '', last_updated timestamp without time zone not null default CURRENT_TIMESTAMP, enabled int not null default 1)"
     _ <- execute_ conn "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'server_config_name_unique') THEN CREATE UNIQUE INDEX IF NOT EXISTS server_config_name_product_unique ON server_config (name, COALESCE(product, '')); END IF; END $$"
     _ <- execute_ conn "ALTER TABLE server_config ADD COLUMN IF NOT EXISTS product text null"
+
+    -- ========================================================================
+    -- release_tracker
+    -- ========================================================================
     _ <- execute_ conn "CREATE TABLE IF NOT EXISTS release_tracker (id text primary key, status text not null, description text null, new_version text not null, old_version text not null, product text not null, service text not null, mode text null, date_created timestamptz not null, last_updated timestamptz not null, start_time timestamptz null, end_time timestamptz null, release_manager text not null, approved_by text null, env text not null, priority int not null, rollout_strategy text null, rollout_history text null, schedule_time timestamptz null, release_tag text not null, events text null, change_log text null, release_context text null, info text null, udf1 text null, udf2 text null, udf3 text null, is_approved boolean null, is_infra_approved boolean null, metadata text null, category text null, release_wf_status text null, global_id text null, new_service boolean null, is_art_recorder int null, cronjob_suspend boolean null, ab_hs_status text null default 'Uninitiated')"
     -- Migrate legacy column names if they exist
     _ <- execute_ conn "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='release_tracker' AND column_name='tracker_type') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='release_tracker' AND column_name='category') THEN ALTER TABLE release_tracker RENAME COLUMN tracker_type TO category; END IF; END $$"
@@ -62,15 +142,9 @@ ensureSchema db = withConn db $ \conn -> do
     _ <- execute_ conn "ALTER TABLE release_tracker ADD COLUMN IF NOT EXISTS cronjob_suspend boolean null"
     _ <- execute_ conn "ALTER TABLE release_tracker ADD COLUMN IF NOT EXISTS ab_hs_status text null default 'Uninitiated'"
     _ <- execute_ conn "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='release_tracker' AND column_name='is_art_recorder' AND data_type='boolean') THEN ALTER TABLE release_tracker ALTER COLUMN is_art_recorder TYPE int USING CASE WHEN is_art_recorder THEN 1 ELSE 0 END; END IF; END $$"
+
+    -- ========================================================================
+    -- release_events
+    -- ========================================================================
     _ <- execute_ conn "CREATE TABLE IF NOT EXISTS release_events (re_id serial primary key, re_release_id text not null, re_category text not null, re_label text not null, re_payload jsonb not null, re_created_at timestamptz not null)"
-    -- VS Edit Tracker table
-    _ <- execute_ conn "CREATE TABLE IF NOT EXISTS vs_edit_tracker (id text primary key, product text not null, service text not null, env text not null, vs_name text not null, old_vs_data text, new_vs_data text, status text not null default 'CREATED', created_by text not null, approved_by text, is_locked boolean default false, locked_by text, locked_at timestamptz, lock_expiry timestamptz, monitoring_end_time timestamptz, info text, created_at timestamptz not null default now(), updated_at timestamptz not null default now())"
-    -- Migrate product_config: pack K8s columns into target_config, then drop old columns
-    _ <- execute_ conn "ALTER TABLE product_config ADD COLUMN IF NOT EXISTS target_config text"
-    _ <- execute_ conn "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='product_config' AND column_name='cluster') THEN UPDATE product_config SET target_config = json_build_object('cluster', COALESCE(cluster, ''), 'namespace', COALESCE(namespace, ''), 'vsName', COALESCE(vs_name, ''), 'kubeContext', kube_context, 'syncCluster', sync_cluster, 'vsLockedBy', vs_locked_by, 'vsLockTimestamp', vs_lock_timestamp)::text WHERE target_config IS NULL; ALTER TABLE product_config DROP COLUMN cluster, DROP COLUMN namespace, DROP COLUMN vs_name, DROP COLUMN sync_cluster, DROP COLUMN vs_locked_by, DROP COLUMN vs_lock_timestamp, DROP COLUMN kube_context; END IF; END $$"
-    -- Migrate release_config: pack service_host into target_config, then drop old column
-    _ <- execute_ conn "ALTER TABLE release_config ADD COLUMN IF NOT EXISTS microservice_type text null"
-    _ <- execute_ conn "ALTER TABLE release_config ADD COLUMN IF NOT EXISTS jira_webhook_url text null"
-    _ <- execute_ conn "ALTER TABLE release_config ADD COLUMN IF NOT EXISTS target_config text"
-    _ <- execute_ conn "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='release_config' AND column_name='service_host') THEN UPDATE release_config SET target_config = json_build_object('serviceHost', service_host)::text WHERE target_config IS NULL; ALTER TABLE release_config DROP COLUMN service_host; END IF; END $$"
     pure ()

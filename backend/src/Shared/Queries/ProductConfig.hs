@@ -11,7 +11,6 @@ module Shared.Queries.ProductConfig (
     deleteProductConfig,
 
     -- * Product config extractors
-    getK8sProductConfig,
     getProductCluster,
     getProductNamespace,
     getProductVsName,
@@ -20,11 +19,12 @@ module Shared.Queries.ProductConfig (
 )
 where
 
--- Re-export product-related queries from the original module
+-- Re-export product-related queries from the unified module
 import Products.Autopilot.Queries.ProductService (
     findProductByName,
     findProductByNameAndCluster,
-    getK8sProductConfig,
+    findProductConfigById,
+    deleteProductConfig,
     getProductCluster,
     getProductNamespace,
     getProductSyncCluster,
@@ -33,9 +33,4 @@ import Products.Autopilot.Queries.ProductService (
     listProducts,
     listProductsByName,
     upsertProduct,
- )
-
-import Products.Autopilot.Queries.VsEditTracker (
-    findProductConfigById,
-    deleteProductConfig,
  )

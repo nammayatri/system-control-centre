@@ -296,6 +296,7 @@ parseReleaseCategory t =
         "MOBILEAPPIOS" -> MobileAppIOS
         "WEBAPPLICATION" -> WebApplication
         "INFRASTRUCTURE" -> Infrastructure
+        "VSEDIT" -> VSEdit
         _ -> BackendService -- Default fallback
 
 parseReleaseWFStatus :: Text -> ReleaseWFStatus
@@ -466,3 +467,11 @@ updateReleaseTrackerUdf3 db rid value =
                 "UPDATE release_tracker SET udf3 = ? WHERE id = ?"
                 (value, rid)
         pure ()
+
+-- | Insert a raw ReleaseTrackerRow (used by VSEdit handlers that build rows directly)
+insertReleaseTrackerRow :: DBEnv -> ReleaseTrackerRow -> IO ()
+insertReleaseTrackerRow db row =
+    withConn db $ \conn ->
+        withTransaction conn $ do
+            execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (rtId row))
+            runBeamPostgres conn $ runInsert $ insert (releaseTrackers nammaAPDb) $ insertValues [row]

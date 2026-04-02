@@ -1,5 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | VS Edit operations now use release_tracker with category='VSEdit'
+-- and deployment_config for VS lock state.
+-- This module provides thin wrappers for backward compatibility.
 module Products.Autopilot.Queries.VsEditTracker where
 
 import Core.DB.Connection (runDB)
@@ -7,123 +10,52 @@ import Core.Environment (DBEnv)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import Database.Beam
-import GHC.Int (Int32)
 import Shared.Types.Storage.Schema
 
-insertVsEditTracker :: DBEnv -> VsEditTracker -> IO ()
-insertVsEditTracker db row =
-    runDB db $
-        runInsert $
-            insert (vsEditTrackers nammaAPDb) $
-                insertValues [row]
-
-findVsEditTrackerById :: DBEnv -> Text -> IO (Maybe VsEditTracker)
-findVsEditTrackerById db tid = do
+-- | Find active VS lock by checking deployment_config.vs_locked_by IS NOT NULL
+findActiveLockFromConfig :: DBEnv -> Text -> IO (Maybe DeploymentConfig)
+findActiveLockFromConfig db product' = do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $ do
-                    t <- all_ (vsEditTrackers nammaAPDb)
-                    guard_ (vetId t ==. val_ tid)
-                    pure t
-    pure $ case rows of
-        [] -> Nothing
-        (x : _) -> Just x
-
-listVsEditTrackers :: DBEnv -> Maybe UTCTime -> Maybe UTCTime -> IO [VsEditTracker]
-listVsEditTrackers db mFrom mTo =
-    runDB db $
-        runSelectReturningList $
-            select $
-                orderBy_ (desc_ . vetCreatedAt) $ do
-                    t <- all_ (vsEditTrackers nammaAPDb)
-                    case mFrom of
-                        Just from -> guard_ (vetCreatedAt t >=. val_ from)
-                        Nothing -> pure ()
-                    case mTo of
-                        Just to -> guard_ (vetCreatedAt t <=. val_ to)
-                        Nothing -> pure ()
-                    pure t
-
-updateVsEditTracker :: DBEnv -> VsEditTracker -> IO ()
-updateVsEditTracker db row = do
-    runDB db $ do
-        runDelete $
-            delete (vsEditTrackers nammaAPDb) (\t -> vetId t ==. val_ (vetId row))
-        runInsert $
-            insert (vsEditTrackers nammaAPDb) $
-                insertValues [row]
-
-deleteVsEditTracker :: DBEnv -> Text -> IO ()
-deleteVsEditTracker db tid =
-    runDB db $
-        runDelete $
-            delete (vsEditTrackers nammaAPDb) (\t -> vetId t ==. val_ tid)
-
--- | Find active lock on a VS (non-expired, is_locked = true)
-findActiveLock :: DBEnv -> Text -> Text -> Text -> UTCTime -> IO (Maybe VsEditTracker)
-findActiveLock db product' vsName' env' now = do
-    rows <-
-        runDB db $
-            runSelectReturningList $
-                select $ do
-                    t <- all_ (vsEditTrackers nammaAPDb)
-                    guard_ (vetProduct t ==. val_ product')
-                    guard_ (vetVsName t ==. val_ vsName')
-                    guard_ (vetEnv t ==. val_ env')
-                    guard_ (vetIsLocked t ==. val_ (Just True))
-                    guard_ (vetLockExpiry t >=. val_ (Just now))
-                    pure t
-    pure $ case rows of
-        [] -> Nothing
-        (x : _) -> Just x
-
--- | List all release configs (no filter)
-listAllReleaseConfigs :: DBEnv -> IO [ReleaseConfig]
-listAllReleaseConfigs db =
-    runDB db $
-        runSelectReturningList $
-            select $
-                all_ (releaseConfig nammaAPDb)
-
--- | Find product config by ID
-findProductConfigById :: DBEnv -> Int32 -> IO (Maybe ProductConfig)
-findProductConfigById db pid = do
-    rows <-
-        runDB db $
-            runSelectReturningList $
-                select $ do
-                    p <- all_ (productConfig nammaAPDb)
-                    guard_ (productConfigId p ==. val_ pid)
+                    p <- all_ (deploymentConfig nammaAPDb)
+                    guard_ (dcProduct p ==. val_ product')
+                    guard_ (isNothing_ (dcService p))
+                    guard_ (isNothing_ (dcVsLockedBy p) ==. val_ False)
                     pure p
     pure $ case rows of
         [] -> Nothing
         (x : _) -> Just x
 
--- | Delete product config by ID
-deleteProductConfig :: DBEnv -> Int32 -> IO ()
-deleteProductConfig db pid =
+-- | List VS edit trackers = release_tracker WHERE category='VSEdit'
+listVsEditTrackerRows :: DBEnv -> Maybe UTCTime -> Maybe UTCTime -> IO [ReleaseTrackerRow]
+listVsEditTrackerRows db mFrom mTo =
     runDB db $
-        runDelete $
-            delete (productConfig nammaAPDb) (\p -> productConfigId p ==. val_ pid)
+        runSelectReturningList $
+            select $
+                orderBy_ (desc_ . rtCreatedAt) $ do
+                    t <- all_ (releaseTrackers nammaAPDb)
+                    guard_ (rtCategory t ==. val_ "VSEdit")
+                    case mFrom of
+                        Just from -> guard_ (rtCreatedAt t >=. val_ from)
+                        Nothing -> pure ()
+                    case mTo of
+                        Just to -> guard_ (rtCreatedAt t <=. val_ to)
+                        Nothing -> pure ()
+                    pure t
 
--- | Find release config by ID
-findReleaseConfigById :: DBEnv -> Int32 -> IO (Maybe ReleaseConfig)
-findReleaseConfigById db rid = do
+-- | Find VS edit tracker by ID = release_tracker WHERE id=? AND category='VSEdit'
+findVsEditTrackerRowById :: DBEnv -> Text -> IO (Maybe ReleaseTrackerRow)
+findVsEditTrackerRowById db tid = do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $ do
-                    r <- all_ (releaseConfig nammaAPDb)
-                    guard_ (releaseConfigId r ==. val_ rid)
-                    pure r
+                    t <- all_ (releaseTrackers nammaAPDb)
+                    guard_ (rtId t ==. val_ tid)
+                    guard_ (rtCategory t ==. val_ "VSEdit")
+                    pure t
     pure $ case rows of
         [] -> Nothing
         (x : _) -> Just x
-
--- | Delete release config by ID
-deleteReleaseConfig :: DBEnv -> Int32 -> IO ()
-deleteReleaseConfig db rid =
-    runDB db $
-        runDelete $
-            delete (releaseConfig nammaAPDb) (\r -> releaseConfigId r ==. val_ rid)

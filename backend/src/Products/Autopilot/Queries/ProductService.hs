@@ -4,43 +4,127 @@ module Products.Autopilot.Queries.ProductService where
 
 import Core.DB.Connection (runDB)
 import Core.Environment (DBEnv)
-import Data.List (find)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Database.Beam
 import GHC.Int (Int32)
-import Products.Autopilot.Queries.ReleaseTracker (encodeJsonText, parseJsonTextMaybe)
-import Products.Autopilot.Types.Target.Kubernetes (K8sProductConfig (..), K8sServiceConfig (..), defaultK8sProductConfig)
 import Shared.Types.Storage.Schema
 
--- | Extract K8s product config from a ProductConfig row
-getK8sProductConfig :: ProductConfig -> K8sProductConfig
-getK8sProductConfig pc =
-    case parseJsonTextMaybe (productTargetConfig pc) :: Maybe K8sProductConfig of
-        Just cfg -> cfg
-        Nothing -> defaultK8sProductConfig
+-- ============================================================================
+-- Product-level queries (service IS NULL)
+-- ============================================================================
 
--- Named extractors to avoid field-name ambiguity at call sites
-getProductCluster :: ProductConfig -> Text
-getProductCluster = cluster . getK8sProductConfig
+-- | Named extractors for product-level fields (flat columns, no JSON parsing)
+getProductCluster :: DeploymentConfig -> Text
+getProductCluster = fromMaybe "" . dcCluster
 
-getProductNamespace :: ProductConfig -> Text
-getProductNamespace = namespace . getK8sProductConfig
+getProductNamespace :: DeploymentConfig -> Text
+getProductNamespace = fromMaybe "" . dcNamespace
 
-getProductVsName :: ProductConfig -> Text
-getProductVsName = vsName . getK8sProductConfig
+getProductVsName :: DeploymentConfig -> Text
+getProductVsName = fromMaybe "" . dcVsName
 
-getProductSyncCluster :: ProductConfig -> Maybe Text
-getProductSyncCluster = syncCluster . getK8sProductConfig
+getProductSyncCluster :: DeploymentConfig -> Maybe Text
+getProductSyncCluster = dcSyncCluster
 
-getProductVsLockedBy :: ProductConfig -> Maybe Text
-getProductVsLockedBy = vsLockedBy . getK8sProductConfig
+getProductVsLockedBy :: DeploymentConfig -> Maybe Text
+getProductVsLockedBy = dcVsLockedBy
 
--- | Extract service host from a ReleaseConfig row
-getServiceHost :: ReleaseConfig -> Maybe Text
-getServiceHost rc =
-    case parseJsonTextMaybe (serviceTargetConfig rc) :: Maybe K8sServiceConfig of
-        Just cfg -> serviceHost cfg
-        Nothing -> Nothing
+-- | Extract service host from a service-level deployment config (flat column)
+getServiceHost :: DeploymentConfig -> Maybe Text
+getServiceHost = dcServiceHost
+
+-- | Get slack channel for a service
+getSlackChannelDirect :: DeploymentConfig -> Maybe Text
+getSlackChannelDirect = dcSlackChannel
+
+findProductByName :: DBEnv -> Text -> IO (Maybe DeploymentConfig)
+findProductByName db pName = do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $ do
+                    p <- all_ (deploymentConfig nammaAPDb)
+                    guard_ (dcProduct p ==. val_ pName)
+                    guard_ (isNothing_ (dcService p))
+                    pure p
+    pure $ case rows of
+        [] -> Nothing
+        (x : _) -> Just x
+
+findProductByNameAndCluster :: DBEnv -> Text -> Text -> IO (Maybe DeploymentConfig)
+findProductByNameAndCluster db pName clusterName = do
+    rows <- listProductsByName db pName
+    pure $ case clusterName of
+        "" -> safeHead rows
+        _  -> case filter (\p -> getProductCluster p == clusterName) rows of
+            (p:_) -> Just p
+            []    -> safeHead rows
+  where
+    safeHead []    = Nothing
+    safeHead (x:_) = Just x
+
+listProductsByName :: DBEnv -> Text -> IO [DeploymentConfig]
+listProductsByName db pName =
+    runDB db $
+        runSelectReturningList $
+            select $ do
+                p <- all_ (deploymentConfig nammaAPDb)
+                guard_ (dcProduct p ==. val_ pName)
+                guard_ (isNothing_ (dcService p))
+                pure p
+
+listProducts :: DBEnv -> IO [DeploymentConfig]
+listProducts db =
+    runDB db $
+        runSelectReturningList $
+            select $ do
+                p <- all_ (deploymentConfig nammaAPDb)
+                guard_ (isNothing_ (dcService p))
+                pure p
+
+-- ============================================================================
+-- Service-level queries (service IS NOT NULL)
+-- ============================================================================
+
+findServiceByProductAndName :: DBEnv -> Text -> Text -> IO (Maybe DeploymentConfig)
+findServiceByProductAndName db pName sName = do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $ do
+                    s <- all_ (deploymentConfig nammaAPDb)
+                    guard_ (dcProduct s ==. val_ pName)
+                    guard_ (dcService s ==. val_ (Just sName))
+                    pure s
+    pure $ case rows of
+        [] -> Nothing
+        (x : _) -> Just x
+
+listReleaseConfigByProduct :: DBEnv -> Text -> IO [DeploymentConfig]
+listReleaseConfigByProduct db pName =
+    runDB db $
+        runSelectReturningList $
+            select $ do
+                s <- all_ (deploymentConfig nammaAPDb)
+                guard_ (dcProduct s ==. val_ pName)
+                guard_ (isNothing_ (dcService s) ==. val_ False)
+                pure s
+
+listSchedulerServicesByProduct :: DBEnv -> Text -> IO [DeploymentConfig]
+listSchedulerServicesByProduct db pName =
+    runDB db $
+        runSelectReturningList $
+            select $ do
+                s <- all_ (deploymentConfig nammaAPDb)
+                guard_ (dcProduct s ==. val_ pName)
+                guard_ (isNothing_ (dcService s) ==. val_ False)
+                guard_ (dcServiceType s ==. val_ (Just "SCHEDULER"))
+                pure s
+
+-- ============================================================================
+-- Upsert operations (delete + insert pattern)
+-- ============================================================================
 
 upsertProduct ::
     DBEnv ->
@@ -56,34 +140,39 @@ upsertProduct ::
     Maybe Text ->
     Maybe Bool ->
     IO ()
-upsertProduct db rowId productName' cluster' namespace' vsName' repoName productType productAcronym releaseBranch syncCluster' needInfraApproval = do
-    let k8sCfg =
-            K8sProductConfig
-                { cluster = cluster'
-                , namespace = namespace'
-                , vsName = vsName'
-                , kubeContext = Just cluster'
-                , syncCluster = syncCluster'
-                , vsLockedBy = Nothing
-                , vsLockTimestamp = Nothing
-                }
-        row :: ProductConfig
+upsertProduct db rowId productName' cluster' namespace' vsName' repoName productType' productAcronym' releaseBranch syncCluster' needInfraApproval = do
+    let row :: DeploymentConfig
         row =
-            ProductConfigT
-                { productConfigId = rowId
-                , productName = productName'
-                , productRepoName = repoName
-                , productType = productType
-                , productAcronym = productAcronym
-                , productReleaseBranch = releaseBranch
-                , productNeedInfraApproval = needInfraApproval
-                , productTargetConfig = Just (encodeJsonText k8sCfg)
+            DeploymentConfigT
+                { dcId = rowId
+                , dcProduct = productName'
+                , dcService = Nothing
+                , dcCluster = Just cluster'
+                , dcNamespace = Just namespace'
+                , dcVsName = Just vsName'
+                , dcProductAcronym = Just productAcronym'
+                , dcProductType = Just productType'
+                , dcRepoName = Just repoName
+                , dcReleaseBranch = Just releaseBranch
+                , dcSyncCluster = syncCluster'
+                , dcNeedInfraApproval = needInfraApproval
+                , dcVsLockedBy = Nothing
+                , dcVsLockTimestamp = Nothing
+                , dcServiceHost = Nothing
+                , dcServiceType = Nothing
+                , dcServiceAcronym = Nothing
+                , dcRolloutStrategy = Nothing
+                , dcRevertStrategy = Nothing
+                , dcDecisionConfig = Nothing
+                , dcBitbucketPath = Nothing
+                , dcSlackChannel = Nothing
+                , dcEmails = Nothing
                 }
     runDB db $ do
         runDelete $
-            delete (productConfig nammaAPDb) (\p -> productName p ==. val_ productName')
+            delete (deploymentConfig nammaAPDb) (\p -> dcProduct p ==. val_ productName' &&. isNothing_ (dcService p))
         runInsert $
-            insert (productConfig nammaAPDb) $
+            insert (deploymentConfig nammaAPDb) $
                 insertValues [row]
 
 upsertService ::
@@ -100,103 +189,103 @@ upsertService ::
     Maybe Text ->
     IO ()
 upsertService db rowId emails rolloutStrategy decisionConfig serviceName' product' sType serviceHost' bitbucketPath revertStrategy = do
-    let svcCfg = K8sServiceConfig{serviceHost = serviceHost'}
-        row :: ReleaseConfig
+    let row :: DeploymentConfig
         row =
-            ReleaseConfigT
-                { releaseConfigId = rowId
-                , releaseConfigEmails = emails
-                , releaseConfigRolloutStrategy = rolloutStrategy
-                , releaseConfigDecisionConfig = decisionConfig
-                , serviceName = serviceName'
-                , serviceProduct = product'
-                , releaseConfigFlags = Nothing
-                , releaseConfigSlackWebhookUrls = Nothing
-                , serviceAcronym = Nothing
-                , serviceType = sType
-                , releaseConfigBitbucketPath = bitbucketPath
-                , releaseConfigMicroserviceType = Nothing
-                , releaseConfigRevertStrategy = revertStrategy
-                , releaseConfigJiraWebhookUrl = Nothing
-                , serviceTargetConfig = Just (encodeJsonText svcCfg)
+            DeploymentConfigT
+                { dcId = rowId
+                , dcProduct = product'
+                , dcService = Just serviceName'
+                , dcCluster = Nothing
+                , dcNamespace = Nothing
+                , dcVsName = Nothing
+                , dcProductAcronym = Nothing
+                , dcProductType = Nothing
+                , dcRepoName = Nothing
+                , dcReleaseBranch = Nothing
+                , dcSyncCluster = Nothing
+                , dcNeedInfraApproval = Nothing
+                , dcVsLockedBy = Nothing
+                , dcVsLockTimestamp = Nothing
+                , dcServiceHost = serviceHost'
+                , dcServiceType = Just sType
+                , dcServiceAcronym = Nothing
+                , dcRolloutStrategy = rolloutStrategy
+                , dcRevertStrategy = revertStrategy
+                , dcDecisionConfig = decisionConfig
+                , dcBitbucketPath = bitbucketPath
+                , dcSlackChannel = Nothing
+                , dcEmails = emails
                 }
     runDB db $ do
         runDelete $
-            delete (releaseConfig nammaAPDb) (\s -> serviceProduct s ==. val_ product' &&. serviceName s ==. val_ serviceName')
+            delete (deploymentConfig nammaAPDb) (\s -> dcProduct s ==. val_ product' &&. dcService s ==. val_ (Just serviceName'))
         runInsert $
-            insert (releaseConfig nammaAPDb) $
+            insert (deploymentConfig nammaAPDb) $
                 insertValues [row]
 
-findProductByName :: DBEnv -> Text -> IO (Maybe ProductConfig)
-findProductByName db pName = do
+-- ============================================================================
+-- CRUD by ID (used by Config actions)
+-- ============================================================================
+
+findProductConfigById :: DBEnv -> Int32 -> IO (Maybe DeploymentConfig)
+findProductConfigById db pid = do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $ do
-                    p <- all_ (productConfig nammaAPDb)
-                    guard_ (productName p ==. val_ pName)
+                    p <- all_ (deploymentConfig nammaAPDb)
+                    guard_ (dcId p ==. val_ pid)
+                    guard_ (isNothing_ (dcService p))
                     pure p
     pure $ case rows of
         [] -> Nothing
         (x : _) -> Just x
 
-findProductByNameAndCluster :: DBEnv -> Text -> Text -> IO (Maybe ProductConfig)
-findProductByNameAndCluster db pName clusterName = do
-    rows <- listProductsByName db pName
-    pure $ case clusterName of
-        "" -> safeHead rows
-        _  -> case find (\p -> getProductCluster p == clusterName) rows of
-            Just p  -> Just p
-            Nothing -> safeHead rows
-  where
-    safeHead []    = Nothing
-    safeHead (x:_) = Just x
+deleteProductConfig :: DBEnv -> Int32 -> IO ()
+deleteProductConfig db pid =
+    runDB db $
+        runDelete $
+            delete (deploymentConfig nammaAPDb) (\p -> dcId p ==. val_ pid)
 
-listProductsByName :: DBEnv -> Text -> IO [ProductConfig]
-listProductsByName db pName =
+listAllReleaseConfigs :: DBEnv -> IO [DeploymentConfig]
+listAllReleaseConfigs db =
     runDB db $
         runSelectReturningList $
             select $ do
-                p <- all_ (productConfig nammaAPDb)
-                guard_ (productName p ==. val_ pName)
-                pure p
+                s <- all_ (deploymentConfig nammaAPDb)
+                guard_ (isNothing_ (dcService s) ==. val_ False)
+                pure s
 
-findServiceByProductAndName :: DBEnv -> Text -> Text -> IO (Maybe ReleaseConfig)
-findServiceByProductAndName db pName sName = do
+findReleaseConfigById :: DBEnv -> Int32 -> IO (Maybe DeploymentConfig)
+findReleaseConfigById db rid = do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $ do
-                    s <- all_ (releaseConfig nammaAPDb)
-                    guard_ (serviceProduct s ==. val_ pName)
-                    guard_ (serviceName s ==. val_ sName)
-                    pure s
+                    r <- all_ (deploymentConfig nammaAPDb)
+                    guard_ (dcId r ==. val_ rid)
+                    guard_ (isNothing_ (dcService r) ==. val_ False)
+                    pure r
     pure $ case rows of
         [] -> Nothing
         (x : _) -> Just x
 
-listProducts :: DBEnv -> IO [ProductConfig]
-listProducts db =
+deleteReleaseConfig :: DBEnv -> Int32 -> IO ()
+deleteReleaseConfig db rid =
     runDB db $
-        runSelectReturningList $
-            select $
-                all_ (productConfig nammaAPDb)
+        runDelete $
+            delete (deploymentConfig nammaAPDb) (\r -> dcId r ==. val_ rid)
 
-listReleaseConfigByProduct :: DBEnv -> Text -> IO [ReleaseConfig]
-listReleaseConfigByProduct db pName =
-    runDB db $
-        runSelectReturningList $
-            select $ do
-                s <- all_ (releaseConfig nammaAPDb)
-                guard_ (serviceProduct s ==. val_ pName)
-                pure s
+-- ============================================================================
+-- VS lock helpers (update deployment_config.vs_locked_by)
+-- ============================================================================
 
-listSchedulerServicesByProduct :: DBEnv -> Text -> IO [ReleaseConfig]
-listSchedulerServicesByProduct db pName =
+updateVsLockedBy :: DBEnv -> Text -> Maybe Text -> IO ()
+updateVsLockedBy db productName' mLockedBy =
     runDB db $
-        runSelectReturningList $
-            select $ do
-                s <- all_ (releaseConfig nammaAPDb)
-                guard_ (serviceProduct s ==. val_ pName)
-                guard_ (serviceType s ==. val_ "SCHEDULER")
-                pure s
+        runUpdate $
+            update (deploymentConfig nammaAPDb)
+                (\p -> mconcat
+                    [ dcVsLockedBy p <-. val_ mLockedBy
+                    ])
+                (\p -> dcProduct p ==. val_ productName' &&. isNothing_ (dcService p))

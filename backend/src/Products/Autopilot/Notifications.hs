@@ -46,11 +46,10 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.HTTP.Client (RequestBody (..), httpLbs, method, newManager, parseRequest, requestBody, requestHeaders, responseBody, responseTimeout, responseTimeoutMicro)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
-import Products.Autopilot.Queries.ProductService (findServiceByProductAndName)
+import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, getSlackChannelDirect)
 import qualified Products.Autopilot.Queries.ReleaseTracker as RTQ
 import Products.Autopilot.RuntimeConfig (isSlackEnabled)
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
-import Shared.Types.Storage.Schema (ReleaseConfigT (..))
 import System.Environment (lookupEnv)
 import Prelude hiding (product)
 
@@ -82,7 +81,7 @@ getSlackChannel :: DBEnv -> Text -> Text -> IO (Maybe Text)
 getSlackChannel db prod svc = do
     mCfg <- findServiceByProductAndName db prod svc
     pure $ case mCfg of
-        Just cfg -> releaseConfigSlackWebhookUrls cfg
+        Just cfg -> getSlackChannelDirect cfg
         Nothing -> Nothing
 
 {- | Post a rich message to Slack using Block Kit attachments.

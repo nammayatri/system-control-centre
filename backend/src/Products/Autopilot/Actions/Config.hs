@@ -33,7 +33,6 @@ import GHC.Int (Int32)
 import Products.Autopilot.Actions.Release (upsertProductH, upsertServiceH)
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ServerConfig (listServerConfigsByProduct, upsertServerConfig, deleteServerConfig)
-import Products.Autopilot.Queries.VsEditTracker (findProductConfigById, deleteProductConfig, listAllReleaseConfigs, findReleaseConfigById, deleteReleaseConfig)
 import Products.Autopilot.Types.API
 import Shared.Config.Registry (allConfigEntries, findConfigEntry, validateConfigValue)
 import Shared.Config.Types (ConfigEntry (..), configGroupToText, configTypeDefault, configTypeTag)
@@ -49,20 +48,20 @@ listProductConfigsH = do
     rows <- liftIO $ listProducts db
     pure $ map toProductConfigResponse rows
 
-toProductConfigResponse :: S.ProductConfig -> ProductConfigResponse
+toProductConfigResponse :: S.DeploymentConfig -> ProductConfigResponse
 toProductConfigResponse p =
     ProductConfigResponse
-        { id = S.productConfigId p
-        , product = S.productName p
-        , repoName = S.productRepoName p
-        , productType = S.productType p
-        , productAcronym = S.productAcronym p
-        , releaseBranch = S.productReleaseBranch p
-        , needInfraApproval = S.productNeedInfraApproval p
-        , cluster = Just (getProductCluster p)
-        , namespace = Just (getProductNamespace p)
-        , vsName = Just (getProductVsName p)
-        , syncCluster = getProductSyncCluster p
+        { id = S.dcId p
+        , product = S.dcProduct p
+        , repoName = fromMaybe "" (S.dcRepoName p)
+        , productType = fromMaybe "SERVICE" (S.dcProductType p)
+        , productAcronym = fromMaybe "" (S.dcProductAcronym p)
+        , releaseBranch = fromMaybe "master" (S.dcReleaseBranch p)
+        , needInfraApproval = S.dcNeedInfraApproval p
+        , cluster = S.dcCluster p
+        , namespace = S.dcNamespace p
+        , vsName = S.dcVsName p
+        , syncCluster = S.dcSyncCluster p
         }
 
 createProductConfigH :: UpsertProductReq -> Flow APIResponse
@@ -97,24 +96,24 @@ listReleaseConfigsH mProduct = do
         Nothing -> liftIO $ listAllReleaseConfigs db
     pure $ map toReleaseConfigResponse rows
 
-toReleaseConfigResponse :: S.ReleaseConfig -> ReleaseConfigResponse
+toReleaseConfigResponse :: S.DeploymentConfig -> ReleaseConfigResponse
 toReleaseConfigResponse r =
     ReleaseConfigResponse
-        { id = S.releaseConfigId r
-        , serviceName = S.serviceName r
-        , serviceProduct = S.serviceProduct r
-        , serviceType = S.serviceType r
-        , emails = S.releaseConfigEmails r
-        , rolloutStrategy = S.releaseConfigRolloutStrategy r
-        , decisionConfig = S.releaseConfigDecisionConfig r
-        , flags = S.releaseConfigFlags r
-        , slackWebhookUrls = S.releaseConfigSlackWebhookUrls r
-        , serviceAcronym = S.serviceAcronym r
-        , bitbucketPath = S.releaseConfigBitbucketPath r
-        , microserviceType = S.releaseConfigMicroserviceType r
-        , revertStrategy = S.releaseConfigRevertStrategy r
-        , jiraWebhookUrl = S.releaseConfigJiraWebhookUrl r
-        , serviceHost = getServiceHost r
+        { id = S.dcId r
+        , serviceName = fromMaybe "" (S.dcService r)
+        , serviceProduct = S.dcProduct r
+        , serviceType = fromMaybe "SERVICE" (S.dcServiceType r)
+        , emails = S.dcEmails r
+        , rolloutStrategy = S.dcRolloutStrategy r
+        , decisionConfig = S.dcDecisionConfig r
+        , flags = Nothing
+        , slackWebhookUrls = S.dcSlackChannel r
+        , serviceAcronym = S.dcServiceAcronym r
+        , bitbucketPath = S.dcBitbucketPath r
+        , microserviceType = Nothing
+        , revertStrategy = S.dcRevertStrategy r
+        , jiraWebhookUrl = Nothing
+        , serviceHost = S.dcServiceHost r
         }
 
 createReleaseConfigH :: UpsertServiceReq -> Flow APIResponse
@@ -244,5 +243,3 @@ deleteServerConfigH configId = do
     db <- getDBEnv
     liftIO $ deleteServerConfig db configId
     pure $ APIResponse "SUCCESS" "Server config deleted"
-
--- (Local helpers removed -- using typed request types instead)
