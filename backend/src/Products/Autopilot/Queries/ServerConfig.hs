@@ -4,6 +4,7 @@ module Products.Autopilot.Queries.ServerConfig (
     getEnabledServerConfigValue,
     listAllServerConfigs,
     upsertServerConfig,
+    deleteServerConfig,
 )
 where
 
@@ -96,3 +97,12 @@ upsertServerConfig db name typ value enabled product_ = do
                                 , scProduct = val_ product_
                                 }
                             ]
+
+-- | Delete a server_config row by ID.
+deleteServerConfig :: DBEnv -> Int32 -> IO ()
+deleteServerConfig db configId =
+    runDB db $
+        runDelete $
+            delete
+                (serverConfigs nammaAPDb)
+                (\sc -> scId sc ==. val_ configId)

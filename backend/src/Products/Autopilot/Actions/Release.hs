@@ -26,6 +26,7 @@ module Products.Autopilot.Actions.Release
     , podHealthH
     , rolloutHistoryH
     , listEventsH
+    , logsLinkH
     -- * Product/Service Handlers (used in Routes wiring)
     , listProductsH
     , upsertProductH
@@ -675,6 +676,25 @@ rolloutHistoryH rid = do
     case m of
         Nothing -> pure $ object ["error" .= ("Release not found" :: Text)]
         Just (tracker, _) -> pure $ toJSON (NT.rolloutHistory tracker)
+
+-- ============================================================================
+-- Logs Link Endpoint (GET /releases/:id/logslink)
+-- ============================================================================
+
+logsLinkH :: Text -> Flow Value
+logsLinkH rid = do
+    db <- getDBEnv
+    m <- liftIO $ findReleaseTracker db rid
+    case m of
+        Nothing -> pure $ object ["error" .= ("Release not found" :: Text)]
+        Just (_tracker, _) ->
+            -- Return placeholder links -- production generates Grafana URLs from config
+            pure $
+                object
+                    [ "grafana_dashboard" .= ("" :: Text)
+                    , "kibana_logs" .= ("" :: Text)
+                    , "pod_logs" .= ("" :: Text)
+                    ]
 
 -- ============================================================================
 -- Diff Endpoint (GET /releases/:id/diff)

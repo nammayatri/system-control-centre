@@ -18,6 +18,7 @@ module Products.Autopilot.Actions.Config
     -- * Server Config
     , listServerConfigH
     , upsertServerConfigH
+    , deleteServerConfigH
     ) where
 
 import Control.Applicative ((<|>))
@@ -31,7 +32,7 @@ import qualified Data.Text as T
 import GHC.Int (Int32)
 import Products.Autopilot.Actions.Release (upsertProductH, upsertServiceH)
 import Products.Autopilot.Queries.ProductService
-import Products.Autopilot.Queries.ServerConfig (listAllServerConfigs, upsertServerConfig)
+import Products.Autopilot.Queries.ServerConfig (listAllServerConfigs, upsertServerConfig, deleteServerConfig)
 import Products.Autopilot.Queries.VsEditTracker (findProductConfigById, deleteProductConfig, listAllReleaseConfigs, findReleaseConfigById, deleteReleaseConfig)
 import Products.Autopilot.Types.API
 import Shared.Config.Registry (allConfigEntries, findConfigEntry, validateConfigValue)
@@ -237,5 +238,11 @@ upsertServerConfigH req = do
                             product_ = ceProduct entry
                         liftIO $ upsertServerConfig db name typ value enabled product_
                         pure $ APIResponse "SUCCESS" ("server_config upserted: " <> name)
+
+deleteServerConfigH :: Int32 -> Flow APIResponse
+deleteServerConfigH configId = do
+    db <- getDBEnv
+    liftIO $ deleteServerConfig db configId
+    pure $ APIResponse "SUCCESS" "Server config deleted"
 
 -- (Local helpers removed -- using typed request types instead)

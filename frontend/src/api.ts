@@ -804,6 +804,16 @@ export async function unlockVSEdit(id: string): Promise<any> {
     return data;
 }
 
+export async function deleteServerConfig(id: number): Promise<any> {
+    const { data } = await apiClient.delete(`/server-config/${id}`);
+    return data;
+}
+
+export async function fetchLogsLink(releaseId: string): Promise<{ grafana_dashboard: string; kibana_logs: string; pod_logs: string }> {
+    const { data } = await apiClient.get(`/releases/${encodeURIComponent(releaseId)}/logslink`);
+    return data;
+}
+
 // ── ConfigMap CRUD ─────────────────────────────────────────────────
 
 export async function createConfigMap(payload: any, isUpdate: boolean = false): Promise<any> {

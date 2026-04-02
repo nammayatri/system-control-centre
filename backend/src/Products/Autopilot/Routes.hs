@@ -44,6 +44,7 @@ type CoreAPI =
         :<|> "configmap" :> "secondary" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] ConfigMapK8sResponse
         :<|> "server-config" :> Get '[JSON] ServerConfigResponse
         :<|> "server-config" :> ReqBody '[JSON] UpsertServerConfigReq :> Post '[JSON] APIResponse
+        :<|> "server-config" :> Capture "id" Int32 :> Delete '[JSON] APIResponse
         :<|> "envs" :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
         :<|> "envs" :> "secondary" :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
         -- New endpoints
@@ -54,6 +55,7 @@ type CoreAPI =
         :<|> "releases" :> Capture "releaseId" Text :> "fast-forward" :> ReqBody '[JSON] FastForwardReq :> Post '[JSON] APIResponse
         :<|> "resources" :> QueryParam "PRODUCT" Text :> QueryParam "SERVICE" Text :> Get '[JSON] ResourcesResponse
         :<|> "releases" :> Capture "releaseId" Text :> "rollout-history" :> Get '[JSON] Value
+        :<|> "releases" :> Capture "releaseId" Text :> "logslink" :> Get '[JSON] Value
         -- Product Config CRUD
         :<|> "products" :> "config" :> Get '[JSON] [ProductConfigResponse]
         :<|> "products" :> "config" :> ReqBody '[JSON] UpsertProductReq :> Post '[JSON] APIResponse
@@ -108,6 +110,7 @@ coreServer =
         -- Server config
         :<|> Config.listServerConfigH
         :<|> Config.upsertServerConfigH
+        :<|> Config.deleteServerConfigH
         -- Envs
         :<|> K8sResource.fetchEnvsH
         :<|> K8sResource.fetchSecondaryEnvsH
@@ -119,6 +122,7 @@ coreServer =
         :<|> Release.fastForwardH
         :<|> K8sResource.fetchResourcesH
         :<|> Release.rolloutHistoryH
+        :<|> Release.logsLinkH
         -- Product Config CRUD
         :<|> Config.listProductConfigsH
         :<|> Config.createProductConfigH
