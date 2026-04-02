@@ -112,7 +112,8 @@ validateStatusTransition from to = to `elem` allowed from
     allowed Aborting = [Aborting, Aborted, UserAborted, Reverting]
     allowed Reverting = [Reverted, UserAborted]
     allowed Reverted = []
-    allowed _ = []
+    allowed Restarting = [InProgress, Aborted, UserAborted]
+    allowed Discarding = [Discarded]
 
 validateGlobalStatusTransition :: ReleaseStatus -> ReleaseStatus -> Bool
 validateGlobalStatusTransition from to = to `elem` allowed from

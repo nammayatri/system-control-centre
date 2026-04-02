@@ -179,7 +179,7 @@ getThreadTs db rid = do
         Nothing -> pure Nothing
 
 saveThreadTs :: DBEnv -> Text -> Text -> IO ()
-saveThreadTs db rid ts = RTQ.updateReleaseTrackerField db rid "udf3" ts
+saveThreadTs db rid ts = RTQ.updateReleaseTrackerUdf3 db rid ts
 
 -- | Clickable header link only (no redundant product/service text)
 releaseLink :: ReleaseTracker -> IO Text

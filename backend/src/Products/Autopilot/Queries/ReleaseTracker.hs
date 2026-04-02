@@ -442,12 +442,12 @@ findCompletedTrackersForScaleDown db now delayHours = do
 {- | Update udf3 field on a release tracker by ID.
 Used to store Slack thread_ts.
 -}
-updateReleaseTrackerField :: DBEnv -> Text -> Text -> Text -> IO ()
-updateReleaseTrackerField db rid _fieldName fieldValue =
+updateReleaseTrackerUdf3 :: DBEnv -> Text -> Text -> IO ()
+updateReleaseTrackerUdf3 db rid value =
     withConn db $ \conn -> do
         _ <-
             execute
                 conn
                 "UPDATE release_tracker SET udf3 = ? WHERE id = ?"
-                (fieldValue, rid)
+                (value, rid)
         pure ()

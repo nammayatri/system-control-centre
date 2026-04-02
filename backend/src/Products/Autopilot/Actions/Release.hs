@@ -40,6 +40,8 @@ import Control.Applicative ((<|>))
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
+import Core.DB.Connection (withConn)
+import Database.PostgreSQL.Simple (Only (..), execute, withTransaction)
 import Data.Char (isAlphaNum)
 import Products.Autopilot.RuntimeConfig (isApproveAllReleases, isUnderMaintenance)
 import Products.Autopilot.K8s.Deployment (deploymentExists)
@@ -55,7 +57,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import qualified Data.Text.Encoding as TE
-import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
@@ -188,8 +190,10 @@ listReleasesH mFrom mTo = do
             pairs <- liftIO $ listReleaseTrackersByDateRange db fromTime toTime
             pure (map fst pairs)
         _ -> do
-            -- No valid date range -- return all (last 30 days as safety)
-            pairs <- liftIO $ listReleaseTrackers db
+            -- No valid date range -- default to last 30 days as safety limit
+            now <- liftIO getCurrentTime
+            let thirtyDaysAgo = addUTCTime (-30 * 86400) now
+            pairs <- liftIO $ listReleaseTrackersByDateRange db thirtyDaysAgo now
             pure (map fst pairs)
   where
     parseISO :: Text -> Maybe UTCTime
@@ -410,11 +414,14 @@ triggerReleaseH rid TriggerReleaseReq{..} = do
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
-            now <- liftIO getCurrentTime
-            let updated = (tracker :: ReleaseTracker){NT.scheduleTime = Just now, NT.status = Created}
-            liftIO $ insertReleaseTracker db updated mTargetState
-            liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_TRIGGERED" (toJSON reason)
-            pure $ APIResponse "SUCCESS" "Release scheduled for execution"
+            if isTerminalStatus (NT.status tracker)
+                then pure $ APIResponse "ERROR" ("Cannot trigger from terminal status: " <> T.pack (show (NT.status tracker)))
+                else do
+                    now <- liftIO getCurrentTime
+                    let updated = (tracker :: ReleaseTracker){NT.scheduleTime = Just now, NT.status = Created}
+                    liftIO $ insertReleaseTracker db updated mTargetState
+                    liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_TRIGGERED" (toJSON reason)
+                    pure $ APIResponse "SUCCESS" "Release scheduled for execution"
 
 rollbackReleaseH :: Text -> TriggerReleaseReq -> Flow APIResponse
 rollbackReleaseH rid TriggerReleaseReq{..} = do
@@ -561,8 +568,9 @@ deleteReleaseH rid = do
             if NT.status tracker `elem` activeStatuses
                 then pure $ APIResponse "ERROR" ("Cannot delete release in " <> T.pack (show (NT.status tracker)) <> " status. Abort or complete it first.")
                 else do
-                    liftIO $ deleteReleaseEvents db rid
-                    liftIO $ deleteReleaseTracker db rid
+                    liftIO $ withConn db $ \conn -> withTransaction conn $ do
+                        execute conn "DELETE FROM release_events WHERE re_release_id = ?" (Only rid)
+                        execute conn "DELETE FROM release_tracker WHERE id = ?" (Only rid)
                     liftIO $ notifyReleaseDeleted db tracker
                     pure $ APIResponse "SUCCESS" ("Release deleted: " <> rid)
 

@@ -259,7 +259,8 @@ stripK8sNoiseValue other = other
 -- Used to produce the "after" YAML for diff comparison.
 modifyDeploymentForPreview :: Value -> Text -> Text -> Text -> Value
 modifyDeploymentForPreview (Object obj) oldDepName newVer newImage =
-    let svcHost = T.intercalate "-" (init (T.splitOn "-" oldDepName))
+    let parts = T.splitOn "-" oldDepName
+        svcHost = if length parts > 1 then T.intercalate "-" (init parts) else oldDepName
         newDepName = svcHost <> "-" <> newVer
         obj1 = updateNestedText ["metadata", "name"] newDepName obj
         obj2 = updateNestedText ["metadata", "labels", "version"] newVer obj1

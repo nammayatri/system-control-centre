@@ -8,11 +8,12 @@ module Products.Autopilot.Queries.ServerConfig (
 )
 where
 
-import Core.DB.Connection (runDB)
+import Core.DB.Connection (runDB, withConn)
 import Core.Environment (DBEnv)
 import Data.Text (Text)
 import Data.Time.Clock (getCurrentTime)
 import Database.Beam
+import Database.PostgreSQL.Simple (execute)
 import GHC.Int (Int32)
 import Shared.Types.Storage.Schema
 
@@ -55,48 +56,21 @@ listAllServerConfigs db = do
         )
 
 -- | Upsert a server_config row by name (now includes product column).
+-- Uses INSERT ON CONFLICT to avoid TOCTOU race between SELECT and UPDATE/INSERT.
 upsertServerConfig :: DBEnv -> Text -> Text -> Text -> Bool -> Maybe Text -> IO ()
 upsertServerConfig db name typ value enabled product_ = do
     let enabledInt = if enabled then (1 :: Int32) else 0
     now <- getCurrentTime
-    existing <-
-        runDB db $
-            runSelectReturningList $
-                select $ do
-                    sc <- all_ (serverConfigs nammaAPDb)
-                    guard_ (scName sc ==. val_ name)
-                    pure (scId sc)
-    case existing of
-        (existingId : _) ->
-            runDB db $
-                runUpdate $
-                    update
-                        (serverConfigs nammaAPDb)
-                        ( \sc ->
-                            mconcat
-                                [ scType sc <-. val_ typ
-                                , scValue sc <-. val_ value
-                                , scEnabled sc <-. val_ enabledInt
-                                , scLastUpdated sc <-. val_ now
-                                , scProduct sc <-. val_ product_
-                                ]
-                        )
-                        (\sc -> scId sc ==. val_ existingId)
-        [] ->
-            runDB db $
-                runInsert $
-                    insert (serverConfigs nammaAPDb) $
-                        insertExpressions
-                            [ ServerConfigT
-                                { scId = default_
-                                , scType = val_ typ
-                                , scName = val_ name
-                                , scValue = val_ value
-                                , scLastUpdated = val_ now
-                                , scEnabled = val_ enabledInt
-                                , scProduct = val_ product_
-                                }
-                            ]
+    withConn db $ \conn -> do
+        _ <- execute conn
+            "INSERT INTO server_config (type, name, value, last_updated, enabled, product) \
+            \VALUES (?, ?, ?, ?, ?, ?) \
+            \ON CONFLICT (name) DO UPDATE SET \
+            \type = EXCLUDED.type, value = EXCLUDED.value, \
+            \last_updated = EXCLUDED.last_updated, enabled = EXCLUDED.enabled, \
+            \product = EXCLUDED.product"
+            (typ, name, value, now, enabledInt, product_)
+        pure ()
 
 -- | Delete a server_config row by ID.
 deleteServerConfig :: DBEnv -> Int32 -> IO ()
