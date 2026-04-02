@@ -77,7 +77,7 @@ getProductConfigH pid = do
         Just p -> pure $ toJSON (toProductConfigResponse p)
 
 updateProductConfigH :: Int32 -> UpsertProductReq -> Flow APIResponse
-updateProductConfigH _ req = upsertProductH req
+updateProductConfigH pathId req = upsertProductH (req { Products.Autopilot.Types.API.id = Just pathId })
 
 deleteProductConfigH :: Int32 -> Flow APIResponse
 deleteProductConfigH pid = do

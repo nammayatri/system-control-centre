@@ -512,6 +512,14 @@ revertReleaseH rid req = do
                                 , "origUdf1" .= (origUdf1 :: Bool)
                                 ]
                             )
+                    -- Capture BEFORE snapshots for the revert release
+                    let revertNs = (\(K8sReleaseContext{namespace = n}) -> n) oldCtx
+                        revertVsN = virtualServiceName oldCtx
+                        revertNewDep = ctxServiceName <> "-" <> NT.newVersion tracker
+                    liftIO $ captureDeploymentSnapshot cfg db newRid revertNs revertNewDep "DEPLOYMENT_BEFORE"
+                    liftIO $ captureVSSnapshot cfg db newRid revertNs revertVsN "VS_BEFORE"
+                    liftIO $ captureDeploymentPreview cfg db newRid revertNs revertNewDep
+                        (NT.oldVersion tracker) (fromMaybe "" (K8s.dockerImage oldCtx)) "DEPLOYMENT_AFTER"
                     liftIO $ notifyReleaseReverted db revertedTracker
                     when (isImmediate && shouldSyncRevert) $
                         liftIO $
