@@ -110,10 +110,23 @@ const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
 const prettyYaml = (raw: string): string => {
   if (!raw) return '';
   try {
-    const parsed = JSON.parse(raw);
-    return YAML.stringify(parsed, { indent: 2 });
+    // Handle double-encoded JSON (string inside string)
+    let data = raw;
+    try {
+      const firstParse = JSON.parse(data);
+      if (typeof firstParse === 'string') {
+        data = firstParse; // was double-encoded
+      } else {
+        return YAML.stringify(firstParse, { indent: 2 });
+      }
+    } catch { /* not JSON, try as-is */ }
+    // Second attempt after unwrapping
+    try {
+      const parsed = JSON.parse(data);
+      return YAML.stringify(parsed, { indent: 2 });
+    } catch { /* not JSON either */ }
+    return data;
   } catch {
-    // If already YAML or not parseable, return as-is
     return raw;
   }
 };

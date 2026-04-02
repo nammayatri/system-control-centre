@@ -265,7 +265,10 @@ prepareK8sResources = do
 
     liftIO $ putStrLn "K8s resources prepared"
 
--- | Progressive rollout: shift traffic old -> new in steps
+-- | Progressive rollout: shift traffic old -> new following the tracker's rollout_strategy.
+-- Production behaviour: iterate through each RolloutStep, apply the traffic percentage,
+-- wait for the cooloff period (in minutes), then advance.  Between steps the runner
+-- re-reads the tracker from DB so that user-initiated abort/pause is respected.
 progressiveRollout :: StateFlow ()
 progressiveRollout = do
     rt <- getRT
@@ -289,10 +292,16 @@ progressiveRollout = do
             currentRT <- getRT
             liftIO $ notifyReleaseProgress db currentRT 100
         else do
-            -- Existing service: progressive traffic shift
-            let steps = [(75, 25), (50, 50), (0, 100)] :: [(Int, Int)]
-            forM_ steps $ \(oldW, newW) -> do
-                liftIO $ putStrLn $ "  Shifting traffic: old=" <> show oldW <> "% new=" <> show newW <> "%"
+            -- Use the tracker's rollout strategy (e.g. 5%/25%/50%/75%/100% with cooloffs)
+            -- If rollout strategy is empty, fallback to a single 100% step
+            let strategy = case rolloutStrategy rt of
+                    [] -> [RolloutStep 100 0 1]
+                    ss -> ss
+            forM_ strategy $ \step -> do
+                let newW = rolloutPercent step
+                    oldW = max 0 (100 - newW)
+                    cooloffMins = cooloffSeconds step  -- stored as minutes in production
+                liftIO $ putStrLn $ "  Rollout step: new=" <> show newW <> "%, cooloff=" <> show cooloffMins <> "min"
                 _ <- runK8sIO $ applyVirtualServiceRollout cfg ctx oldW newW
                 updateK8sField (\k8s -> k8s{trafficPercentage = newW})
 
@@ -300,9 +309,11 @@ progressiveRollout = do
                 currentRT <- getRT
                 liftIO $ notifyReleaseProgress db currentRT newW
 
-                -- Health check between steps (skip after final 100% step)
-                when (newW < 100) $ do
-                    liftIO $ threadDelay 5000000 -- 5 seconds between steps
+                -- Wait for cooloff period (skip for the final 100% step)
+                when (newW < 100 && cooloffMins > 0) $ do
+                    liftIO $ putStrLn $ "    Cooloff: waiting " <> show cooloffMins <> " minutes"
+                    liftIO $ threadDelay (cooloffMins * 60 * 1000000)
+                    -- Health check after cooloff
                     checkDeploymentHealth cfg ctx
 
     liftIO $ putStrLn "Progressive rollout complete"

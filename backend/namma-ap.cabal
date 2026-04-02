@@ -130,6 +130,7 @@ library
     , transformers
     , unordered-containers
     , uuid
+    , vector
     , wai
     , wai-cors
     , warp

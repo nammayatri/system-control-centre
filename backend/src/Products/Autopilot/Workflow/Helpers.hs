@@ -41,6 +41,7 @@ import Core.Utils.FlowMonad (Flow, getDBEnv)
 import Data.Aeson (Value (..), eitherDecode, encode, toJSON)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
+import qualified Data.Vector as V
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -135,32 +136,68 @@ captureDeploymentSnapshot cfg db releaseId ns depName label = do
         Left _ -> pure ()
 
 -- | Generate a preview of what the deployment will look like after changes.
--- Fetches old deployment, replaces version label + image tag, stores as event.
--- This makes the diff available at creation time (before workflow runs).
+-- Fetches old deployment JSON, modifies specific fields (name, version labels, image),
+-- stores as event. This makes the diff available at creation time.
 captureDeploymentPreview :: Config -> DBEnv -> Text -> Text -> Text -> Text -> Text -> Text -> IO ()
 captureDeploymentPreview cfg db releaseId ns oldDepName newVer newImage label = do
     result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack oldDepName, "-o", "json"])
     case result of
         Right (K8sResult jsonStr) -> do
             let cleaned = stripK8sNoise jsonStr
-            -- Replace old version with new version in the JSON text
-            -- Replace deployment name, version labels, and image tag
-                oldVer = case T.breakOn "-" (T.reverse oldDepName) of
-                    (rev, _) -> T.reverse rev  -- extract version from deployment name
-                preview = T.replace oldVer newVer cleaned
-                withImage = if T.null newImage then preview
-                            else -- Replace image tag if docker image provided
-                                let lines' = T.lines preview
-                                    updated = map (\l -> if "\"image\"" `T.isInfixOf` l && ("asia" `T.isInfixOf` l || "ecr" `T.isInfixOf` l || "gcr" `T.isInfixOf` l || "docker" `T.isInfixOf` l)
-                                        then T.replace (getImageTag l) newImage l
-                                        else l) lines'
-                                in T.unlines updated
-            DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON withImage)
+            case eitherDecode (LBS.fromStrict (TE.encodeUtf8 cleaned)) :: Either String Value of
+                Right (Object obj) -> do
+                    -- Extract service host from old deployment name (e.g. "test-svc" from "test-svc-e2e-v1")
+                    let svcHost = T.intercalate "-" (init (T.splitOn "-" oldDepName))
+                        newDepName = svcHost <> "-" <> newVer
+                        -- Update metadata.name
+                        obj1 = updateNestedText ["metadata", "name"] newDepName obj
+                        -- Update metadata.labels.version
+                        obj2 = updateNestedText ["metadata", "labels", "version"] newVer obj1
+                        -- Update spec.selector.matchLabels.version
+                        obj3 = updateNestedText ["spec", "selector", "matchLabels", "version"] newVer obj2
+                        -- Update spec.template.metadata.labels.version
+                        obj4 = updateNestedText ["spec", "template", "metadata", "labels", "version"] newVer obj3
+                        -- Update container image if provided
+                        obj5 = if T.null newImage then obj4
+                               else updateContainerImage newImage obj4
+                        result' = TE.decodeUtf8 (LBS.toStrict (encode (Object obj5)))
+                    DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON result')
+                _ -> do
+                    -- Can't parse, store as-is
+                    DB.insertReleaseEvent db releaseId "SNAPSHOT" label (toJSON cleaned)
         Left _ -> pure ()
-  where
-    getImageTag line =
-        let parts = T.splitOn ":" line
-        in if length parts >= 2 then T.strip (T.replace "\"" "" (T.replace "," "" (last parts))) else ""
+
+-- | Update a nested text field in a JSON object
+updateNestedText :: [Text] -> Text -> KM.KeyMap Value -> KM.KeyMap Value
+updateNestedText [] _ obj = obj
+updateNestedText [k] v obj = KM.insert (K.fromText k) (String v) obj
+updateNestedText (k:ks) v obj =
+    case KM.lookup (K.fromText k) obj of
+        Just (Object inner) -> KM.insert (K.fromText k) (Object (updateNestedText ks v inner)) obj
+        _ -> obj
+
+-- | Update the first container's image in a deployment spec
+updateContainerImage :: Text -> KM.KeyMap Value -> KM.KeyMap Value
+updateContainerImage img obj =
+    case KM.lookup (K.fromText "spec") obj of
+        Just (Object spec) -> case KM.lookup (K.fromText "template") spec of
+            Just (Object tmpl) -> case KM.lookup (K.fromText "spec") tmpl of
+                Just (Object podSpec) -> case KM.lookup (K.fromText "containers") podSpec of
+                    Just (Array containers) ->
+                        let cList = V.toList containers
+                        in case cList of
+                            (Object c : rest) ->
+                                let c' = KM.insert (K.fromText "image") (String img) c
+                                    containers' = Array (V.fromList (Object c' : rest))
+                                    podSpec' = KM.insert (K.fromText "containers") containers' podSpec
+                                    tmpl' = KM.insert (K.fromText "spec") (Object podSpec') tmpl
+                                    spec' = KM.insert (K.fromText "template") (Object tmpl') spec
+                                in KM.insert (K.fromText "spec") (Object spec') obj
+                            _ -> obj
+                    _ -> obj
+                _ -> obj
+            _ -> obj
+        _ -> obj
 
 -- | Capture VirtualService JSON snapshot and store as release event
 captureVSSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()

@@ -168,8 +168,15 @@ withChannel db prod svc f = do
         Nothing -> putStrLn $ "[SLACK] No channel for " <> T.unpack prod <> "/" <> T.unpack svc
         Just ch -> f ch
 
-getThreadTs :: ReleaseTracker -> Maybe Text
-getThreadTs tracker = udf3 tracker
+-- | Read thread_ts fresh from DB every time (avoids stale in-memory tracker).
+-- The runner/workflow may hold an old copy of the tracker whose udf3 is Nothing
+-- because saveThreadTs only writes to DB.
+getThreadTs :: DBEnv -> Text -> IO (Maybe Text)
+getThreadTs db rid = do
+    m <- RTQ.findReleaseTracker db rid
+    case m of
+        Just (tracker, _) -> pure (udf3 tracker)
+        Nothing -> pure Nothing
 
 saveThreadTs :: DBEnv -> Text -> Text -> IO ()
 saveThreadTs db rid ts = RTQ.updateReleaseTrackerField db rid "udf3" ts
@@ -205,128 +212,142 @@ notifyReleaseCreated db tracker = whenSlackEnabled db $
 notifyReleaseApproved :: DBEnv -> ReleaseTracker -> IO ()
 notifyReleaseApproved db tracker = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks = [sectionBlock ("Approved by *" <> maybe "admin" id (approvedBy tracker) <> "*")]
-        _ <- sendSlackRich channel "Approved" colorApproved blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel "Approved" colorApproved blocks threadTs
         pure ()
 
 -- | Release progress with rollout percentage
 notifyReleaseProgress :: DBEnv -> ReleaseTracker -> Int -> IO ()
 notifyReleaseProgress db tracker percentage = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let pct = T.pack (show percentage)
             blocks =
                 [ sectionBlock ("*INPROGRESS*  " <> pct <> "%")
                 , contextBlock ["Routing " <> pct <> "% traffic to `" <> newVersion tracker <> "` | " <> T.pack (show (100 - percentage)) <> "% on `" <> oldVersion tracker <> "`"]
                 ]
-        _ <- sendSlackRich channel ("InProgress " <> pct <> "%") colorInProgress blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel ("InProgress " <> pct <> "%") colorInProgress blocks threadTs
         pure ()
 
 -- | Release completed
 notifyReleaseCompleted :: DBEnv -> ReleaseTracker -> IO ()
 notifyReleaseCompleted db tracker = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks =
                 [ sectionBlock "*COMPLETED*  100%"
                 , contextBlock ["All traffic on `" <> newVersion tracker <> "`"]
                 ]
-        _ <- sendSlackRich channel "Completed" colorCompleted blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel "Completed" colorCompleted blocks threadTs
         pure ()
 
 -- | Release aborted
 notifyReleaseAborted :: DBEnv -> ReleaseTracker -> IO ()
 notifyReleaseAborted db tracker = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks =
                 [ sectionBlock "*ABORTED*"
                 , contextBlock ["Traffic restored to `" <> oldVersion tracker <> "`"]
                 ]
-        _ <- sendSlackRich channel "Aborted" colorAborted blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel "Aborted" colorAborted blocks threadTs
         pure ()
 
 -- | Release paused
 notifyReleasePaused :: DBEnv -> ReleaseTracker -> IO ()
 notifyReleasePaused db tracker = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks = [sectionBlock "*PAUSED*  — cooloff in progress"]
-        _ <- sendSlackRich channel "Paused" colorPaused blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel "Paused" colorPaused blocks threadTs
         pure ()
 
 -- | Release resumed
 notifyReleaseResumed :: DBEnv -> ReleaseTracker -> IO ()
 notifyReleaseResumed db tracker = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks = [sectionBlock "*RESUMED*"]
-        _ <- sendSlackRich channel "Resumed" colorInProgress blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel "Resumed" colorInProgress blocks threadTs
         pure ()
 
 -- | Release reverted
 notifyReleaseReverted :: DBEnv -> ReleaseTracker -> IO ()
 notifyReleaseReverted db tracker = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks =
                 [ sectionBlock "*REVERTED*"
                 , contextBlock ["Rolled back to `" <> oldVersion tracker <> "`"]
                 ]
-        _ <- sendSlackRich channel "Reverted" colorReverted blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel "Reverted" colorReverted blocks threadTs
         pure ()
 
 -- | Release discarded
 notifyReleaseDiscarded :: DBEnv -> ReleaseTracker -> IO ()
 notifyReleaseDiscarded db tracker = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks = [sectionBlock "*DISCARDED*"]
-        _ <- sendSlackRich channel "Discarded" colorDefault blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel "Discarded" colorDefault blocks threadTs
         pure ()
 
 -- | Release deleted
 notifyReleaseDeleted :: DBEnv -> ReleaseTracker -> IO ()
 notifyReleaseDeleted db tracker = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks = [sectionBlock "*DELETED*"]
-        _ <- sendSlackRich channel "Deleted" colorAborted blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel "Deleted" colorAborted blocks threadTs
         pure ()
 
 -- | Release updated
 notifyReleaseUpdated :: DBEnv -> ReleaseTracker -> Text -> IO ()
 notifyReleaseUpdated db tracker detail = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks = [sectionBlock ("*UPDATED*  " <> detail)]
-        _ <- sendSlackRich channel ("Updated: " <> detail) colorDefault blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel ("Updated: " <> detail) colorDefault blocks threadTs
         pure ()
 
 -- | Release restarted
 notifyReleaseRestarted :: DBEnv -> ReleaseTracker -> IO ()
 notifyReleaseRestarted db tracker = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks = [sectionBlock "*RESTARTED*  — reset to Created"]
-        _ <- sendSlackRich channel "Restarted" colorCreated blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel "Restarted" colorCreated blocks threadTs
         pure ()
 
 -- | Release fast-forwarded
 notifyReleaseFastForwarded :: DBEnv -> ReleaseTracker -> IO ()
 notifyReleaseFastForwarded db tracker = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks = [sectionBlock "*FAST FORWARDED*  — advancing to next stage"]
-        _ <- sendSlackRich channel "Fast Forwarded" colorInProgress blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel "Fast Forwarded" colorInProgress blocks threadTs
         pure ()
 
 -- | Immediate revert
 notifyImmediateReverted :: DBEnv -> ReleaseTracker -> IO ()
 notifyImmediateReverted db tracker = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks =
                 [ sectionBlock "*IMMEDIATE REVERT*"
                 , contextBlock ["Image swapped back to `" <> oldVersion tracker <> "` | rollout bypassed"]
                 ]
-        _ <- sendSlackRich channel "Immediate Revert" colorAborted blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel "Immediate Revert" colorAborted blocks threadTs
         pure ()
 
 -- | Pods scaled down
 notifyPodsScaledDown :: DBEnv -> ReleaseTracker -> Text -> IO ()
 notifyPodsScaledDown db tracker oldVer = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks = [sectionBlock ("Pods scaled down for `" <> oldVer <> "`")]
-        _ <- sendSlackRich channel ("Pods scaled down: " <> oldVer) colorDefault blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel ("Pods scaled down: " <> oldVer) colorDefault blocks threadTs
         pure ()
 
 -- ── VS Edit Notifications (with color) ──────────────────────────
@@ -384,14 +405,16 @@ notifyConfigMapCreated db tracker = whenSlackEnabled db $
 notifyConfigMapUpdated :: DBEnv -> ReleaseTracker -> Text -> IO ()
 notifyConfigMapUpdated db tracker detail = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks = [sectionBlock ("*" <> product tracker <> "* | ConfigMap " <> detail)]
-        _ <- sendSlackRich channel ("ConfigMap " <> detail) colorInProgress blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel ("ConfigMap " <> detail) colorInProgress blocks threadTs
         pure ()
 
 -- | Generic message in a release's thread
 notifyGenericThreadMessage :: DBEnv -> ReleaseTracker -> Text -> IO ()
 notifyGenericThreadMessage db tracker msg = whenSlackEnabled db $
     withChannel db (product tracker) (service tracker) $ \channel -> do
+        threadTs <- getThreadTs db (releaseId tracker)
         let blocks = [sectionBlock msg]
-        _ <- sendSlackRich channel msg colorDefault blocks (getThreadTs tracker)
+        _ <- sendSlackRich channel msg colorDefault blocks threadTs
         pure ()
