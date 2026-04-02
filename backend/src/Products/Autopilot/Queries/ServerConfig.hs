@@ -85,6 +85,8 @@ listServerConfigsByProduct db mProduct = do
 
 -- | Upsert a server_config row by name (now includes product column).
 -- Uses INSERT ON CONFLICT to avoid TOCTOU race between SELECT and UPDATE/INSERT.
+-- | Upsert a server_config row by (name, product).
+-- Same name can exist for different products.
 upsertServerConfig :: DBEnv -> Text -> Text -> Text -> Bool -> Maybe Text -> IO ()
 upsertServerConfig db name typ value enabled product_ = do
     let enabledInt = if enabled then (1 :: Int32) else 0
@@ -93,10 +95,9 @@ upsertServerConfig db name typ value enabled product_ = do
         _ <- execute conn
             "INSERT INTO server_config (type, name, value, last_updated, enabled, product) \
             \VALUES (?, ?, ?, ?, ?, ?) \
-            \ON CONFLICT (name) DO UPDATE SET \
+            \ON CONFLICT (name, COALESCE(product, '')) DO UPDATE SET \
             \type = EXCLUDED.type, value = EXCLUDED.value, \
-            \last_updated = EXCLUDED.last_updated, enabled = EXCLUDED.enabled, \
-            \product = EXCLUDED.product"
+            \last_updated = EXCLUDED.last_updated, enabled = EXCLUDED.enabled"
             (typ, name, value, now, enabledInt, product_)
         pure ()
 
