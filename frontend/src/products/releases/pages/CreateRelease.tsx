@@ -489,7 +489,7 @@ const CreateRelease: React.FC = () => {
             {/* Col 2 */}
             <div className="space-y-4">
               <div>
-                <FieldLabel required={!isUpdate}>Product</FieldLabel>
+                <FieldLabel required={!isUpdate}>App Group</FieldLabel>
                 {isUpdate ? (
                   <input type="text" value={formData.appGroup} disabled className={disabledInputClass} />
                 ) : (

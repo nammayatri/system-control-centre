@@ -800,7 +800,7 @@ const ReleaseSummary: React.FC = () => {
                     { label: 'Env', value: release.env },
                     { label: 'Mode', value: release.mode },
                     { label: 'Approved', value: release.is_approved ? 'Yes' : 'No' },
-                    { label: 'Approved By', value: release.release_manager },
+                    { label: 'Approved By', value: release.is_approved ? (release.release_manager || '-') : '-' },
                     { label: 'Info', value: release.info },
                   ],
                 },
@@ -817,7 +817,7 @@ const ReleaseSummary: React.FC = () => {
                 },
               ].map((card, ci) => (
                 <div key={ci} className="bg-zinc-50 rounded-xl border border-zinc-100 p-4 text-sm">
-                  <h3 className="font-semibold text-zinc-500 uppercase text-[11px] tracking-widest mb-3">{card.title}</h3>
+                  <h3 className="font-semibold text-zinc-500 uppercase text-[11px] tracking-wider mb-3">{card.title}</h3>
                   <dl className="space-y-2.5">
                     {card.rows.map((r, ri) => (
                       <div key={ri}>
@@ -844,70 +844,22 @@ const ReleaseSummary: React.FC = () => {
               status={s}
             />
 
-            {/* Two-column info cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-              {/* Release Info */}
-              <div className="border border-zinc-200 rounded-lg p-4">
-                <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Release Info</h3>
-                <div className="grid grid-cols-2 gap-x-6 gap-y-3">
-                  <InfoField label="ID" value={release.id} mono />
-                  <InfoField label="Product" value={release.appGroup} />
-                  <InfoField label="Service" value={release.service} />
-                  <InfoField label="Status" value={release.status} />
-                  <InfoField label="Env" value={release.env} />
-                  <InfoField label="Mode" value={release.mode} />
-                  <InfoField label="Category" value={category} />
-                  <InfoField label="Release Manager" value={release.release_manager || '-'} />
-                  <InfoField label="Old Version" value={release.old_version} mono />
-                  <InfoField label="New Version" value={release.new_version} mono />
-                  <InfoField label="Docker Image" value={dockerImage} mono />
-                  <InfoField label="Cluster" value={release.release_context?.cluster || ''} />
-                  <InfoField label="Priority" value={String(release.priority ?? 0)} />
-                  <InfoField label="Approved" value={release.is_approved ? 'Yes' : 'No'} />
-                  <InfoField label="Infra Approved" value={release.is_infra_approved ? 'Yes' : 'No'} />
-                  {release.description && <InfoField label="Description" value={release.description} />}
-                  {release.change_log && <InfoField label="Change Log" value={release.change_log} />}
-                  {releaseTag && <InfoField label="Release Tag" value={releaseTag} mono />}
-                  {globalId && <InfoField label="Global ID" value={globalId} mono />}
-                  {newService === 'Yes' && <InfoField label="New Service" value="Yes" />}
-                  {cronjobSuspend && <InfoField label="Cronjob Suspend" value="Yes" />}
-                </div>
-              </div>
-
-              {/* Timeline */}
-              <div className="border border-zinc-200 rounded-lg p-4">
-                <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Timeline</h3>
-                <div className="grid grid-cols-2 gap-x-6 gap-y-3">
-                  <InfoField label="Release Tag" value={release.release_tag} mono />
-                  <InfoField label="Created" value={formatDate(release.date_created)} mono />
-                  <InfoField label="Release Manager" value={release.release_manager} />
-                  <InfoField label="Schedule Time" value={formatDate(release.schedule_time)} mono />
-                  <InfoField label="Start Time" value={formatDate(release.start_time)} mono />
-                  <InfoField label="End Time" value={formatDate(release.end_time)} mono />
-                  <InfoField label="Priority" value={String(release.priority)} />
-                  <InfoField label="AB HS Status" value={release.ab_hs_status} />
-                  <InfoField label="Cronjob Suspend" value={release.cronjob_suspend ? 'Yes' : 'No'} />
-                  <InfoField label="Scale Down Delay" value={release.release_context?.pods_scale_down_delay ? `${release.release_context.pods_scale_down_delay} hrs` : '-'} />
-                  <InfoField label="Scale Down Status" value={release.release_context?.pods_scale_down_status || '-'} />
-                </div>
-              </div>
-            </div>
-
-            {/* K8s Context */}
-            <K8sContextCard releaseContext={release.release_context} />
-
-            {/* Details - full width */}
+            {/* Release Details — consolidated (no duplicate data) */}
             <div className="border border-zinc-200 rounded-lg p-4 mb-6">
-              <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Details</h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-3">
-                <InfoField label="Description" value={release.description} />
-                <InfoField label="Change Log" value={release.change_log} />
-                <InfoField label="Info" value={release.info} />
+              <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Release Details</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-3">
+                <InfoField label="App Group" value={release.appGroup} />
+                <InfoField label="Service" value={release.service} />
+                <InfoField label="Old Version" value={release.old_version} mono />
+                <InfoField label="New Version" value={release.new_version} mono />
+                <InfoField label="Docker Image" value={dockerImage} mono />
+                <InfoField label="Release Manager" value={release.release_manager || '-'} />
+                <InfoField label="Infra Approved" value={release.is_infra_approved ? 'Yes' : 'No'} />
+                {release.description && <InfoField label="Description" value={release.description} />}
+                {release.change_log && <InfoField label="Change Log" value={release.change_log} />}
+                {globalId && <InfoField label="Global ID" value={globalId} mono />}
               </div>
             </div>
-
-            {/* Resources */}
-            <ResourcesSection product={release.appGroup} service={release.service} />
           </div>
         )}
 

@@ -330,6 +330,8 @@ applyCmUpdates rt (Object obj) =
             Just "INPROGRESS" -> rt{NT.status = InProgress}
             Just "COMPLETED" -> rt{NT.status = Completed}
             Just "ABORTED" -> rt{NT.status = Aborted}
+            Just "DISCARDED" -> rt{NT.status = Discarded}
+            Just "PAUSED" -> rt{NT.status = Paused}
             _ -> rt
         rt2 = maybe rt1 (\s -> rt1{NT.description = Just s}) (getStrM "description" obj)
         rt3 = maybe rt2 (\s -> rt2{NT.changeLog = Just s}) (getStrM "change_log" obj)

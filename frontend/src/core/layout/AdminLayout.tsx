@@ -52,7 +52,7 @@ const AdminLayout: React.FC = () => {
               key={item.path}
               to={item.path}
               className={cn(
-                'flex items-center gap-2.5 px-4 h-10 text-[13px] cursor-pointer transition-all duration-150',
+                'flex items-center gap-2.5 px-4 h-10 text-sm cursor-pointer transition-all duration-150',
                 collapsed && 'justify-center px-0',
                 isActive(item.path)
                   ? 'text-[#fafafa] bg-[#262626] border-l-2 border-emerald-500'

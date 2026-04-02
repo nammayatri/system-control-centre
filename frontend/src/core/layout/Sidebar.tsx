@@ -70,7 +70,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
         <button
           onClick={() => !collapsed && toggleSection(key)}
           className={cn(
-            'w-full flex items-center gap-3 px-4 h-10 text-[13px] cursor-pointer transition-colors duration-150',
+            'w-full flex items-center gap-3 px-4 h-10 text-sm cursor-pointer transition-colors duration-150',
             'text-[#a1a1aa] hover:text-white hover:bg-[#171717]',
             collapsed && 'justify-center px-0'
           )}
@@ -94,7 +94,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
                 key={item.path}
                 to={item.path}
                 className={cn(
-                  'flex items-center gap-2.5 pl-11 pr-4 h-9 text-[13px] cursor-pointer transition-colors duration-150',
+                  'flex items-center gap-2.5 pl-11 pr-4 h-9 text-sm cursor-pointer transition-colors duration-150',
                   isActive(item.path)
                     ? 'text-[#fafafa] bg-[#262626] border-l-2 border-emerald-500'
                     : 'text-zinc-500 hover:text-zinc-300 hover:bg-[#171717] border-l-2 border-transparent'
@@ -140,7 +140,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
               <button
                 onClick={() => !collapsed && toggleSection('admin')}
                 className={cn(
-                  'w-full flex items-center gap-3 px-4 h-10 text-[13px] cursor-pointer transition-colors duration-150',
+                  'w-full flex items-center gap-3 px-4 h-10 text-sm cursor-pointer transition-colors duration-150',
                   'text-[#a1a1aa] hover:text-white hover:bg-[#171717]',
                   collapsed && 'justify-center px-0'
                 )}
@@ -167,7 +167,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
                       key={item.path}
                       to={item.path}
                       className={cn(
-                        'flex items-center gap-2.5 pl-11 pr-4 h-9 text-[13px] cursor-pointer transition-colors duration-150',
+                        'flex items-center gap-2.5 pl-11 pr-4 h-9 text-sm cursor-pointer transition-colors duration-150',
                         isActive(item.path)
                           ? 'text-[#fafafa] bg-[#262626] border-l-2 border-emerald-500'
                           : 'text-zinc-500 hover:text-zinc-300 hover:bg-[#171717] border-l-2 border-transparent'

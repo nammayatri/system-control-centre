@@ -303,7 +303,7 @@ const ListRelease: React.FC = () => {
                           <div className="flex items-center gap-1.5">
                             <StatusBadge status={release.status} />
                             {release.env && (
-                              <span className="px-1.5 py-0.5 rounded-md text-[9px] font-medium uppercase tracking-wide bg-sky-50 text-sky-700 border border-sky-200">
+                              <span className="rounded px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide bg-sky-700 text-white">
                                 {release.env}
                               </span>
                             )}

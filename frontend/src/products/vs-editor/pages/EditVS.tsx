@@ -115,7 +115,7 @@ const EditVS: React.FC = () => {
       <div className="bg-white rounded-xl border border-zinc-200 p-6 mb-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
-            <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Product *</label>
+            <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">App Group *</label>
             <select value={appGroup} onChange={e => { setAppGroup(e.target.value); setService(''); setVsData(''); setIsLocked(false); setTrackerId(null); }} disabled={isLocked} className={cn(inputClass, 'cursor-pointer', isLocked && 'bg-zinc-50 cursor-not-allowed')}>
               <option value="">Select Product</option>
               {products.map(p => <option key={p} value={p}>{p}</option>)}

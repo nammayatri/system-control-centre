@@ -113,7 +113,7 @@ trigger db (rt, mts) = do
             -- Atomically claim: DELETE WHERE status='CREATED' + INSERT with INPROGRESS
             -- If another runner already changed the status, this returns False.
             now <- liftIO getCurrentTime
-            let rtInProgress = rt{status = InProgress}
+            let rtInProgress = rt{status = InProgress, startTime = Just now}
                 row = toRow now now rtInProgress mts
             claimed <- liftIO $ conditionalUpdateTrackerRow db row "CREATED"
             if not claimed
@@ -139,7 +139,8 @@ trigger db (rt, mts) = do
                                     liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "WORKFLOW_ABORT_EXIT" (toJSON (show err))
                                 else do
                                     -- Non-abort failure: handle VS restoration here
-                                    let abortedTracker = rtInProgress{status = Aborted, releaseWFStatus = RollingBack}
+                                    endNow <- liftIO getCurrentTime
+                                    let abortedTracker = rtInProgress{status = Aborted, releaseWFStatus = RollingBack, endTime = Just endNow}
                                     liftIO $ insertReleaseTracker db abortedTracker mts
                                     liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
                                     liftIO $ restoreVsTrafficOnFailure cfg' db rt mts
@@ -279,8 +280,9 @@ handleAbortingRelease cfg db rt mts = do
     putStrLn $ "[handleAbortingRelease] Processing abort for " <> T.unpack (releaseId rt)
     -- Restore VS traffic to old version
     restoreVsTrafficOnFailure cfg db rt mts
-    -- Mark as UserAborted
-    let aborted = rt{status = UserAborted}
+    -- Mark as UserAborted with endTime
+    now <- getCurrentTime
+    let aborted = rt{status = UserAborted, endTime = Just now}
     insertReleaseTracker db aborted mts
     insertReleaseEvent db (releaseId rt) "BUSINESS" "ABORT_HANDLED" (toJSON ("User abort processed" :: String))
     notifyReleaseAborted db aborted

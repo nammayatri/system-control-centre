@@ -32,6 +32,10 @@ data AutopilotPermission
     | AP_PRODUCT_CONFIG_EDIT
     | AP_SERVICE_CONFIG_VIEW
     | AP_SERVICE_CONFIG_EDIT
+    | AP_CONFIG_APPROVE
+    | AP_CONFIG_EDIT
+    | AP_CONFIG_DISCARD
+    | AP_CONFIG_REVERT
     deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 autopilotPermissionToText :: AutopilotPermission -> Text
@@ -50,6 +54,10 @@ autopilotPermissionToText AP_PRODUCT_CONFIG_VIEW = "PRODUCT_CONFIG_VIEW"
 autopilotPermissionToText AP_PRODUCT_CONFIG_EDIT = "PRODUCT_CONFIG_EDIT"
 autopilotPermissionToText AP_SERVICE_CONFIG_VIEW = "SERVICE_CONFIG_VIEW"
 autopilotPermissionToText AP_SERVICE_CONFIG_EDIT = "SERVICE_CONFIG_EDIT"
+autopilotPermissionToText AP_CONFIG_APPROVE = "CONFIG_APPROVE"
+autopilotPermissionToText AP_CONFIG_EDIT = "CONFIG_EDIT"
+autopilotPermissionToText AP_CONFIG_DISCARD = "CONFIG_DISCARD"
+autopilotPermissionToText AP_CONFIG_REVERT = "CONFIG_REVERT"
 
 textToAutopilotPermission :: Text -> Maybe AutopilotPermission
 textToAutopilotPermission "RELEASE_VIEW" = Just AP_RELEASE_VIEW
@@ -67,6 +75,10 @@ textToAutopilotPermission "PRODUCT_CONFIG_VIEW" = Just AP_PRODUCT_CONFIG_VIEW
 textToAutopilotPermission "PRODUCT_CONFIG_EDIT" = Just AP_PRODUCT_CONFIG_EDIT
 textToAutopilotPermission "SERVICE_CONFIG_VIEW" = Just AP_SERVICE_CONFIG_VIEW
 textToAutopilotPermission "SERVICE_CONFIG_EDIT" = Just AP_SERVICE_CONFIG_EDIT
+textToAutopilotPermission "CONFIG_APPROVE" = Just AP_CONFIG_APPROVE
+textToAutopilotPermission "CONFIG_EDIT" = Just AP_CONFIG_EDIT
+textToAutopilotPermission "CONFIG_DISCARD" = Just AP_CONFIG_DISCARD
+textToAutopilotPermission "CONFIG_REVERT" = Just AP_CONFIG_REVERT
 textToAutopilotPermission _ = Nothing
 
 {- | Human-readable description of each permission.
@@ -88,3 +100,7 @@ permissionDescription AP_PRODUCT_CONFIG_VIEW = "View product configurations"
 permissionDescription AP_PRODUCT_CONFIG_EDIT = "Edit product configurations"
 permissionDescription AP_SERVICE_CONFIG_VIEW = "View server configurations"
 permissionDescription AP_SERVICE_CONFIG_EDIT = "Edit server configurations"
+permissionDescription AP_CONFIG_APPROVE = "Approve ConfigMap and VS edit releases"
+permissionDescription AP_CONFIG_EDIT = "Edit ConfigMap and VS edit releases"
+permissionDescription AP_CONFIG_DISCARD = "Discard ConfigMap and VS edit releases"
+permissionDescription AP_CONFIG_REVERT = "Revert ConfigMap releases"

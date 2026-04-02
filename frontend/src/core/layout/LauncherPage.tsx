@@ -38,7 +38,7 @@ export default function LauncherPage() {
           <div className="w-8 h-8 bg-zinc-900 rounded-lg flex items-center justify-center">
             <span className="text-white text-sm font-bold">SC</span>
           </div>
-          <span className="text-[15px] font-semibold text-zinc-900 tracking-tight">System Control Centre</span>
+          <span className="text-base font-semibold text-zinc-900 tracking-tight">System Control Centre</span>
         </div>
         <div className="flex items-center gap-4">
           <span className="text-sm text-zinc-500">{user?.email}</span>
@@ -55,7 +55,7 @@ export default function LauncherPage() {
       {/* Main content */}
       <main className="max-w-4xl mx-auto px-6 py-12">
         <div className="mb-8">
-          <h1 className="text-2xl font-semibold text-zinc-900">
+          <h1 className="text-lg font-semibold text-zinc-900">
             Welcome{user?.name ? `, ${user.name.split(' ')[0]}` : ''}
           </h1>
           <p className="text-sm text-zinc-500 mt-1">Select a product to get started</p>

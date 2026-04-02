@@ -183,7 +183,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
           <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-5">
             {/* LEFT column */}
             <div className="space-y-4">
-              <div><FieldLabel required>Product</FieldLabel><select name="appGroup" value={form.appGroup} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select App Group</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
+              <div><FieldLabel required>App Group</FieldLabel><select name="appGroup" value={form.appGroup} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select App Group</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
               <div><FieldLabel>Description</FieldLabel><input name="description" value={form.description} onChange={handleChange} placeholder="Deploying Hotfix" className={inputClass} /></div>
               <div><FieldLabel>Priority</FieldLabel><select name="priority" value={form.priority} onChange={handleChange} className={cn(inputClass, 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(n => <option key={n} value={n}>{n}</option>)}</select></div>
             </div>

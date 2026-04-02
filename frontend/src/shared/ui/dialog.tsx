@@ -70,7 +70,7 @@ export function DialogFooter({ className, ...props }: React.HTMLAttributes<HTMLD
 }
 
 export function DialogTitle({ className, ...props }: React.HTMLAttributes<HTMLHeadingElement>) {
-  return <DialogPrimitive.Title className={cn('text-[15px] font-semibold text-zinc-900 tracking-tight', className)} {...props} />;
+  return <DialogPrimitive.Title className={cn('text-lg font-semibold text-zinc-900 tracking-tight', className)} {...props} />;
 }
 
 export function DialogDescription({ className, ...props }: React.HTMLAttributes<HTMLParagraphElement>) {

@@ -168,7 +168,7 @@ const ListVSEdit: React.FC = () => {
               <thead>
                 <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
                   <th className="py-3 px-4 w-12">#</th>
-                  <th className="py-3 px-4">Product</th>
+                  <th className="py-3 px-4">App Group</th>
                   <th className="py-3 px-4">Service</th>
                   <th className="py-3 px-4">VS Name</th>
                   <th className="py-3 px-4">Status</th>

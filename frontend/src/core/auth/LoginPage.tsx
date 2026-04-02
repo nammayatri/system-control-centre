@@ -60,8 +60,8 @@ const LoginPage: React.FC = () => {
             <div className="flex items-center justify-center mb-3">
               <img src={nyLogo} alt="Logo" className="h-8 w-auto" />
             </div>
-            <h1 className="text-base font-semibold text-zinc-900">System Control Centre</h1>
-            <p className="text-[13px] text-zinc-500 mt-1">Sign in to your account</p>
+            <h1 className="text-lg font-semibold text-zinc-900">System Control Centre</h1>
+            <p className="text-sm text-zinc-500 mt-1">Sign in to your account</p>
           </div>
 
           {/* Form */}

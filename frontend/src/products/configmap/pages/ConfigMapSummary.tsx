@@ -137,7 +137,7 @@ const ConfigMapSummary: React.FC = () => {
               <Button size="sm" variant="danger" onClick={() => handleAction('Abort')} loading={actionMut.isPending}><Square className="w-3.5 h-3.5" /> Abort</Button>
             </PermissionGate>
           )}
-          {data.status === 'CREATED' && data.is_approved !== 0 && (
+          {data.status === 'CREATED' && (
             <PermissionGate product="autopilot" permission="CONFIG_DISCARD">
               <Button size="sm" variant="outline" className="border-red-300 text-red-700 hover:bg-red-50" onClick={() => handleAction('Discard')} loading={actionMut.isPending}><X className="w-3.5 h-3.5" /> Discard</Button>
             </PermissionGate>
@@ -167,13 +167,13 @@ const ConfigMapSummary: React.FC = () => {
         {activeTab === 'Summary' && (
           <div className="p-6 grid grid-cols-1 md:grid-cols-4 gap-4">
             {[
-              { title: 'PRODUCT', rows: [{ label: 'Product', value: data.appGroup }, { label: 'Description', value: data.description }, { label: 'Release Manager', value: data.release_manager }, { label: 'Name', value: data.name }, { label: 'Change log', value: data.change_log }] },
+              { title: 'APP GROUP', rows: [{ label: 'App Group', value: data.appGroup }, { label: 'Description', value: data.description }, { label: 'Release Manager', value: data.release_manager }, { label: 'Name', value: data.name }, { label: 'Change log', value: data.change_log }] },
               { title: 'TIME SCHEDULE', rows: [{ label: 'Created at', value: data.date_created }, { label: 'Scheduled time', value: data.schedule_time }, { label: 'Last Updated', value: data.last_updated }, { label: 'Start time', value: data.start_time }, { label: 'End time', value: data.end_time }] },
               { title: 'META DATA', rows: [{ label: 'Priority', value: String(data.priority) }, { label: 'Env', value: data.env }, { label: 'Approved', value: data.is_approved === 1 ? 'Yes' : 'No' }, { label: 'Slack Thread Id', value: data.slack_thread_id }] },
               { title: 'K8S INFO', rows: [{ label: 'Id', value: data.id }, { label: 'Cluster', value: data.cluster }] },
             ].map((card, ci) => (
               <div key={ci} className="bg-zinc-50 rounded-xl border border-zinc-100 p-4 text-sm">
-                <h3 className="font-semibold text-zinc-500 uppercase text-[11px] tracking-widest mb-3">{card.title}</h3>
+                <h3 className="font-semibold text-zinc-500 uppercase text-[11px] tracking-wider mb-3">{card.title}</h3>
                 <dl className="space-y-2.5">
                   {card.rows.map((r, ri) => (
                     <div key={ri}>

@@ -289,7 +289,7 @@ const DeploymentConfig: React.FC = () => {
               <thead>
                 <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
                   <th className="py-3 px-4 w-10"></th>
-                  <th className="py-3 px-4">Name</th>
+                  <th className="py-3 px-4">App Group</th>
                   <th className="py-3 px-4">Cluster</th>
                   <th className="py-3 px-4">Namespace</th>
                   <th className="py-3 px-4">VS Name</th>
