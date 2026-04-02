@@ -25,7 +25,7 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, (.!=))
 import Data.Foldable (toList)
-import Data.Text (Text)
+import Data.Text (Text, pack)
 import Data.Time.Clock (UTCTime)
 import GHC.Generics (Generic)
 import GHC.Int (Int32)
@@ -978,7 +978,15 @@ instance FromJSON UpsertServerConfigReq where
         UpsertServerConfigReq
             <$> (v .: "name")
             <*> v .:? "value"
-            <*> v .:? "enabled"
+            <*> (do
+                    mVal <- v .:? "enabled"
+                    case mVal of
+                        Nothing -> pure Nothing
+                        Just (String s) -> pure (Just s)
+                        Just (Number n) -> pure (Just (pack (show (round n :: Int))))
+                        Just (Bool b) -> pure (Just (if b then "1" else "0"))
+                        _ -> pure Nothing
+                )
 
 instance ToJSON UpsertServerConfigReq where
     toJSON r =
