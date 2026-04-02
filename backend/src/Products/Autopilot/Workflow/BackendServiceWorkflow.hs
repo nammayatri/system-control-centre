@@ -64,7 +64,6 @@ import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, hpaExists)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getVirtualServiceJson)
 import Products.Autopilot.Notifications
   ( notifyGenericThreadMessage,
-    notifyPodsScaledDown,
     notifyReleaseCompleted,
     notifyReleaseProgress,
   )
@@ -964,12 +963,13 @@ cleanupOldVersion = do
 
       -- If scale_down_pods_on_completion is enabled, do it immediately too
       -- (production has this commented out but the Runner handles it)
+      -- NOTE: Slack notification for pods scaled down is sent ONLY from the Runner's
+      -- scaleDownOldDeployment on actual success — not here (avoids duplicates).
       shouldScaleDownNow <- liftIO $ isScaleDownPodsOnCompletion db
       when shouldScaleDownNow $ do
         liftIO $ putStrLn $ "  Immediate scale-down: " <> T.unpack oldDepName
         _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
         updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
-        liftIO $ notifyPodsScaledDown db rt (oldVersion ctx)
 
   -- Capture AFTER snapshots
   cfgAfter <- getCfg

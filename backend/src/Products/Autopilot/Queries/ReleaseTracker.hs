@@ -13,6 +13,7 @@ module Products.Autopilot.Queries.ReleaseTracker
     listReleaseTrackers,
     listReleaseTrackersByDateRange,
     findRunnableReleaseTrackers,
+    findInProgressReleaseTrackers,
     findCleanupScheduledTrackers,
     findAbortingReleaseTrackers,
     findOngoingReleaseTrackers,
@@ -170,6 +171,9 @@ listReleaseTrackersByDateRange db fromTime toTime = do
             pure rt
   pure (map fromRow rows)
 
+-- | Find releases ready to be dispatched. Only picks CREATED status.
+-- INPROGRESS releases are NOT re-dispatched — on server restart, they are
+-- rolled back (matching Julia production behavior: rollbackReleaseInProgress).
 findRunnableReleaseTrackers :: DBEnv -> UTCTime -> IO [TrackerWithTarget]
 findRunnableReleaseTrackers db now = do
   rows <-
@@ -178,7 +182,7 @@ findRunnableReleaseTrackers db now = do
         select $
           orderBy_ (asc_ . rtCreatedAt) $ do
             rt <- all_ (releaseTrackers nammaAPDb)
-            guard_ (rtStatus rt `in_` [val_ "CREATED", val_ "INPROGRESS"])
+            guard_ (rtStatus rt ==. val_ "CREATED")
             pure rt
   let parsed = map fromRow rows
       isDue (tracker, _) = case scheduleTime tracker of
@@ -186,6 +190,19 @@ findRunnableReleaseTrackers db now = do
         Just t -> t <= now
       isApproved' (tracker, _) = isApproved tracker
   pure (filter (\t -> isDue t && isApproved' t) parsed)
+
+-- | Find all INPROGRESS releases (for rollback on startup).
+findInProgressReleaseTrackers :: DBEnv -> IO [TrackerWithTarget]
+findInProgressReleaseTrackers db = do
+  rows <-
+    runDB db $
+      runSelectReturningList $
+        select $
+          orderBy_ (asc_ . rtCreatedAt) $ do
+            rt <- all_ (releaseTrackers nammaAPDb)
+            guard_ (rtStatus rt `in_` [val_ "INPROGRESS", val_ "PAUSED", val_ "REVERTING"])
+            pure rt
+  pure (map fromRow rows)
 
 findCleanupScheduledTrackers :: DBEnv -> UTCTime -> IO [TrackerWithTarget]
 findCleanupScheduledTrackers db now = do
