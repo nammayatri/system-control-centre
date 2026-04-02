@@ -166,9 +166,9 @@ instance FromJSON RolloutHistory
 
 data ReleaseTracker = ReleaseTracker
     { releaseId :: Text
-    , product :: Text
-    -- ^ Service/app name (e.g., "Beckn", "rider-app", "BecknSchedulers")
-    -- This is the WHAT - which service or app is being released
+    , appGroup :: Text
+    -- ^ App group name (e.g., "Beckn", "rider-app", "BecknSchedulers")
+    -- This is the WHAT - which group/product is being released
     , service :: Text
     -- ^ Alias for product (for backward compatibility)
     , env :: Text

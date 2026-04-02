@@ -40,9 +40,9 @@ const CreateRelease: React.FC = () => {
     status: 'Created', mode: 'AUTO', priority: '0', info: '', custom_pods_scale_down_days: '1',
     cluster: 'EULER_UAT', scale_down_delay: '1',
     cronjob_suspend: false, description: '', schedule_time: '',
-    deploy_file_path: '', vs_file_path: '', dr_file_path: '',
+    // deploy_file_path, vs_file_path, dr_file_path removed (backend still accepts via API)
   });
-  const [isNewService, setIsNewService] = useState(false);
+  const isNewService = false; // new_service toggle removed from UI; still accepted by backend API
   const [error, setError] = useState('');
   const [isEnvSwitch, setIsEnvSwitch] = useState(false);
   const [envData, setEnvData] = useState('');
@@ -102,11 +102,8 @@ const CreateRelease: React.FC = () => {
         cronjob_suspend: existingRelease.cronjob_suspend || false,
         description: existingRelease.description || '',
         schedule_time: existingRelease.schedule_time || '',
-        deploy_file_path: existingRelease.release_context?.deploy_file_path || '',
-        vs_file_path: existingRelease.release_context?.vs_file_path || '',
-        dr_file_path: existingRelease.release_context?.dr_file_path || '',
+        // deploy/vs/dr file paths removed from UI
       });
-      setIsNewService(existingRelease.new_service === 'Yes');
       setRolloutHistoryLength(existingRelease.rollout_history?.length || 0);
       if (existingRelease.udf2) { setIsEnvSwitch(true); setEnvData(existingRelease.udf2); }
       if (existingRelease.rollout_strategy) {
@@ -123,7 +120,6 @@ const CreateRelease: React.FC = () => {
   useEffect(() => {
     if (isClone && id) {
       fetchReleaseDetails(id).then(data => {
-        setIsNewService(data.new_service === 'Yes');
         setClonedService(data.service);
         setFormData(prev => ({
           ...prev, product: data.product, service: data.service,
@@ -299,10 +295,7 @@ const CreateRelease: React.FC = () => {
       pods_scale_down_delay: parseFloat(formData.scale_down_delay) || 1.0,
       cronjob_suspend: formData.cronjob_suspend,
       description: formData.description, schedule_time: formData.schedule_time,
-      cluster: formData.cluster, new_service: isNewService, rollout_strategy: stages,
-      deploy_file_path: isNewService && formData.deploy_file_path ? formData.deploy_file_path : null,
-      vs_file_path: isNewService && formData.vs_file_path ? formData.vs_file_path : null,
-      dr_file_path: isNewService && formData.dr_file_path ? formData.dr_file_path : null,
+      cluster: formData.cluster, new_service: false, rollout_strategy: stages,
       is_approved: formData.env === 'INTEG_CLUSTER' ? 1 : 0,
       udf2: isEnvSwitch ? envData : null,
       udf3: isConfigMapSwitch ? configMapData : null,
@@ -354,12 +347,6 @@ const CreateRelease: React.FC = () => {
         <div className="bg-white rounded-xl border border-zinc-200">
           <div className="px-6 py-4 border-b border-zinc-100 flex justify-between items-center">
             <h2 className="text-lg font-semibold text-zinc-900">{pageTitle}</h2>
-            {!isUpdate && (
-              <div className="flex items-center gap-3">
-                <span className="text-sm text-zinc-600">New Service?</span>
-                <Toggle checked={isNewService} onChange={() => setIsNewService(!isNewService)} />
-              </div>
-            )}
           </div>
 
           <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-5">
@@ -475,17 +462,7 @@ const CreateRelease: React.FC = () => {
             </div>
           </div>
 
-          {/* New Service File Paths */}
-          {isNewService && !isUpdate && (
-            <div className="px-6 pb-6 pt-2 border-t border-zinc-100">
-              <h3 className="text-sm font-semibold text-zinc-700 mb-3">New Service YAML Paths</h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-4">
-                <div><FieldLabel>Deploy File Path</FieldLabel><input type="text" name="deploy_file_path" value={formData.deploy_file_path} onChange={handleInputChange} placeholder="/path/to/deployment.yaml" className={inputClass} /></div>
-                <div><FieldLabel>VirtualService File Path</FieldLabel><input type="text" name="vs_file_path" value={formData.vs_file_path} onChange={handleInputChange} placeholder="/path/to/virtualservice.yaml" className={inputClass} /></div>
-                <div><FieldLabel>DestinationRule File Path</FieldLabel><input type="text" name="dr_file_path" value={formData.dr_file_path} onChange={handleInputChange} placeholder="/path/to/destinationrule.yaml" className={inputClass} /></div>
-              </div>
-            </div>
-          )}
+          {/* New Service YAML Paths removed from UI — backend still accepts via API */}
         </div>
 
         {/* Stages Card */}

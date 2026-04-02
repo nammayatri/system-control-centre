@@ -54,7 +54,7 @@ newtype ServiceSlug = ServiceSlug { unServiceSlug :: Text }
 
 data UpsertProductReq = UpsertProductReq
     { id :: Maybe Int32
-    , product :: Text
+    , appGroup :: Text
     , cluster :: Text
     , namespace :: Text
     , vsName :: Text
@@ -107,7 +107,7 @@ instance ToJSON UpsertServiceReq where
     toJSON = genericToJSON defaultOptions { omitNothingFields = True }
 
 data K8sCreateReleaseReq = K8sCreateReleaseReq
-    { product :: Text
+    { appGroup :: Text
     , service :: Text
     , env :: Text
     , requestedCluster :: Maybe Text
@@ -132,7 +132,6 @@ data K8sCreateReleaseReq = K8sCreateReleaseReq
     , priority :: Maybe Int32
     , globalId :: Maybe Text
     , newService :: Maybe Bool
-    , isArtRecorder :: Maybe Int32
     , cronjobSuspend :: Maybe Bool
     , changeLog :: Maybe Text
     , udf1 :: Maybe Text
@@ -148,7 +147,7 @@ data K8sCreateReleaseReq = K8sCreateReleaseReq
 -- Complex manual parser needed for legacy field names and special parsing logic
 instance FromJSON K8sCreateReleaseReq where
     parseJSON = withObject "K8sCreateReleaseReq" $ \o -> do
-        product <- o .: "product"
+        appGroup <- (o .:? "appGroup" >>= maybe (o .: "product") pure)
         service <- parseService o
         env <- o .:? "env" .!= "UAT"
         requestedCluster <- o .:? "requestedCluster" >>= maybe (o .:? "cluster") pure
@@ -173,7 +172,6 @@ instance FromJSON K8sCreateReleaseReq where
         priority <- o .:? "priority"
         globalId <- o .:? "global_id"
         newService <- o .:? "new_service"
-        isArtRecorder <- o .:? "is_art_recorder"
         cronjobSuspend <- o .:? "cronjob_suspend"
         changeLog <- o .:? "change_log"
         udf1 <- o .:? "udf1"
@@ -256,7 +254,8 @@ instance FromJSON K8sCreateReleaseReq where
 instance ToJSON K8sCreateReleaseReq where
     toJSON K8sCreateReleaseReq{..} =
         object
-            [ "product" .= product
+            [ "appGroup" .= appGroup
+            , "product" .= appGroup  -- backward compat alias
             , "service" .= service
             , "env" .= env
             , "requestedCluster" .= requestedCluster
@@ -281,7 +280,6 @@ instance ToJSON K8sCreateReleaseReq where
             , "priority" .= priority
             , "global_id" .= globalId
             , "new_service" .= newService
-            , "is_art_recorder" .= isArtRecorder
             , "cronjob_suspend" .= cronjobSuspend
             , "change_log" .= changeLog
             , "udf1" .= udf1

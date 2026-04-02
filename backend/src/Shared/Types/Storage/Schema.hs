@@ -16,14 +16,14 @@ import GHC.Int (Int32)
 -- | Unified deployment config: product-level (service IS NULL) or service-level (service IS NOT NULL)
 data DeploymentConfigT f = DeploymentConfigT
     { dcId :: Columnar f Int32
-    , dcProduct :: Columnar f Text
+    , dcAppGroup :: Columnar f Text
     , dcService :: Columnar f (Maybe Text)
     -- Product-level fields (service IS NULL)
     , dcCluster :: Columnar f (Maybe Text)
     , dcNamespace :: Columnar f (Maybe Text)
     , dcVsName :: Columnar f (Maybe Text)
-    , dcProductAcronym :: Columnar f (Maybe Text)
-    , dcProductType :: Columnar f (Maybe Text)
+    , dcAppGroupAcronym :: Columnar f (Maybe Text)
+    , dcAppGroupType :: Columnar f (Maybe Text)
     , dcRepoName :: Columnar f (Maybe Text)
     , dcReleaseBranch :: Columnar f (Maybe Text)
     , dcSyncCluster :: Columnar f (Maybe Text)
@@ -55,7 +55,7 @@ data ReleaseTrackerT f = ReleaseTrackerT
     { rtId :: Columnar f Text
     , rtOldVersion :: Columnar f Text
     , rtNewVersion :: Columnar f Text
-    , rtProduct :: Columnar f Text
+    , rtAppGroup :: Columnar f Text
     , rtService :: Columnar f Text
     , rtPriority :: Columnar f Int32
     , rtEnv :: Columnar f Text
@@ -149,13 +149,13 @@ nammaAPDb =
                     <> modifyTableFields
                         tableModification
                             { dcId = fieldNamed "id"
-                            , dcProduct = fieldNamed "product"
+                            , dcAppGroup = fieldNamed "app_group"
                             , dcService = fieldNamed "service"
                             , dcCluster = fieldNamed "cluster"
                             , dcNamespace = fieldNamed "namespace"
                             , dcVsName = fieldNamed "vs_name"
-                            , dcProductAcronym = fieldNamed "product_acronym"
-                            , dcProductType = fieldNamed "product_type"
+                            , dcAppGroupAcronym = fieldNamed "product_acronym"
+                            , dcAppGroupType = fieldNamed "product_type"
                             , dcRepoName = fieldNamed "repo_name"
                             , dcReleaseBranch = fieldNamed "release_branch"
                             , dcSyncCluster = fieldNamed "sync_cluster"
@@ -179,7 +179,7 @@ nammaAPDb =
                             { rtId = fieldNamed "id"
                             , rtOldVersion = fieldNamed "old_version"
                             , rtNewVersion = fieldNamed "new_version"
-                            , rtProduct = fieldNamed "product"
+                            , rtAppGroup = fieldNamed "app_group"
                             , rtService = fieldNamed "service"
                             , rtPriority = fieldNamed "priority"
                             , rtEnv = fieldNamed "env"

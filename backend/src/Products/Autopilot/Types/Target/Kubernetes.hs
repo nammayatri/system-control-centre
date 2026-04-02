@@ -34,7 +34,7 @@ import Data.Aeson (FromJSON, ToJSON, Value)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import GHC.Generics (Generic)
-import GHC.Int (Int32)
+
 
 -- ============================================================================
 -- K8s Enums (moved from Release.hs)
@@ -258,8 +258,6 @@ data K8sDeploymentState = K8sDeploymentState
     -- ^ Decision engine health status
     , newService :: Bool
     -- ^ Whether this is a new service (no existing deployment)
-    , isArtRecorder :: Int32
-    -- ^ ART recorder flag
     , categoryWorkflowStatus :: BackendServiceWFStatus
     -- ^ Granular K8s-specific workflow progress
     , deploymentCreated :: Bool
@@ -293,7 +291,6 @@ emptyK8sState =
         , cronjobSuspend = False
         , abHsStatus = Uninitiated
         , newService = False
-        , isArtRecorder = 0
         , categoryWorkflowStatus = BSInit
         , deploymentCreated = False
         , serviceCreated = False

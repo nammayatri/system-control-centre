@@ -1,17 +1,26 @@
-# Migrations — system-control
+# Migrations
 
-Place SQL migration files here. They are applied in lexicographic order.
+Tables are auto-created by `ensureSchema` on app startup. These migrations are for **seed data** and **performance indexes**.
 
-## Naming convention
+## How to run
 
+```bash
+# Run all migrations
+for f in dev/migrations/system-control/0*.sql; do psql -d system_control -f "$f"; done
+
+# Or use nix command
+sc-migrate
 ```
-0001-description.sql
-0002-another-description.sql
+
+## Migrations
+
+| File | What | When to run |
+|------|------|-------------|
+| `0001-seed-server-config.sql` | Insert default server_config entries | Once on fresh DB |
+| `0002-add-indexes.sql` | Performance indexes on all 10 tables | Once on fresh DB |
+
+## For local testing
+
+```bash
+sc-setup-db    # Creates DB + schema + seed + indexes (all-in-one)
 ```
-
-## Rules
-
-- Migrations must be idempotent (use `IF NOT EXISTS`, `ON CONFLICT DO NOTHING`, etc.)
-- Never modify a migration that has already been applied to production
-- Each migration should be self-contained
-- Include both UP logic; for reversible changes, add a comment with the DOWN SQL

@@ -51,7 +51,7 @@ ensureSchema db = withConn db $ \conn -> do
     -- ========================================================================
     _ <- execute_ conn "CREATE TABLE IF NOT EXISTS deployment_config (\
         \id serial primary key, \
-        \product text not null, \
+        \app_group text not null, \
         \service text null, \
         \cluster text null, \
         \namespace text null, \
@@ -73,11 +73,13 @@ ensureSchema db = withConn db $ \conn -> do
         \bitbucket_path text null, \
         \slack_channel text null, \
         \emails text null)"
-    -- Unique constraint: (product, COALESCE(service, ''))
+    -- Unique constraint: (app_group, COALESCE(service, ''))
     _ <- execute_ conn "DO $$ BEGIN \
         \IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_deployment_config') THEN \
-        \CREATE UNIQUE INDEX IF NOT EXISTS uq_deployment_config ON deployment_config (product, COALESCE(service, '')); \
+        \CREATE UNIQUE INDEX IF NOT EXISTS uq_deployment_config ON deployment_config (app_group, COALESCE(service, '')); \
         \END IF; END $$"
+    -- Rename product -> app_group if needed (for existing DBs)
+    _ <- execute_ conn "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='deployment_config' AND column_name='product') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='deployment_config' AND column_name='app_group') THEN ALTER TABLE deployment_config RENAME COLUMN product TO app_group; END IF; END $$"
 
     -- ========================================================================
     -- Migrate data from old tables (if they exist) into deployment_config
@@ -85,7 +87,7 @@ ensureSchema db = withConn db $ \conn -> do
     -- Migrate product_config -> deployment_config (product-level rows, DISTINCT ON handles dups)
     _ <- execute_ conn "DO $$ BEGIN \
         \IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='product_config') THEN \
-        \INSERT INTO deployment_config (product, product_type, product_acronym, repo_name, release_branch, need_infra_approval, \
+        \INSERT INTO deployment_config (app_group, product_type, product_acronym, repo_name, release_branch, need_infra_approval, \
         \cluster, namespace, vs_name, sync_cluster) \
         \SELECT DISTINCT ON (p.product) p.product, p.product_type, p.product_acronym, p.repo_name, p.release_branch, p.need_infra_approval, \
         \COALESCE((p.target_config::json->>'cluster')::text, ''), \
@@ -93,21 +95,21 @@ ensureSchema db = withConn db $ \conn -> do
         \COALESCE((p.target_config::json->>'vsName')::text, ''), \
         \(p.target_config::json->>'syncCluster')::text \
         \FROM product_config p \
-        \WHERE NOT EXISTS (SELECT 1 FROM deployment_config d WHERE d.product = p.product AND d.service IS NULL) \
+        \WHERE NOT EXISTS (SELECT 1 FROM deployment_config d WHERE d.app_group = p.product AND d.service IS NULL) \
         \ORDER BY p.product, p.id; \
         \END IF; END $$"
 
     -- Migrate release_config -> deployment_config (service-level rows)
     _ <- execute_ conn "DO $$ BEGIN \
         \IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='release_config') THEN \
-        \INSERT INTO deployment_config (product, service, service_type, emails, rollout_strategy, revert_strategy, \
+        \INSERT INTO deployment_config (app_group, service, service_type, emails, rollout_strategy, revert_strategy, \
         \decision_config, slack_channel, bitbucket_path, service_host, service_acronym) \
         \SELECT r.product, r.service, r.service_type, r.emails, r.rollout_strategy, r.revert_strategy, \
         \r.decision_config, r.slack_webhook_urls, r.bitbucket_path, \
         \COALESCE((r.target_config::json->>'serviceHost')::text, ''), \
         \r.service_acronym \
         \FROM release_config r \
-        \WHERE NOT EXISTS (SELECT 1 FROM deployment_config d WHERE d.product = r.product AND d.service = r.service); \
+        \WHERE NOT EXISTS (SELECT 1 FROM deployment_config d WHERE d.app_group = r.product AND d.service = r.service); \
         \END IF; END $$"
 
     -- ========================================================================
@@ -127,17 +129,20 @@ ensureSchema db = withConn db $ \conn -> do
     -- ========================================================================
     -- release_tracker
     -- ========================================================================
-    _ <- execute_ conn "CREATE TABLE IF NOT EXISTS release_tracker (id text primary key, status text not null, description text null, new_version text not null, old_version text not null, product text not null, service text not null, mode text null, date_created timestamptz not null, last_updated timestamptz not null, start_time timestamptz null, end_time timestamptz null, release_manager text not null, approved_by text null, env text not null, priority int not null, rollout_strategy text null, rollout_history text null, schedule_time timestamptz null, release_tag text not null, events text null, change_log text null, release_context text null, info text null, udf1 text null, udf2 text null, udf3 text null, is_approved boolean null, is_infra_approved boolean null, metadata text null, category text null, release_wf_status text null, global_id text null, new_service boolean null, is_art_recorder int null, cronjob_suspend boolean null, ab_hs_status text null default 'Uninitiated')"
+    _ <- execute_ conn "CREATE TABLE IF NOT EXISTS release_tracker (id text primary key, status text not null, description text null, new_version text not null, old_version text not null, app_group text not null, service text not null, mode text null, date_created timestamptz not null, last_updated timestamptz not null, start_time timestamptz null, end_time timestamptz null, release_manager text not null, approved_by text null, env text not null, priority int not null, rollout_strategy text null, rollout_history text null, schedule_time timestamptz null, release_tag text not null, change_log text null, release_context text null, info text null, udf1 text null, udf2 text null, udf3 text null, is_approved boolean null, is_infra_approved boolean null, metadata text null, category text null, release_wf_status text null, global_id text null, new_service boolean null, cronjob_suspend boolean null, ab_hs_status text null default 'Uninitiated')"
     -- Migrate legacy column names if they exist
     _ <- execute_ conn "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='release_tracker' AND column_name='tracker_type') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='release_tracker' AND column_name='category') THEN ALTER TABLE release_tracker RENAME COLUMN tracker_type TO category; END IF; END $$"
     _ <- execute_ conn "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='release_tracker' AND column_name='workflow_status') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='release_tracker' AND column_name='release_wf_status') THEN ALTER TABLE release_tracker RENAME COLUMN workflow_status TO release_wf_status; END IF; END $$"
     _ <- execute_ conn "ALTER TABLE release_tracker ADD COLUMN IF NOT EXISTS approved_by text null"
     _ <- execute_ conn "ALTER TABLE release_tracker ADD COLUMN IF NOT EXISTS global_id text null"
     _ <- execute_ conn "ALTER TABLE release_tracker ADD COLUMN IF NOT EXISTS new_service boolean null"
-    _ <- execute_ conn "ALTER TABLE release_tracker ADD COLUMN IF NOT EXISTS is_art_recorder int null"
     _ <- execute_ conn "ALTER TABLE release_tracker ADD COLUMN IF NOT EXISTS cronjob_suspend boolean null"
     _ <- execute_ conn "ALTER TABLE release_tracker ADD COLUMN IF NOT EXISTS ab_hs_status text null default 'Uninitiated'"
-    _ <- execute_ conn "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='release_tracker' AND column_name='is_art_recorder' AND data_type='boolean') THEN ALTER TABLE release_tracker ALTER COLUMN is_art_recorder TYPE int USING CASE WHEN is_art_recorder THEN 1 ELSE 0 END; END IF; END $$"
+    -- Drop obsolete columns (events, is_art_recorder)
+    _ <- execute_ conn "ALTER TABLE release_tracker DROP COLUMN IF EXISTS events"
+    _ <- execute_ conn "ALTER TABLE release_tracker DROP COLUMN IF EXISTS is_art_recorder"
+    -- Rename product -> app_group if needed
+    _ <- execute_ conn "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='release_tracker' AND column_name='product') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='release_tracker' AND column_name='app_group') THEN ALTER TABLE release_tracker RENAME COLUMN product TO app_group; END IF; END $$"
 
     -- ========================================================================
     -- release_events
