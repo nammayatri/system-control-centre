@@ -210,7 +210,8 @@ updateConfigMapH cmId' body = do
                 Just "restart" -> liftIO $ notifyConfigMapUpdated db updated "restarted"
                 _ -> pure ()
               when (isTruthy "is_approved" obj) $
-                liftIO $ notifyConfigMapApproved db updated
+                liftIO $
+                  notifyConfigMapApproved db updated
               case getStrM "current_cool_off" obj of
                 Just "0" -> liftIO $ notifyConfigMapFastForwarded db updated
                 _ -> pure ()
@@ -250,12 +251,12 @@ handleConfigMapRevert db rt mts cmId' = do
               KM.insert (K.fromText "config") (String c) $
                 KM.insert (K.fromText "file") (String c) oldMeta
             Nothing -> oldMeta
-          finalTracker = revertTracker {NT.metadata = Just (Object revertMeta)}
+          finalTracker = revertTracker{NT.metadata = Just (Object revertMeta)}
           targetState = ConfigState emptyConfigState
       liftIO $ insertReleaseTracker db finalTracker (Just targetState)
       liftIO $ insertReleaseEvent db newRid "BUSINESS" "REVERT_TRACKER_CREATED" (toJSON ("Revert of " <> cmId'))
       -- Mark original as REVERTING
-      let reverted = rt {NT.status = Reverting}
+      let reverted = rt{NT.status = Reverting}
       liftIO $ insertReleaseTracker db reverted mts
       liftIO $ notifyConfigMapReverted db reverted
       pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)

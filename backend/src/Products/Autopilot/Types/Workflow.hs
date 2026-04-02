@@ -96,8 +96,8 @@ migrateTrackerTypeToCategory _ = BackendService
 --
 -- Workflow progression:
 -- Init → Preparing → Deploying → Monitoring → Finalizing → Done
---                                            ↓
---                                       RollingBack (on error)
+--                                           ↓
+--                                      RollingBack (on error)
 data ReleaseWFStatus
   = -- | Validation and precondition checks
     -- Examples:

@@ -80,7 +80,7 @@ instance FromJSON UpsertProductReq where
       <*> (v .:? "needInfraApproval" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "need_infra_approval")
 
 instance ToJSON UpsertProductReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 data UpsertServiceReq = UpsertServiceReq
   { id :: Maybe Int32,
@@ -95,10 +95,10 @@ data UpsertServiceReq = UpsertServiceReq
   deriving (Show, Generic)
 
 instance FromJSON UpsertServiceReq where
-  parseJSON = genericParseJSON defaultOptions {omitNothingFields = True}
+  parseJSON = genericParseJSON defaultOptions{omitNothingFields = True}
 
 instance ToJSON UpsertServiceReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 data K8sCreateReleaseReq = K8sCreateReleaseReq
   { appGroup :: Text,
@@ -296,10 +296,10 @@ data ApproveReleaseReq = ApproveReleaseReq
   deriving (Show, Generic)
 
 instance FromJSON ApproveReleaseReq where
-  parseJSON = genericParseJSON defaultOptions {omitNothingFields = True}
+  parseJSON = genericParseJSON defaultOptions{omitNothingFields = True}
 
 instance ToJSON ApproveReleaseReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 data TriggerReleaseReq = TriggerReleaseReq
   { reason :: Maybe Text
@@ -307,10 +307,10 @@ data TriggerReleaseReq = TriggerReleaseReq
   deriving (Show, Generic)
 
 instance FromJSON TriggerReleaseReq where
-  parseJSON = genericParseJSON defaultOptions {omitNothingFields = True}
+  parseJSON = genericParseJSON defaultOptions{omitNothingFields = True}
 
 instance ToJSON TriggerReleaseReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 data RevertReleaseReq = RevertReleaseReq
   { requestedBy :: Maybe Text,
@@ -321,10 +321,10 @@ data RevertReleaseReq = RevertReleaseReq
   deriving (Show, Generic)
 
 instance FromJSON RevertReleaseReq where
-  parseJSON = genericParseJSON defaultOptions {omitNothingFields = True}
+  parseJSON = genericParseJSON defaultOptions{omitNothingFields = True}
 
 instance ToJSON RevertReleaseReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 data K8sUpdateTrackerReq = K8sUpdateTrackerReq
   { status :: Maybe Text,
@@ -367,7 +367,7 @@ instance FromJSON K8sUpdateTrackerReq where
       <*> o .:? "podsScaleDownDelay"
 
 instance ToJSON K8sUpdateTrackerReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 data DiscardReleaseReq = DiscardReleaseReq
   { reason :: Maybe Text
@@ -375,10 +375,10 @@ data DiscardReleaseReq = DiscardReleaseReq
   deriving (Show, Generic)
 
 instance FromJSON DiscardReleaseReq where
-  parseJSON = genericParseJSON defaultOptions {omitNothingFields = True}
+  parseJSON = genericParseJSON defaultOptions{omitNothingFields = True}
 
 instance ToJSON DiscardReleaseReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 data ImmediateRevertReq = ImmediateRevertReq
   { requestedBy :: Maybe Text,
@@ -388,10 +388,10 @@ data ImmediateRevertReq = ImmediateRevertReq
   deriving (Show, Generic)
 
 instance FromJSON ImmediateRevertReq where
-  parseJSON = genericParseJSON defaultOptions {omitNothingFields = True}
+  parseJSON = genericParseJSON defaultOptions{omitNothingFields = True}
 
 instance ToJSON ImmediateRevertReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 data RestartReleaseReq = RestartReleaseReq
   { requestedBy :: Maybe Text,
@@ -400,10 +400,10 @@ data RestartReleaseReq = RestartReleaseReq
   deriving (Show, Generic)
 
 instance FromJSON RestartReleaseReq where
-  parseJSON = genericParseJSON defaultOptions {omitNothingFields = True}
+  parseJSON = genericParseJSON defaultOptions{omitNothingFields = True}
 
 instance ToJSON RestartReleaseReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 data FastForwardReq = FastForwardReq
   { requestedBy :: Maybe Text,
@@ -412,10 +412,10 @@ data FastForwardReq = FastForwardReq
   deriving (Show, Generic)
 
 instance FromJSON FastForwardReq where
-  parseJSON = genericParseJSON defaultOptions {omitNothingFields = True}
+  parseJSON = genericParseJSON defaultOptions{omitNothingFields = True}
 
 instance ToJSON FastForwardReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 -- ============================================================================
 -- VS Edit Tracker Request Types
@@ -433,10 +433,10 @@ data CreateVsEditTrackerReq = CreateVsEditTrackerReq
   deriving (Show, Generic)
 
 instance FromJSON CreateVsEditTrackerReq where
-  parseJSON = genericParseJSON defaultOptions {omitNothingFields = True}
+  parseJSON = genericParseJSON defaultOptions{omitNothingFields = True}
 
 instance ToJSON CreateVsEditTrackerReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 data UpdateVsEditTrackerReq = UpdateVsEditTrackerReq
   { newVsData :: Maybe Text,
@@ -447,10 +447,10 @@ data UpdateVsEditTrackerReq = UpdateVsEditTrackerReq
   deriving (Show, Generic)
 
 instance FromJSON UpdateVsEditTrackerReq where
-  parseJSON = genericParseJSON defaultOptions {omitNothingFields = True}
+  parseJSON = genericParseJSON defaultOptions{omitNothingFields = True}
 
 instance ToJSON UpdateVsEditTrackerReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 -- Manual FromJSON for VsLockReq to accept both camelCase and snake_case
 data VsLockReq = VsLockReq
@@ -476,7 +476,7 @@ instance FromJSON VsLockReq where
       <*> (v .:? "lockDurationMinutes" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "lock_duration_minutes")
 
 instance ToJSON VsLockReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 -- Manual FromJSON for VsUnlockReq to accept both camelCase and snake_case
 data VsUnlockReq = VsUnlockReq
@@ -496,7 +496,7 @@ instance FromJSON VsUnlockReq where
       <*> v .:? "env"
 
 instance ToJSON VsUnlockReq where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 -- ============================================================================
 -- Generic Response Type
@@ -530,7 +530,7 @@ data ProductResponse = ProductResponse
   deriving (Show, Generic)
 
 instance ToJSON ProductResponse where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 data ServiceResponse = ServiceResponse
   { service :: Text,
@@ -541,7 +541,7 @@ data ServiceResponse = ServiceResponse
   deriving (Show, Generic)
 
 instance ToJSON ServiceResponse where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 -- ============================================================================
 -- Product Config CRUD Response
@@ -562,7 +562,7 @@ data ProductConfigResponse = ProductConfigResponse
   deriving (Show, Generic)
 
 instance ToJSON ProductConfigResponse where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 -- ============================================================================
 -- Release Config CRUD Response
@@ -585,7 +585,7 @@ data ReleaseConfigResponse = ReleaseConfigResponse
   deriving (Show, Generic)
 
 instance ToJSON ReleaseConfigResponse where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
 -- ============================================================================
 -- Pod Health Response Types

@@ -285,7 +285,7 @@ lockVsEditTrackerH VsLockReq {..} = do
       let durationSecs = fromIntegral (fromMaybe 15 lockDurationMinutes) * 60
           lockExpiry = addUTCTime durationSecs now
           row = mkVsEditRow tid appGroup resolvedService resolvedEnv resolvedVsName oldVsData (Just resolvedLockedBy) "LOCKED" now
-          rowWithExpiry = row {S.rtEndTime = Just lockExpiry}
+          rowWithExpiry = row{S.rtEndTime = Just lockExpiry}
       liftIO $ insertReleaseTrackerRow db rowWithExpiry
       -- Capture old VS data as SNAPSHOT event
       case oldVsData of
@@ -304,7 +304,7 @@ unlockVsEditTrackerH VsUnlockReq {..} = do
       case m of
         Nothing -> pure $ APIResponse "ERROR" "Tracker not found"
         Just existing -> do
-          let updated = existing {S.rtStatus = "UNLOCKED", S.rtUpdatedAt = now, S.rtEndTime = Just now}
+          let updated = existing{S.rtStatus = "UNLOCKED", S.rtUpdatedAt = now, S.rtEndTime = Just now}
           liftIO $ insertReleaseTrackerRow db updated
           -- Clear vs_locked_by in deployment_config
           liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing

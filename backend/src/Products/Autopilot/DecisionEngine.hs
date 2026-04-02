@@ -6,10 +6,10 @@
 -- Provides three decision functions, all gated behind server_config flags:
 --
 -- 1. Prometheus query checks — reads decision_config from deployment_config,
---   queries Prometheus HTTP API, checks thresholds.
+--  queries Prometheus HTTP API, checks thresholds.
 -- 2. AB Decision Engine — calls external AB testing service for Continue/Wait/Abort.
 -- 3. Health Score (HS) Decision — calls external health score service,
---   supports pre-monitoring (during rollout) and post-monitoring (after 100%).
+--  supports pre-monitoring (during rollout) and post-monitoring (after 100%).
 --
 -- All functions fail OPEN: on any error (HTTP failure, parse failure, missing config),
 -- they return Continue/PromOK so releases are never blocked by monitoring infrastructure failures.
@@ -125,13 +125,13 @@ checkAllConfigs url (c : rest) rt = do
 --
 -- Expected config structure:
 -- {
---  "cluster": "...",
---  "config": {
---    "experiments": [{
---      "queries": [{"query": "...", "name": "..."}],
---      "thresholds": {"abort": 100, "warn": 50}
---    }]
---  }
+-- "cluster": "...",
+-- "config": {
+--   "experiments": [{
+--     "queries": [{"query": "...", "name": "..."}],
+--     "thresholds": {"abort": 100, "warn": 50}
+--   }]
+-- }
 -- }
 --
 -- Uses try/catch for HTTP failures — returns PromOK on failure (fail open).
@@ -334,7 +334,7 @@ callABEngine abUrl trackerId = do
 -- | Get decision from Health Score engine.
 --
 -- Calls: GET {AB_HS_URL}/decision/{trackerId} (pre-monitoring)
---   or: GET {AB_HS_URL}/decision/post/{trackerId} (post-monitoring)
+--  or: GET {AB_HS_URL}/decision/post/{trackerId} (post-monitoring)
 --
 -- Returns Continue if:
 -- - ab_hs_enabled is false (gate)

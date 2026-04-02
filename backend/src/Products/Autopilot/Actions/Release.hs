@@ -5,79 +5,81 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Products.Autopilot.Actions.Release
-    ( -- * Release Handlers
-      createReleaseH
-    , getReleaseH
-    , listReleasesH
-    , approveReleaseH
-    , triggerReleaseH
-    , rollbackReleaseH
-    , revertReleaseH
-    , revertByGlobalIdH
-    , immediateRevertByGlobalIdH
-    , discardReleaseH
-    , deleteReleaseH
-    , updateTrackerH
-    , immediateRevertH
-    , restartReleaseH
-    , fastForwardH
-    , releaseDiffH
-    , podHealthH
-    , rolloutHistoryH
-    , listEventsH
-    , logsLinkH
+module Products.Autopilot.Actions.Release (
+    -- * Release Handlers
+    createReleaseH,
+    getReleaseH,
+    listReleasesH,
+    approveReleaseH,
+    triggerReleaseH,
+    rollbackReleaseH,
+    revertReleaseH,
+    revertByGlobalIdH,
+    immediateRevertByGlobalIdH,
+    discardReleaseH,
+    deleteReleaseH,
+    updateTrackerH,
+    immediateRevertH,
+    restartReleaseH,
+    fastForwardH,
+    releaseDiffH,
+    podHealthH,
+    rolloutHistoryH,
+    listEventsH,
+    logsLinkH,
+
     -- * Product/Service Handlers (used in Routes wiring)
-    , listProductsH
-    , upsertProductH
-    , listServicesH
-    , upsertServiceH
+    listProductsH,
+    upsertProductH,
+    listServicesH,
+    upsertServiceH,
+
     -- * Helpers exported for other modules
-    , isValidK8sVersion
-    ) where
+    isValidK8sVersion,
+) where
 
 import Control.Applicative ((<|>))
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
 import Core.DB.Connection (withConn)
-import Database.PostgreSQL.Simple (Only (..), execute, withTransaction)
-import Data.Char (isAlphaNum)
-import Products.Autopilot.RuntimeConfig (isApproveAllReleases, isUnderMaintenance)
-import Products.Autopilot.K8s.Deployment (deploymentExists)
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
 import Data.Aeson (Value (..), eitherDecode, object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy.Char8 as LBS
+import Data.Char (isAlphaNum)
 import Data.List (find)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import qualified Data.Text.Encoding as TE
-import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
+import Database.PostgreSQL.Simple (Only (..), execute, withTransaction)
+import GHC.Int (Int32)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
+import Products.Autopilot.K8s.Deployment (deploymentExists)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import Products.Autopilot.Notifications
-import GHC.Int (Int32)
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.Queries.VsEditTracker ()
+import Products.Autopilot.RuntimeConfig (isApproveAllReleases, isUnderMaintenance)
 import Products.Autopilot.Sync (triggerImmediateRevertSync)
-import Products.Autopilot.Workflow.Helpers (captureDeploymentSnapshot, captureDeploymentPreview)
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes
 import qualified Products.Autopilot.Types.Target.Kubernetes as K8s
+import Products.Autopilot.Workflow.Helpers (captureDeploymentPreview, captureDeploymentSnapshot)
 import qualified Shared.Types.Storage.Schema as S
 
 -- ============================================================================
@@ -213,169 +215,179 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
             -- Safety check: old_version == new_version
             if oldVersion == newVersion
                 then pure $ APIResponse "ERROR" "old_version and new_version cannot be the same"
-            -- Safety check: maintenance mode
-            else do
-              maintenance <- liftIO $ isUnderMaintenance db
-              if maintenance
-                then pure $ APIResponse "ERROR" "System is under maintenance. Release creation is disabled."
-              -- Safety check: version format (K8s label: [a-z0-9]([-a-z0-9]*[a-z0-9])?)
-              else if not (isValidK8sVersion newVersion)
-                then pure $ APIResponse "ERROR" ("Invalid version format for K8s label: " <> newVersion <> ". Must match [a-z0-9]([-a-z0-9]*[a-z0-9])?")
-              -- Existing cluster check
-              else if maybe False (/= getProductCluster pCfg) requestedCluster
-                then pure $ APIResponse "ERROR" "Requested cluster does not match product config"
-              else do
-                -- Safety check: duplicate deployment in K8s
-                let targetSvcHostForCheck = fromMaybe service (getServiceHost sCfg)
-                    newDepNameCheck = targetSvcHostForCheck <> "-" <> newVersion
-                depAlreadyExists <- liftIO $ deploymentExists cfg (getProductNamespace pCfg) newDepNameCheck
-                if depAlreadyExists && not (fromMaybe False newService)
-                    then pure $ APIResponse "ERROR" ("Deployment with version " <> newVersion <> " already exists: " <> newDepNameCheck)
-                    else do
-                    rid <- liftIO (UUID.toText <$> UUID.nextRandom)
-                    let targetSvcHost = fromMaybe service (getServiceHost sCfg)
-                        metadataDockerImage =
-                            case metadata of
-                                Just (Object obj) ->
-                                    case KM.lookup (K.fromText "docker-image") obj of
-                                        Just (String t) | not (T.null t) -> Just t
-                                        _ ->
-                                            case KM.lookup (K.fromText "dockerImage") obj of
-                                                Just (String t) | not (T.null t) -> Just t
-                                                _ -> Nothing
-                                _ -> Nothing
-                        metadataInternalVsName =
-                            case metadata of
-                                Just (Object obj) ->
-                                    case KM.lookup (K.fromText "internal-vs-name") obj of
-                                        Just (String t) | not (T.null t) -> Just t
-                                        _ ->
-                                            case KM.lookup (K.fromText "internalVsName") obj of
-                                                Just (String t) | not (T.null t) -> Just t
-                                                _ -> Nothing
-                                _ -> Nothing
-                    resolvedOldVersion <-
-                        if fromMaybe False newService
-                            then do
-                                -- New service: no old version to discover, set to "new"
-                                liftIO $ putStrLn $ "[createReleaseH] New service flag set, skipping old version discovery"
-                                pure (if T.null oldVersion then "new" else oldVersion)
-                            else
-                                if T.toLower oldVersion == "unknown" || T.null oldVersion
-                                    then do
-                                        discovered <- liftIO $ getPrimarySubsetFromVirtualService cfg (getProductNamespace pCfg) (getProductVsName pCfg) targetSvcHost
-                                        pure $ case discovered of
-                                            Right (Just subset) -> subset
-                                            _ -> oldVersion
-                                    else pure oldVersion
-                    let derivedContext =
-                            K8sReleaseContext
-                                { cluster = getProductCluster pCfg
-                                , namespace = getProductNamespace pCfg
-                                , deploymentName = targetSvcHost <> "-" <> newVersion
-                                , serviceName = targetSvcHost
-                                , destinationRuleName = targetSvcHost <> "-destinations"
-                                , virtualServiceName = getProductVsName pCfg
-                                , internalVirtualServiceName = metadataInternalVsName
-                                , containerName = targetSvcHost
-                                , oldVersion = resolvedOldVersion
-                                , newVersion = newVersion
-                                , dockerImage = metadataDockerImage
-                                , matches = []
-                                , podsScaleDownDelay = Nothing
-                                , podsScaleDownTimestamp = Nothing
-                                , podsScaleDownStatus = Nothing
-                                , oldVersionPodCount = Nothing
-                                , revert = Nothing
-                                , abRunId = Nothing
-                                , abStatus = Nothing
-                                , cleanupAt = Nothing
-                                , cleanupTargetDeployment = Nothing
-                                , cleanupStatus = Nothing
-                                , deployFilePath = deployFilePath
-                                , serviceFilePath = serviceFilePath
-                                , drFilePath = drFilePath
-                                , vsFilePath = vsFilePath
-                                , prevAbHsDecision = Nothing
-                                , postMonitoringDecisionMap = Nothing
-                                , syncClusterEnvOverrideData = syncClusterEnvOverrideData
-                                , syncClusterRolloutStrategy = fmap (\v -> T.pack (LBS.unpack (A.encode v))) syncClusterRolloutStrategy
-                                , syncXForwardedEmail = mXForwardedEmail
-                                , syncXPomeriumJwt = mXPomeriumJwt
-                                }
-                        reqMode = case mode of
-                            Just "MANUAL" -> Manual
-                            Just "manual" -> Manual
-                            _ -> Auto
-                    approveAll <- liftIO $ isApproveAllReleases db
-                    now <- liftIO getCurrentTime
-                    let initialApproval = case isApproved of
-                            Just True -> True
-                            _ -> approveAll && fromMaybe False isSystemTriggered
-                        -- Auto-generate release tag if not provided
-                        autoTag = case releaseTag of
-                            Just t | not (T.null t) -> Just t
-                            _ ->
-                                let datePart = T.pack (formatTime defaultTimeLocale "%Y%m%d" now)
-                                    modeText = case reqMode of Auto -> "AUTO"; Manual -> "MANUAL"
-                                    priText = T.pack (show (fromMaybe 0 priority))
-                                 in Just (T.intercalate "_" [appGroup, datePart, newVersion, service, modeText, env, priText])
-                        tracker =
-                            ReleaseTracker
-                                { releaseId = rid
-                                , appGroup = appGroup
-                                , service = service
-                                , env = env
-                                , category = trackerType
-                                , status = Created
-                                , releaseWFStatus = Init
-                                , mode = reqMode
-                                , createdBy = createdBy
-                                , approvedBy = approvedBy
-                                , isApproved = initialApproval
-                                , isInfraApproved = fromMaybe (fromMaybe False (S.dcNeedInfraApproval pCfg >>= \need -> if need then Just False else Just True)) isInfraApproved
-                                , releaseTag = autoTag
-                                , dateCreated = Nothing -- DB sets via DEFAULT now()
-                                , lastUpdated = Nothing -- DB sets via DEFAULT now()
-                                , scheduleTime = scheduleTime
-                                , startTime = Nothing
-                                , endTime = Nothing
-                                , rolloutStrategy = rolloutStrategy
-                                , rolloutHistory = []
-                                , oldVersion = resolvedOldVersion
-                                , newVersion = newVersion
-                                , info = info
-                                , description = description
-                                , changeLog = changeLog
-                                , metadata = metadata
-                                , priority = fromMaybe 0 priority
-                                , globalId = globalId
-                                , syncEnabled = case isReleaseSync of
-                                    Just True -> Just "true"
-                                    _ -> syncEnabled
-                                , envOverrideData = envOverrideData
-                                , slackThreadTs = slackThreadTs
-                                }
-                        targetState =
-                            K8sState $
-                                emptyK8sState
-                                    { context = derivedContext
-                                    , newService = fromMaybe False newService
-                                    , cronjobSuspend = fromMaybe False cronjobSuspend
-                                    }
-                    liftIO $ insertReleaseTracker db tracker (Just targetState)
-                    liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
-                    -- Capture BEFORE snapshots at creation time (so diff is available immediately)
-                    -- Also generate a preview AFTER by modifying version/image in the old deployment YAML
-                    let ns = getProductNamespace pCfg
-                        vsN = getProductVsName pCfg
-                        oldDepName = targetSvcHost <> "-" <> resolvedOldVersion
-                    liftIO $ captureDeploymentSnapshot cfg db rid ns oldDepName "DEPLOYMENT_BEFORE"
-                    -- Generate preview AFTER: take old deployment, replace version + image
-                    liftIO $ captureDeploymentPreview cfg db rid ns oldDepName newVersion
-                        (fromMaybe "" metadataDockerImage) "DEPLOYMENT_AFTER"
-                    liftIO $ notifyReleaseCreated db tracker
-                    pure $ APIResponse "SUCCESS" ("Tracker created: " <> rid)
+                else -- Safety check: maintenance mode
+                do
+                    maintenance <- liftIO $ isUnderMaintenance db
+                    if maintenance
+                        then pure $ APIResponse "ERROR" "System is under maintenance. Release creation is disabled."
+                        else -- Safety check: version format (K8s label: [a-z0-9]([-a-z0-9]*[a-z0-9])?)
+
+                            if not (isValidK8sVersion newVersion)
+                                then pure $ APIResponse "ERROR" ("Invalid version format for K8s label: " <> newVersion <> ". Must match [a-z0-9]([-a-z0-9]*[a-z0-9])?")
+                                else -- Existing cluster check
+
+                                    if maybe False (/= getProductCluster pCfg) requestedCluster
+                                        then pure $ APIResponse "ERROR" "Requested cluster does not match product config"
+                                        else do
+                                            -- Safety check: duplicate deployment in K8s
+                                            let targetSvcHostForCheck = fromMaybe service (getServiceHost sCfg)
+                                                newDepNameCheck = targetSvcHostForCheck <> "-" <> newVersion
+                                            depAlreadyExists <- liftIO $ deploymentExists cfg (getProductNamespace pCfg) newDepNameCheck
+                                            if depAlreadyExists && not (fromMaybe False newService)
+                                                then pure $ APIResponse "ERROR" ("Deployment with version " <> newVersion <> " already exists: " <> newDepNameCheck)
+                                                else do
+                                                    rid <- liftIO (UUID.toText <$> UUID.nextRandom)
+                                                    let targetSvcHost = fromMaybe service (getServiceHost sCfg)
+                                                        metadataDockerImage =
+                                                            case metadata of
+                                                                Just (Object obj) ->
+                                                                    case KM.lookup (K.fromText "docker-image") obj of
+                                                                        Just (String t) | not (T.null t) -> Just t
+                                                                        _ ->
+                                                                            case KM.lookup (K.fromText "dockerImage") obj of
+                                                                                Just (String t) | not (T.null t) -> Just t
+                                                                                _ -> Nothing
+                                                                _ -> Nothing
+                                                        metadataInternalVsName =
+                                                            case metadata of
+                                                                Just (Object obj) ->
+                                                                    case KM.lookup (K.fromText "internal-vs-name") obj of
+                                                                        Just (String t) | not (T.null t) -> Just t
+                                                                        _ ->
+                                                                            case KM.lookup (K.fromText "internalVsName") obj of
+                                                                                Just (String t) | not (T.null t) -> Just t
+                                                                                _ -> Nothing
+                                                                _ -> Nothing
+                                                    resolvedOldVersion <-
+                                                        if fromMaybe False newService
+                                                            then do
+                                                                -- New service: no old version to discover, set to "new"
+                                                                liftIO $ putStrLn $ "[createReleaseH] New service flag set, skipping old version discovery"
+                                                                pure (if T.null oldVersion then "new" else oldVersion)
+                                                            else
+                                                                if T.toLower oldVersion == "unknown" || T.null oldVersion
+                                                                    then do
+                                                                        discovered <- liftIO $ getPrimarySubsetFromVirtualService cfg (getProductNamespace pCfg) (getProductVsName pCfg) targetSvcHost
+                                                                        pure $ case discovered of
+                                                                            Right (Just subset) -> subset
+                                                                            _ -> oldVersion
+                                                                    else pure oldVersion
+                                                    let derivedContext =
+                                                            K8sReleaseContext
+                                                                { cluster = getProductCluster pCfg
+                                                                , namespace = getProductNamespace pCfg
+                                                                , deploymentName = targetSvcHost <> "-" <> newVersion
+                                                                , serviceName = targetSvcHost
+                                                                , destinationRuleName = targetSvcHost <> "-destinations"
+                                                                , virtualServiceName = getProductVsName pCfg
+                                                                , internalVirtualServiceName = metadataInternalVsName
+                                                                , containerName = targetSvcHost
+                                                                , oldVersion = resolvedOldVersion
+                                                                , newVersion = newVersion
+                                                                , dockerImage = metadataDockerImage
+                                                                , matches = []
+                                                                , podsScaleDownDelay = Nothing
+                                                                , podsScaleDownTimestamp = Nothing
+                                                                , podsScaleDownStatus = Nothing
+                                                                , oldVersionPodCount = Nothing
+                                                                , revert = Nothing
+                                                                , abRunId = Nothing
+                                                                , abStatus = Nothing
+                                                                , cleanupAt = Nothing
+                                                                , cleanupTargetDeployment = Nothing
+                                                                , cleanupStatus = Nothing
+                                                                , deployFilePath = deployFilePath
+                                                                , serviceFilePath = serviceFilePath
+                                                                , drFilePath = drFilePath
+                                                                , vsFilePath = vsFilePath
+                                                                , prevAbHsDecision = Nothing
+                                                                , postMonitoringDecisionMap = Nothing
+                                                                , syncClusterEnvOverrideData = syncClusterEnvOverrideData
+                                                                , syncClusterRolloutStrategy = fmap (\v -> T.pack (LBS.unpack (A.encode v))) syncClusterRolloutStrategy
+                                                                , syncXForwardedEmail = mXForwardedEmail
+                                                                , syncXPomeriumJwt = mXPomeriumJwt
+                                                                }
+                                                        reqMode = case mode of
+                                                            Just "MANUAL" -> Manual
+                                                            Just "manual" -> Manual
+                                                            _ -> Auto
+                                                    approveAll <- liftIO $ isApproveAllReleases db
+                                                    now <- liftIO getCurrentTime
+                                                    let initialApproval = case isApproved of
+                                                            Just True -> True
+                                                            _ -> approveAll && fromMaybe False isSystemTriggered
+                                                        -- Auto-generate release tag if not provided
+                                                        autoTag = case releaseTag of
+                                                            Just t | not (T.null t) -> Just t
+                                                            _ ->
+                                                                let datePart = T.pack (formatTime defaultTimeLocale "%Y%m%d" now)
+                                                                    modeText = case reqMode of Auto -> "AUTO"; Manual -> "MANUAL"
+                                                                    priText = T.pack (show (fromMaybe 0 priority))
+                                                                 in Just (T.intercalate "_" [appGroup, datePart, newVersion, service, modeText, env, priText])
+                                                        tracker =
+                                                            ReleaseTracker
+                                                                { releaseId = rid
+                                                                , appGroup = appGroup
+                                                                , service = service
+                                                                , env = env
+                                                                , category = trackerType
+                                                                , status = Created
+                                                                , releaseWFStatus = Init
+                                                                , mode = reqMode
+                                                                , createdBy = createdBy
+                                                                , approvedBy = approvedBy
+                                                                , isApproved = initialApproval
+                                                                , isInfraApproved = fromMaybe (fromMaybe False (S.dcNeedInfraApproval pCfg >>= \need -> if need then Just False else Just True)) isInfraApproved
+                                                                , releaseTag = autoTag
+                                                                , dateCreated = Nothing -- DB sets via DEFAULT now()
+                                                                , lastUpdated = Nothing -- DB sets via DEFAULT now()
+                                                                , scheduleTime = scheduleTime
+                                                                , startTime = Nothing
+                                                                , endTime = Nothing
+                                                                , rolloutStrategy = rolloutStrategy
+                                                                , rolloutHistory = []
+                                                                , oldVersion = resolvedOldVersion
+                                                                , newVersion = newVersion
+                                                                , info = info
+                                                                , description = description
+                                                                , changeLog = changeLog
+                                                                , metadata = metadata
+                                                                , priority = fromMaybe 0 priority
+                                                                , globalId = globalId
+                                                                , syncEnabled = case isReleaseSync of
+                                                                    Just True -> Just "true"
+                                                                    _ -> syncEnabled
+                                                                , envOverrideData = envOverrideData
+                                                                , slackThreadTs = slackThreadTs
+                                                                }
+                                                        targetState =
+                                                            K8sState $
+                                                                emptyK8sState
+                                                                    { context = derivedContext
+                                                                    , newService = fromMaybe False newService
+                                                                    , cronjobSuspend = fromMaybe False cronjobSuspend
+                                                                    }
+                                                    liftIO $ insertReleaseTracker db tracker (Just targetState)
+                                                    liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
+                                                    -- Capture BEFORE snapshots at creation time (so diff is available immediately)
+                                                    -- Also generate a preview AFTER by modifying version/image in the old deployment YAML
+                                                    let ns = getProductNamespace pCfg
+                                                        vsN = getProductVsName pCfg
+                                                        oldDepName = targetSvcHost <> "-" <> resolvedOldVersion
+                                                    liftIO $ captureDeploymentSnapshot cfg db rid ns oldDepName "DEPLOYMENT_BEFORE"
+                                                    -- Generate preview AFTER: take old deployment, replace version + image
+                                                    liftIO $
+                                                        captureDeploymentPreview
+                                                            cfg
+                                                            db
+                                                            rid
+                                                            ns
+                                                            oldDepName
+                                                            newVersion
+                                                            (fromMaybe "" metadataDockerImage)
+                                                            "DEPLOYMENT_AFTER"
+                                                    liftIO $ notifyReleaseCreated db tracker
+                                                    pure $ APIResponse "SUCCESS" ("Tracker created: " <> rid)
 
 getReleaseH :: Text -> Flow (Maybe ReleaseTracker)
 getReleaseH rid = do
@@ -521,8 +533,16 @@ revertReleaseH rid req = do
                         revertVsN = virtualServiceName oldCtx
                         revertNewDep = ctxServiceName <> "-" <> NT.newVersion tracker
                     liftIO $ captureDeploymentSnapshot cfg db newRid revertNs revertNewDep "DEPLOYMENT_BEFORE"
-                    liftIO $ captureDeploymentPreview cfg db newRid revertNs revertNewDep
-                        (NT.oldVersion tracker) (fromMaybe "" (K8s.dockerImage oldCtx)) "DEPLOYMENT_AFTER"
+                    liftIO $
+                        captureDeploymentPreview
+                            cfg
+                            db
+                            newRid
+                            revertNs
+                            revertNewDep
+                            (NT.oldVersion tracker)
+                            (fromMaybe "" (K8s.dockerImage oldCtx))
+                            "DEPLOYMENT_AFTER"
                     liftIO $ notifyReleaseReverted db revertedTracker
                     when (isImmediate && shouldSyncRevert) $
                         liftIO $
@@ -601,7 +621,7 @@ updateTrackerH rid req = do
             -- Guard: when release is InProgress, only allow pause/abort status transitions.
             -- Other field modifications would race with the running workflow.
             let isAllowedInProgress = case (req :: K8sUpdateTrackerReq).status of
-                    Just s  -> let ns = parseReleaseStatus s in ns == Paused || ns == Aborting
+                    Just s -> let ns = parseReleaseStatus s in ns == Paused || ns == Aborting
                     Nothing -> False
             if oldStatus == InProgress && not isAllowedInProgress
                 then pure $ APIResponse "ERROR" "Cannot modify release while in progress. Pause it first."
@@ -620,22 +640,23 @@ updateTrackerH rid req = do
                                             liftIO $ notifyReleaseUpdated db updatedTracker "fields updated"
                                             pure $ APIResponse "SUCCESS" "Tracker updated"
                                         else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
-                            else if not (validateStatusTransition oldStatus newStatus)
-                                then pure $ APIResponse "ERROR" ("Invalid status transition: " <> T.pack (show oldStatus) <> " -> " <> newStatusText)
-                                else do
-                                    ok <- liftIO $ conditionalUpdateTracker db updatedTracker updatedTargetState oldStatusText
-                                    if ok
-                                        then do
-                                            liftIO $ insertReleaseEvent db rid "BUSINESS" "STATUS_UPDATED" (toJSON updatedTracker)
-                                            -- Send status-specific Slack notifications
-                                            case newStatus of
-                                                Paused -> liftIO $ notifyReleasePaused db updatedTracker
-                                                InProgress -> liftIO $ notifyReleaseResumed db updatedTracker
-                                                Aborting -> liftIO $ notifyReleaseAborted db updatedTracker
-                                                Completed -> liftIO $ notifyReleaseCompleted db updatedTracker
-                                                _ -> liftIO $ notifyReleaseUpdated db updatedTracker ("status changed to " <> newStatusText)
-                                            pure $ APIResponse "SUCCESS" "Tracker updated"
-                                        else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
+                                else
+                                    if not (validateStatusTransition oldStatus newStatus)
+                                        then pure $ APIResponse "ERROR" ("Invalid status transition: " <> T.pack (show oldStatus) <> " -> " <> newStatusText)
+                                        else do
+                                            ok <- liftIO $ conditionalUpdateTracker db updatedTracker updatedTargetState oldStatusText
+                                            if ok
+                                                then do
+                                                    liftIO $ insertReleaseEvent db rid "BUSINESS" "STATUS_UPDATED" (toJSON updatedTracker)
+                                                    -- Send status-specific Slack notifications
+                                                    case newStatus of
+                                                        Paused -> liftIO $ notifyReleasePaused db updatedTracker
+                                                        InProgress -> liftIO $ notifyReleaseResumed db updatedTracker
+                                                        Aborting -> liftIO $ notifyReleaseAborted db updatedTracker
+                                                        Completed -> liftIO $ notifyReleaseCompleted db updatedTracker
+                                                        _ -> liftIO $ notifyReleaseUpdated db updatedTracker ("status changed to " <> newStatusText)
+                                                    pure $ APIResponse "SUCCESS" "Tracker updated"
+                                                else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
                         Nothing -> do
                             -- No status change requested, but guard against concurrent status change
                             ok <- liftIO $ conditionalUpdateTracker db updatedTracker updatedTargetState oldStatusText
@@ -768,19 +789,21 @@ releaseDiffH rid mType = do
                 mBefore = findSnapshot beforeLabel
                 mAfter = findSnapshot afterLabel
             let payloadToText :: Value -> Text
-                payloadToText (String s) = s  -- Already YAML text from snapshot capture, return as-is
+                payloadToText (String s) = s -- Already YAML text from snapshot capture, return as-is
                 payloadToText other = TE.decodeUtf8 (LBS.toStrict (A.encode other))
             case (mBefore, mAfter) of
                 (Just beforeEvt, Just afterEvt) ->
-                    pure $ DiffResponse
-                        (payloadToText (S.rePayload beforeEvt))
-                        (payloadToText (S.rePayload afterEvt))
-                        diffLabel
+                    pure $
+                        DiffResponse
+                            (payloadToText (S.rePayload beforeEvt))
+                            (payloadToText (S.rePayload afterEvt))
+                            diffLabel
                 (Just beforeEvt, Nothing) ->
-                    pure $ DiffResponse
-                        (payloadToText (S.rePayload beforeEvt))
-                        ""
-                        (diffLabel <> " (in progress -- after snapshot pending)")
+                    pure $
+                        DiffResponse
+                            (payloadToText (S.rePayload beforeEvt))
+                            ""
+                            (diffLabel <> " (in progress -- after snapshot pending)")
                 _ -> do
                     -- Fall back to live K8s diff (original behavior)
                     let mCtx = case mTargetState of
@@ -976,7 +999,8 @@ immediateRevertH rid req = do
                                     -- Step 4: Optionally trigger sync revert
                                     let shouldSync = fromMaybe False (isRevertSync (req :: ImmediateRevertReq))
                                     when shouldSync $
-                                        liftIO $ triggerImmediateRevertSync cfg db tracker mTargetState
+                                        liftIO $
+                                            triggerImmediateRevertSync cfg db tracker mTargetState
                                     pure $ APIResponse "SUCCESS" "Immediate revert: image swapped + pods restarting"
 
 -- ============================================================================
@@ -995,21 +1019,28 @@ restartReleaseH rid req = do
                 then pure $ APIResponse "ERROR" ("Cannot restart from status: " <> T.pack (show currentStatus) <> ". Valid: Aborted, UserAborted, Reverted")
                 else do
                     now <- liftIO getCurrentTime
-                    let updated = (tracker :: ReleaseTracker)
-                            { NT.status = Created
-                            , NT.releaseWFStatus = Init
-                            , NT.startTime = Nothing
-                            , NT.endTime = Nothing
-                            , NT.scheduleTime = Just now
-                            , NT.rolloutHistory = []
-                            }
+                    let updated =
+                            (tracker :: ReleaseTracker)
+                                { NT.status = Created
+                                , NT.releaseWFStatus = Init
+                                , NT.startTime = Nothing
+                                , NT.endTime = Nothing
+                                , NT.scheduleTime = Just now
+                                , NT.rolloutHistory = []
+                                }
                     liftIO $ insertReleaseTracker db updated mTargetState
-                    liftIO $ insertReleaseEvent db rid "BUSINESS" "RELEASE_RESTARTED"
-                        (object
-                            [ "requestedBy" .= (req :: RestartReleaseReq).requestedBy
-                            , "reason" .= (req :: RestartReleaseReq).reason
-                            , "previousStatus" .= T.pack (show currentStatus)
-                            ])
+                    liftIO $
+                        insertReleaseEvent
+                            db
+                            rid
+                            "BUSINESS"
+                            "RELEASE_RESTARTED"
+                            ( object
+                                [ "requestedBy" .= (req :: RestartReleaseReq).requestedBy
+                                , "reason" .= (req :: RestartReleaseReq).reason
+                                , "previousStatus" .= T.pack (show currentStatus)
+                                ]
+                            )
                     liftIO $ notifyReleaseRestarted db updated
                     pure $ APIResponse "SUCCESS" "Release restarted"
 
@@ -1028,32 +1059,46 @@ fastForwardH rid req = do
             if currentStatus /= InProgress
                 then pure $ APIResponse "ERROR" ("Cannot fast-forward from status: " <> T.pack (show currentStatus) <> ". Must be InProgress")
                 else do
-                    -- Fast-forward: set the rollout strategy's cooloff to 0 for current step
-                    -- so the workflow's isCoolOffExceeded check passes immediately.
-                    -- Also mark historyManualOverride = True on the history entry.
+                    -- Fast-forward: match production Julia logic exactly.
+                    -- Sets rollout strategy cooloff to elapsed minutes (time since step started),
+                    -- so isCoolOffExceeded(cooloff, startedAt) returns true immediately:
+                    --   coolOffLimit = startedAt + Minute(elapsedMinutes) <= now  →  true
+                    -- Also marks historyManualOverride = True.
+                    now <- liftIO getCurrentTime
                     let currentStepIdx = length (NT.rolloutHistory tracker) - 1
+                        history = NT.rolloutHistory tracker
+                        -- Calculate elapsed minutes from step start
+                        elapsedMins = case history of
+                            [] -> 0
+                            steps -> let lastStep = last steps
+                                     in round (realToFrac (diffUTCTime now (historyStartedAt lastStep)) / 60 :: Double) :: Int
                         strategy = NT.rolloutStrategy tracker
                         updatedStrategy = case strategy of
                             [] -> []
                             steps ->
-                                zipWith (\i s -> if i == currentStepIdx then s{cooloffSeconds = 0} else s) [0..] steps
-                        history = NT.rolloutHistory tracker
+                                zipWith (\i s -> if i == currentStepIdx then s{cooloffSeconds = elapsedMins} else s) [0 ..] steps
                         updatedHistory = case history of
                             [] -> []
                             steps ->
                                 let lastIdx = length steps - 1
                                     updateStep i step =
                                         if i == lastIdx
-                                            then step{historyCooloffSeconds = 0, historyManualOverride = True}
+                                            then step{historyCooloffSeconds = elapsedMins, historyManualOverride = True}
                                             else step
                                  in zipWith updateStep [0 ..] steps
                         updated = (tracker :: ReleaseTracker){NT.rolloutHistory = updatedHistory, NT.rolloutStrategy = updatedStrategy}
                     liftIO $ insertReleaseTracker db updated mTargetState
-                    liftIO $ insertReleaseEvent db rid "BUSINESS" "FAST_FORWARD"
-                        (object
-                            [ "requestedBy" .= (req :: FastForwardReq).requestedBy
-                            , "reason" .= (req :: FastForwardReq).reason
-                            ])
+                    liftIO $
+                        insertReleaseEvent
+                            db
+                            rid
+                            "BUSINESS"
+                            "FAST_FORWARD"
+                            ( object
+                                [ "requestedBy" .= (req :: FastForwardReq).requestedBy
+                                , "reason" .= (req :: FastForwardReq).reason
+                                ]
+                            )
                     liftIO $ notifyReleaseFastForwarded db updated
                     pure $ APIResponse "SUCCESS" "Fast forward: cooloff period skipped, runner will advance on next poll"
 
@@ -1061,8 +1106,9 @@ fastForwardH rid req = do
 -- Validation Helpers
 -- ============================================================================
 
--- | Validate that a version string matches the K8s label format: [a-z0-9]([-a-z0-9]*[a-z0-9])?
--- Empty strings are rejected. The check is case-insensitive (lowered before validation).
+{- | Validate that a version string matches the K8s label format: [a-z0-9]([-a-z0-9]*[a-z0-9])?
+Empty strings are rejected. The check is case-insensitive (lowered before validation).
+-}
 isValidK8sVersion :: Text -> Bool
 isValidK8sVersion ver
     | T.null ver = False
@@ -1070,6 +1116,6 @@ isValidK8sVersion ver
         let lowered = T.toLower ver
             chars = T.unpack lowered
             isValidChar c = isAlphaNum c || c == '-'
-            startsOk = case chars of (c:_) -> isAlphaNum c; [] -> False
+            startsOk = case chars of (c : _) -> isAlphaNum c; [] -> False
             endsOk = case chars of [] -> False; _ -> isAlphaNum (Prelude.last chars)
-        in all isValidChar chars && startsOk && endsOk
+         in all isValidChar chars && startsOk && endsOk

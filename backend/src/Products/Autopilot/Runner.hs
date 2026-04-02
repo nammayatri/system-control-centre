@@ -1,6 +1,6 @@
 module Products.Autopilot.Runner where
 
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (forM_, forever)
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
@@ -42,8 +42,9 @@ runnerLoop st = runFlow st loop
       eligible <- liftIO $ filterM (isEligibleToRun db multiRelease ongoing) jobs
 
       -- Step 2: Pick jobs respecting single-release constraint and priority
+      -- Fork each trigger into a background thread so multiple releases run in parallel
       let picked = pickJobs multiRelease eligible
-      mapM_ (trigger db) picked
+      forM_ picked $ \twt -> liftIO $ forkIO $ runFlow st (trigger db twt)
 
       -- Step 3: Handle aborting trackers
       abortingTrackers <- liftIO $ findAbortingReleaseTrackers db
@@ -121,26 +122,27 @@ trigger db (rt, mts) = do
       now <- liftIO getCurrentTime
       let currentStatus = NT.status rt
       -- Handle both CREATED (new) and INPROGRESS (resume after restart)
-      rtInProgress <- if currentStatus == InProgress
-        then do
-          -- Already INPROGRESS — resume workflow (server may have restarted)
-          liftIO $ putStrLn $ "[RUNNER] Resuming INPROGRESS release: " <> T.unpack (releaseId rt)
-          liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "RUNNER_RESUMED" (toJSON ("Resuming after restart" :: T.Text))
-          pure rt
-        else do
-          -- CREATED — atomically claim and mark INPROGRESS
-          let rtNew = rt{status = InProgress, startTime = Just now}
-              row = toRow now now rtNew mts
-          claimed <- liftIO $ conditionalUpdateTrackerRow db row "CREATED"
-          if not claimed
-            then do
-              liftIO $ putStrLn $ "[RUNNER] Release " <> T.unpack (releaseId rt) <> " already claimed by another runner, skipping"
-              pure rt{status = Discarded}  -- marker to skip
-            else do
-              liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "RUNNER_PICKED" (toJSON rt)
-              pure rtNew
+      rtInProgress <-
+        if currentStatus == InProgress
+          then do
+            -- Already INPROGRESS — resume workflow (server may have restarted)
+            liftIO $ putStrLn $ "[RUNNER] Resuming INPROGRESS release: " <> T.unpack (releaseId rt)
+            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "RUNNER_RESUMED" (toJSON ("Resuming after restart" :: T.Text))
+            pure rt
+          else do
+            -- CREATED — atomically claim and mark INPROGRESS
+            let rtNew = rt{status = InProgress, startTime = Just now}
+                row = toRow now now rtNew mts
+            claimed <- liftIO $ conditionalUpdateTrackerRow db row "CREATED"
+            if not claimed
+              then do
+                liftIO $ putStrLn $ "[RUNNER] Release " <> T.unpack (releaseId rt) <> " already claimed by another runner, skipping"
+                pure rt{status = Discarded} -- marker to skip
+              else do
+                liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "RUNNER_PICKED" (toJSON rt)
+                pure rtNew
       if NT.status rtInProgress == Discarded
-        then pure ()  -- skip, already claimed by another runner
+        then pure () -- skip, already claimed by another runner
         else do
           result <- dispatchWorkflow rtInProgress mts
           case result of

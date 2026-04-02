@@ -61,9 +61,9 @@ instance FromJSON Mode where
 --
 -- Lifecycle:
 -- Created → InProgress → Completed
---                      → Paused → InProgress (resume)
---                      → Aborting → Aborted / UserAborted
---                      → Reverting → Reverted
+--                     → Paused → InProgress (resume)
+--                     → Aborting → Aborted / UserAborted
+--                     → Reverting → Reverted
 -- Created → Discarding → Discarded
 data ReleaseStatus
   = -- | Initial state, awaiting approval or scheduling

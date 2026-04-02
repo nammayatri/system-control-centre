@@ -232,7 +232,8 @@ monitorJobStatus = do
 pollJobStatus :: Config -> String -> Int -> Int -> StateFlow ()
 pollJobStatus cfg getJobCmd maxPolls currentPoll = do
   when (currentPoll > maxPolls) $
-    liftIO $ fail "Job timed out waiting for completion"
+    liftIO $
+      fail "Job timed out waiting for completion"
 
   liftIO $ putStrLn $ "  Poll " <> show currentPoll <> "/" <> show maxPolls <> ": checking job status"
   result <- liftIO $ runCmd getJobCmd

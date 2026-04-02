@@ -56,7 +56,7 @@ responseOptions =
 
 -- | Options that strip a prefix from field labels and lowercase the first char.
 -- Usage: stripPrefixOptions 2 strips "pc" from "pcProduct" -> "product"
---        stripPrefixOptions 3 strips "vet" from "vetProduct" -> "product"
+--       stripPrefixOptions 3 strips "vet" from "vetProduct" -> "product"
 stripPrefixOptions :: Int -> Options
 stripPrefixOptions n =
   defaultOptions

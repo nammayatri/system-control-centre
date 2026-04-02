@@ -46,10 +46,10 @@ errorCode (InternalError _) = "INTERNAL_ERROR"
 
 -- Convert APIError to Servant ServerError with JSON body
 throwAPIError :: APIError -> ServerError
-throwAPIError err@(NotFound _) = (err404 :: ServerError) {errBody = encode err, errHeaders = [("Content-Type", "application/json")]}
-throwAPIError err@(BadRequest _) = (err400 :: ServerError) {errBody = encode err, errHeaders = [("Content-Type", "application/json")]}
-throwAPIError err@(Forbidden _) = (err403 :: ServerError) {errBody = encode err, errHeaders = [("Content-Type", "application/json")]}
-throwAPIError err@(Conflict _) = (err409 :: ServerError) {errBody = encode err, errHeaders = [("Content-Type", "application/json")]}
+throwAPIError err@(NotFound _) = (err404 :: ServerError){errBody = encode err, errHeaders = [("Content-Type", "application/json")]}
+throwAPIError err@(BadRequest _) = (err400 :: ServerError){errBody = encode err, errHeaders = [("Content-Type", "application/json")]}
+throwAPIError err@(Forbidden _) = (err403 :: ServerError){errBody = encode err, errHeaders = [("Content-Type", "application/json")]}
+throwAPIError err@(Conflict _) = (err409 :: ServerError){errBody = encode err, errHeaders = [("Content-Type", "application/json")]}
 throwAPIError err@(InvalidTransition _) = let e = ServerError 422 "Unprocessable Entity" (encode err) [("Content-Type", "application/json")] in e
 throwAPIError err@(InternalError _) = let e = ServerError 500 "Internal Server Error" (encode err) [("Content-Type", "application/json")] in e
 

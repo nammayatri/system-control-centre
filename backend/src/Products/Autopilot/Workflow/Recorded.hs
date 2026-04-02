@@ -134,10 +134,10 @@ recordedWithPersist persist computation getter =
 -- Usage:
 -- @
 -- step "Create Deployment"
---   (\rt -> rt { deploymentCreated = True })
---   (\rt -> deploymentCreated rt)
---   (\rt -> insertReleaseTracker db rt)
---   createDeploymentAction
+--  (\rt -> rt { deploymentCreated = True })
+--  (\rt -> deploymentCreated rt)
+--  (\rt -> insertReleaseTracker db rt)
+--  createDeploymentAction
 -- @
 step ::
   (MonadIO m) =>
@@ -174,11 +174,11 @@ step stepName updateState isDone persist computation =
 -- Usage:
 -- @
 -- stepWithRollback "Deploy to Production"
---   (\rt -> rt { deployedToProduction = True })
---   (\rt -> deployedToProduction rt)
---   (\rt -> insertReleaseTracker db rt)
---   deployAction
---   rollbackAction
+--  (\rt -> rt { deployedToProduction = True })
+--  (\rt -> deployedToProduction rt)
+--  (\rt -> insertReleaseTracker db rt)
+--  deployAction
+--  rollbackAction
 -- @
 stepWithRollback ::
   (MonadIO m) =>

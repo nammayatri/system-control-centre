@@ -215,7 +215,8 @@ validatePreconditions = do
         )
 
   when isNew $
-    liftIO $ putStrLn "  New service release: skipping old version validation"
+    liftIO $
+      putStrLn "  New service release: skipping old version validation"
 
   -- Check internal VS (if exists) and log if found
   let internalVsName = serviceName ctx <> "-internal-vs"
@@ -583,10 +584,9 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                       when (not (null curHistory)) $ do
                         let lastH = last curHistory
                             updatedLast =
-                              lastH
-                                { historyCompletedAt = Just now,
-                                  historyDecision = Just Continue
-                                }
+                              lastH{historyCompletedAt = Just now,
+                                    historyDecision = Just Continue
+                                   }
                             updatedHistory = init curHistory <> [updatedLast]
                         updateRT $ \r -> r{rolloutHistory = updatedHistory}
 
@@ -597,7 +597,10 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                           nextOldW = max 0 (100 - nextNewW)
                       liftIO $
                         putStrLn $
-                          "  Rollout step " <> show (currentIndex + 1) <> "/" <> show totalSteps
+                          "  Rollout step "
+                            <> show (currentIndex + 1)
+                            <> "/"
+                            <> show totalSteps
                             <> ": new="
                             <> show nextNewW
                             <> "%, cooloff="
@@ -909,7 +912,7 @@ checkSinglePod _ = Right "unknown"
 -- Production parity (releaseCompletionActions, line 558-596):
 -- - Records end time on the tracker
 -- - Schedules scale-down of old pods (done by Runner's scaleDownOldDeployment on next poll)
---  rather than scaling down immediately
+-- rather than scaling down immediately
 -- - Only scales down immediately if scale_down_pods_on_completion is enabled
 -- - Captures AFTER snapshots for diff
 cleanupOldVersion :: StateFlow ()
