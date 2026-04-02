@@ -40,8 +40,6 @@ type CoreAPI =
         :<|> "tracker" :> "configmap" :> Capture "id" Text :> Get '[JSON] Value
         :<|> "tracker" :> "configmap" :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
         :<|> "tracker" :> "configmap" :> Capture "id" Text :> ReqBody '[JSON] Value :> Put '[JSON] APIResponse
-        :<|> "configmap" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] ConfigMapK8sResponse
-        :<|> "configmap" :> "secondary" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] ConfigMapK8sResponse
         :<|> "server-config" :> QueryParam "product" Text :> Get '[JSON] ServerConfigResponse
         :<|> "server-config" :> ReqBody '[JSON] UpsertServerConfigReq :> Post '[JSON] APIResponse
         :<|> "server-config" :> Capture "id" Int32 :> Delete '[JSON] APIResponse
@@ -104,9 +102,6 @@ coreServer =
         :<|> ConfigMap.getConfigMapH
         :<|> ConfigMap.createConfigMapH
         :<|> ConfigMap.updateConfigMapH
-        -- ConfigMap K8s lookup
-        :<|> K8sResource.fetchConfigMapFromK8sH
-        :<|> K8sResource.fetchSecondaryConfigMapH
         -- Server config
         :<|> Config.listServerConfigH
         :<|> Config.upsertServerConfigH

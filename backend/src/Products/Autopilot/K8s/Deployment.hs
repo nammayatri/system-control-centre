@@ -62,7 +62,7 @@ buildCloneDeploymentCommand cfg ctx =
         patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[] | select(.name == $container) | .image) |= (if ($dockerImage != \"\") then (if ($dockerImage | test(\"/\")) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | " <> stripUnsupportedEnvs <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
      in unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "get deployment", shellQuote (T.pack sourceDep), "-o json | jq", "--arg targetDep", shellQuote (T.pack targetDep), "--arg container", shellQuote (containerName ctx), "--arg newTag", shellQuote (newVersion ctx), "--arg oldTag", shellQuote (oldVersion ctx), "--arg dockerImage", shellQuote (T.pack explicitDockerImage), "'" <> patchFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "apply -f -"]
 
-{- | Clone deployment with env vars injected from udf2 (env switch).
+{- | Clone deployment with env vars injected from envOverrideData (env switch).
 Matches ny-autopilot's updateDeploymentWithNewEnvs: replaces the
 containers[0].env array in the cloned deployment with the user-provided envs.
 -}
@@ -97,7 +97,7 @@ buildRolloutStatusCommand cfg ctx =
     unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "rollout status deployment", shellQuote (deploymentName ctx), "--timeout=300s"]
 
 {- | Patch envs on an existing deployment using kubectl patch.
-Used when env switch (udf2) is set but deployment already exists (not cloned).
+Used when env switch (envOverrideData) is set but deployment already exists (not cloned).
 -}
 buildPatchDeploymentEnvsCommand :: Config -> K8sReleaseContext -> Text -> String
 buildPatchDeploymentEnvsCommand cfg ctx envsJson =

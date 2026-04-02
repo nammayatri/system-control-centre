@@ -307,8 +307,13 @@ const ListRelease: React.FC = () => {
                                 {release.env}
                               </span>
                             )}
+                            {release.env_override_data && (
+                              <span className="rounded px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide bg-blue-700 text-white">
+                                ENV
+                              </span>
+                            )}
                             {isRevert && (
-                              <span className="px-1.5 py-0.5 rounded-md text-[9px] font-medium uppercase tracking-wide bg-violet-50 text-violet-700 border border-violet-200">
+                              <span className="rounded px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide bg-blue-700 text-white">
                                 REVERT
                               </span>
                             )}

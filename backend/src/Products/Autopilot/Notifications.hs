@@ -5,7 +5,7 @@
 
 Thread-aware: the first message (Created) starts a thread,
 all subsequent messages (Approved, Progress, Completed, etc.)
-reply in that thread using the thread_ts stored in release_tracker.udf3.
+reply in that thread using the thread_ts stored in release_tracker.slack_thread_ts.
 
 Uses Slack Block Kit with colored attachments for rich formatting.
 -}
@@ -180,17 +180,17 @@ withChannel db prod svc f = do
         Just ch -> f ch
 
 -- | Read thread_ts fresh from DB every time (avoids stale in-memory tracker).
--- The runner/workflow may hold an old copy of the tracker whose udf3 is Nothing
+-- The runner/workflow may hold an old copy of the tracker whose slackThreadTs is Nothing
 -- because saveThreadTs only writes to DB.
 getThreadTs :: DBEnv -> Text -> IO (Maybe Text)
 getThreadTs db rid = do
     m <- RTQ.findReleaseTracker db rid
     case m of
-        Just (tracker, _) -> pure (udf3 tracker)
+        Just (tracker, _) -> pure (slackThreadTs tracker)
         Nothing -> pure Nothing
 
 saveThreadTs :: DBEnv -> Text -> Text -> IO ()
-saveThreadTs db rid ts = RTQ.updateReleaseTrackerUdf3 db rid ts
+saveThreadTs db rid ts = RTQ.updateReleaseTrackerSlackThreadTs db rid ts
 
 -- | Clickable header link only (no redundant product/service text)
 releaseLink :: ReleaseTracker -> IO Text

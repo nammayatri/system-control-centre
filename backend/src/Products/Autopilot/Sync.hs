@@ -25,7 +25,7 @@ import Products.Autopilot.Types
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (
     K8sDeploymentState (context),
-    K8sReleaseContext (dockerImage, revert, syncClusterRolloutStrategy, syncClusterUdf2, syncXForwardedEmail, syncXPomeriumJwt),
+    K8sReleaseContext (dockerImage, revert, syncClusterRolloutStrategy, syncClusterEnvOverrideData, syncXForwardedEmail, syncXPomeriumJwt),
  )
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
@@ -39,7 +39,7 @@ getK8sContext _ = Nothing
 {- | Trigger sync to secondary cluster if all gates pass.
 Called after release reaches COMPLETED status.
 Gates: sync_cluster_enabled in DB, product has sync_cluster,
-release has udf1="true".
+release has syncEnabled="true".
 -}
 triggerSyncIfEnabled :: Config -> DBEnv -> ReleaseTracker -> Maybe TargetState -> IO ()
 triggerSyncIfEnabled cfg db tracker mts = do
@@ -48,8 +48,8 @@ triggerSyncIfEnabled cfg db tracker mts = do
         then insertReleaseEvent db (releaseId tracker) "BUSINESS" "SYNC_SKIPPED" (String "No SYNC_CLUSTER_URL configured")
         else do
             k8sEnabled <- isK8sEnabled db
-            syncEnabled <- isSyncClusterEnabled db
-            let udf1Flag = maybe False (\t -> T.toLower t == "true") (udf1 tracker)
+            syncClusterOn <- isSyncClusterEnabled db
+            let syncFlag = maybe False (\t -> T.toLower t == "true") (syncEnabled tracker)
             mProduct <- findProductByName db (appGroup tracker)
             let mSyncCluster = mProduct >>= getProductSyncCluster
                 hasSyncCluster = maybe False (not . T.null) mSyncCluster
@@ -60,13 +60,13 @@ triggerSyncIfEnabled cfg db tracker mts = do
                 "SYNC_GATE_CHECK"
                 ( object
                     [ "k8sEnabled" .= k8sEnabled
-                    , "syncEnabled" .= syncEnabled
-                    , "udf1" .= udf1Flag
+                    , "syncClusterOn" .= syncClusterOn
+                    , "syncFlag" .= syncFlag
                     , "hasSyncCluster" .= hasSyncCluster
                     , "syncCluster" .= mSyncCluster
                     ]
                 )
-            if k8sEnabled && syncEnabled && udf1Flag && hasSyncCluster
+            if k8sEnabled && syncClusterOn && syncFlag && hasSyncCluster
                 then do
                     insertReleaseEvent
                         db
@@ -83,8 +83,8 @@ triggerSyncIfEnabled cfg db tracker mts = do
                         "BUSINESS"
                         "SYNC_SKIPPED"
                         ( object
-                            [ "syncEnabled" .= syncEnabled
-                            , "udf1" .= udf1Flag
+                            [ "syncClusterOn" .= syncClusterOn
+                            , "syncFlag" .= syncFlag
                             , "hasSyncCluster" .= hasSyncCluster
                             ]
                         )
@@ -139,9 +139,9 @@ createTrackerForSyncCluster cfg db tracker mts targetCluster = do
              in if not (null u) && Prelude.last u == '/' then u else u <> "/"
         url = normalised <> "releases/create"
         mCtx = getK8sContext mts
-        syncUdf2 = case mCtx >>= syncClusterUdf2 of
+        syncEnvOverride = case mCtx >>= syncClusterEnvOverrideData of
             Just t | not (T.null t) -> Just t
-            _ -> udf2 tracker
+            _ -> envOverrideData tracker
         body =
             object
                 [ "release_tag" .= releaseTag tracker
@@ -158,11 +158,11 @@ createTrackerForSyncCluster cfg db tracker mts targetCluster = do
                 , "docker_image" .= (mCtx >>= dockerImage)
                 , "change_log" .= changeLog tracker
                 , "info" .= info tracker
-                , "udf2" .= syncUdf2
+                , "udf2" .= syncEnvOverride  -- keep "udf2" key for backward compat with secondary cluster
                 , "revert" .= revertValue tracker
                 , "global_id" .= globalId tracker
                 , "is_infra_approved" .= (1 :: Int)
-                , "udf3" .= udf3 tracker
+                , "udf3" .= slackThreadTs tracker  -- keep "udf3" key for backward compat with secondary cluster
                 , "isReleaseSync" .= False
                 , "isSystemTriggered" .= True
                 ]
@@ -288,13 +288,13 @@ triggerRevertSyncIfEnabled cfg db tracker mts = do
     let syncUrl = syncClusterUrl cfg
         mCtx = getK8sContext mts
         isRevert = maybe False (maybe False (/= 0) . revert) mCtx
-        udf1Flag = maybe False (\t -> T.toLower t == "true") (udf1 tracker)
+        syncFlag = maybe False (\t -> T.toLower t == "true") (syncEnabled tracker)
         mGlobalId = globalId tracker
         hasGlobalId = maybe False (not . T.null) mGlobalId
-    if not isRevert || not udf1Flag || not hasGlobalId || null syncUrl
+    if not isRevert || not syncFlag || not hasGlobalId || null syncUrl
         then pure ()
         else do
-            syncEnabled <- isSyncClusterEnabled db
+            syncClusterOn <- isSyncClusterEnabled db
             mProduct <- findProductByName db (appGroup tracker)
             let mSyncCluster = mProduct >>= getProductSyncCluster
                 hasSyncCluster = maybe False (not . T.null) mSyncCluster
@@ -304,14 +304,14 @@ triggerRevertSyncIfEnabled cfg db tracker mts = do
                 "BUSINESS"
                 "REVERT_SYNC_GATE_CHECK"
                 ( object
-                    [ "syncEnabled" .= syncEnabled
-                    , "udf1" .= udf1Flag
+                    [ "syncClusterOn" .= syncClusterOn
+                    , "syncFlag" .= syncFlag
                     , "hasGlobalId" .= hasGlobalId
                     , "hasSyncCluster" .= hasSyncCluster
                     , "globalId" .= mGlobalId
                     ]
                 )
-            if syncEnabled && hasSyncCluster
+            if syncClusterOn && hasSyncCluster
                 then do
                     let gid = maybe "" id mGlobalId
                     insertReleaseEvent
@@ -328,7 +328,7 @@ triggerRevertSyncIfEnabled cfg db tracker mts = do
                         (releaseId tracker)
                         "BUSINESS"
                         "REVERT_SYNC_SKIPPED"
-                        (object ["syncEnabled" .= syncEnabled, "hasSyncCluster" .= hasSyncCluster])
+                        (object ["syncClusterOn" .= syncClusterOn, "hasSyncCluster" .= hasSyncCluster])
 
 -- | PUT to sync cluster to revert a release by global_id.
 revertTrackerSyncCluster :: Config -> DBEnv -> ReleaseTracker -> Maybe TargetState -> Text -> IO ()
@@ -425,12 +425,12 @@ triggerImmediateRevertSync cfg db tracker mts = do
     if null syncUrl || not hasGlobalId
         then pure ()
         else do
-            syncEnabled <- isSyncClusterEnabled db
+            syncClusterOn <- isSyncClusterEnabled db
             mProduct <- findProductByName db (appGroup tracker)
             let mSyncCluster = mProduct >>= getProductSyncCluster
                 hasSyncCluster = maybe False (not . T.null) mSyncCluster
                 gid = maybe "" id mGlobalId
-            if syncEnabled && hasSyncCluster
+            if syncClusterOn && hasSyncCluster
                 then do
                     let rawUrl = syncUrl
                         normalised =

@@ -6,8 +6,6 @@ module Products.Autopilot.Actions.K8sResource
       fetchResourcesH
     , fetchEnvsH
     , fetchSecondaryEnvsH
-    , fetchConfigMapFromK8sH
-    , fetchSecondaryConfigMapH
     ) where
 
 import Control.Exception (SomeException, try)

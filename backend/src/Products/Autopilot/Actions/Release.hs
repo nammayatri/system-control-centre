@@ -298,7 +298,7 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                 , vsFilePath = vsFilePath
                                 , prevAbHsDecision = Nothing
                                 , postMonitoringDecisionMap = Nothing
-                                , syncClusterUdf2 = syncClusterUdf2
+                                , syncClusterEnvOverrideData = syncClusterEnvOverrideData
                                 , syncClusterRolloutStrategy = fmap (\v -> T.pack (LBS.unpack (A.encode v))) syncClusterRolloutStrategy
                                 , syncXForwardedEmail = mXForwardedEmail
                                 , syncXPomeriumJwt = mXPomeriumJwt
@@ -350,11 +350,11 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                 , metadata = metadata
                                 , priority = fromMaybe 0 priority
                                 , globalId = globalId
-                                , udf1 = case isReleaseSync of
+                                , syncEnabled = case isReleaseSync of
                                     Just True -> Just "true"
-                                    _ -> udf1
-                                , udf2 = udf2
-                                , udf3 = udf3
+                                    _ -> syncEnabled
+                                , envOverrideData = envOverrideData
+                                , slackThreadTs = slackThreadTs
                                 }
                         targetState =
                             K8sState $
@@ -466,8 +466,8 @@ revertReleaseH rid req = do
                     newRid <- liftIO (UUID.toText <$> UUID.nextRandom)
                     let trackerCreatedBy = NT.createdBy tracker
                         isImmediate = fromMaybe False (immediate req)
-                        origUdf1 = maybe False (\t -> T.toLower t == "true") (NT.udf1 tracker)
-                        shouldSyncRevert = fromMaybe False ((req :: RevertReleaseReq).isRevertSync) && origUdf1
+                        origSyncEnabled = maybe False (\t -> T.toLower t == "true") (NT.syncEnabled tracker)
+                        shouldSyncRevert = fromMaybe False ((req :: RevertReleaseReq).isRevertSync) && origSyncEnabled
                         revertedContext =
                             oldCtx
                                 { deploymentName = ctxServiceName <> "-" <> ctxOldVersion
@@ -500,7 +500,7 @@ revertReleaseH rid req = do
                                 , NT.rolloutHistory = []
                                 , NT.releaseTag = fmap (<> "_REVERT") (NT.releaseTag tracker)
                                 , NT.info = (req :: RevertReleaseReq).info
-                                , NT.udf1 = if shouldSyncRevert then Just "true" else Nothing
+                                , NT.syncEnabled = if shouldSyncRevert then Just "true" else Nothing
                                 }
                     liftIO $ insertReleaseTracker db revertedTracker (Just revertedTargetState)
                     liftIO $
@@ -513,7 +513,7 @@ revertReleaseH rid req = do
                                 [ "originalId" .= rid
                                 , "shouldSyncRevert" .= shouldSyncRevert
                                 , "isImmediate" .= isImmediate
-                                , "origUdf1" .= (origUdf1 :: Bool)
+                                , "origSyncEnabled" .= (origSyncEnabled :: Bool)
                                 ]
                             )
                     -- Capture BEFORE snapshots for the revert release
@@ -682,14 +682,14 @@ applyUpdates tracker mts req =
         t11 = case req.isInfraApproved of
             Just a -> t10{NT.isInfraApproved = a}
             Nothing -> t10
-        t12 = case req.udf1 of
-            Just u -> t11{NT.udf1 = Just u}
+        t12 = case req.syncEnabled of
+            Just u -> t11{NT.syncEnabled = Just u}
             Nothing -> t11
-        t13 = case req.udf2 of
-            Just u -> t12{NT.udf2 = Just u}
+        t13 = case req.envOverrideData of
+            Just u -> t12{NT.envOverrideData = Just u}
             Nothing -> t12
-        t14 = case req.udf3 of
-            Just u -> t13{NT.udf3 = Just u}
+        t14 = case req.slackThreadTs of
+            Just u -> t13{NT.slackThreadTs = Just u}
             Nothing -> t13
         ts1 = case req.dockerImage of
             Just img -> updateK8sContext mts (\ctx -> ctx{dockerImage = Just img})
@@ -796,15 +796,15 @@ releaseDiffH rid mType = do
                                 newDep = svcHost <> "-" <> ctx.newVersion
                             -- Get old deployment envs
                             oldEnvResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack oldDep, "-o jsonpath='{.spec.template.spec.containers[0].env}'"])
-                            -- Get new deployment envs (or udf2 env switch data)
-                            let newEnvSource = NT.udf2 tracker
+                            -- Get new deployment envs (or envOverrideData env switch data)
+                            let newEnvSource = NT.envOverrideData tracker
                             case newEnvSource of
-                                Just udf2Envs | not (T.null udf2Envs) -> do
-                                    -- udf2 contains the new env switch data
+                                Just envOverrideEnvs | not (T.null envOverrideEnvs) -> do
+                                    -- envOverrideData contains the new env switch data
                                     let oldEnvText = case oldEnvResult of
                                             Right (K8sResult out) -> cleanJsonpath out
                                             Left _ -> ""
-                                    pure $ DiffResponse oldEnvText udf2Envs "Diff from env switch (udf2)"
+                                    pure $ DiffResponse oldEnvText envOverrideEnvs "Diff from env switch (envOverrideData)"
                                 _ -> do
                                     -- Fetch new deployment envs from K8s
                                     newEnvResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack newDep, "-o jsonpath='{.spec.template.spec.containers[0].env}'"])

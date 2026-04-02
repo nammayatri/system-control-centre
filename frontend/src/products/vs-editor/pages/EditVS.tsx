@@ -16,7 +16,7 @@ const EditVS: React.FC = () => {
   const queryClient = useQueryClient();
   const confirmAction = useConfirm();
 
-  const [product, setProduct] = useState('');
+  const [appGroup, setAppGroup] = useState('');
   const [service, setService] = useState('');
   const [vsData, setVsData] = useState('');
   const [trackerId, setTrackerId] = useState<string | null>(null);
@@ -31,16 +31,16 @@ const EditVS: React.FC = () => {
   const products = [...new Set(productConfigs.map((c: ProductConfig) => c.appGroup).filter(Boolean))];
 
   const { data: services = [] } = useQuery({
-    queryKey: ['services', product],
-    queryFn: () => fetchServices(product, false),
-    enabled: !!product,
+    queryKey: ['services', appGroup],
+    queryFn: () => fetchServices(appGroup, false),
+    enabled: !!appGroup,
     staleTime: 120000,
   });
 
   const { data: currentVS, isLoading: loadingVS, refetch: refetchVS } = useQuery({
-    queryKey: ['current-vs', product, service],
-    queryFn: () => fetchCurrentVS(product, service),
-    enabled: !!product && !!service,
+    queryKey: ['current-vs', appGroup, service],
+    queryFn: () => fetchCurrentVS(appGroup, service),
+    enabled: !!appGroup && !!service,
   });
 
   useEffect(() => {
@@ -48,7 +48,7 @@ const EditVS: React.FC = () => {
   }, [currentVS]);
 
   const lockMut = useMutation({
-    mutationFn: () => lockAndEditVS({ product, service, env: 'UAT', vsName: '', lockedBy: 'admin', oldVsData: vsData }),
+    mutationFn: () => lockAndEditVS({ appGroup, service, env: 'UAT', vsName: '', lockedBy: 'admin', oldVsData: vsData }),
     onSuccess: (data) => {
       toast.success('VS locked for editing');
       setTrackerId(data.message?.includes('Tracker ID:') ? data.message.split('Tracker ID: ')[1] : data.id);
@@ -79,7 +79,7 @@ const EditVS: React.FC = () => {
   });
 
   const handleLock = async () => {
-    if (!product || !service) { toast.error('Select product and service first'); return; }
+    if (!appGroup || !service) { toast.error('Select product and service first'); return; }
     lockMut.mutate();
   };
 
@@ -116,15 +116,15 @@ const EditVS: React.FC = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
             <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Product *</label>
-            <select value={product} onChange={e => { setProduct(e.target.value); setService(''); setVsData(''); setIsLocked(false); setTrackerId(null); }} disabled={isLocked} className={cn(inputClass, 'cursor-pointer', isLocked && 'bg-zinc-50 cursor-not-allowed')}>
+            <select value={appGroup} onChange={e => { setAppGroup(e.target.value); setService(''); setVsData(''); setIsLocked(false); setTrackerId(null); }} disabled={isLocked} className={cn(inputClass, 'cursor-pointer', isLocked && 'bg-zinc-50 cursor-not-allowed')}>
               <option value="">Select Product</option>
               {products.map(p => <option key={p} value={p}>{p}</option>)}
             </select>
           </div>
           <div>
             <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Service *</label>
-            <select value={service} onChange={e => { setService(e.target.value); setVsData(''); setIsLocked(false); setTrackerId(null); }} disabled={!product || services.length === 0 || isLocked}
-              className={cn(inputClass, 'cursor-pointer', (!product || services.length === 0 || isLocked) && 'bg-zinc-50 cursor-not-allowed')}>
+            <select value={service} onChange={e => { setService(e.target.value); setVsData(''); setIsLocked(false); setTrackerId(null); }} disabled={!appGroup || services.length === 0 || isLocked}
+              className={cn(inputClass, 'cursor-pointer', (!appGroup || services.length === 0 || isLocked) && 'bg-zinc-50 cursor-not-allowed')}>
               <option value="">Select Service</option>
               {services.map((s: string) => <option key={s} value={s}>{s}</option>)}
             </select>
@@ -133,7 +133,7 @@ const EditVS: React.FC = () => {
       </div>
 
       {/* Editor */}
-      {product && service && (
+      {appGroup && service && (
         <div className="bg-white rounded-xl border border-zinc-200">
           <div className="px-6 py-4 border-b border-zinc-100 flex items-center justify-between">
             <div className="flex items-center gap-3">

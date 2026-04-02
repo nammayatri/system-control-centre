@@ -128,12 +128,12 @@ data K8sCreateReleaseReq = K8sCreateReleaseReq
     , newService :: Maybe Bool
     , cronjobSuspend :: Maybe Bool
     , changeLog :: Maybe Text
-    , udf1 :: Maybe Text
-    , udf2 :: Maybe Text
-    , udf3 :: Maybe Text
+    , syncEnabled :: Maybe Text
+    , envOverrideData :: Maybe Text
+    , slackThreadTs :: Maybe Text
     , isReleaseSync :: Maybe Bool
     , isSystemTriggered :: Maybe Bool
-    , syncClusterUdf2 :: Maybe Text
+    , syncClusterEnvOverrideData :: Maybe Text
     , syncClusterRolloutStrategy :: Maybe Value
     }
     deriving (Show, Generic)
@@ -168,12 +168,12 @@ instance FromJSON K8sCreateReleaseReq where
         newService <- o .:? "new_service"
         cronjobSuspend <- o .:? "cronjob_suspend"
         changeLog <- o .:? "change_log"
-        udf1 <- o .:? "udf1"
-        udf2 <- o .:? "udf2"
-        udf3 <- o .:? "udf3"
+        syncEnabled <- (o .:? "syncEnabled" >>= maybe (o .:? "udf1") (pure . Just))
+        envOverrideData <- (o .:? "envOverrideData" >>= maybe (o .:? "udf2") (pure . Just))
+        slackThreadTs <- (o .:? "slackThreadTs" >>= maybe (o .:? "udf3") (pure . Just))
         isReleaseSync <- o .:? "isReleaseSync"
         isSystemTriggered <- o .:? "isSystemTriggered"
-        syncClusterUdf2 <- o .:? "syncClusterUdf2"
+        syncClusterEnvOverrideData <- (o .:? "syncClusterEnvOverrideData" >>= maybe (o .:? "syncClusterUdf2") (pure . Just))
         syncClusterRolloutStrategy <- o .:? "syncClusterRolloutStrategy"
         pure K8sCreateReleaseReq{..}
       where
@@ -276,12 +276,16 @@ instance ToJSON K8sCreateReleaseReq where
             , "new_service" .= newService
             , "cronjob_suspend" .= cronjobSuspend
             , "change_log" .= changeLog
-            , "udf1" .= udf1
-            , "udf2" .= udf2
-            , "udf3" .= udf3
+            , "syncEnabled" .= syncEnabled
+            , "udf1" .= syncEnabled  -- backward compat alias
+            , "envOverrideData" .= envOverrideData
+            , "udf2" .= envOverrideData  -- backward compat alias
+            , "slackThreadTs" .= slackThreadTs
+            , "udf3" .= slackThreadTs  -- backward compat alias
             , "isReleaseSync" .= isReleaseSync
             , "isSystemTriggered" .= isSystemTriggered
-            , "syncClusterUdf2" .= syncClusterUdf2
+            , "syncClusterEnvOverrideData" .= syncClusterEnvOverrideData
+            , "syncClusterUdf2" .= syncClusterEnvOverrideData  -- backward compat alias
             , "syncClusterRolloutStrategy" .= syncClusterRolloutStrategy
             ]
 
@@ -334,16 +338,33 @@ data K8sUpdateTrackerReq = K8sUpdateTrackerReq
     , changeLog :: Maybe Text
     , isApproved :: Maybe Bool
     , isInfraApproved :: Maybe Bool
-    , udf1 :: Maybe Text
-    , udf2 :: Maybe Text
-    , udf3 :: Maybe Text
+    , syncEnabled :: Maybe Text
+    , envOverrideData :: Maybe Text
+    , slackThreadTs :: Maybe Text
     , dockerImage :: Maybe Text
     , podsScaleDownDelay :: Maybe Double
     }
     deriving (Show, Generic)
 
 instance FromJSON K8sUpdateTrackerReq where
-    parseJSON = genericParseJSON defaultOptions { omitNothingFields = True }
+    parseJSON = withObject "K8sUpdateTrackerReq" $ \o ->
+        K8sUpdateTrackerReq
+            <$> o .:? "status"
+            <*> o .:? "mode"
+            <*> o .:? "releaseManager"
+            <*> o .:? "priority"
+            <*> o .:? "scheduleTime"
+            <*> o .:? "description"
+            <*> o .:? "info"
+            <*> o .:? "rolloutStrategy"
+            <*> o .:? "changeLog"
+            <*> o .:? "isApproved"
+            <*> o .:? "isInfraApproved"
+            <*> (o .:? "syncEnabled" >>= maybe (o .:? "udf1") (pure . Just))
+            <*> (o .:? "envOverrideData" >>= maybe (o .:? "udf2") (pure . Just))
+            <*> (o .:? "slackThreadTs" >>= maybe (o .:? "udf3") (pure . Just))
+            <*> o .:? "dockerImage"
+            <*> o .:? "podsScaleDownDelay"
 
 instance ToJSON K8sUpdateTrackerReq where
     toJSON = genericToJSON defaultOptions { omitNothingFields = True }

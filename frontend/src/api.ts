@@ -108,9 +108,9 @@ export interface APRelease {
     schedule_time: string;
     change_log: string;
     info: string;
-    udf1: string;
-    udf2: string;
-    udf3: string;
+    sync_enabled: string;
+    env_override_data: string;
+    slack_thread_ts: string;
     global_id: string;
     new_service: string;
     // is_art_recorder removed (column dropped)
@@ -196,9 +196,9 @@ type NammaRelease = {
     isArtRecorder?: number;
     cronjobSuspend?: boolean;
     abHsStatus?: string;
-    udf1?: string | null;
-    udf2?: string | null;
-    udf3?: string | null;
+    syncEnabled?: string | null;
+    envOverrideData?: string | null;
+    slackThreadTs?: string | null;
     metadata?: any;
     rolloutStrategy?: Array<{ rolloutPercent: number; cooloffSeconds: number; podPercent: number }>;
     rolloutHistory?: Array<{
@@ -294,9 +294,9 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     // is_art_recorder removed
     cronjob_suspend: r.cronjobSuspend ?? false,
     ab_hs_status: r.abHsStatus || 'Uninitiated',
-    udf1: r.udf1 || '',
-    udf2: r.udf2 || '',
-    udf3: r.udf3 || '',
+    sync_enabled: r.syncEnabled || (r as any).sync_enabled || (r as any).udf1 || '',
+    env_override_data: r.envOverrideData || (r as any).env_override_data || (r as any).udf2 || '',
+    slack_thread_ts: r.slackThreadTs || (r as any).slack_thread_ts || (r as any).udf3 || '',
 
     new_version: (r as any).newVersion || r.releaseContext?.newVersion || '',
     old_version: (r as any).oldVersion || r.releaseContext?.oldVersion || '',
@@ -516,9 +516,9 @@ export async function createRelease(isNewService: boolean, payload: any): Promis
         // is_art_recorder removed
         cronjob_suspend: payload.cronjob_suspend || false,
         change_log: payload.change_log || null,
-        udf1: payload.udf1 || null,
-        udf2: payload.udf2 || null,
-        udf3: payload.udf3 || null,
+        syncEnabled: payload.sync_enabled || null,
+        envOverrideData: payload.env_override_data || null,
+        slackThreadTs: payload.slack_thread_ts || null,
         isReleaseSync: payload.isReleaseSync || false,
         syncClusterUdf2: payload.syncClusterUdf2 || null,
         syncClusterRolloutStrategy: payload.syncClusterRolloutStrategy || null,
@@ -632,8 +632,8 @@ export interface ResourceInfo {
     memory_limits: string;
 }
 
-export async function fetchResources(product: string, service: string): Promise<ResourceInfo> {
-    const { data } = await apiClient.get('/resources', { params: { PRODUCT: product, SERVICE: service } });
+export async function fetchResources(appGroup: string, service: string): Promise<ResourceInfo> {
+    const { data } = await apiClient.get('/resources', { params: { PRODUCT: appGroup, SERVICE: service } });
     return data;
 }
 
@@ -783,13 +783,13 @@ export async function fetchVSEditDetail(id: string): Promise<VSEditTracker> {
     return data;
 }
 
-export async function fetchCurrentVS(product: string, service: string): Promise<string> {
-    const { data } = await apiClient.get('/vs-edit-tracker/current-vs', { params: { product, service } });
+export async function fetchCurrentVS(appGroup: string, service: string): Promise<string> {
+    const { data } = await apiClient.get('/vs-edit-tracker/current-vs', { params: { product: appGroup, service } });
     return typeof data === 'string' ? data : JSON.stringify(data, null, 2);
 }
 
-export async function lockAndEditVS(payload: { product: string; service: string; env: string; vsName: string; lockedBy: string; oldVsData?: string }): Promise<any> {
-    const { data } = await apiClient.post('/vs-edit-tracker/lock', payload);
+export async function lockAndEditVS(payload: { appGroup: string; service: string; env: string; vsName: string; lockedBy: string; oldVsData?: string }): Promise<any> {
+    const { data } = await apiClient.post('/vs-edit-tracker/lock', { ...payload, product: payload.appGroup });
     return data;
 }
 

@@ -5,7 +5,7 @@ import Editor from '@monaco-editor/react';
 import { useProductConfigs, useServices } from '../useProducts';
 import { useCreateRelease, useUpdateTracker } from '../hooks';
 import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs } from '../api';
-import { fetchReleaseConfigs, fetchConfigMapData } from '../../../api';
+import { fetchReleaseConfigs, fetchResources } from '../../../api';
 import type { ProductConfig } from '../../../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
@@ -39,7 +39,7 @@ const CreateRelease: React.FC = () => {
   const [formData, setFormData] = useState({
     appGroup: '', service: '', env: DEFAULT_ENV, old_version: '', new_version: '', docker_image: '', change_log: '',
     status: 'CREATED', mode: 'AUTO', priority: '0', info: '', custom_pods_scale_down_days: '1',
-    cluster: 'EULER_UAT', scale_down_delay: '1',
+    cluster: 'MOVING_TECH', scale_down_delay: '1',
     cronjob_suspend: false, description: '', schedule_time: '',
     // deploy_file_path, vs_file_path, dr_file_path removed (backend still accepts via API)
   });
@@ -47,8 +47,8 @@ const CreateRelease: React.FC = () => {
   const [error, setError] = useState('');
   const [isEnvSwitch, setIsEnvSwitch] = useState(false);
   const [envData, setEnvData] = useState('');
-  const [isConfigMapSwitch, setIsConfigMapSwitch] = useState(false);
-  const [configMapData, setConfigMapData] = useState('');
+  const [isResourcesSwitch, setIsResourcesSwitch] = useState(false);
+  const [resourcesData, setResourcesData] = useState('');
   const [clonedService, setClonedService] = useState('');
   const [stages, setStages] = useState([
     { rollout: 5, cooloff: 10, pods: 2 },
@@ -98,7 +98,7 @@ const CreateRelease: React.FC = () => {
         priority: String(existingRelease.priority ?? 0),
         info: existingRelease.info || '',
         custom_pods_scale_down_days: String(existingRelease.custom_pod_scaledown_days ?? 1),
-        cluster: existingRelease.release_context?.cluster || 'EULER_UAT',
+        cluster: existingRelease.release_context?.cluster || 'MOVING_TECH',
         scale_down_delay: String(existingRelease.release_context?.pods_scale_down_delay ?? 1),
         cronjob_suspend: existingRelease.cronjob_suspend || false,
         description: existingRelease.description || '',
@@ -106,7 +106,7 @@ const CreateRelease: React.FC = () => {
         // deploy/vs/dr file paths removed from UI
       });
       setRolloutHistoryLength(existingRelease.rollout_history?.length || 0);
-      if (existingRelease.udf2) { setIsEnvSwitch(true); setEnvData(existingRelease.udf2); }
+      if (existingRelease.env_override_data) { setIsEnvSwitch(true); setEnvData(existingRelease.env_override_data); }
       if (existingRelease.rollout_strategy) {
         try {
           const parsed = typeof existingRelease.rollout_strategy === 'string'
@@ -124,12 +124,12 @@ const CreateRelease: React.FC = () => {
         setClonedService(data.service);
         setFormData(prev => ({
           ...prev, appGroup: data.appGroup, service: data.service,
-          cluster: data.release_context?.cluster || 'EULER_UAT', env: data.env,
+          cluster: data.release_context?.cluster || 'MOVING_TECH', env: data.env,
           priority: String(data.priority || '0'),
           docker_image: data.release_context?.docker_image || data.docker_image || '',
           mode: data.mode, new_version: data.new_version || '', change_log: data.change_log || ''
         }));
-        if (data.udf2) { setIsEnvSwitch(true); setEnvData(data.udf2); }
+        if (data.env_override_data) { setIsEnvSwitch(true); setEnvData(data.env_override_data); }
         if (data.rollout_strategy) {
           try {
             const parsed = typeof data.rollout_strategy === 'string' ? JSON.parse(data.rollout_strategy) : data.rollout_strategy;
@@ -175,7 +175,7 @@ const CreateRelease: React.FC = () => {
   }, [formData.appGroup, formData.service, isClone, isUpdate]);
 
   useEffect(() => { if (!isEnvSwitch) setEnvData(''); }, [isEnvSwitch]);
-  useEffect(() => { if (!isConfigMapSwitch) setConfigMapData(''); }, [isConfigMapSwitch]);
+  useEffect(() => { if (!isResourcesSwitch) setResourcesData(''); }, [isResourcesSwitch]);
 
   // Fetch envs
   useEffect(() => {
@@ -184,21 +184,15 @@ const CreateRelease: React.FC = () => {
     }
   }, [isEnvSwitch, formData.appGroup, formData.service, formData.env]);
 
-  // Fetch configmap
+  // Fetch resources
   useEffect(() => {
-    if (isConfigMapSwitch && formData.appGroup && formData.service) {
-      fetchConfigMapData(formData.appGroup, formData.service)
-        .then(res => {
-          try {
-            const parsed = typeof res === 'string' ? JSON.parse(res) : res;
-            setConfigMapData(JSON.stringify(parsed, null, 2));
-          } catch {
-            setConfigMapData(typeof res === 'string' ? res : JSON.stringify(res, null, 2));
-          }
-        })
-        .catch(() => setConfigMapData(''));
+    if (isResourcesSwitch && formData.appGroup && formData.service) {
+      fetchResources(formData.appGroup, formData.service)
+        .then(res => setResourcesData(JSON.stringify(res, null, 2)))
+        .catch(() => setResourcesData(''));
     }
-  }, [isConfigMapSwitch, formData.appGroup, formData.service]);
+  }, [isResourcesSwitch, formData.appGroup, formData.service]);
+
 
   // Secondary envs
   useEffect(() => {
@@ -237,14 +231,16 @@ const CreateRelease: React.FC = () => {
   };
 
   const generateReleaseTag = () => {
-    const acronym = productConfigs.find((p: ProductConfig) => p.appGroup === formData.appGroup)?.product_acronym || formData.appGroup?.slice(0, 4)?.toUpperCase() || 'UNKN';
+    const acronym = productConfigs.find((p: ProductConfig) => p.appGroup === formData.appGroup)?.product_acronym || formData.appGroup?.slice(0, 4)?.toUpperCase() || '';
     const dateStr = new Date().toISOString().split('T')[0].replace(/-/g, '.');
-    const versionTag = (formData.new_version || 'unknown').slice(0, 8);
-    const svcTag = (formData.service || '').slice(0, 6).toUpperCase();
+    const versionTag = formData.new_version ? formData.new_version.slice(0, 8) : '';
+    const svcTag = formData.service ? formData.service.slice(0, 6).toUpperCase() : '';
     const mode = formData.mode || 'AUTO';
     const env = formData.env || 'UAT';
     const pri = formData.priority || '0';
-    return `${acronym}_${dateStr}_${versionTag}_${svcTag}_${mode}_${env}_${pri}`;
+    // Only include non-empty parts to avoid double underscores
+    const parts = [acronym, dateStr, versionTag, svcTag, mode, env, pri].filter(Boolean);
+    return parts.join('_');
   };
   const generatedReleaseTag = generateReleaseTag();
 
@@ -355,8 +351,8 @@ const CreateRelease: React.FC = () => {
       description: formData.description, schedule_time: formData.schedule_time,
       cluster: formData.cluster, new_service: false, rollout_strategy: stages,
       is_approved: formData.env === 'INTEG_CLUSTER' ? 1 : 0,
-      udf2: isEnvSwitch ? envData : null,
-      udf3: isConfigMapSwitch ? configMapData : null,
+      env_override_data: isEnvSwitch ? envData : null,
+      slack_thread_ts: null,
       isReleaseSync,
       syncClusterUdf2: isReleaseSync && isSecondaryEnvSwitch ? secondaryEnvData : null,
       syncClusterRolloutStrategy: isReleaseSync ? secondaryStages.map(s => ({ rolloutPercent: s.rollout, cooloffSeconds: s.cooloff, podPercent: s.pods })) : null,
@@ -441,7 +437,6 @@ const CreateRelease: React.FC = () => {
               </div>
               <div><FieldLabel>Info</FieldLabel><input type="text" name="info" value={formData.info} onChange={handleInputChange} placeholder="Any Valid JSON" className={inputClass} /></div>
               <div><FieldLabel>Scale Down Days</FieldLabel><select name="custom_pods_scale_down_days" value={formData.custom_pods_scale_down_days} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>{[1,2,3,4,5,6].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
-              <label className="flex items-center gap-2.5 cursor-pointer"><input type="checkbox" name="cronjob_suspend" checked={formData.cronjob_suspend} onChange={handleInputChange} className="rounded border-zinc-300 accent-zinc-900" /><span className="text-sm text-zinc-700">Cronjob Suspend</span></label>
             </div>
 
             {/* Col 2 */}
@@ -606,19 +601,19 @@ const CreateRelease: React.FC = () => {
           </div>
         )}
 
-        {/* ConfigMap Switch */}
+        {/* Get Resources */}
         {!isNewService && (
           <div className="bg-white rounded-xl border border-zinc-200">
             <div className="px-6 py-4 border-b border-zinc-100 flex items-center gap-3">
-              <h2 className="text-lg font-semibold text-zinc-900">Get ConfigMap</h2>
-              <Toggle checked={isConfigMapSwitch} onChange={() => formData.service && setIsConfigMapSwitch(!isConfigMapSwitch)} disabled={!formData.service} />
+              <h2 className="text-lg font-semibold text-zinc-900">Get Resources</h2>
+              <Toggle checked={isResourcesSwitch} onChange={() => formData.service && setIsResourcesSwitch(!isResourcesSwitch)} disabled={!formData.service} />
             </div>
-            {isConfigMapSwitch && (
+            {isResourcesSwitch && (
               <div className="p-6">
-                <FieldLabel>ConfigMap Data</FieldLabel>
+                <FieldLabel>Resource Limits (CPU / Memory)</FieldLabel>
                 <div className="border border-zinc-200 rounded-lg overflow-hidden mt-1">
-                  <Editor height="320px" defaultLanguage="json" theme="light" value={configMapData} onChange={(val) => setConfigMapData(val || '')}
-                    options={{ minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
+                  <Editor height="280px" defaultLanguage="json" theme="light" value={resourcesData}
+                    options={{ readOnly: true, minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
                 </div>
               </div>
             )}

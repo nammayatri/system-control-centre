@@ -26,7 +26,7 @@ module Products.Autopilot.Queries.ReleaseTracker
     , deleteReleaseTracker
     , deleteReleaseEvents
     -- * Misc / Update helpers
-    , updateReleaseTrackerUdf3
+    , updateReleaseTrackerSlackThreadTs
     -- * Row conversion
     , toRow
     , fromRow
@@ -312,9 +312,9 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
         , rtChangeLog = changeLog
         , rtMetadata = fmap encodeJsonText metadata
         , rtGlobalId = globalId
-        , rtUdf1 = udf1
-        , rtUdf2 = udf2
-        , rtUdf3 = udf3
+        , rtSyncEnabled = syncEnabled
+        , rtEnvOverrideData = envOverrideData
+        , rtSlackThreadTs = slackThreadTs
         , rtCreatedAt = createdAt
         , rtUpdatedAt = updatedAt
         }
@@ -351,9 +351,9 @@ fromRow ReleaseTrackerT{..} =
                 , metadata = parseJsonTextMaybe rtMetadata
                 , priority = rtPriority
                 , globalId = rtGlobalId
-                , udf1 = rtUdf1
-                , udf2 = rtUdf2
-                , udf3 = rtUdf3
+                , syncEnabled = rtSyncEnabled
+                , envOverrideData = rtEnvOverrideData
+                , slackThreadTs = rtSlackThreadTs
                 }
         -- Deserialize full TargetState; fall back to legacy K8sReleaseContext JSON
         mTargetState = case parseJsonTextMaybe rtTargetState :: Maybe TargetState of
@@ -555,16 +555,16 @@ findCompletedTrackersForScaleDown db now delayHours = do
         addDelay t = addUTCTime (realToFrac (delayHours * 3600) :: NominalDiffTime) t
     pure (filter isEligible parsed)
 
-{- | Update udf3 field on a release tracker by ID.
+{- | Update slack_thread_ts field on a release tracker by ID.
 Used to store Slack thread_ts.
 -}
-updateReleaseTrackerUdf3 :: DBEnv -> Text -> Text -> IO ()
-updateReleaseTrackerUdf3 db rid value =
+updateReleaseTrackerSlackThreadTs :: DBEnv -> Text -> Text -> IO ()
+updateReleaseTrackerSlackThreadTs db rid value =
     withConn db $ \conn -> do
         _ <-
             execute
                 conn
-                "UPDATE release_tracker SET udf3 = ? WHERE id = ?"
+                "UPDATE release_tracker SET slack_thread_ts = ? WHERE id = ?"
                 (value, rid)
         pure ()
 

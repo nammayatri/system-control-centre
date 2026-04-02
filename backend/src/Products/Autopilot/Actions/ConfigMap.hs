@@ -110,9 +110,9 @@ createConfigMapH body = do
                         , metadata = Just cmMetadata
                         , priority = fromIntegral priority'
                         , globalId = Nothing
-                        , udf1 = Nothing
-                        , udf2 = Nothing
-                        , udf3 = Nothing
+                        , syncEnabled = Nothing
+                        , envOverrideData = Nothing
+                        , slackThreadTs = Nothing
                         }
                 targetState = ConfigState emptyConfigState
             liftIO $ insertReleaseTracker db tracker (Just targetState)

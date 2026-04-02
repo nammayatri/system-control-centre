@@ -74,9 +74,9 @@ data ReleaseTrackerT f = ReleaseTrackerT
     , rtChangeLog :: Columnar f (Maybe Text)
     , rtMetadata :: Columnar f (Maybe Text)
     , rtGlobalId :: Columnar f (Maybe Text)
-    , rtUdf1 :: Columnar f (Maybe Text)
-    , rtUdf2 :: Columnar f (Maybe Text)
-    , rtUdf3 :: Columnar f (Maybe Text)
+    , rtSyncEnabled :: Columnar f (Maybe Text)
+    , rtEnvOverrideData :: Columnar f (Maybe Text)
+    , rtSlackThreadTs :: Columnar f (Maybe Text)
     , rtCreatedAt :: Columnar f UTCTime
     , rtUpdatedAt :: Columnar f UTCTime
     }
@@ -193,9 +193,9 @@ nammaAPDb =
                             , rtChangeLog = fieldNamed "change_log"
                             , rtMetadata = fieldNamed "metadata"
                             , rtGlobalId = fieldNamed "global_id"
-                            , rtUdf1 = fieldNamed "udf1"
-                            , rtUdf2 = fieldNamed "udf2"
-                            , rtUdf3 = fieldNamed "udf3"
+                            , rtSyncEnabled = fieldNamed "sync_enabled"
+                            , rtEnvOverrideData = fieldNamed "env_override_data"
+                            , rtSlackThreadTs = fieldNamed "slack_thread_ts"
                             , rtCreatedAt = fieldNamed "date_created"
                             , rtUpdatedAt = fieldNamed "last_updated"
                             }

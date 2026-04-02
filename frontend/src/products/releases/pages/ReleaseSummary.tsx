@@ -577,13 +577,13 @@ const ReleaseSummary: React.FC = () => {
   const { data: release, isLoading, error, refetch } = useRelease(id);
   const { data: events = [] } = useReleaseEvents(id);
 
-  // Revert sync checkbox defaults based on release.udf1
+  // Revert sync checkbox defaults based on release.sync_enabled
   const [revertSyncChecked, setRevertSyncChecked] = useState(false);
   useEffect(() => {
     if (release) {
-      setRevertSyncChecked(release.udf1 === 'true');
+      setRevertSyncChecked(release.sync_enabled === 'true');
     }
-  }, [release?.udf1]);
+  }, [release?.sync_enabled]);
 
   const approveMut = useApproveRelease();
   const discardMut = useDiscardRelease();

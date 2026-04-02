@@ -116,7 +116,7 @@ data K8sReleaseContext = K8sReleaseContext
     , vsFilePath :: Maybe Text
     , prevAbHsDecision :: Maybe Value
     , postMonitoringDecisionMap :: Maybe Value
-    , syncClusterUdf2 :: Maybe Text
+    , syncClusterEnvOverrideData :: Maybe Text
     , syncClusterRolloutStrategy :: Maybe Text
     , syncXForwardedEmail :: Maybe Text
     , syncXPomeriumJwt :: Maybe Text
@@ -159,7 +159,7 @@ defaultK8sReleaseContext =
         , vsFilePath = Nothing
         , prevAbHsDecision = Nothing
         , postMonitoringDecisionMap = Nothing
-        , syncClusterUdf2 = Nothing
+        , syncClusterEnvOverrideData = Nothing
         , syncClusterRolloutStrategy = Nothing
         , syncXForwardedEmail = Nothing
         , syncXPomeriumJwt = Nothing

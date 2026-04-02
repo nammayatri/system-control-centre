@@ -47,7 +47,7 @@ import qualified Shared.Types.Storage.Schema as S
 -- | Convert a release_tracker row (category=VSEdit) to VsEditTrackerResponse
 -- VS-specific data: old_vs_data and new_vs_data are now stored as SNAPSHOT events.
 -- Lock info is in deployment_config.vs_locked_by.
--- For backward compat, also check udf2/udf3 for old data that hasn't been migrated.
+-- For backward compat, also check envOverrideData/slackThreadTs for old data that hasn't been migrated.
 releaseRowToVsResponse :: S.ReleaseTrackerRow -> VsEditTrackerResponse
 releaseRowToVsResponse t =
     let vsName' = fromMaybe "" (S.rtMetadata t)  -- vs_name stored in metadata
@@ -57,8 +57,8 @@ releaseRowToVsResponse t =
         , vetRespService = S.rtService t
         , vetRespEnv = S.rtEnv t
         , vetRespVsName = vsName'
-        , vetRespOldVsData = S.rtUdf2 t           -- backward compat: old data still in udf2
-        , vetRespNewVsData = S.rtUdf3 t            -- backward compat: old data still in udf3
+        , vetRespOldVsData = S.rtEnvOverrideData t  -- backward compat: old data still in env_override_data
+        , vetRespNewVsData = S.rtSlackThreadTs t   -- backward compat: old data still in slack_thread_ts
         , vetRespStatus = S.rtStatus t
         , vetRespCreatedBy = S.rtCreatedBy t
         , vetRespApprovedBy = S.rtApprovedBy t
@@ -120,9 +120,9 @@ mkVsEditRow tid product' service' env' vsName' _oldVsData' createdBy' status' no
         , rtChangeLog = Nothing
         , rtMetadata = Just vsName'       -- vs_name in metadata
         , rtGlobalId = Nothing
-        , rtUdf1 = Nothing                -- no longer used for locked_by
-        , rtUdf2 = Nothing                -- no longer used for old_vs_data
-        , rtUdf3 = Nothing                -- no longer used for new_vs_data
+        , rtSyncEnabled = Nothing          -- no longer used for locked_by
+        , rtEnvOverrideData = Nothing     -- no longer used for old_vs_data
+        , rtSlackThreadTs = Nothing       -- no longer used for new_vs_data
         , rtCreatedAt = now
         , rtUpdatedAt = now
         }

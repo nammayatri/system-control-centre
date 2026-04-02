@@ -246,9 +246,9 @@ data ReleaseTracker = ReleaseTracker
     , metadata :: Maybe Value
     , priority :: Int32
     , globalId :: Maybe Text
-    , udf1 :: Maybe Text
-    , udf2 :: Maybe Text
-    , udf3 :: Maybe Text
+    , syncEnabled :: Maybe Text
+    , envOverrideData :: Maybe Text
+    , slackThreadTs :: Maybe Text
     }
     deriving (Eq, Show, Generic)
 
