@@ -48,46 +48,59 @@ export function Badge({ children, variant = 'default', size = 'sm', dot, classNa
 }
 
 export function statusVariant(status: ReleaseStatus | string): BadgeProps['variant'] {
-  const s = (status || '').toUpperCase().replace(/\s+/g, '_');
-  switch (s) {
-    case 'COMPLETED':
-    case 'RECORDED':
+  // PascalCase (canonical)
+  switch (status) {
+    case 'Completed':
       return 'success';
-    case 'INPROGRESS':
-    case 'IN_PROGRESS':
-    case 'RECORDING':
-    case 'RESTARTING':
+    case 'InProgress':
+    case 'Restarting':
       return 'warning';
-    case 'PAUSED':
+    case 'Paused':
       return 'info';
-    case 'CREATED':
+    case 'Created':
       return 'blue';
-    case 'DISCARDED':
-    case 'DISCARDING':
+    case 'Discarded':
+    case 'Discarding':
       return 'muted';
-    case 'VS_APPLIED':
-    case 'VSAPPLIED':
-    case 'APPLIED':
-      return 'success';
-    case 'REVERTING':
-    case 'REVERTED':
+    case 'Reverting':
+    case 'Reverted':
       return 'purple';
-    case 'ABORTED':
-    case 'USER_ABORTED':
-    case 'USERABORTED':
-    case 'GCLT_ABORTED':
-    case 'GCLTABORTED':
-    case 'ABORTING':
+    case 'Aborted':
+    case 'UserAborted':
+    case 'Aborting':
       return 'danger';
-    default:
-      return 'default';
+    default: {
+      // UPPER_SNAKE_CASE fallback for backward compat (e.g. configmap statuses)
+      const upper = (status || '').toUpperCase().replace(/\s+/g, '_');
+      switch (upper) {
+        case 'COMPLETED': case 'RECORDED': case 'VS_APPLIED': case 'VSAPPLIED': case 'APPLIED':
+          return 'success';
+        case 'INPROGRESS': case 'IN_PROGRESS': case 'RECORDING': case 'RESTARTING':
+          return 'warning';
+        case 'PAUSED':
+          return 'info';
+        case 'CREATED':
+          return 'blue';
+        case 'DISCARDED': case 'DISCARDING':
+          return 'muted';
+        case 'REVERTING': case 'REVERTED':
+          return 'purple';
+        case 'ABORTED': case 'USER_ABORTED': case 'USERABORTED':
+        case 'GCLT_ABORTED': case 'GCLTABORTED': case 'ABORTING':
+          return 'danger';
+        default:
+          return 'default';
+      }
+    }
   }
 }
 
 export function StatusBadge({ status }: { status: ReleaseStatus | string }) {
+  // "InProgress" → "In Progress", "UserAborted" → "User Aborted"
+  const displayStatus = (status || '').replace(/([A-Z])/g, ' $1').trim();
   return (
     <Badge variant={statusVariant(status)} dot size="sm">
-      {(status || '').replace(/_/g, ' ')}
+      {displayStatus}
     </Badge>
   );
 }

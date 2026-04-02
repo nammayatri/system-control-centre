@@ -417,7 +417,7 @@ const RolloutStrategyTab: React.FC<{
     setIsEditing(false);
   }, [strategy]);
 
-  const canEdit = status === 'CREATED' || status === 'INPROGRESS' || status === 'PAUSED';
+  const canEdit = status === 'Created' || status === 'InProgress' || status === 'Paused';
 
   const handleStageChange = (idx: number, field: keyof RolloutStrategyEvent, value: number) => {
     setStages(prev => {
@@ -672,7 +672,7 @@ const ReleaseSummary: React.FC = () => {
         <span className="text-zinc-600">{release.release_context?.cluster || release.env || ''}</span>
         <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300" />
         <span className="font-mono text-xs text-zinc-800 truncate max-w-[200px]">{release.release_tag || id}</span>
-        {(s === 'CREATED' || s === 'INPROGRESS' || s === 'PAUSED') && (
+        {(s === 'Created' || s === 'InProgress' || s === 'Paused') && (
           <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
             <button
               onClick={() => navigate(`/releases/${id}/edit`)}
@@ -708,17 +708,17 @@ const ReleaseSummary: React.FC = () => {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {s === 'CREATED' && release.is_approved === 0 && (
+          {s === 'Created' && release.is_approved === 0 && (
             <PermissionGate product="autopilot" permission="RELEASE_APPROVE">
               <Button size="sm" variant="success" loading={approveMut.isPending} onClick={() => doAction('approve', () => approveMut.mutateAsync({ releaseId: id!, approvedBy: 'admin' }))}><Check className="w-3.5 h-3.5" /> Approve</Button>
             </PermissionGate>
           )}
-          {s === 'CREATED' && (
+          {s === 'Created' && (
             <PermissionGate product="autopilot" permission="RELEASE_DISCARD">
               <Button size="sm" variant="outline" className="border-red-300 text-red-700 hover:bg-red-50" loading={discardMut.isPending} onClick={() => doAction('discard', () => discardMut.mutateAsync({ releaseId: id! }), true)}><X className="w-3.5 h-3.5" /> Discard</Button>
             </PermissionGate>
           )}
-          {(s === 'INPROGRESS') && (
+          {(s === 'InProgress') && (
             <>
               <PermissionGate product="autopilot" permission="RELEASE_PAUSE">
                 <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
@@ -729,13 +729,13 @@ const ReleaseSummary: React.FC = () => {
               </PermissionGate>
             </>
           )}
-          {s === 'PAUSED' && (
+          {s === 'Paused' && (
             <PermissionGate product="autopilot" permission="RELEASE_RESUME">
               <Button size="sm" className="bg-blue-600 text-white hover:bg-blue-700" loading={resumeMut.isPending} onClick={() => doAction('resume', () => resumeMut.mutateAsync(id!))}><Play className="w-3.5 h-3.5" /> Resume</Button>
               <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
             </PermissionGate>
           )}
-          {s === 'COMPLETED' && (
+          {s === 'Completed' && (
             <>
               <PermissionGate product="autopilot" permission="RELEASE_REVERT">
                 <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: 'admin' }), true)}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
@@ -751,7 +751,7 @@ const ReleaseSummary: React.FC = () => {
               </PermissionGate>
             </>
           )}
-          {(s === 'ABORTED' || s === 'USER_ABORTED' || s === 'GCLT_ABORTED' || s === 'REVERTED') && (
+          {(s === 'Aborted' || s === 'UserAborted' || s === 'Reverted') && (
             <PermissionGate product="autopilot" permission="RELEASE_CREATE">
               <Button size="sm" variant="outline" className="border-blue-300 text-blue-700 hover:bg-blue-50" loading={restartMut.isPending} onClick={() => doAction('restart', () => restartMut.mutateAsync(id!))}><RotateCw className="w-3.5 h-3.5" /> Restart</Button>
             </PermissionGate>

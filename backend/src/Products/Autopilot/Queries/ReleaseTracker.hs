@@ -312,28 +312,43 @@ parseReleaseWFStatus t =
 
 parseReleaseStatus :: Text -> ReleaseStatus
 parseReleaseStatus t =
-    case T.toUpper t of
-        "CREATED" -> Created
-        "INPROGRESS" -> InProgress
-        "ABORTED" -> Aborted
-        "USER_ABORTED" -> UserAborted
-        "USERABORTED" -> UserAborted
-        "COMPLETED" -> Completed
-        "DISCARDED" -> Discarded
-        "PAUSED" -> Paused
-        "ABORTING" -> Aborting
-        "REVERTING" -> Reverting
-        "REVERTED" -> Reverted
-        "RESTARTING" -> Restarting
-        "DISCARDING" -> Discarding
-        -- Legacy status mappings (backward compat for old production DB rows)
-        "RECORDING" -> InProgress -- ART recording (deprecated) → InProgress
-        "RECORDED" -> Completed  -- ART recorded (deprecated) → Completed
-        "GCLT_ABORTED" -> Aborted -- K8s health check abort → generic Aborted
-        "GCLTABORTED" -> Aborted
-        "VS_APPLIED" -> InProgress -- K8s VirtualService applied → treat as in-progress
-        "VSAPPLIED" -> InProgress
-        _ -> Created
+    -- PascalCase (canonical, from Haskell ADT / Generic ToJSON)
+    case t of
+        "Created" -> Created
+        "InProgress" -> InProgress
+        "Completed" -> Completed
+        "Aborted" -> Aborted
+        "UserAborted" -> UserAborted
+        "Discarded" -> Discarded
+        "Discarding" -> Discarding
+        "Paused" -> Paused
+        "Aborting" -> Aborting
+        "Reverting" -> Reverting
+        "Reverted" -> Reverted
+        "Restarting" -> Restarting
+        -- UPPER_SNAKE_CASE fallback (legacy frontend / old DB rows)
+        _ -> case T.toUpper t of
+            "CREATED" -> Created
+            "INPROGRESS" -> InProgress
+            "ABORTED" -> Aborted
+            "USER_ABORTED" -> UserAborted
+            "USERABORTED" -> UserAborted
+            "COMPLETED" -> Completed
+            "DISCARDED" -> Discarded
+            "PAUSED" -> Paused
+            "ABORTING" -> Aborting
+            "REVERTING" -> Reverting
+            "REVERTED" -> Reverted
+            "RESTARTING" -> Restarting
+            "DISCARDING" -> Discarding
+            -- Legacy status mappings (backward compat for old production DB rows)
+            "RECORDING" -> InProgress
+            "RECORDED" -> Completed
+            "GCLT_ABORTED" -> Aborted
+            "GCLTABORTED" -> Aborted
+            "VS_APPLIED" -> InProgress
+            "VSAPPLIED" -> InProgress
+            _ -> Created
 
 parseMode :: Maybe Text -> Mode
 parseMode Nothing = Auto

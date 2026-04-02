@@ -58,34 +58,28 @@ export interface ReleaseContext {
     sync_x_pomerium_jwt: string;
 }
 
-// ── All statuses matching ny-autopilot ─────────────────────────────
+// ── All statuses (PascalCase — canonical, matching Haskell ADT) ─────
 
 export type ReleaseStatus =
-    | 'CREATED'
-    | 'INPROGRESS'
-    | 'ABORTED'
-    | 'USER_ABORTED'
-    | 'COMPLETED'
-    | 'DISCARDED'
-    | 'PAUSED'
-    | 'ABORTING'
-
-    | 'REVERTING'
-    | 'REVERTED'
-
-    | 'RESTARTING'
-    | 'GCLT_ABORTED'
-    | 'DISCARDING'
-    | 'VS_APPLIED'
-    | 'RECORDING'
-    | 'RECORDED';
+    | 'Created'
+    | 'InProgress'
+    | 'Completed'
+    | 'Aborted'
+    | 'UserAborted'
+    | 'Discarded'
+    | 'Discarding'
+    | 'Paused'
+    | 'Aborting'
+    | 'Reverting'
+    | 'Reverted'
+    | 'Restarting';
 
 export const TERMINAL_STATUSES: ReleaseStatus[] = [
-    'ABORTED', 'USER_ABORTED', 'COMPLETED', 'DISCARDED', 'GCLT_ABORTED', 'REVERTED', 'RECORDED'
+    'Aborted', 'UserAborted', 'Completed', 'Discarded', 'Reverted'
 ];
 
 export const ABORTED_STATUSES: ReleaseStatus[] = [
-    'ABORTED', 'USER_ABORTED', 'GCLT_ABORTED', 'ABORTING'
+    'Aborted', 'UserAborted', 'Aborting'
 ];
 
 // ── Main release type ──────────────────────────────────────────────
@@ -251,25 +245,29 @@ type NammaRelease = {
     };
 };
 
-const toLegacyStatus = (status?: string): ReleaseStatus => {
+/** PascalCase from backend is canonical — pass through directly.
+ *  Legacy statuses (GcltAborted, Recording, etc.) are mapped to canonical equivalents. */
+const normalizePascalStatus = (status?: string): ReleaseStatus => {
     switch (status) {
-        case 'Created': return 'CREATED';
-        case 'InProgress': return 'INPROGRESS';
-        case 'Paused': return 'PAUSED';
-        case 'Aborting': return 'ABORTING';
-        case 'Reverting': return 'REVERTING';
-        case 'Reverted': return 'REVERTED';
-        case 'Aborted': return 'ABORTED';
-        case 'Completed': return 'COMPLETED';
-        case 'UserAborted': return 'USER_ABORTED';
-        case 'GcltAborted': return 'GCLT_ABORTED';
-        case 'Discarded': return 'DISCARDED';
-        case 'Recording': return 'RECORDING';
-        case 'Recorded': return 'RECORDED';
-        case 'Restarting': return 'RESTARTING';
-        case 'Discarding': return 'DISCARDING';
-        case 'VsApplied': return 'VS_APPLIED';
-        default: return ((status || '').toUpperCase() || 'CREATED') as ReleaseStatus;
+        case 'Created': return 'Created';
+        case 'InProgress': return 'InProgress';
+        case 'Completed': return 'Completed';
+        case 'Aborted': return 'Aborted';
+        case 'UserAborted': return 'UserAborted';
+        case 'Discarded': return 'Discarded';
+        case 'Discarding': return 'Discarding';
+        case 'Paused': return 'Paused';
+        case 'Aborting': return 'Aborting';
+        case 'Reverting': return 'Reverting';
+        case 'Reverted': return 'Reverted';
+        case 'Restarting': return 'Restarting';
+        // Legacy statuses from old DB rows (backend parser normalizes these,
+        // but handle here too for safety)
+        case 'GcltAborted': return 'Aborted';
+        case 'Recording': return 'InProgress';
+        case 'Recorded': return 'Completed';
+        case 'VsApplied': return 'InProgress';
+        default: return (status || 'Created') as ReleaseStatus;
     }
 };
 
@@ -277,7 +275,7 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     id: r.releaseId,
     service: r.service,
     product: r.product,
-    status: toLegacyStatus(r.status),
+    status: normalizePascalStatus(r.status),
     env: r.env,
     tracker_type: (r as any).category || r.trackerType || 'BackendService',
     mode: (r.mode || 'AUTO').toUpperCase(),
@@ -361,28 +359,24 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
 
 export function statusColor(status: ReleaseStatus | string): string {
     switch (status) {
-        case 'COMPLETED':
-        case 'RECORDED':
+        case 'Completed':
             return 'bg-green-600 text-white';
-        case 'INPROGRESS':
-        case 'RECORDING':
+        case 'InProgress':
+        case 'Restarting':
             return 'bg-orange-500 text-white';
-        case 'PAUSED':
+        case 'Paused':
             return 'bg-yellow-500 text-white';
-        case 'CREATED':
+        case 'Created':
             return 'bg-blue-600 text-white';
-        case 'DISCARDED':
-        case 'DISCARDING':
+        case 'Discarded':
+        case 'Discarding':
             return 'bg-gray-500 text-white';
-        case 'REVERTING':
-        case 'REVERTED':
-        case 'VS_APPLIED':
-        case 'RESTARTING':
+        case 'Reverting':
+        case 'Reverted':
             return 'bg-blue-500 text-white';
-        case 'ABORTED':
-        case 'USER_ABORTED':
-        case 'GCLT_ABORTED':
-        case 'ABORTING':
+        case 'Aborted':
+        case 'UserAborted':
+        case 'Aborting':
             return 'bg-red-500 text-white';
         default:
             return 'bg-red-500 text-white';
