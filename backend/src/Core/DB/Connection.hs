@@ -112,14 +112,10 @@ ensureSchema db = withConn db $ \conn -> do
 
     -- ========================================================================
     -- Old tables (kept for backward compat — not used by new code)
-    -- ========================================================================
-    _ <- execute_ conn "CREATE TABLE IF NOT EXISTS product_config (id serial primary key, product text not null, repo_name text not null, product_type text not null, product_acronym text not null, release_branch text not null, need_infra_approval boolean null, target_config text null)"
-    _ <- execute_ conn "CREATE TABLE IF NOT EXISTS release_config (id serial primary key, emails text null, rollout_strategy text null, decision_config text null, service text not null, product text not null, flags text null, slack_webhook_urls text null, service_acronym text null, service_type text null, bitbucket_path text null, revert_strategy text null, target_config text null)"
-    _ <- execute_ conn "ALTER TABLE release_config ADD COLUMN IF NOT EXISTS microservice_type text null"
-    _ <- execute_ conn "ALTER TABLE release_config ADD COLUMN IF NOT EXISTS jira_webhook_url text null"
-    _ <- execute_ conn "ALTER TABLE release_config ADD COLUMN IF NOT EXISTS target_config text"
-    _ <- execute_ conn "ALTER TABLE product_config ADD COLUMN IF NOT EXISTS target_config text"
-    _ <- execute_ conn "CREATE TABLE IF NOT EXISTS vs_edit_tracker (id text primary key, product text not null, service text not null, env text not null, vs_name text not null, old_vs_data text, new_vs_data text, status text not null default 'CREATED', created_by text not null, approved_by text, is_locked boolean default false, locked_by text, locked_at timestamptz, lock_expiry timestamptz, monitoring_end_time timestamptz, info text, created_at timestamptz not null default now(), updated_at timestamptz not null default now())"
+    -- Old tables removed (migrated to deployment_config + release_tracker):
+    -- product_config → deployment_config WHERE service IS NULL
+    -- release_config → deployment_config WHERE service IS NOT NULL
+    -- vs_edit_tracker → release_tracker WHERE category = 'VSEdit'
 
     -- ========================================================================
     -- server_config
