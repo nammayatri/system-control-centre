@@ -1,42 +1,41 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Autopilot product permissions
-
-All permissions for the Autopilot product as a type-safe ADT.
-Adding a new permission here without handling in permissionDescription
-will cause a compiler warning with -Wall.
--}
-module Products.Autopilot.Types.Permission (
-    AutopilotPermission (..),
+-- | Autopilot product permissions
+--
+-- All permissions for the Autopilot product as a type-safe ADT.
+-- Adding a new permission here without handling in permissionDescription
+-- will cause a compiler warning with -Wall.
+module Products.Autopilot.Types.Permission
+  ( AutopilotPermission (..),
     autopilotPermissionToText,
     textToAutopilotPermission,
     permissionDescription,
-)
+  )
 where
 
 import Data.Text (Text)
 
 data AutopilotPermission
-    = AP_RELEASE_VIEW
-    | AP_RELEASE_CREATE
-    | AP_RELEASE_APPROVE
-    | AP_RELEASE_REVERT
-    | AP_RELEASE_DISCARD
-    | AP_RELEASE_PAUSE
-    | AP_RELEASE_RESUME
-    | AP_RELEASE_ABORT
-    | AP_RELEASE_UPDATE
-    | AP_RELEASE_DELETE
-    | AP_MANAGE_STAGGER
-    | AP_PRODUCT_CONFIG_VIEW
-    | AP_PRODUCT_CONFIG_EDIT
-    | AP_SERVICE_CONFIG_VIEW
-    | AP_SERVICE_CONFIG_EDIT
-    | AP_CONFIG_APPROVE
-    | AP_CONFIG_EDIT
-    | AP_CONFIG_DISCARD
-    | AP_CONFIG_REVERT
-    deriving (Show, Read, Eq, Ord, Enum, Bounded)
+  = AP_RELEASE_VIEW
+  | AP_RELEASE_CREATE
+  | AP_RELEASE_APPROVE
+  | AP_RELEASE_REVERT
+  | AP_RELEASE_DISCARD
+  | AP_RELEASE_PAUSE
+  | AP_RELEASE_RESUME
+  | AP_RELEASE_ABORT
+  | AP_RELEASE_UPDATE
+  | AP_RELEASE_DELETE
+  | AP_MANAGE_STAGGER
+  | AP_PRODUCT_CONFIG_VIEW
+  | AP_PRODUCT_CONFIG_EDIT
+  | AP_SERVICE_CONFIG_VIEW
+  | AP_SERVICE_CONFIG_EDIT
+  | AP_CONFIG_APPROVE
+  | AP_CONFIG_EDIT
+  | AP_CONFIG_DISCARD
+  | AP_CONFIG_REVERT
+  deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 autopilotPermissionToText :: AutopilotPermission -> Text
 autopilotPermissionToText AP_RELEASE_VIEW = "RELEASE_VIEW"
@@ -81,9 +80,8 @@ textToAutopilotPermission "CONFIG_DISCARD" = Just AP_CONFIG_DISCARD
 textToAutopilotPermission "CONFIG_REVERT" = Just AP_CONFIG_REVERT
 textToAutopilotPermission _ = Nothing
 
-{- | Human-readable description of each permission.
-Exhaustive pattern match ensures compiler warns if a new permission is added.
--}
+-- | Human-readable description of each permission.
+-- Exhaustive pattern match ensures compiler warns if a new permission is added.
 permissionDescription :: AutopilotPermission -> Text
 permissionDescription AP_RELEASE_VIEW = "View releases and events"
 permissionDescription AP_RELEASE_CREATE = "Create new releases"

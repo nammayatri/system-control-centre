@@ -13,11 +13,11 @@ import Core.Environment (AppState (..))
 import Core.Utils.FlowMonad (Flow)
 import Network.Wai (Application, requestHeaders)
 import Network.Wai.Handler.Warp (run)
-import Network.Wai.Middleware.Cors (
-    CorsResourcePolicy (..),
+import Network.Wai.Middleware.Cors
+  ( CorsResourcePolicy (..),
     cors,
     simpleCorsResourcePolicy,
- )
+  )
 import Products.Autopilot.Routes (CoreAPI, coreServer)
 import Servant
 
@@ -31,19 +31,19 @@ serverLoop st = run (port (config st)) (mkApp st)
 
 mkApp :: AppState -> Application
 mkApp st =
-    cors corsForRequest $
-        authMiddleware (dbEnv st) $
-            serve fullApi $
-                hoistServer fullApi (toHandler st) fullServer
+  cors corsForRequest $
+    authMiddleware (dbEnv st) $
+      serve fullApi $
+        hoistServer fullApi (toHandler st) fullServer
   where
     corsForRequest req =
-        let origin = lookup "Origin" (requestHeaders req)
-         in Just $
-                simpleCorsResourcePolicy
-                    { corsOrigins = fmap (\o -> ([o], True)) origin
-                    , corsMethods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-                    , corsRequestHeaders = ["Content-Type", "Authorization", "X-Forwarded-Email", "x-pomerium-jwt-assertion", "x-requested-with"]
-                    }
+      let origin = lookup "Origin" (requestHeaders req)
+       in Just $
+            simpleCorsResourcePolicy
+              { corsOrigins = fmap (\o -> ([o], True)) origin,
+                corsMethods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                corsRequestHeaders = ["Content-Type", "Authorization", "X-Forwarded-Email", "x-pomerium-jwt-assertion", "x-requested-with"]
+              }
 
 fullServer :: ServerT FullAPI Flow
 fullServer = authServer :<|> adminServer :<|> coreServer

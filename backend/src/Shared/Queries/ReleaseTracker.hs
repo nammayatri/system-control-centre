@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Shared.Queries.ReleaseTracker (
-    -- * CRUD
+module Shared.Queries.ReleaseTracker
+  ( -- * CRUD
     insertReleaseTracker,
     findReleaseTracker,
     listReleaseTrackers,
@@ -33,7 +33,7 @@ module Shared.Queries.ReleaseTracker (
     parseJsonTextOr,
     parseJsonTextMaybe,
     safeHead,
-)
+  )
 where
 
 -- Re-export everything from the original module

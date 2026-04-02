@@ -2,35 +2,35 @@
 
 -- | Autopilot-specific runtime configs read from server_config DB table.
 module Products.Autopilot.RuntimeConfig
-    ( -- Feature flags
-      isK8sEnabled
-    , isWatcherEnabled
-    , isApproveAllReleases
-    , isScaleDownPodsOnCompletion
-    , isGcltEnabled
-    , isPromQueryCheckEnabled
-    , isSyncClusterEnabled
-    , isMultiReleasePerProduct
-    , isUnderMaintenance
-      -- Delays / numeric
-    , getReleaseWatchDelay
-    , getReleaseStartDelay
-    , getCollectMetricsDelay
-    , getPodsCreationDelay
-    , getPodsScaleDownDelayFromConfig
-    , getPodsCalculationFactor
-    , getHpaMinMaxFactor
-    , getMaxJobCompletionHours
-    , getRevertCooloff
-    , getLockExpiryDelayMinutes
-    , getMaxK8sRetries
-      -- HPA
-    , isHpaEnabledForProduct
-    , getHpaTemplate
-      -- Re-export global flags for convenience
-    , isSlackEnabled
-    , isMailingEnabled
-    )
+  ( -- Feature flags
+    isK8sEnabled,
+    isWatcherEnabled,
+    isApproveAllReleases,
+    isScaleDownPodsOnCompletion,
+    isGcltEnabled,
+    isPromQueryCheckEnabled,
+    isSyncClusterEnabled,
+    isMultiReleasePerProduct,
+    isUnderMaintenance,
+    -- Delays / numeric
+    getReleaseWatchDelay,
+    getReleaseStartDelay,
+    getCollectMetricsDelay,
+    getPodsCreationDelay,
+    getPodsScaleDownDelayFromConfig,
+    getPodsCalculationFactor,
+    getHpaMinMaxFactor,
+    getMaxJobCompletionHours,
+    getRevertCooloff,
+    getLockExpiryDelayMinutes,
+    getMaxK8sRetries,
+    -- HPA
+    isHpaEnabledForProduct,
+    getHpaTemplate,
+    -- Re-export global flags for convenience
+    isSlackEnabled,
+    isMailingEnabled,
+  )
 where
 
 import Core.Environment (DBEnv)
@@ -41,14 +41,14 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Shared.Config.Runtime
-    ( getConfigBoolForProduct
-    , getConfigDoubleForProduct
-    , getConfigIntForProduct
-    , isMailingEnabled
-    , isSlackEnabled
-    )
 import Products.Autopilot.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
+import Shared.Config.Runtime
+  ( getConfigBoolForProduct,
+    getConfigDoubleForProduct,
+    getConfigIntForProduct,
+    isMailingEnabled,
+    isSlackEnabled,
+  )
 
 -- ── Feature flags ──────────────────────────────────────────────────
 
@@ -82,17 +82,17 @@ isMultiReleasePerProduct db = getConfigBoolForProduct db "multi_release_per_prod
 -- "ap_under_maintenance" field is true.
 isUnderMaintenance :: DBEnv -> IO Bool
 isUnderMaintenance db = do
-    v <- getEnabledServerConfigValueForProduct db "ap_under_maintenance" (Just "autopilot")
-    pure $ case v of
-        Nothing -> False
-        Just raw ->
-            case eitherDecode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Either String Value of
-                Right (Object obj) ->
-                    case KM.lookup (K.fromText "ap_under_maintenance") obj of
-                        Just (Bool b) -> b
-                        _ -> False
-                -- If it's not JSON, treat as a simple boolean string
-                _ -> T.toLower (T.strip raw) `elem` ["true", "1", "yes"]
+  v <- getEnabledServerConfigValueForProduct db "ap_under_maintenance" (Just "autopilot")
+  pure $ case v of
+    Nothing -> False
+    Just raw ->
+      case eitherDecode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Either String Value of
+        Right (Object obj) ->
+          case KM.lookup (K.fromText "ap_under_maintenance") obj of
+            Just (Bool b) -> b
+            _ -> False
+        -- If it's not JSON, treat as a simple boolean string
+        _ -> T.toLower (T.strip raw) `elem` ["true", "1", "yes"]
 
 -- ── Delays / numeric configs ───────────────────────────────────────
 
@@ -126,7 +126,6 @@ getRevertCooloff db = getConfigIntForProduct db "revert_cooloff" (Just "autopilo
 getLockExpiryDelayMinutes :: DBEnv -> IO Int
 getLockExpiryDelayMinutes db = getConfigIntForProduct db "lock_expiry_delay_minutes" (Just "autopilot") 15
 
-
 getMaxK8sRetries :: DBEnv -> IO Int
 getMaxK8sRetries db = getConfigIntForProduct db "max_k8s_retries" (Just "autopilot") 3
 
@@ -134,11 +133,11 @@ getMaxK8sRetries db = getConfigIntForProduct db "max_k8s_retries" (Just "autopil
 
 isHpaEnabledForProduct :: DBEnv -> Text -> IO Bool
 isHpaEnabledForProduct db productName = do
-    dbConfig <- getEnabledServerConfigValueForProduct db "scaling_with_hpa_enabled" (Just "autopilot")
-    let dbProducts = case dbConfig of
-            Just val -> map T.strip (T.splitOn "," (T.filter (\c -> c /= '[' && c /= ']' && c /= '"') val))
-            Nothing -> []
-    pure $ T.toUpper productName `elem` map T.toUpper (filter (not . T.null) dbProducts)
+  dbConfig <- getEnabledServerConfigValueForProduct db "scaling_with_hpa_enabled" (Just "autopilot")
+  let dbProducts = case dbConfig of
+        Just val -> map T.strip (T.splitOn "," (T.filter (\c -> c /= '[' && c /= ']' && c /= '"') val))
+        Nothing -> []
+  pure $ T.toUpper productName `elem` map T.toUpper (filter (not . T.null) dbProducts)
 
 getHpaTemplate :: DBEnv -> IO (Maybe Text)
 getHpaTemplate db = getEnabledServerConfigValueForProduct db "hpa_template" (Just "autopilot")

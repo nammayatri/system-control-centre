@@ -93,6 +93,9 @@ const statusPillColor: Record<string, string> = {
   USER_ABORTED: 'bg-red-700 text-white',
   USERABORTED: 'bg-red-700 text-white',
   ABORTING: 'bg-red-700 text-white',
+  // Legacy statuses from production (backward compat)
+  GCLT_ABORTED: 'bg-red-700 text-white',
+  VS_APPLIED: 'bg-orange-700 text-white',
 };
 
 export function StatusBadge({ status }: { status: ReleaseStatus | string }) {

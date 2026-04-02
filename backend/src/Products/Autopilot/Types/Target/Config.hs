@@ -1,17 +1,16 @@
-{- | Configuration target types
-
-This module contains all types related to configuration-only deployments:
-- ConfigDeploymentState: State tracking for ConfigMap/Secret updates
-- BackendConfigWFStatus: Detailed config-specific workflow stages
--}
-module Products.Autopilot.Types.Target.Config (
-    -- * Target State
+-- | Configuration target types
+--
+-- This module contains all types related to configuration-only deployments:
+-- - ConfigDeploymentState: State tracking for ConfigMap/Secret updates
+-- - BackendConfigWFStatus: Detailed config-specific workflow stages
+module Products.Autopilot.Types.Target.Config
+  ( -- * Target State
     ConfigDeploymentState (..),
     emptyConfigState,
 
     -- * Workflow Status
     BackendConfigWFStatus (..),
-)
+  )
 where
 
 import Data.Aeson (FromJSON, ToJSON)
@@ -22,29 +21,28 @@ import GHC.Generics (Generic)
 -- Config Workflow Status
 -- ============================================================================
 
-{- | Backend config workflow status (K8s ConfigMap/Secret-specific)
-
-Tracks ConfigMap/Secret updates and pod restarts.
-This provides detailed progress within the generic ReleaseWFStatus stages.
--}
+-- | Backend config workflow status (K8s ConfigMap/Secret-specific)
+--
+-- Tracks ConfigMap/Secret updates and pod restarts.
+-- This provides detailed progress within the generic ReleaseWFStatus stages.
 data BackendConfigWFStatus
-    = -- | Validate config changes
-      BCInit
-    | -- | Apply ConfigMap updates
-      BCApplyConfigMap
-    | -- | Apply Secret updates
-      BCApplySecret
-    | -- | Restart affected pods
-      BCRestartPods
-    | -- | Monitor config propagation
-      BCMonitorRollout
-    | -- | Verify config loaded correctly
-      BCVerifyConfig
-    | -- | Complete
-      BCDone
-    | -- | Revert config changes
-      BCRevertConfig
-    deriving (Eq, Show, Read, Generic, Ord)
+  = -- | Validate config changes
+    BCInit
+  | -- | Apply ConfigMap updates
+    BCApplyConfigMap
+  | -- | Apply Secret updates
+    BCApplySecret
+  | -- | Restart affected pods
+    BCRestartPods
+  | -- | Monitor config propagation
+    BCMonitorRollout
+  | -- | Verify config loaded correctly
+    BCVerifyConfig
+  | -- | Complete
+    BCDone
+  | -- | Revert config changes
+    BCRevertConfig
+  deriving (Eq, Show, Read, Generic, Ord)
 
 instance ToJSON BackendConfigWFStatus
 
@@ -54,23 +52,22 @@ instance FromJSON BackendConfigWFStatus
 -- Config Deployment State
 -- ============================================================================
 
-{- | Configuration deployment state
-
-Tracks ConfigMap and Secret updates and rollout status
--}
+-- | Configuration deployment state
+--
+-- Tracks ConfigMap and Secret updates and rollout status
 data ConfigDeploymentState = ConfigDeploymentState
-    { categoryWorkflowStatus :: BackendConfigWFStatus
-    -- ^ Granular config-specific workflow progress
-    , configMapsUpdated :: [Text]
-    -- ^ Names of updated ConfigMaps
-    , secretsUpdated :: [Text]
-    -- ^ Names of updated Secrets
-    , podsRestarted :: Bool
-    -- ^ Whether affected pods were restarted
-    , rolloutComplete :: Bool
-    -- ^ Whether config rollout completed across all pods
-    }
-    deriving (Eq, Show, Generic)
+  { -- | Granular config-specific workflow progress
+    categoryWorkflowStatus :: BackendConfigWFStatus,
+    -- | Names of updated ConfigMaps
+    configMapsUpdated :: [Text],
+    -- | Names of updated Secrets
+    secretsUpdated :: [Text],
+    -- | Whether affected pods were restarted
+    podsRestarted :: Bool,
+    -- | Whether config rollout completed across all pods
+    rolloutComplete :: Bool
+  }
+  deriving (Eq, Show, Generic)
 
 instance ToJSON ConfigDeploymentState
 
@@ -79,10 +76,10 @@ instance FromJSON ConfigDeploymentState
 -- | Empty config deployment state (initial state)
 emptyConfigState :: ConfigDeploymentState
 emptyConfigState =
-    ConfigDeploymentState
-        { categoryWorkflowStatus = BCInit
-        , configMapsUpdated = []
-        , secretsUpdated = []
-        , podsRestarted = False
-        , rolloutComplete = False
-        }
+  ConfigDeploymentState
+    { categoryWorkflowStatus = BCInit,
+      configMapsUpdated = [],
+      secretsUpdated = [],
+      podsRestarted = False,
+      rolloutComplete = False
+    }

@@ -1,35 +1,35 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Shared.Config.Types (
-    ConfigType (..),
+module Shared.Config.Types
+  ( ConfigType (..),
     ConfigGroup (..),
     ConfigEntry (..),
     configGroupToText,
     configTypeDefault,
     configTypeTag,
-)
+  )
 where
 
 import Data.Text (Text)
 import qualified Data.Text as T
 
 data ConfigType
-    = BoolConfig Bool -- toggle
-    | IntConfig Int -- number
-    | DoubleConfig Double -- decimal
-    | TextConfig Text -- free text
-    | JsonConfig Text -- JSON string
-    deriving (Show)
+  = BoolConfig Bool -- toggle
+  | IntConfig Int -- number
+  | DoubleConfig Double -- decimal
+  | TextConfig Text -- free text
+  | JsonConfig Text -- JSON string
+  deriving (Show)
 
 data ConfigGroup
-    = GeneralGroup
-    | DeploymentGroup
-    | SyncGroup
-    | MonitoringGroup
-    | ScalingGroup
-    | NotificationGroup
-    | ABTestingGroup
-    deriving (Show, Eq, Ord, Enum, Bounded)
+  = GeneralGroup
+  | DeploymentGroup
+  | SyncGroup
+  | MonitoringGroup
+  | ScalingGroup
+  | NotificationGroup
+  | ABTestingGroup
+  deriving (Show, Eq, Ord, Enum, Bounded)
 
 configGroupToText :: ConfigGroup -> Text
 configGroupToText GeneralGroup = "General"
@@ -41,12 +41,12 @@ configGroupToText NotificationGroup = "Notification"
 configGroupToText ABTestingGroup = "A/B Testing"
 
 data ConfigEntry = ConfigEntry
-    { ceKey :: Text
-    , ceType :: ConfigType
-    , ceGroup :: ConfigGroup
-    , ceDescription :: Text
-    , ceProduct :: Maybe Text -- Nothing = global
-    }
+  { ceKey :: Text,
+    ceType :: ConfigType,
+    ceGroup :: ConfigGroup,
+    ceDescription :: Text,
+    ceProduct :: Maybe Text -- Nothing = global
+  }
 
 configTypeDefault :: ConfigType -> Text
 configTypeDefault (BoolConfig b) = if b then "true" else "false"

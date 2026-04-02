@@ -1,31 +1,32 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Shared.Error
-    ( APIError(..)
-    , throwAPIError
-    , toAPIResponse
-    ) where
+  ( APIError (..),
+    throwAPIError,
+    toAPIResponse,
+  )
+where
 
-import Data.Aeson (ToJSON(..), Value, object, (.=))
+import Data.Aeson (ToJSON (..), Value, encode, object, (.=))
 import Data.Text (Text)
-import Servant (ServerError(..), err400, err404, err403, err409)
-import Data.Aeson (encode)
+import Servant (ServerError (..), err400, err403, err404, err409)
 
 data APIError
-    = NotFound Text           -- 404
-    | BadRequest Text         -- 400
-    | Forbidden Text          -- 403
-    | Conflict Text           -- 409
-    | InvalidTransition Text  -- 422
-    | InternalError Text      -- 500
-    deriving (Show)
+  = NotFound Text -- 404
+  | BadRequest Text -- 400
+  | Forbidden Text -- 403
+  | Conflict Text -- 409
+  | InvalidTransition Text -- 422
+  | InternalError Text -- 500
+  deriving (Show)
 
 instance ToJSON APIError where
-    toJSON err = object
-        [ "status" .= ("ERROR" :: Text)
-        , "message" .= errorMessage err
-        , "code" .= errorCode err
-        ]
+  toJSON err =
+    object
+      [ "status" .= ("ERROR" :: Text),
+        "message" .= errorMessage err,
+        "code" .= errorCode err
+      ]
 
 errorMessage :: APIError -> Text
 errorMessage (NotFound msg) = msg
@@ -45,10 +46,10 @@ errorCode (InternalError _) = "INTERNAL_ERROR"
 
 -- Convert APIError to Servant ServerError with JSON body
 throwAPIError :: APIError -> ServerError
-throwAPIError err@(NotFound _) = (err404 :: ServerError) { errBody = encode err, errHeaders = [("Content-Type", "application/json")] }
-throwAPIError err@(BadRequest _) = (err400 :: ServerError) { errBody = encode err, errHeaders = [("Content-Type", "application/json")] }
-throwAPIError err@(Forbidden _) = (err403 :: ServerError) { errBody = encode err, errHeaders = [("Content-Type", "application/json")] }
-throwAPIError err@(Conflict _) = (err409 :: ServerError) { errBody = encode err, errHeaders = [("Content-Type", "application/json")] }
+throwAPIError err@(NotFound _) = (err404 :: ServerError) {errBody = encode err, errHeaders = [("Content-Type", "application/json")]}
+throwAPIError err@(BadRequest _) = (err400 :: ServerError) {errBody = encode err, errHeaders = [("Content-Type", "application/json")]}
+throwAPIError err@(Forbidden _) = (err403 :: ServerError) {errBody = encode err, errHeaders = [("Content-Type", "application/json")]}
+throwAPIError err@(Conflict _) = (err409 :: ServerError) {errBody = encode err, errHeaders = [("Content-Type", "application/json")]}
 throwAPIError err@(InvalidTransition _) = let e = ServerError 422 "Unprocessable Entity" (encode err) [("Content-Type", "application/json")] in e
 throwAPIError err@(InternalError _) = let e = ServerError 500 "Internal Server Error" (encode err) [("Content-Type", "application/json")] in e
 

@@ -1,10 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Shared.Queries.ServerConfig (
-    getEnabledServerConfigValue,
+module Shared.Queries.ServerConfig
+  ( getEnabledServerConfigValue,
     listAllServerConfigs,
     upsertServerConfig,
-)
+  )
 where
 
 -- Re-export from the original module

@@ -35,6 +35,7 @@ library
       Core.Server
       Core.Utils.FlowMonad
       Products.Autopilot.Config
+      Products.Autopilot.DecisionEngine
       Products.Autopilot.Discovery
       Products.Autopilot.K8s.Deployment
       Products.Autopilot.K8s.DestinationRule

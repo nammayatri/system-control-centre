@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Shared.Queries.ProductConfig (
-    -- * Product CRUD
+module Shared.Queries.ProductConfig
+  ( -- * Product CRUD
     upsertProduct,
     findProductByName,
     findProductByNameAndCluster,
@@ -16,15 +16,15 @@ module Shared.Queries.ProductConfig (
     getProductVsName,
     getProductSyncCluster,
     getProductVsLockedBy,
-)
+  )
 where
 
 -- Re-export product-related queries from the unified module
-import Products.Autopilot.Queries.ProductService (
+import Products.Autopilot.Queries.ProductService
+  ( deleteProductConfig,
     findProductByName,
     findProductByNameAndCluster,
     findProductConfigById,
-    deleteProductConfig,
     getProductCluster,
     getProductNamespace,
     getProductSyncCluster,
@@ -33,4 +33,4 @@ import Products.Autopilot.Queries.ProductService (
     listProducts,
     listProductsByName,
     upsertProduct,
- )
+  )
