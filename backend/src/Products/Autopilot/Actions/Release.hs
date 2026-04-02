@@ -1088,13 +1088,15 @@ fastForwardH rid req = do
                             [] -> []
                             steps ->
                                 zipWith (\i s -> if i == currentStepIdx then s{cooloffSeconds = elapsedMins} else s) [0 ..] steps
+                        -- History keeps original cooloff for display; manualOverride=True shows it was fast-forwarded
+                        -- Strategy gets elapsedMins so workflow's isCoolOffExceeded passes immediately
                         updatedHistory = case history of
                             [] -> []
                             steps ->
                                 let lastIdx = length steps - 1
                                     updateStep i step =
                                         if i == lastIdx
-                                            then step{historyCooloffSeconds = elapsedMins, historyManualOverride = True}
+                                            then step{historyManualOverride = True}
                                             else step
                                  in zipWith updateStep [0 ..] steps
                         updated = (tracker :: ReleaseTracker){NT.rolloutHistory = updatedHistory, NT.rolloutStrategy = updatedStrategy}
