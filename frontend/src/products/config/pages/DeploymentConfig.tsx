@@ -595,7 +595,7 @@ const DeploymentConfig: React.FC = () => {
                     value={serviceForm.service || ''}
                     onChange={e => setServiceForm(prev => ({ ...prev, service: e.target.value }))}
                     className={inputClass}
-                    placeholder="e.g. beckn-app-backend-master"
+                    placeholder="e.g. BECKN_APP_BACKEND_MASTER"
                     disabled={!!editingService}
                   />
                 </div>
