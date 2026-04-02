@@ -103,7 +103,7 @@ const RoleList: React.FC = () => {
 
   return (
     <div className="flex flex-col w-full">
-      <h1 className="text-lg font-semibold text-zinc-900 mb-5" style={{ fontFamily: 'Fira Sans, sans-serif' }}>
+      <h1 className="text-lg font-semibold text-zinc-900 mb-5">
         Roles
       </h1>
 
@@ -119,7 +119,7 @@ const RoleList: React.FC = () => {
           {productData.map((product) => (
             <div key={product.slug} className="bg-white rounded-xl border border-zinc-200 overflow-hidden">
               <div className="px-4 py-3 bg-zinc-50 border-b border-zinc-200 flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider" style={{ fontFamily: 'Fira Sans, sans-serif' }}>
+                <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">
                   {product.name}
                 </h2>
                 <Button size="sm" variant="secondary" onClick={() => openCreateDialog(product.slug)}>
@@ -155,7 +155,7 @@ const RoleList: React.FC = () => {
                               {role.type || 'custom'}
                             </Badge>
                           </td>
-                          <td className="px-4 py-2.5 text-zinc-500" style={{ fontFamily: 'Fira Code, monospace', fontSize: '12px' }}>
+                          <td className="px-4 py-2.5 text-zinc-500 font-mono text-xs">
                             {(role.permissions || []).length} permissions
                           </td>
                         </tr>
@@ -220,7 +220,7 @@ const RoleList: React.FC = () => {
                               onChange={() => togglePerm(permStr)}
                               className="rounded border-zinc-300 accent-zinc-900 cursor-pointer"
                             />
-                            <span className="text-xs text-zinc-700" style={{ fontFamily: 'Fira Code, monospace' }}>
+                            <span className="text-xs text-zinc-700 font-mono">
                               {permStr}
                             </span>
                           </label>

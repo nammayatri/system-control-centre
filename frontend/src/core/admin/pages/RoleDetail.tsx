@@ -131,7 +131,7 @@ const RoleDetail: React.FC = () => {
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <div>
-          <h1 className="text-lg font-semibold text-zinc-900" style={{ fontFamily: 'Fira Sans, sans-serif' }}>
+          <h1 className="text-lg font-semibold text-zinc-900">
             {role.name}
           </h1>
           <div className="flex items-center gap-2 mt-1">
@@ -150,7 +150,7 @@ const RoleDetail: React.FC = () => {
 
       {/* Role info card */}
       <div className="bg-white rounded-xl border border-zinc-200 p-5 mb-5">
-        <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-3" style={{ fontFamily: 'Fira Sans, sans-serif' }}>
+        <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-3">
           Role Information
         </h2>
         <div className="grid grid-cols-2 gap-4 text-sm">
@@ -192,7 +192,7 @@ const RoleDetail: React.FC = () => {
 
       {/* Permissions */}
       <div className="bg-white rounded-xl border border-zinc-200 p-5">
-        <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4" style={{ fontFamily: 'Fira Sans, sans-serif' }}>
+        <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">
           Permissions ({selectedPerms.length})
         </h2>
 
@@ -227,7 +227,7 @@ const RoleDetail: React.FC = () => {
                       onChange={() => togglePerm(perm)}
                       className="rounded border-zinc-300 accent-zinc-900 cursor-pointer"
                     />
-                    <span className="text-sm text-zinc-700" style={{ fontFamily: 'Fira Code, monospace' }}>
+                    <span className="text-sm text-zinc-700 font-mono">
                       {perm}
                     </span>
                   </label>

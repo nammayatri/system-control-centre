@@ -261,7 +261,7 @@ const DeploymentConfig: React.FC = () => {
               placeholder="Search groups or services..."
               value={search}
               onChange={e => setSearch(e.target.value)}
-              className="pl-9 pr-4 h-9 border border-zinc-300 rounded-lg text-sm w-72 outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+              className="pl-9 pr-4 h-9 border border-zinc-300 rounded-lg text-sm w-72 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
             />
           </div>
           <Button size="icon" variant="ghost" onClick={refetchAll}>

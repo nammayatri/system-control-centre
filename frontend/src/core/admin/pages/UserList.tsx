@@ -80,7 +80,7 @@ const UserList: React.FC = () => {
     <div className="flex flex-col w-full">
       {/* Page header */}
       <div className="flex items-center justify-between mb-5">
-        <h1 className="text-lg font-semibold text-zinc-900" style={{ fontFamily: 'Fira Sans, sans-serif' }}>
+        <h1 className="text-lg font-semibold text-zinc-900">
           Users
         </h1>
         <div className="flex items-center gap-3">
@@ -91,8 +91,7 @@ const UserList: React.FC = () => {
               placeholder="Search by name or email"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="pl-9 pr-4 h-9 border border-zinc-300 rounded-lg text-sm w-64 outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
-              style={{ fontFamily: 'Fira Sans, sans-serif' }}
+              className="pl-9 pr-4 h-9 border border-zinc-300 rounded-lg text-sm w-64 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
             />
           </div>
           <Button size="sm" onClick={() => setAddOpen(true)}>
@@ -139,7 +138,7 @@ const UserList: React.FC = () => {
                       <td className="px-4 py-3 font-medium text-zinc-800">
                         {user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim() || '-'}
                       </td>
-                      <td className="px-4 py-3 text-zinc-600" style={{ fontFamily: 'Fira Code, monospace', fontSize: '12px' }}>
+                      <td className="px-4 py-3 text-zinc-600 font-mono text-xs">
                         {user.email}
                       </td>
                       <td className="px-4 py-3">
@@ -150,7 +149,7 @@ const UserList: React.FC = () => {
                       <td className="px-4 py-3 text-sm text-zinc-600">
                         {user.isSuperadmin ? 'Yes' : 'No'}
                       </td>
-                      <td className="px-4 py-3 text-zinc-500" style={{ fontFamily: 'Fira Code, monospace', fontSize: '12px' }}>
+                      <td className="px-4 py-3 text-zinc-500 font-mono text-xs">
                         {formatDate(user.createdAt)}
                       </td>
                       <td className="px-4 py-3">

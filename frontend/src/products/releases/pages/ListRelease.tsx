@@ -195,7 +195,7 @@ const ListRelease: React.FC = () => {
               placeholder="Search releases..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="pl-9 pr-4 h-9 w-64 border border-zinc-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+              className="pl-9 pr-4 h-9 w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
             />
           </div>
 
@@ -228,8 +228,8 @@ const ListRelease: React.FC = () => {
                     </div>
                     <div className="text-xs text-zinc-400">Max range: 30 days</div>
                     <div className="flex gap-2">
-                      <button onClick={handleCustomRangeApply} className="flex-1 bg-zinc-900 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-zinc-800 cursor-pointer transition-colors duration-150">Apply</button>
-                      <button onClick={() => { setTimeRange('last_30_days'); setCustomFrom(''); setCustomTo(''); setShowDatePicker(false); }} className="px-2 py-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 cursor-pointer transition-colors duration-150"><X className="w-4 h-4" /></button>
+                      <Button size="sm" onClick={handleCustomRangeApply} className="flex-1">Apply</Button>
+                      <Button size="sm" variant="secondary" onClick={() => { setTimeRange('last_30_days'); setCustomFrom(''); setCustomTo(''); setShowDatePicker(false); }}><X className="w-4 h-4" /></Button>
                     </div>
                   </div>
                 )}

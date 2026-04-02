@@ -556,9 +556,9 @@ const RolloutStrategyTab: React.FC<{
       </div>
 
       {isEditing && (
-        <button onClick={addStage} className="mt-2 w-full border border-dashed border-zinc-300 rounded-lg py-2 text-xs text-zinc-500 hover:bg-zinc-50 hover:border-zinc-400 cursor-pointer transition-colors">
+        <Button type="button" variant="secondary" size="sm" onClick={addStage} className="mt-2 w-full">
           + Add Stage
-        </button>
+        </Button>
       )}
 
       {!canEdit && (

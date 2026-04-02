@@ -10,7 +10,7 @@ import type { ProductConfig } from '../../../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
 import { DEFAULT_ENV, AVAILABLE_ENVS } from '../../../lib/constants';
-import { Trash2, Lock } from 'lucide-react';
+import { Trash2, Lock, ChevronDown } from 'lucide-react';
 import { toast } from 'sonner';
 
 // Valid status transitions for update mode (UPPERCASE canonical)
@@ -49,6 +49,8 @@ const CreateRelease: React.FC = () => {
   const [envData, setEnvData] = useState('');
   const [isResourcesSwitch, setIsResourcesSwitch] = useState(false);
   const [resourcesData, setResourcesData] = useState('');
+  const [selectedServices, setSelectedServices] = useState<string[]>([]);
+  const [showServiceDropdown, setShowServiceDropdown] = useState(false);
   const [clonedService, setClonedService] = useState('');
   const [stages, setStages] = useState([
     { rollout: 5, cooloff: 10, pods: 2 },
@@ -74,6 +76,27 @@ const CreateRelease: React.FC = () => {
   const { data: services = [] } = useServices(formData.appGroup, isNewService);
   const createMutation = useCreateRelease();
   const updateMutation = useUpdateTracker();
+
+  // Sync first selected service into formData.service for dependent effects (envs, resources, rollout)
+  useEffect(() => {
+    setFormData(prev => ({ ...prev, service: selectedServices[0] || '' }));
+    // Disable env/resources switches when multiple services selected (can't fetch for multiple)
+    if (selectedServices.length !== 1) {
+      setIsEnvSwitch(false);
+      setIsResourcesSwitch(false);
+    }
+  }, [selectedServices]);
+
+  // Close service dropdown on outside click
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (showServiceDropdown && !(e.target as HTMLElement).closest('.service-dropdown')) {
+        setShowServiceDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showServiceDropdown]);
 
   // Fetch existing release for update mode
   const { data: existingRelease } = useQuery({
@@ -105,6 +128,7 @@ const CreateRelease: React.FC = () => {
         schedule_time: existingRelease.schedule_time || '',
         // deploy/vs/dr file paths removed from UI
       });
+      setSelectedServices([existingRelease.service || ''].filter(Boolean));
       setRolloutHistoryLength(existingRelease.rollout_history?.length || 0);
       if (existingRelease.env_override_data) { setIsEnvSwitch(true); setEnvData(existingRelease.env_override_data); }
       if (existingRelease.rollout_strategy) {
@@ -122,6 +146,7 @@ const CreateRelease: React.FC = () => {
     if (isClone && id) {
       fetchReleaseDetails(id).then(data => {
         setClonedService(data.service);
+        setSelectedServices([data.service].filter(Boolean));
         setFormData(prev => ({
           ...prev, appGroup: data.appGroup, service: data.service,
           cluster: data.release_context?.cluster || 'MOVING_TECH', env: data.env,
@@ -155,8 +180,11 @@ const CreateRelease: React.FC = () => {
         const svcConfig = configs.find(c => c.service === formData.service);
         if (svcConfig?.rollout_strategy) {
           try {
-            const parsed = typeof svcConfig.rollout_strategy === 'string'
-              ? JSON.parse(svcConfig.rollout_strategy) : svcConfig.rollout_strategy;
+            // DB stores double-escaped JSON — parse until we get an array
+            let parsed: any = svcConfig.rollout_strategy;
+            for (let i = 0; i < 3 && typeof parsed === 'string'; i++) {
+              parsed = JSON.parse(parsed);
+            }
             // Handle [{cluster, rollouts: [...]}] format
             if (Array.isArray(parsed) && parsed.length > 0) {
               const rollouts = parsed[0]?.rollouts || parsed;
@@ -209,17 +237,18 @@ const CreateRelease: React.FC = () => {
     if (!isReleaseSync) { setIsSecondaryEnvSwitch(false); setSecondaryEnvData(''); }
   }, [isReleaseSync]);
 
-  // Auto-fill cluster & set cloned service
+  // Auto-fill cluster & clear services on product change
   useEffect(() => {
     if (formData.appGroup && !isUpdate) {
       const config = productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup);
       if (config) setFormData(prev => ({ ...prev, cluster: config.cluster }));
     }
-  }, [formData.appGroup, productConfigs, isUpdate]);
+    if (!isUpdate && !isClone) setSelectedServices([]);
+  }, [formData.appGroup, productConfigs, isUpdate, isClone]);
 
   useEffect(() => {
     if (clonedService && services.includes(clonedService)) {
-      setFormData(prev => ({ ...prev, service: clonedService }));
+      setSelectedServices([clonedService]);
       setClonedService('');
     }
   }, [services, clonedService]);
@@ -230,11 +259,12 @@ const CreateRelease: React.FC = () => {
     setFormData(prev => ({ ...prev, [name]: finalValue }));
   };
 
-  const generateReleaseTag = () => {
+  const generateReleaseTag = (serviceOverride?: string) => {
+    const svc = serviceOverride || selectedServices[0] || '';
     const acronym = productConfigs.find((p: ProductConfig) => p.appGroup === formData.appGroup)?.product_acronym || formData.appGroup?.slice(0, 4)?.toUpperCase() || '';
     const dateStr = new Date().toISOString().split('T')[0].replace(/-/g, '.');
     const versionTag = formData.new_version ? formData.new_version.slice(0, 8) : '';
-    const svcTag = formData.service ? formData.service.slice(0, 6).toUpperCase() : '';
+    const svcTag = svc ? svc.slice(0, 6).toUpperCase() : '';
     const mode = formData.mode || 'AUTO';
     const env = formData.env || 'UAT';
     const pri = formData.priority || '0';
@@ -337,11 +367,16 @@ const CreateRelease: React.FC = () => {
     }
 
     // Create mode
+    if (selectedServices.length === 0) {
+      toast.error('Select at least one service');
+      return;
+    }
+
     const selectedProductConfig = productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup);
     const trackerType = selectedProductConfig?.product_type === 'SCHEDULER' ? 'BackendScheduler' : 'BackendService';
 
-    const payload = {
-      appGroup: formData.appGroup, service: [formData.service], env: formData.env,
+    const buildPayload = (svc: string) => ({
+      appGroup: formData.appGroup, service: [svc], env: formData.env,
       old_version: formData.old_version || 'unknown',
       new_version: formData.new_version, docker_image: formData.docker_image,
       change_log: formData.change_log, status: formData.status, mode: formData.mode,
@@ -356,11 +391,21 @@ const CreateRelease: React.FC = () => {
       isReleaseSync,
       syncClusterUdf2: isReleaseSync && isSecondaryEnvSwitch ? secondaryEnvData : null,
       syncClusterRolloutStrategy: isReleaseSync ? secondaryStages.map(s => ({ rolloutPercent: s.rollout, cooloffSeconds: s.cooloff, podPercent: s.pods })) : null,
-      release_manager: "local_admin", release_tag: generatedReleaseTag, trackerType,
-    };
+      release_manager: "local_admin", release_tag: generateReleaseTag(svc), trackerType,
+    });
 
     try {
-      await createMutation.mutateAsync({ isNewService, payload });
+      if (selectedServices.length === 1) {
+        await createMutation.mutateAsync({ isNewService, payload: buildPayload(selectedServices[0]) });
+        toast.success('Release created');
+      } else {
+        let created = 0;
+        for (const svc of selectedServices) {
+          await createMutation.mutateAsync({ isNewService, payload: buildPayload(svc) });
+          created++;
+        }
+        toast.success(`Created ${created} releases`);
+      }
       navigate('/releases');
     } catch (err: any) {
       setError(err.message || 'Failed to create release');
@@ -386,11 +431,13 @@ const CreateRelease: React.FC = () => {
     </button>
   );
 
+  const canToggleEnvSwitch = selectedServices.length === 1;
+  const canToggleResourcesSwitch = selectedServices.length === 1;
   const isSubmitting = isUpdate ? updateMutation.isPending : createMutation.isPending;
   const pageTitle = isUpdate ? 'Update Release' : isClone ? 'Clone Release' : 'Create Release';
   const submitLabel = isUpdate
     ? (updateMutation.isPending ? 'Updating...' : 'Update Release')
-    : (createMutation.isPending ? 'Creating...' : 'Create Release');
+    : (createMutation.isPending ? 'Creating...' : selectedServices.length > 1 ? `Create ${selectedServices.length} Releases` : 'Create Release');
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
@@ -485,17 +532,51 @@ const CreateRelease: React.FC = () => {
               <div>
                 <FieldLabel required={!isUpdate}>Service</FieldLabel>
                 {isUpdate ? (
-                  <input type="text" value={formData.service} disabled className={disabledInputClass} />
+                  <input type="text" value={selectedServices.join(', ')} disabled className={disabledInputClass} />
                 ) : (
-                  <>
-                    <select name="service" value={formData.service} onChange={handleInputChange} required
-                      disabled={!formData.appGroup || services.length === 0}
-                      className={cn(inputClass, (!formData.appGroup || services.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}>
-                      <option value="">Select Service</option>
-                      {services.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                    <p className="text-[10px] text-zinc-400 mt-1">Need multiple services? Use Clone after creating this release.</p>
-                  </>
+                  <div className="service-dropdown relative">
+                    <div
+                      onClick={() => formData.appGroup && services.length > 0 && setShowServiceDropdown(!showServiceDropdown)}
+                      className={cn(inputClass, 'cursor-pointer flex items-center justify-between', (!formData.appGroup || services.length === 0) && 'bg-zinc-50 cursor-not-allowed')}
+                    >
+                      <span className={selectedServices.length > 0 ? 'text-zinc-900' : 'text-zinc-400'}>
+                        {selectedServices.length > 0 ? `${selectedServices.length} selected` : 'Select services'}
+                      </span>
+                      <ChevronDown className="w-4 h-4 text-zinc-400" />
+                    </div>
+                    {showServiceDropdown && (
+                      <div className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto bg-white border border-zinc-200 rounded-lg shadow-lg">
+                        {services.length === 0 ? (
+                          <div className="px-3 py-2 text-sm text-zinc-400">No services found</div>
+                        ) : (
+                          <>
+                            <button type="button" onClick={() => setSelectedServices(selectedServices.length === services.length ? [] : [...services])}
+                              className="w-full px-3 py-2 text-left text-xs text-zinc-500 hover:bg-zinc-50 border-b border-zinc-100">
+                              {selectedServices.length === services.length ? 'Deselect All' : 'Select All'}
+                            </button>
+                            {services.map((svc: string) => (
+                              <label key={svc} className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-zinc-50 cursor-pointer">
+                                <input type="checkbox" checked={selectedServices.includes(svc)}
+                                  onChange={() => setSelectedServices(prev => prev.includes(svc) ? prev.filter(s => s !== svc) : [...prev, svc])}
+                                  className="rounded border-zinc-300 accent-zinc-900" />
+                                {svc}
+                              </label>
+                            ))}
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {selectedServices.length > 0 && !isUpdate && (
+                  <div className="flex flex-wrap gap-1 mt-1.5">
+                    {selectedServices.map(svc => (
+                      <span key={svc} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-zinc-100 text-zinc-700 text-xs">
+                        {svc}
+                        <button type="button" onClick={() => setSelectedServices(prev => prev.filter(s => s !== svc))} className="text-zinc-400 hover:text-zinc-600">&times;</button>
+                      </span>
+                    ))}
+                  </div>
                 )}
               </div>
               <div><FieldLabel>Schedule Time</FieldLabel><input type="text" name="schedule_time" value={formData.schedule_time} onChange={handleInputChange} placeholder="2022-11-01T19:39:35" className={inputClass} /></div>
@@ -503,7 +584,7 @@ const CreateRelease: React.FC = () => {
               <div>
                 <FieldLabel required={!isUpdate}>Change Log</FieldLabel>
                 <input type="text" name="change_log" value={formData.change_log} onChange={handleInputChange}
-                  required={!isUpdate} placeholder="EUL-1.0.0" className={inputClass} />
+                  required={!isUpdate} placeholder="v1.0.0" className={inputClass} />
               </div>
               <div><FieldLabel>Scale Down Delay (hrs)</FieldLabel><input type="text" name="scale_down_delay" value={formData.scale_down_delay} onChange={handleInputChange} placeholder="1" className={inputClass} /></div>
             </div>
@@ -587,7 +668,8 @@ const CreateRelease: React.FC = () => {
           <div className="bg-white rounded-xl border border-zinc-200">
             <div className="px-6 py-4 border-b border-zinc-100 flex items-center gap-3">
               <h2 className="text-lg font-semibold text-zinc-900">Env Switch</h2>
-              <Toggle checked={isEnvSwitch} onChange={() => formData.service && setIsEnvSwitch(!isEnvSwitch)} disabled={!formData.service} />
+              <Toggle checked={isEnvSwitch} onChange={() => canToggleEnvSwitch && formData.service && setIsEnvSwitch(!isEnvSwitch)} disabled={!canToggleEnvSwitch || !formData.service} />
+              {!canToggleEnvSwitch && selectedServices.length > 1 && <span className="text-xs text-zinc-400 ml-2">Single service only</span>}
             </div>
             {isEnvSwitch && (
               <div className="p-6">
@@ -606,7 +688,8 @@ const CreateRelease: React.FC = () => {
           <div className="bg-white rounded-xl border border-zinc-200">
             <div className="px-6 py-4 border-b border-zinc-100 flex items-center gap-3">
               <h2 className="text-lg font-semibold text-zinc-900">Get Resources</h2>
-              <Toggle checked={isResourcesSwitch} onChange={() => formData.service && setIsResourcesSwitch(!isResourcesSwitch)} disabled={!formData.service} />
+              <Toggle checked={isResourcesSwitch} onChange={() => canToggleResourcesSwitch && formData.service && setIsResourcesSwitch(!isResourcesSwitch)} disabled={!canToggleResourcesSwitch || !formData.service} />
+              {!canToggleResourcesSwitch && selectedServices.length > 1 && <span className="text-xs text-zinc-400 ml-2">Single service only</span>}
             </div>
             {isResourcesSwitch && (
               <div className="p-6">
@@ -633,7 +716,7 @@ const CreateRelease: React.FC = () => {
                 <div>
                   <div className="flex items-center gap-3 mb-3">
                     <h3 className="text-base font-semibold text-zinc-900">Env Switch (Secondary)</h3>
-                    <Toggle checked={isSecondaryEnvSwitch} onChange={() => formData.service && setIsSecondaryEnvSwitch(!isSecondaryEnvSwitch)} disabled={!formData.service} />
+                    <Toggle checked={isSecondaryEnvSwitch} onChange={() => canToggleEnvSwitch && formData.service && setIsSecondaryEnvSwitch(!isSecondaryEnvSwitch)} disabled={!canToggleEnvSwitch || !formData.service} />
                   </div>
                   {isSecondaryEnvSwitch && (
                     secondaryEnvLoading ? <p className="text-xs text-zinc-400 py-4">Loading secondary env vars...</p> : (

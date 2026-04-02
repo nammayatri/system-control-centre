@@ -106,7 +106,7 @@ const ListVSEdit: React.FC = () => {
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
             <input type="text" placeholder="Search VS edits..." value={search} onChange={(e) => setSearch(e.target.value)}
-              className="pl-9 pr-4 h-9 w-64 border border-zinc-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
+              className="pl-9 pr-4 h-9 w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
           </div>
 
           {/* Date Range */}
@@ -137,8 +137,8 @@ const ListVSEdit: React.FC = () => {
                       <input type="datetime-local" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent" />
                     </div>
                     <div className="flex gap-2">
-                      <button onClick={() => { if (customFrom && customTo) setShowDatePicker(false); }} className="flex-1 bg-zinc-900 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-zinc-800 cursor-pointer transition-colors duration-150">Apply</button>
-                      <button onClick={() => { setTimeRange('last_7_days'); setCustomFrom(''); setCustomTo(''); setShowDatePicker(false); }} className="px-2 py-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 cursor-pointer transition-colors duration-150"><X className="w-4 h-4" /></button>
+                      <Button size="sm" onClick={() => { if (customFrom && customTo) setShowDatePicker(false); }} className="flex-1">Apply</Button>
+                      <Button size="sm" variant="secondary" onClick={() => { setTimeRange('last_7_days'); setCustomFrom(''); setCustomTo(''); setShowDatePicker(false); }}><X className="w-4 h-4" /></Button>
                     </div>
                   </div>
                 )}

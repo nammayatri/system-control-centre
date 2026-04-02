@@ -204,10 +204,10 @@ const UserDetail: React.FC = () => {
 
       <div className="flex items-center justify-between mb-5">
         <div>
-          <h1 className="text-lg font-semibold text-zinc-900" style={{ fontFamily: 'Fira Sans, sans-serif' }}>
+          <h1 className="text-lg font-semibold text-zinc-900">
             {userName}
           </h1>
-          <p className="text-sm text-zinc-500 mt-0.5" style={{ fontFamily: 'Fira Code, monospace' }}>
+          <p className="text-sm text-zinc-500 mt-0.5 font-mono">
             {user.email}
           </p>
         </div>
@@ -223,7 +223,7 @@ const UserDetail: React.FC = () => {
 
       {/* User Info Card */}
       <div className="bg-white rounded-xl border border-zinc-200 p-5 mb-5">
-        <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4" style={{ fontFamily: 'Fira Sans, sans-serif' }}>
+        <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">
           User Information
         </h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
@@ -237,7 +237,7 @@ const UserDetail: React.FC = () => {
           </div>
           <div>
             <span className="text-zinc-400 text-[11px] uppercase tracking-wider block">Email</span>
-            <div className="text-zinc-800 mt-0.5" style={{ fontFamily: 'Fira Code, monospace', fontSize: '12px' }}>{user.email || '-'}</div>
+            <div className="text-zinc-800 mt-0.5 font-mono text-xs">{user.email || '-'}</div>
           </div>
           <div>
             <span className="text-zinc-400 text-[11px] uppercase tracking-wider block">Status</span>
@@ -257,7 +257,7 @@ const UserDetail: React.FC = () => {
           </div>
           <div>
             <span className="text-zinc-400 text-[11px] uppercase tracking-wider block">Created</span>
-            <div className="text-zinc-800 mt-0.5" style={{ fontFamily: 'Fira Code, monospace', fontSize: '12px' }}>
+            <div className="text-zinc-800 mt-0.5 font-mono text-xs">
               {formatDate(user.createdAt)}
             </div>
           </div>
@@ -267,7 +267,7 @@ const UserDetail: React.FC = () => {
       {/* Product Access */}
       <div className="bg-white rounded-xl border border-zinc-200 p-5 mb-5">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider" style={{ fontFamily: 'Fira Sans, sans-serif' }}>
+          <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">
             Product Access
           </h2>
           <Button size="sm" variant="secondary" onClick={() => setAssignOpen(true)}>
@@ -293,7 +293,7 @@ const UserDetail: React.FC = () => {
                     <td className="px-4 py-2.5">
                       <Badge variant="info" size="sm">{p.role || p.roleName || '-'}</Badge>
                     </td>
-                    <td className="px-4 py-2.5 text-zinc-500" style={{ fontFamily: 'Fira Code, monospace', fontSize: '12px' }}>
+                    <td className="px-4 py-2.5 text-zinc-500 font-mono text-xs">
                       {(p.permissions || []).length} permissions
                     </td>
                     <td className="px-4 py-2.5 text-right">
@@ -325,7 +325,7 @@ const UserDetail: React.FC = () => {
       {/* Permission Overrides */}
       <div className="bg-white rounded-xl border border-zinc-200 p-5 mb-5">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider" style={{ fontFamily: 'Fira Sans, sans-serif' }}>
+          <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">
             Permission Overrides
           </h2>
           <Button size="sm" variant="secondary" onClick={() => setOverrideOpen(true)}>
@@ -348,7 +348,7 @@ const UserDetail: React.FC = () => {
                 {userOverrides.map((o: any, i: number) => (
                   <tr key={o.id || i} className={cn('border-b border-zinc-100', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
                     <td className="px-4 py-2.5 text-zinc-800">{o.productSlug}</td>
-                    <td className="px-4 py-2.5" style={{ fontFamily: 'Fira Code, monospace', fontSize: '12px' }}>
+                    <td className="px-4 py-2.5 font-mono text-xs">
                       {o.permissionAction || o.permission}
                     </td>
                     <td className="px-4 py-2.5">
