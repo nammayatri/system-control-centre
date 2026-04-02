@@ -591,7 +591,14 @@ updateTrackerH rid req = do
             case (req :: K8sUpdateTrackerReq).status of
                 Just newStatusText -> do
                     let newStatus = parseReleaseStatus newStatusText
-                    if not (validateStatusTransition (NT.status tracker) newStatus)
+                    if newStatus == NT.status tracker
+                        then do
+                            -- Same status: just update other fields (no transition needed)
+                            liftIO $ insertReleaseTracker db updatedTracker updatedTargetState
+                            liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
+                            liftIO $ notifyReleaseUpdated db updatedTracker "fields updated"
+                            pure $ APIResponse "SUCCESS" "Tracker updated"
+                    else if not (validateStatusTransition (NT.status tracker) newStatus)
                         then pure $ APIResponse "ERROR" ("Invalid status transition: " <> T.pack (show (NT.status tracker)) <> " -> " <> newStatusText)
                         else do
                             liftIO $ insertReleaseTracker db updatedTracker updatedTargetState
