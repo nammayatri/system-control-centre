@@ -536,6 +536,7 @@ data ProductConfigResponse = ProductConfigResponse
     , namespace :: Maybe Text
     , vsName :: Maybe Text
     , syncCluster :: Maybe Text
+    , vsLockedBy :: Maybe Text
     }
     deriving (Show, Generic)
 

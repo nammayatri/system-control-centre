@@ -182,10 +182,75 @@ updateConfigMapH cmId' body = do
     case m of
         Nothing -> pure $ APIResponse "ERROR" "ConfigMap tracker not found"
         Just (rt, mts) -> do
-            let updated = applyCmUpdates rt body
-            liftIO $ insertReleaseTracker db updated mts
-            liftIO $ notifyConfigMapUpdated db updated "status updated"
-            pure $ APIResponse "SUCCESS" "ConfigMap tracker updated"
+            -- Check if this is a revert request — handle specially
+            let isRevert = case body of
+                    Object obj -> getStrM "status" obj == Just "revert"
+                    _ -> False
+            if isRevert
+                then handleConfigMapRevert db rt mts cmId'
+                else do
+                    let updated = applyCmUpdates rt body
+                    liftIO $ insertReleaseTracker db updated mts
+                    -- Status-specific notifications
+                    case body of
+                        Object obj -> do
+                            case getStrM "status" obj of
+                                Just "INPROGRESS" -> liftIO $ notifyConfigMapInProgress db updated
+                                Just "COMPLETED"  -> liftIO $ notifyConfigMapCompleted db updated
+                                Just "ABORTED"    -> liftIO $ notifyConfigMapAborted db updated
+                                Just "PAUSED"     -> liftIO $ notifyConfigMapPaused db updated
+                                Just "RESUMED"    -> liftIO $ notifyConfigMapResumed db updated
+                                Just "DISCARDED"  -> liftIO $ notifyConfigMapDiscarded db updated
+                                Just "restart"    -> liftIO $ notifyConfigMapUpdated db updated "restarted"
+                                _                 -> pure ()
+                            when (isTruthy "is_approved" obj) $
+                                liftIO $ notifyConfigMapApproved db updated
+                            case getStrM "current_cool_off" obj of
+                                Just "0" -> liftIO $ notifyConfigMapFastForwarded db updated
+                                _        -> pure ()
+                        _ -> pure ()
+                    pure $ APIResponse "SUCCESS" "ConfigMap tracker updated"
+
+-- | Handle revert by creating a new tracker with old config data
+handleConfigMapRevert :: DBEnv -> ReleaseTracker -> Maybe TargetState -> Text -> Flow APIResponse
+handleConfigMapRevert db rt mts cmId' = do
+    events <- liftIO $ listReleaseEvents db cmId'
+    let mBeforeSnap = find (\e -> reCategory e == "SNAPSHOT" && reLabel e == "CONFIGMAP_BEFORE") events
+    case mBeforeSnap of
+        Nothing -> pure $ APIResponse "ERROR" "No CONFIGMAP_BEFORE snapshot found to revert to"
+        Just beforeEvt -> do
+            newRid <- liftIO (UUID.toText <$> UUID.nextRandom)
+            let oldConfig = case rePayload beforeEvt of
+                    String s -> Just s
+                    _ -> Nothing
+                -- Create a new tracker as a revert copy
+                revertTracker = rt
+                    { NT.releaseId = newRid
+                    , NT.status = Created
+                    , NT.isApproved = False
+                    , NT.description = Just ("Revert of " <> cmId')
+                    , NT.changeLog = Just ("Reverted from tracker " <> cmId')
+                    , NT.info = Just "REVERT"
+                    , NT.dateCreated = Nothing
+                    , NT.lastUpdated = Nothing
+                    }
+                -- Update metadata with old config
+                oldMeta = case NT.metadata revertTracker of
+                    Just (Object o) -> o
+                    _ -> KM.empty
+                revertMeta = case oldConfig of
+                    Just c -> KM.insert (K.fromText "config") (String c) $
+                              KM.insert (K.fromText "file") (String c) oldMeta
+                    Nothing -> oldMeta
+                finalTracker = revertTracker { NT.metadata = Just (Object revertMeta) }
+                targetState = ConfigState emptyConfigState
+            liftIO $ insertReleaseTracker db finalTracker (Just targetState)
+            liftIO $ insertReleaseEvent db newRid "BUSINESS" "REVERT_TRACKER_CREATED" (toJSON ("Revert of " <> cmId'))
+            -- Mark original as REVERTING
+            let reverted = rt { NT.status = Reverting }
+            liftIO $ insertReleaseTracker db reverted mts
+            liftIO $ notifyConfigMapReverted db reverted
+            pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
 
 -- ============================================================================
 -- Internal Helpers

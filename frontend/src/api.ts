@@ -421,6 +421,7 @@ export async function fetchProductConfigs(): Promise<ProductConfig[]> {
         repo_name: p.repoName || '',
         sync_cluster: p.syncCluster || p.sync_cluster || null,
         need_infra_approval: p.needInfraApproval ? 1 : 0,
+        vs_locked_by: p.vsLockedBy || null,
     }));
 }
 
@@ -690,6 +691,8 @@ export interface ReleaseConfig {
     serviceType?: string;
     serviceAcronym?: string;
     emails?: string;
+    revert_strategy?: string;
+    decision_config?: string;
 }
 
 export async function fetchReleaseConfigs(appGroup?: string): Promise<ReleaseConfig[]> {
@@ -707,6 +710,8 @@ export async function fetchReleaseConfigs(appGroup?: string): Promise<ReleaseCon
         serviceType: d.serviceType || '',
         serviceAcronym: d.serviceAcronym || '',
         emails: d.emails || '',
+        revert_strategy: d.revertStrategy || d.revert_strategy || '',
+        decision_config: d.decisionConfig || d.decision_config || '',
     }));
 }
 
@@ -720,6 +725,8 @@ export async function createReleaseConfig(payload: Partial<ReleaseConfig>): Prom
         rolloutStrategyText: payload.rollout_strategy,
         slackWebhookUrls: payload.slack_channel,
         emails: payload.emails,
+        revertStrategyText: payload.revert_strategy || null,
+        decisionConfigText: payload.decision_config || null,
     };
     const { data } = await apiClient.post('/services/config', body);
     return data;
@@ -735,6 +742,8 @@ export async function updateReleaseConfig(id: number, payload: Partial<ReleaseCo
         rolloutStrategyText: payload.rollout_strategy,
         slackWebhookUrls: payload.slack_channel,
         emails: payload.emails,
+        revertStrategyText: payload.revert_strategy || null,
+        decisionConfigText: payload.decision_config || null,
     };
     const { data } = await apiClient.put(`/services/config/${id}`, body);
     return data;
@@ -754,6 +763,9 @@ export interface VSEditTracker {
     vs_name: string;
     status: string;
     created_by: string;
+    approved_by?: string;
+    is_locked?: boolean;
+    locked_by?: string;
     created_at: string;
     updated_at: string;
     old_vs_data: string;
@@ -783,6 +795,11 @@ export async function lockAndEditVS(payload: { product: string; service: string;
 
 export async function applyVSEdit(id: string, newVsData: string): Promise<any> {
     const { data } = await apiClient.put(`/vs-edit-tracker/${encodeURIComponent(id)}`, { status: 'APPLIED', newVsData });
+    return data;
+}
+
+export async function saveVSEdit(id: string, newVsData: string): Promise<any> {
+    const { data } = await apiClient.put(`/vs-edit-tracker/${encodeURIComponent(id)}`, { status: 'CREATED', newVsData });
     return data;
 }
 

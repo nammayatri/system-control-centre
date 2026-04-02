@@ -2,13 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
-import { fetchProductConfigs, fetchServices, fetchCurrentVS, lockAndEditVS, applyVSEdit, revertVSEdit } from '../../../api';
+import { fetchProductConfigs, fetchServices, fetchCurrentVS, lockAndEditVS, saveVSEdit, unlockVSEdit } from '../../../api';
 import type { ProductConfig } from '../../../api';
 import { Button } from '../../../shared/ui/button';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
-import { Lock, Play, RotateCcw } from 'lucide-react';
+import { Lock, Save, X } from 'lucide-react';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
 
 const EditVS: React.FC = () => {
@@ -57,25 +57,25 @@ const EditVS: React.FC = () => {
     onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to lock VS'),
   });
 
-  const applyMut = useMutation({
-    mutationFn: () => applyVSEdit(trackerId!, vsData),
+  const saveMut = useMutation({
+    mutationFn: () => saveVSEdit(trackerId!, vsData),
     onSuccess: () => {
-      toast.success('VS edit applied');
+      toast.success('VS changes saved');
       queryClient.invalidateQueries({ queryKey: ['vs-edits'] });
       navigate(`/vs-editor/${trackerId}`);
     },
-    onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to apply VS edit'),
+    onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to save VS edit'),
   });
 
-  const revertMut = useMutation({
-    mutationFn: () => revertVSEdit(trackerId!),
+  const unlockMut = useMutation({
+    mutationFn: () => unlockVSEdit(trackerId!),
     onSuccess: () => {
-      toast.success('VS edit reverted');
+      toast.success('VS edit unlocked');
       setIsLocked(false);
       setTrackerId(null);
       refetchVS();
     },
-    onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to revert VS edit'),
+    onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to unlock VS edit'),
   });
 
   const handleLock = async () => {
@@ -83,24 +83,24 @@ const EditVS: React.FC = () => {
     lockMut.mutate();
   };
 
-  const handleApply = async () => {
+  const handleSave = async () => {
     const ok = await confirmAction({
-      title: 'Apply VS Edit',
-      description: 'Are you sure you want to apply this VS change? This will update the live VirtualService.',
-      confirmLabel: 'Apply',
+      title: 'Save VS Changes',
+      description: 'Save your changes and proceed to the approval flow?',
+      confirmLabel: 'Save',
       variant: 'primary',
     });
-    if (ok) applyMut.mutate();
+    if (ok) saveMut.mutate();
   };
 
-  const handleRevert = async () => {
+  const handleCancel = async () => {
     const ok = await confirmAction({
-      title: 'Revert VS Edit',
-      description: 'Are you sure you want to revert to the original VS? This will discard your changes.',
-      confirmLabel: 'Revert',
+      title: 'Cancel VS Edit',
+      description: 'Are you sure you want to cancel? This will unlock the VS without saving your changes.',
+      confirmLabel: 'Cancel Edit',
       variant: 'danger',
     });
-    if (ok) revertMut.mutate();
+    if (ok) unlockMut.mutate();
   };
 
   const inputClass = "w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
@@ -154,23 +154,21 @@ const EditVS: React.FC = () => {
                 </PermissionGate>
               )}
               {isLocked && trackerId && (
-                <>
-                  <PermissionGate product="autopilot" permission="RELEASE_CREATE">
-                    <Button size="sm" variant="success" loading={applyMut.isPending} onClick={handleApply}>
-                      <Play className="w-3.5 h-3.5" /> Apply
-                    </Button>
-                    <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={handleRevert}>
-                      <RotateCcw className="w-3.5 h-3.5" /> Revert
-                    </Button>
-                  </PermissionGate>
-                </>
+                <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                  <Button size="sm" variant="success" loading={saveMut.isPending} onClick={handleSave}>
+                    <Save className="w-3.5 h-3.5" /> Save Changes
+                  </Button>
+                  <Button size="sm" variant="outline" className="border-red-300 text-red-700 hover:bg-red-50" loading={unlockMut.isPending} onClick={handleCancel}>
+                    <X className="w-3.5 h-3.5" /> Cancel
+                  </Button>
+                </PermissionGate>
               )}
             </div>
           </div>
           <div className="border-t border-zinc-100">
             <Editor
               height="500px"
-              defaultLanguage="json"
+              defaultLanguage="yaml"
               theme="light"
               value={vsData}
               onChange={(val) => { if (isLocked) setVsData(val || ''); }}

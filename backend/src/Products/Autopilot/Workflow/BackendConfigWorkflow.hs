@@ -25,6 +25,7 @@ import Data.Text.Encoding (encodeUtf8)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd, shellQuote)
+import Products.Autopilot.Notifications (notifyConfigMapCompleted)
 import Products.Autopilot.Queries.ProductService (findProductByName, getProductNamespace)
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
 import Products.Autopilot.Types.Target (BackendConfigWFStatus (..), ConfigDeploymentState (..), TargetState (..), emptyConfigState)
@@ -201,7 +202,9 @@ applyConfigMap = do
 notifyComplete :: StateFlow ()
 notifyComplete = do
     rt <- getRT
+    db <- lift getDBEnv
     liftIO $ putStrLn $ "ConfigMap release " <> T.unpack (releaseId rt) <> " completed!"
+    liftIO $ notifyConfigMapCompleted db rt
     updateRT $ \r -> r{status = Completed}
 
 -- ============================================================================

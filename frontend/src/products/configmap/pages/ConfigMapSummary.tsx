@@ -2,7 +2,9 @@ import React, { useState, Fragment, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
+import ReactDiffViewer from 'react-diff-viewer-continued';
 import { fetchConfigMapDetail, updateConfigMap } from '../api';
+import { fetchReleaseEvents } from '../../../api';
 import { StatusBadge, Badge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
@@ -44,6 +46,12 @@ const ConfigMapSummary: React.FC = () => {
     queryFn: () => fetchConfigMapDetail(id),
     enabled: !!id,
     refetchInterval: 10000,
+  });
+
+  const { data: releaseEvents = [] } = useQuery({
+    queryKey: ['configmap-events', id],
+    queryFn: () => fetchReleaseEvents(id),
+    enabled: !!id,
   });
 
   const actionMut = useMutation({
@@ -91,8 +99,13 @@ const ConfigMapSummary: React.FC = () => {
   if (!data) return <div className="p-10 text-center text-red-500">ConfigMap not found.</div>;
 
   const tabs = ['Summary', 'Event Data', 'Json Data', 'ConfigMap Diff'];
-  const events: ConfigMapEvent[] = (data.events as ConfigMapEvent[] | undefined) || [];
+  const events: ConfigMapEvent[] = releaseEvents.length > 0
+    ? releaseEvents.map(e => ({ category: e.category, label: e.label, data: e.data, timestamp: e.timestamp }))
+    : (data.events as ConfigMapEvent[] | undefined) || [];
   const sortedEvents = [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+
+  const beforeSnapshot = events.find(e => e.category === 'SNAPSHOT' && e.label === 'CONFIGMAP_BEFORE');
+  const afterSnapshot = events.find(e => e.category === 'SNAPSHOT' && e.label === 'CONFIGMAP_AFTER');
 
   return (
     <div className="flex flex-col w-full">
@@ -212,11 +225,22 @@ const ConfigMapSummary: React.FC = () => {
 
         {activeTab === 'ConfigMap Diff' && (
           <div className="p-0">
-            {data?.file ? (
+            {(beforeSnapshot || afterSnapshot) ? (
+              <div className="overflow-hidden">
+                <ReactDiffViewer
+                  oldValue={beforeSnapshot?.data ? formatConfigMapContent(beforeSnapshot.data) : ''}
+                  newValue={afterSnapshot?.data ? formatConfigMapContent(afterSnapshot.data) : ''}
+                  splitView={true}
+                  leftTitle="Before"
+                  rightTitle="After"
+                  useDarkTheme={false}
+                />
+              </div>
+            ) : data?.file ? (
               <Editor height="60vh" defaultLanguage="yaml" theme="light" value={formatConfigMapContent(data.file)}
                 options={{ readOnly: true, minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', automaticLayout: true }} />
             ) : (
-              <div className="p-6 text-sm text-zinc-400">No ConfigMap file content available.</div>
+              <div className="p-6 text-sm text-zinc-400">No ConfigMap diff available. Snapshots are captured when the workflow runs.</div>
             )}
           </div>
         )}

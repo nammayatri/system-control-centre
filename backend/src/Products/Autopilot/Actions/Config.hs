@@ -60,6 +60,7 @@ toProductConfigResponse p =
         , namespace = S.dcNamespace p
         , vsName = S.dcVsName p
         , syncCluster = S.dcSyncCluster p
+        , vsLockedBy = S.dcVsLockedBy p
         }
 
 createProductConfigH :: UpsertProductReq -> Flow APIResponse

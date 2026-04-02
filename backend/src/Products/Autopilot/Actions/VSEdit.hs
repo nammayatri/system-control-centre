@@ -26,12 +26,16 @@ import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import qualified Data.ByteString.Lazy.Char8 as LBS
+import qualified Data.Yaml as Yaml
+import Data.Text.Encoding (decodeUtf8)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
+import Products.Autopilot.K8s.Execute (K8sError (..), runCmd, shellQuote)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import Products.Autopilot.Notifications
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ReleaseTracker (insertReleaseTrackerRow, insertReleaseEvent, listReleaseEvents)
+import Products.Autopilot.Workflow.Helpers (stripK8sNoiseValue)
 import Products.Autopilot.Queries.VsEditTracker
 import Products.Autopilot.Types.API
 import qualified Shared.Types.Storage.Schema as S
@@ -146,6 +150,7 @@ createVsEditTrackerH CreateVsEditTrackerReq{..} = do
                 Nothing -> pure ()
             -- Set vs_locked_by in deployment_config
             liftIO $ updateVsLockedBy db appGroup (Just createdBy)
+            liftIO $ notifyVsEditCreated db tid appGroup service (Just createdBy)
             pure $ toJSON $ releaseRowToVsResponse row
 
 listVsEditTrackersH :: Maybe Text -> Maybe Text -> Flow [VsEditTrackerResponse]
@@ -172,6 +177,7 @@ getVsEditTrackerH tid = do
 updateVsEditTrackerH :: Text -> UpdateVsEditTrackerReq -> Flow APIResponse
 updateVsEditTrackerH tid UpdateVsEditTrackerReq{..} = do
     db <- getDBEnv
+    cfg <- getConfig
     now <- liftIO getCurrentTime
     m <- liftIO $ findVsEditTrackerRowById db tid
     case m of
@@ -187,15 +193,64 @@ updateVsEditTrackerH tid UpdateVsEditTrackerReq{..} = do
                         Nothing -> S.rtInfo existing
                     , S.rtUpdatedAt = now
                     }
-            liftIO $ insertReleaseTrackerRow db updated
-            -- Capture new VS data as SNAPSHOT event
-            case newVsData of
-                Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_NEW" (String d)
-                Nothing -> pure ()
+            -- Handle status-specific logic
             case status of
-                Just "APPLIED" -> liftIO $ notifyVsEditApplied db (S.rtAppGroup existing) (S.rtService existing) (fromMaybe "admin" approvedBy)
-                _ -> pure ()
-            pure $ APIResponse "SUCCESS" "VS edit tracker updated"
+                Just "CREATED" -> do
+                    -- Saving changes: capture VS_NEW snapshot, VS stays locked until apply/discard
+                    case newVsData of
+                        Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_NEW" (String d)
+                        Nothing -> pure ()
+                    liftIO $ insertReleaseTrackerRow db updated
+                    pure $ APIResponse "SUCCESS" "VS edit saved"
+
+                Just "APPLIED" -> do
+                    -- Get the new VS data from SNAPSHOT events
+                    events <- liftIO $ listReleaseEvents db tid
+                    let mNewVs = find (\e -> S.reCategory e == "SNAPSHOT" && S.reLabel e == "VS_NEW") events
+                    case mNewVs of
+                        Nothing -> pure $ APIResponse "ERROR" "No new VS data found"
+                        Just newVsEvt -> do
+                            -- Get product config for namespace
+                            mProdCfg <- liftIO $ findProductByNameAndCluster db (S.rtAppGroup existing) ""
+                            case mProdCfg of
+                                Nothing -> pure $ APIResponse "ERROR" "No product config found"
+                                Just pCfg -> do
+                                    let ns = getProductNamespace pCfg
+                                        vsContent = case S.rePayload newVsEvt of
+                                            String s -> s
+                                            _ -> ""
+                                    if T.null vsContent
+                                        then pure $ APIResponse "ERROR" "Empty VS data"
+                                        else do
+                                            -- Apply to K8s via kubectl replace
+                                            result <- liftIO $ applyVsToK8s cfg (T.unpack ns) vsContent
+                                            case result of
+                                                Left err -> pure $ APIResponse "ERROR" ("K8s apply failed: " <> err)
+                                                Right () -> do
+                                                    liftIO $ insertReleaseTrackerRow db updated
+                                                    -- Unlock VS after successful apply
+                                                    liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing
+                                                    liftIO $ notifyVsEditApplied db tid (S.rtAppGroup existing) (S.rtService existing) (fromMaybe "admin" approvedBy)
+                                                    pure $ APIResponse "SUCCESS" "VS edit applied to K8s"
+
+                Just "DISCARDED" -> do
+                    liftIO $ insertReleaseTrackerRow db updated
+                    -- Clear lock if present
+                    liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing
+                    liftIO $ notifyVsEditDiscarded db tid (S.rtAppGroup existing) (S.rtService existing)
+                    pure $ APIResponse "SUCCESS" "VS edit discarded"
+
+                _ -> do
+                    -- Generic update (approval, info change, etc.)
+                    liftIO $ insertReleaseTrackerRow db updated
+                    case newVsData of
+                        Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_NEW" (String d)
+                        Nothing -> pure ()
+                    -- Notification for approval
+                    case approvedBy of
+                        Just ab -> liftIO $ notifyVsEditApproved db tid (S.rtAppGroup existing) (S.rtService existing) ab
+                        Nothing -> pure ()
+                    pure $ APIResponse "SUCCESS" "VS edit tracker updated"
 
 lockVsEditTrackerH :: VsLockReq -> Flow APIResponse
 lockVsEditTrackerH VsLockReq{..} = do
@@ -204,7 +259,9 @@ lockVsEditTrackerH VsLockReq{..} = do
     now <- liftIO getCurrentTime
     -- Resolve vsName from deployment_config if not provided
     mProdCfg <- liftIO $ findProductByNameAndCluster db appGroup ""
-    let resolvedVsName = fromMaybe (maybe "" getProductVsName mProdCfg) vsName
+    let resolvedVsName = case vsName of
+            Just v | not (T.null v) -> v
+            _ -> maybe "" getProductVsName mProdCfg
         resolvedEnv = fromMaybe (envName cfg) env
         resolvedService = fromMaybe "" service
         resolvedLockedBy = fromMaybe "admin" lockedBy
@@ -226,7 +283,7 @@ lockVsEditTrackerH VsLockReq{..} = do
                 Nothing -> pure ()
             -- Set vs_locked_by in deployment_config
             liftIO $ updateVsLockedBy db appGroup (Just resolvedLockedBy)
-            liftIO $ notifyVsEditLocked db appGroup (fromMaybe "" service) (fromMaybe "admin" lockedBy)
+            liftIO $ notifyVsEditLocked db tid appGroup (fromMaybe "" service) (fromMaybe "admin" lockedBy)
             pure $ APIResponse "SUCCESS" ("VS locked. Tracker ID: " <> tid)
 
 unlockVsEditTrackerH :: VsUnlockReq -> Flow APIResponse
@@ -243,7 +300,7 @@ unlockVsEditTrackerH VsUnlockReq{..} = do
                     liftIO $ insertReleaseTrackerRow db updated
                     -- Clear vs_locked_by in deployment_config
                     liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing
-                    liftIO $ notifyVsEditUnlocked db (S.rtAppGroup existing) (S.rtService existing)
+                    liftIO $ notifyVsEditUnlocked db (S.rtId existing) (S.rtAppGroup existing) (S.rtService existing)
                     pure $ APIResponse "SUCCESS" "VS unlocked"
         Nothing -> do
             let p = fromMaybe "" appGroup
@@ -253,34 +310,12 @@ unlockVsEditTrackerH VsUnlockReq{..} = do
                 Just _existing -> do
                     -- Clear vs_locked_by in deployment_config
                     liftIO $ updateVsLockedBy db p Nothing
-                    liftIO $ notifyVsEditUnlocked db p ""
+                    liftIO $ notifyVsEditUnlocked db "" p ""
                     pure $ APIResponse "SUCCESS" "VS unlocked"
 
 revertVsEditTrackerH :: Text -> Flow APIResponse
-revertVsEditTrackerH tid = do
-    db <- getDBEnv
-    now <- liftIO getCurrentTime
-    m <- liftIO $ findVsEditTrackerRowById db tid
-    case m of
-        Nothing -> pure $ APIResponse "ERROR" "VS edit tracker not found"
-        Just existing -> do
-            -- Check for old VS data in SNAPSHOT events, then fall back to udf2
-            events <- liftIO $ listReleaseEvents db tid
-            let hasOldVsData = any (\e -> S.reCategory e == "SNAPSHOT" && S.reLabel e == "VS_OLD") events
-                                || maybe False (const True) (S.rtUdf2 existing)
-            if not hasOldVsData
-                then pure $ APIResponse "ERROR" "No old VS data to revert to"
-                else do
-                    let _oldData = True  -- existence confirmed above
-                    let updated = existing
-                            { S.rtStatus = "REVERTED"
-                            , S.rtUpdatedAt = now
-                            }
-                    liftIO $ insertReleaseTrackerRow db updated
-                    -- Clear vs lock
-                    liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing
-                    liftIO $ notifyVsEditReverted db (S.rtAppGroup existing) (S.rtService existing)
-                    pure $ APIResponse "SUCCESS" "VS edit tracker marked as REVERTED"
+revertVsEditTrackerH _tid =
+    pure $ APIResponse "ERROR" "VS edit revert is not supported. Create a new VS edit instead."
 
 -- | Fetch the current live VirtualService JSON from K8s
 -- Uses the deployment_config's vs_name (e.g. "atlas-vs"), NOT the service name
@@ -303,6 +338,24 @@ fetchCurrentVsH mProduct _mService = do
                             case result of
                                 Left err -> pure $ toJSON $ ErrorResponse (T.pack (show err)) (Just "Failed to fetch VirtualService")
                                 Right vsText -> case eitherDecode (LBS.pack (T.unpack vsText)) of
-                                    Right vsJson -> pure vsJson
-                                    Left _ -> pure $ object ["data" .= vsText]
+                                    Right vsJson ->
+                                        let cleaned = stripK8sNoiseValue vsJson
+                                            yamlText = decodeUtf8 (Yaml.encode cleaned)
+                                        in pure $ toJSON yamlText
+                                    Left _ -> pure $ toJSON vsText
         _ -> pure $ toJSON $ ErrorResponse "product query param required" Nothing
+
+-- ============================================================================
+-- K8s helpers
+-- ============================================================================
+
+-- | Apply VS data to K8s via kubectl replace (same pattern as replaceFromStdin
+-- in BackendConfigWorkflow)
+applyVsToK8s :: Config -> String -> Text -> IO (Either Text ())
+applyVsToK8s cfg ns content = do
+    let cmd = unwords ["echo", shellQuote content, "|", kubectlBin cfg, "-n", ns, "replace -f -"]
+    putStrLn $ "[VS-APPLY] Running: kubectl -n " <> ns <> " replace -f -"
+    result <- runCmd cmd
+    case result of
+        Right _ -> pure (Right ())
+        Left (K8sError err) -> pure (Left ("kubectl replace failed: " <> err))

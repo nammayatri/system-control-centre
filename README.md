@@ -51,12 +51,12 @@ The Autopilot backend was refactored from a single Routes.hs into domain-specifi
 ```
 Products/Autopilot/
 ├── Actions/
-│   ├── Release.hs      (988 lines — release lifecycle: CRUD, approve, trigger, revert, abort, restart, fast-forward, diff, pods, rollout history)
-│   ├── ConfigMap.hs     (304 lines — configmap tracker CRUD, K8s configmap fetch)
-│   ├── VSEdit.hs        (262 lines — VS editor: lock/unlock, apply, revert, list)
+│   ├── Release.hs      (1035 lines — release lifecycle: CRUD, approve, trigger, revert, abort, restart, fast-forward, diff, pods, rollout history)
+│   ├── VSEdit.hs        (380 lines — VS editor: lock/unlock, apply, revert, list)
+│   ├── ConfigMap.hs     (322 lines — configmap tracker CRUD, K8s configmap fetch)
 │   ├── Config.hs        (241 lines — product config, service config, server config, discovery)
 │   └── K8sResource.hs   (232 lines — env vars, K8s resources, configmap K8s endpoints)
-├── Routes.hs            (142 lines — API type + wiring only)
+├── Routes.hs            (146 lines — API type + wiring only)
 ├── Queries.hs           (DB queries via Beam ORM)
 ├── Workflows/           (category-specific deployment workflows)
 ├── Runner.hs            (background polling loop)
@@ -95,7 +95,7 @@ newtype ServiceSlug = ServiceSlug { unServiceSlug :: Text }
 
 ### Database Indexes
 
-16 indexes across all tables, defined in `dev/migrations/system-control/0005-add-indexes.sql`:
+15 indexes across all tables, defined in `dev/migrations/system-control/0002-add-indexes.sql`:
 
 | Table | Index | Columns |
 |-------|-------|---------|
@@ -106,15 +106,14 @@ newtype ServiceSlug = ServiceSlug { unServiceSlug :: Text }
 | release_tracker | idx_rt_global_id | global_id (partial, WHERE NOT NULL) |
 | release_tracker | idx_rt_updated_at | last_updated DESC |
 | release_events | idx_re_release_id | re_release_id |
+| deployment_config | idx_dc_app_group | app_group |
+| deployment_config | idx_dc_app_group_service | app_group, service |
+| server_config | idx_sc_name | name |
 | sc_person | idx_person_email | email |
 | sc_role | idx_role_product | product_slug |
 | sc_person_product_access | idx_access_person | person_id |
 | sc_person_permission_override | idx_override_person | person_id, product_slug |
 | sc_registration_token | idx_token_value | token |
-| product_config | idx_pc_product | product |
-| release_config | idx_rc_product_service | product, service |
-| server_config | idx_sc_name | name |
-| vs_edit_tracker | idx_vet_product_vs | product, vs_name, env |
 
 ### Connection Pool
 
@@ -310,7 +309,7 @@ The runner (`Products.Autopilot.Runner.runnerLoop`) is a background polling loop
 **Step 1: Find and pick runnable releases**
 - Polls every `release_watch_delay` seconds (default 20, configurable via `server_config`).
 - Finds releases with status `Created`, approved (`is_approved = true`), schedule time arrived.
-- Checks eligibility: for K8s-backed categories, VirtualService must not be locked by the VS edit tracker, and no ongoing release for the same product+env (unless `multi_release_per_product` is enabled). BackendConfig, MobileApp, WebApp, and Infrastructure categories are always eligible.
+- Checks eligibility: for K8s-backed categories, VirtualService must not be locked (`deployment_config.vs_locked_by`), and no ongoing release for the same product+env (unless `multi_release_per_product` is enabled). BackendConfig, MobileApp, WebApp, and Infrastructure categories are always eligible.
 - Sorts by priority (higher first), then by schedule time. When `multi_release_per_product` is off, at most one release per product+env is picked per poll.
 
 **Step 2: Validate version and dispatch**
@@ -396,7 +395,7 @@ Sync to a secondary cluster is triggered after a release reaches `Completed` sta
 |------|--------|
 | `k8s_enabled` | server_config (must be true) |
 | `sync_cluster_enabled` | server_config (must be true) |
-| Product has `sync_cluster` | product_config.target_config (must be non-empty) |
+| Product has `sync_cluster` | deployment_config.sync_cluster (must be non-empty) |
 | Release has `udf1 = "true"` | release_tracker.udf1 |
 
 Sync behavior:
@@ -421,8 +420,9 @@ Thread-aware Slack notifications using Block Kit with colored sidebars:
 | Violet (#7c3aed) | Reverted |
 | Zinc (#71717a) | Default (updated, deleted, scaled down) |
 
-21 notification functions:
+34 notification functions:
 
+**Release notifications (15):**
 1. `notifyReleaseCreated` -- starts a new Slack thread (header link + version line)
 2. `notifyReleaseApproved`
 3. `notifyReleaseProgress` -- includes traffic percentage and routing details
@@ -438,17 +438,35 @@ Thread-aware Slack notifications using Block Kit with colored sidebars:
 13. `notifyReleaseFastForwarded`
 14. `notifyImmediateReverted`
 15. `notifyPodsScaledDown`
-16. `notifyVsEditLocked` -- includes clickable dashboard link
-17. `notifyVsEditApplied`
-18. `notifyVsEditReverted`
-19. `notifyVsEditUnlocked`
-20. `notifyConfigMapCreated` -- starts its own thread
-21. `notifyConfigMapUpdated`
-22. `notifyGenericThreadMessage` -- generic message in a release's thread
+
+**VS edit notifications (7):**
+16. `notifyVsEditCreated`
+17. `notifyVsEditLocked` -- includes clickable dashboard link
+18. `notifyVsEditApplied`
+19. `notifyVsEditApproved`
+20. `notifyVsEditDiscarded`
+21. `notifyVsEditReverted`
+22. `notifyVsEditUnlocked`
+
+**ConfigMap notifications (11):**
+23. `notifyConfigMapCreated` -- starts its own thread
+24. `notifyConfigMapUpdated`
+25. `notifyConfigMapApproved`
+26. `notifyConfigMapInProgress`
+27. `notifyConfigMapCompleted`
+28. `notifyConfigMapAborted`
+29. `notifyConfigMapPaused`
+30. `notifyConfigMapResumed`
+31. `notifyConfigMapReverted`
+32. `notifyConfigMapDiscarded`
+33. `notifyConfigMapFastForwarded`
+
+**Generic (1):**
+34. `notifyGenericThreadMessage` -- generic message in a release's thread
 
 Threading: The first message (Created or ConfigMap Created) starts a Slack thread. All subsequent messages reply in that thread using the `thread_ts` stored in `release_tracker.udf3`.
 
-Requirements: `SLACK_BOT_TOKEN` env var, `slack_enabled = true` in server_config, and a Slack channel configured per service in `release_config.slack_webhook_urls`. HTTP timeout is 10 seconds.
+Requirements: `SLACK_BOT_TOKEN` env var, `slack_enabled = true` in server_config, and a Slack channel configured per service in `deployment_config.slack_channel`. HTTP timeout is 10 seconds.
 
 ## API Reference
 
@@ -587,11 +605,11 @@ All admin endpoints require superadmin status. Non-superadmins receive `"Unautho
 
 ## Database Schema
 
-12 tables across two domains: Autopilot (release management) and RBAC (access control). 16 performance indexes are defined in `dev/migrations/system-control/0005-add-indexes.sql` (see [Performance](#performance) section for the full list).
+10 tables across two domains: Autopilot (release management) and RBAC (access control). 15 performance indexes are defined in `dev/migrations/system-control/0002-add-indexes.sql` (see [Performance](#performance) section for the full list).
 
 ### 1. release_tracker
 
-Tracks the lifecycle of every release. 37 columns.
+Tracks the lifecycle of every release (including VS edits with `category = 'VSEdit'`). 35 columns.
 
 | Column | Type | Nullable | Description |
 |--------|------|----------|-------------|
@@ -600,7 +618,7 @@ Tracks the lifecycle of every release. 37 columns.
 | description | text | YES | Human-readable description |
 | new_version | text | NOT NULL | Target version being deployed |
 | old_version | text | NOT NULL | Previous/current running version |
-| product | text | NOT NULL | Product/service group name (e.g., "Beckn") |
+| app_group | text | NOT NULL | Product/service group name (e.g., "Beckn") |
 | service | text | NOT NULL | Specific service name (e.g., "rider-app") |
 | mode | text | YES | Execution mode: "Auto" or "Manual" |
 | date_created | timestamptz | NOT NULL | Creation timestamp (default: now()) |
@@ -614,7 +632,6 @@ Tracks the lifecycle of every release. 37 columns.
 | rollout_history | text | YES | JSON-serialized array of completed rollout steps with decisions |
 | schedule_time | timestamptz | YES | Earliest time the runner will pick this job |
 | release_tag | text | NOT NULL | Auto-generated or user-provided release tag |
-| events | text | YES | Legacy events field (deprecated; use release_events table) |
 | change_log | text | YES | Changelog text |
 | release_context | text | YES | JSON-serialized target state (K8sDeploymentState, ConfigState, etc.) |
 | info | text | YES | Additional info or notes |
@@ -626,7 +643,6 @@ Tracks the lifecycle of every release. 37 columns.
 | metadata | text | YES | JSON metadata (docker-image, internal-vs-name, etc.) |
 | global_id | text | YES | Cross-cluster global identifier for multi-cloud sync |
 | new_service | boolean | YES | Flag for first-time service deployments (skips version validation) |
-| is_art_recorder | integer | YES | ART (Automated Regression Testing) recorder flag |
 | cronjob_suspend | boolean | YES | Whether to suspend cron job during release |
 | ab_hs_status | text | YES | A/B testing health score status |
 | category | text | YES | Release category: BackendService, BackendScheduler, BackendCronJob, BackendJob, BackendConfig, MobileAppAndroid, MobileAppIOS, WebApplication, Infrastructure |
@@ -649,44 +665,34 @@ Immutable event log for release lifecycle audit trail.
 | re_payload | jsonb | NOT NULL | Event payload (tracker snapshot, error details, messages, etc.) |
 | re_created_at | timestamptz | NOT NULL | Event timestamp |
 
-### 3. product_config
+### 3. deployment_config
 
-Kubernetes deployment configuration per product (cluster, namespace, VirtualService).
+Unified product and service deployment configuration (replaces the former `product_config` and `release_config` tables). Product-level rows have `service IS NULL`; service-level rows have `service IS NOT NULL`.
 
 | Column | Type | Nullable | Description |
 |--------|------|----------|-------------|
-| id | bigint | NOT NULL | Primary key |
-| product | text | NOT NULL | Product name |
-| repo_name | text | NOT NULL | Git repository name |
-| product_type | text | NOT NULL | Type: "SERVICE", "SCHEDULER", etc. |
-| product_acronym | text | NOT NULL | Short acronym for the product |
-| release_branch | text | NOT NULL | Default release branch (e.g., "main", "master") |
+| id | integer | NOT NULL | Auto-incrementing primary key |
+| app_group | text | NOT NULL | Product/service group name (e.g., "Beckn") |
+| service | text | YES | Service name (NULL = product-level config) |
+| cluster | text | YES | Target K8s cluster |
+| namespace | text | YES | Target K8s namespace |
+| vs_name | text | YES | VirtualService name in K8s |
+| product_acronym | text | YES | Short acronym for the product |
+| product_type | text | YES | Type: "SERVICE", "SCHEDULER", etc. |
+| sync_cluster | text | YES | Secondary cluster for multi-cloud sync |
 | need_infra_approval | boolean | YES | Whether infrastructure team must approve releases |
-| target_config | text | YES | JSON: cluster, namespace, vsName, syncCluster fields |
-
-### 4. release_config
-
-Per-service release configuration (rollout strategy, notification channels, decision config).
-
-| Column | Type | Nullable | Description |
-|--------|------|----------|-------------|
-| id | bigint | NOT NULL | Primary key |
-| emails | text | YES | Notification email addresses (comma-separated) |
-| rollout_strategy | text | YES | Default rollout strategy as JSON array |
-| decision_config | text | YES | Decision engine configuration JSON |
-| service | text | NOT NULL | Service name |
-| product | text | NOT NULL | Parent product name |
-| flags | text | YES | Feature flags JSON |
-| slack_webhook_urls | text | YES | Slack channel ID for notifications |
-| service_acronym | text | YES | Service abbreviation |
+| vs_locked_by | text | YES | Email of the person holding the VS lock |
+| vs_lock_timestamp | timestamptz | YES | When the VS lock was acquired |
+| service_host | text | YES | Service host URL |
 | service_type | text | YES | Service type ("SERVICE", "SCHEDULER", etc.) |
-| bitbucket_path | text | YES | Repository path for the service |
-| microservice_type | text | YES | Microservice classification |
+| rollout_strategy | text | YES | Default rollout strategy as JSON array |
 | revert_strategy | text | YES | Revert-specific rollout strategy JSON |
-| jira_webhook_url | text | YES | Jira integration webhook URL |
-| target_config | text | YES | JSON: serviceHost and other target-specific config |
+| decision_config | text | YES | Decision engine configuration JSON |
+| slack_channel | text | YES | Slack channel ID for notifications |
 
-### 5. server_config
+Unique constraint: `uq_deployment_config` on `(app_group, COALESCE(service, ''))`.
+
+### 4. server_config
 
 Runtime configuration key-value store. Values are read at runtime without server restart.
 
@@ -700,32 +706,9 @@ Runtime configuration key-value store. Values are read at runtime without server
 | enabled | integer | NOT NULL | 0 = disabled (ignored), 1 = enabled (default: 0) |
 | product | text | YES | Product scope (NULL = global config) |
 
-### 6. vs_edit_tracker
+Unique constraint: `server_config_name_product_unique` on `(name, COALESCE(product, ''))`.
 
-Tracks manual VirtualService edits with locking, approval, and revert capability.
-
-| Column | Type | Nullable | Description |
-|--------|------|----------|-------------|
-| id | text | NOT NULL | Primary key (UUID) |
-| product | text | NOT NULL | Product name |
-| service | text | NOT NULL | Service name |
-| env | text | NOT NULL | Environment |
-| vs_name | text | NOT NULL | VirtualService name in K8s |
-| old_vs_data | text | YES | Original VirtualService YAML/JSON before edit |
-| new_vs_data | text | YES | Modified VirtualService YAML/JSON after edit |
-| status | text | NOT NULL | Status (default: "CREATED") |
-| created_by | text | NOT NULL | Creator email address |
-| approved_by | text | YES | Approver email address |
-| is_locked | boolean | YES | Whether VS is currently locked for editing (default: false) |
-| locked_by | text | YES | Email of the person holding the lock |
-| locked_at | timestamptz | YES | When the lock was acquired |
-| lock_expiry | timestamptz | YES | When the lock automatically expires |
-| monitoring_end_time | timestamptz | YES | End of post-edit monitoring period |
-| info | text | YES | Additional notes |
-| created_at | timestamptz | NOT NULL | Creation timestamp (default: now()) |
-| updated_at | timestamptz | NOT NULL | Last update timestamp (default: now()) |
-
-### 7. sc_person
+### 5. sc_person
 
 User accounts for the control centre.
 
@@ -743,7 +726,7 @@ User accounts for the control centre.
 
 Unique constraint: `sc_person_email_key` on `email`.
 
-### 8. sc_role
+### 6. sc_role
 
 Role definitions per product. Each role has an explicit list of permissions.
 
@@ -759,7 +742,7 @@ Role definitions per product. Each role has an explicit list of permissions.
 
 Unique constraint: `sc_role_product_slug_name_key` on `(product_slug, name)`.
 
-### 9. sc_person_product_access
+### 7. sc_person_product_access
 
 Maps a person to a role within a specific product. One role per person per product.
 
@@ -774,7 +757,7 @@ Maps a person to a role within a specific product. One role per person per produ
 
 Unique constraint: `(person_id, product_slug)` -- one role per person per product.
 
-### 10. sc_person_permission_override
+### 8. sc_person_permission_override
 
 Per-person permission overrides (GRANT or DENY) that modify the base role permissions.
 
@@ -791,7 +774,7 @@ Per-person permission overrides (GRANT or DENY) that modify the base role permis
 Unique constraint: `(person_id, product_slug, permission_action)` -- one override per permission per person per product.
 Check constraint: `override_type IN ('GRANT', 'DENY')`.
 
-### 11. sc_registration_token
+### 9. sc_registration_token
 
 Active session tokens for authenticated users.
 
@@ -806,7 +789,7 @@ Active session tokens for authenticated users.
 
 Unique constraint: `sc_registration_token_token_key` on `token`.
 
-### 12. sc_audit_log
+### 10. sc_audit_log
 
 Audit trail for admin operations.
 
@@ -920,7 +903,7 @@ These configs are read from the `server_config` database table at runtime and ca
 
 ### Create Release Page
 
-- Product/service dropdown (auto-populated from product_config)
+- Product/service dropdown (auto-populated from deployment_config)
 - Environment selector with available environments
 - New service toggle (skips old version validation)
 - Docker image field (from metadata)
@@ -952,9 +935,13 @@ These configs are read from the `server_config` database table at runtime and ca
 
 ### VS Editor Pages
 
+VS edits are stored in `release_tracker` with `category = 'VSEdit'` (no separate table). Old/new VS data is stored as SNAPSHOT events in `release_events`. VS locking is managed via `deployment_config.vs_locked_by` and `deployment_config.vs_lock_timestamp`.
+
+Workflow: Lock -> Edit -> Save (CREATED) -> Approve -> Apply (kubectl to K8s) / Discard
+
 - List page with VS edit tracker entries
 - Edit page with live VS fetch from K8s
-- Summary page with lock/unlock/revert actions and Slack notifications
+- Summary page with lock/unlock/apply/revert/approve/discard actions and Slack notifications
 - Lock system with configurable expiry (lock_expiry_delay_minutes in server_config)
 
 ### Product and Service Config Pages

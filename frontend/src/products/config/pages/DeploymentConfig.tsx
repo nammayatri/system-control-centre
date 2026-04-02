@@ -35,6 +35,7 @@ const EMPTY_GROUP_FORM: Partial<ProductConfig> = {
 const EMPTY_SERVICE_FORM: Partial<ReleaseConfig> = {
   appGroup: '', service: '', host: '', rollout_strategy: '',
   slack_channel: '', serviceType: 'SERVICE', emails: '',
+  revert_strategy: '', decision_config: '',
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -289,12 +290,14 @@ const DeploymentConfig: React.FC = () => {
                 <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
                   <th className="py-3 px-4 w-10"></th>
                   <th className="py-3 px-4">Name</th>
+                  <th className="py-3 px-4">Cluster</th>
                   <th className="py-3 px-4">Namespace</th>
                   <th className="py-3 px-4">VS Name</th>
-                  <th className="py-3 px-4">Cluster</th>
                   <th className="py-3 px-4">Acronym</th>
                   <th className="py-3 px-4">Type</th>
                   <th className="py-3 px-4">Sync Cluster</th>
+                  <th className="py-3 px-4">Infra Approval</th>
+                  <th className="py-3 px-4">VS Locked</th>
                   <th className="py-3 px-4 w-24 text-center">Actions</th>
                 </tr>
               </thead>
@@ -328,9 +331,9 @@ const DeploymentConfig: React.FC = () => {
                             {services.length} service{services.length !== 1 ? 's' : ''}
                           </span>
                         </td>
+                        <td className="py-3 px-4 font-mono text-xs text-zinc-600">{group.cluster || '-'}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">{group.namespace || '-'}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">{group.vs_name || '-'}</td>
-                        <td className="py-3 px-4 font-mono text-xs text-zinc-600">{group.cluster || '-'}</td>
                         <td className="py-3 px-4 text-zinc-600">{group.product_acronym || '-'}</td>
                         <td className="py-3 px-4">
                           <Badge variant={typeBadgeVariant(group.product_type)} size="sm">
@@ -339,6 +342,18 @@ const DeploymentConfig: React.FC = () => {
                         </td>
                         <td className="py-3 px-4 text-xs text-zinc-500">
                           {group.sync_cluster || '-'}
+                        </td>
+                        <td className="py-3 px-4">
+                          <Badge variant={group.need_infra_approval ? 'warning' : 'default'} size="sm">
+                            {group.need_infra_approval ? 'Yes' : 'No'}
+                          </Badge>
+                        </td>
+                        <td className="py-3 px-4">
+                          {group.vs_locked_by ? (
+                            <Badge variant="danger" size="sm">{group.vs_locked_by}</Badge>
+                          ) : (
+                            <span className="text-xs text-zinc-400">-</span>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-center">
                           <div className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
@@ -368,7 +383,9 @@ const DeploymentConfig: React.FC = () => {
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Host</td>
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Type</td>
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Slack Channel</td>
-                          <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider" colSpan={2}>Rollout Strategy</td>
+                          <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Rollout Strategy</td>
+                          <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Revert Strategy</td>
+                          <td className="py-2 px-4" colSpan={2}></td>
                           <td className="py-2 px-4"></td>
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider text-center">Actions</td>
                         </tr>
@@ -399,9 +416,13 @@ const DeploymentConfig: React.FC = () => {
                             ) : '-'}
                           </td>
                           <td className="py-2.5 px-4 font-mono text-xs text-zinc-500">{svc.slack_channel || '-'}</td>
-                          <td className="py-2.5 px-4 font-mono text-[11px] text-zinc-500 max-w-[180px] truncate" colSpan={2} title={svc.rollout_strategy}>
+                          <td className="py-2.5 px-4 font-mono text-[11px] text-zinc-500 max-w-[180px] truncate" title={svc.rollout_strategy}>
                             {truncateJson(svc.rollout_strategy)}
                           </td>
+                          <td className="py-2.5 px-4 font-mono text-[11px] text-zinc-500 max-w-[180px] truncate" title={svc.revert_strategy}>
+                            {truncateJson(svc.revert_strategy || '')}
+                          </td>
+                          <td className="py-2.5 px-4" colSpan={2}></td>
                           <td className="py-2.5 px-4"></td>
                           <td className="py-2.5 px-4 text-center">
                             <div className="flex items-center justify-center gap-1">
@@ -428,7 +449,7 @@ const DeploymentConfig: React.FC = () => {
                       {isExpanded && (
                         <tr className="border-b border-zinc-100 bg-zinc-50/10">
                           <td className="py-2 px-4"></td>
-                          <td className="py-2 px-4" colSpan={8}>
+                          <td className="py-2 px-4" colSpan={10}>
                             <div className="flex items-center">
                               <div className="border-l-2 border-zinc-200 h-5 mr-3"></div>
                               <PermissionGate product="autopilot" permission="RELEASE_CREATE">
@@ -630,6 +651,26 @@ const DeploymentConfig: React.FC = () => {
                   rows={4}
                   className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
                   placeholder='[{"rolloutPercent": 5, "cooloffSeconds": 300, "podPercent": 2}]'
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Revert Strategy (JSON)</label>
+                <textarea
+                  value={serviceForm.revert_strategy || ''}
+                  onChange={e => setServiceForm(prev => ({ ...prev, revert_strategy: e.target.value }))}
+                  rows={3}
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+                  placeholder='Optional revert configuration JSON'
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Decision Config (JSON)</label>
+                <textarea
+                  value={serviceForm.decision_config || ''}
+                  onChange={e => setServiceForm(prev => ({ ...prev, decision_config: e.target.value }))}
+                  rows={3}
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+                  placeholder='Optional decision config JSON'
                 />
               </div>
               <div className="grid grid-cols-2 gap-4">
