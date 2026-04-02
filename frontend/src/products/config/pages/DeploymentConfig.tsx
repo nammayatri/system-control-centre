@@ -290,11 +290,11 @@ const DeploymentConfig: React.FC = () => {
                   <th className="py-3 px-4 w-10"></th>
                   <th className="py-3 px-4">Name</th>
                   <th className="py-3 px-4">Namespace</th>
-                  <th className="py-3 px-4">VS / Host</th>
-                  <th className="py-3 px-4">Cluster / Slack</th>
+                  <th className="py-3 px-4">VS Name</th>
+                  <th className="py-3 px-4">Cluster</th>
                   <th className="py-3 px-4">Acronym</th>
                   <th className="py-3 px-4">Type</th>
-                  <th className="py-3 px-4">Sync / Rollout</th>
+                  <th className="py-3 px-4">Sync Cluster</th>
                   <th className="py-3 px-4 w-24 text-center">Actions</th>
                 </tr>
               </thead>
@@ -360,6 +360,20 @@ const DeploymentConfig: React.FC = () => {
                         </td>
                       </tr>
 
+                      {/* Service sub-header (expanded) */}
+                      {isExpanded && services.length > 0 && (
+                        <tr className="bg-zinc-100/60 border-b border-zinc-200">
+                          <td className="py-2 px-4"></td>
+                          <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Service</td>
+                          <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Host</td>
+                          <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Type</td>
+                          <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Slack Channel</td>
+                          <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider" colSpan={2}>Rollout Strategy</td>
+                          <td className="py-2 px-4"></td>
+                          <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider text-center">Actions</td>
+                        </tr>
+                      )}
+
                       {/* Service rows (expanded) */}
                       {isExpanded && services.map((svc, sIdx) => (
                         <tr
@@ -376,9 +390,7 @@ const DeploymentConfig: React.FC = () => {
                               <span className="text-zinc-700">{svc.service}</span>
                             </div>
                           </td>
-                          <td className="py-2.5 px-4 text-xs text-zinc-400">-</td>
                           <td className="py-2.5 px-4 font-mono text-xs text-zinc-600">{svc.host || '-'}</td>
-                          <td className="py-2.5 px-4 font-mono text-xs text-zinc-500">{svc.slack_channel || '-'}</td>
                           <td className="py-2.5 px-4">
                             {svc.serviceType ? (
                               <Badge variant={typeBadgeVariant(svc.serviceType)} size="sm">
@@ -386,18 +398,11 @@ const DeploymentConfig: React.FC = () => {
                               </Badge>
                             ) : '-'}
                           </td>
-                          <td className="py-2.5 px-4">
-                            <div className="flex flex-col gap-0.5">
-                              <span className="font-mono text-[11px] text-zinc-500 max-w-[180px] truncate" title={svc.rollout_strategy}>
-                                {truncateJson(svc.rollout_strategy)}
-                              </span>
-                              {svc.slack_channel && (
-                                <span className="text-[11px] text-zinc-400 truncate max-w-[180px]" title={svc.slack_channel}>
-                                  {svc.slack_channel}
-                                </span>
-                              )}
-                            </div>
+                          <td className="py-2.5 px-4 font-mono text-xs text-zinc-500">{svc.slack_channel || '-'}</td>
+                          <td className="py-2.5 px-4 font-mono text-[11px] text-zinc-500 max-w-[180px] truncate" colSpan={2} title={svc.rollout_strategy}>
+                            {truncateJson(svc.rollout_strategy)}
                           </td>
+                          <td className="py-2.5 px-4"></td>
                           <td className="py-2.5 px-4 text-center">
                             <div className="flex items-center justify-center gap-1">
                               <PermissionGate product="autopilot" permission="RELEASE_CREATE">
