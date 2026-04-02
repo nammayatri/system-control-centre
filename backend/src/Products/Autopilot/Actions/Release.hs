@@ -606,7 +606,6 @@ deleteReleaseH rid = do
                     liftIO $ withConn db $ \conn -> withTransaction conn $ do
                         execute conn "DELETE FROM release_events WHERE re_release_id = ?" (Only rid)
                         execute conn "DELETE FROM release_tracker WHERE id = ?" (Only rid)
-                    liftIO $ notifyReleaseDeleted db tracker
                     pure $ APIResponse "SUCCESS" ("Release deleted: " <> rid)
 
 updateTrackerH :: Text -> K8sUpdateTrackerReq -> Flow APIResponse
