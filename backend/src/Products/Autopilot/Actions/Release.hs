@@ -626,7 +626,12 @@ updateTrackerH rid req = do
                     Just s -> let ns = parseReleaseStatus s in ns == Paused || ns == Aborting
                     Nothing -> False
                 isStrategyUpdate = case (req :: K8sUpdateTrackerReq).rolloutStrategy of
-                    Just _ -> True
+                    Just newStrategy ->
+                        -- During INPROGRESS: preserve completed stages, only allow future stage changes
+                        let histLen = length (NT.rolloutHistory tracker)
+                            oldStrategy = NT.rolloutStrategy tracker
+                            completedPreserved = take histLen newStrategy == take histLen oldStrategy
+                        in completedPreserved || histLen == 0
                     Nothing -> False
                 isAllowedInProgress = isStatusTransition || isStrategyUpdate
             if oldStatus == InProgress && not isAllowedInProgress
