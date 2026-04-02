@@ -39,8 +39,7 @@ import ListConfigMap from './configmap/pages/ListConfigMap';
 import CreateConfigMap from './configmap/pages/CreateConfigMap';
 import ConfigMapSummary from './configmap/pages/ConfigMapSummary';
 import Configurations from './config/pages/Configurations';
-import ProductConfigs from './config/pages/ProductConfigs';
-import ServiceConfigs from './config/pages/ServiceConfigs';
+import DeploymentConfig from './config/pages/DeploymentConfig';
 import ListVSEdit from './vs-editor/pages/ListVSEdit';
 import EditVS from './vs-editor/pages/EditVS';
 import VSEditSummary from './vs-editor/pages/VSEditSummary';
@@ -54,8 +53,7 @@ const releasesProduct: ProductDefinition = {
     { label: 'Releases', path: '/releases', icon: 'List' },
     { label: 'Create Release', path: '/releases/new', icon: 'Plus' },
     { label: 'Config Maps', path: '/configmap', icon: 'FileText' },
-    { label: 'Products', path: '/product-config', icon: 'Package' },
-    { label: 'Services', path: '/service-config', icon: 'Layers' },
+    { label: 'Deployment Config', path: '/deployment-config', icon: 'Layers' },
     { label: 'VS Editor', path: '/vs-editor', icon: 'Settings' },
     { label: 'Server Config', path: '/configurations', icon: 'Settings' },
   ],
@@ -70,10 +68,8 @@ const releasesProduct: ProductDefinition = {
     { path: '/configmap', component: ListConfigMap },
     { path: '/configmap/new', component: CreateConfigMap, permission: 'RELEASE_CREATE' },
     { path: '/configmap/:id', component: ConfigMapSummary },
-    // Product Config
-    { path: '/product-config', component: ProductConfigs },
-    // Service Config
-    { path: '/service-config', component: ServiceConfigs },
+    // Deployment Config (groups + services)
+    { path: '/deployment-config', component: DeploymentConfig },
     // VS Editor
     { path: '/vs-editor', component: ListVSEdit },
     { path: '/vs-editor/new', component: EditVS, permission: 'RELEASE_CREATE' },
