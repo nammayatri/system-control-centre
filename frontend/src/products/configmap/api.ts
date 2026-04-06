@@ -1,6 +1,6 @@
 import { apiClient } from '../../lib/api-client';
-import type { APConfigMap } from '../../api';
-import { fetchAPConfigMaps, fetchConfigMapDetail, updateConfigMap, createConfigMap, fetchConfigMapNames, fetchConfigMapData } from '../../api';
+import type { APConfigMap } from '../releases/api';
+import { fetchAPConfigMaps, fetchConfigMapDetail, updateConfigMap, createConfigMap, fetchConfigMapNames, fetchConfigMapData } from '../releases/api';
 
 export {
   fetchAPConfigMaps,

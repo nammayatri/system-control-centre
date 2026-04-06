@@ -15,6 +15,7 @@
 -- STRING (not a nested object) to match Julia's @JSON2.write@ output.
 module Products.Autopilot.EventLog
   ( logTrafficUpdated,
+    logTrafficUpdatedWithMessage,
     logDecisionResult,
     logStatusUpdated,
     encodeProdRolloutHistory,
@@ -30,13 +31,12 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (UTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
-import Products.Autopilot.Queries.ReleaseTracker (insertReleaseEvent)
+import Products.Autopilot.Queries.ReleaseTracker (insertReleaseEvent, releaseStatusToText)
 import Products.Autopilot.Types.Release
   ( Decision (..),
     ReleaseTracker (..),
     RolloutHistory (..),
   )
-import qualified Products.Autopilot.Types.Release as NT
 
 -- ============================================================================
 -- Production-format rollout_history serialization
@@ -64,7 +64,7 @@ historyToProdJson :: RolloutHistory -> Value
 historyToProdJson h =
   object
     [ "rollout" .= historyRolloutPercent h,
-      "cooloff" .= historyCooloffSeconds h,
+      "cooloff" .= historyCooloffMinutes h,
       "pods" .= historyPodsPercent h,
       "last_decision" .= fmap decisionToText (historyDecision h),
       "decision_result" .= historyDecisionReason h,
@@ -104,6 +104,21 @@ logTrafficUpdated db rt previousRollout = do
           [ "status" .= statusText rt,
             "previous_rollout" .= previousRollout,
             "rollout_history" .= encodeProdRolloutHistory (rolloutHistory rt)
+          ]
+  insertReleaseEvent db (releaseId rt) "BUSINESS" "TRAFFIC_UPDATED" payload
+
+-- | BUSINESS / TRAFFIC_UPDATED with a @message@ field — emitted on rollback.
+--
+-- Production reference: @release/events.jl@ @rollbackEvent!@ (line 251-286).
+-- Same shape as 'logTrafficUpdated' but with an extra @"message"@ key.
+logTrafficUpdatedWithMessage :: DBEnv -> ReleaseTracker -> Int -> Text -> IO ()
+logTrafficUpdatedWithMessage db rt previousRollout message = do
+  let payload =
+        object
+          [ "status" .= statusText rt,
+            "previous_rollout" .= previousRollout,
+            "rollout_history" .= encodeProdRolloutHistory (rolloutHistory rt),
+            "message" .= message
           ]
   insertReleaseEvent db (releaseId rt) "BUSINESS" "TRAFFIC_UPDATED" payload
 
@@ -164,4 +179,4 @@ logStatusUpdated db rt message = do
 -- ============================================================================
 
 statusText :: ReleaseTracker -> Text
-statusText = T.pack . show . NT.status
+statusText = releaseStatusToText . status

@@ -6,17 +6,20 @@
 
 -- | Autopilot storage schema.
 --
--- Canonical location for all autopilot Beam table definitions:
+-- Canonical location for all autopilot-owned Beam table definitions:
+--
 --   * 'DeploymentConfigT'  — unified product+service deployment config
 --   * 'ReleaseTrackerT'    — release tracker rows
 --   * 'ReleaseEventT'      — release event log rows
---   * 'ServerConfigT'      — per-product server config (runtime flags)
---   * 'NammaAPDb'          — Beam Database binding all four tables
+--   * 'AutopilotDb'        — Beam Database binding the three autopilot tables
 --
--- This module used to live at @Shared.Types.Storage.Schema@ but was moved to
--- sit inside the Autopilot product: every table here belongs to Autopilot and
--- nothing outside Autopilot should depend on it directly. This is step V1 of
--- the product-boundary cleanup (see task #22).
+-- Cross-product tables (e.g. @server_config@) do NOT live here — they belong
+-- under "Shared.Types.Storage.*" so that other products can use them without
+-- reaching into Autopilot. See "Shared.Types.Storage.ServerConfig".
+--
+-- History: this module used to live at @Shared.Types.Storage.Schema@ and was
+-- moved inside the Autopilot product in task #22. Task #30 then extracted
+-- 'ServerConfigT' into Shared and renamed @NammaAPDb@ → 'AutopilotDb'.
 module Products.Autopilot.Types.Storage.Schema where
 
 import Data.Aeson (Value)
@@ -121,35 +124,15 @@ instance Table ReleaseEventT where
   data PrimaryKey ReleaseEventT f = ReleaseEventId (Columnar f Int32) deriving (Generic, Beamable)
   primaryKey = ReleaseEventId . reId
 
-data ServerConfigT f = ServerConfigT
-  { scId :: Columnar f Int32,
-    scType :: Columnar f Text,
-    scName :: Columnar f Text,
-    scValue :: Columnar f Text,
-    scLastUpdated :: Columnar f UTCTime,
-    scEnabled :: Columnar f Int32,
-    scProduct :: Columnar f (Maybe Text)
-  }
-  deriving (Generic, Beamable)
-
-type ServerConfig = ServerConfigT Identity
-
-deriving instance Show ServerConfig
-
-instance Table ServerConfigT where
-  data PrimaryKey ServerConfigT f = ServerConfigId (Columnar f Int32) deriving (Generic, Beamable)
-  primaryKey = ServerConfigId . scId
-
-data NammaAPDb f = NammaAPDb
+data AutopilotDb f = AutopilotDb
   { deploymentConfig :: f (TableEntity DeploymentConfigT),
     releaseTrackers :: f (TableEntity ReleaseTrackerT),
-    releaseEvents :: f (TableEntity ReleaseEventT),
-    serverConfigs :: f (TableEntity ServerConfigT)
+    releaseEvents :: f (TableEntity ReleaseEventT)
   }
   deriving (Generic, Database be)
 
-nammaAPDb :: DatabaseSettings be NammaAPDb
-nammaAPDb =
+autopilotDb :: DatabaseSettings be AutopilotDb
+autopilotDb =
   defaultDbSettings
     `withDbModification` dbModification
       { deploymentConfig =
@@ -222,17 +205,5 @@ nammaAPDb =
                   reLabel = fieldNamed "re_label",
                   rePayload = fieldNamed "re_payload",
                   reCreatedAt = fieldNamed "re_created_at"
-                },
-        serverConfigs =
-          setEntityName "server_config"
-            <> modifyTableFields
-              tableModification
-                { scId = fieldNamed "id",
-                  scType = fieldNamed "type",
-                  scName = fieldNamed "name",
-                  scValue = fieldNamed "value",
-                  scLastUpdated = fieldNamed "last_updated",
-                  scEnabled = fieldNamed "enabled",
-                  scProduct = fieldNamed "product"
                 }
       }

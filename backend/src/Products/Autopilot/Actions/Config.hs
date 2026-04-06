@@ -35,8 +35,9 @@ import qualified Data.Text as T
 import GHC.Int (Int32)
 import Products.Autopilot.Actions.Release (upsertProductH, upsertServiceH)
 import Products.Autopilot.Queries.ProductService
-import Products.Autopilot.Queries.ServerConfig (deleteServerConfig, listServerConfigsByProduct, upsertServerConfig)
+import Shared.Queries.ServerConfig (deleteServerConfig, listServerConfigsByProduct, upsertServerConfig)
 import Products.Autopilot.Types.API
+import Shared.API.Response (APIResponse (..))
 import Shared.Config.Registry (allConfigEntries, findConfigEntry, validateConfigValue)
 import Shared.Config.Types (ConfigEntry (..), configGroupToText, configTypeDefault, configTypeTag)
 import qualified Products.Autopilot.Types.Storage.Schema as S

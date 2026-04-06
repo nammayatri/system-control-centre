@@ -58,7 +58,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
   };
 
   const visibleProducts = PRODUCT_REGISTRY.filter((p) =>
-    hasPermission(p.slug, `${p.slug === 'config-manager' ? 'CONFIG' : 'RELEASE'}_VIEW`)
+    hasPermission(p.slug, p.viewPermission)
   );
 
   const renderProductSection = (product: ProductDefinition) => {

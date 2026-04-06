@@ -7,8 +7,9 @@ import {
   useFastForwardRelease, useImmediateRevertWithSync,
   useReleaseDiff, usePodHealth, useResources, useUpdateTracker,
 } from '../hooks';
-import type { RolloutHistoryEvent, RolloutEvent, RolloutStrategyEvent, PodInfo } from '../../../api';
-import { StatusBadge, Badge } from '../../../shared/ui/badge';
+import type { RolloutHistoryEvent, RolloutEvent, RolloutStrategyEvent, PodInfo } from '../api';
+import { Badge } from '../../../shared/ui/badge';
+import { StatusBadge } from '../components/StatusBadge';
 import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
@@ -24,10 +25,22 @@ import { toast } from 'sonner';
 import ReactDiffViewer from 'react-diff-viewer-continued';
 import YAML from 'yaml';
 
+// NammaYatri ops run on IST — format all timestamps in Asia/Kolkata so
+// dashboard users outside India still see the same values as on-call India.
+// Backend stores UTC; this is a display-only transform.
 const formatDate = (d?: string) => {
   if (!d) return '-';
   const date = new Date(d);
-  return date.toLocaleString('en-US', { month: 'short', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+  if (isNaN(date.getTime())) return '-';
+  return date.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    month: 'short',
+    day: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  }) + ' IST';
 };
 
 const tryFormatJson = (data: string): string => {
@@ -453,7 +466,7 @@ const RolloutStrategyTab: React.FC<{
         updates: {
           rolloutStrategy: stages.map(s => ({
             rolloutPercent: s.rollout,
-            cooloffSeconds: s.cooloff,
+            cooloffMinutes: s.cooloff,
             podPercent: s.pods,
           })),
         },
@@ -768,7 +781,7 @@ const ReleaseSummary: React.FC = () => {
               </PermissionGate>
             </>
           )}
-          {(s === 'ABORTED' || s === 'USER_ABORTED' || s === 'REVERTED') && (
+          {(s === 'ABORTED' || s === 'USER_ABORTED' || s === 'GCLT_ABORTED' || s === 'REVERTED') && (
             <PermissionGate product="autopilot" permission="RELEASE_CREATE">
               <Button size="sm" variant="outline" className="border-blue-300 text-blue-700 hover:bg-blue-50" loading={restartMut.isPending} onClick={() => doAction('restart', () => restartMut.mutateAsync(id!))}><RotateCw className="w-3.5 h-3.5" /> Restart</Button>
             </PermissionGate>

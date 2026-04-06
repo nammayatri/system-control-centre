@@ -17,6 +17,7 @@ import Products.Autopilot.Actions.VSEdit as VSEdit
 import Products.Autopilot.Types (ReleaseTracker)
 import Products.Autopilot.Types.API
 import Servant
+import Shared.API.Response (APIResponse (..))
 
 type CoreAPI =
   "products" :> Get '[JSON] [ProductResponse]
@@ -72,6 +73,7 @@ type CoreAPI =
     :<|> "vs-edit-tracker" :> "current-vs" :> QueryParam "product" Text :> QueryParam "service" Text :> Get '[JSON] Value
     :<|> "vs-edit-tracker" :> "lock" :> ReqBody '[JSON] VsLockReq :> Post '[JSON] APIResponse
     :<|> "vs-edit-tracker" :> "unlock" :> ReqBody '[JSON] VsUnlockReq :> Post '[JSON] APIResponse
+    :<|> "vs-edit-tracker" :> "force-unlock" :> ReqBody '[JSON] VsUnlockReq :> Post '[JSON] APIResponse
     :<|> "vs-edit-tracker" :> "revert" :> Capture "id" Text :> Put '[JSON] APIResponse
     :<|> "vs-edit-tracker" :> Capture "id" Text :> Get '[JSON] Value
     :<|> "vs-edit-tracker" :> Capture "id" Text :> ReqBody '[JSON] UpdateVsEditTrackerReq :> Put '[JSON] APIResponse
@@ -136,6 +138,7 @@ coreServer =
     :<|> VSEdit.fetchCurrentVsH
     :<|> VSEdit.lockVsEditTrackerH
     :<|> VSEdit.unlockVsEditTrackerH
+    :<|> VSEdit.forceUnlockVsEditTrackerH
     :<|> VSEdit.revertVsEditTrackerH
     :<|> VSEdit.getVsEditTrackerH
     :<|> VSEdit.updateVsEditTrackerH

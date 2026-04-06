@@ -49,10 +49,10 @@ import Prelude
 -- | Backend config workflow using generic stages
 backendConfigWorkflow :: ReleaseWorkFlow ()
 backendConfigWorkflow = do
-  Init |>> validateConfig
-  Preparing |>> resolveConfigContent
-  Deploying |>> applyConfigMap
-  Done |>> notifyComplete
+  INIT |>> validateConfig
+  PREPARING |>> resolveConfigContent
+  DEPLOYING |>> applyConfigMap
+  DONE |>> notifyComplete
 
 -- ============================================================================
 -- Helpers
@@ -131,7 +131,7 @@ resolveConfigContent = do
 
       if isK8sManifest fc
         then do
-          -- Store resolved content + namespace in workflowMetadata for Deploying stage
+          -- Store resolved content + namespace in workflowMetadata for DEPLOYING stage
           let resolved =
                 Object $
                   KM.fromList
@@ -204,7 +204,7 @@ notifyComplete = do
   db <- lift getDBEnv
   liftIO $ putStrLn $ "ConfigMap release " <> T.unpack (releaseId rt) <> " completed!"
   liftIO $ notifyConfigMapCompleted db rt
-  updateRT $ \r -> r{status = Completed}
+  updateRT $ \r -> r{status = COMPLETED}
 
 -- ============================================================================
 -- ConfigMap Helpers (moved from Runner.hs)

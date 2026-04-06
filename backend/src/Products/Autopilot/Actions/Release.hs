@@ -51,7 +51,7 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Char (isAlphaNum)
 import Data.List (find)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
@@ -82,6 +82,7 @@ import Products.Autopilot.Types.Target.Kubernetes
 import qualified Products.Autopilot.Types.Target.Kubernetes as K8s
 import Products.Autopilot.Workflow.Helpers (captureDeploymentPreview, captureDeploymentSnapshot)
 import qualified Products.Autopilot.Types.Storage.Schema as S
+import Shared.API.Response (APIResponse (..))
 
 -- ============================================================================
 -- Product/Service Handlers
@@ -309,9 +310,9 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                                                 , syncXPomeriumJwt = mXPomeriumJwt
                                                                 }
                                                         reqMode = case mode of
-                                                            Just "MANUAL" -> Manual
-                                                            Just "manual" -> Manual
-                                                            _ -> Auto
+                                                            Just "MANUAL" -> MANUAL
+                                                            Just "manual" -> MANUAL
+                                                            _ -> AUTO
                                                     approveAll <- liftIO $ isApproveAllReleases db
                                                     now <- liftIO getCurrentTime
                                                     let initialApproval = case isApproved of
@@ -322,7 +323,7 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                                             Just t | not (T.null t) -> Just t
                                                             _ ->
                                                                 let datePart = T.pack (formatTime defaultTimeLocale "%Y%m%d" now)
-                                                                    modeText = case reqMode of Auto -> "AUTO"; Manual -> "MANUAL"
+                                                                    modeText = T.pack (show reqMode)
                                                                     priText = T.pack (show (fromMaybe 0 priority))
                                                                  in Just (T.intercalate "_" [appGroup, datePart, newVersion, service, modeText, env, priText])
                                                         tracker =
@@ -332,8 +333,8 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                                                 , service = service
                                                                 , env = env
                                                                 , category = trackerType
-                                                                , status = Created
-                                                                , releaseWFStatus = Init
+                                                                , status = CREATED
+                                                                , releaseWFStatus = INIT
                                                                 , mode = reqMode
                                                                 , createdBy = createdBy
                                                                 , approvedBy = approvedBy
@@ -428,7 +429,7 @@ triggerReleaseH rid TriggerReleaseReq{..} = do
                 then pure $ APIResponse "ERROR" ("Cannot trigger from terminal status: " <> T.pack (show oldStatus))
                 else do
                     now <- liftIO getCurrentTime
-                    let updated = (tracker :: ReleaseTracker){NT.scheduleTime = Just now, NT.status = Created}
+                    let updated = (tracker :: ReleaseTracker){NT.scheduleTime = Just now, NT.status = CREATED}
                     ok <- liftIO $ conditionalUpdateTracker db updated mTargetState (releaseStatusToText oldStatus)
                     if ok
                         then do
@@ -444,10 +445,10 @@ rollbackReleaseH rid TriggerReleaseReq{..} = do
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
             let oldStatus = NT.status tracker
-            if not (validateStatusTransition oldStatus Aborting)
+            if not (validateStatusTransition oldStatus ABORTING)
                 then pure $ APIResponse "ERROR" ("Cannot rollback from status: " <> T.pack (show oldStatus))
                 else do
-                    let updated = (tracker :: ReleaseTracker){NT.status = Aborting, NT.releaseWFStatus = RollingBack}
+                    let updated = (tracker :: ReleaseTracker){NT.status = ABORTING, NT.releaseWFStatus = ROLLING_BACK}
                     ok <- liftIO $ conditionalUpdateTracker db updated mTargetState (releaseStatusToText oldStatus)
                     if ok
                         then do
@@ -502,8 +503,8 @@ revertReleaseH rid req = do
                         revertedTracker =
                             (tracker :: ReleaseTracker)
                                 { NT.releaseId = newRid
-                                , NT.status = Created
-                                , NT.releaseWFStatus = Init
+                                , NT.status = CREATED
+                                , NT.releaseWFStatus = INIT
                                 , NT.createdBy = fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)
                                 , NT.approvedBy = if isImmediate then Just (fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)) else Nothing
                                 , NT.isApproved = isImmediate
@@ -574,10 +575,10 @@ discardReleaseH rid DiscardReleaseReq{..} = do
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
             let oldStatus = NT.status tracker
-            if not (validateStatusTransition oldStatus Discarded)
+            if not (validateStatusTransition oldStatus DISCARDED)
                 then pure $ APIResponse "ERROR" ("Cannot discard from status: " <> T.pack (show oldStatus))
                 else do
-                    let updated = (tracker :: ReleaseTracker){NT.status = Discarded}
+                    let updated = (tracker :: ReleaseTracker){NT.status = DISCARDED}
                     ok <- liftIO $ conditionalUpdateTracker db updated mTargetState (releaseStatusToText oldStatus)
                     if ok
                         then do
@@ -594,8 +595,8 @@ deleteReleaseH rid = do
     case mTracker of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, _) -> do
-            -- Block deletion of active releases (InProgress, Aborting, Reverting, Paused, Restarting)
-            let activeStatuses = [InProgress, Aborting, Reverting, Paused, Restarting]
+            -- Block deletion of active releases (INPROGRESS, ABORTING, REVERTING, PAUSED, RESTARTING)
+            let activeStatuses = [INPROGRESS, ABORTING, REVERTING, PAUSED, RESTARTING]
             if NT.status tracker `elem` activeStatuses
                 then pure $ APIResponse "ERROR" ("Cannot delete release in " <> T.pack (show (NT.status tracker)) <> " status. Abort or complete it first.")
                 else do
@@ -613,25 +614,13 @@ updateTrackerH rid req = do
         Just (tracker, mTargetState) -> do
             let oldStatus = NT.status tracker
                 oldStatusText = releaseStatusToText oldStatus
-            -- Guard: when release is InProgress, allow:
-            -- 1. Pause/abort status transitions
-            -- 2. Rollout strategy updates (for editing future stages)
-            -- Block other field modifications that would race with the running workflow.
-            let isStatusTransition = case (req :: K8sUpdateTrackerReq).status of
-                    Just s -> let ns = parseReleaseStatus s in ns == Paused || ns == Aborting
-                    Nothing -> False
-                isStrategyUpdate = case (req :: K8sUpdateTrackerReq).rolloutStrategy of
-                    Just newStrategy ->
-                        -- During INPROGRESS: preserve completed stages, only allow future stage changes
-                        let histLen = length (NT.rolloutHistory tracker)
-                            oldStrategy = NT.rolloutStrategy tracker
-                            completedPreserved = take histLen newStrategy == take histLen oldStrategy
-                        in completedPreserved || histLen == 0
-                    Nothing -> False
-                isAllowedInProgress = isStatusTransition || isStrategyUpdate
-            if oldStatus == InProgress && not isAllowedInProgress
-                then pure $ APIResponse "ERROR" "Cannot modify release while in progress. Pause it first."
-                else do
+            -- Validate the update request against rollout-strategy invariants
+            -- and mid-flight immutability rules. A broken strategy shape or a
+            -- disallowed field modification is always rejected up-front, so
+            -- the downstream apply/DB path never sees inconsistent data.
+            case validateUpdateRequest tracker req of
+                Left err -> pure $ APIResponse "ERROR" err
+                Right () -> do
                     let (updatedTracker, updatedTargetState) = applyUpdates tracker mTargetState req
                     case (req :: K8sUpdateTrackerReq).status of
                         Just newStatusText -> do
@@ -657,10 +646,10 @@ updateTrackerH rid req = do
                                                     liftIO $ logStatusUpdated db updatedTracker ("Tracker marked as " <> newStatusText)
                                                     -- Send status-specific Slack notifications
                                                     case newStatus of
-                                                        Paused -> liftIO $ notifyReleasePaused db updatedTracker
-                                                        InProgress -> liftIO $ notifyReleaseResumed db updatedTracker
-                                                        Aborting -> liftIO $ notifyReleaseAborted db updatedTracker
-                                                        Completed -> liftIO $ notifyReleaseCompleted db updatedTracker
+                                                        PAUSED -> liftIO $ notifyReleasePaused db updatedTracker
+                                                        INPROGRESS -> liftIO $ notifyReleaseResumed db updatedTracker
+                                                        ABORTING -> liftIO $ notifyReleaseAborted db updatedTracker
+                                                        COMPLETED -> liftIO $ notifyReleaseCompleted db updatedTracker
                                                         _ -> liftIO $ notifyReleaseUpdated db updatedTracker ("status changed to " <> newStatusText)
                                                     pure $ APIResponse "SUCCESS" "Tracker updated"
                                                 else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
@@ -674,14 +663,130 @@ updateTrackerH rid req = do
                                     pure $ APIResponse "SUCCESS" "Tracker updated"
                                 else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
+-- | Validate an incoming 'K8sUpdateTrackerReq' against two independent sets
+-- of rules, returning @Left reason@ on the first failure.
+--
+-- 1. __Rollout strategy invariants__ (apply at /every/ status): whenever the
+-- request supplies a new @rolloutStrategy@, it must be non-empty, use only
+-- valid cooloff/pod/percent values, have strictly-monotonic @rolloutPercent@
+-- values, and end at 100. These are cheap shape checks that catch obviously
+-- broken payloads before they hit the DB or the workflow loop.
+--
+-- 2. __Mid-flight immutability__ (apply to @INPROGRESS@ / @PAUSED@ /
+-- @RESTARTING@ / @REVERTING@): while a release is live the ONLY fields a
+-- user may touch are @status@ (pause/resume/abort transitions),
+-- @rolloutStrategy@ (limited to future-stage edits — stages that already
+-- appear in @rolloutHistory@ must be byte-identical), and @changeLog@
+-- (informational, safe to append during a rollout). Everything else is
+-- rejected because it would race the running workflow.
+--
+-- The separation matters: #1 runs even at @CREATED@ (catches bad initial
+-- strategies); #2 only runs once the rollout is live, so @CREATED@ releases
+-- can still be edited freely.
+validateUpdateRequest :: ReleaseTracker -> K8sUpdateTrackerReq -> Either Text ()
+validateUpdateRequest tracker req = do
+    -- (1) Strategy shape invariants — always applied when a strategy is sent.
+    case (req :: K8sUpdateTrackerReq).rolloutStrategy of
+        Nothing -> pure ()
+        Just newStrategy -> validateStrategyShape newStrategy
+    -- (2) Mid-flight immutability.
+    let oldStatus = NT.status tracker
+    if oldStatus `elem` midFlightStatuses
+        then do
+            -- Only status / rolloutStrategy / changeLog may be non-Nothing.
+            case forbiddenFieldDuringMidFlight req of
+                Just fieldName ->
+                    Left $
+                        "Cannot modify '" <> fieldName
+                            <> "' while release is "
+                            <> releaseStatusText oldStatus
+                            <> ". Pause it first."
+                Nothing -> pure ()
+            -- Status transition, if requested, must be pause/abort-only.
+            case (req :: K8sUpdateTrackerReq).status of
+                Nothing -> pure ()
+                Just newStatusText ->
+                    let newStatus = parseReleaseStatus newStatusText
+                     in if newStatus == oldStatus
+                            || newStatus `elem` [PAUSED, ABORTING, INPROGRESS, RESTARTING]
+                            then pure ()
+                            else
+                                Left $
+                                    "During mid-flight, only status transitions to PAUSED / ABORTING / "
+                                        <> "INPROGRESS / RESTARTING are allowed; got "
+                                        <> newStatusText
+            -- Strategy updates must preserve every stage already reached.
+            case (req :: K8sUpdateTrackerReq).rolloutStrategy of
+                Nothing -> pure ()
+                Just newStrategy ->
+                    let histLen = length (NT.rolloutHistory tracker)
+                        oldStrategy = NT.rolloutStrategy tracker
+                     in if histLen == 0 || take histLen newStrategy == take histLen oldStrategy
+                            then pure ()
+                            else
+                                Left
+                                    "Cannot modify a rollout stage that has already started. \
+                                    \Future (not-yet-reached) stages may still be edited."
+        else pure ()
+  where
+    midFlightStatuses :: [ReleaseStatus]
+    midFlightStatuses = [INPROGRESS, PAUSED, RESTARTING, REVERTING]
+
+-- | Shape-level invariants on a proposed rollout strategy: non-empty, valid
+-- numeric ranges, strictly monotonic rolloutPercent, and a terminal 100 stage.
+-- Runs before any state-dependent checks.
+validateStrategyShape :: [RolloutStep] -> Either Text ()
+validateStrategyShape [] = Left "Rollout strategy must have at least one stage"
+validateStrategyShape steps = do
+    let percents = map rolloutPercent steps
+        cooloffs = map cooloffMinutes steps
+        pods = map podPercent steps
+    when (any (\p -> p < 0 || p > 100) percents) $
+        Left "Rollout percents must be in the range [0, 100]"
+    when (any (\p -> p < 0 || p > 100) pods) $
+        Left "Pod percents must be in the range [0, 100]"
+    when (any (< 0) cooloffs) $
+        Left "Cooloff minutes must be non-negative"
+    when (percents /= sortedStrictlyIncreasing percents) $
+        Left "Rollout percents must be strictly increasing across stages"
+    when (Prelude.last percents /= 100) $
+        Left "Final rollout stage must reach 100%"
+  where
+    sortedStrictlyIncreasing :: [Int] -> [Int]
+    sortedStrictlyIncreasing xs =
+        -- Strictly-increasing iff no adjacent pair (x, y) has x >= y.
+        if all (uncurry (<)) (zip xs (drop 1 xs))
+            then xs
+            else [] -- sentinel that never equals a valid list of length >= 1
+
+-- | Identify the first mid-flight-forbidden field set in the request, if any.
+-- During INPROGRESS/PAUSED/etc only status, rolloutStrategy, and changeLog
+-- are legal. Returns @Just fieldName@ for the first violation.
+forbiddenFieldDuringMidFlight :: K8sUpdateTrackerReq -> Maybe Text
+forbiddenFieldDuringMidFlight req
+    | isJust (req.mode) = Just "mode"
+    | isJust (req.releaseManager) = Just "releaseManager"
+    | isJust (req.priority) = Just "priority"
+    | isJust (req.scheduleTime) = Just "scheduleTime"
+    | isJust (req.description) = Just "description"
+    | isJust (req.info) = Just "info"
+    | isJust (req.isApproved) = Just "isApproved"
+    | isJust (req.isInfraApproved) = Just "isInfraApproved"
+    | isJust (req.syncEnabled) = Just "syncEnabled"
+    | isJust (req.envOverrideData) = Just "envOverrideData"
+    | isJust (req.slackThreadTs) = Just "slackThreadTs"
+    | isJust (req.dockerImage) = Just "dockerImage"
+    | isJust (req.podsScaleDownDelay) = Just "podsScaleDownDelay"
+    | otherwise = Nothing
+
 applyUpdates :: ReleaseTracker -> Maybe TargetState -> K8sUpdateTrackerReq -> (ReleaseTracker, Maybe TargetState)
 applyUpdates tracker mts req =
     let t1 = case req.status of
             Just s -> (tracker :: ReleaseTracker){NT.status = parseReleaseStatus s}
             Nothing -> tracker
         t2 = case req.mode of
-            Just "MANUAL" -> t1{NT.mode = Manual}
-            Just "AUTO" -> t1{NT.mode = Auto}
+            Just "MANUAL" -> t1{NT.mode = MANUAL}
+            Just "AUTO" -> t1{NT.mode = AUTO}
             _ -> t1
         t3 = case req.releaseManager of
             Just rm -> t2{NT.createdBy = rm}
@@ -972,7 +1077,7 @@ immediateRevertH rid req = do
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
             let currentStatus = NT.status tracker
-            if currentStatus /= Completed && currentStatus /= InProgress
+            if currentStatus /= COMPLETED && currentStatus /= INPROGRESS
                 then pure $ APIResponse "ERROR" ("Cannot immediate-revert from status: " <> T.pack (show currentStatus))
                 else do
                     let mCtx = case mTargetState of
@@ -999,7 +1104,7 @@ immediateRevertH rid req = do
                                     let restartCmd = unwords [kubectlBin cfg, "rollout", "restart", "deployment/" <> depQ, "-n", nsQ]
                                     _ <- liftIO $ executeWithRetry cfg restartCmd
                                     -- Step 3: Update tracker status
-                                    let updated = (tracker :: ReleaseTracker){NT.status = Reverted}
+                                    let updated = (tracker :: ReleaseTracker){NT.status = REVERTED}
                                     liftIO $ insertReleaseTracker db updated mTargetState
                                     liftIO $ insertReleaseEvent db rid "BUSINESS" "IMMEDIATE_REVERT" (object ["requestedBy" .= (req :: ImmediateRevertReq).requestedBy, "info" .= (req :: ImmediateRevertReq).info])
                                     liftIO $ notifyImmediateReverted db updated
@@ -1022,14 +1127,14 @@ restartReleaseH rid req = do
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
             let currentStatus = NT.status tracker
-            if currentStatus /= Aborted && currentStatus /= UserAborted && currentStatus /= Reverted
-                then pure $ APIResponse "ERROR" ("Cannot restart from status: " <> T.pack (show currentStatus) <> ". Valid: Aborted, UserAborted, Reverted")
+            if currentStatus /= ABORTED && currentStatus /= USER_ABORTED && currentStatus /= REVERTED
+                then pure $ APIResponse "ERROR" ("Cannot restart from status: " <> T.pack (show currentStatus) <> ". Valid: ABORTED, USER_ABORTED, REVERTED")
                 else do
                     now <- liftIO getCurrentTime
                     let updated =
                             (tracker :: ReleaseTracker)
-                                { NT.status = Created
-                                , NT.releaseWFStatus = Init
+                                { NT.status = CREATED
+                                , NT.releaseWFStatus = INIT
                                 , NT.startTime = Nothing
                                 , NT.endTime = Nothing
                                 , NT.scheduleTime = Just now
@@ -1063,8 +1168,8 @@ fastForwardH rid req = do
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
             let currentStatus = NT.status tracker
-            if currentStatus /= InProgress
-                then pure $ APIResponse "ERROR" ("Cannot fast-forward from status: " <> T.pack (show currentStatus) <> ". Must be InProgress")
+            if currentStatus /= INPROGRESS
+                then pure $ APIResponse "ERROR" ("Cannot fast-forward from status: " <> T.pack (show currentStatus) <> ". Must be INPROGRESS")
                 else do
                     -- Fast-forward: match production Julia logic exactly.
                     -- Sets rollout strategy cooloff to elapsed minutes (time since step started),
@@ -1083,7 +1188,7 @@ fastForwardH rid req = do
                         updatedStrategy = case strategy of
                             [] -> []
                             steps ->
-                                zipWith (\i s -> if i == currentStepIdx then s{cooloffSeconds = elapsedMins} else s) [0 ..] steps
+                                zipWith (\i s -> if i == currentStepIdx then s{cooloffMinutes = elapsedMins} else s) [0 ..] steps
                         -- History keeps original cooloff for display; manualOverride=True shows it was fast-forwarded
                         -- Strategy gets elapsedMins so workflow's isCoolOffExceeded passes immediately
                         updatedHistory = case history of

@@ -3,6 +3,9 @@
 
 module Core.Auth.Middleware
   ( authMiddleware,
+    findRoutePermission,
+    isPublicRoute,
+    knownDynamicRoutes,
   )
 where
 
@@ -52,6 +55,9 @@ findRoutePermission method pathSegs =
         ("GET", ["releases", _, "diff"]) -> Just $ mkPP "RELEASE_VIEW" "autopilot"
         ("GET", ["releases", _, "pods", "health"]) -> Just $ mkPP "RELEASE_VIEW" "autopilot"
         ("POST", ["releases", _, "revert", "immediate"]) -> Just $ mkPP "RELEASE_REVERT" "autopilot"
+        -- Cross-cluster revert by global_id (sync endpoints) — specific before general
+        ("PUT", ["release", "revert", "immediate", "global", _]) -> Just $ mkPP "RELEASE_REVERT" "autopilot"
+        ("PUT", ["release", "revert", "global", _]) -> Just $ mkPP "RELEASE_REVERT" "autopilot"
         ("POST", ["releases", _, "restart"]) -> Just $ mkPP "RELEASE_CREATE" "autopilot"
         ("POST", ["releases", _, "fast-forward"]) -> Just $ mkPP "RELEASE_UPDATE" "autopilot"
         ("GET", ["releases", _, "rollout-history"]) -> Just $ mkPP "RELEASE_VIEW" "autopilot"
@@ -74,6 +80,10 @@ findRoutePermission method pathSegs =
         ("GET", ["services", "config", _]) -> Just $ mkPP "PRODUCT_CONFIG_VIEW" "autopilot"
         ("PUT", ["services", "config", _]) -> Just $ mkPP "PRODUCT_CONFIG_EDIT" "autopilot"
         ("DELETE", ["services", "config", _]) -> Just $ mkPP "PRODUCT_CONFIG_EDIT" "autopilot"
+        -- VS Edit Tracker static paths (force-unlock MUST come before
+        -- the generic ["vs-edit-tracker", _] capture, otherwise the wildcard
+        -- claims it as a GET/PUT-by-id match and permission resolution is wrong)
+        ("POST", ["vs-edit-tracker", "force-unlock"]) -> Just $ mkPP "FORCE_UNLOCK" "autopilot"
         -- VS Edit Tracker with ID
         ("GET", ["vs-edit-tracker", _]) -> Just $ mkPP "RELEASE_VIEW" "autopilot"
         ("PUT", ["vs-edit-tracker", _]) -> Just $ mkPP "RELEASE_UPDATE" "autopilot"
@@ -85,6 +95,50 @@ findRoutePermission method pathSegs =
         Nothing -> find (\pp -> ppMethod pp == method && ppPathSegments pp `isPrefixOf` pathSegs) allProductPermissions
   where
     mkPP perm prod = ProductPermission method [] perm prod
+
+-- | Representative inputs for every dynamic case in 'findRoutePermission',
+-- with @":id"@ placeholders in Capture positions. Used by the startup
+-- self-test in 'Core.Server' to verify that the lookup function agrees with
+-- the shape 'Core.Auth.RouteCheck' emits from Servant API types (Capture as
+-- @":name"@). If you add a case to 'findRoutePermission', add a mirror entry
+-- here so the self-test keeps covering it.
+knownDynamicRoutes :: [(Text, [Text])]
+knownDynamicRoutes =
+  [ ("GET", ["releases", ":id", "events"]),
+    ("GET", ["releases", ":id"]),
+    ("POST", ["releases", ":id", "approve"]),
+    ("POST", ["releases", ":id", "rollback"]),
+    ("POST", ["releases", ":id", "revert"]),
+    ("POST", ["releases", ":id", "discard"]),
+    ("POST", ["releases", ":id", "delete"]),
+    ("POST", ["releases", ":id", "update"]),
+    ("POST", ["releases", ":id", "trigger"]),
+    ("GET", ["releases", ":id", "diff"]),
+    ("GET", ["releases", ":id", "pods", "health"]),
+    ("POST", ["releases", ":id", "revert", "immediate"]),
+    ("PUT", ["release", "revert", "immediate", "global", ":globalId"]),
+    ("PUT", ["release", "revert", "global", ":globalId"]),
+    ("POST", ["releases", ":id", "restart"]),
+    ("POST", ["releases", ":id", "fast-forward"]),
+    ("GET", ["releases", ":id", "rollout-history"]),
+    ("GET", ["releases", ":id", "logslink"]),
+    ("DELETE", ["server-config", ":id"]),
+    ("GET", ["products", ":product", "services", ":service"]),
+    ("GET", ["envs", "secondary", ":anything"]),
+    ("GET", ["configmap", "secondary", ":anything"]),
+    ("GET", ["tracker", "configmap", ":id"]),
+    ("PUT", ["tracker", "configmap", ":id"]),
+    ("GET", ["products", "config", ":id"]),
+    ("PUT", ["products", "config", ":id"]),
+    ("DELETE", ["products", "config", ":id"]),
+    ("GET", ["services", "config", ":id"]),
+    ("PUT", ["services", "config", ":id"]),
+    ("DELETE", ["services", "config", ":id"]),
+    ("GET", ["vs-edit-tracker", ":id"]),
+    ("PUT", ["vs-edit-tracker", ":id"]),
+    ("PUT", ["vs-edit-tracker", "revert", ":id"]),
+    ("POST", ["vs-edit-tracker", "force-unlock"])
+  ]
 
 -- | WAI middleware that enforces RBAC on all routes.
 -- Flow: extract token → validate → check permission → allow/deny
@@ -100,9 +154,12 @@ authMiddleware db app req respond = do
       ("admin" : _) -> handleAuth db app req respond Nothing
       -- Auth routes (logout, me): validate token only
       ("auth" : _) -> handleAuth db app req respond Nothing
-      -- All other routes: validate token + check product permission
+      -- All other routes: validate token + check product permission.
+      -- Fallback is DENY (403) — a missing mapping is a security bug, not a free pass.
       _ -> case findRoutePermission method pathSegs of
-        Nothing -> handleAuth db app req respond Nothing -- Unknown routes: validate token (no specific permission)
+        Nothing ->
+          respond $
+            jsonError 403 ("No permission mapping for route: " <> method <> " /" <> T.intercalate "/" pathSegs)
         Just pp -> handleAuth db app req respond (Just pp)
 
 -- | Core auth handler: validates token, optionally checks permission

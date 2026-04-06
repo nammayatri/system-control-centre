@@ -17,7 +17,7 @@ in  { -- Database
       }
     , serverCfg =
       { port = env:PORT as Text ? "8012"
-      , env = env:NammaAP_ENV as Text ? "development"
+      , env = env:SC_ENV as Text ? "development"
       }
     , logLevel = LogLevel.DEBUG
     , appState = AppState.SERVER

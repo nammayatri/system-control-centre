@@ -25,7 +25,9 @@ library
       Core.Admin.Routes
       Core.Admin.Types
       Core.Auth.Middleware
+      Core.Auth.Protected
       Core.Auth.Queries
+      Core.Auth.RouteCheck
       Core.Auth.Routes
       Core.Auth.Types
       Core.Config
@@ -47,7 +49,6 @@ library
       Products.Autopilot.K8s.VirtualService
       Products.Autopilot.Queries.ProductService
       Products.Autopilot.Queries.ReleaseTracker
-      Products.Autopilot.Queries.ServerConfig
       Products.Autopilot.Queries.VsEditTracker
       Products.Autopilot.Actions.Config
       Products.Autopilot.Actions.ConfigMap
@@ -81,10 +82,13 @@ library
       Products.Autopilot.Workflow.Types
       Products.Registry
       Products.Types
+      Shared.API.Response
       Shared.Config.Registry
       Shared.Config.Types
       Shared.Error
       Shared.JSON
+      Shared.Queries.ServerConfig
+      Shared.Types.Storage.ServerConfig
   other-modules:
       Paths_namma_ap
   hs-source-dirs:

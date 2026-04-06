@@ -10,6 +10,7 @@ module Products.Autopilot.Actions.VSEdit
     updateVsEditTrackerH,
     lockVsEditTrackerH,
     unlockVsEditTrackerH,
+    forceUnlockVsEditTrackerH,
     revertVsEditTrackerH,
     fetchCurrentVsH,
   )
@@ -34,12 +35,13 @@ import qualified Data.Yaml as Yaml
 import Products.Autopilot.K8s.Execute (K8sError (..), runCmd, shellQuote)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import Products.Autopilot.Notifications
-import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductNamespace, getProductVsName, tryAcquireVsLock, updateVsLockedBy)
+import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductNamespace, getProductVsName, releaseVsLockIfOwner, tryAcquireVsLock, updateVsLockedBy)
 import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTrackerRow, insertReleaseEvent, insertReleaseTrackerRow, listReleaseEvents)
 import Products.Autopilot.Queries.VsEditTracker
 import Products.Autopilot.Types.API
 import Products.Autopilot.Workflow.Helpers (stripK8sNoiseValue)
 import qualified Products.Autopilot.Types.Storage.Schema as S
+import Shared.API.Response (APIResponse (..))
 
 -- ============================================================================
 -- VS Edit Tracker CRUD (using release_tracker with category=VSEdit)
@@ -103,7 +105,7 @@ mkVsEditRow tid product' service' env' vsName' _oldVsData' createdBy' status' no
       rtEnv = env',
       rtCategory = "VSEdit",
       rtStatus = status',
-      rtReleaseWFStatus = "Init",
+      rtReleaseWFStatus = "INIT",
       rtMode = Nothing,
       rtCreatedBy = fromMaybe "admin" createdBy',
       rtApprovedBy = Nothing,
@@ -133,7 +135,9 @@ createVsEditTrackerH CreateVsEditTrackerReq {..} = do
   db <- getDBEnv
   now <- liftIO getCurrentTime
   tid <- liftIO (UUID.toText <$> UUID.nextRandom)
-  -- Atomically acquire VS lock (single UPDATE WHERE vs_locked_by IS NULL)
+  -- Atomically acquire VS lock. The UPDATE inside tryAcquireVsLock treats a
+  -- lock whose vs_lock_timestamp is stale (> lock_expiry_delay_minutes old)
+  -- as released, so a crashed-mid-edit lock no longer blocks all new edits.
   acquired <- liftIO $ tryAcquireVsLock db appGroup createdBy
   if not acquired
     then
@@ -151,6 +155,30 @@ createVsEditTrackerH CreateVsEditTrackerReq {..} = do
       case oldVsData of
         Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_OLD" (String d)
         Nothing -> pure ()
+      -- Close the TOCTOU window: if another caller raced us (same owner,
+      -- stale-lock expiry race, retry after transient error) and also
+      -- created a CREATED tracker for this VS, mark those earlier trackers
+      -- DISCARDED so only the latest one survives. Mirrors Julia's
+      -- validateExistingVSTrackers + discardIfDuplicate (create.jl:46-62).
+      discardedCount <- liftIO $ discardDuplicateCreatedVsTrackers db appGroup tid
+      liftIO $
+        if discardedCount > 0
+          then do
+            putStrLn $
+              "[VS-EDIT] DISCARDED "
+                <> show discardedCount
+                <> " duplicate CREATED tracker(s) for app_group="
+                <> T.unpack appGroup
+                <> " (kept: "
+                <> T.unpack tid
+                <> ")"
+            insertReleaseEvent
+              db
+              tid
+              "BUSINESS"
+              "DUPLICATE_DISCARDED"
+              (toJSON (object ["discardedCount" .= discardedCount, "appGroup" .= appGroup]))
+          else pure ()
       liftIO $ notifyVsEditCreated db tid appGroup service (Just createdBy)
       pure $ toJSON $ releaseRowToVsResponse row
 
@@ -226,7 +254,20 @@ updateVsEditTrackerH tid UpdateVsEditTrackerReq {..} = do
                   if T.null vsContent
                     then pure $ APIResponse "ERROR" "Empty VS data"
                     else do
-                      -- Apply to K8s via kubectl replace
+                      -- NOTE (M7 — deferred, task #10 audit):
+                      -- kubectl replace runs BEFORE the DB tracker row flips
+                      -- to APPLIED. If kubectl succeeds but the subsequent
+                      -- conditionalUpdateTrackerRow loses a CAS race (another
+                      -- request already mutated the tracker row), K8s has
+                      -- already been patched while the DB still says CREATED
+                      -- — a drift between reality and our record. Julia has
+                      -- the same ordering (api/vsedit/apply.jl). Team-lead's
+                      -- call (see race-hunter task #10 report): do NOT fix
+                      -- now — the CAS loser branch is rare, recoverable
+                      -- (retry the update with the new baseline), and fixing
+                      -- it properly needs an idempotency token on the K8s
+                      -- side we don't have yet. Revisit alongside the planned
+                      -- APPLIED-event-sourced rollback scheme.
                       result <- liftIO $ applyVsToK8s cfg (T.unpack ns) vsContent
                       case result of
                         Left err -> pure $ APIResponse "ERROR" ("K8s apply failed: " <> err)
@@ -294,6 +335,29 @@ lockVsEditTrackerH VsLockReq {..} = do
       liftIO $ notifyVsEditLocked db tid appGroup (fromMaybe "" service) (fromMaybe "admin" lockedBy)
       pure $ APIResponse "SUCCESS" ("VS locked. Tracker ID: " <> tid)
 
+-- | Ownership-checked unlock (task #10 audit, M6). Anyone holding the
+-- tracker ID used to be able to clear the lock unconditionally, even if the
+-- lock was held by someone else — a soft auth hole. The check is now:
+--
+--   1. Look up the tracker row. Its 'rtCreatedBy' is the owner-of-record
+--      (set at lock time to whatever identity lockVsEditTrackerH was called
+--      with).
+--   2. Ask the DB to release the lock ONLY IF deployment_config.vs_locked_by
+--      matches that owner ('releaseVsLockIfOwner'). The guard is in a single
+--      UPDATE, so there is no TOCTOU between check and release.
+--   3. If the guard fails — because some other identity acquired the lock
+--      after this tracker was created (e.g. after the prior lock was
+--      expired+swept by 'tryAcquireVsLock') — return an error pointing the
+--      caller at the force-unlock endpoint.
+--
+-- The tracker row is still flipped to UNLOCKED and an event is emitted, but
+-- only after the DB lock release succeeds, so we never record an "unlocked"
+-- state that doesn't reflect reality.
+--
+-- The no-tracker-id branch (legacy "just unlock whatever's held for this
+-- app_group") is intentionally refused: without a tracker row we have no
+-- record of who the expected owner is, so we cannot safely do an ownership
+-- check. Callers in that situation must use the superadmin force-unlock.
 unlockVsEditTrackerH :: VsUnlockReq -> Flow APIResponse
 unlockVsEditTrackerH VsUnlockReq {..} = do
   db <- getDBEnv
@@ -304,22 +368,102 @@ unlockVsEditTrackerH VsUnlockReq {..} = do
       case m of
         Nothing -> pure $ APIResponse "ERROR" "Tracker not found"
         Just existing -> do
-          let updated = existing{S.rtStatus = "UNLOCKED", S.rtUpdatedAt = now, S.rtEndTime = Just now}
-          liftIO $ insertReleaseTrackerRow db updated
-          -- Clear vs_locked_by in deployment_config
+          let expectedOwner = S.rtCreatedBy existing
+          released <- liftIO $ releaseVsLockIfOwner db (S.rtAppGroup existing) expectedOwner
+          if not released
+            then
+              pure $
+                APIResponse
+                  "ERROR"
+                  ( "VS lock is not held by tracker owner ('"
+                      <> expectedOwner
+                      <> "'). Use /vs-edit-tracker/force-unlock (superadmin only) to override."
+                  )
+            else do
+              -- CAS (task #34 M6): blind insert overwrote concurrent writers
+              -- (e.g. an updateVsEditTrackerH running in parallel). Expected
+              -- status is whatever the tracker was when we read it above.
+              -- Lock is already cleared, so on CAS failure we still return
+              -- the lock-release outcome but flag the tracker as stale so
+              -- the UI refreshes rather than showing this handler's snapshot.
+              let updated = existing{S.rtStatus = "UNLOCKED", S.rtUpdatedAt = now, S.rtEndTime = Just now}
+              ok <- liftIO $ conditionalUpdateTrackerRow db updated (S.rtStatus existing)
+              if ok
+                then do
+                  liftIO $ notifyVsEditUnlocked db (S.rtId existing) (S.rtAppGroup existing) (S.rtService existing)
+                  pure $ APIResponse "SUCCESS" "VS unlocked"
+                else
+                  pure $
+                    APIResponse
+                      "WARNING"
+                      "VS lock was released, but the tracker row was modified by another request. Please refresh."
+    Nothing ->
+      pure $
+        APIResponse
+          "ERROR"
+          ( "trackerId is required to verify ownership. "
+              <> maybe "" (\p -> "(app_group=" <> p <> ") ") appGroup
+              <> "Use /vs-edit-tracker/force-unlock (superadmin only) if no tracker is available."
+          )
+
+-- | Superadmin-only force unlock (task #10 audit, M6). Bypasses the
+-- ownership check in 'unlockVsEditTrackerH' and unconditionally clears the
+-- VS lock for a given app_group. Intended for operator recovery when a
+-- tracker row is missing, the owner identity is unknown, or the lock is
+-- stuck for some other reason outside the normal expiry sweep.
+--
+-- Gating: the route is wired to the 'AP_CONFIG_FORCE_UNLOCK' permission,
+-- which by convention is granted only to superadmin. The middleware's
+-- superadmin bypass ('Core.Auth.Middleware.handleAuth') ensures that
+-- permission-checked routes go through the superadmin-only path; a
+-- non-superadmin with no matching role will get a 403.
+forceUnlockVsEditTrackerH :: VsUnlockReq -> Flow APIResponse
+forceUnlockVsEditTrackerH VsUnlockReq {..} = do
+  db <- getDBEnv
+  now <- liftIO getCurrentTime
+  case trackerId of
+    Just tid -> do
+      m <- liftIO $ findVsEditTrackerRowById db tid
+      case m of
+        Nothing -> do
+          -- Allow force-unlock by app_group even if tracker lookup fails,
+          -- as long as the body also passed appGroup.
+          case appGroup of
+            Just p | not (T.null p) -> do
+              liftIO $ updateVsLockedBy db p Nothing
+              liftIO $ notifyVsEditUnlocked db "" p ""
+              pure $ APIResponse "SUCCESS" ("VS force-unlocked for app_group=" <> p <> " (tracker missing)")
+            _ -> pure $ APIResponse "ERROR" "Tracker not found and no appGroup provided"
+        Just existing -> do
           liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing
-          liftIO $ notifyVsEditUnlocked db (S.rtId existing) (S.rtAppGroup existing) (S.rtService existing)
-          pure $ APIResponse "SUCCESS" "VS unlocked"
+          -- CAS (task #34 M7): same fix as M6. Force-unlock is an operator
+          -- recovery path, so the tracker row MAY have been edited by an
+          -- unrelated writer in parallel; blind insert would silently
+          -- overwrite that. Lock has already been force-cleared, which is
+          -- the authoritative side effect; the tracker update is housekeeping.
+          let updated = existing{S.rtStatus = "UNLOCKED", S.rtUpdatedAt = now, S.rtEndTime = Just now}
+          ok <- liftIO $ conditionalUpdateTrackerRow db updated (S.rtStatus existing)
+          if ok
+            then do
+              liftIO $ notifyVsEditUnlocked db (S.rtId existing) (S.rtAppGroup existing) (S.rtService existing)
+              pure $ APIResponse "SUCCESS" "VS force-unlocked"
+            else
+              pure $
+                APIResponse
+                  "WARNING"
+                  "VS lock was force-cleared, but the tracker row was modified by another request. Please refresh."
     Nothing -> do
       let p = fromMaybe "" appGroup
-      mLock <- liftIO $ findActiveLockFromConfig db p
-      case mLock of
-        Nothing -> pure $ APIResponse "ERROR" "No active lock found"
-        Just _existing -> do
-          -- Clear vs_locked_by in deployment_config
-          liftIO $ updateVsLockedBy db p Nothing
-          liftIO $ notifyVsEditUnlocked db "" p ""
-          pure $ APIResponse "SUCCESS" "VS unlocked"
+      if T.null p
+        then pure $ APIResponse "ERROR" "trackerId or appGroup required"
+        else do
+          mLock <- liftIO $ findActiveLockFromConfig db p
+          case mLock of
+            Nothing -> pure $ APIResponse "ERROR" ("No active lock found for app_group=" <> p)
+            Just _existing -> do
+              liftIO $ updateVsLockedBy db p Nothing
+              liftIO $ notifyVsEditUnlocked db "" p ""
+              pure $ APIResponse "SUCCESS" ("VS force-unlocked for app_group=" <> p)
 
 revertVsEditTrackerH :: Text -> Flow APIResponse
 revertVsEditTrackerH _tid =

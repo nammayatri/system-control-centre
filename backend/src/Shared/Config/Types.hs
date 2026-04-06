@@ -35,7 +35,7 @@ configGroupToText :: ConfigGroup -> Text
 configGroupToText GeneralGroup = "General"
 configGroupToText DeploymentGroup = "Deployment"
 configGroupToText SyncGroup = "Sync"
-configGroupToText MonitoringGroup = "Monitoring"
+configGroupToText MonitoringGroup = "MONITORING"
 configGroupToText ScalingGroup = "Scaling"
 configGroupToText NotificationGroup = "Notification"
 configGroupToText ABTestingGroup = "A/B Testing"

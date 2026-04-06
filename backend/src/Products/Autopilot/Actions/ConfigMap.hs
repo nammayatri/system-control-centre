@@ -39,6 +39,7 @@ import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Target (TargetState (..), emptyConfigState)
 import qualified Products.Autopilot.Types.Storage.Schema as S
+import Shared.API.Response (APIResponse (..))
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
@@ -88,9 +89,9 @@ createConfigMapH body = do
                 service = fromMaybe service' name',
                 env = env',
                 category = BackendConfig,
-                status = Created,
-                releaseWFStatus = Init,
-                mode = Auto,
+                status = CREATED,
+                releaseWFStatus = INIT,
+                mode = AUTO,
                 createdBy = releaseManager',
                 approvedBy = Nothing,
                 isApproved = False,
@@ -234,10 +235,10 @@ handleConfigMapRevert db rt mts cmId' = do
           revertTracker =
             rt
               { NT.releaseId = newRid,
-                NT.status = Created,
+                NT.status = CREATED,
                 NT.isApproved = False,
                 NT.description = Just ("Revert of " <> cmId'),
-                NT.changeLog = Just ("Reverted from tracker " <> cmId'),
+                NT.changeLog = Just ("REVERTED from tracker " <> cmId'),
                 NT.info = Just "REVERT",
                 NT.dateCreated = Nothing,
                 NT.lastUpdated = Nothing
@@ -256,7 +257,7 @@ handleConfigMapRevert db rt mts cmId' = do
       liftIO $ insertReleaseTracker db finalTracker (Just targetState)
       liftIO $ insertReleaseEvent db newRid "BUSINESS" "REVERT_TRACKER_CREATED" (toJSON ("Revert of " <> cmId'))
       -- Mark original as REVERTING
-      let reverted = rt{NT.status = Reverting}
+      let reverted = rt{NT.status = REVERTING}
       liftIO $ insertReleaseTracker db reverted mts
       liftIO $ notifyConfigMapReverted db reverted
       pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
@@ -278,13 +279,7 @@ toConfigMapResponse rt =
       fileVal = getMetaStr "file"
       nameVal = getMetaStr "name"
       clusterVal = fromMaybe "" (getMetaStr "cluster")
-      statusText = case NT.status rt of
-        Created -> "CREATED" :: Text
-        InProgress -> "INPROGRESS"
-        Completed -> "COMPLETED"
-        Aborted -> "ABORTED"
-        UserAborted -> "ABORTED"
-        _ -> T.pack (show (NT.status rt))
+      statusText = T.pack (show (NT.status rt)) :: Text
    in ConfigMapResponse
         { cmrId = NT.releaseId rt,
           cmrService = NT.service rt,
@@ -332,12 +327,12 @@ extractCmFields _ = Left "Invalid JSON body"
 applyCmUpdates :: ReleaseTracker -> Value -> ReleaseTracker
 applyCmUpdates rt (Object obj) =
   let rt1 = case getStrM "status" obj of
-        Just "CREATED" -> rt{NT.status = Created}
-        Just "INPROGRESS" -> rt{NT.status = InProgress}
-        Just "COMPLETED" -> rt{NT.status = Completed}
-        Just "ABORTED" -> rt{NT.status = Aborted}
-        Just "DISCARDED" -> rt{NT.status = Discarded}
-        Just "PAUSED" -> rt{NT.status = Paused}
+        Just "CREATED" -> rt{NT.status = CREATED}
+        Just "INPROGRESS" -> rt{NT.status = INPROGRESS}
+        Just "COMPLETED" -> rt{NT.status = COMPLETED}
+        Just "ABORTED" -> rt{NT.status = ABORTED}
+        Just "DISCARDED" -> rt{NT.status = DISCARDED}
+        Just "PAUSED" -> rt{NT.status = PAUSED}
         _ -> rt
       rt2 = maybe rt1 (\s -> rt1{NT.description = Just s}) (getStrM "description" obj)
       rt3 = maybe rt2 (\s -> rt2{NT.changeLog = Just s}) (getStrM "change_log" obj)

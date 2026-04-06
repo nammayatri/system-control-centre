@@ -22,13 +22,10 @@ export default function LauncherPage() {
   const { user, logout } = useAuth();
   const { isAdmin, hasPermission } = usePermissions();
 
-  // Filter products user has access to
-  const accessibleProducts = PRODUCT_REGISTRY.filter((p) => {
-    if (isAdmin) return true;
-    // Check if user has any VIEW permission for this product
-    const viewPerms = ['VIEW', 'RELEASE_VIEW', 'AP_RELEASE_VIEW', 'CONFIG_VIEW', 'CM_CONFIG_VIEW'];
-    return viewPerms.some(perm => hasPermission(p.slug, perm));
-  });
+  // Filter products user has access to via each product's declared viewPermission
+  const accessibleProducts = PRODUCT_REGISTRY.filter((p) =>
+    hasPermission(p.slug, p.viewPermission)
+  );
 
   return (
     <div className="min-h-screen bg-zinc-50 font-sans">
@@ -102,7 +99,7 @@ export default function LauncherPage() {
               </div>
               <h3 className="text-sm font-semibold text-zinc-900 mt-4">{product.label}</h3>
               <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
-                {getProductDescription(product.slug)}
+                {product.description}
               </p>
             </motion.button>
           ))}
@@ -112,15 +109,3 @@ export default function LauncherPage() {
   );
 }
 
-function getProductDescription(slug: string): string {
-  switch (slug) {
-    case 'autopilot':
-      return 'Create, approve, and manage backend service releases';
-    case 'config-manager':
-      return 'Manage ConfigMaps and runtime configurations';
-    case 'frontend-releases':
-      return 'Deploy and manage frontend applications';
-    default:
-      return 'Manage and monitor operations';
-  }
-}

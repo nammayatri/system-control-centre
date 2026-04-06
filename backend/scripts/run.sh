@@ -48,7 +48,7 @@ echo "  Port: $SERVER_PORT"
 echo "  DB:   postgres://$DB_USER@$DB_HOST:$DB_PORT/$DB_NAME"
 echo ""
 
-export NammaAP_DATABASE_URL="postgres://$DB_USER@$DB_HOST:$DB_PORT/$DB_NAME"
+export SC_DATABASE_URL="postgres://$DB_USER@$DB_HOST:$DB_PORT/$DB_NAME"
 export PORT="$SERVER_PORT"
 
 exec cabal run namma-ap-exe

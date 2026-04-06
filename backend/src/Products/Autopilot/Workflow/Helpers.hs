@@ -289,10 +289,10 @@ stateCheckFuncV2 targetStatus rs =
 -- Usage:
 -- @
 -- workflow = do
--- Init |>> validatePreconditions
--- Deploying |>> deployApplication
--- Monitoring |>> monitorHealth
--- Finalizing |>> cleanup
+-- INIT |>> validatePreconditions
+-- DEPLOYING |>> deployApplication
+-- MONITORING |>> monitorHealth
+-- FINALIZING |>> cleanup
 -- @
 cprV2 :: ReleaseWFStatus -> StateFlow () -> ReleaseWorkFlow ()
 cprV2 targetStatus func =

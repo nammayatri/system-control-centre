@@ -5,7 +5,7 @@ import Core.Config (appState, loadConfig)
 import Core.DB.Connection (mkDBEnv)
 import Core.Environment (AppState (..))
 import Core.Server (serverLoop)
-import Products.Autopilot.Runner (runnerLoop)
+import Products.Autopilot.Runner (runnerLoop, runnerPollLoop, runnerStartupRecovery)
 
 main :: IO ()
 main = do
@@ -15,5 +15,12 @@ main = do
   case appState cfg of
     "RUNNER" -> runnerLoop st
     -- In local/single-process mode keep server + worker together.
-    "SERVER" -> concurrently_ (serverLoop st) (runnerLoop st)
+    -- #35 FIX 1 — run startup recovery SYNCHRONOUSLY before the HTTP port
+    -- is bound. If we forked the poll loop alongside the server like we
+    -- used to, rollbackInProgressOnStartup could race with user-initiated
+    -- HTTP writes and silently overwrite them. Startup recovery must
+    -- complete with the server still closed to new connections.
+    "SERVER" -> do
+      runnerStartupRecovery st
+      concurrently_ (serverLoop st) (runnerPollLoop st)
     _ -> serverLoop st

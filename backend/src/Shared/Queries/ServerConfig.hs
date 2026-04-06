@@ -1,6 +1,17 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Products.Autopilot.Queries.ServerConfig
+-- | Cross-product queries for the @server_config@ table.
+--
+-- This module is product-agnostic: every query that cares about scoping takes
+-- a @Maybe Text@ product argument. Callers inside a specific product should
+-- pass @Just "autopilot"@ (etc.); callers that legitimately want global-only
+-- behaviour pass 'Nothing'.
+--
+-- History: these queries used to live at @Products.Autopilot.Queries.ServerConfig@
+-- even though the table itself is cross-product, which broke the product
+-- boundary for "Shared" consumers like 'Shared.Config.Runtime'. Task #30
+-- moved them here.
+module Shared.Queries.ServerConfig
   ( getEnabledServerConfigValue,
     getEnabledServerConfigValueForProduct,
     listAllServerConfigs,
@@ -18,30 +29,29 @@ import Data.Time.Clock (getCurrentTime)
 import Database.Beam
 import Database.PostgreSQL.Simple (execute)
 import GHC.Int (Int32)
-import Products.Autopilot.Types.Storage.Schema
+import Shared.Types.Storage.ServerConfig
 
--- | Fetch a server_config value by name, with product-scoped lookup.
--- Priority: product-specific value > global (product IS NULL) value.
--- If no product param given, falls back to first enabled match (backward compat).
+-- | Fetch a server_config value by name, global lookup only (no product scoping).
+-- Equivalent to 'getEnabledServerConfigValueForProduct' with @mProduct = Nothing@,
+-- kept as a thin wrapper for call-sites that truly want global-only semantics.
 getEnabledServerConfigValue :: DBEnv -> Text -> IO (Maybe Text)
 getEnabledServerConfigValue db name = getEnabledServerConfigValueForProduct db name Nothing
 
 -- | Product-aware config lookup.
 -- Queries all enabled rows matching the name, then picks:
--- 1. Product-specific match (if product param given and match exists)
--- 2. Global match (product IS NULL)
--- 3. Any match (first found)
+--   1. Product-specific match (if product param given and match exists)
+--   2. Global match (product IS NULL)
+--   3. Any match (first found) — backward-compat fallback
 getEnabledServerConfigValueForProduct :: DBEnv -> Text -> Maybe Text -> IO (Maybe Text)
 getEnabledServerConfigValueForProduct db name mProduct = do
   rows <-
     runDB db $
       runSelectReturningList $
         select $ do
-          sc <- all_ (serverConfigs nammaAPDb)
+          sc <- all_ (serverConfigs serverConfigDb)
           guard_ (scName sc ==. val_ name)
           guard_ (scEnabled sc ==. val_ 1)
           pure (scProduct sc, scValue sc)
-  -- Priority: product-specific > global (NULL) > any
   let productMatch = case mProduct of
         Just p -> lookup (Just p) rows
         Nothing -> Nothing
@@ -64,7 +74,7 @@ listServerConfigsByProduct db mProduct = do
       runSelectReturningList $
         select $
           orderBy_ (\sc -> (asc_ (scType sc), asc_ (scName sc))) $ do
-            sc <- all_ (serverConfigs nammaAPDb)
+            sc <- all_ (serverConfigs serverConfigDb)
             case mProduct of
               Just p -> guard_ (scProduct sc ==. val_ (Just p) ||. scProduct sc ==. val_ Nothing)
               Nothing -> pure ()
@@ -81,10 +91,9 @@ listServerConfigsByProduct db mProduct = do
         scProduct sc
       )
 
--- | Upsert a server_config row by name (now includes product column).
--- Uses INSERT ON CONFLICT to avoid TOCTOU race between SELECT and UPDATE/INSERT.
 -- | Upsert a server_config row by (name, product).
--- Same name can exist for different products.
+-- Same name can exist for different products. Uses INSERT ON CONFLICT to
+-- avoid TOCTOU race between SELECT and UPDATE/INSERT.
 upsertServerConfig :: DBEnv -> Text -> Text -> Text -> Bool -> Maybe Text -> IO ()
 upsertServerConfig db name typ value enabled product_ = do
   let enabledInt = if enabled then (1 :: Int32) else 0
@@ -107,5 +116,5 @@ deleteServerConfig db configId =
   runDB db $
     runDelete $
       delete
-        (serverConfigs nammaAPDb)
+        (serverConfigs serverConfigDb)
         (\sc -> scId sc ==. val_ configId)

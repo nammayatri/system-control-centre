@@ -69,12 +69,12 @@ import Prelude
 -- | Backend scheduler workflow using pod-count based rollout (no traffic shifting)
 backendSchedulerWorkflow :: ReleaseWorkFlow ()
 backendSchedulerWorkflow = do
-  Init |>> validatePreconditions
-  Preparing |>> prepareK8sResources
-  Deploying |>> podCountRollout
-  Monitoring |>> monitorHealth
-  Finalizing |>> cleanupOldVersion
-  Done |>> notifyComplete
+  INIT |>> validatePreconditions
+  PREPARING |>> prepareK8sResources
+  DEPLOYING |>> podCountRollout
+  MONITORING |>> monitorHealth
+  FINALIZING |>> cleanupOldVersion
+  DONE |>> notifyComplete
 
 -- ============================================================================
 -- Helpers: Config / Context / K8s IO
@@ -158,7 +158,7 @@ prepareK8sResources = do
   cfg <- getCfg
   ctx <- getK8sCtx
   db <- getDB
-  liftIO $ putStrLn $ "Preparing K8s resources for scheduler " <> T.unpack (appGroup rt)
+  liftIO $ putStrLn $ "PREPARING K8s resources for scheduler " <> T.unpack (appGroup rt)
 
   -- Capture BEFORE snapshot (old deployment)
   let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
@@ -239,11 +239,11 @@ podCountRollout = do
         liftIO $ notifyReleaseProgress db latestRT (rolloutPercent step)
 
         -- Cooloff between steps
-        when (cooloffSeconds step > 0 && rolloutPercent step < 100) $ do
+        when (cooloffMinutes step > 0 && rolloutPercent step < 100) $ do
           liftIO $
             putStrLn $
-              "  Cooloff: " <> show (cooloffSeconds step) <> " seconds"
-          liftIO $ threadDelay (cooloffSeconds step * 1000000)
+              "  Cooloff: " <> show (cooloffMinutes step) <> " seconds"
+          liftIO $ threadDelay (cooloffMinutes step * 1000000)
 
         -- Health check between steps
         when (rolloutPercent step < 100) $
@@ -275,10 +275,10 @@ monitorHealth = do
   rt <- getRT
   cfg <- getCfg
   ctx <- getK8sCtx
-  liftIO $ putStrLn $ "Monitoring health for scheduler " <> T.unpack (appGroup rt)
+  liftIO $ putStrLn $ "MONITORING health for scheduler " <> T.unpack (appGroup rt)
 
   updateK8sStatus BSMonitoring
-  liftIO $ putStrLn "  Monitoring pod health metrics"
+  liftIO $ putStrLn "  MONITORING pod health metrics"
 
   updateK8sStatus BSStabilize
   liftIO $ putStrLn "  Stabilization period (30s)"
@@ -347,9 +347,9 @@ notifyComplete = do
   liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
   liftIO $ putStrLn $ "   Service: " <> T.unpack (appGroup rt)
   liftIO $ putStrLn $ "   Category: BackendScheduler"
-  liftIO $ putStrLn $ "   Status: Completed"
+  liftIO $ putStrLn $ "   Status: COMPLETED"
 
-  updateRT $ \r -> r{status = Completed}
+  updateRT $ \r -> r{status = COMPLETED}
 
   -- Notify Slack
   liftIO $ notifyReleaseCompleted db rt

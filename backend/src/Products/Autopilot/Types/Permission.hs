@@ -35,6 +35,7 @@ data AutopilotPermission
   | AP_CONFIG_EDIT
   | AP_CONFIG_DISCARD
   | AP_CONFIG_REVERT
+  | AP_FORCE_UNLOCK
   deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 autopilotPermissionToText :: AutopilotPermission -> Text
@@ -57,6 +58,7 @@ autopilotPermissionToText AP_CONFIG_APPROVE = "CONFIG_APPROVE"
 autopilotPermissionToText AP_CONFIG_EDIT = "CONFIG_EDIT"
 autopilotPermissionToText AP_CONFIG_DISCARD = "CONFIG_DISCARD"
 autopilotPermissionToText AP_CONFIG_REVERT = "CONFIG_REVERT"
+autopilotPermissionToText AP_FORCE_UNLOCK = "FORCE_UNLOCK"
 
 textToAutopilotPermission :: Text -> Maybe AutopilotPermission
 textToAutopilotPermission "RELEASE_VIEW" = Just AP_RELEASE_VIEW
@@ -78,6 +80,7 @@ textToAutopilotPermission "CONFIG_APPROVE" = Just AP_CONFIG_APPROVE
 textToAutopilotPermission "CONFIG_EDIT" = Just AP_CONFIG_EDIT
 textToAutopilotPermission "CONFIG_DISCARD" = Just AP_CONFIG_DISCARD
 textToAutopilotPermission "CONFIG_REVERT" = Just AP_CONFIG_REVERT
+textToAutopilotPermission "FORCE_UNLOCK" = Just AP_FORCE_UNLOCK
 textToAutopilotPermission _ = Nothing
 
 -- | Human-readable description of each permission.
@@ -102,3 +105,4 @@ permissionDescription AP_CONFIG_APPROVE = "Approve ConfigMap and VS edit release
 permissionDescription AP_CONFIG_EDIT = "Edit ConfigMap and VS edit releases"
 permissionDescription AP_CONFIG_DISCARD = "Discard ConfigMap and VS edit releases"
 permissionDescription AP_CONFIG_REVERT = "Revert ConfigMap releases"
+permissionDescription AP_FORCE_UNLOCK = "Force-release a VS edit lock held by another user (operator recovery; superadmin only)"

@@ -4,10 +4,10 @@
 --
 -- This module implements the workflow for updating CronJobs in Kubernetes.
 -- CronJobs are simpler than services:
--- 1. Preparing: Get current cronjob spec
--- 2. Deploying: Update cronjob image
--- 3. Monitoring: Optionally suspend old cronjob if cronjob_suspend flag is set
--- 4. Done: Mark Completed
+-- 1. PREPARING: Get current cronjob spec
+-- 2. DEPLOYING: Update cronjob image
+-- 3. MONITORING: Optionally suspend old cronjob if cronjob_suspend flag is set
+-- 4. DONE: Mark COMPLETED
 module Products.Autopilot.Workflow.BackendCronJobWorkflow
   ( backendCronJobWorkflow,
   )
@@ -54,11 +54,11 @@ import Prelude
 -- | Backend CronJob workflow: simple image update
 backendCronJobWorkflow :: ReleaseWorkFlow ()
 backendCronJobWorkflow = do
-  Init |>> validatePreconditions
-  Preparing |>> getCronJobSpec
-  Deploying |>> updateCronJobImage
-  Monitoring |>> handleCronJobSuspend
-  Done |>> notifyComplete
+  INIT |>> validatePreconditions
+  PREPARING |>> getCronJobSpec
+  DEPLOYING |>> updateCronJobImage
+  MONITORING |>> handleCronJobSuspend
+  DONE |>> notifyComplete
 
 -- ============================================================================
 -- Helpers: Config / Context / K8s IO
@@ -234,9 +234,9 @@ notifyComplete = do
   liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
   liftIO $ putStrLn $ "   Service: " <> T.unpack (appGroup rt)
   liftIO $ putStrLn $ "   Category: BackendCronJob"
-  liftIO $ putStrLn $ "   Status: Completed"
+  liftIO $ putStrLn $ "   Status: COMPLETED"
 
-  updateRT $ \r -> r{status = Completed}
+  updateRT $ \r -> r{status = COMPLETED}
 
   -- Notify Slack
   liftIO $ notifyReleaseCompleted db rt

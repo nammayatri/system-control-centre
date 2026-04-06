@@ -2,7 +2,7 @@
 --
 -- This module contains the high-level types for release workflows:
 -- - ReleaseCategory: What type of release (BackendService, MobileAppAndroid, etc.)
--- - ReleaseWFStatus: Generic workflow stages (Init, Deploying, Monitoring, Done, etc.)
+-- - ReleaseWFStatus: Generic workflow stages (INIT, DEPLOYING, MONITORING, DONE, etc.)
 --
 -- These types are deployment-target agnostic and apply to ALL releases.
 module Products.Autopilot.Types.Workflow
@@ -95,64 +95,64 @@ migrateTrackerTypeToCategory _ = BackendService
 -- Category-specific sub-stages are tracked in the targetState field.
 --
 -- Workflow progression:
--- Init → Preparing → Deploying → Monitoring → Finalizing → Done
+-- INIT → PREPARING → DEPLOYING → MONITORING → FINALIZING → DONE
 --                                           ↓
---                                      RollingBack (on error)
+--                                      ROLLING_BACK (on error)
 data ReleaseWFStatus
   = -- | Validation and precondition checks
     -- Examples:
     -- - K8s: Validate manifests, check cluster capacity
     -- - Play Store: Validate APK, check signing keys
     -- - App Store: Validate bundle, check certificates
-    Init
+    INIT
   | -- | Pre-deployment preparation
     -- Examples:
     -- - K8s: Create namespace, apply ConfigMaps
     -- - Play Store: Upload APK to Play Console
     -- - App Store: Upload bundle to TestFlight
-    Preparing
+    PREPARING
   | -- | Active deployment/rollout
     -- Examples:
     -- - K8s: Create Deployment, apply VirtualService, progressive traffic shift
     -- - Play Store: Staged rollout (0% → 25% → 50% → 100%)
     -- - App Store: Phased release, TestFlight distribution
-    Deploying
+    DEPLOYING
   | -- | Post-deployment monitoring and health checks
     -- Examples:
     -- - K8s: Monitor pod health, latency, error rates
     -- - Play Store: Monitor crash rate, ANR rate, user ratings
     -- - App Store: Monitor crash reports, TestFlight feedback
-    Monitoring
+    MONITORING
   | -- | Cleanup and finalization
     -- Examples:
     -- - K8s: Scale down old deployment, cleanup old resources
     -- - Play Store: Promote to full release, cleanup draft versions
     -- - App Store: Remove TestFlight build, archive old versions
-    Finalizing
+    FINALIZING
   | -- | Successfully completed
-    Done
+    DONE
   | -- | Rollback in progress (error state)
     -- Examples:
     -- - K8s: Revert traffic to old version, scale down new deployment
     -- - Play Store: Halt rollout, revert to previous version
     -- - App Store: Halt phased release, submit emergency rollback
-    RollingBack
+    ROLLING_BACK
   deriving (Eq, Show, Read, Generic, Ord)
 
 instance ToJSON ReleaseWFStatus
 
 instance FromJSON ReleaseWFStatus
 
--- | Migrate old WorkflowStatus to new generic ReleaseWFStatus
+-- | Migrate old WorkflowStatus strings to new generic ReleaseWFStatus ctors
 migrateWorkflowStatusToReleaseWFStatus :: String -> ReleaseWFStatus
-migrateWorkflowStatusToReleaseWFStatus "Init" = Init
-migrateWorkflowStatusToReleaseWFStatus "CreateDeployment" = Preparing
-migrateWorkflowStatusToReleaseWFStatus "UpdateService" = Deploying
-migrateWorkflowStatusToReleaseWFStatus "ApplyConfigMap" = Preparing
-migrateWorkflowStatusToReleaseWFStatus "ApplyDestinationRule" = Preparing
-migrateWorkflowStatusToReleaseWFStatus "FlipVirtualService" = Deploying
-migrateWorkflowStatusToReleaseWFStatus "Monitoring" = Monitoring
-migrateWorkflowStatusToReleaseWFStatus "Stabilize" = Finalizing
-migrateWorkflowStatusToReleaseWFStatus "Done" = Done
-migrateWorkflowStatusToReleaseWFStatus "Rollback" = RollingBack
-migrateWorkflowStatusToReleaseWFStatus _ = Deploying
+migrateWorkflowStatusToReleaseWFStatus "INIT" = INIT
+migrateWorkflowStatusToReleaseWFStatus "CreateDeployment" = PREPARING
+migrateWorkflowStatusToReleaseWFStatus "UpdateService" = DEPLOYING
+migrateWorkflowStatusToReleaseWFStatus "ApplyConfigMap" = PREPARING
+migrateWorkflowStatusToReleaseWFStatus "ApplyDestinationRule" = PREPARING
+migrateWorkflowStatusToReleaseWFStatus "FlipVirtualService" = DEPLOYING
+migrateWorkflowStatusToReleaseWFStatus "MONITORING" = MONITORING
+migrateWorkflowStatusToReleaseWFStatus "Stabilize" = FINALIZING
+migrateWorkflowStatusToReleaseWFStatus "DONE" = DONE
+migrateWorkflowStatusToReleaseWFStatus "Rollback" = ROLLING_BACK
+migrateWorkflowStatusToReleaseWFStatus _ = DEPLOYING

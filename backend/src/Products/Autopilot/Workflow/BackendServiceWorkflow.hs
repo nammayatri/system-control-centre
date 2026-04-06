@@ -118,12 +118,12 @@ import Prelude
 -- | Backend service workflow using generic stages
 backendServiceWorkflow :: ReleaseWorkFlow ()
 backendServiceWorkflow = do
-  Init |>> validatePreconditions
-  Preparing |>> prepareK8sResources
-  Deploying |>> progressiveRollout
-  Monitoring |>> monitorHealth
-  Finalizing |>> cleanupOldVersion
-  Done |>> notifyComplete
+  INIT |>> validatePreconditions
+  PREPARING |>> prepareK8sResources
+  DEPLOYING |>> progressiveRollout
+  MONITORING |>> monitorHealth
+  FINALIZING |>> cleanupOldVersion
+  DONE |>> notifyComplete
 
 -- ============================================================================
 -- Helpers: Config / Context / K8s IO
@@ -254,7 +254,7 @@ prepareK8sResources = do
   ctx <- getK8sCtx
   db <- getDB
   isNew <- isNewServiceRelease
-  liftIO $ putStrLn $ "Preparing K8s resources for " <> T.unpack (appGroup rt) <> if isNew then " (NEW SERVICE)" else ""
+  liftIO $ putStrLn $ "PREPARING K8s resources for " <> T.unpack (appGroup rt) <> if isNew then " (NEW SERVICE)" else ""
 
   -- BEFORE snapshots are captured at release creation time (createReleaseH)
   -- so diffs are available before the workflow starts.
@@ -445,25 +445,25 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
 
       -- Production line 462: isTrackerInTerminalState!
       case status freshRT of
-        Aborting -> do
+        ABORTING -> do
           liftIO $ putStrLn $ "  [rolloutLoop] Release " <> T.unpack (releaseId freshRT) <> " is aborting, exiting workflow. Runner will handle cleanup."
           liftIO $ fail "Release aborted by user — runner will restore traffic"
-        UserAborted -> do
+        USER_ABORTED -> do
           liftIO $ putStrLn "  [rolloutLoop] Tracker is USER_ABORTED, stopping rollout"
           liftIO $ fail "Release user-aborted during rollout"
-        Aborted -> do
+        ABORTED -> do
           liftIO $ putStrLn "  [rolloutLoop] Tracker is ABORTED, stopping rollout"
           liftIO $ fail "Release aborted during rollout"
-        Completed -> do
+        COMPLETED -> do
           liftIO $ putStrLn "  [rolloutLoop] Tracker is COMPLETED (externally), finishing"
           pure ()
-        Paused -> do
+        PAUSED -> do
           -- Production line 195: if isReleasePaused(tracker) return (routePercent, coolOff, podsCount)
           liftIO $ putStrLn "  [rolloutLoop] Tracker is PAUSED, waiting..."
           collectDelay <- liftIO $ getCollectMetricsDelay db
           liftIO $ threadDelay (collectDelay * 1000000)
           rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime
-        InProgress -> do
+        INPROGRESS -> do
           -- Check AUTO vs MANUAL mode behavior
           let currentMode = mode freshRT
           -- Production line 197: MANUAL calls getNewRollout directly
@@ -505,12 +505,12 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                 else do
                   -- Cooloff exceeded - decide whether to advance
                   shouldAdvance <- case currentMode of
-                    Manual -> do
-                      -- MANUAL: advance if cooloff exceeded and status is InProgress
+                    MANUAL -> do
+                      -- MANUAL: advance if cooloff exceeded and status is INPROGRESS
                       -- Production line 128: isCoolOffExceeded && tracker.status == INPROGRESS
                       liftIO $ putStrLn "  [rolloutLoop] MANUAL mode: cooloff exceeded, advancing"
                       pure True
-                    Auto -> do
+                    AUTO -> do
                       -- AUTO: check health/decision engine first
                       -- Production lines 520-553: collect metrics, get decision
                       liftIO $ putStrLn "  [rolloutLoop] AUTO mode: checking health before advancing"
@@ -524,9 +524,9 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                         PromAbort reason -> do
                           liftIO $ putStrLn $ "[DECISION] Prometheus ABORT: " <> T.unpack reason
                           -- Production parity (service.jl:203): NOTIFICATION / STATUS_UPDATED
-                          liftIO $ logStatusUpdated db freshRT ("Aborting the release because prom query checks failing: " <> reason)
+                          liftIO $ logStatusUpdated db freshRT ("ABORTING the release because prom query checks failing: " <> reason)
                           liftIO $ notifyGenericThreadMessage db freshRT ("Prometheus check ABORT: " <> reason)
-                          updateRT $ \r -> r{status = Aborting}
+                          updateRT $ \r -> r{status = ABORTING}
                           currentRT' <- getRT
                           currentTS' <- gets targetState
                           liftIO $ insertReleaseTracker db currentRT' currentTS'
@@ -582,8 +582,8 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                         Wait -> pure False -- stay at current step, re-loop
                         Abort -> do
                           -- Production parity (service.jl:213): first STATUS_UPDATED
-                          liftIO $ logStatusUpdated db rtForEvent "Aborting the release because of the Decision Engine"
-                          updateRT $ \r -> r{status = Aborting}
+                          liftIO $ logStatusUpdated db rtForEvent "ABORTING the release because of the Decision Engine"
+                          updateRT $ \r -> r{status = ABORTING}
                           currentRT' <- getRT
                           currentTS' <- gets targetState
                           liftIO $ insertReleaseTracker db currentRT' currentTS'
@@ -705,7 +705,7 @@ monitorHealth = do
   cfg <- getCfg
   ctx <- getK8sCtx
   db <- getDB
-  liftIO $ putStrLn $ "Monitoring health for " <> T.unpack (appGroup rt)
+  liftIO $ putStrLn $ "MONITORING health for " <> T.unpack (appGroup rt)
 
   updateK8sStatus BSMonitoring
   liftIO $ putStrLn "  Waiting for pods to be ready (max 5 min, polling every 10s)"
@@ -783,7 +783,7 @@ postMonitorLoop cfg db rt iteration = do
               "POST_MONITORING_RESULT"
               (object ["decision" .= ("Abort" :: T.Text), "reason" .= drReason hsResult])
           liftIO $ notifyGenericThreadMessage db rt ("Post-monitoring ABORT: " <> maybe "no reason" id (drReason hsResult))
-          updateRT $ \r -> r{status = Aborting}
+          updateRT $ \r -> r{status = ABORTING}
           currentRT <- getRT
           currentTS <- gets targetState
           liftIO $ insertReleaseTracker db currentRT currentTS
@@ -1014,7 +1014,7 @@ cleanupOldVersion = do
 -- | Notify complete.
 --
 -- Production parity (service.jl line 176 + releaseCompletionActions):
--- - Sets tracker status to Completed
+-- - Sets tracker status to COMPLETED
 -- - Records completion event
 -- - Persists final state to DB
 -- - Notifies Slack
@@ -1027,11 +1027,11 @@ notifyComplete = do
   liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
   liftIO $ putStrLn $ "   Service: " <> T.unpack (appGroup rt)
   liftIO $ putStrLn $ "   Category: BackendService"
-  liftIO $ putStrLn $ "   Status: Completed"
+  liftIO $ putStrLn $ "   Status: COMPLETED"
 
   -- Production line 176: update_tracker_status!(conn, COMPLETED, tracker)
   now <- liftIO getCurrentTime
-  updateRT $ \r -> r{status = Completed, endTime = Just now}
+  updateRT $ \r -> r{status = COMPLETED, endTime = Just now}
 
   -- Persist final state to DB immediately (production does this in update_tracker_status!)
   currentRT <- getRT

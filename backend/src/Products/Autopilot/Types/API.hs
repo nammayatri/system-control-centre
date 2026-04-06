@@ -223,14 +223,15 @@ instance FromJSON K8sCreateReleaseReq where
       parseLegacyStep = withObject "RolloutStepLegacy" $ \s -> do
         rolloutPercent <- s .:? "rolloutPercent" .!= 0
         legacyRollout <- s .:? "rollout" .!= rolloutPercent
-        cooloffSeconds <- s .:? "cooloffSeconds" .!= 0
-        legacyCooloff <- s .:? "cooloff" .!= cooloffSeconds
+        -- Legacy parser: accept either modern "cooloffMinutes" or Julia-style "cooloff".
+        cooloffFromJson <- s .:? "cooloffMinutes" .!= 0
+        legacyCooloff <- s .:? "cooloff" .!= cooloffFromJson
         podPercent <- s .:? "podPercent" .!= 0
         legacyPods <- s .:? "pods" .!= podPercent
         pure $
           RolloutStep
             { rolloutPercent = legacyRollout,
-              cooloffSeconds = legacyCooloff,
+              cooloffMinutes = legacyCooloff,
               podPercent = legacyPods
             }
       parseMetadata obj = do
@@ -497,22 +498,6 @@ instance FromJSON VsUnlockReq where
 
 instance ToJSON VsUnlockReq where
   toJSON = genericToJSON defaultOptions{omitNothingFields = True}
-
--- ============================================================================
--- Generic Response Type
--- ============================================================================
-
-data APIResponse = APIResponse
-  { status :: Text,
-    message :: Text
-  }
-  deriving (Show, Generic)
-
-instance ToJSON APIResponse where
-  toJSON = genericToJSON defaultOptions
-
-instance FromJSON APIResponse where
-  parseJSON = genericParseJSON defaultOptions
 
 -- ============================================================================
 -- Product & Service Response Types

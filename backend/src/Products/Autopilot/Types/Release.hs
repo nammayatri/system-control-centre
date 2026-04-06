@@ -10,6 +10,8 @@ module Products.Autopilot.Types.Release
     isAbortedStatus,
     validateStatusTransition,
     validateGlobalStatusTransition,
+    releaseStatusText,
+    parseReleaseStatusText,
 
     -- * Common Enums
     Decision (..),
@@ -17,7 +19,8 @@ module Products.Autopilot.Types.Release
   )
 where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, withText)
+import Data.Aeson (FromJSON, ToJSON, Value)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime)
@@ -36,19 +39,12 @@ instance ToJSON Decision
 
 instance FromJSON Decision
 
-data Mode = Auto | Manual
+data Mode = AUTO | MANUAL
   deriving (Eq, Show, Read, Generic)
 
-instance ToJSON Mode where
-  toJSON Auto = "AUTO"
-  toJSON Manual = "MANUAL"
+instance ToJSON Mode
 
-instance FromJSON Mode where
-  parseJSON = withText "Mode" $ \t ->
-    case T.toUpper t of
-      "AUTO" -> pure Auto
-      "MANUAL" -> pure Manual
-      _ -> pure Auto
+instance FromJSON Mode
 
 -- ============================================================================
 -- Release Status (user-facing lifecycle states)
@@ -59,124 +55,129 @@ instance FromJSON Mode where
 -- These are the user-facing states that apply to ALL release types.
 -- Platform-specific workflow progress is tracked separately in targetState.
 --
--- Lifecycle:
--- Created → InProgress → Completed
---                     → Paused → InProgress (resume)
---                     → Aborting → Aborted / UserAborted
---                     → Reverting → Reverted
--- Created → Discarding → Discarded
+-- Lifecycle (backend/config releases):
+-- CREATED → INPROGRESS → COMPLETED
+--                     → PAUSED → INPROGRESS (resume)
+--                     → ABORTING → ABORTED / USER_ABORTED / GCLT_ABORTED
+--                     → REVERTING → REVERTED
+-- CREATED → DISCARDING → DISCARDED
+--
+-- VSEdit states (same table, category='VSEdit'):
+-- CREATED → LOCKED → APPLIED → COMPLETED
+--                 → UNLOCKED (abort / expiry / discard)
 data ReleaseStatus
   = -- | Initial state, awaiting approval or scheduling
-    Created
+    CREATED
   | -- | Actively executing
-    InProgress
+    INPROGRESS
   | -- | Successfully finished
-    Completed
+    COMPLETED
   | -- | System-initiated abort (errors, health check failures, etc.)
-    Aborted
+    ABORTED
   | -- | User-initiated abort
-    UserAborted
-  | -- | Discarded before execution
-    Discarded
-  | -- | Transitioning to Discarded (async cleanup)
-    Discarding
-  | -- | Paused by user, can be resumed
-    Paused
-  | -- | Abort in progress (transitioning to Aborted/UserAborted)
-    Aborting
-  | -- | Reverting a completed release back to previous version
-    Reverting
+    USER_ABORTED
+  | -- | DISCARDED before execution
+    DISCARDED
+  | -- | Transitioning to DISCARDED (async cleanup)
+    DISCARDING
+  | -- | PAUSED by user, can be resumed
+    PAUSED
+  | -- | Abort in progress (transitioning to ABORTED/USER_ABORTED)
+    ABORTING
+  | -- | REVERTING a completed release back to previous version
+    REVERTING
   | -- | Revert completed successfully
-    Reverted
+    REVERTED
   | -- | Resuming after pause or transient failure
-    Restarting
-  | -- | Aborted by decision engine (HS/AB) — distinct from user-initiated abort
-    GcltAborted
-  deriving (Eq, Show, Read, Generic)
+    RESTARTING
+  | -- | ABORTED by decision engine (HS/AB) — distinct from user-initiated abort
+    GCLT_ABORTED
+  | -- | VSEdit: lock held on target virtual service
+    LOCKED
+  | -- | VSEdit: lock released (abort/expiry/discard)
+    UNLOCKED
+  | -- | VSEdit: edit applied to virtual service
+    APPLIED
+  deriving (Eq, Show, Read, Generic, Enum, Bounded)
 
-instance ToJSON ReleaseStatus where
-  toJSON Created = "CREATED"
-  toJSON InProgress = "INPROGRESS"
-  toJSON Completed = "COMPLETED"
-  toJSON Aborted = "ABORTED"
-  toJSON UserAborted = "USER_ABORTED"
-  toJSON Discarded = "DISCARDED"
-  toJSON Discarding = "DISCARDING"
-  toJSON Paused = "PAUSED"
-  toJSON Aborting = "ABORTING"
-  toJSON Reverting = "REVERTING"
-  toJSON Reverted = "REVERTED"
-  toJSON Restarting = "RESTARTING"
-  toJSON GcltAborted = "GCLT_ABORTED"
+instance ToJSON ReleaseStatus
 
-instance FromJSON ReleaseStatus where
-  parseJSON = withText "ReleaseStatus" $ \t ->
-    case T.toUpper t of
-      "CREATED" -> pure Created
-      "INPROGRESS" -> pure InProgress
-      "COMPLETED" -> pure Completed
-      "ABORTED" -> pure Aborted
-      "USER_ABORTED" -> pure UserAborted
-      "USERABORTED" -> pure UserAborted
-      "DISCARDED" -> pure Discarded
-      "DISCARDING" -> pure Discarding
-      "PAUSED" -> pure Paused
-      "ABORTING" -> pure Aborting
-      "REVERTING" -> pure Reverting
-      "REVERTED" -> pure Reverted
-      "RESTARTING" -> pure Restarting
-      "GCLT_ABORTED" -> pure GcltAborted
-      "GCLTABORTED" -> pure GcltAborted
-      -- Legacy status mappings
-      "RECORDING" -> pure InProgress
-      "RECORDED" -> pure Completed
-      "VS_APPLIED" -> pure InProgress
-      "VSAPPLIED" -> pure InProgress
-      _ -> pure Created
+instance FromJSON ReleaseStatus
+
+-- | Canonical text form of a 'ReleaseStatus' — identical to the constructor
+-- name and to the JSON wire format (Aeson default @allNullaryToStringTag@).
+-- Single source of truth: both the DB layer and the JSON layer agree by
+-- construction, no lookup tables to drift.
+releaseStatusText :: ReleaseStatus -> Text
+releaseStatusText = T.pack . show
+
+-- | Case-insensitive text → 'ReleaseStatus'. Derived from 'Enum'+'Bounded',
+-- so adding a new constructor to 'ReleaseStatus' is the ONLY edit needed.
+-- Legacy DB aliases (e.g. @USERABORTED@, @GCLTABORTED@ without the underscore)
+-- are handled explicitly before the generic lookup. Unknown values default
+-- to 'CREATED' to match prior behavior.
+parseReleaseStatusText :: Text -> ReleaseStatus
+parseReleaseStatusText t = case T.toUpper t of
+  "USERABORTED" -> USER_ABORTED
+  "GCLTABORTED" -> GCLT_ABORTED
+  canon -> fromMaybe CREATED (lookup canon releaseStatusLookup)
+  where
+    releaseStatusLookup :: [(Text, ReleaseStatus)]
+    releaseStatusLookup =
+      [ (T.toUpper (releaseStatusText s), s)
+        | s <- [minBound .. maxBound :: ReleaseStatus]
+      ]
 
 -- ============================================================================
 -- Status Helpers
 -- ============================================================================
 
 isTerminalStatus :: ReleaseStatus -> Bool
-isTerminalStatus s = s `elem` [Aborted, UserAborted, GcltAborted, Completed, Discarded, Reverted]
+isTerminalStatus s = s `elem` [ABORTED, USER_ABORTED, GCLT_ABORTED, COMPLETED, DISCARDED, REVERTED, UNLOCKED]
 
 isAbortedStatus :: ReleaseStatus -> Bool
-isAbortedStatus s = s `elem` [Aborted, UserAborted, GcltAborted, Aborting]
+isAbortedStatus s = s `elem` [ABORTED, USER_ABORTED, GCLT_ABORTED, ABORTING]
 
 validateStatusTransition :: ReleaseStatus -> ReleaseStatus -> Bool
 validateStatusTransition from to = to `elem` allowed from
   where
-    allowed Created = [InProgress, Discarded]
-    allowed InProgress = [Aborted, UserAborted, GcltAborted, Completed, Paused, Aborting]
-    allowed Aborted = []
-    allowed UserAborted = []
-    allowed GcltAborted = []
-    allowed Completed = []
-    allowed Discarded = []
-    allowed Paused = [Aborting, UserAborted, InProgress]
-    allowed Aborting = [Aborting, Aborted, UserAborted, GcltAborted, Reverting]
-    allowed Reverting = [Reverted, UserAborted]
-    allowed Reverted = []
-    allowed Restarting = [InProgress, Aborted, UserAborted, GcltAborted]
-    allowed Discarding = [Discarded]
+    allowed CREATED = [INPROGRESS, DISCARDED, LOCKED]
+    allowed INPROGRESS = [ABORTED, USER_ABORTED, GCLT_ABORTED, COMPLETED, PAUSED, ABORTING]
+    allowed ABORTED = []
+    allowed USER_ABORTED = []
+    allowed GCLT_ABORTED = []
+    allowed COMPLETED = []
+    allowed DISCARDED = []
+    allowed PAUSED = [ABORTING, USER_ABORTED, INPROGRESS]
+    allowed ABORTING = [ABORTING, ABORTED, USER_ABORTED, GCLT_ABORTED, REVERTING]
+    allowed REVERTING = [REVERTED, USER_ABORTED]
+    allowed REVERTED = []
+    allowed RESTARTING = [INPROGRESS, ABORTED, USER_ABORTED, GCLT_ABORTED]
+    allowed DISCARDING = [DISCARDED]
+    -- VSEdit transitions
+    allowed LOCKED = [APPLIED, UNLOCKED, DISCARDED]
+    allowed APPLIED = [COMPLETED, UNLOCKED]
+    allowed UNLOCKED = []
 
 validateGlobalStatusTransition :: ReleaseStatus -> ReleaseStatus -> Bool
 validateGlobalStatusTransition from to = to `elem` allowed from
   where
-    allowed Created = [InProgress, Discarded, Discarding]
-    allowed InProgress = [Aborted, UserAborted, GcltAborted, Completed, Paused, Aborting, Reverting, Discarded, Restarting]
-    allowed Restarting = [InProgress, UserAborted, Aborted, GcltAborted, Reverting, Paused]
-    allowed Aborted = []
-    allowed UserAborted = []
-    allowed GcltAborted = []
-    allowed Completed = [Reverting]
-    allowed Discarded = []
-    allowed Paused = [Aborting, Reverting, UserAborted, InProgress, Restarting]
-    allowed Aborting = [Aborting, Discarded, Aborted, UserAborted, GcltAborted, Reverting, Restarting, Completed]
-    allowed Reverting = [Reverted, UserAborted, Paused, Restarting]
-    allowed Discarding = [Discarded]
-    allowed _ = []
+    allowed CREATED = [INPROGRESS, DISCARDED, DISCARDING, LOCKED]
+    allowed INPROGRESS = [ABORTED, USER_ABORTED, GCLT_ABORTED, COMPLETED, PAUSED, ABORTING, REVERTING, DISCARDED, RESTARTING]
+    allowed RESTARTING = [INPROGRESS, USER_ABORTED, ABORTED, GCLT_ABORTED, REVERTING, PAUSED]
+    allowed ABORTED = []
+    allowed USER_ABORTED = []
+    allowed GCLT_ABORTED = []
+    allowed COMPLETED = [REVERTING]
+    allowed DISCARDED = []
+    allowed PAUSED = [ABORTING, REVERTING, USER_ABORTED, INPROGRESS, RESTARTING]
+    allowed ABORTING = [ABORTING, DISCARDED, ABORTED, USER_ABORTED, GCLT_ABORTED, REVERTING, RESTARTING, COMPLETED]
+    allowed REVERTING = [REVERTED, USER_ABORTED, PAUSED, RESTARTING]
+    allowed DISCARDING = [DISCARDED]
+    -- VSEdit transitions
+    allowed LOCKED = [APPLIED, UNLOCKED, DISCARDED]
+    allowed APPLIED = [COMPLETED, UNLOCKED]
+    allowed UNLOCKED = []
 
 -- ============================================================================
 -- Release Data Types
@@ -184,7 +185,9 @@ validateGlobalStatusTransition from to = to `elem` allowed from
 
 data RolloutStep = RolloutStep
   { rolloutPercent :: Int,
-    cooloffSeconds :: Int,
+    -- | Cooloff duration in MINUTES. Matches Julia production semantics:
+    -- the workflow multiplies by 60 before use.
+    cooloffMinutes :: Int,
     podPercent :: Int
   }
   deriving (Eq, Show, Generic)
@@ -195,7 +198,8 @@ instance FromJSON RolloutStep
 
 data RolloutHistory = RolloutHistory
   { historyRolloutPercent :: Int,
-    historyCooloffSeconds :: Int,
+    -- | Cooloff duration in minutes (same unit as 'cooloffMinutes').
+    historyCooloffMinutes :: Int,
     historyPodsPercent :: Int,
     historyDecision :: Maybe Decision,
     historyDecisionReason :: Maybe Text,
@@ -222,9 +226,9 @@ data ReleaseTracker = ReleaseTracker
     -- | Release category: BackendService, MobileAppAndroid, BackendConfig, etc.
     -- This is the HOW/WHERE - how/where to deploy it
     category :: ReleaseCategory,
-    -- | Current release status: Created, InProgress, Completed, Aborted, etc.
+    -- | Current release status: CREATED, INPROGRESS, COMPLETED, ABORTED, etc.
     status :: ReleaseStatus,
-    -- | Generic workflow stage: Init, Preparing, Deploying, Monitoring, Finalizing, Done
+    -- | Generic workflow stage: INIT, PREPARING, DEPLOYING, MONITORING, FINALIZING, DONE
     -- Applies to ALL release categories (K8s, Play Store, App Store, etc.)
     releaseWFStatus :: ReleaseWFStatus,
     mode :: Mode,

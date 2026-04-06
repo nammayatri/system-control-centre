@@ -4,9 +4,8 @@ import { useQuery } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import { useProductConfigs, useServices } from '../useProducts';
 import { useCreateRelease, useUpdateTracker } from '../hooks';
-import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs } from '../api';
-import { fetchReleaseConfigs, fetchResources } from '../../../api';
-import type { ProductConfig } from '../../../api';
+import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources } from '../api';
+import type { ProductConfig } from '../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
 import { DEFAULT_ENV, AVAILABLE_ENVS } from '../../../lib/constants';
@@ -21,6 +20,7 @@ const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
   'ABORTING': ['ABORTING'],
   'ABORTED': ['ABORTED'],
   'USER_ABORTED': ['USER_ABORTED'],
+  'GCLT_ABORTED': ['GCLT_ABORTED'],
   'COMPLETED': ['COMPLETED'],
   'REVERTED': ['REVERTED'],
   'DISCARDED': ['DISCARDED'],
@@ -191,7 +191,7 @@ const CreateRelease: React.FC = () => {
               if (Array.isArray(rollouts) && rollouts.length > 0) {
                 setStages(rollouts.map((r: any) => ({
                   rollout: r.rollout ?? r.rolloutPercent ?? 0,
-                  cooloff: r.cooloff ?? r.cooloffSeconds ?? 10,
+                  cooloff: r.cooloff ?? r.cooloffMinutes ?? 10,
                   pods: r.pods ?? r.podPercent ?? 1,
                 })));
               }
@@ -354,7 +354,7 @@ const CreateRelease: React.FC = () => {
             info: formData.info,
             rolloutStrategy: stages.map(s => ({
               rolloutPercent: s.rollout,
-              cooloffSeconds: s.cooloff,
+              cooloffMinutes: s.cooloff,
               podPercent: s.pods,
             })),
           },
@@ -389,8 +389,8 @@ const CreateRelease: React.FC = () => {
       env_override_data: isEnvSwitch ? envData : null,
       slack_thread_ts: null,
       isReleaseSync,
-      syncClusterUdf2: isReleaseSync && isSecondaryEnvSwitch ? secondaryEnvData : null,
-      syncClusterRolloutStrategy: isReleaseSync ? secondaryStages.map(s => ({ rolloutPercent: s.rollout, cooloffSeconds: s.cooloff, podPercent: s.pods })) : null,
+      syncClusterEnvOverrideData: isReleaseSync && isSecondaryEnvSwitch ? secondaryEnvData : null,
+      syncClusterRolloutStrategy: isReleaseSync ? secondaryStages.map(s => ({ rolloutPercent: s.rollout, cooloffMinutes: s.cooloff, podPercent: s.pods })) : null,
       release_manager: "local_admin", release_tag: generateReleaseTag(svc), trackerType,
     });
 

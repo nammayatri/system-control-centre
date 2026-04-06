@@ -2,14 +2,14 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { useReleases } from '../hooks';
-import { StatusBadge } from '../../../shared/ui/badge';
+import { StatusBadge } from '../components/StatusBadge';
 import { Button } from '../../../shared/ui/button';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
-import type { ReleaseStatus } from '../../../api';
+import type { ReleaseStatus } from '../api';
 
 type TimeRange = 'last_30_mins' | 'last_1_hour' | 'last_6_hours' | 'today' | 'yesterday' | 'last_2_days' | 'last_7_days' | 'last_30_days' | 'this_month' | 'last_month' | 'custom';
 
@@ -29,7 +29,7 @@ const TIME_RANGE_OPTIONS = [
 
 const STATUS_FILTER_OPTIONS: ReleaseStatus[] = [
   'CREATED', 'INPROGRESS', 'PAUSED', 'COMPLETED', 'ABORTED', 'USER_ABORTED',
-  'REVERTED', 'REVERTING', 'DISCARDED', 'DISCARDING', 'ABORTING', 'RESTARTING',
+  'GCLT_ABORTED', 'REVERTED', 'REVERTING', 'DISCARDED', 'DISCARDING', 'ABORTING', 'RESTARTING',
 ];
 
 const getDateRange = (range: TimeRange, customFrom: string, customTo: string): { from: Date; to: Date } => {
@@ -122,7 +122,7 @@ const ListRelease: React.FC = () => {
       total: releases.length,
       active: releases.filter(r => ['INPROGRESS', 'RESTARTING'].includes(r.status)).length,
       completedToday: releases.filter(r => r.status === 'COMPLETED' && r.end_time && new Date(r.end_time) >= today).length,
-      failedToday: releases.filter(r => ['ABORTED', 'USER_ABORTED'].includes(r.status) && r.end_time && new Date(r.end_time) >= today).length,
+      failedToday: releases.filter(r => ['ABORTED', 'USER_ABORTED', 'GCLT_ABORTED'].includes(r.status) && r.end_time && new Date(r.end_time) >= today).length,
     };
   }, [releases]);
 

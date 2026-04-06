@@ -41,7 +41,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Products.Autopilot.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
+import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 import Shared.Config.Runtime
   ( getConfigBoolForProduct,
     getConfigDoubleForProduct,

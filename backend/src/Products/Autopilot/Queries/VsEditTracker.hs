@@ -5,11 +5,12 @@
 -- This module provides thin wrappers for backward compatibility.
 module Products.Autopilot.Queries.VsEditTracker where
 
-import Core.DB.Connection (runDB)
+import Core.DB.Connection (runDB, withConn)
 import Core.Environment (DBEnv)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import Database.Beam
+import Database.PostgreSQL.Simple (execute)
 import Products.Autopilot.Types.Storage.Schema
 
 -- | Find active VS lock by checking deployment_config.vs_locked_by IS NOT NULL
@@ -19,7 +20,7 @@ findActiveLockFromConfig db product' = do
     runDB db $
       runSelectReturningList $
         select $ do
-          p <- all_ (deploymentConfig nammaAPDb)
+          p <- all_ (deploymentConfig autopilotDb)
           guard_ (dcAppGroup p ==. val_ product')
           guard_ (isNothing_ (dcService p))
           guard_ (isNothing_ (dcVsLockedBy p) ==. val_ False)
@@ -35,7 +36,7 @@ listVsEditTrackerRows db mFrom mTo =
     runSelectReturningList $
       select $
         orderBy_ (desc_ . rtCreatedAt) $ do
-          t <- all_ (releaseTrackers nammaAPDb)
+          t <- all_ (releaseTrackers autopilotDb)
           guard_ (rtCategory t ==. val_ "VSEdit")
           case mFrom of
             Just from -> guard_ (rtCreatedAt t >=. val_ from)
@@ -52,10 +53,34 @@ findVsEditTrackerRowById db tid = do
     runDB db $
       runSelectReturningList $
         select $ do
-          t <- all_ (releaseTrackers nammaAPDb)
+          t <- all_ (releaseTrackers autopilotDb)
           guard_ (rtId t ==. val_ tid)
           guard_ (rtCategory t ==. val_ "VSEdit")
           pure t
   pure $ case rows of
     [] -> Nothing
     (x : _) -> Just x
+
+-- | Mark as DISCARDED any CREATED VSEdit tracker for the given app_group
+-- whose id is NOT the one just created. Mirrors Julia's
+-- 'validateExistingVSTrackers' + 'discardIfDuplicate' post-insert cleanup
+-- (api/vsedit/create.jl:46-62). This closes the TOCTOU window between two
+-- concurrent createVsEditTrackerH calls that both manage to acquire the VS
+-- lock (e.g. if one caller observes a stale lock and installs a new one
+-- just as another call succeeds with the same owner).
+--
+-- Returns the number of trackers discarded.
+discardDuplicateCreatedVsTrackers :: DBEnv -> Text -> Text -> IO Int
+discardDuplicateCreatedVsTrackers db appGroup' keepTrackerId =
+  withConn db $ \conn -> do
+    n <-
+      execute
+        conn
+        "UPDATE release_tracker \
+        \SET status = 'DISCARDED', last_updated = NOW() \
+        \WHERE category = 'VSEdit' \
+        \  AND app_group = ? \
+        \  AND status = 'CREATED' \
+        \  AND id <> ?"
+        (appGroup', keepTrackerId)
+    pure (fromIntegral n)

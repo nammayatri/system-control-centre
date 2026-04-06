@@ -21,13 +21,7 @@ import Core.Environment (DBEnv)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
--- NOTE (V4 follow-up): this module still reaches into Products.Autopilot.* for
--- the per-product server_config accessors. That's the V4 product-boundary
--- violation and will be addressed in task #24 (move the helper into autopilot,
--- or host a generic server_config under Shared once we have a second product).
--- For V1+V2 (task #22), we delete the Shared.Queries.ServerConfig re-export
--- shim and import directly to keep the build green.
-import Products.Autopilot.Queries.ServerConfig
+import Shared.Queries.ServerConfig
   ( getEnabledServerConfigValue,
     getEnabledServerConfigValueForProduct,
   )

@@ -23,9 +23,9 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.UUID (UUID)
 import qualified Data.UUID as UUID
-import Products.Autopilot.Types.API (APIResponse (..))
 import Products.Types (ProductSlug (..), allPermissionsText, productSlugToText)
 import Servant
+import Shared.API.Response (APIResponse (..))
 
 -- | Admin API type
 type AdminAPI =

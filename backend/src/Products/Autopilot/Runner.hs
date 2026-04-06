@@ -33,20 +33,42 @@ import Prelude
 -- Runner Entry Point
 -- ============================================================================
 
+-- | Full runner lifecycle: synchronous startup recovery then the polling
+-- loop. Used by the standalone @RUNNER@ mode. The @SERVER@ mode in
+-- "Main" calls 'runnerStartupRecovery' and 'runnerPollLoop' separately so
+-- that startup recovery finishes before the HTTP port is bound — this
+-- closes the CRITICAL race (task #35 FIX 1) where concurrent HTTP writes
+-- could be silently clobbered by a stale rollback sweep (race-hunter #29).
 runnerLoop :: AppState -> IO ()
 runnerLoop st = do
-  -- Julia production parity (rollbackReleaseInProgress):
-  -- On startup, roll back ALL INPROGRESS/PAUSED/REVERTING releases.
-  -- Their workflow threads are gone (server restarted), so restore VS and abort.
+  runnerStartupRecovery st
+  runnerPollLoop st
+
+-- | Synchronous startup recovery. Must run BEFORE the HTTP server binds
+-- its port, otherwise user-initiated state changes (abort, revert) can
+-- land in parallel with these sweeps and get overwritten by their stale
+-- snapshots. See #35 FIX 1 for the full race description.
+--
+-- This function performs two recovery actions:
+--
+--   1. 'rollbackInProgressOnStartup' — drives any INPROGRESS/PAUSED/
+--      REVERTING releases to a terminal state (ABORTED/REVERTED) because
+--      their workflow threads were lost when the server died.
+--   2. 'releaseExpiredVsLocksOnStartup' — clears any orphaned VS locks
+--      whose timestamp is older than @lock_expiry_delay_minutes@. Covers
+--      the case where a lock is held but no one tries to acquire it (so
+--      the inline expiry check inside 'tryAcquireVsLock' never runs),
+--      leaving an orphaned lock visible to 'isEligibleToRun' and blocking
+--      release dispatch.
+runnerStartupRecovery :: AppState -> IO ()
+runnerStartupRecovery st = do
   runFlow st rollbackInProgressOnStartup
-  -- Companion to tryAcquireVsLock's inline expiry check: sweep any orphaned
-  -- VS locks whose timestamp is older than lock_expiry_delay_minutes. Covers
-  -- the case where a lock is held but no one tries to acquire (so the inline
-  -- expiry check never runs), leaving an orphaned lock visible to
-  -- isEligibleToRun and blocking release dispatch.
   runFlow st releaseExpiredVsLocksOnStartup
-  -- Then start the poll loop — only picks CREATED trackers.
-  runFlow st loop
+
+-- | Forever poll loop. Picks CREATED trackers, handles aborting releases,
+-- schedules scale-downs. Safe to run concurrently with the HTTP server.
+runnerPollLoop :: AppState -> IO ()
+runnerPollLoop st = runFlow st loop
 
 -- | Release any VS lock older than the configured expiry. Runs once at
 -- startup; tryAcquireVsLock also treats stale locks as released so new
@@ -66,7 +88,7 @@ releaseExpiredVsLocksOnStartup = do
 -- ============================================================================
 
 -- | Roll back all orphaned INPROGRESS/PAUSED/REVERTING releases on server startup.
--- Restores VS traffic to old version and marks as Aborted.
+-- Restores VS traffic to old version and marks as ABORTED.
 -- Julia reference: api/rollback/rollback.jl lines 10-75
 rollbackInProgressOnStartup :: Flow ()
 rollbackInProgressOnStartup = do
@@ -87,35 +109,57 @@ rollbackInProgressOnStartup = do
         -- Julia parity (api/rollback/rollback.jl:32-38): a REVERTING release
         -- whose thread was lost on restart should be treated as a *completed*
         -- revert (RECORDED in Julia), not a fresh abort. Our equivalent of the
-        -- "revert finished" terminal state is `Reverted` (see
-        -- validateStatusTransition: Reverting → Reverted).
-        case NT.status rt of
-          Reverting -> do
-            let reverted = rt{status = Reverted, endTime = Just now}
-            insertReleaseTracker db reverted mts
-            logStatusUpdated db reverted "Revert completed on startup recovery"
-            insertReleaseEvent
-              db
-              (releaseId rt)
-              "BUSINESS"
-              "STARTUP_REVERT_COMPLETED"
-              (toJSON ("Revert completed on startup recovery — VS traffic restored to old version" :: T.Text))
+        -- "revert finished" terminal state is `REVERTED` (see
+        -- validateStatusTransition: REVERTING → REVERTED).
+        -- Defense-in-depth CAS: Layer 1 (synchronous startup in Main.hs)
+        -- guarantees no HTTP writes have landed yet, so in practice the
+        -- status we snapshotted at findInProgressReleaseTrackers still
+        -- matches. The CAS below guards against the RUNNER-mode path
+        -- where this sweep runs alongside the server, and against any
+        -- future regression that re-parallelises startup with HTTP.
+        let oldStatus = NT.status rt
+            oldStatusText = releaseStatusToText oldStatus
+        case oldStatus of
+          REVERTING -> do
+            let reverted = rt{status = REVERTED, endTime = Just now}
+            ok <- conditionalUpdateTracker db reverted mts oldStatusText
+            if not ok
+              then
+                putStrLn $
+                  "[STARTUP] Skipping revert completion for "
+                    <> T.unpack (releaseId rt)
+                    <> " — status changed under us during restoreVsTrafficOnFailure"
+              else do
+                logStatusUpdated db reverted "Revert completed on startup recovery"
+                insertReleaseEvent
+                  db
+                  (releaseId rt)
+                  "BUSINESS"
+                  "STARTUP_REVERT_COMPLETED"
+                  (toJSON ("Revert completed on startup recovery — VS traffic restored to old version" :: T.Text))
           _ -> do
-            let aborted = rt{status = Aborted, endTime = Just now}
-            insertReleaseTracker db aborted mts
-            -- Production parity (events.jl:251-286 rollbackEvent!):
-            -- BUSINESS / TRAFFIC_UPDATED with a message field on rollback.
-            let previousRollout = case rolloutHistory rt of
-                  [] -> 0
-                  xs -> historyRolloutPercent (last xs)
-            logTrafficUpdatedWithMessage db aborted previousRollout "Rolling back traffic due to server restart"
-            insertReleaseEvent
-              db
-              (releaseId rt)
-              "BUSINESS"
-              "STARTUP_ROLLBACK"
-              (toJSON ("Aborted due to server restart — VS traffic restored to old version" :: T.Text))
-            notifyReleaseAborted db aborted
+            let aborted = rt{status = ABORTED, endTime = Just now}
+            ok <- conditionalUpdateTracker db aborted mts oldStatusText
+            if not ok
+              then
+                putStrLn $
+                  "[STARTUP] Skipping rollback for "
+                    <> T.unpack (releaseId rt)
+                    <> " — status changed under us during restoreVsTrafficOnFailure"
+              else do
+                -- Production parity (events.jl:251-286 rollbackEvent!):
+                -- BUSINESS / TRAFFIC_UPDATED with a message field on rollback.
+                let previousRollout = case rolloutHistory rt of
+                      [] -> 0
+                      xs -> historyRolloutPercent (last xs)
+                logTrafficUpdatedWithMessage db aborted previousRollout "Rolling back traffic due to server restart"
+                insertReleaseEvent
+                  db
+                  (releaseId rt)
+                  "BUSINESS"
+                  "STARTUP_ROLLBACK"
+                  (toJSON ("ABORTED due to server restart — VS traffic restored to old version" :: T.Text))
+                notifyReleaseAborted db aborted
       liftIO $ putStrLn "[STARTUP] Rollback complete"
 
 -- ============================================================================
@@ -222,7 +266,7 @@ trigger db (rt, mts) = do
   versionOk <- liftIO $ validateRunningVersion cfg db rt mts
   case versionOk of
     Just mismatchMsg -> do
-      let discarded = rt{status = Discarded}
+      let discarded = rt{status = DISCARDED}
       liftIO $ insertReleaseTracker db discarded mts
       liftIO $
         insertReleaseEvent
@@ -235,7 +279,7 @@ trigger db (rt, mts) = do
     Nothing -> do
       now <- liftIO getCurrentTime
       -- Atomically claim: CREATED → INPROGRESS
-      let rtNew = rt{status = InProgress, startTime = Just now}
+      let rtNew = rt{status = INPROGRESS, startTime = Just now}
           row = toRow now now rtNew mts
       claimed <- liftIO $ conditionalUpdateTrackerRow db row "CREATED"
       if not claimed
@@ -251,7 +295,7 @@ trigger db (rt, mts) = do
               let currentStatus' = case freshM of
                     Just (freshRT, _) -> status freshRT
                     Nothing -> status rtNew
-                  isUserAbort = currentStatus' == Aborting || currentStatus' == UserAborted
+                  isUserAbort = currentStatus' == ABORTING || currentStatus' == USER_ABORTED
               if isUserAbort
                 then do
                   -- Defer to handleAbortingRelease (Step 3 of poll loop)
@@ -259,7 +303,7 @@ trigger db (rt, mts) = do
                   liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "WORKFLOW_ABORT_EXIT" (toJSON (show err))
                 else do
                   endNow <- liftIO getCurrentTime
-                  let abortedTracker = rtNew{status = Aborted, releaseWFStatus = RollingBack, endTime = Just endNow}
+                  let abortedTracker = rtNew{status = ABORTED, releaseWFStatus = ROLLING_BACK, endTime = Just endNow}
                   liftIO $ insertReleaseTracker db abortedTracker mts
                   liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
                   liftIO $ restoreVsTrafficOnFailure cfg' db rt mts
@@ -344,7 +388,7 @@ handleAbortingRelease cfg db rt mts = do
   putStrLn $ "[handleAbortingRelease] Processing abort for " <> T.unpack (releaseId rt)
   restoreVsTrafficOnFailure cfg db rt mts
   now <- getCurrentTime
-  let aborted = rt{status = UserAborted, endTime = Just now}
+  let aborted = rt{status = USER_ABORTED, endTime = Just now}
   insertReleaseTracker db aborted mts
   -- Production parity (events.jl:251-286 rollbackEvent!):
   -- BUSINESS / TRAFFIC_UPDATED with a message field on rollback.
@@ -363,33 +407,73 @@ handleAbortingRelease cfg db rt mts = do
 -- ============================================================================
 
 -- | Scale down old deployment. Sends Slack notification only on success.
+--
+-- Race guard (#35 FIX 2): between the poll pick (which sees status=COMPLETED
+-- and schedules this callback after the scale-down delay) and this function
+-- firing, a user may have issued an immediate revert via the HTTP API. The
+-- tracker's status in the DB will then be REVERTING, and the revert path
+-- needs the old deployment pods still running — scaling them down here
+-- would corrupt the revert.
+--
+-- Two defenses, matching race-hunter's HIGH-severity finding:
+--
+--   Part A — re-read the tracker's status from DB before running the
+--   kubectl scale-down. If the status is no longer in the set
+--   @{COMPLETED, ABORTED, USER_ABORTED}@ (e.g. user reverted, admin edit),
+--   skip the entire scale-down. Prevents kubectl-level corruption.
+--
+--   Part B — CAS the final DB write of the scale-down flag against the
+--   status we saw at poll-pick time. If anything changed between re-read
+--   and CAS (narrow window but real), the blind insert is suppressed so
+--   we don't overwrite the user's concurrent edit.
 scaleDownOldDeployment :: DBEnv -> Config -> TrackerWithTarget -> IO ()
 scaleDownOldDeployment db cfg (rt, mts) = do
   case mts of
     Just (K8sState k8s) -> do
-      let ctx = context k8s
-          oldVer = K8s.oldVersion ctx
-          svcName = serviceName ctx
-          ns = namespace ctx
-          oldDepName = svcName <> "-" <> oldVer
-      if T.null oldVer || oldVer == "new" || oldVer == "unknown"
-        then pure ()
-        else do
-          putStrLn $ "[scaleDownOldDeployment] Scaling down old deployment: " <> T.unpack oldDepName <> " for release " <> T.unpack (releaseId rt)
-          result <- runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName 0)
-          case result of
-            Left err -> putStrLn $ "[scaleDownOldDeployment] WARNING: Failed to scale down: " <> show err
-            Right _ -> do
-              putStrLn $ "[scaleDownOldDeployment] Old deployment scaled down successfully"
-              notifyPodsScaledDown db rt oldVer
-          let updatedCtx = ctx{podsScaleDownStatus = Just ScaleDownCompleted}
-              updatedK8s = k8s{context = updatedCtx}
-              updatedMts = Just (K8sState updatedK8s)
-          insertReleaseTracker db rt updatedMts
-          insertReleaseEvent
-            db
-            (releaseId rt)
-            "BUSINESS"
-            "OLD_PODS_SCALED_DOWN"
-            (object ["oldDeployment" .= (oldDepName :: T.Text), "namespace" .= (ns :: T.Text)])
+      -- Part A — re-verify the tracker is still scale-down-eligible.
+      freshM <- findReleaseTracker db (releaseId rt)
+      case freshM of
+        Just (freshRT, _)
+          | NT.status freshRT `elem` [COMPLETED, ABORTED, USER_ABORTED] -> do
+              let ctx = context k8s
+                  oldVer = K8s.oldVersion ctx
+                  svcName = serviceName ctx
+                  ns = namespace ctx
+                  oldDepName = svcName <> "-" <> oldVer
+              if T.null oldVer || oldVer == "new" || oldVer == "unknown"
+                then pure ()
+                else do
+                  putStrLn $ "[scaleDownOldDeployment] Scaling down old deployment: " <> T.unpack oldDepName <> " for release " <> T.unpack (releaseId rt)
+                  result <- runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName 0)
+                  case result of
+                    Left err -> putStrLn $ "[scaleDownOldDeployment] WARNING: Failed to scale down: " <> show err
+                    Right _ -> do
+                      putStrLn $ "[scaleDownOldDeployment] Old deployment scaled down successfully"
+                      notifyPodsScaledDown db rt oldVer
+                  let updatedCtx = ctx{podsScaleDownStatus = Just ScaleDownCompleted}
+                      updatedK8s = k8s{context = updatedCtx}
+                      updatedMts = Just (K8sState updatedK8s)
+                  -- Part B — CAS against the original poll-pick status.
+                  ok <- conditionalUpdateTracker db rt updatedMts (releaseStatusToText (NT.status rt))
+                  if not ok
+                    then
+                      putStrLn $
+                        "[scaleDownOldDeployment] Status changed under us; not persisting scale-down flag for "
+                          <> T.unpack (releaseId rt)
+                    else
+                      insertReleaseEvent
+                        db
+                        (releaseId rt)
+                        "BUSINESS"
+                        "OLD_PODS_SCALED_DOWN"
+                        (object ["oldDeployment" .= (oldDepName :: T.Text), "namespace" .= (ns :: T.Text)])
+        _ ->
+          putStrLn $
+            "[scaleDownOldDeployment] Skipping "
+              <> T.unpack (releaseId rt)
+              <> " — status no longer scale-down-eligible (was "
+              <> show (NT.status rt)
+              <> ", now "
+              <> show (fmap (NT.status . fst) freshM)
+              <> ")"
     _ -> pure ()

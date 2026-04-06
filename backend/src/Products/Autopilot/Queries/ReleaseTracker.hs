@@ -84,7 +84,7 @@ insertReleaseTracker db rt mts = do
   withConn db $ \conn ->
     withTransaction conn $ do
       execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (releaseId rt))
-      runBeamPostgres conn $ runInsert $ insert (releaseTrackers nammaAPDb) $ insertValues [row]
+      runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
 
 -- | Atomically update a release tracker only if its current status matches the expected value.
 -- Uses DELETE ... WHERE id = ? AND status = ? to prevent concurrent modifications.
@@ -103,7 +103,7 @@ conditionalUpdateTracker db rt mts expectedStatus = do
       if rowsDeleted == 0
         then pure False
         else do
-          runBeamPostgres conn $ runInsert $ insert (releaseTrackers nammaAPDb) $ insertValues [row]
+          runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
           pure True
 
 -- | Like 'conditionalUpdateTracker' but accepts a raw 'ReleaseTrackerRow'.
@@ -120,7 +120,7 @@ conditionalUpdateTrackerRow db row expectedStatus =
       if rowsDeleted == 0
         then pure False
         else do
-          runBeamPostgres conn $ runInsert $ insert (releaseTrackers nammaAPDb) $ insertValues [row]
+          runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
           pure True
 
 findReleaseTracker :: DBEnv -> Text -> IO (Maybe TrackerWithTarget)
@@ -130,7 +130,7 @@ findReleaseTracker db rid = do
       runSelectReturningList $
         select $
           do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             guard_ (rtId rt ==. val_ rid)
             pure rt
   pure $ fmap fromRow (safeHead rows)
@@ -140,7 +140,7 @@ listReleaseEvents db rid =
   runDB db $
     runSelectReturningList $
       select $ do
-        ev <- all_ (releaseEvents nammaAPDb)
+        ev <- all_ (releaseEvents autopilotDb)
         guard_ (reReleaseId ev ==. val_ rid)
         pure ev
 
@@ -151,7 +151,7 @@ listReleaseTrackers db = do
       runSelectReturningList $
         select $
           orderBy_ (desc_ . rtCreatedAt) $ do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             pure rt
   pure (map fromRow rows)
 
@@ -162,7 +162,7 @@ listReleaseTrackersByDateRange db fromTime toTime = do
       runSelectReturningList $
         select $
           orderBy_ (desc_ . rtCreatedAt) $ do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             guard_ (rtCreatedAt rt >=. val_ fromTime)
             guard_ (rtCreatedAt rt <=. val_ toTime)
             -- Exclude VS edits and ConfigMap changes (shown in their own sections)
@@ -181,7 +181,7 @@ findRunnableReleaseTrackers db now = do
       runSelectReturningList $
         select $
           orderBy_ (asc_ . rtCreatedAt) $ do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             guard_ (rtStatus rt ==. val_ "CREATED")
             pure rt
   let parsed = map fromRow rows
@@ -199,7 +199,7 @@ findInProgressReleaseTrackers db = do
       runSelectReturningList $
         select $
           orderBy_ (asc_ . rtCreatedAt) $ do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             guard_ (rtStatus rt `in_` [val_ "INPROGRESS", val_ "PAUSED", val_ "REVERTING"])
             pure rt
   pure (map fromRow rows)
@@ -211,7 +211,7 @@ findCleanupScheduledTrackers db now = do
       runSelectReturningList $
         select $
           orderBy_ (asc_ . rtUpdatedAt) $ do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             guard_ (rtStatus rt `in_` [val_ "COMPLETED", val_ "ABORTED", val_ "USER_ABORTED"])
             pure rt
   let parsed = map fromRow rows
@@ -235,7 +235,7 @@ findAbortingReleaseTrackers db = do
       runSelectReturningList $
         select $
           orderBy_ (asc_ . rtUpdatedAt) $ do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             guard_ (rtStatus rt ==. val_ "ABORTING")
             pure rt
   pure (map fromRow rows)
@@ -247,7 +247,7 @@ findOngoingReleaseTrackers db = do
       runSelectReturningList $
         select $
           orderBy_ (desc_ . rtUpdatedAt) $ do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             guard_ (rtStatus rt `in_` [val_ "INPROGRESS", val_ "PAUSED", val_ "ABORTING", val_ "REVERTING", val_ "RESTARTING"])
             pure rt
   pure (map fromRow rows)
@@ -260,7 +260,7 @@ findTrackersWithStatusAndTime db statusList ts = do
       runSelectReturningList $
         select $
           orderBy_ (asc_ . rtUpdatedAt) $ do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             guard_ (rtStatus rt `in_` map val_ statusList)
             guard_ (rtUpdatedAt rt <=. val_ ts)
             pure rt
@@ -274,7 +274,7 @@ findApprovedReleasesWithStatus db statusList = do
       runSelectReturningList $
         select $
           orderBy_ (asc_ . rtCreatedAt) $ do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             guard_ (rtStatus rt `in_` map val_ statusList)
             guard_ (rtIsApproved rt ==. val_ (Just True))
             pure rt
@@ -287,7 +287,7 @@ findReleaseTrackersByCategory db cat from to = do
       runSelectReturningList $
         select $
           orderBy_ (desc_ . rtCreatedAt) $ do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             guard_ (rtCategory rt ==. val_ cat)
             guard_ (rtCreatedAt rt >=. val_ from)
             guard_ (rtCreatedAt rt <=. val_ to)
@@ -299,7 +299,7 @@ insertReleaseEvent db rid category label payload = do
   now <- getCurrentTime
   runDB db $
     runInsert $
-      insert (releaseEvents nammaAPDb) $
+      insert (releaseEvents autopilotDb) $
         insertExpressions
           [ ReleaseEventT
               { reId = default_,
@@ -414,85 +414,47 @@ parseReleaseCategory t =
     "VSEDIT" -> VSEdit
     _ -> BackendService -- Default fallback
 
+-- | Parse ReleaseWFStatus from DB text. Explicit case at the DB boundary
+-- (haskell-reviewer Trap 7 — avoid 'read' which is strict about whitespace and
+-- gives terrible error messages). Constructors are UPPER_SNAKE, so they match
+-- the DB wire format 1:1.
 parseReleaseWFStatus :: Text -> ReleaseWFStatus
 parseReleaseWFStatus t =
   case T.toUpper t of
-    "INIT" -> Init
-    "PREPARING" -> Preparing
-    "DEPLOYING" -> Deploying
-    "MONITORING" -> Monitoring
-    "FINALIZING" -> Finalizing
-    "DONE" -> Done
-    "ROLLINGBACK" -> RollingBack
-    _ -> Init -- Default fallback
+    "INIT" -> INIT
+    "PREPARING" -> PREPARING
+    "DEPLOYING" -> DEPLOYING
+    "MONITORING" -> MONITORING
+    "FINALIZING" -> FINALIZING
+    "DONE" -> DONE
+    "ROLLING_BACK" -> ROLLING_BACK
+    "ROLLINGBACK" -> ROLLING_BACK -- legacy pascalCase-without-underscore
+    _ -> INIT -- safe default; unknown values shouldn't exist after DB cleanup
 
+-- | Parse ReleaseStatus from DB text. Delegates to 'parseReleaseStatusText'
+-- in "Products.Autopilot.Types.Release", which derives the lookup from the
+-- 'ReleaseStatus' 'Enum'\/'Bounded' instance — one source of truth for both
+-- the DB layer and the Aeson JSON layer.
 parseReleaseStatus :: Text -> ReleaseStatus
-parseReleaseStatus t =
-  -- PascalCase (canonical, from Haskell ADT / Generic ToJSON)
-  case t of
-    "Created" -> Created
-    "InProgress" -> InProgress
-    "Completed" -> Completed
-    "Aborted" -> Aborted
-    "UserAborted" -> UserAborted
-    "Discarded" -> Discarded
-    "Discarding" -> Discarding
-    "Paused" -> Paused
-    "Aborting" -> Aborting
-    "Reverting" -> Reverting
-    "Reverted" -> Reverted
-    "Restarting" -> Restarting
-    -- UPPER_SNAKE_CASE fallback (legacy frontend / old DB rows)
-    _ -> case T.toUpper t of
-      "CREATED" -> Created
-      "INPROGRESS" -> InProgress
-      "ABORTED" -> Aborted
-      "USER_ABORTED" -> UserAborted
-      "USERABORTED" -> UserAborted
-      "COMPLETED" -> Completed
-      "DISCARDED" -> Discarded
-      "PAUSED" -> Paused
-      "ABORTING" -> Aborting
-      "REVERTING" -> Reverting
-      "REVERTED" -> Reverted
-      "RESTARTING" -> Restarting
-      "DISCARDING" -> Discarding
-      -- Legacy status mappings (backward compat for old production DB rows)
-      "RECORDING" -> InProgress
-      "RECORDED" -> Completed
-      "GCLT_ABORTED" -> Aborted
-      "GCLTABORTED" -> Aborted
-      "VS_APPLIED" -> InProgress
-      "VSAPPLIED" -> InProgress
-      _ -> Created
+parseReleaseStatus = parseReleaseStatusText
 
 parseMode :: Maybe Text -> Mode
-parseMode Nothing = Auto
+parseMode Nothing = AUTO
 parseMode (Just t) =
   case T.toUpper t of
-    "MANUAL" -> Manual
-    "AUTO" -> Auto
-    _ -> Auto
+    "MANUAL" -> MANUAL
+    "AUTO" -> AUTO
+    _ -> AUTO
 
--- | Convert ReleaseStatus to UPPERCASE Text for DB storage
+-- | Convert ReleaseStatus to UPPERCASE Text for DB storage.
+-- Re-export of 'releaseStatusText' from "Products.Autopilot.Types.Release"
+-- so callers in this module don't need to import the types module directly.
 releaseStatusToText :: ReleaseStatus -> Text
-releaseStatusToText Created = "CREATED"
-releaseStatusToText InProgress = "INPROGRESS"
-releaseStatusToText Completed = "COMPLETED"
-releaseStatusToText Aborted = "ABORTED"
-releaseStatusToText UserAborted = "USER_ABORTED"
-releaseStatusToText Discarded = "DISCARDED"
-releaseStatusToText Discarding = "DISCARDING"
-releaseStatusToText Paused = "PAUSED"
-releaseStatusToText Aborting = "ABORTING"
-releaseStatusToText Reverting = "REVERTING"
-releaseStatusToText Reverted = "REVERTED"
-releaseStatusToText Restarting = "RESTARTING"
+releaseStatusToText = releaseStatusText
 
--- | Convert Mode to UPPERCASE Text for DB storage
+-- | Convert Mode to UPPERCASE Text for DB storage (same as show).
 modeToText :: Mode -> Text
-modeToText Auto = "AUTO"
-modeToText Manual = "MANUAL"
+modeToText = T.pack . show
 
 parseDecisionEngineHSStatus :: Maybe Text -> DecisionEngineHSStatus
 parseDecisionEngineHSStatus Nothing = Uninitiated
@@ -532,7 +494,7 @@ findReleaseTrackerByGlobalId db gid = do
       runSelectReturningList $
         select $
           orderBy_ (desc_ . rtCreatedAt) $ do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             guard_ (rtGlobalId rt ==. val_ (Just gid))
             pure rt
   pure $ fmap fromRow (safeHead rows)
@@ -553,7 +515,7 @@ safeHead (x : _) = Just x
 
 -- | Find completed/aborted trackers whose old deployment is due for scale-down.
 -- A tracker is eligible if:
--- - status IN (Completed, Aborted, UserAborted)
+-- - status IN (COMPLETED, ABORTED, USER_ABORTED)
 -- - end_time + delay hours < now
 -- - old_version is not empty/unknown/new
 -- - podsScaleDownStatus is NOT already ScaleDownCompleted
@@ -565,7 +527,7 @@ findCompletedTrackersForScaleDown db now delayHours = do
       runSelectReturningList $
         select $
           orderBy_ (asc_ . rtUpdatedAt) $ do
-            rt <- all_ (releaseTrackers nammaAPDb)
+            rt <- all_ (releaseTrackers autopilotDb)
             guard_ (rtStatus rt `in_` [val_ "COMPLETED", val_ "ABORTED", val_ "USER_ABORTED"])
             pure rt
   let parsed = map fromRow rows
@@ -607,4 +569,4 @@ insertReleaseTrackerRow db row =
   withConn db $ \conn ->
     withTransaction conn $ do
       execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (rtId row))
-      runBeamPostgres conn $ runInsert $ insert (releaseTrackers nammaAPDb) $ insertValues [row]
+      runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]

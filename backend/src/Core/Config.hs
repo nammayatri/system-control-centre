@@ -17,7 +17,6 @@ data Config = Config
     envName :: Text,
     -- Kubernetes
     kubectlBin :: FilePath,
-    defaultNamespace :: Text,
     maxK8sRetries :: Int,
     -- Database
     postgresHost :: String,
@@ -40,18 +39,21 @@ loadConfig :: IO Config
 loadConfig = do
   appState <- envOr "APP_STATE" "SERVER"
   port <- envInt "PORT" 8012
-  envName <- pack <$> envOr "NammaAP_ENV" "production"
+  -- All bootstrap env vars use the @SC_*@ prefix (System Control).
+  -- @NammaAP_*@ is accepted as a deprecated fallback for one release cycle to
+  -- keep existing deployments working while scripts migrate. Remove after
+  -- every deployment is on SC_*.
+  envName <- pack <$> envOrDeprecated "SC_ENV" "NammaAP_ENV" "production"
 
-  kubectlBin <- envOr "NammaAP_KUBECTL_BIN" "kubectl"
-  defaultNamespace <- pack <$> envOr "NammaAP_DEFAULT_NAMESPACE" "default"
-  maxK8sRetries <- envInt "NammaAP_MAX_K8S_RETRIES" 3
+  kubectlBin <- envOrDeprecated "SC_KUBECTL_BIN" "NammaAP_KUBECTL_BIN" "kubectl"
+  maxK8sRetries <- envIntDeprecated "SC_MAX_K8S_RETRIES" "NammaAP_MAX_K8S_RETRIES" 3
 
-  postgresHost <- envOr "NammaAP_POSTGRES_HOST" "127.0.0.1"
-  postgresPort <- envInt "NammaAP_POSTGRES_PORT" 5432
-  postgresUser <- envOr "NammaAP_POSTGRES_USER" "postgres"
-  postgresPassword <- envOr "NammaAP_POSTGRES_PASSWORD" "postgres"
-  postgresDatabase <- envOr "NammaAP_POSTGRES_DB" "namma_ap"
-  databaseUrl <- lookupSetting "NammaAP_DATABASE_URL"
+  postgresHost <- envOrDeprecated "SC_POSTGRES_HOST" "NammaAP_POSTGRES_HOST" "127.0.0.1"
+  postgresPort <- envIntDeprecated "SC_POSTGRES_PORT" "NammaAP_POSTGRES_PORT" 5432
+  postgresUser <- envOrDeprecated "SC_POSTGRES_USER" "NammaAP_POSTGRES_USER" "postgres"
+  postgresPassword <- envOrDeprecated "SC_POSTGRES_PASSWORD" "NammaAP_POSTGRES_PASSWORD" "postgres"
+  postgresDatabase <- envOrDeprecated "SC_POSTGRES_DB" "NammaAP_POSTGRES_DB" "system_control"
+  databaseUrl <- lookupSettingDeprecated "SC_DATABASE_URL" "NammaAP_DATABASE_URL"
 
   syncClusterUrl <- envOr "SYNC_CLUSTER_URL" ""
   syncClusterBaseAuth <- envOr "SYNC_CLUSTER_BASE_AUTH" ""
@@ -73,6 +75,25 @@ envInt :: String -> Int -> IO Int
 envInt key fallback = do
   v <- lookupSetting key
   pure $ maybe fallback id (v >>= readMaybe)
+
+-- | Look up @primary@ first, then fall back to the deprecated @legacy@ key.
+-- If neither is set, return the hard-coded fallback.
+envOrDeprecated :: String -> String -> String -> IO String
+envOrDeprecated primary legacy fallback = do
+  v <- lookupSettingDeprecated primary legacy
+  pure (maybe fallback id v)
+
+envIntDeprecated :: String -> String -> Int -> IO Int
+envIntDeprecated primary legacy fallback = do
+  v <- lookupSettingDeprecated primary legacy
+  pure $ maybe fallback id (v >>= readMaybe)
+
+lookupSettingDeprecated :: String -> String -> IO (Maybe String)
+lookupSettingDeprecated primary legacy = do
+  p <- lookupSetting primary
+  case p of
+    Just _ -> pure p
+    Nothing -> lookupSetting legacy
 
 lookupSetting :: String -> IO (Maybe String)
 lookupSetting key = do

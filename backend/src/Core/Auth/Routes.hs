@@ -21,8 +21,8 @@ import qualified Data.Text as T
 import Data.Time.Clock (addUTCTime, getCurrentTime)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
-import Products.Autopilot.Types.API (APIResponse (..))
 import Servant
+import Shared.API.Response (APIResponse (..))
 
 -- | Auth API type
 type AuthAPI =

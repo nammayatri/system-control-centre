@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { fetchVSEdits } from '../../../api';
-import type { VSEditTracker } from '../../../api';
-import { StatusBadge } from '../../../shared/ui/badge';
+import { fetchVSEdits } from '../../releases/api';
+import type { VSEditTracker } from '../../releases/api';
+import { StatusBadge } from '../../releases/components/StatusBadge';
 import { Button } from '../../../shared/ui/button';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { TableSkeleton } from '../../../shared/ui/skeleton';

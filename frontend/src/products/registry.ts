@@ -21,13 +21,23 @@ export interface ProductRoute {
   permission?: string;   // required permission (e.g., 'RELEASE_CREATE')
 }
 
+export interface Crumb {
+  label: string;
+  to?: string;
+}
+
 export interface ProductDefinition {
   slug: string;          // matches sc_product.slug in backend DB
   label: string;         // display name in sidebar
+  description: string;   // one-line description shown on launcher cards
   icon: string;          // Lucide icon name for sidebar section
   basePath: string;      // URL base path (e.g., '/releases')
+  viewPermission: string; // permission string required to see this product (e.g., 'RELEASE_VIEW')
   navItems: ProductNavItem[];
   routes: ProductRoute[];
+  // Optional: build breadcrumbs for a path under this product.
+  // Return an empty array if this product does not own the given path.
+  getBreadcrumbs?: (parts: string[]) => Crumb[];
 }
 
 // ── Product: Releases ────────────────────────────────────────────
@@ -47,8 +57,10 @@ import VSEditSummary from './vs-editor/pages/VSEditSummary';
 const releasesProduct: ProductDefinition = {
   slug: 'autopilot',
   label: 'Backend Releases',
+  description: 'Create, approve, and manage backend service releases',
   icon: 'Rocket',
   basePath: '/releases',
+  viewPermission: 'RELEASE_VIEW',
   navItems: [
     { label: 'Releases', path: '/releases', icon: 'List' },
     { label: 'Create Release', path: '/releases/new', icon: 'Plus' },
@@ -77,6 +89,37 @@ const releasesProduct: ProductDefinition = {
     // Server Config
     { path: '/configurations', component: Configurations },
   ],
+  getBreadcrumbs: (parts) => {
+    const crumbs: Crumb[] = [];
+    if (parts[0] === 'releases') {
+      crumbs.push({ label: 'Releases', to: '/releases' });
+      if (parts[1] === 'new') {
+        crumbs.push({ label: 'Create Release' });
+      } else if (parts.length >= 3) {
+        crumbs.push({ label: parts[1], to: `/releases/${parts[1]}/${parts[2]}` });
+        if (parts[3] === 'clone') {
+          crumbs.push({ label: 'Clone' });
+        } else {
+          crumbs.push({ label: 'Release Summary' });
+        }
+      }
+      return crumbs;
+    }
+    if (parts[0] === 'configmap') {
+      crumbs.push({ label: 'Config Map', to: '/configmap' });
+      if (parts[1] === 'new') {
+        crumbs.push({ label: 'Create ConfigMap' });
+      } else if (parts.length >= 2) {
+        crumbs.push({ label: 'ConfigMap Details' });
+      }
+      return crumbs;
+    }
+    if (parts[0] === 'configurations') {
+      crumbs.push({ label: 'Configurations' });
+      return crumbs;
+    }
+    return [];
+  },
 };
 
 // ── Registry ─────────────────────────────────────────────────────

@@ -4,10 +4,10 @@
 --
 -- This module implements the workflow for running one-time Jobs in Kubernetes.
 -- Jobs are simpler than services:
--- 1. Preparing: Create job from template or apply job YAML
--- 2. Deploying: Monitor job status, check .status.succeeded and .status.failed
--- 3. Monitoring: Poll until job completes (succeeded >= 1) or fails (failed > backoffLimit)
--- 4. Done: Mark Completed or Aborted based on job status
+-- 1. PREPARING: Create job from template or apply job YAML
+-- 2. DEPLOYING: Monitor job status, check .status.succeeded and .status.failed
+-- 3. MONITORING: Poll until job completes (succeeded >= 1) or fails (failed > backoffLimit)
+-- 4. DONE: Mark COMPLETED or ABORTED based on job status
 module Products.Autopilot.Workflow.BackendJobWorkflow
   ( backendJobWorkflow,
   )
@@ -62,10 +62,10 @@ import Prelude
 -- | Backend Job workflow: one-time job execution
 backendJobWorkflow :: ReleaseWorkFlow ()
 backendJobWorkflow = do
-  Init |>> validatePreconditions
-  Preparing |>> createJob
-  Deploying |>> monitorJobStatus
-  Done |>> notifyComplete
+  INIT |>> validatePreconditions
+  PREPARING |>> createJob
+  DEPLOYING |>> monitorJobStatus
+  DONE |>> notifyComplete
 
 -- ============================================================================
 -- Helpers: Config / Context / K8s IO
@@ -209,7 +209,7 @@ monitorJobStatus = do
   rt <- getRT
   cfg <- getCfg
   ctx <- getK8sCtx
-  liftIO $ putStrLn $ "Monitoring job status for " <> T.unpack (appGroup rt)
+  liftIO $ putStrLn $ "MONITORING job status for " <> T.unpack (appGroup rt)
 
   updateK8sStatus BSMonitoring
 
@@ -259,7 +259,7 @@ pollJobStatus cfg getJobCmd maxPolls currentPoll = do
             then do
               liftIO $ putStrLn "  Job FAILED: exceeded backoff limit"
               -- Mark as aborted
-              updateRT $ \r -> r{status = Aborted}
+              updateRT $ \r -> r{status = ABORTED}
               db <- getDB
               rt <- getRT
               liftIO $ notifyReleaseAborted db rt
@@ -303,15 +303,15 @@ notifyComplete = do
 
   -- Check if job was already marked as aborted
   case status rt of
-    Aborted -> do
+    ABORTED -> do
       liftIO $ putStrLn $ "Job " <> T.unpack (releaseId rt) <> " was aborted"
     _ -> do
       liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
       liftIO $ putStrLn $ "   Service: " <> T.unpack (appGroup rt)
       liftIO $ putStrLn $ "   Category: BackendJob"
-      liftIO $ putStrLn $ "   Status: Completed"
+      liftIO $ putStrLn $ "   Status: COMPLETED"
 
-      updateRT $ \r -> r{status = Completed}
+      updateRT $ \r -> r{status = COMPLETED}
 
       -- Notify Slack
       liftIO $ notifyReleaseCompleted db rt

@@ -3,8 +3,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   fetchProductConfigs, createProductConfig, updateProductConfig, deleteProductConfig,
   fetchReleaseConfigs, createReleaseConfig, updateReleaseConfig, deleteReleaseConfig,
-} from '../../../api';
-import type { ProductConfig, ReleaseConfig } from '../../../api';
+} from '../../releases/api';
+import type { ProductConfig, ReleaseConfig } from '../../releases/api';
 import { Button } from '../../../shared/ui/button';
 import { Badge } from '../../../shared/ui/badge';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
@@ -647,7 +647,7 @@ const DeploymentConfig: React.FC = () => {
               <div>
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Rollout Strategy</label>
                 {(() => {
-                  let stages: Array<{rolloutPercent: number; cooloffSeconds: number; podPercent: number}> = [];
+                  let stages: Array<{rolloutPercent: number; cooloffMinutes: number; podPercent: number}> = [];
                   try { stages = JSON.parse(serviceForm.rollout_strategy || '[]'); } catch { stages = []; }
                   if (!Array.isArray(stages)) stages = [];
 
@@ -675,8 +675,8 @@ const DeploymentConfig: React.FC = () => {
                                   className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
                               </td>
                               <td className="px-2 py-1">
-                                <input type="number" min={0} max={90} value={s.cooloffSeconds}
-                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, cooloffSeconds: parseInt(e.target.value) || 0 } : st))}
+                                <input type="number" min={0} max={90} value={s.cooloffMinutes}
+                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, cooloffMinutes: parseInt(e.target.value) || 0 } : st))}
                                   className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
                               </td>
                               <td className="px-2 py-1">
@@ -693,7 +693,7 @@ const DeploymentConfig: React.FC = () => {
                         </tbody>
                       </table>
                       <button type="button"
-                        onClick={() => updateStages([...stages, { rolloutPercent: 100, cooloffSeconds: 0, podPercent: 100 }])}
+                        onClick={() => updateStages([...stages, { rolloutPercent: 100, cooloffMinutes: 0, podPercent: 100 }])}
                         className="w-full py-1.5 text-xs text-zinc-400 hover:text-zinc-600 border-t border-zinc-100 cursor-pointer">
                         + Add Stage
                       </button>
@@ -705,7 +705,7 @@ const DeploymentConfig: React.FC = () => {
               <div>
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Revert Strategy</label>
                 {(() => {
-                  let stages: Array<{rolloutPercent: number; cooloffSeconds: number; podPercent: number}> = [];
+                  let stages: Array<{rolloutPercent: number; cooloffMinutes: number; podPercent: number}> = [];
                   try { stages = JSON.parse(serviceForm.revert_strategy || '[]'); } catch { stages = []; }
                   if (!Array.isArray(stages)) stages = [];
 
@@ -733,8 +733,8 @@ const DeploymentConfig: React.FC = () => {
                                   className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
                               </td>
                               <td className="px-2 py-1">
-                                <input type="number" min={0} max={90} value={s.cooloffSeconds}
-                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, cooloffSeconds: parseInt(e.target.value) || 0 } : st))}
+                                <input type="number" min={0} max={90} value={s.cooloffMinutes}
+                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, cooloffMinutes: parseInt(e.target.value) || 0 } : st))}
                                   className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
                               </td>
                               <td className="px-2 py-1">
@@ -751,7 +751,7 @@ const DeploymentConfig: React.FC = () => {
                         </tbody>
                       </table>
                       <button type="button"
-                        onClick={() => updateStages([...stages, { rolloutPercent: 100, cooloffSeconds: 0, podPercent: 100 }])}
+                        onClick={() => updateStages([...stages, { rolloutPercent: 100, cooloffMinutes: 0, podPercent: 100 }])}
                         className="w-full py-1.5 text-xs text-zinc-400 hover:text-zinc-600 border-t border-zinc-100 cursor-pointer">
                         + Add Stage
                       </button>

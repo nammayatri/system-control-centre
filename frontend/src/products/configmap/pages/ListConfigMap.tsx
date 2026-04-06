@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Search, RefreshCw, Calendar, Copy, ChevronLeft, ChevronRight, ChevronDown, X, Plus } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchAPConfigMaps } from '../api';
-import { StatusBadge } from '../../../shared/ui/badge';
+import { StatusBadge } from '../../releases/components/StatusBadge';
 import { Button } from '../../../shared/ui/button';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { TableSkeleton } from '../../../shared/ui/skeleton';

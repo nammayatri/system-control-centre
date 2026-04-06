@@ -87,7 +87,7 @@
             fi
 
             DB_USER="$(whoami)"
-            export NammaAP_DATABASE_URL="postgres://$DB_USER@localhost:5432/''${SC_DB_NAME:-system_control}"
+            export SC_DATABASE_URL="postgres://$DB_USER@localhost:5432/''${SC_DB_NAME:-system_control}"
             export PORT=''${PORT:-8012}
 
             # Add bin/ scripts to PATH (works with direnv, unlike shell functions)

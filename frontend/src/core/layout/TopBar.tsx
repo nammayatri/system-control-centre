@@ -2,44 +2,33 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { ChevronRight, LogOut } from 'lucide-react';
+import { PRODUCT_REGISTRY, type Crumb } from '../../products/registry';
 
-function getBreadcrumbs(pathname: string): { label: string; to?: string }[] {
-  const parts = pathname.split('/').filter(Boolean);
-  const crumbs: { label: string; to?: string }[] = [];
-
-  if (parts[0] === 'releases') {
-    crumbs.push({ label: 'Releases', to: '/releases' });
-    if (parts[1] === 'new') {
-      crumbs.push({ label: 'Create Release' });
-    } else if (parts.length >= 3) {
-      crumbs.push({ label: parts[1], to: `/releases/${parts[1]}/${parts[2]}` });
-      if (parts[3] === 'clone') {
-        crumbs.push({ label: 'Clone' });
-      } else {
-        crumbs.push({ label: 'Release Summary' });
-      }
-    }
-  } else if (parts[0] === 'configmap') {
-    crumbs.push({ label: 'Config Map', to: '/configmap' });
-    if (parts[1] === 'new') {
-      crumbs.push({ label: 'Create ConfigMap' });
-    } else if (parts.length >= 2) {
-      crumbs.push({ label: 'ConfigMap Details' });
-    }
-  } else if (parts[0] === 'configurations') {
-    crumbs.push({ label: 'Configurations' });
-  } else if (parts[0] === 'admin') {
-    crumbs.push({ label: 'Admin' });
-    if (parts[1] === 'users') {
-      crumbs.push({ label: 'Users', to: '/admin/users' });
-      if (parts[2]) crumbs.push({ label: 'User Detail' });
-    } else if (parts[1] === 'roles') {
-      crumbs.push({ label: 'Roles', to: '/admin/roles' });
-      if (parts[2]) crumbs.push({ label: 'Role Detail' });
-    }
+function getAdminBreadcrumbs(parts: string[]): Crumb[] {
+  const crumbs: Crumb[] = [{ label: 'Admin' }];
+  if (parts[1] === 'users') {
+    crumbs.push({ label: 'Users', to: '/admin/users' });
+    if (parts[2]) crumbs.push({ label: 'User Detail' });
+  } else if (parts[1] === 'roles') {
+    crumbs.push({ label: 'Roles', to: '/admin/roles' });
+    if (parts[2]) crumbs.push({ label: 'Role Detail' });
   }
-
   return crumbs;
+}
+
+function getBreadcrumbs(pathname: string): Crumb[] {
+  const parts = pathname.split('/').filter(Boolean);
+  if (parts.length === 0) return [];
+
+  // Admin routes are a core concern, handled here.
+  if (parts[0] === 'admin') return getAdminBreadcrumbs(parts);
+
+  // Delegate to the first product that claims this path.
+  for (const product of PRODUCT_REGISTRY) {
+    const crumbs = product.getBreadcrumbs?.(parts);
+    if (crumbs && crumbs.length > 0) return crumbs;
+  }
+  return [];
 }
 
 const TopBar: React.FC = () => {

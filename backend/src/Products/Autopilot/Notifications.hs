@@ -3,8 +3,8 @@
 
 -- | Slack notification helpers for autopilot release lifecycle.
 --
--- Thread-aware: the first message (Created) starts a thread,
--- all subsequent messages (Approved, Progress, Completed, etc.)
+-- Thread-aware: the first message (CREATED) starts a thread,
+-- all subsequent messages (Approved, Progress, COMPLETED, etc.)
 -- reply in that thread using the thread_ts stored in release_tracker.slack_thread_ts.
 --
 -- Uses Slack Block Kit with colored attachments for rich formatting.
@@ -239,7 +239,7 @@ notifyReleaseProgress db tracker percentage = whenSlackEnabled db $
           [ sectionBlock ("*INPROGRESS*  " <> pct <> "%"),
             contextBlock ["Routing " <> pct <> "% traffic to `" <> newVersion tracker <> "` | " <> T.pack (show (100 - percentage)) <> "% on `" <> oldVersion tracker <> "`"]
           ]
-    _ <- sendSlackRich channel ("InProgress " <> pct <> "%") colorInProgress blocks threadTs
+    _ <- sendSlackRich channel ("INPROGRESS " <> pct <> "%") colorInProgress blocks threadTs
     pure ()
 
 -- | Release completed
@@ -251,7 +251,7 @@ notifyReleaseCompleted db tracker = whenSlackEnabled db $
           [ sectionBlock "*COMPLETED*  100%",
             contextBlock ["All traffic on `" <> newVersion tracker <> "`"]
           ]
-    _ <- sendSlackRich channel "Completed" colorCompleted blocks threadTs
+    _ <- sendSlackRich channel "COMPLETED" colorCompleted blocks threadTs
     pure ()
 
 -- | Release aborted
@@ -263,7 +263,7 @@ notifyReleaseAborted db tracker = whenSlackEnabled db $
           [ sectionBlock "*ABORTED*",
             contextBlock ["Traffic restored to `" <> oldVersion tracker <> "`"]
           ]
-    _ <- sendSlackRich channel "Aborted" colorAborted blocks threadTs
+    _ <- sendSlackRich channel "ABORTED" colorAborted blocks threadTs
     pure ()
 
 -- | Release paused
@@ -272,7 +272,7 @@ notifyReleasePaused db tracker = whenSlackEnabled db $
   withChannel db (appGroup tracker) (service tracker) $ \channel -> do
     threadTs <- getThreadTs db (releaseId tracker)
     let blocks = [sectionBlock "*PAUSED*  — cooloff in progress"]
-    _ <- sendSlackRich channel "Paused" colorPaused blocks threadTs
+    _ <- sendSlackRich channel "PAUSED" colorPaused blocks threadTs
     pure ()
 
 -- | Release resumed
@@ -293,7 +293,7 @@ notifyReleaseReverted db tracker = whenSlackEnabled db $
           [ sectionBlock "*REVERTED*",
             contextBlock ["Rolled back to `" <> oldVersion tracker <> "`"]
           ]
-    _ <- sendSlackRich channel "Reverted" colorReverted blocks threadTs
+    _ <- sendSlackRich channel "REVERTED" colorReverted blocks threadTs
     pure ()
 
 -- | Release discarded
@@ -302,7 +302,7 @@ notifyReleaseDiscarded db tracker = whenSlackEnabled db $
   withChannel db (appGroup tracker) (service tracker) $ \channel -> do
     threadTs <- getThreadTs db (releaseId tracker)
     let blocks = [sectionBlock "*DISCARDED*"]
-    _ <- sendSlackRich channel "Discarded" colorDefault blocks threadTs
+    _ <- sendSlackRich channel "DISCARDED" colorDefault blocks threadTs
     pure ()
 
 -- | Release deleted
@@ -328,7 +328,7 @@ notifyReleaseRestarted :: DBEnv -> ReleaseTracker -> IO ()
 notifyReleaseRestarted db tracker = whenSlackEnabled db $
   withChannel db (appGroup tracker) (service tracker) $ \channel -> do
     threadTs <- getThreadTs db (releaseId tracker)
-    let blocks = [sectionBlock "*RESTARTED*  — reset to Created"]
+    let blocks = [sectionBlock "*RESTARTED*  — reset to CREATED"]
     _ <- sendSlackRich channel "Restarted" colorCreated blocks threadTs
     pure ()
 
@@ -373,9 +373,9 @@ notifyVsEditCreated db trackerId prod svc mCreatedByUser = whenSlackEnabled db $
         createdByUser = maybe "admin" id mCreatedByUser
         blocks =
           [ sectionBlock vsLink,
-            contextBlock ["Created by *" <> createdByUser <> "*"]
+            contextBlock ["CREATED by *" <> createdByUser <> "*"]
           ]
-    mTs <- sendSlackRich channel "VS Created" colorCreated blocks Nothing
+    mTs <- sendSlackRich channel "VS CREATED" colorCreated blocks Nothing
     case mTs of
       Just ts -> saveThreadTs db trackerId ts
       Nothing -> pure ()
@@ -388,9 +388,9 @@ notifyVsEditLocked db trackerId prod svc lockedByUser = whenSlackEnabled db $
     let vsLink = "<" <> link <> "/vs-editor/" <> trackerId <> "|" <> prod <> " | " <> svc <> " | VS Edit>"
         blocks =
           [ sectionBlock vsLink,
-            contextBlock ["Locked by *" <> lockedByUser <> "*"]
+            contextBlock ["LOCKED by *" <> lockedByUser <> "*"]
           ]
-    mTs <- sendSlackRich channel "VS Locked" colorPaused blocks Nothing
+    mTs <- sendSlackRich channel "VS LOCKED" colorPaused blocks Nothing
     case mTs of
       Just ts -> saveThreadTs db trackerId ts
       Nothing -> pure ()
@@ -402,9 +402,9 @@ notifyVsEditApplied db trackerId prod svc appliedBy = whenSlackEnabled db $
     threadTs <- getThreadTs db trackerId
     let blocks =
           [ sectionBlock ("*" <> prod <> "* | *" <> svc <> "* | VS *APPLIED*"),
-            contextBlock ["Applied by " <> appliedBy]
+            contextBlock ["APPLIED by " <> appliedBy]
           ]
-    _ <- sendSlackRich channel "VS Applied" colorCompleted blocks threadTs
+    _ <- sendSlackRich channel "VS APPLIED" colorCompleted blocks threadTs
     pure ()
 
 -- | VS approved — thread reply
@@ -422,7 +422,7 @@ notifyVsEditDiscarded db trackerId prod svc = whenSlackEnabled db $
   withChannel db prod svc $ \channel -> do
     threadTs <- getThreadTs db trackerId
     let blocks = [sectionBlock ("*" <> prod <> "* | *" <> svc <> "* | VS *DISCARDED*")]
-    _ <- sendSlackRich channel "VS Discarded" colorDefault blocks threadTs
+    _ <- sendSlackRich channel "VS DISCARDED" colorDefault blocks threadTs
     pure ()
 
 -- | VS reverted — thread reply
@@ -431,7 +431,7 @@ notifyVsEditReverted db trackerId prod svc = whenSlackEnabled db $
   withChannel db prod svc $ \channel -> do
     threadTs <- getThreadTs db trackerId
     let blocks = [sectionBlock ("*" <> prod <> "* | *" <> svc <> "* | VS *REVERTED*")]
-    _ <- sendSlackRich channel "VS Reverted" colorReverted blocks threadTs
+    _ <- sendSlackRich channel "VS REVERTED" colorReverted blocks threadTs
     pure ()
 
 -- | VS unlocked — thread reply
@@ -440,7 +440,7 @@ notifyVsEditUnlocked db trackerId prod svc = whenSlackEnabled db $
   withChannel db prod svc $ \channel -> do
     threadTs <- getThreadTs db trackerId
     let blocks = [sectionBlock ("*" <> prod <> "* | *" <> svc <> "* | VS *UNLOCKED*")]
-    _ <- sendSlackRich channel "VS Unlocked" colorDefault blocks threadTs
+    _ <- sendSlackRich channel "VS UNLOCKED" colorDefault blocks threadTs
     pure ()
 
 -- ── ConfigMap Notifications ──────────────────────────────────────
@@ -452,7 +452,7 @@ notifyConfigMapCreated db tracker = whenSlackEnabled db $
           [ sectionBlock ("*" <> appGroup tracker <> "* | *" <> service tracker <> "* | ConfigMap Release"),
             sectionBlock (appGroup tracker <> " | " <> createdBy tracker)
           ]
-    mTs <- sendSlackRich channel "ConfigMap Created" colorCreated blocks Nothing
+    mTs <- sendSlackRich channel "ConfigMap CREATED" colorCreated blocks Nothing
     case mTs of
       Just ts -> saveThreadTs db (releaseId tracker) ts
       Nothing -> pure ()
@@ -478,7 +478,7 @@ notifyConfigMapInProgress db tracker = whenSlackEnabled db $
   withChannel db (appGroup tracker) (service tracker) $ \channel -> do
     threadTs <- getThreadTs db (releaseId tracker)
     let blocks = [sectionBlock "*INPROGRESS*  — Applying ConfigMap"]
-    _ <- sendSlackRich channel "ConfigMap InProgress" colorInProgress blocks threadTs
+    _ <- sendSlackRich channel "ConfigMap INPROGRESS" colorInProgress blocks threadTs
     pure ()
 
 notifyConfigMapCompleted :: DBEnv -> ReleaseTracker -> IO ()
@@ -486,7 +486,7 @@ notifyConfigMapCompleted db tracker = whenSlackEnabled db $
   withChannel db (appGroup tracker) (service tracker) $ \channel -> do
     threadTs <- getThreadTs db (releaseId tracker)
     let blocks = [sectionBlock "*COMPLETED*"]
-    _ <- sendSlackRich channel "ConfigMap Completed" colorCompleted blocks threadTs
+    _ <- sendSlackRich channel "ConfigMap COMPLETED" colorCompleted blocks threadTs
     pure ()
 
 notifyConfigMapAborted :: DBEnv -> ReleaseTracker -> IO ()
@@ -494,7 +494,7 @@ notifyConfigMapAborted db tracker = whenSlackEnabled db $
   withChannel db (appGroup tracker) (service tracker) $ \channel -> do
     threadTs <- getThreadTs db (releaseId tracker)
     let blocks = [sectionBlock "*ABORTED*"]
-    _ <- sendSlackRich channel "ConfigMap Aborted" colorAborted blocks threadTs
+    _ <- sendSlackRich channel "ConfigMap ABORTED" colorAborted blocks threadTs
     pure ()
 
 notifyConfigMapPaused :: DBEnv -> ReleaseTracker -> IO ()
@@ -502,7 +502,7 @@ notifyConfigMapPaused db tracker = whenSlackEnabled db $
   withChannel db (appGroup tracker) (service tracker) $ \channel -> do
     threadTs <- getThreadTs db (releaseId tracker)
     let blocks = [sectionBlock "*PAUSED*  — cooloff in progress"]
-    _ <- sendSlackRich channel "ConfigMap Paused" colorPaused blocks threadTs
+    _ <- sendSlackRich channel "ConfigMap PAUSED" colorPaused blocks threadTs
     pure ()
 
 notifyConfigMapResumed :: DBEnv -> ReleaseTracker -> IO ()
@@ -521,7 +521,7 @@ notifyConfigMapReverted db tracker = whenSlackEnabled db $
           [ sectionBlock "*REVERTED*",
             contextBlock ["ConfigMap rolled back"]
           ]
-    _ <- sendSlackRich channel "ConfigMap Reverted" colorReverted blocks threadTs
+    _ <- sendSlackRich channel "ConfigMap REVERTED" colorReverted blocks threadTs
     pure ()
 
 notifyConfigMapDiscarded :: DBEnv -> ReleaseTracker -> IO ()
@@ -529,7 +529,7 @@ notifyConfigMapDiscarded db tracker = whenSlackEnabled db $
   withChannel db (appGroup tracker) (service tracker) $ \channel -> do
     threadTs <- getThreadTs db (releaseId tracker)
     let blocks = [sectionBlock "*DISCARDED*"]
-    _ <- sendSlackRich channel "ConfigMap Discarded" colorDefault blocks threadTs
+    _ <- sendSlackRich channel "ConfigMap DISCARDED" colorDefault blocks threadTs
     pure ()
 
 notifyConfigMapFastForwarded :: DBEnv -> ReleaseTracker -> IO ()

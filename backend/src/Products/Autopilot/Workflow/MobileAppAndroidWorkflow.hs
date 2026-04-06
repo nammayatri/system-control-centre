@@ -46,24 +46,24 @@ import Prelude
 -- | Mobile app Android workflow using generic stages
 --
 -- This workflow releases an Android app to Google Play Store with:
--- - Generic ReleaseWFStatus stages (Init, Preparing, Deploying, Monitoring, Finalizing, Done)
+-- - Generic ReleaseWFStatus stages (INIT, PREPARING, DEPLOYING, MONITORING, FINALIZING, DONE)
 -- - Play Store-specific MobileAppAndroidWFStatus sub-stages
 -- - Category-specific state in PlayStoreDeploymentState
 --
 -- Example release:
 -- - product = "rider-android"
 -- - category = MobileAppAndroid
--- - releaseWFStatus: Init → Preparing → Deploying → Monitoring → Finalizing → Done
+-- - releaseWFStatus: INIT → PREPARING → DEPLOYING → MONITORING → FINALIZING → DONE
 -- - targetState: PlayStoreState with MobileAppAndroidWFStatus sub-stages
 mobileAppAndroidWorkflow :: ReleaseWorkFlow ()
 mobileAppAndroidWorkflow = do
   -- Generic ReleaseWFStatus stages
-  Init |>> validateAPK
-  Preparing |>> uploadToPlayStore
-  Deploying |>> stagedRollout
-  Monitoring |>> monitorCrashRates
-  Finalizing |>> promoteToFull
-  Done |>> notifyRelease
+  INIT |>> validateAPK
+  PREPARING |>> uploadToPlayStore
+  DEPLOYING |>> stagedRollout
+  MONITORING |>> monitorCrashRates
+  FINALIZING |>> promoteToFull
+  DONE |>> notifyRelease
 
 -- ============================================================================
 -- Workflow Step Implementations
@@ -71,7 +71,7 @@ mobileAppAndroidWorkflow = do
 
 -- | Validate APK
 --
--- Generic stage: Init
+-- Generic stage: INIT
 -- Play Store sub-stage: MAInit
 validateAPK :: StateFlow ()
 validateAPK = do
@@ -95,7 +95,7 @@ validateAPK = do
 
 -- | Upload to Play Store
 --
--- Generic stage: Preparing
+-- Generic stage: PREPARING
 -- Play Store sub-stages: MAUploadAPK, MASubmitForReview
 uploadToPlayStore :: StateFlow ()
 uploadToPlayStore = do
@@ -129,7 +129,7 @@ uploadToPlayStore = do
 
 -- | Staged rollout (0% → 25% → 50% → 100%)
 --
--- Generic stage: Deploying
+-- Generic stage: DEPLOYING
 -- Play Store sub-stage: MAStagedRollout
 stagedRollout :: StateFlow ()
 stagedRollout = do
@@ -183,17 +183,17 @@ checkHealthAtRolloutLevel pct = do
 
 -- | Monitor crash rates
 --
--- Generic stage: Monitoring
+-- Generic stage: MONITORING
 -- Play Store sub-stage: MAMonitorCrashRate
 monitorCrashRates :: StateFlow ()
 monitorCrashRates = do
   rt <- getRT
-  liftIO $ putStrLn $ "👀 Monitoring crash rates for " <> T.unpack (appGroup rt)
+  liftIO $ putStrLn $ "👀 MONITORING crash rates for " <> T.unpack (appGroup rt)
 
   updatePlayStoreStatus MAMonitorCrashRate
 
   -- Monitor for 30 seconds
-  liftIO $ putStrLn "  ⏱️  Monitoring period (30s)"
+  liftIO $ putStrLn "  ⏱️  MONITORING period (30s)"
   liftIO $ threadDelay 30000000
 
   -- Check final metrics
@@ -208,11 +208,11 @@ monitorCrashRates = do
         else liftIO $ putStrLn "  ✓ Metrics within acceptable range"
     _ -> return ()
 
-  liftIO $ putStrLn "✅ Monitoring complete"
+  liftIO $ putStrLn "✅ MONITORING complete"
 
 -- | Promote to full release
 --
--- Generic stage: Finalizing
+-- Generic stage: FINALIZING
 -- Play Store sub-stage: MAPromoteToFull
 promoteToFull :: StateFlow ()
 promoteToFull = do
@@ -228,7 +228,7 @@ promoteToFull = do
 
 -- | Notify release complete
 --
--- Generic stage: Done
+-- Generic stage: DONE
 -- Play Store sub-stage: MADone
 notifyRelease :: StateFlow ()
 notifyRelease = do
@@ -238,7 +238,7 @@ notifyRelease = do
   liftIO $ putStrLn $ "🎉 Release " <> T.unpack (releaseId rt) <> " completed successfully!"
   liftIO $ putStrLn $ "   App: " <> T.unpack (appGroup rt)
   liftIO $ putStrLn $ "   Category: MobileAppAndroid"
-  liftIO $ putStrLn $ "   Status: Completed"
+  liftIO $ putStrLn $ "   Status: COMPLETED"
 
   -- Display final metrics
   rs <- gets id
@@ -251,8 +251,8 @@ notifyRelease = do
       liftIO $ putStrLn $ "     - Average rating: " <> show (fromMaybe 0 (averageRating ps))
     _ -> return ()
 
-  -- Update global status to Completed
-  updateRT $ \r -> r{status = Completed}
+  -- Update global status to COMPLETED
+  updateRT $ \r -> r{status = COMPLETED}
 
 -- ============================================================================
 -- Helper Functions

@@ -11,7 +11,7 @@ import { toast } from 'sonner';
 import { cn } from '../../../lib/utils';
 import ReactDiffViewer from 'react-diff-viewer-continued';
 import { DEFAULT_ENV, AVAILABLE_ENVS } from '../../../lib/constants';
-import type { ProductConfig } from '../../../api';
+import type { ProductConfig } from '../../releases/api';
 
 function jsonConfigToYaml(raw: string): string {
   try {
