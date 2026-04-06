@@ -12,11 +12,12 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
+import Products.Autopilot.EventLog (logStatusUpdated, logTrafficUpdatedWithMessage)
 import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand)
 import Products.Autopilot.K8s.Execute (runCmd)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
-import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductVsLockedBy)
+import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductVsLockedBy, releaseExpiredVsLocks)
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.RuntimeConfig (getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
 import Products.Autopilot.Types
@@ -38,8 +39,27 @@ runnerLoop st = do
   -- On startup, roll back ALL INPROGRESS/PAUSED/REVERTING releases.
   -- Their workflow threads are gone (server restarted), so restore VS and abort.
   runFlow st rollbackInProgressOnStartup
+  -- Companion to tryAcquireVsLock's inline expiry check: sweep any orphaned
+  -- VS locks whose timestamp is older than lock_expiry_delay_minutes. Covers
+  -- the case where a lock is held but no one tries to acquire (so the inline
+  -- expiry check never runs), leaving an orphaned lock visible to
+  -- isEligibleToRun and blocking release dispatch.
+  runFlow st releaseExpiredVsLocksOnStartup
   -- Then start the poll loop — only picks CREATED trackers.
   runFlow st loop
+
+-- | Release any VS lock older than the configured expiry. Runs once at
+-- startup; tryAcquireVsLock also treats stale locks as released so new
+-- edit attempts unblock themselves without needing this sweep to run first.
+releaseExpiredVsLocksOnStartup :: Flow ()
+releaseExpiredVsLocksOnStartup = do
+  db <- getDBEnv
+  n <- liftIO $ releaseExpiredVsLocks db
+  liftIO $
+    putStrLn $
+      if n == 0
+        then "[STARTUP] No expired VS locks to release"
+        else "[STARTUP] Released " <> show n <> " expired VS lock(s)"
 
 -- ============================================================================
 -- Startup Rollback (Julia parity: rollbackReleaseInProgress)
@@ -59,19 +79,43 @@ rollbackInProgressOnStartup = do
       liftIO $ putStrLn $ "[STARTUP] Rolling back " <> show (length orphaned) <> " orphaned release(s)"
       forM_ orphaned $ \(rt, mts) -> liftIO $ do
         putStrLn $ "[STARTUP] Rolling back: " <> T.unpack (releaseId rt) <> " (status: " <> show (NT.status rt) <> ")"
-        -- Restore VS traffic to old version (best-effort)
+        -- Restore VS traffic to old version (best-effort). For REVERTING releases
+        -- this is also the correct recovery action: the revert was mid-flight, so
+        -- pointing traffic back to old version completes the revert's intent.
         restoreVsTrafficOnFailure cfg db rt mts
-        -- Mark as Aborted
         now <- getCurrentTime
-        let aborted = rt{status = Aborted, endTime = Just now}
-        insertReleaseTracker db aborted mts
-        insertReleaseEvent
-          db
-          (releaseId rt)
-          "BUSINESS"
-          "STARTUP_ROLLBACK"
-          (toJSON ("Aborted due to server restart — VS traffic restored to old version" :: T.Text))
-        notifyReleaseAborted db aborted
+        -- Julia parity (api/rollback/rollback.jl:32-38): a REVERTING release
+        -- whose thread was lost on restart should be treated as a *completed*
+        -- revert (RECORDED in Julia), not a fresh abort. Our equivalent of the
+        -- "revert finished" terminal state is `Reverted` (see
+        -- validateStatusTransition: Reverting → Reverted).
+        case NT.status rt of
+          Reverting -> do
+            let reverted = rt{status = Reverted, endTime = Just now}
+            insertReleaseTracker db reverted mts
+            logStatusUpdated db reverted "Revert completed on startup recovery"
+            insertReleaseEvent
+              db
+              (releaseId rt)
+              "BUSINESS"
+              "STARTUP_REVERT_COMPLETED"
+              (toJSON ("Revert completed on startup recovery — VS traffic restored to old version" :: T.Text))
+          _ -> do
+            let aborted = rt{status = Aborted, endTime = Just now}
+            insertReleaseTracker db aborted mts
+            -- Production parity (events.jl:251-286 rollbackEvent!):
+            -- BUSINESS / TRAFFIC_UPDATED with a message field on rollback.
+            let previousRollout = case rolloutHistory rt of
+                  [] -> 0
+                  xs -> historyRolloutPercent (last xs)
+            logTrafficUpdatedWithMessage db aborted previousRollout "Rolling back traffic due to server restart"
+            insertReleaseEvent
+              db
+              (releaseId rt)
+              "BUSINESS"
+              "STARTUP_ROLLBACK"
+              (toJSON ("Aborted due to server restart — VS traffic restored to old version" :: T.Text))
+            notifyReleaseAborted db aborted
       liftIO $ putStrLn "[STARTUP] Rollback complete"
 
 -- ============================================================================
@@ -302,6 +346,15 @@ handleAbortingRelease cfg db rt mts = do
   now <- getCurrentTime
   let aborted = rt{status = UserAborted, endTime = Just now}
   insertReleaseTracker db aborted mts
+  -- Production parity (events.jl:251-286 rollbackEvent!):
+  -- BUSINESS / TRAFFIC_UPDATED with a message field on rollback.
+  let previousRollout = case rolloutHistory rt of
+        [] -> 0
+        xs -> historyRolloutPercent (last xs)
+      oldVer = case mts of
+        Just (K8sState k8s) -> K8s.oldVersion (context k8s)
+        _ -> ""
+  logTrafficUpdatedWithMessage db aborted previousRollout ("Rolling back traffic to old version: " <> oldVer)
   insertReleaseEvent db (releaseId rt) "BUSINESS" "ABORT_HANDLED" (toJSON ("User abort processed" :: String))
   notifyReleaseAborted db aborted
 
