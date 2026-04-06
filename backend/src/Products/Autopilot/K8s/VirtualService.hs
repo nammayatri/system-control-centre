@@ -5,6 +5,7 @@ module Products.Autopilot.K8s.VirtualService (
     getVirtualServiceJson,
     getVirtualServiceJsonInContext,
     applyVirtualServiceRollout,
+    applyVirtualServiceRolloutWithRetries,
     isSubsetReceivingTraffic,
     getPrimarySubsetFromVirtualService,
 )
@@ -40,24 +41,26 @@ getVirtualServiceJsonInContext cfg kubeContext ns vsName = do
             pure $ case fallback of Left err -> Left err; Right (K8sResult out) -> Right out
 
 applyVirtualServiceRollout :: Config -> K8sReleaseContext -> Int -> Int -> IO (Either K8sError K8sResult)
-applyVirtualServiceRollout cfg ctx oldW newW = do
-    externalRes <- applyVirtualServiceRolloutSingle cfg ctx (virtualServiceName ctx) oldW newW
+applyVirtualServiceRollout = applyVirtualServiceRolloutWithRetries 3
+
+applyVirtualServiceRolloutWithRetries :: Int -> Config -> K8sReleaseContext -> Int -> Int -> IO (Either K8sError K8sResult)
+applyVirtualServiceRolloutWithRetries maxRetries cfg ctx oldW newW = do
+    externalRes <- applyVirtualServiceRolloutSingle cfg ctx maxRetries (virtualServiceName ctx) oldW newW
     case externalRes of
         Left err -> pure (Left err)
         Right _ ->
             case internalVirtualServiceName ctx of
                 Nothing -> pure (Right (K8sResult "external-vs-updated"))
-                Just internalVs -> applyVirtualServiceRolloutSingle cfg ctx internalVs oldW newW
+                Just internalVs -> applyVirtualServiceRolloutSingle cfg ctx maxRetries internalVs oldW newW
 
 {- | Apply VS rollout with optimistic concurrency.
 Reads the full VS (with resourceVersion), surgically modifies only the target
 service's routes, then kubectl replace. On 409 Conflict (another release
 modified the VS between our read and write), re-reads and retries up to 3 times.
 -}
-applyVirtualServiceRolloutSingle :: Config -> K8sReleaseContext -> Text -> Int -> Int -> IO (Either K8sError K8sResult)
-applyVirtualServiceRolloutSingle cfg ctx vsName oldW newW = go 1
+applyVirtualServiceRolloutSingle :: Config -> K8sReleaseContext -> Int -> Text -> Int -> Int -> IO (Either K8sError K8sResult)
+applyVirtualServiceRolloutSingle cfg ctx maxRetries vsName oldW newW = go 1
   where
-    maxRetries = 3 :: Int
     go attempt = do
         vsRes <- getVirtualServiceJson cfg (namespace ctx) vsName
         case vsRes of

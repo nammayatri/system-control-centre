@@ -69,7 +69,7 @@ import Products.Autopilot.K8s.Deployment (
 import Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
 import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildDeleteHpaCommand, hpaExists)
-import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getVirtualServiceJson)
+import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRolloutWithRetries, getVirtualServiceJson)
 import Products.Autopilot.Notifications (
     notifyGenericThreadMessage,
     notifyReleaseCompleted,
@@ -80,6 +80,7 @@ import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker, insertRele
 import Products.Autopilot.RuntimeConfig (
     getCollectMetricsDelay,
     getHpaMinMaxFactor,
+    getMaxK8sRetries,
     getReleaseStartDelay,
     isHpaEnabledForProduct,
     isScaleDownPodsOnCompletion,
@@ -185,11 +186,12 @@ runVsRolloutWithLock :: Config -> K8sReleaseContext -> Int -> Int -> StateFlow (
 runVsRolloutWithLock cfg ctx oldW newW = do
     db <- getDB
     rt <- getRT
+    maxRetries <- liftIO $ getMaxK8sRetries db
     let lockOwner = "release:" <> releaseId rt
     result <-
         liftIO $
             withVsLock db (appGroup rt) lockOwner $
-                applyVirtualServiceRollout cfg ctx oldW newW
+                applyVirtualServiceRolloutWithRetries maxRetries cfg ctx oldW newW
     case result of
         Left err -> do
             liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "VS_LOCK_FAILED" (toJSON err)
