@@ -57,7 +57,7 @@ where
 
 import Core.DB.Connection (runDB, withConn)
 import Core.Environment (DBEnv)
-import Data.Aeson (FromJSON, ToJSON, Value, eitherDecode, encode)
+import Data.Aeson (FromJSON, ToJSON, Value, eitherDecode, encode, toJSON)
 import qualified Data.ByteString.Lazy as BSL
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -350,7 +350,18 @@ toRow createdAt updatedAt ReleaseTracker {..} mts =
 
 fromRow :: ReleaseTrackerRow -> TrackerWithTarget
 fromRow ReleaseTrackerT {..} =
-  let tracker =
+  let -- Deserialize full TargetState; fall back to legacy K8sReleaseContext JSON
+      mTargetState = case parseJsonTextMaybe rtTargetState :: Maybe TargetState of
+        Just ts -> Just ts
+        Nothing -> case parseJsonTextMaybe rtTargetState :: Maybe K8sReleaseContext of
+          Just ctx -> Just $ K8sState $ emptyK8sState{context = ctx}
+          Nothing -> Nothing
+      -- Extract the K8s context as a JSON Value so the frontend can display
+      -- cluster / namespace / pods scale-down status / etc.
+      mReleaseContext = case mTargetState of
+        Just (K8sState k8s) -> Just (toJSON (context k8s))
+        _ -> Nothing
+      tracker =
         ReleaseTracker
           { releaseId = rtId,
             appGroup = rtAppGroup,
@@ -382,14 +393,9 @@ fromRow ReleaseTrackerT {..} =
             globalId = rtGlobalId,
             syncEnabled = rtSyncEnabled,
             envOverrideData = rtEnvOverrideData,
-            slackThreadTs = rtSlackThreadTs
+            slackThreadTs = rtSlackThreadTs,
+            releaseContext = mReleaseContext
           }
-      -- Deserialize full TargetState; fall back to legacy K8sReleaseContext JSON
-      mTargetState = case parseJsonTextMaybe rtTargetState :: Maybe TargetState of
-        Just ts -> Just ts
-        Nothing -> case parseJsonTextMaybe rtTargetState :: Maybe K8sReleaseContext of
-          Just ctx -> Just $ K8sState $ emptyK8sState{context = ctx}
-          Nothing -> Nothing
    in (tracker, mTargetState)
 
 -- New parsers (recommended)

@@ -48,11 +48,13 @@ import Products.Autopilot.DecisionEngine
     getCombinedDecision,
     getHSDecision,
   )
+-- buildDeleteDeploymentCommand removed: scale-down handled by Runner
+
+import Products.Autopilot.EventLog (logDecisionResult, logStatusUpdated, logTrafficUpdated)
 import Products.Autopilot.K8s.Deployment
   ( buildApplyFileCommand,
     buildCloneDeploymentCommand,
     buildConfigMapApplyCommand,
-    -- buildDeleteDeploymentCommand removed: scale-down handled by Runner
     buildScaleNamedDeploymentCommand,
     deploymentExists,
     getDeploymentReplicaStatus,
@@ -408,13 +410,8 @@ progressiveRollout = do
           currentRT <- getRT
           liftIO $ insertReleaseTracker db currentRT (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = firstNewW})))
           liftIO $ notifyReleaseProgress db currentRT firstNewW
-          liftIO $
-            insertReleaseEvent
-              db
-              (releaseId currentRT)
-              "BUSINESS"
-              "ROLLOUT_STEP"
-              (toJSON $ "Routing " <> show firstNewW <> "% to " <> T.unpack (newVersion ctx))
+          -- Production parity: BUSINESS / TRAFFIC_UPDATED with previous_rollout=0 for first step
+          liftIO $ logTrafficUpdated db currentRT 0
 
           -- Production while-loop: iterate through remaining steps with re-entrant checks
           -- index starts at 1 (0-based), first step already applied
@@ -526,13 +523,8 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                       case promResult of
                         PromAbort reason -> do
                           liftIO $ putStrLn $ "[DECISION] Prometheus ABORT: " <> T.unpack reason
-                          liftIO $
-                            insertReleaseEvent
-                              db
-                              (releaseId freshRT)
-                              "DECISION_ENGINE"
-                              "DECISION_RESULT"
-                              (object ["source" .= ("PROMETHEUS" :: T.Text), "decision" .= ("ABORT" :: T.Text), "reason" .= reason])
+                          -- Production parity: DECISION_ENGINE / DECISION_RESULT
+                          liftIO $ logDecisionResult db freshRT Abort ("Prometheus: " <> reason) [reason]
                           liftIO $ notifyGenericThreadMessage db freshRT ("Prometheus check ABORT: " <> reason)
                           updateRT $ \r -> r{status = Aborting}
                           currentRT' <- getRT
@@ -541,13 +533,8 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                           liftIO $ fail ("Prometheus ABORT: " <> T.unpack reason)
                         PromWarn reason -> do
                           liftIO $ putStrLn $ "[DECISION] Prometheus WARN: " <> T.unpack reason
-                          liftIO $
-                            insertReleaseEvent
-                              db
-                              (releaseId freshRT)
-                              "DECISION_ENGINE"
-                              "DECISION_RESULT"
-                              (object ["source" .= ("PROMETHEUS" :: T.Text), "decision" .= ("WARN" :: T.Text), "reason" .= reason])
+                          -- Production parity: DECISION_ENGINE / DECISION_RESULT (warning → Wait)
+                          liftIO $ logDecisionResult db freshRT Wait ("Prometheus: " <> reason) [reason]
                           liftIO $ notifyGenericThreadMessage db freshRT ("Prometheus warning: " <> reason)
                         -- Continue despite warning
                         PromOK -> pure ()
@@ -559,20 +546,14 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
 
                       -- Log combined decision event
                       let combinedDecision = getCombinedDecision abDecision hsDecision
-                      liftIO $
-                        insertReleaseEvent
-                          db
-                          (releaseId freshRT)
-                          "DECISION_ENGINE"
-                          "DECISION_RESULT"
-                          ( object
-                              [ "ab_decision" .= show (drDecision abDecision),
-                                "hs_decision" .= show (drDecision hsDecision),
-                                "combined" .= show combinedDecision,
-                                "ab_reason" .= drReason abDecision,
-                                "hs_reason" .= drReason hsDecision
-                              ]
-                          )
+                          abReasonText = maybe "" id (drReason abDecision)
+                          hsReasonText = maybe "" id (drReason hsDecision)
+                          combinedReasons = filter (not . T.null) [abReasonText, hsReasonText]
+                          combinedResultText =
+                            "AB=" <> T.pack (show (drDecision abDecision))
+                              <> " HS="
+                              <> T.pack (show (drDecision hsDecision))
+                      liftIO $ logDecisionResult db freshRT combinedDecision combinedResultText combinedReasons
 
                       case combinedDecision of
                         Continue -> pure True -- advance
@@ -604,6 +585,11 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                       let nextStep = strategy !! currentIndex
                           nextNewW = rolloutPercent nextStep
                           nextOldW = max 0 (100 - nextNewW)
+                          -- Capture previous rollout % before we append the new history entry
+                          previousRolloutW =
+                            case rolloutHistory freshRT of
+                              [] -> 0
+                              xs -> historyRolloutPercent (last xs)
                       liftIO $
                         putStrLn $
                           "  Rollout step "
@@ -633,13 +619,8 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
 
                       -- Notify Slack
                       liftIO $ notifyReleaseProgress db currentRT nextNewW
-                      liftIO $
-                        insertReleaseEvent
-                          db
-                          (releaseId currentRT)
-                          "BUSINESS"
-                          "ROLLOUT_STEP"
-                          (toJSON $ "Routing " <> show nextNewW <> "% to " <> T.unpack (newVersion ctx))
+                      -- Production parity: BUSINESS / TRAFFIC_UPDATED
+                      liftIO $ logTrafficUpdated db currentRT previousRolloutW
 
                       -- Check health after applying step
                       when (nextNewW < 100) $
@@ -1008,13 +989,9 @@ notifyComplete = do
   liftIO $ insertReleaseTracker db currentRT currentTS
 
   -- Log completion event
-  liftIO $
-    insertReleaseEvent
-      db
-      (releaseId currentRT)
-      "BUSINESS"
-      "COMPLETED"
-      (toJSON $ "Tracker marked as COMPLETED with " <> show (getTrafficPct currentTS) <> "% traffic")
+  -- Production parity: NOTIFICATION / STATUS_UPDATED
+  let completionMsg = "Tracker marked as COMPLETED with " <> T.pack (show (getTrafficPct currentTS)) <> "% traffic"
+  liftIO $ logStatusUpdated db currentRT completionMsg
 
   -- Notify Slack
   liftIO $ notifyReleaseCompleted db currentRT

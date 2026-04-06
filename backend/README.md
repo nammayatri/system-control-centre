@@ -20,9 +20,13 @@ cp .env.example .env
 #   NammaAP_DATABASE_URL=postgres://user:pass@localhost:5432/namma_ap
 # Or set individual vars: NammaAP_POSTGRES_HOST, _PORT, _USER, _PASSWORD, _DB
 
-# 3. Create the database
-createdb namma_ap
-psql namma_ap < scripts/base_schema_postgres.sql
+# 3. Create + seed the database (idempotent — safe to re-run)
+bash scripts/setup-db.sh
+# This creates the DB, applies the canonical schema + seed under
+# dev/sql-seed/, and runs migrations from dev/migrations/system-control/.
+# At runtime, src/Core/DB/Connection.hs `ensureSchema` also creates any
+# missing core tables (deployment_config, release_tracker, release_events,
+# server_config) on server startup.
 
 # 4. Build
 cabal build
@@ -117,20 +121,32 @@ Namma AP is a release orchestration engine for [NammaYatri](https://nammayatri.i
 
 ```
 app/Main.hs                          # Entry point — selects SERVER vs RUNNER mode
+bin/                                 # Dev helper scripts (sc-build, sc-run, sc-server, sc-setup-db, ...)
 src/
-  NammaAP/Config.hs                  # Bootstrap config from env vars / .env
-  NammaAP/Config/Runtime.hs          # Runtime-tunable configs from DB
-  NammaAP/Server.hs                  # HTTP server (Servant + Warp)
-  NammaAP/Runner.hs                  # Worker loop — polls and executes releases
-  NammaAP/Environment.hs             # AppState, DBEnv, Flow monad
-  NammaAP/DB/Connection.hs           # PostgreSQL connection pool
-  NammaAP/Types/                     # Domain types (Release, Config, API)
-  NammaAP/Workflow/                  # State machine engine
-  NammaAP/Release/                   # Workflow implementations per release type
-  NammaAP/K8s/                       # kubectl execution wrappers
-  NammaAP/App/Storage/Queries/       # Database queries
-scripts/
-  base_schema_postgres.sql           # Full PostgreSQL schema
+  Core/                              # Shared framework (RBAC, server, DB, config)
+    Auth/                            # Login, tokens, permission middleware
+    Admin/                           # User/role/permission CRUD (superadmin)
+    Config.hs                        # Bootstrap config from env vars / .env
+    Config/                          # Runtime-tunable configs
+    DB/Connection.hs                 # PostgreSQL pool + ensureSchema (runtime DDL)
+    Environment.hs                   # AppState, DBEnv, Flow monad
+    Server.hs                        # HTTP server (Servant + Warp + auth middleware)
+    Utils/                           # Flow monad utilities
+  Products/                          # Self-contained product modules
+    Types.hs                         # ProductSlug + Permission ADTs (source of truth)
+    Registry.hs                      # Route -> permission mappings per product
+    Autopilot/                       # Releases, ConfigMaps, VS edits, server config
+      Routes.hs                      # Servant API definition
+      Actions/                       # HTTP handlers (Release, Config, ConfigMap, K8sResource, VSEdit)
+      Queries/                       # Database queries
+      Types/                         # Domain types (incl. Permission ADT)
+      Workflow/                      # Release workflow state machines
+      K8s/                           # kubectl execution wrappers
+      Runner.hs                      # Background worker loop
+      Sync.hs, DecisionEngine.hs, Notifications.hs, Discovery.hs, RuntimeConfig.hs
+  Shared/                            # Cross-product helpers (Error, JSON, Config, Queries, Types)
+scripts/                             # setup-db.sh, run.sh, format.sh, test-api.sh, SQL seeds
+dev/                                 # Canonical sql-seed/ + migrations/system-control/
 Dockerfile                           # Multi-stage Docker build
 flake.nix                            # Nix reproducible environment
 ```

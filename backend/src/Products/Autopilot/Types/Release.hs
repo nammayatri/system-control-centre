@@ -252,7 +252,8 @@ data ReleaseTracker = ReleaseTracker
     globalId :: Maybe Text,
     syncEnabled :: Maybe Text,
     envOverrideData :: Maybe Text,
-    slackThreadTs :: Maybe Text
+    slackThreadTs :: Maybe Text,
+    releaseContext :: Maybe Value
   }
   deriving (Eq, Show, Generic)
 

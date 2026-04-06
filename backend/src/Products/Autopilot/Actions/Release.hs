@@ -67,6 +67,7 @@ import Products.Autopilot.K8s.Deployment (deploymentExists)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
+import Products.Autopilot.EventLog (logStatusUpdated)
 import Products.Autopilot.Notifications
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ReleaseTracker
@@ -580,13 +581,8 @@ discardReleaseH rid DiscardReleaseReq{..} = do
                     ok <- liftIO $ conditionalUpdateTracker db updated mTargetState (releaseStatusToText oldStatus)
                     if ok
                         then do
-                            liftIO $
-                                insertReleaseEvent
-                                    db
-                                    rid
-                                    "BUSINESS"
-                                    "STATUS_UPDATED"
-                                    (toJSON ("Tracker marked as DISCARDED" <> maybe "" (": " <>) reason))
+                            -- Production parity: NOTIFICATION / STATUS_UPDATED
+                            liftIO $ logStatusUpdated db updated ("Tracker marked as DISCARDED" <> maybe "" (": " <>) reason)
                             liftIO $ notifyReleaseDiscarded db updated
                             pure $ APIResponse "SUCCESS" "Release discarded"
                         else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
@@ -657,7 +653,8 @@ updateTrackerH rid req = do
                                             ok <- liftIO $ conditionalUpdateTracker db updatedTracker updatedTargetState oldStatusText
                                             if ok
                                                 then do
-                                                    liftIO $ insertReleaseEvent db rid "BUSINESS" "STATUS_UPDATED" (toJSON updatedTracker)
+                                                    -- Production parity: NOTIFICATION / STATUS_UPDATED
+                                                    liftIO $ logStatusUpdated db updatedTracker ("Tracker marked as " <> newStatusText)
                                                     -- Send status-specific Slack notifications
                                                     case newStatus of
                                                         Paused -> liftIO $ notifyReleasePaused db updatedTracker

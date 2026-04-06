@@ -921,11 +921,11 @@ These configs are read from the `server_config` database table at runtime and ca
 - Header with status badge, product/service/env info, version arrow (old -> new)
 - Action buttons (permission-gated): Approve, Trigger, Pause, Resume, Abort, Revert, Immediate Revert, Delete, Restart, Fast Forward
 - Confirmation dialogs for destructive actions
-- Tabbed interface:
-  - **Overview tab**: Release details (mode, priority, schedule, timestamps, release tag, description, changelog), inline rollout history with editable rollout strategy, deployment status with pod health, observability links (Grafana, Kibana), edit dialog for metadata updates
+- Tabbed interface (4 tabs: `Summary | Events | ENV Diff | JSON Data`):
+  - **Summary tab**: Release details (mode, priority, schedule, timestamps, release tag, description, changelog), inline Rollout History sub-section with editable rollout strategy, deployment status with pod health, observability links (Grafana, Kibana), edit dialog for metadata updates
   - **Events tab**: Searchable event timeline with expandable JSON payloads
-  - **Diff tab**: YAML diff viewer (react-diff-viewer) with type switcher (Deployment / VirtualService / ConfigMap) for before/after snapshots
-  - **JSON tab**: Raw release tracker JSON
+  - **ENV Diff tab**: YAML diff viewer (react-diff-viewer) with type switcher (Deployment / VirtualService / ConfigMap) for before/after snapshots
+  - **JSON Data tab**: Raw release tracker JSON
 
 ### ConfigMap Pages
 

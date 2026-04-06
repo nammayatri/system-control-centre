@@ -84,6 +84,7 @@ This is an **internal tool used by engineers 8 hours a day**. Every decision opt
 - Font: 13px Fira Sans, weight 500
 - Transitions: background-color 150ms
 - **NO transform/scale on hover** — only color change
+- **Allowed press feedback:** `transform: scale(0.98)` on `:active` (80ms ease) — global rule in `index.css`. This is press-only, never on hover.
 - Primary: bg zinc-900, text white, hover zinc-800
 - Secondary: bg white, border zinc-300, text zinc-700, hover bg zinc-50
 - Danger: bg red-600, text white, hover red-700
@@ -171,15 +172,17 @@ This is an **internal tool used by engineers 8 hours a day**. Every decision opt
 ## Interaction Rules
 
 1. **cursor-pointer** on ALL clickable elements (buttons, links, table rows, toggle buttons)
-2. **Hover: background-color only** — no transform, no scale, no elevation
-3. **Transition: 150ms** for hover states, 200ms for expand/collapse
-4. **Focus: ring-2 ring-zinc-400 ring-offset-1** — visible, neutral, consistent
-5. **Disabled: opacity-50, pointer-events-none**
-6. **Loading: spinner in button, skeleton for content, never blank screen**
-7. **prefers-reduced-motion: skip all transitions**
-8. **Touch targets: minimum 44x44px** on mobile
-9. **Tab order matches visual order** — no tabIndex hacks
-10. **Toast notifications: top-right, auto-dismiss 4s, close button**
+2. **Hover: background-color only** — no transform, no scale, no elevation on hover
+3. **Press feedback:** `button:active` may use `transform: scale(0.98)` (80ms) — applied globally in `index.css`. Press-only, never hover.
+4. **Mount animations:** Framer Motion fade-in (opacity + small y-axis offset, ~250ms ease-out) is allowed for page/card mount (e.g. `LoginPage`). Subtle only — no springs, no bounces, no large translations. Equivalent CSS keyframes (`page-mount`, `fadeInUp`) are also defined in `index.css`.
+5. **Transition: 150ms** for hover states, 200ms for expand/collapse
+6. **Focus: ring-2 ring-zinc-400 ring-offset-1** — visible, neutral, consistent
+7. **Disabled: opacity-50, pointer-events-none**
+8. **Loading: spinner in button, skeleton for content, never blank screen**
+9. **prefers-reduced-motion: skip all transitions**
+10. **Touch targets: minimum 44x44px** on mobile
+11. **Tab order matches visual order** — no tabIndex hacks
+12. **Toast notifications: top-right, auto-dismiss 4s, close button**
 
 ---
 
@@ -189,7 +192,7 @@ This is an **internal tool used by engineers 8 hours a day**. Every decision opt
 - Glassmorphism / backdrop-blur
 - Glowing effects / neon accents / text shadows
 - Rounded blobs / decorative shapes
-- Scale/elevation on hover (translateY, scale)
+- Scale/elevation on hover (translateY, scale) — note: a small `scale(0.98)` on `:active` press is allowed (see Buttons / Interaction Rules)
 - Parallax scrolling
 - Custom cursors
 - Background patterns/textures

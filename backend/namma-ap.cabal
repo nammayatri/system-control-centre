@@ -37,6 +37,7 @@ library
       Products.Autopilot.Config
       Products.Autopilot.DecisionEngine
       Products.Autopilot.Discovery
+      Products.Autopilot.EventLog
       Products.Autopilot.K8s.Deployment
       Products.Autopilot.K8s.DestinationRule
       Products.Autopilot.K8s.Execute

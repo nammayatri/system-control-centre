@@ -332,7 +332,7 @@ const RolloutHistoryInline: React.FC<{ history: RolloutHistoryEvent[] }> = ({ hi
               <th className="py-2 px-3">HS Decision</th>
               <th className="py-2 px-3">Manual Override</th>
               <th className="py-2 px-3">Cooloff (min)</th>
-              <th className="py-2 px-3">Pods</th>
+              <th className="py-2 px-3">Pods %</th>
             </tr>
           </thead>
           <tbody>
@@ -358,7 +358,7 @@ const RolloutHistoryInline: React.FC<{ history: RolloutHistoryEvent[] }> = ({ hi
                   </Badge>
                 </td>
                 <td className="py-2 px-3 font-mono">{h.cooloff}m</td>
-                <td className="py-2 px-3 font-mono">{h.pods}</td>
+                <td className="py-2 px-3 font-mono">{h.pods}%</td>
               </tr>
             ))}
           </tbody>
@@ -505,7 +505,7 @@ const RolloutStrategyTab: React.FC<{
               <th className="py-2.5 px-4 text-left w-20">#</th>
               <th className="py-2.5 px-4 text-left">Rollout %</th>
               <th className="py-2.5 px-4 text-left">Cooloff (min)</th>
-              <th className="py-2.5 px-4 text-left">Pods</th>
+              <th className="py-2.5 px-4 text-left">Pods %</th>
               <th className="py-2.5 px-4 text-left w-32">Progress</th>
               {isEditing && <th className="py-2.5 px-4 w-12"></th>}
             </tr>
@@ -543,11 +543,11 @@ const RolloutStrategyTab: React.FC<{
                   </td>
                   <td className="py-2.5 px-4">
                     {isEditing && !isLocked ? (
-                      <input type="number" min={1} value={stage.pods}
+                      <input type="number" min={1} max={100} value={stage.pods}
                         onChange={(e) => handleStageChange(idx, 'pods', parseInt(e.target.value) || 1)}
                         className="w-16 h-8 border border-zinc-300 rounded-lg px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400" />
                     ) : (
-                      <span className="text-sm font-mono text-zinc-600">{stage.pods}</span>
+                      <span className="text-sm font-mono text-zinc-600">{stage.pods}%</span>
                     )}
                   </td>
                   <td className="py-2.5 px-4">

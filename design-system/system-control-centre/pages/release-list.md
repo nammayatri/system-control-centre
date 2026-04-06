@@ -29,7 +29,7 @@
   - Right: Page size selector (10/25/50) + Previous/Next buttons
 
 ## Specific Rules
-- Auto-refresh every 60s (React Query refetchInterval)
+- Auto-refresh every 60s via React Query `refetchInterval: 60000` in `useReleases` hook
 - Search debounced 300ms
-- Default date range: last 2 days
+- Default date range: `today` (from midnight to now)
 - Empty state: centered text "No releases found" with muted icon

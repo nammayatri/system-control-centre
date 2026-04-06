@@ -79,6 +79,7 @@ See README.md "Adding a New Product" section.
 - cursor-pointer on all clickable elements
 - 150ms transitions for hover states
 - Skeleton loaders for loading states (not spinners)
+- Before any UI work, review the design constraints in `design-system/system-control-centre/MASTER.md` and follow them
 
 ## File Organization
 

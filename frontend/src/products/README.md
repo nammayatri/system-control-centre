@@ -1,98 +1,117 @@
-# Adding a New Product
+# Products
 
-Follow these steps to add a new product to System Control Centre.
+Each product is a self-contained folder under `src/products/`. Routes and sidebar
+entries are auto-wired from a single source of truth: `registry.ts`. There is no
+need to edit `App.tsx` or `Sidebar.tsx` when adding pages.
 
-## 1. Create product folder
+## Folder layout
+
+A product folder typically looks like:
 
 ```
-src/products/my-new-product/
-  index.ts          ← route registration + exports
-  api.ts            ← API calls for this product
-  types.ts          ← TypeScript types for this product
-  screens/
-    List.tsx         ← list/table view
-    Create.tsx       ← creation form
-    Detail.tsx       ← detail/summary view
+src/products/<product>/
+  pages/           UI screens (List / Create / Detail / Summary, etc.)
+  api.ts           fetch helpers for this product's endpoints
+  hooks.ts         react-query hooks wrapping api.ts
+  types.ts         TypeScript types for this product (optional)
 ```
 
-## 2. Define the product config
+`pages/` is the only required subfolder. `api.ts` / `hooks.ts` / `types.ts` are
+conventional but optional — add them when you need them. Note: a single product
+slug can own several route groups (see below), in which case each group can live
+in its own top-level folder (e.g. `releases/`, `configmap/`, `vs-editor/`,
+`config/`) and all of them get registered under the same `ProductDefinition`.
 
-In `index.ts`:
+## Registering a product
 
-```tsx
-import { ProductConfig } from '../_shared/types';
+Open `src/products/registry.ts` and add an entry to `PRODUCT_REGISTRY`. Every
+product is described by a `ProductDefinition`:
 
-export const config: ProductConfig = {
-  slug: 'my-new-product',
-  label: 'My New Product',
-  basePath: '/my-new-product',
-  icon: 'Package',           // Lucide icon name
+```ts
+export interface ProductDefinition {
+  slug: string;          // matches sc_role.product_slug in backend DB
+  label: string;         // display name in sidebar
+  icon: string;          // Lucide icon name for sidebar section
+  basePath: string;      // URL base path (e.g., '/releases')
+  navItems: ProductNavItem[];
+  routes: ProductRoute[];
+}
+```
+
+Each route may carry an optional `permission` string that gets enforced by
+`ProtectedRoute` at render time:
+
+```ts
+export interface ProductRoute {
+  path: string;          // React Router path
+  component: ComponentType;
+  permission?: string;   // e.g. 'RELEASE_CREATE'
+}
+```
+
+A real example, abridged from the current registry:
+
+```ts
+import ListRelease from './releases/pages/ListRelease';
+import CreateRelease from './releases/pages/CreateRelease';
+import ReleaseSummary from './releases/pages/ReleaseSummary';
+import ListConfigMap from './configmap/pages/ListConfigMap';
+// ... more imports
+
+const releasesProduct: ProductDefinition = {
+  slug: 'autopilot',
+  label: 'Backend Releases',
+  icon: 'Rocket',
+  basePath: '/releases',
   navItems: [
-    { label: 'List', path: '/my-new-product', icon: 'List' },
-    { label: 'Create', path: '/my-new-product/new', icon: 'Plus' },
+    { label: 'Releases',          path: '/releases',          icon: 'List' },
+    { label: 'Create Release',    path: '/releases/new',      icon: 'Plus' },
+    { label: 'Config Maps',       path: '/configmap',         icon: 'FileText' },
+    { label: 'Deployment Config', path: '/deployment-config', icon: 'Layers' },
+    { label: 'VS Editor',         path: '/vs-editor',         icon: 'Settings' },
+    { label: 'Server Config',     path: '/configurations',    icon: 'Settings' },
+  ],
+  routes: [
+    { path: '/releases',           component: ListRelease },
+    { path: '/releases/new',       component: CreateRelease, permission: 'RELEASE_CREATE' },
+    { path: '/releases/:id',       component: ReleaseSummary },
+    { path: '/releases/:id/edit',  component: CreateRelease, permission: 'RELEASE_UPDATE' },
+    { path: '/configmap',          component: ListConfigMap },
+    // ... etc
   ],
 };
+
+export const PRODUCT_REGISTRY: ProductDefinition[] = [
+  releasesProduct,
+  // ← add new products here
+];
 ```
 
-## 3. Register routes in App.tsx
+That's it. `app/App.tsx` consumes `PRODUCT_REGISTRY.flatMap(...)` to mount every
+route under `ProductLayout` + `ProtectedRoute`, and `core/layout/Sidebar.tsx`
+iterates the same registry to render the nav. Don't hand-edit either file.
 
-```tsx
-import MyList from './products/my-new-product/screens/List';
-import MyCreate from './products/my-new-product/screens/Create';
-import MyDetail from './products/my-new-product/screens/Detail';
+Note that one product slug can own several distinct URL groups — the `autopilot`
+product currently exposes `/releases`, `/configmap`, `/deployment-config`,
+`/vs-editor`, and `/configurations` all under the same backend slug.
 
-// Inside <Route element={<Layout />}>:
-<Route path="/my-new-product" element={<ProtectedRoute product="my-new-product"><MyList /></ProtectedRoute>} />
-<Route path="/my-new-product/new" element={<ProtectedRoute product="my-new-product"><MyCreate /></ProtectedRoute>} />
-<Route path="/my-new-product/:id" element={<ProtectedRoute product="my-new-product"><MyDetail /></ProtectedRoute>} />
-```
+## Currently registered products
 
-## 4. Add to sidebar navigation
+- `autopilot` — Backend Releases. Owns the route groups: `/releases`,
+  `/configmap`, `/deployment-config`, `/vs-editor`, `/configurations`.
 
-In `components/layout/Sidebar.tsx`, add to the `sections` array:
+The Admin console (`/admin/...`) is not a product — it lives directly in
+`app/App.tsx` with its own `AdminLayout`.
 
-```tsx
-{
-  label: 'My New Product',
-  icon: <Package className="w-4 h-4" />,
-  items: [
-    { label: 'List', to: '/my-new-product', icon: <List className="w-3.5 h-3.5" /> },
-    { label: 'Create', to: '/my-new-product/new', icon: <Plus className="w-3.5 h-3.5" /> },
-  ],
-},
-```
+## Backend coupling
 
-## 5. Backend: Seed permissions
+The frontend `slug` must match a `product_slug` known to the backend RBAC layer
+(`sc_role` rows are seeded per product slug, and `ProtectedRoute` calls
+`hasPermission(slug, permission)`). When you add a new product slug here, also:
 
-```sql
--- Add product
-INSERT INTO sc_product (slug, name) VALUES ('my-new-product', 'My New Product');
+1. Add the corresponding `ProductSlug` constructor and permission ADT in the
+   Haskell backend (`Products/Types.hs` + `Products/Registry.hs`).
+2. Seed system roles into `sc_role` for that slug so users can be granted access.
 
--- Add permissions
-INSERT INTO sc_permission (product_id, action) VALUES
-  ((SELECT id FROM sc_product WHERE slug = 'my-new-product'), 'MY_VIEW'),
-  ((SELECT id FROM sc_product WHERE slug = 'my-new-product'), 'MY_CREATE'),
-  ((SELECT id FROM sc_product WHERE slug = 'my-new-product'), 'MY_UPDATE');
-
--- Create roles + assign permissions
--- (follow pattern in scripts/rbac_seed.sql)
-```
-
-## 6. Backend: Add route-permission mapping
-
-In `Auth/Middleware.hs`, add to `routePermissions`:
-
-```haskell
-, RoutePermission "GET"  ["my-new-product"]        "MY_VIEW"   "my-new-product"
-, RoutePermission "POST" ["my-new-product", "create"] "MY_CREATE" "my-new-product"
-```
-
-## Common utilities available
-
-- `PermissionGate` — wrap buttons/actions that need specific permissions
-- `useAuth()` / `usePermissions()` — auth + permission hooks
-- `Badge`, `StatusBadge` — status indicators
-- `Button`, `Card`, `Input`, `SelectInput`, `Dialog` — UI components
-- `Skeleton`, `TableSkeleton` — loading states
-- `toast` from sonner — notifications
-- React Query hooks — data fetching with caching
+Without the backend side in place, the sidebar will hide the product (the
+`hasPermission` check in `Sidebar.tsx` filters it out) and routes will 403.
