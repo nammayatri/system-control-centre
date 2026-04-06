@@ -35,11 +35,11 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import qualified Data.Text.Encoding as TE
-import qualified Data.Yaml as Yaml
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
+import qualified Data.Yaml as Yaml
 import Products.Autopilot.Notifications
 import Products.Autopilot.Queries.ProductService (findProductByName, getProductNamespace)
 import Products.Autopilot.Queries.ReleaseTracker
@@ -48,7 +48,6 @@ import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.API
 import qualified Products.Autopilot.Types.Storage.Schema as S
 import Products.Autopilot.Types.Target (TargetState (..), emptyConfigState)
-import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers (captureConfigMapSnapshot)
 import Shared.API.Response (APIResponse (..))
 import System.Exit (ExitCode (..))

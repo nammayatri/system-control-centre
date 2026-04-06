@@ -73,7 +73,7 @@ fetchResourcesH _ap mProduct mService = do
 -- ============================================================================
 
 fetchEnvsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
-fetchEnvsH _ap mProduct mEnv mService = do
+fetchEnvsH _ap mProduct _mEnv mService = do
   cfg <- getConfig
   db <- getDBEnv
   case (mProduct, mService) of
@@ -124,7 +124,7 @@ fetchSecondaryEnvsH _ap mProduct mEnv mService = do
                   -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
                   logInfo $ "[SYNC-ENV] GET response not valid JSON, trying ny-autopilot format"
                   tryNyAutopilotFormat normalised baseAuth authArgs product' env' service'
-            Right (ExitSuccess, out, _) -> do
+            Right (ExitSuccess, _out, _) -> do
               -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
               logInfo $ "[SYNC-ENV] GET returned empty/[], trying ny-autopilot format"
               tryNyAutopilotFormat normalised baseAuth authArgs product' env' service'
@@ -138,7 +138,7 @@ fetchSecondaryEnvsH _ap mProduct mEnv mService = do
               tryNyAutopilotFormat normalised baseAuth authArgs product' env' service'
     _ -> pure $ A.toJSON ([] :: [Value])
   where
-    tryNyAutopilotFormat normalised baseAuth authArgs product' env' service' = do
+    tryNyAutopilotFormat normalised _baseAuth authArgs product' env' service' = do
       let postUrl = normalised <> "release/getenvs/"
           bodyJson =
             A.encode $

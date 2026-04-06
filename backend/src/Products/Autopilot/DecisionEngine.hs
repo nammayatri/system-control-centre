@@ -29,7 +29,7 @@ where
 import Control.Exception (SomeException, try)
 import Core.Config (Config (..))
 import Core.Environment (DBEnv)
-import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson (Value (..))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM

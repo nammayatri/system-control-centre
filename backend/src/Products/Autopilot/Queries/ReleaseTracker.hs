@@ -84,7 +84,7 @@ insertReleaseTracker db rt mts = do
   -- Atomic: DELETE+INSERT in a single transaction (if INSERT fails, DELETE is rolled back)
   withConn db $ \conn ->
     withTransaction conn $ do
-      execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (releaseId rt))
+      _deleted <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (releaseId rt))
       runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
 
 -- | Atomically update a release tracker only if its current status matches the expected value.
@@ -581,5 +581,5 @@ insertReleaseTrackerRow :: DBEnv -> ReleaseTrackerRow -> IO ()
 insertReleaseTrackerRow db row =
   withConn db $ \conn ->
     withTransaction conn $ do
-      execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (rtId row))
+      _ <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (rtId row))
       runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]

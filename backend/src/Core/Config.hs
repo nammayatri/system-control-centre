@@ -1,7 +1,6 @@
 module Core.Config where
 
 import Control.Exception (IOException, try)
-import Data.List (break)
 import Data.Text (Text, pack)
 import qualified Data.Text as T
 import System.Directory (doesFileExist)

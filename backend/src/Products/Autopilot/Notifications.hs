@@ -51,7 +51,6 @@ import Core.Environment (DBEnv)
 import Data.Aeson (Value (..), decode, encode, object, (.=))
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
-import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE

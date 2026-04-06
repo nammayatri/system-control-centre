@@ -122,7 +122,7 @@ mkBackgroundEnv cfg pool logEnv =
 --   * 'MonadDB' for safe database access
 --   * 'MonadLog' for context-aware logging
 --   * 'MonadAppConfig' for config access
-newtype AppM a = AppM {unAppM :: ReaderT AppEnv IO a}
+newtype AppM a = AppM (ReaderT AppEnv IO a)
   deriving
     ( Functor,
       Applicative,

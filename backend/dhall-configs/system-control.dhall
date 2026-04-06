@@ -22,7 +22,7 @@ in  { -- Database
     , loggerCfg =
       { logLevel = LogLevel.DEBUG
       , logToFile = True
-      , logFilePath = "/tmp/system-control.log"
+      , logFilePath = "./system-control.log"
       , logToConsole = True
       }
     , appState = AppState.SERVER

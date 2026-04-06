@@ -19,7 +19,6 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.Utils.FlowMonad (logInfo, logWarning)
 import Data.Maybe (fromMaybe)
-import Data.Text (Text)
 import qualified Data.Text as T
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
 import Products.Autopilot.Types.Target
@@ -29,10 +28,7 @@ import Products.Autopilot.Types.Target
     TargetState (..),
     emptyPlayStoreState,
   )
-import Products.Autopilot.Types.Workflow
-  ( ReleaseCategory (..),
-    ReleaseWFStatus (..),
-  )
+import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers (getRT, updateRT, (|>>))
 import Products.Autopilot.Workflow.Types
   ( ReleaseState (..),

@@ -17,8 +17,6 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (throwIO)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
-import Control.Exception (throwIO)
-import Core.AppError (WorkflowError(..))
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
@@ -253,12 +251,12 @@ pollJobStatus cfg getJobCmd maxPolls currentPoll = do
     Right (K8sResult out) -> do
       let (succeeded, failed, backoffLimit) = parseJobStatus out
       logInfoS $
-          "    succeeded="
-            <> T.pack (show succeeded)
-            <> " failed="
-            <> T.pack (show failed)
-            <> " backoffLimit="
-            <> T.pack (show backoffLimit)
+        "    succeeded="
+          <> T.pack (show succeeded)
+          <> " failed="
+          <> T.pack (show failed)
+          <> " backoffLimit="
+          <> T.pack (show backoffLimit)
 
       if succeeded >= 1
         then do

@@ -113,8 +113,8 @@ buildSyncAuthArgs cfg mCtx =
 
 -- | Map revert value for sync: production logic (revert==2||revert==0) ? 0 : 1
 revertValue :: ReleaseTracker -> Int
-revertValue tracker =
-  let mCtx = Nothing :: Maybe K8sReleaseContext -- release_context.revert not easily accessible here
+revertValue _tracker =
+  let _mCtx = Nothing :: Maybe K8sReleaseContext -- release_context.revert not easily accessible here
    in 0 -- Default to 0 for non-revert releases; revert sync uses separate endpoint
 
 -- | Get sync rollout strategy: prefer sync_cluster_rollout_strategy from K8s context, else use tracker's strategy

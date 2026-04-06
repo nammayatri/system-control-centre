@@ -58,7 +58,6 @@ import Control.Monad.Catch (MonadThrow, throwM)
 import Data.Aeson (ToJSON (..), encode, object, (.=))
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
-import qualified Data.Text as T
 import Data.Typeable (Typeable, cast)
 import Network.HTTP.Types (Header)
 import Servant (ServerError (..), err400, err401, err403, err404, err409, err500)

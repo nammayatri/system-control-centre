@@ -40,7 +40,7 @@ import Control.Monad.Trans.Class (lift)
 import Core.Config (Config (..))
 import Core.Environment (DBEnv)
 import Core.Utils.FlowMonad (Flow, getDBEnv)
-import Data.Aeson (Value (..), eitherDecode, encode)
+import Data.Aeson (Value (..), eitherDecode)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
@@ -50,10 +50,10 @@ import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (NominalDiffTime, addUTCTime, getCurrentTime)
 import qualified Data.Vector as V
 import qualified Data.Yaml as Yaml
-import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
+import Products.Autopilot.K8s.Execute (K8sResult (..), runCmd)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import qualified Products.Autopilot.Queries.ReleaseTracker as DB
-import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
+import Products.Autopilot.Types.Release (ReleaseTracker (..))
 import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Recorded (recordedWithPersist)
 import Products.Autopilot.Workflow.Types
@@ -219,22 +219,6 @@ captureConfigMapSnapshot cfg db releaseId ns cmName label = do
           DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String cleanYaml)
         Left _ -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String yamlStr)
     Left _ -> pure ()
-
--- | Strip K8s metadata noise from raw JSON text (backward compat, used by older callers).
--- Keeps only name, namespace, labels in metadata. Like production autopilot's getContentWithoutExtraMetadata.
-stripK8sNoise :: Text -> Text
-stripK8sNoise raw =
-  case eitherDecode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Either String Value of
-    Left _ -> raw -- not JSON, return as-is
-    Right (Object obj) ->
-      let cleaned = KM.delete (K.fromText "status") obj
-          cleanMeta = case KM.lookup (K.fromText "metadata") cleaned of
-            Just (Object meta) ->
-              let keep = KM.filterWithKey (\k _ -> K.toText k `elem` ["name", "namespace", "labels"]) meta
-               in KM.insert (K.fromText "metadata") (Object keep) cleaned
-            _ -> cleaned
-       in TE.decodeUtf8 (LBS.toStrict (encode (Object cleanMeta)))
-    Right other -> TE.decodeUtf8 (LBS.toStrict (encode other))
 
 -- | Strip K8s noise from a parsed Value directly.
 -- Removes status, strips metadata to only name/namespace/labels.

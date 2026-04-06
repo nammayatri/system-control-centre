@@ -178,6 +178,7 @@ validateGlobalStatusTransition from to = to `elem` allowed from
     allowed LOCKED = [APPLIED, UNLOCKED, DISCARDED]
     allowed APPLIED = [COMPLETED, UNLOCKED]
     allowed UNLOCKED = []
+    allowed REVERTED = []
 
 -- ============================================================================
 -- Release Data Types

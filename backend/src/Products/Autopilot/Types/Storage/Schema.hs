@@ -26,7 +26,6 @@ import Data.Aeson (Value)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import Database.Beam
-import Database.Beam.Schema.Tables (fieldNamed, setEntityName)
 import GHC.Int (Int32)
 
 -- | Unified deployment config: product-level (service IS NULL) or service-level (service IS NOT NULL)

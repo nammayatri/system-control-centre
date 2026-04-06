@@ -5,6 +5,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
+
 module Products.Autopilot.Actions.Release (
     -- * Release Handlers
     createReleaseH,
@@ -39,7 +40,7 @@ module Products.Autopilot.Actions.Release (
 ) where
 
 import Control.Applicative ((<|>))
-import Control.Monad (void, when)
+import Control.Monad (when)
 import Control.Monad.Catch (throwM)
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..))
@@ -47,7 +48,7 @@ import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
 import Core.DB.Connection (withConn)
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv, logInfo)
-import Data.Aeson (Value (..), eitherDecode, object, toJSON, (.=))
+import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -65,12 +66,10 @@ import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Database.PostgreSQL.Simple (Only (..), execute, withTransaction)
-import GHC.Int (Int32)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
 import Products.Autopilot.K8s.Deployment (deploymentExists)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
-import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import Products.Autopilot.EventLog (logStatusUpdated)
 import Products.Autopilot.Notifications
 import Products.Autopilot.Queries.ProductService
@@ -93,9 +92,9 @@ import Shared.API.Response (APIResponse (..))
 -- ============================================================================
 
 upsertProductH :: AuthedPerson -> UpsertProductReq -> Flow APIResponse
-upsertProductH _ap UpsertProductReq{..} = do
+upsertProductH _ap req@UpsertProductReq{..} = do
     db <- getDBEnv
-    let rowId = fromMaybe 0 id
+    let rowId = fromMaybe 0 (req.id)
     liftIO $ upsertProduct db rowId appGroup cluster namespace vsName productType productAcronym syncCluster needInfraApproval slackChannel
     pure $ APIResponse "SUCCESS" "product_config upserted"
 
@@ -178,9 +177,9 @@ listServicesH _ap productName' = do
                             | otherwise -> pure $ map toResponse hosts
 
 upsertServiceH :: AuthedPerson -> UpsertServiceReq -> Flow APIResponse
-upsertServiceH _ap UpsertServiceReq{..} = do
+upsertServiceH _ap req@UpsertServiceReq{..} = do
     db <- getDBEnv
-    let rowId = fromMaybe 0 id
+    let rowId = fromMaybe 0 (req.id)
     liftIO $ upsertService db rowId rolloutStrategyText decisionConfigText service appGroup serviceType serviceHost revertStrategyText slackChannel
     pure $ APIResponse "SUCCESS" "release_config upserted"
 
@@ -209,7 +208,7 @@ listReleasesH _ap mFrom mTo = do
             <|> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q%Z" (T.unpack t)
 
 createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
-createReleaseH _ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
+createReleaseH _ap mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
     cfg <- getConfig
     db <- getDBEnv
     p <- liftIO $ findProductByName db appGroup
@@ -384,7 +383,6 @@ createReleaseH _ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = 
                                                     -- Capture BEFORE snapshots at creation time (so diff is available immediately)
                                                     -- Also generate a preview AFTER by modifying version/image in the old deployment YAML
                                                     let ns = getProductNamespace pCfg
-                                                        vsN = getProductVsName pCfg
                                                         oldDepName = targetSvcHost <> "-" <> resolvedOldVersion
                                                     liftIO $ captureDeploymentSnapshot cfg db rid ns oldDepName "DEPLOYMENT_BEFORE"
                                                     -- Generate preview AFTER: take old deployment, replace version + image
@@ -542,7 +540,6 @@ revertReleaseH _ap rid req = do
                             )
                     -- Capture BEFORE snapshots for the revert release
                     let revertNs = (\(K8sReleaseContext{namespace = n}) -> n) oldCtx
-                        revertVsN = virtualServiceName oldCtx
                         revertNewDep = ctxServiceName <> "-" <> NT.newVersion tracker
                     liftIO $ captureDeploymentSnapshot cfg db newRid revertNs revertNewDep "DEPLOYMENT_BEFORE"
                     liftIO $
@@ -610,8 +607,8 @@ deleteReleaseH _ap rid = do
             if NT.status tracker `elem` activeStatuses
                 then pure $ APIResponse "ERROR" ("Cannot delete release in " <> T.pack (show (NT.status tracker)) <> " status. Abort or complete it first.")
                 else do
-                    liftIO $ withConn db $ \conn -> withTransaction conn $ do
-                        execute conn "DELETE FROM release_events WHERE re_release_id = ?" (Only rid)
+                    _ <- liftIO $ withConn db $ \conn -> withTransaction conn $ do
+                        _ <- execute conn "DELETE FROM release_events WHERE re_release_id = ?" (Only rid)
                         execute conn "DELETE FROM release_tracker WHERE id = ?" (Only rid)
                     pure $ APIResponse "SUCCESS" ("Release deleted: " <> rid)
 
@@ -894,7 +891,7 @@ logsLinkH _ap rid = do
 -- ============================================================================
 
 releaseDiffH :: AuthedPerson -> Text -> Maybe Text -> Flow DiffResponse
-releaseDiffH _ap rid mType = do
+releaseDiffH _ap rid _mType = do
     cfg <- getConfig
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid

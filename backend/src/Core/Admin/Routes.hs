@@ -14,7 +14,7 @@ import Control.Monad.IO.Class (liftIO)
 import Core.Admin.Queries
 import Core.Admin.Types
 import Core.AppError (APIError (..), AuthError (..))
-import Core.Auth.Queries (TokenRow (..), findAllProductsForPerson, findPersonById, findProductAccessForPerson, findTokenByValue)
+import Core.Auth.Queries (TokenRow (..), findAllProductsForPerson, findPersonById, findTokenByValue)
 import Core.Auth.Types (PersonAuth (..), PersonProductPerms (..))
 import Core.Utils.FlowMonad (Flow, getDBEnv)
 import Data.Aeson (Value (..), object, (.=))
@@ -117,16 +117,6 @@ getStrListM k obj = case KM.lookup (K.fromText k) obj of
   where
     extractStr (String t) = [t]
     extractStr _ = []
-
-getUuidListM :: Text -> KM.KeyMap Value -> [UUID]
-getUuidListM k obj = case KM.lookup (K.fromText k) obj of
-  Just (Array arr) -> concatMap extractUuid (toList arr)
-  _ -> []
-  where
-    extractUuid (String t) = case UUID.fromText t of
-      Just u -> [u]
-      Nothing -> []
-    extractUuid _ = []
 
 getUuidM :: Text -> KM.KeyMap Value -> Maybe UUID
 getUuidM k obj = case KM.lookup (K.fromText k) obj of
@@ -377,16 +367,6 @@ personDetailToJson PersonDetail {..} =
       "createdAt" .= pdCreatedAt
     ]
 
-productToJson :: ProductDetail -> Value
-productToJson ProductDetail {..} =
-  object
-    [ "id" .= prodId,
-      "slug" .= prodSlug,
-      "name" .= prodName,
-      "description" .= prodDescription,
-      "isActive" .= prodIsActive
-    ]
-
 roleToJson :: RoleDetail -> Value
 roleToJson RoleDetail {..} =
   object
@@ -395,14 +375,6 @@ roleToJson RoleDetail {..} =
       "description" .= rdDescription,
       "isSystemRole" .= rdIsSystemRole,
       "permissions" .= rdPermissions
-    ]
-
-permToJson :: PermissionDetail -> Value
-permToJson PermissionDetail {..} =
-  object
-    [ "id" .= permId,
-      "action" .= permAction,
-      "description" .= permDescription
     ]
 
 overrideToJson :: OverrideDetail -> Value

@@ -10,8 +10,6 @@ module Products.Autopilot.Workflow.BackendConfigWorkflow
 where
 
 import Control.Exception (throwIO)
-import System.Exit (ExitCode (..))
-import System.Process (readProcessWithExitCode)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
@@ -27,7 +25,7 @@ import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
-import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd, shellQuote)
+import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.Notifications (notifyConfigMapCompleted)
 import Products.Autopilot.Queries.ProductService (findProductByName, getProductNamespace)
 import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker, insertReleaseEvent, insertReleaseTracker)
@@ -45,6 +43,8 @@ import Products.Autopilot.Workflow.Types
     ReleaseWorkFlow,
     StateFlow,
   )
+import System.Exit (ExitCode (..))
+import System.Process (readProcessWithExitCode)
 import Prelude
 
 -- ============================================================================

@@ -53,9 +53,6 @@ buildCloneDeploymentCommand :: Config -> K8sReleaseContext -> String
 buildCloneDeploymentCommand cfg ctx =
   let sourceDep = T.unpack (serviceName ctx) <> "-" <> T.unpack (oldVersion ctx)
       targetDep = T.unpack (deploymentName ctx)
-      ns = T.unpack (namespace ctx)
-      container = T.unpack (containerName ctx)
-      newTag = T.unpack (newVersion ctx)
       explicitDockerImage = maybe "" T.unpack (dockerImage ctx)
       -- Strip env vars with unsupported fieldRef paths (e.g. metadata.labels[...])
       stripUnsupportedEnvs = "(.spec.template.spec.containers[].env) |= [.[]? | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]"
@@ -69,9 +66,6 @@ buildCloneDeploymentWithEnvsCommand :: Config -> K8sReleaseContext -> Text -> St
 buildCloneDeploymentWithEnvsCommand cfg ctx envsJson =
   let sourceDep = T.unpack (serviceName ctx) <> "-" <> T.unpack (oldVersion ctx)
       targetDep = T.unpack (deploymentName ctx)
-      ns = T.unpack (namespace ctx)
-      container = T.unpack (containerName ctx)
-      newTag = T.unpack (newVersion ctx)
       explicitDockerImage = maybe "" T.unpack (dockerImage ctx)
       -- Same jq filter as buildCloneDeploymentCommand, plus env injection
       -- Strip env vars with unsupported fieldRef paths (e.g. metadata.labels[...])
@@ -99,9 +93,7 @@ buildRolloutStatusCommand cfg ctx =
 -- Used when env switch (envOverrideData) is set but deployment already exists (not cloned).
 buildPatchDeploymentEnvsCommand :: Config -> K8sReleaseContext -> Text -> String
 buildPatchDeploymentEnvsCommand cfg ctx envsJson =
-  let ns = T.unpack (namespace ctx)
-      dep = T.unpack (deploymentName ctx)
-      container = T.unpack (containerName ctx)
+  let container = T.unpack (containerName ctx)
       -- Use jq to build a strategic merge patch, filtering out unsupported fieldRef paths
       stripAndPatch = "($envs | fromjson | [.[] | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]) as $filtered | {\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"" <> container <> "\",\"env\":$filtered}]}}}}"
    in unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "patch deployment", shellQuote (deploymentName ctx), "--type=strategic", "-p", "\"$(echo null | jq --arg envs", shellQuote envsJson, "'" <> stripAndPatch <> "'" <> ")\""]
@@ -217,5 +209,6 @@ getRunningVersionFromVS cfg ns vsName svcHost = do
     getObj key obj = case KM.lookup (K.fromText key) obj of Just (Object o) -> Just o; _ -> Nothing
     getArr key obj = case KM.lookup (K.fromText key) obj of Just (Array a) -> Just (foldr (:) [] a); _ -> Nothing
     getTxt key obj = case KM.lookup (K.fromText key) obj of Just (String t) -> Just t; _ -> Nothing
+    getIntVal :: Text -> KM.KeyMap Value -> Int
     getIntVal key obj = case KM.lookup (K.fromText key) obj of Just (Number n) -> round n; _ -> 0
     mapMaybeList f = foldr (\x acc -> maybe acc (: acc) (f x)) []

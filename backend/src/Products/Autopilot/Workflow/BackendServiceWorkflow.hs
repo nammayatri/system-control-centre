@@ -31,15 +31,13 @@ import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
 -- getPodsCalculationFactor reserved for future pod-count calculation
 
-import Core.Environment (DBEnv)
-import Core.Environment (getLoggerEnv)
+import Core.Environment (DBEnv, getLoggerEnv)
 import Core.Logging (LoggerEnv, logErrorIO, logInfoIO)
 import Core.Utils.FlowMonad (getConfig, getDBEnv, logError, logInfo, logWarning)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
-import Data.Text (Text)
 import qualified Data.Text as T
 -- (Data.ByteString.Lazy removed - not used after refactor)
 import qualified Data.Text.Encoding as TE
@@ -102,7 +100,6 @@ import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..))
 import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers
   ( captureDeploymentSnapshot,
-    captureVSSnapshot,
     getRT,
     updateRT,
     (|>>),

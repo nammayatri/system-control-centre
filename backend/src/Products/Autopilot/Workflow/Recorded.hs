@@ -56,17 +56,15 @@ instance (Monad m) => Functor (Recorded s m) where
 
 -- Applicative instance
 instance (Monad m) => Applicative (Recorded s m) where
-  pure = return
+  pure a =
+    Recorded
+      { inner = pure a,
+        getter = const Nothing -- No cached value, always run
+      }
   (<*>) = ap
 
 -- Monad instance - this is where the magic happens
 instance (Monad m) => Monad (Recorded s m) where
-  return a =
-    Recorded
-      { inner = return a,
-        getter = const Nothing -- No cached value, always run
-      }
-
   recordedma >>= recordedmab =
     Recorded
       { inner = StateT $ \s -> do
@@ -152,7 +150,7 @@ step ::
   -- | The actual step computation
   StateT s m () ->
   Recorded s m ()
-step stepName updateState isDone persist computation =
+step _stepName updateState isDone persist computation =
   recordedWithPersist persist computation' getter
   where
     computation' = do
@@ -195,7 +193,7 @@ stepWithRollback ::
   -- | Rollback action
   StateT s m () ->
   Recorded s m (Either String ())
-stepWithRollback stepName updateState isDone persist forwardAction rollbackAction =
+stepWithRollback _stepName updateState isDone persist forwardAction rollbackAction =
   recordedWithPersist persist computation' getter
   where
     computation' = do
@@ -217,7 +215,7 @@ stepWithRollback stepName updateState isDone persist forwardAction rollbackActio
     getter s = if isDone s then Just (Right ()) else Nothing
 
     tryAction :: (Monad m) => StateT s m () -> m (Either String ())
-    tryAction action = do
+    tryAction _action = do
       -- In a real implementation, you'd use ExceptT or catch exceptions
       -- For now, we assume actions succeed
       return $ Right ()

@@ -6,7 +6,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
 import Core.Config (Config (..))
 import Core.Environment (AppState (..), DBEnv)
-import Core.Logging (LoggerEnv, logErrorIO, logInfoIO, logWarningIO)
+import Core.Logging (LoggerEnv, logInfoIO, logWarningIO)
 import Core.Utils.FlowMonad
 import Data.Aeson (object, toJSON, (.=))
 import Data.List (sortBy)
@@ -238,7 +238,7 @@ pickJobs multi jobs
     go _ [] = []
     go counts ((rt, mts) : rest) =
       let key = appGroup rt <> ":" <> env rt
-          picked = Map.findWithDefault 0 key counts
+          picked = Map.findWithDefault (0 :: Int) key counts
        in if picked >= 1
             then go counts rest
             else (rt, mts) : go (Map.insert key (picked + 1) counts) rest
@@ -311,9 +311,9 @@ trigger db (rt, mts) = do
               case freshM of
                 Just (freshRT, freshTS)
                   | NT.status freshRT /= COMPLETED -> do
-                      now' <- liftIO getCurrentTime
-                      let completed = freshRT{NT.status = COMPLETED, NT.endTime = Just now'}
-                      liftIO $ insertReleaseTracker db completed freshTS
+                    now' <- liftIO getCurrentTime
+                    let completed = freshRT{NT.status = COMPLETED, NT.endTime = Just now'}
+                    liftIO $ insertReleaseTracker db completed freshTS
                 _ -> pure ()
               liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
 
@@ -483,4 +483,5 @@ scaleDownOldDeployment logEnv db cfg (rt, mts) = do
               <> T.pack (show (fmap (NT.status . fst) freshM))
               <> ")"
     _ -> pure ()
+
 -- force rebuild 1775474191

@@ -24,7 +24,6 @@ module Shared.Types.Storage.ServerConfig where
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import Database.Beam
-import Database.Beam.Schema.Tables (fieldNamed, setEntityName)
 import GHC.Int (Int32)
 
 -- | Row in the @server_config@ table.

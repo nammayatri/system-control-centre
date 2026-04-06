@@ -232,11 +232,11 @@ podCountRollout = do
       forM_ steps $ \step -> do
         let targetPods = max 1 (podPercent step)
         logInfoS $
-            "  Scaling new deployment to "
-              <> T.pack (show targetPods)
-              <> " pods (rollout "
-              <> T.pack (show (rolloutPercent step))
-              <> "%)"
+          "  Scaling new deployment to "
+            <> T.pack (show targetPods)
+            <> " pods (rollout "
+            <> T.pack (show (rolloutPercent step))
+            <> "%)"
         _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx targetPods)
         updateK8sField (\k8s -> k8s{trafficPercentage = rolloutPercent step})
 
@@ -247,7 +247,7 @@ podCountRollout = do
         -- Cooloff between steps
         when (cooloffMinutes step > 0 && rolloutPercent step < 100) $ do
           logInfoS $
-              "  Cooloff: " <> T.pack (show (cooloffMinutes step)) <> " seconds"
+            "  Cooloff: " <> T.pack (show (cooloffMinutes step)) <> " seconds"
           liftIO $ threadDelay (cooloffMinutes step * 1000000)
 
         -- Health check between steps
@@ -263,12 +263,12 @@ checkDeploymentHealth cfg ctx = do
     runK8sIO $
       getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
   logInfoS $
-      "    Health: ready="
-        <> T.pack (show ready)
-        <> " available="
-        <> T.pack (show available)
-        <> " desired="
-        <> T.pack (show desired)
+    "    Health: ready="
+      <> T.pack (show ready)
+      <> " available="
+      <> T.pack (show available)
+      <> " desired="
+      <> T.pack (show desired)
   when (ready < desired) $
     logWarningS "    WARNING: Not all replicas ready yet"
 
@@ -292,14 +292,14 @@ monitorHealth = do
       runK8sIO $
         getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
     logInfoS $
-        "    Check "
-          <> T.pack (show i)
-          <> "/"
-          <> T.pack (show checks)
-          <> ": ready="
-          <> T.pack (show ready)
-          <> "/"
-          <> T.pack (show desired)
+      "    Check "
+        <> T.pack (show i)
+        <> "/"
+        <> T.pack (show checks)
+        <> ": ready="
+        <> T.pack (show ready)
+        <> "/"
+        <> T.pack (show desired)
 
   logInfoS "Health monitoring complete for scheduler"
 
