@@ -561,6 +561,16 @@ const DeploymentConfig: React.FC = () => {
                     className={inputClass}
                   />
                 </div>
+                <div>
+                  <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">Slack Channel</label>
+                  <input
+                    type="text"
+                    value={groupForm.slack_channel || ''}
+                    onChange={e => setGroupForm(prev => ({ ...prev, slack_channel: e.target.value }))}
+                    placeholder="e.g. some-channel"
+                    className={inputClass}
+                  />
+                </div>
               </div>
               <label className="flex items-center gap-2.5 cursor-pointer">
                 <input

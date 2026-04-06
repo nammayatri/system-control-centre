@@ -10,6 +10,8 @@ module Products.Autopilot.Workflow.BackendConfigWorkflow
 where
 
 import Control.Exception (throwIO)
+import System.Exit (ExitCode (..))
+import System.Process (readProcessWithExitCode)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
@@ -28,6 +30,7 @@ import qualified Data.Text.Lazy.Encoding as TLE
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd, shellQuote)
 import Products.Autopilot.Notifications (notifyConfigMapCompleted)
 import Products.Autopilot.Queries.ProductService (findProductByName, getProductNamespace)
+import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker, insertReleaseTracker)
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
 import Products.Autopilot.Types.Target (BackendConfigWFStatus (..), ConfigDeploymentState (..), TargetState (..), emptyConfigState)
 import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
@@ -210,6 +213,20 @@ notifyComplete = do
   db <- lift getDBEnv
   logInfoS $ "ConfigMap release " <> releaseId rt <> " completed!"
   liftIO $ notifyConfigMapCompleted db rt
+  -- If this is a revert tracker, mark the original as REVERTED
+  case (info rt, description rt) of
+    (Just "REVERT", Just desc) ->
+      case T.stripPrefix "Revert of " desc of
+        Just origId -> do
+          mOrig <- liftIO $ findReleaseTracker db origId
+          case mOrig of
+            Just (origRt, origTs) | status origRt == REVERTING -> do
+              let reverted = origRt{status = REVERTED}
+              liftIO $ insertReleaseTracker db reverted origTs
+              logInfoS $ "Marked original " <> origId <> " as REVERTED"
+            _ -> pure ()
+        Nothing -> pure ()
+    _ -> pure ()
   updateRT $ \r -> r{status = COMPLETED}
 
 -- ============================================================================
@@ -219,11 +236,11 @@ notifyComplete = do
 -- | Pipe content into kubectl replace -f -
 replaceFromStdin :: Config -> String -> Text -> IO (Either Text ())
 replaceFromStdin cfg ns content = do
-  let cmd = unwords ["echo", shellQuote content, "|", kubectlBin cfg, "-n", ns, "replace -f -"]
-  res <- runCmd cmd
-  case res of
-    Right _ -> pure (Right ())
-    Left (K8sError err) -> pure (Left ("kubectl replace failed: " <> err))
+  let args = ["-n", ns, "apply", "-f", "-"]
+  (exitCode, _out, err) <- readProcessWithExitCode (kubectlBin cfg) args (T.unpack content)
+  case exitCode of
+    ExitSuccess -> pure (Right ())
+    ExitFailure _ -> pure (Left ("kubectl apply failed: " <> T.pack err))
 
 -- | Check if content looks like a raw K8s YAML manifest
 isK8sManifest :: Text -> Bool

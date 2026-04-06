@@ -61,7 +61,8 @@ data UpsertProductReq = UpsertProductReq
     productType :: Text,
     productAcronym :: Text,
     syncCluster :: Maybe Text,
-    needInfraApproval :: Maybe Bool
+    needInfraApproval :: Maybe Bool,
+    slackChannel :: Maybe Text
   }
   deriving (Show, Generic)
 
@@ -78,6 +79,7 @@ instance FromJSON UpsertProductReq where
       <*> (v .:? "productAcronym" >>= \mv -> case mv of Just x -> pure x; Nothing -> v .:? "product_acronym" .!= "")
       <*> (v .:? "syncCluster" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "sync_cluster")
       <*> (v .:? "needInfraApproval" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "need_infra_approval")
+      <*> (v .:? "slackChannel" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "slack_channel")
 
 instance ToJSON UpsertProductReq where
   toJSON = genericToJSON defaultOptions{omitNothingFields = True}

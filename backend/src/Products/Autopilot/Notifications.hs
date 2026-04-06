@@ -57,7 +57,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.HTTP.Client (RequestBody (..), httpLbs, method, newManager, parseRequest, requestBody, requestHeaders, responseBody, responseTimeout, responseTimeoutMicro)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
-import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, getSlackChannelDirect)
+import Products.Autopilot.Queries.ProductService (findProductByName, findServiceByProductAndName, getSlackChannelDirect)
 import qualified Products.Autopilot.Queries.ReleaseTracker as RTQ
 import Products.Autopilot.RuntimeConfig (isSlackEnabled)
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
@@ -94,9 +94,12 @@ getDashboardUrl = do
 getSlackChannel :: DBEnv -> Text -> Text -> IO (Maybe Text)
 getSlackChannel db prod svc = do
   mCfg <- findServiceByProductAndName db prod svc
-  pure $ case mCfg of
-    Just cfg -> getSlackChannelDirect cfg
-    Nothing -> Nothing
+  case mCfg >>= getSlackChannelDirect of
+    Just ch | not (T.null ch) -> pure (Just ch)
+    -- Fall back to app group's slack_channel (covers configmaps, VS edits, etc.)
+    _ -> do
+      mProd <- findProductByName db prod
+      pure (mProd >>= getSlackChannelDirect)
 
 -- | Post a rich message to Slack using Block Kit attachments.
 -- Returns the message ts (thread ID) if successful.

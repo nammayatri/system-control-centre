@@ -96,7 +96,7 @@ upsertProductH :: AuthedPerson -> UpsertProductReq -> Flow APIResponse
 upsertProductH _ap UpsertProductReq{..} = do
     db <- getDBEnv
     let rowId = fromMaybe 0 id
-    liftIO $ upsertProduct db rowId appGroup cluster namespace vsName productType productAcronym syncCluster needInfraApproval
+    liftIO $ upsertProduct db rowId appGroup cluster namespace vsName productType productAcronym syncCluster needInfraApproval slackChannel
     pure $ APIResponse "SUCCESS" "product_config upserted"
 
 listProductsH :: AuthedPerson -> Flow [ProductResponse]
@@ -181,7 +181,7 @@ upsertServiceH :: AuthedPerson -> UpsertServiceReq -> Flow APIResponse
 upsertServiceH _ap UpsertServiceReq{..} = do
     db <- getDBEnv
     let rowId = fromMaybe 0 id
-    liftIO $ upsertService db rowId rolloutStrategyText decisionConfigText service appGroup serviceType serviceHost revertStrategyText
+    liftIO $ upsertService db rowId rolloutStrategyText decisionConfigText service appGroup serviceType serviceHost revertStrategyText slackChannel
     pure $ APIResponse "SUCCESS" "release_config upserted"
 
 -- ============================================================================
@@ -917,19 +917,17 @@ releaseDiffH _ap rid mType = do
                 payloadToText other = TE.decodeUtf8 (LBS.toStrict (A.encode other))
             case (mBefore, mAfter) of
                 (Just beforeEvt, Just afterEvt) ->
-                    pure $
-                        DiffResponse
-                            (payloadToText (S.rePayload beforeEvt))
-                            (payloadToText (S.rePayload afterEvt))
-                            diffLabel
+                    let b = payloadToText (S.rePayload beforeEvt)
+                        a = payloadToText (S.rePayload afterEvt)
+                    in pure $ case trackerCat of
+                        BackendConfig -> DiffResponse (extractConfigMapDataSection b) (extractConfigMapDataSection a) diffLabel
+                        _ -> DiffResponse b a diffLabel
                 (Just beforeEvt, Nothing) -> do
-                    -- For configmaps, extract data section from BEFORE and use tracker file as proposed
+                    -- For configmaps, extract data section from both sides so they're comparable
                     case trackerCat of
                       BackendConfig -> do
-                        let beforeYaml = payloadToText (S.rePayload beforeEvt)
-                            -- Extract just the JSON data from the K8s YAML snapshot
-                            beforeData = extractConfigMapDataSection beforeYaml
-                            proposedContent =
+                        let beforeData = extractConfigMapDataSection (payloadToText (S.rePayload beforeEvt))
+                            rawProposed =
                               case NT.metadata tracker of
                                 Just (Object o) ->
                                   case KM.lookup (K.fromText "file") o of
@@ -938,7 +936,9 @@ releaseDiffH _ap rid mType = do
                                       Just (String c) -> c
                                       _ -> ""
                                 _ -> ""
-                        pure $ DiffResponse beforeData proposedContent diffLabel
+                            -- Normalize: if proposed is a K8s YAML manifest, extract data section
+                            proposedData = extractConfigMapDataSection rawProposed
+                        pure $ DiffResponse beforeData proposedData diffLabel
                       _ ->
                         pure $
                             DiffResponse

@@ -34,6 +34,8 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
+import qualified Data.Text.Encoding as TE
+import qualified Data.Yaml as Yaml
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import qualified Data.UUID as UUID
@@ -274,8 +276,11 @@ handleConfigMapRevert db rt mts cmId' = do
     Nothing -> pure $ APIResponse "ERROR" "No CONFIGMAP_BEFORE snapshot found to revert to"
     Just beforeEvt -> do
       newRid <- liftIO (UUID.toText <$> UUID.nextRandom)
+      -- Extract just the data section as JSON (not full K8s YAML) so the
+      -- workflow patches it into the current configmap like Julia does,
+      -- rather than trying kubectl replace with a stale resourceVersion.
       let oldConfig = case S.rePayload beforeEvt of
-            String s -> Just s
+            String s -> Just (extractDataAsJson s)
             _ -> Nothing
           -- Create a new tracker as a revert copy
           revertTracker =
@@ -488,3 +493,22 @@ safeReadInt t = case reads (T.unpack t) of ((n, _) : _) -> Just n; _ -> Nothing
 firstJust :: Maybe a -> Maybe a -> Maybe a
 firstJust (Just x) _ = Just x
 firstJust Nothing b = b
+
+-- | Extract the data section from a K8s ConfigMap YAML as JSON.
+-- Input: "apiVersion: v1\ndata:\n  app.conf: |-\n    ...\nkind: ConfigMap\n..."
+-- Output: "{\"app.conf\":\"...\"}" — just the data, no K8s wrapper.
+-- If parsing fails, returns the input unchanged.
+extractDataAsJson :: Text -> Text
+extractDataAsJson yamlText =
+  case A.decodeStrict' (encodeUtf8 yamlText) :: Maybe Value of
+    Just (Object obj) ->
+      case KM.lookup (K.fromText "data") obj of
+        Just dataVal -> TE.decodeUtf8 (LBS.toStrict (A.encode dataVal))
+        Nothing -> yamlText
+    _ ->
+      case Yaml.decodeEither' (encodeUtf8 yamlText) :: Either Yaml.ParseException Value of
+        Right (Object obj) ->
+          case KM.lookup (K.fromText "data") obj of
+            Just dataVal -> TE.decodeUtf8 (LBS.toStrict (A.encode dataVal))
+            Nothing -> yamlText
+        _ -> yamlText

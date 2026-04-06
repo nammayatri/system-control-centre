@@ -164,6 +164,7 @@ export interface ProductConfig {
     sync_cluster?: string | null;
     need_infra_approval?: number;
     vs_locked_by?: string | null;
+    slack_channel?: string | null;
 }
 
 // ── Namma AP backend → frontend normalizer ─────────────────────────
@@ -655,6 +656,7 @@ export async function createProductConfig(payload: Partial<ProductConfig>): Prom
         repoName: payload.repo_name,
         syncCluster: payload.sync_cluster,
         needInfraApproval: payload.need_infra_approval ? true : false,
+        slackChannel: payload.slack_channel || null,
     };
     const { data } = await apiClient.post('/products/config', body);
     return data;
@@ -673,6 +675,7 @@ export async function updateProductConfig(id: number, payload: Partial<ProductCo
         repoName: payload.repo_name,
         syncCluster: payload.sync_cluster,
         needInfraApproval: payload.need_infra_approval ? true : false,
+        slackChannel: payload.slack_channel || null,
     };
     const { data } = await apiClient.put(`/products/config/${id}`, body);
     return data;

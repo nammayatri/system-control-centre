@@ -311,8 +311,19 @@ trigger db (rt, mts) = do
                   st' <- getAppState
                   liftIO $ restoreVsTrafficOnFailure (loggerEnv st') cfg' db rt mts
                   liftIO $ notifyReleaseAborted db abortedTracker
-            Right finalState -> do
-              liftIO $ insertReleaseTracker db (releaseTracker finalState) (targetState finalState)
+            Right _finalState -> do
+              -- The workflow persists state via persistWorkflowState in each cprV2
+              -- stage, but the Recorded monad's bind may short-circuit the final
+              -- stage's persist. Re-read from DB to verify, and force COMPLETED if
+              -- the workflow reported success but the status wasn't persisted.
+              freshM <- liftIO $ findReleaseTracker db (releaseId rt)
+              case freshM of
+                Just (freshRT, freshTS)
+                  | NT.status freshRT /= COMPLETED -> do
+                      now' <- liftIO getCurrentTime
+                      let completed = freshRT{NT.status = COMPLETED, NT.endTime = Just now'}
+                      liftIO $ insertReleaseTracker db completed freshTS
+                _ -> pure ()
               liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
 
 dispatchWorkflow :: ReleaseTracker -> Maybe TargetState -> Flow (Either WorkFlowError ReleaseState)
@@ -481,3 +492,4 @@ scaleDownOldDeployment logEnv db cfg (rt, mts) = do
               <> T.pack (show (fmap (NT.status . fst) freshM))
               <> ")"
     _ -> pure ()
+-- force rebuild 1775474191

@@ -144,8 +144,9 @@ upsertProduct ::
   Text ->
   Maybe Text ->
   Maybe Bool ->
+  Maybe Text ->
   IO ()
-upsertProduct db _rowId productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval = do
+upsertProduct db _rowId productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval slackChannel' = do
   withConn db $ \conn ->
     withTransaction conn $ do
       runBeamPostgres conn $
@@ -173,7 +174,7 @@ upsertProduct db _rowId productName' cluster' namespace' vsName' productType' pr
                     dcRolloutStrategy = val_ Nothing,
                     dcRevertStrategy = val_ Nothing,
                     dcDecisionConfig = val_ Nothing,
-                    dcSlackChannel = val_ Nothing
+                    dcSlackChannel = val_ slackChannel'
                   }
               ]
 
