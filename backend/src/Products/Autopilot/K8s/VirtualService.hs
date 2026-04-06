@@ -21,6 +21,8 @@ import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import Products.Autopilot.K8s.Execute
 import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..))
+import System.Exit (ExitCode (..))
+import System.Process (readProcessWithExitCode)
 
 getVirtualServiceJson :: Config -> Text -> Text -> IO (Either K8sError Text)
 getVirtualServiceJson cfg ns vsName = do
@@ -67,16 +69,17 @@ applyVirtualServiceRolloutSingle cfg ctx vsName oldW newW = go 1
                         case buildUpdatedVS v of
                             Nothing -> pure (Left (K8sError "VirtualService missing spec.http"))
                             Just updatedJson -> do
-                                -- kubectl replace checks resourceVersion for conflict detection
-                                result <- runCmd (unwords ["echo", shellQuote updatedJson, "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "replace -f -"])
-                                case result of
-                                    Right ok -> pure (Right ok)
-                                    Left err
-                                        | isConflictError err && attempt < maxRetries -> do
-                                            -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
-                                            putStrLn $ "[VS-ROLLOUT] Conflict on attempt " <> show attempt <> ", retrying..."
-                                            go (attempt + 1)
-                                        | otherwise -> pure (Left err)
+                                -- kubectl replace with stdin piping (no echo — safe for all content)
+                                (exitCode, _out, errStr) <- readProcessWithExitCode (kubectlBin cfg) ["-n", T.unpack (namespace ctx), "replace", "-f", "-"] (T.unpack updatedJson)
+                                case exitCode of
+                                    ExitSuccess -> pure (Right (K8sResult "vs-updated"))
+                                    ExitFailure _ ->
+                                        let err = K8sError (T.pack errStr)
+                                        in if isConflictError err && attempt < maxRetries
+                                            then do
+                                                putStrLn $ "[VS-ROLLOUT] Conflict on attempt " <> show attempt <> ", retrying..."
+                                                go (attempt + 1)
+                                            else pure (Left err)
     buildUpdatedVS (Object root) = do
         spec <- getObj "spec" root
         httpRules <- getArr "http" spec

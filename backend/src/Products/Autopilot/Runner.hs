@@ -226,14 +226,17 @@ isEligibleToRun db multiRelease ongoing (rt, mts) = case category rt of
     Infrastructure -> pure True
     VSEdit -> pure True
   where
-    k8sEligible skipOngoingCheck = do
+    k8sEligible _skipOngoingCheck = do
         let k8sCluster = case mts of
                 Just (K8sState k8s) -> cluster (context k8s)
                 _ -> ""
         p <- findProductByNameAndCluster db (appGroup rt) k8sCluster
         let vsLocked = maybe False (isJust . getProductVsLockedBy) p
+            -- Block same-service concurrent releases (always, even with multi_release_per_product)
+            hasOngoingSameService = any (\(o, _) -> appGroup o == appGroup rt && service o == service rt && env o == env rt) ongoing
+            -- Block same-appGroup when multi_release_per_product is off
             hasOngoingSameProduct = any (\(o, _) -> appGroup o == appGroup rt && env o == env rt) ongoing
-        pure (not vsLocked && (skipOngoingCheck || not hasOngoingSameProduct))
+        pure (not vsLocked && not hasOngoingSameService && (multiRelease || not hasOngoingSameProduct))
 
 pickJobs :: Bool -> [TrackerWithTarget] -> [TrackerWithTarget]
 pickJobs multi jobs
