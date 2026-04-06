@@ -62,7 +62,7 @@ import Products.Autopilot.K8s.Deployment
   )
 import Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
-import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, hpaExists)
+import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildDeleteHpaCommand, hpaExists)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getVirtualServiceJson)
 import Products.Autopilot.Notifications
   ( notifyGenericThreadMessage,
@@ -399,13 +399,13 @@ progressiveRollout = do
           let firstStep = head strategy
               firstNewW = rolloutPercent firstStep
               firstOldW = max 0 (100 - firstNewW)
-          liftIO $ putStrLn $ "  Initial rollout step: new=" <> show firstNewW <> "%, cooloff=" <> show (cooloffSeconds firstStep) <> "min"
+          liftIO $ putStrLn $ "  Initial rollout step: new=" <> show firstNewW <> "%, cooloff=" <> show (cooloffMinutes firstStep) <> "min"
           runVsRolloutWithLock cfg ctx firstOldW firstNewW
           updateK8sField (\k8s -> k8s{trafficPercentage = firstNewW})
 
           -- Record rollout history for first step
           stepStartTime <- liftIO getCurrentTime
-          let firstHist = mkRolloutHistory firstNewW (cooloffSeconds firstStep) (podPercent firstStep) stepStartTime Nothing
+          let firstHist = mkRolloutHistory firstNewW (cooloffMinutes firstStep) (podPercent firstStep) stepStartTime Nothing
           updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [firstHist]}
           currentRT <- getRT
           liftIO $ insertReleaseTracker db currentRT (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = firstNewW})))
@@ -490,7 +490,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
               -- Reads from rollout strategy (fast-forward sets strategy cooloff to 0)
               now <- liftIO getCurrentTime
               let currentStep = (rolloutStrategy freshRT) !! (currentIndex - 1)
-                  cooloffMins = cooloffSeconds currentStep
+                  cooloffMins = cooloffMinutes currentStep
                   elapsed = diffUTCTime now stepStartTime
                   cooloffSecs = fromIntegral cooloffMins * 60 :: Double
                   cooloffExceeded = realToFrac elapsed >= cooloffSecs
@@ -523,8 +523,8 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                       case promResult of
                         PromAbort reason -> do
                           liftIO $ putStrLn $ "[DECISION] Prometheus ABORT: " <> T.unpack reason
-                          -- Production parity: DECISION_ENGINE / DECISION_RESULT
-                          liftIO $ logDecisionResult db freshRT Abort ("Prometheus: " <> reason) [reason]
+                          -- Production parity (service.jl:203): NOTIFICATION / STATUS_UPDATED
+                          liftIO $ logStatusUpdated db freshRT ("Aborting the release because prom query checks failing: " <> reason)
                           liftIO $ notifyGenericThreadMessage db freshRT ("Prometheus check ABORT: " <> reason)
                           updateRT $ \r -> r{status = Aborting}
                           currentRT' <- getRT
@@ -533,8 +533,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                           liftIO $ fail ("Prometheus ABORT: " <> T.unpack reason)
                         PromWarn reason -> do
                           liftIO $ putStrLn $ "[DECISION] Prometheus WARN: " <> T.unpack reason
-                          -- Production parity: DECISION_ENGINE / DECISION_RESULT (warning → Wait)
-                          liftIO $ logDecisionResult db freshRT Wait ("Prometheus: " <> reason) [reason]
+                          -- Production parity (service.jl:206-208): Slack only, no DB event
                           liftIO $ notifyGenericThreadMessage db freshRT ("Prometheus warning: " <> reason)
                         -- Continue despite warning
                         PromOK -> pure ()
@@ -553,16 +552,43 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                             "AB=" <> T.pack (show (drDecision abDecision))
                               <> " HS="
                               <> T.pack (show (drDecision hsDecision))
-                      liftIO $ logDecisionResult db freshRT combinedDecision combinedResultText combinedReasons
+
+                      -- Production parity (service.jl:548): write decision fields into
+                      -- the last rollout history entry BEFORE emitting DECISION_RESULT,
+                      -- so the embedded rollout_history in the event shows the decision.
+                      -- Do this for Continue, Wait AND Abort paths.
+                      let curHistoryDR = rolloutHistory freshRT
+                      when (not (null curHistoryDR)) $ do
+                        let lastHDR = last curHistoryDR
+                            updatedLastDR =
+                              lastHDR
+                                { historyDecision = Just combinedDecision,
+                                  historyDecisionReason = Just combinedResultText,
+                                  historyDecisionHs = Just (drDecision hsDecision),
+                                  historyDecisionHsReason = drReason hsDecision
+                                }
+                            updatedHistoryDR = init curHistoryDR <> [updatedLastDR]
+                        updateRT $ \r -> r{rolloutHistory = updatedHistoryDR}
+                        currentRTDR <- getRT
+                        currentTSDR <- gets targetState
+                        liftIO $ insertReleaseTracker db currentRTDR currentTSDR
+
+                      -- Read back so the event payload sees the updated history
+                      rtForEvent <- getRT
+                      liftIO $ logDecisionResult db rtForEvent combinedDecision combinedResultText combinedReasons
 
                       case combinedDecision of
                         Continue -> pure True -- advance
                         Wait -> pure False -- stay at current step, re-loop
                         Abort -> do
+                          -- Production parity (service.jl:213): first STATUS_UPDATED
+                          liftIO $ logStatusUpdated db rtForEvent "Aborting the release because of the Decision Engine"
                           updateRT $ \r -> r{status = Aborting}
                           currentRT' <- getRT
                           currentTS' <- gets targetState
                           liftIO $ insertReleaseTracker db currentRT' currentTS'
+                          -- Production parity (service.jl:222): second STATUS_UPDATED for rollback
+                          liftIO $ logStatusUpdated db currentRT' ("Rolling back the traffic to version " <> oldVersion ctx)
                           liftIO $ fail "Decision engine: ABORT"
 
                   if shouldAdvance
@@ -599,7 +625,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                             <> ": new="
                             <> show nextNewW
                             <> "%, cooloff="
-                            <> show (cooloffSeconds nextStep)
+                            <> show (cooloffMinutes nextStep)
                             <> "min"
 
                       -- Apply VS rollout with lock
@@ -609,7 +635,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                       -- Record new rollout history entry
                       -- Production line 489: setRolloutHistory!(tracker, push!(...))
                       newStepStart <- liftIO getCurrentTime
-                      let newHist = mkRolloutHistory nextNewW (cooloffSeconds nextStep) (podPercent nextStep) newStepStart Nothing
+                      let newHist = mkRolloutHistory nextNewW (cooloffMinutes nextStep) (podPercent nextStep) newStepStart Nothing
                       updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [newHist]}
 
                       -- Persist to DB
@@ -643,7 +669,7 @@ mkRolloutHistory :: Int -> Int -> Int -> UTCTime -> Maybe UTCTime -> RolloutHist
 mkRolloutHistory rollout cooloff pods startedAt completedAt =
   RolloutHistory
     { historyRolloutPercent = rollout,
-      historyCooloffSeconds = cooloff,
+      historyCooloffMinutes = cooloff,
       historyPodsPercent = pods,
       historyDecision = Nothing,
       historyDecisionReason = Nothing,
@@ -951,6 +977,30 @@ cleanupOldVersion = do
         liftIO $ putStrLn $ "  Immediate scale-down: " <> T.unpack oldDepName
         _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
         updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
+
+      -- Delete old version's HPA so a revert can re-create it cleanly and
+      -- we don't leak HPAs across releases. Mirrors prepareK8sResources
+      -- which clones the HPA when isHpaEnabledForProduct; only attempt the
+      -- delete if one actually exists (no-op when HPA was never created).
+      -- Julia parity (service.jl:138-154 — cleanup of old-version HPA post
+      -- rollout).
+      let oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
+      oldHpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
+      when oldHpaFound $ do
+        liftIO $ putStrLn $ "  Deleting old HPA: " <> T.unpack oldHpaName
+        deleteResult <- liftIO $ runCmd (buildDeleteHpaCommand cfg (namespace ctx) oldHpaName)
+        case deleteResult of
+          Right _ -> do
+            liftIO $ putStrLn "  Old HPA deleted"
+            liftIO $
+              insertReleaseEvent
+                db
+                (releaseId rt)
+                "BUSINESS"
+                "HPA_DELETED"
+                (toJSON oldHpaName)
+          Left err ->
+            liftIO $ putStrLn $ "  WARNING: Failed to delete old HPA: " <> show err
 
   -- Capture AFTER snapshots
   cfgAfter <- getCfg
