@@ -10,7 +10,7 @@ import Core.Environment (DBEnv)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import Database.Beam
-import Shared.Types.Storage.Schema
+import Products.Autopilot.Types.Storage.Schema
 
 -- | Find active VS lock by checking deployment_config.vs_locked_by IS NOT NULL
 findActiveLockFromConfig :: DBEnv -> Text -> IO (Maybe DeploymentConfig)

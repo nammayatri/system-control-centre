@@ -18,7 +18,7 @@ import Data.Time.Clock (getCurrentTime)
 import Database.Beam
 import Database.PostgreSQL.Simple (execute)
 import GHC.Int (Int32)
-import Shared.Types.Storage.Schema
+import Products.Autopilot.Types.Storage.Schema
 
 -- | Fetch a server_config value by name, with product-scoped lookup.
 -- Priority: product-specific value > global (product IS NULL) value.

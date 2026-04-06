@@ -39,7 +39,7 @@ import Products.Autopilot.Queries.ServerConfig (deleteServerConfig, listServerCo
 import Products.Autopilot.Types.API
 import Shared.Config.Registry (allConfigEntries, findConfigEntry, validateConfigValue)
 import Shared.Config.Types (ConfigEntry (..), configGroupToText, configTypeDefault, configTypeTag)
-import qualified Shared.Types.Storage.Schema as S
+import qualified Products.Autopilot.Types.Storage.Schema as S
 
 -- ============================================================================
 -- Product Config CRUD (GET/POST/GET/:id/PUT/:id/DELETE/:id /products/config)

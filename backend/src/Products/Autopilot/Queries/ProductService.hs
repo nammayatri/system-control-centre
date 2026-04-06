@@ -13,7 +13,7 @@ import Database.Beam
 import Database.Beam.Postgres (runBeamPostgres)
 import Database.PostgreSQL.Simple (withTransaction)
 import GHC.Int (Int32)
-import Shared.Types.Storage.Schema
+import Products.Autopilot.Types.Storage.Schema
 
 -- ============================================================================
 -- Product-level queries (service IS NULL)

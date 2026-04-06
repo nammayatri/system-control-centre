@@ -39,7 +39,7 @@ import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTrackerRow, i
 import Products.Autopilot.Queries.VsEditTracker
 import Products.Autopilot.Types.API
 import Products.Autopilot.Workflow.Helpers (stripK8sNoiseValue)
-import qualified Shared.Types.Storage.Schema as S
+import qualified Products.Autopilot.Types.Storage.Schema as S
 
 -- ============================================================================
 -- VS Edit Tracker CRUD (using release_tracker with category=VSEdit)

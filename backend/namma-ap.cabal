@@ -85,17 +85,6 @@ library
       Shared.Config.Types
       Shared.Error
       Shared.JSON
-      Shared.Queries.ProductConfig
-      Shared.Queries.ReleaseConfig
-      Shared.Queries.ReleaseEvents
-      Shared.Queries.ReleaseTracker
-      Shared.Queries.ServerConfig
-      Shared.Types.ProductConfig
-      Shared.Types.Release
-      Shared.Types.ReleaseCategory
-      Shared.Types.ReleaseConfig
-      Shared.Types.ServerConfig
-      Shared.Types.Storage.Schema
   other-modules:
       Paths_namma_ap
   hs-source-dirs:

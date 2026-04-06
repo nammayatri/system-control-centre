@@ -71,7 +71,7 @@ import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes
-import Shared.Types.Storage.Schema
+import Products.Autopilot.Types.Storage.Schema
 
 -- | Type alias for tracker + target state pair
 type TrackerWithTarget = (ReleaseTracker, Maybe TargetState)

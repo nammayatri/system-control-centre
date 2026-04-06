@@ -38,7 +38,7 @@ import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Target (TargetState (..), emptyConfigState)
-import qualified Shared.Types.Storage.Schema as S
+import qualified Products.Autopilot.Types.Storage.Schema as S
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 

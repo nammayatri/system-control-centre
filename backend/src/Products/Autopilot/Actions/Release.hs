@@ -81,7 +81,7 @@ import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes
 import qualified Products.Autopilot.Types.Target.Kubernetes as K8s
 import Products.Autopilot.Workflow.Helpers (captureDeploymentPreview, captureDeploymentSnapshot)
-import qualified Shared.Types.Storage.Schema as S
+import qualified Products.Autopilot.Types.Storage.Schema as S
 
 -- ============================================================================
 -- Product/Service Handlers

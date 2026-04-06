@@ -108,7 +108,7 @@ import Products.Autopilot.Workflow.Types
     StateFlow,
   )
 import Shared.Config.Runtime (getConfigBoolForProduct)
-import qualified Shared.Types.Storage.Schema as S
+import qualified Products.Autopilot.Types.Storage.Schema as S
 import Prelude
 
 -- ============================================================================
