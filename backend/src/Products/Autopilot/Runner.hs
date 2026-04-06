@@ -308,7 +308,8 @@ trigger db (rt, mts) = do
                   liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
                   liftIO $ restoreVsTrafficOnFailure cfg' db rt mts
                   liftIO $ notifyReleaseAborted db abortedTracker
-            Right _finalState ->
+            Right finalState -> do
+              liftIO $ insertReleaseTracker db (releaseTracker finalState) (targetState finalState)
               liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
 
 dispatchWorkflow :: ReleaseTracker -> Maybe TargetState -> Flow (Either WorkFlowError ReleaseState)
@@ -435,38 +436,38 @@ scaleDownOldDeployment db cfg (rt, mts) = do
       case freshM of
         Just (freshRT, _)
           | NT.status freshRT `elem` [COMPLETED, ABORTED, USER_ABORTED] -> do
-              let ctx = context k8s
-                  oldVer = K8s.oldVersion ctx
-                  svcName = serviceName ctx
-                  ns = namespace ctx
-                  oldDepName = svcName <> "-" <> oldVer
-              if T.null oldVer || oldVer == "new" || oldVer == "unknown"
-                then pure ()
-                else do
-                  putStrLn $ "[scaleDownOldDeployment] Scaling down old deployment: " <> T.unpack oldDepName <> " for release " <> T.unpack (releaseId rt)
-                  result <- runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName 0)
-                  case result of
-                    Left err -> putStrLn $ "[scaleDownOldDeployment] WARNING: Failed to scale down: " <> show err
-                    Right _ -> do
-                      putStrLn $ "[scaleDownOldDeployment] Old deployment scaled down successfully"
-                      notifyPodsScaledDown db rt oldVer
-                  let updatedCtx = ctx{podsScaleDownStatus = Just ScaleDownCompleted}
-                      updatedK8s = k8s{context = updatedCtx}
-                      updatedMts = Just (K8sState updatedK8s)
-                  -- Part B — CAS against the original poll-pick status.
-                  ok <- conditionalUpdateTracker db rt updatedMts (releaseStatusToText (NT.status rt))
-                  if not ok
-                    then
-                      putStrLn $
-                        "[scaleDownOldDeployment] Status changed under us; not persisting scale-down flag for "
-                          <> T.unpack (releaseId rt)
-                    else
-                      insertReleaseEvent
-                        db
-                        (releaseId rt)
-                        "BUSINESS"
-                        "OLD_PODS_SCALED_DOWN"
-                        (object ["oldDeployment" .= (oldDepName :: T.Text), "namespace" .= (ns :: T.Text)])
+            let ctx = context k8s
+                oldVer = K8s.oldVersion ctx
+                svcName = serviceName ctx
+                ns = namespace ctx
+                oldDepName = svcName <> "-" <> oldVer
+            if T.null oldVer || oldVer == "new" || oldVer == "unknown"
+              then pure ()
+              else do
+                putStrLn $ "[scaleDownOldDeployment] Scaling down old deployment: " <> T.unpack oldDepName <> " for release " <> T.unpack (releaseId rt)
+                result <- runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName 0)
+                case result of
+                  Left err -> putStrLn $ "[scaleDownOldDeployment] WARNING: Failed to scale down: " <> show err
+                  Right _ -> do
+                    putStrLn $ "[scaleDownOldDeployment] Old deployment scaled down successfully"
+                    notifyPodsScaledDown db rt oldVer
+                let updatedCtx = ctx{podsScaleDownStatus = Just ScaleDownCompleted}
+                    updatedK8s = k8s{context = updatedCtx}
+                    updatedMts = Just (K8sState updatedK8s)
+                -- Part B — CAS against the original poll-pick status.
+                ok <- conditionalUpdateTracker db rt updatedMts (releaseStatusToText (NT.status rt))
+                if not ok
+                  then
+                    putStrLn $
+                      "[scaleDownOldDeployment] Status changed under us; not persisting scale-down flag for "
+                        <> T.unpack (releaseId rt)
+                  else
+                    insertReleaseEvent
+                      db
+                      (releaseId rt)
+                      "BUSINESS"
+                      "OLD_PODS_SCALED_DOWN"
+                      (object ["oldDeployment" .= (oldDepName :: T.Text), "namespace" .= (ns :: T.Text)])
         _ ->
           putStrLn $
             "[scaleDownOldDeployment] Skipping "

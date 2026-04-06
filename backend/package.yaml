@@ -49,7 +49,9 @@ dependencies:
   - beam-postgres
   - bytestring
   - containers
+  - fast-logger
   - directory
+  - exceptions
   - filepath
   - http-client
   - http-client-tls

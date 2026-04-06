@@ -167,35 +167,35 @@ checkPermission db prodSlug permText req = do
                 Nothing -> pure $ Left (err401, "Person not found")
                 Just person
                   | not (personIsActive person) ->
-                      pure $ Left (err401, "Account deactivated")
+                    pure $ Left (err401, "Account deactivated")
                   | personIsSuperadmin person -> do
-                      accesses <- findProductAccessForPerson db (personId person)
-                      pure $
-                        Right
-                          AuthedPerson
-                            { apPersonId = personId person,
-                              apEmail = personEmail person,
-                              apIsSuperadmin = True,
-                              apProductAccesses = accesses
-                            }
+                    accesses <- findProductAccessForPerson db (personId person)
+                    pure $
+                      Right
+                        AuthedPerson
+                          { apPersonId = personId person,
+                            apEmail = personEmail person,
+                            apIsSuperadmin = True,
+                            apProductAccesses = accesses
+                          }
                   | otherwise -> do
-                      accesses <- findProductAccessForPerson db (personId person)
-                      case find (\pa -> paProductSlug pa == prodSlug) accesses of
-                        Nothing ->
-                          pure $ Left (err403, "No access to product: " <> prodSlug)
-                        Just pa -> do
-                          perms <- computeEffectivePermissions db person prodSlug (paRoleId pa)
-                          if permText `elem` perms
-                            then
-                              pure $
-                                Right
-                                  AuthedPerson
-                                    { apPersonId = personId person,
-                                      apEmail = personEmail person,
-                                      apIsSuperadmin = False,
-                                      apProductAccesses = accesses
-                                    }
-                            else pure $ Left (err403, "Permission denied: " <> permText)
+                    accesses <- findProductAccessForPerson db (personId person)
+                    case find (\pa -> paProductSlug pa == prodSlug) accesses of
+                      Nothing ->
+                        pure $ Left (err403, "No access to product: " <> prodSlug)
+                      Just pa -> do
+                        perms <- computeEffectivePermissions db person prodSlug (paRoleId pa)
+                        if permText `elem` perms
+                          then
+                            pure $
+                              Right
+                                AuthedPerson
+                                  { apPersonId = personId person,
+                                    apEmail = personEmail person,
+                                    apIsSuperadmin = False,
+                                    apProductAccesses = accesses
+                                  }
+                          else pure $ Left (err403, "Permission denied: " <> permText)
 
 -- | Pull the bearer token out of an @Authorization@ header value. Accepts
 -- both @"Bearer xyz"@ and a bare @"xyz"@ for compatibility with the previous

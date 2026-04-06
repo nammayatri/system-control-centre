@@ -19,7 +19,12 @@ in  { -- Database
       { port = env:PORT as Text ? "8012"
       , env = env:SC_ENV as Text ? "development"
       }
-    , logLevel = LogLevel.DEBUG
+    , loggerCfg =
+      { logLevel = LogLevel.DEBUG
+      , logToFile = True
+      , logFilePath = "/tmp/system-control.log"
+      , logToConsole = True
+      }
     , appState = AppState.SERVER
     , authTokenExpiry = 86400
     , runnerPollSeconds = 20

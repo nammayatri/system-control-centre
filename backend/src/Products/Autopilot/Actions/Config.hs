@@ -36,13 +36,13 @@ import qualified Data.Text as T
 import GHC.Int (Int32)
 import Products.Autopilot.Actions.Release (upsertProductH, upsertServiceH)
 import Products.Autopilot.Queries.ProductService
-import Shared.Queries.ServerConfig (deleteServerConfig, listServerConfigsByProduct, upsertServerConfig)
 import Products.Autopilot.Types.API
-import Shared.API.Response (APIResponse (..))
+import qualified Products.Autopilot.Types.Storage.Schema as S
 import Products.ConfigCatalog (allConfigEntries, findConfigEntry)
+import Shared.API.Response (APIResponse (..))
 import Shared.Config.Registry (validateConfigValue)
 import Shared.Config.Types (ConfigEntry (..), configGroupToText, configTypeDefault, configTypeTag)
-import qualified Products.Autopilot.Types.Storage.Schema as S
+import Shared.Queries.ServerConfig (deleteServerConfig, listServerConfigsByProduct, upsertServerConfig)
 
 -- ============================================================================
 -- Product Config CRUD (GET/POST/GET/:id/PUT/:id/DELETE/:id /products/config)

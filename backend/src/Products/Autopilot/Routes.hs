@@ -84,6 +84,9 @@ type CoreAPI =
     :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_REVERT :> "revert" :> Capture "id" Text :> Put '[JSON] APIResponse
     :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_VIEW :> Capture "id" Text :> Get '[JSON] Value
     :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_UPDATE :> Capture "id" Text :> ReqBody '[JSON] UpdateVsEditTrackerReq :> Put '[JSON] APIResponse
+    -- K8s ConfigMap lookup
+    :<|> "configmap" :> Protected 'AP_CONFIG_EDIT :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] Value
+    :<|> "configmap" :> Protected 'AP_CONFIG_EDIT :> "secondary" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] Value
 
 coreServer :: ServerT CoreAPI Flow
 coreServer =
@@ -149,3 +152,6 @@ coreServer =
     :<|> VSEdit.revertVsEditTrackerH
     :<|> VSEdit.getVsEditTrackerH
     :<|> VSEdit.updateVsEditTrackerH
+    -- K8s ConfigMap lookup
+    :<|> ConfigMap.fetchConfigMapFromK8sH
+    :<|> ConfigMap.fetchSecondaryConfigMapH

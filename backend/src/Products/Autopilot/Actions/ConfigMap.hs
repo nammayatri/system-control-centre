@@ -9,6 +9,10 @@ module Products.Autopilot.Actions.ConfigMap
     getConfigMapH,
     createConfigMapH,
     updateConfigMapH,
+
+    -- * K8s ConfigMap Lookup
+    fetchConfigMapFromK8sH,
+    fetchSecondaryConfigMapH,
   )
 where
 
@@ -29,17 +33,19 @@ import Data.List (find)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Text.Encoding (encodeUtf8)
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Products.Autopilot.Notifications
+import Products.Autopilot.Queries.ProductService (findProductByName, getProductNamespace)
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.API
-import Products.Autopilot.Types.Target (TargetState (..), emptyConfigState)
 import qualified Products.Autopilot.Types.Storage.Schema as S
+import Products.Autopilot.Types.Target (TargetState (..), emptyConfigState)
 import Shared.API.Response (APIResponse (..))
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
@@ -210,10 +216,14 @@ updateConfigMapH _ap cmId' body = do
               case getStrM "status" obj of
                 Just "INPROGRESS" -> liftIO $ notifyConfigMapInProgress db updated
                 Just "COMPLETED" -> liftIO $ notifyConfigMapCompleted db updated
-                Just "ABORTED" -> liftIO $ notifyConfigMapAborted db updated
+                Just "ABORTED" -> do
+                  liftIO $ notifyConfigMapAborted db updated
+                  restoreOriginalOnRevertCancel db updated
                 Just "PAUSED" -> liftIO $ notifyConfigMapPaused db updated
                 Just "RESUMED" -> liftIO $ notifyConfigMapResumed db updated
-                Just "DISCARDED" -> liftIO $ notifyConfigMapDiscarded db updated
+                Just "DISCARDED" -> do
+                  liftIO $ notifyConfigMapDiscarded db updated
+                  restoreOriginalOnRevertCancel db updated
                 Just "restart" -> liftIO $ notifyConfigMapUpdated db updated "restarted"
                 _ -> pure ()
               when (isTruthy "is_approved" obj) $
@@ -224,6 +234,26 @@ updateConfigMapH _ap cmId' body = do
                 _ -> pure ()
             _ -> pure ()
           pure $ APIResponse "SUCCESS" "ConfigMap tracker updated"
+
+-- | When a revert tracker is discarded or aborted, restore the original
+-- tracker from REVERTING back to COMPLETED.
+restoreOriginalOnRevertCancel :: DBEnv -> ReleaseTracker -> Flow ()
+restoreOriginalOnRevertCancel db rt = do
+  case NT.info rt of
+    Just "REVERT" -> do
+      -- Extract original tracker ID from description "Revert of <id>"
+      let origId = T.stripPrefix "Revert of " =<< NT.description rt
+      case origId of
+        Just oid -> do
+          mOrig <- liftIO $ findReleaseTracker db oid
+          case mOrig of
+            Just (origRt, origTs) | NT.status origRt == REVERTING -> do
+              let restored = origRt{NT.status = COMPLETED}
+              liftIO $ insertReleaseTracker db restored origTs
+              liftIO $ putStrLn $ "[CONFIGMAP] Restored original tracker " <> T.unpack oid <> " from REVERTING to COMPLETED"
+            _ -> pure ()
+        Nothing -> pure ()
+    _ -> pure ()
 
 -- | Handle revert by creating a new tracker with old config data
 handleConfigMapRevert :: DBEnv -> ReleaseTracker -> Maybe TargetState -> Text -> Flow APIResponse
@@ -267,6 +297,68 @@ handleConfigMapRevert db rt mts cmId' = do
       liftIO $ insertReleaseTracker db reverted mts
       liftIO $ notifyConfigMapReverted db reverted
       pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
+
+-- ============================================================================
+-- K8s ConfigMap Lookup (kubectl)
+-- ============================================================================
+
+-- | Fetch configmap names (no NAME param) or data (with NAME param) from K8s
+fetchConfigMapFromK8sH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow Value
+fetchConfigMapFromK8sH _ap mProduct mName = do
+  cfg <- getConfig
+  db <- getDBEnv
+  case mProduct of
+    Nothing -> pure $ object ["configMap" .= toJSON ([] :: [Text])]
+    Just productName -> do
+      p <- liftIO $ findProductByName db productName
+      case p of
+        Nothing -> pure $ object ["configMap" .= toJSON ([] :: [Text])]
+        Just pCfg -> do
+          let ns = getProductNamespace pCfg
+          case mName of
+            Nothing -> do
+              res <- liftIO $ try (readProcessWithExitCode (kubectlBin cfg) ["-n", T.unpack ns, "get", "configmap", "-o", "jsonpath={.items[*].metadata.name}"] "") :: Flow (Either SomeException (ExitCode, String, String))
+              case res of
+                Right (ExitSuccess, out, _) ->
+                  let cleaned = T.strip (T.pack out)
+                      names = filter (not . T.null) (T.words cleaned)
+                   in pure $ object ["configMap" .= names]
+                _ -> pure $ object ["configMap" .= toJSON ([] :: [Text])]
+            Just name' -> do
+              res <- liftIO $ try (readProcessWithExitCode (kubectlBin cfg) ["-n", T.unpack ns, "get", "configmap", T.unpack name', "-o", "jsonpath={.data}"] "") :: Flow (Either SomeException (ExitCode, String, String))
+              case res of
+                Right (ExitSuccess, out, _) ->
+                  let cleaned = T.strip (T.pack out)
+                   in pure $ object ["configMap" .= cleaned]
+                _ -> pure $ object ["configMap" .= ("" :: Text)]
+
+-- | Fetch configmap from secondary cluster via sync URL
+fetchSecondaryConfigMapH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow Value
+fetchSecondaryConfigMapH _ap mProduct mName = do
+  cfg <- getConfig
+  let rawUrl = syncClusterUrl cfg
+  if null rawUrl
+    then pure $ object ["configMap" .= toJSON ([] :: [Text])]
+    else do
+      let normalised =
+            let u = if "http" `T.isPrefixOf` T.pack rawUrl then rawUrl else "http://" <> rawUrl
+             in if not (null u) && Prelude.last u == '/' then u else u <> "/"
+          baseAuth = syncClusterBaseAuth cfg
+          authArgs = if null baseAuth then [] else ["-H", "Authorization: Basic " <> baseAuth]
+          queryParams = case (mProduct, mName) of
+            (Just p, Just n) -> "?PRODUCT=" <> T.unpack p <> "&NAME=" <> T.unpack n
+            (Just p, Nothing) -> "?PRODUCT=" <> T.unpack p
+            _ -> ""
+          getUrl = normalised <> "configmap" <> queryParams
+          getCurlArgs = ["-s", "-X", "GET", getUrl, "--max-time", "15"] <> authArgs
+      liftIO $ putStrLn $ "[SYNC-CONFIGMAP] Fetching secondary configmap from: " <> getUrl
+      getResult <- liftIO (try (readProcessWithExitCode "curl" getCurlArgs "") :: IO (Either SomeException (ExitCode, String, String)))
+      case getResult of
+        Right (ExitSuccess, out, _) | not (null out) ->
+          case A.decodeStrict' (encodeUtf8 (T.pack out)) :: Maybe Value of
+            Just v -> pure v
+            Nothing -> pure $ object ["configMap" .= toJSON ([] :: [Text])]
+        _ -> pure $ object ["configMap" .= toJSON ([] :: [Text])]
 
 -- ============================================================================
 -- Internal Helpers

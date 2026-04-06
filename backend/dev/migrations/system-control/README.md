@@ -1,6 +1,6 @@
 # Migrations
 
-Tables are auto-created by `ensureSchema` on app startup. These migrations are for **seed data** and **performance indexes**.
+Tables are created by `dev/sql-seed/system-control-seed.sql` (run via `setup-db.sh`). These migrations add **seed data** and **performance indexes**.
 
 ## How to run
 
@@ -17,10 +17,11 @@ sc-migrate
 | File | What | When to run |
 |------|------|-------------|
 | `0001-seed-server-config.sql` | Insert default server_config entries | Once on fresh DB |
-| `0002-add-indexes.sql` | Performance indexes on all 10 tables | Once on fresh DB |
+| `0002-add-indexes.sql` | Performance indexes on all tables | Once on fresh DB |
+| `0009-decision-engine-configs.sql` | Decision engine server_config entries | Once on fresh DB |
 
 ## For local testing
 
 ```bash
-sc-setup-db    # Creates DB + schema + seed + indexes (all-in-one)
+sc-setup-db    # Creates DB + schema + seed + migrations (all-in-one)
 ```

@@ -40,8 +40,8 @@ import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, g
 import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTrackerRow, insertReleaseEvent, insertReleaseTrackerRow, listReleaseEvents)
 import Products.Autopilot.Queries.VsEditTracker
 import Products.Autopilot.Types.API
-import Products.Autopilot.Workflow.Helpers (stripK8sNoiseValue)
 import qualified Products.Autopilot.Types.Storage.Schema as S
+import Products.Autopilot.Workflow.Helpers (stripK8sNoiseValue)
 import Shared.API.Response (APIResponse (..))
 
 -- ============================================================================

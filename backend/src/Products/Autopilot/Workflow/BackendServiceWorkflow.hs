@@ -87,6 +87,7 @@ import Products.Autopilot.Types.Release
     RolloutHistory (..),
     RolloutStep (..),
   )
+import qualified Products.Autopilot.Types.Storage.Schema as S
 import Products.Autopilot.Types.Target
   ( BackendServiceWFStatus (..),
     K8sDeploymentState (..),
@@ -108,7 +109,6 @@ import Products.Autopilot.Workflow.Types
     StateFlow,
   )
 import Shared.Config.Runtime (getConfigBoolForProduct)
-import qualified Products.Autopilot.Types.Storage.Schema as S
 import Prelude
 
 -- ============================================================================

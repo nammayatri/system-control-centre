@@ -3,14 +3,19 @@
 
 module Core.Server where
 
+import Control.Exception (SomeException, fromException, try)
 import Control.Monad.Reader (runReaderT)
 import Control.Monad.Trans.Except (ExceptT (..))
 import Core.Admin.Routes (AdminAPI, adminServer)
+import Core.AppError (AppException (..))
 import Core.Auth.Routes (AuthAPI, authServer)
 import Core.Config (port)
 import Core.Environment (AppState (..), DBEnv)
+import Core.Logging (logErrorIO, logInfoIO)
 import Core.Utils.FlowMonad (Flow)
-import qualified Data.Text.IO as TIO
+import Data.Aeson (encode, object, (.=))
+import Data.Text (Text)
+import qualified Data.Text as T
 import Network.Wai (requestHeaders)
 import Network.Wai.Handler.Warp (run)
 import Network.Wai.Middleware.Cors
@@ -28,25 +33,10 @@ fullApi = Proxy
 
 serverLoop :: AppState -> IO ()
 serverLoop st = do
-  -- Phase 3: every product route carries its required permission as a
-  -- 'Protected perm' combinator in the Servant API type. The 'HasServer'
-  -- instance in 'Core.Auth.Protected' validates the bearer token and the
-  -- required permission before the handler runs, and a missing mapping is
-  -- impossible by construction — a handler that forgets its permission
-  -- annotation would fail to typecheck because 'ServerT' would demand an
-  -- 'AuthedPerson' argument the handler does not accept. No runtime route
-  -- walker or startup assertion is required any more.
-  TIO.putStrLn "[startup] Phase 3: route permissions enforced at compile time via Protected combinator."
+  logInfoIO (loggerEnv st) "[startup] Phase 3: route permissions enforced at compile time via Protected combinator."
   run (port (config st)) (mkApp st)
 
 -- | The Servant 'Context' threaded through 'serveWithContext'.
---
--- 'Core.Auth.Protected' reads the 'DBEnv' out of the context via
--- 'HasContextEntry' so the permission check can query
--- @sc_registration_token@ / @sc_person@ / @sc_person_product_access@.
--- Admin + Auth routes do not touch the context — they validate their own
--- tokens inside each handler — but the 'DBEnv' entry must still be present
--- because all three sub-APIs are served through the same context.
 serverContext :: AppState -> Context '[DBEnv]
 serverContext st = dbEnv st :. EmptyContext
 
@@ -72,5 +62,46 @@ mkApp st =
 fullServer :: ServerT FullAPI Flow
 fullServer = authServer :<|> adminServer :<|> coreServer
 
+-- | Global error handler. Catches all exceptions from handlers and
+-- converts them to structured JSON responses.
+--
+-- Exception hierarchy:
+--   * 'AppException' → typed error with correct HTTP status + JSON body
+--   * 'APIError' (via AppException) → 400/403/404/409/422/500
+--   * 'DBError' (via AppException) → 500 with context
+--   * 'WorkflowError' (via AppException) → 500 with step info
+--   * Any other exception → generic 500 with "INTERNAL_ERROR"
+--
+-- NammaYatri does this in @withFlowHandlerAPI@ + @apiHandler@ across
+-- multiple modules. Ours is a single function.
 toHandler :: AppState -> Flow a -> Handler a
-toHandler st flow = Handler $ ExceptT $ Right <$> runReaderT flow st
+toHandler st flow = Handler . ExceptT $ do
+  result <- try (runReaderT flow st)
+  case result of
+    Right a -> pure (Right a)
+    Left ex -> do
+      -- Log the error
+      logErrorIO (loggerEnv st) $ "[ERROR] " <> T.pack (show ex)
+      -- Convert to structured Servant error
+      pure . Left $ exceptionToServantError ex
+
+exceptionToServantError :: SomeException -> ServerError
+exceptionToServantError ex
+  -- Our typed exception hierarchy: AppException carries ToAppError constraint
+  | Just (AppException inner) <- fromException ex = toServantError inner
+  -- Anything else: generic 500
+  | otherwise = generic500 (T.pack (show ex))
+
+generic500 :: Text -> ServerError
+generic500 msg =
+  ServerError
+    500
+    "Internal Server Error"
+    ( encode $
+        object
+          [ "status" .= ("ERROR" :: Text),
+            "code" .= ("INTERNAL_ERROR" :: Text),
+            "message" .= msg
+          ]
+    )
+    [("Content-Type", "application/json")]

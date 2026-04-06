@@ -39,6 +39,7 @@ npm run dev                        # starts on :5173
 | SC_DB_HOST | localhost | PostgreSQL host |
 | SC_DB_PORT | 5432 | PostgreSQL port |
 | PORT | 8012 | Backend server port |
+| SC_CONFIG_PATH | ./dhall-configs/system-control.dhall | Dhall config file path |
 
 ## Default Login
 - Email: admin@juspay.in

@@ -31,7 +31,10 @@ library
       Core.Auth.RouteCheck
       Core.Auth.Routes
       Core.Auth.Types
+      Core.AppError
+      Core.AppM
       Core.Config
+      Core.Logging
       Shared.Config.Runtime
       Core.DB.Connection
       Core.Environment
@@ -110,6 +113,8 @@ library
     , bytestring
     , containers
     , directory
+    , exceptions
+    , fast-logger
     , filepath
     , http-client
     , http-client-tls
@@ -155,6 +160,7 @@ executable namma-ap-exe
     , bytestring
     , containers
     , directory
+    , exceptions
     , filepath
     , mtl
     , namma-ap
@@ -197,6 +203,7 @@ test-suite namma-ap-test
     , bytestring
     , containers
     , directory
+    , exceptions
     , filepath
     , mtl
     , namma-ap

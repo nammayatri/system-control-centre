@@ -41,7 +41,6 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 import Shared.Config.Runtime
   ( getConfigBoolForProduct,
     getConfigDoubleForProduct,
@@ -49,6 +48,7 @@ import Shared.Config.Runtime
     isMailingEnabled,
     isSlackEnabled,
   )
+import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 
 -- ── Feature flags ──────────────────────────────────────────────────
 

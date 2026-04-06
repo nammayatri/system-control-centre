@@ -14,8 +14,8 @@ import Database.Beam
 import Database.Beam.Postgres (runBeamPostgres)
 import Database.PostgreSQL.Simple (Only (..), execute, query, withTransaction)
 import GHC.Int (Int32)
-import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 import Products.Autopilot.Types.Storage.Schema
+import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 
 -- ============================================================================
 -- Product-level queries (service IS NULL)
@@ -145,29 +145,7 @@ upsertProduct ::
   Maybe Text ->
   Maybe Bool ->
   IO ()
-upsertProduct db rowId productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval = do
-  let row :: DeploymentConfig
-      row =
-        DeploymentConfigT
-          { dcId = rowId,
-            dcAppGroup = productName',
-            dcService = Nothing,
-            dcCluster = Just cluster',
-            dcNamespace = Just namespace',
-            dcVsName = Just vsName',
-            dcAppGroupAcronym = Just productAcronym',
-            dcAppGroupType = Just productType',
-            dcSyncCluster = syncCluster',
-            dcNeedInfraApproval = needInfraApproval,
-            dcVsLockedBy = Nothing,
-            dcVsLockTimestamp = Nothing,
-            dcServiceHost = Nothing,
-            dcServiceType = Nothing,
-            dcRolloutStrategy = Nothing,
-            dcRevertStrategy = Nothing,
-            dcDecisionConfig = Nothing,
-            dcSlackChannel = Nothing
-          }
+upsertProduct db _rowId productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval = do
   withConn db $ \conn ->
     withTransaction conn $ do
       runBeamPostgres conn $
@@ -176,7 +154,28 @@ upsertProduct db rowId productName' cluster' namespace' vsName' productType' pro
       runBeamPostgres conn $
         runInsert $
           insert (deploymentConfig autopilotDb) $
-            insertValues [row]
+            insertExpressions
+              [ DeploymentConfigT
+                  { dcId = default_,
+                    dcAppGroup = val_ productName',
+                    dcService = val_ Nothing,
+                    dcCluster = val_ (Just cluster'),
+                    dcNamespace = val_ (Just namespace'),
+                    dcVsName = val_ (Just vsName'),
+                    dcAppGroupAcronym = val_ (Just productAcronym'),
+                    dcAppGroupType = val_ (Just productType'),
+                    dcSyncCluster = val_ syncCluster',
+                    dcNeedInfraApproval = val_ needInfraApproval,
+                    dcVsLockedBy = val_ Nothing,
+                    dcVsLockTimestamp = val_ Nothing,
+                    dcServiceHost = val_ Nothing,
+                    dcServiceType = val_ Nothing,
+                    dcRolloutStrategy = val_ Nothing,
+                    dcRevertStrategy = val_ Nothing,
+                    dcDecisionConfig = val_ Nothing,
+                    dcSlackChannel = val_ Nothing
+                  }
+              ]
 
 upsertService ::
   DBEnv ->
@@ -189,29 +188,7 @@ upsertService ::
   Maybe Text ->
   Maybe Text ->
   IO ()
-upsertService db rowId rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy = do
-  let row :: DeploymentConfig
-      row =
-        DeploymentConfigT
-          { dcId = rowId,
-            dcAppGroup = product',
-            dcService = Just serviceName',
-            dcCluster = Nothing,
-            dcNamespace = Nothing,
-            dcVsName = Nothing,
-            dcAppGroupAcronym = Nothing,
-            dcAppGroupType = Nothing,
-            dcSyncCluster = Nothing,
-            dcNeedInfraApproval = Nothing,
-            dcVsLockedBy = Nothing,
-            dcVsLockTimestamp = Nothing,
-            dcServiceHost = serviceHost',
-            dcServiceType = Just sType,
-            dcRolloutStrategy = rolloutStrategy,
-            dcRevertStrategy = revertStrategy,
-            dcDecisionConfig = decisionConfig,
-            dcSlackChannel = Nothing
-          }
+upsertService db _rowId rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy = do
   withConn db $ \conn ->
     withTransaction conn $ do
       runBeamPostgres conn $
@@ -220,7 +197,28 @@ upsertService db rowId rolloutStrategy decisionConfig serviceName' product' sTyp
       runBeamPostgres conn $
         runInsert $
           insert (deploymentConfig autopilotDb) $
-            insertValues [row]
+            insertExpressions
+              [ DeploymentConfigT
+                  { dcId = default_,
+                    dcAppGroup = val_ product',
+                    dcService = val_ (Just serviceName'),
+                    dcCluster = val_ Nothing,
+                    dcNamespace = val_ Nothing,
+                    dcVsName = val_ Nothing,
+                    dcAppGroupAcronym = val_ Nothing,
+                    dcAppGroupType = val_ Nothing,
+                    dcSyncCluster = val_ Nothing,
+                    dcNeedInfraApproval = val_ Nothing,
+                    dcVsLockedBy = val_ Nothing,
+                    dcVsLockTimestamp = val_ Nothing,
+                    dcServiceHost = val_ serviceHost',
+                    dcServiceType = val_ (Just sType),
+                    dcRolloutStrategy = val_ rolloutStrategy,
+                    dcRevertStrategy = val_ revertStrategy,
+                    dcDecisionConfig = val_ decisionConfig,
+                    dcSlackChannel = val_ Nothing
+                  }
+              ]
 
 -- ============================================================================
 -- CRUD by ID (used by Config actions)
