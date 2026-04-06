@@ -58,9 +58,13 @@ const UserList: React.FC = () => {
     return !q || name.includes(q) || u.email?.toLowerCase().includes(q);
   });
 
+  // IST everywhere — NammaYatri ops convention.
   const formatDate = (d: string) => {
     if (!d) return '-';
-    return new Date(d).toLocaleDateString('en-US', {
+    const date = new Date(d);
+    if (isNaN(date.getTime())) return '-';
+    return date.toLocaleDateString('en-IN', {
+      timeZone: 'Asia/Kolkata',
       month: 'short',
       day: '2-digit',
       year: 'numeric',

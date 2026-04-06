@@ -10,12 +10,33 @@ import Text.Read (readMaybe)
 
 -- | Bootstrap configuration loaded once at startup from env vars / .env file.
 -- Runtime-tunable configs live in server_config DB table (see RuntimeConfig.hs).
+--
+-- == Layer policy note (task #24 V4)
+--
+-- A few fields here (prometheusUrl, abEngineUrl, abHsUrl, syncClusterUrl,
+-- syncClusterBaseAuth) are only read by Products.Autopilot today —
+-- specifically by the decision engine and the cross-cluster sync. They live
+-- in 'Core.Config' rather than 'Products.Autopilot.Config' because:
+--
+--   * The types are plain strings — there is no autopilot-specific *type*
+--     imported into Core. So this is not a layer dependency edge, just a
+--     record with fields that currently have a single consumer.
+--   * Moving them to a product-specific bootstrap record would require
+--     either making 'AppState' polymorphic in a product-extension slot or
+--     introducing a Dynamic-like escape hatch — both of which are much more
+--     intrusive than the leak they would fix.
+--
+-- The field *names* are intentionally generic (prometheusUrl, not
+-- nammaApPrometheusUrl) so a second product consuming the same URL tomorrow
+-- does not constitute a rename. If the field list grows or a second product
+-- needs a *different* value for one of these fields, revisit — that is the
+-- trigger to introduce a per-product bootstrap extension.
 data Config = Config
   { -- Server
     appState :: String,
     port :: Int,
     envName :: Text,
-    -- Kubernetes
+    -- Kubernetes (infrastructure — any product talking to K8s uses these)
     kubectlBin :: FilePath,
     maxK8sRetries :: Int,
     -- Database
@@ -25,10 +46,10 @@ data Config = Config
     postgresPassword :: String,
     postgresDatabase :: String,
     databaseUrl :: Maybe String,
-    -- Cluster sync (secrets)
+    -- Cross-cluster sync endpoint (secrets). See V4 layer note above.
     syncClusterUrl :: String,
     syncClusterBaseAuth :: String,
-    -- Decision engine URLs
+    -- Decision engine URLs (metrics + A/B + health score). See V4 layer note.
     prometheusUrl :: String,
     abEngineUrl :: String,
     abHsUrl :: String

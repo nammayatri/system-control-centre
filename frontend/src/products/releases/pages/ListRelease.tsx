@@ -59,10 +59,18 @@ const getDateRange = (range: TimeRange, customFrom: string, customTo: string): {
   return { from, to };
 };
 
+// NammaYatri ops run on IST — all timestamps render in Asia/Kolkata so
+// dashboard users outside India still see the same values as on-call India.
+// Backend stores UTC; this is a display-only transform.
 const formatISODate = (isoString?: string) => {
   if (!isoString) return '-';
   const date = new Date(isoString);
-  return date.toLocaleString('en-US', { month: 'short', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+  if (isNaN(date.getTime())) return '-';
+  return date.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    month: 'short', day: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  }) + ' IST';
 };
 
 const ListRelease: React.FC = () => {

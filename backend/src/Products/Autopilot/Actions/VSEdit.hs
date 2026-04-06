@@ -18,6 +18,7 @@ where
 
 import Control.Applicative ((<|>))
 import Control.Monad.IO.Class (liftIO)
+import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
 import Data.Aeson (Value (..), eitherDecode, object, toJSON, (.=))
@@ -130,8 +131,8 @@ mkVsEditRow tid product' service' env' vsName' _oldVsData' createdBy' status' no
       rtUpdatedAt = now
     }
 
-createVsEditTrackerH :: CreateVsEditTrackerReq -> Flow Value
-createVsEditTrackerH CreateVsEditTrackerReq {..} = do
+createVsEditTrackerH :: AuthedPerson -> CreateVsEditTrackerReq -> Flow Value
+createVsEditTrackerH _ap CreateVsEditTrackerReq {..} = do
   db <- getDBEnv
   now <- liftIO getCurrentTime
   tid <- liftIO (UUID.toText <$> UUID.nextRandom)
@@ -182,8 +183,8 @@ createVsEditTrackerH CreateVsEditTrackerReq {..} = do
       liftIO $ notifyVsEditCreated db tid appGroup service (Just createdBy)
       pure $ toJSON $ releaseRowToVsResponse row
 
-listVsEditTrackersH :: Maybe Text -> Maybe Text -> Flow [VsEditTrackerResponse]
-listVsEditTrackersH mFrom mTo = do
+listVsEditTrackersH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow [VsEditTrackerResponse]
+listVsEditTrackersH _ap mFrom mTo = do
   db <- getDBEnv
   let tryParse t = case parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" (T.unpack t) of
         Just v -> Just v
@@ -193,8 +194,8 @@ listVsEditTrackersH mFrom mTo = do
   rows <- liftIO $ listVsEditTrackerRows db from to
   pure $ map releaseRowToVsResponse rows
 
-getVsEditTrackerH :: Text -> Flow Value
-getVsEditTrackerH tid = do
+getVsEditTrackerH :: AuthedPerson -> Text -> Flow Value
+getVsEditTrackerH _ap tid = do
   db <- getDBEnv
   m <- liftIO $ findVsEditTrackerRowById db tid
   case m of
@@ -203,8 +204,8 @@ getVsEditTrackerH tid = do
       events <- liftIO $ listReleaseEvents db tid
       pure $ toJSON $ releaseRowToVsResponseWithEvents t events
 
-updateVsEditTrackerH :: Text -> UpdateVsEditTrackerReq -> Flow APIResponse
-updateVsEditTrackerH tid UpdateVsEditTrackerReq {..} = do
+updateVsEditTrackerH :: AuthedPerson -> Text -> UpdateVsEditTrackerReq -> Flow APIResponse
+updateVsEditTrackerH _ap tid UpdateVsEditTrackerReq {..} = do
   db <- getDBEnv
   cfg <- getConfig
   now <- liftIO getCurrentTime
@@ -304,8 +305,8 @@ updateVsEditTrackerH tid UpdateVsEditTrackerReq {..} = do
               pure $ APIResponse "SUCCESS" "VS edit tracker updated"
             else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
 
-lockVsEditTrackerH :: VsLockReq -> Flow APIResponse
-lockVsEditTrackerH VsLockReq {..} = do
+lockVsEditTrackerH :: AuthedPerson -> VsLockReq -> Flow APIResponse
+lockVsEditTrackerH _ap VsLockReq {..} = do
   db <- getDBEnv
   cfg <- getConfig
   now <- liftIO getCurrentTime
@@ -358,8 +359,8 @@ lockVsEditTrackerH VsLockReq {..} = do
 -- app_group") is intentionally refused: without a tracker row we have no
 -- record of who the expected owner is, so we cannot safely do an ownership
 -- check. Callers in that situation must use the superadmin force-unlock.
-unlockVsEditTrackerH :: VsUnlockReq -> Flow APIResponse
-unlockVsEditTrackerH VsUnlockReq {..} = do
+unlockVsEditTrackerH :: AuthedPerson -> VsUnlockReq -> Flow APIResponse
+unlockVsEditTrackerH _ap VsUnlockReq {..} = do
   db <- getDBEnv
   now <- liftIO getCurrentTime
   case trackerId of
@@ -417,8 +418,8 @@ unlockVsEditTrackerH VsUnlockReq {..} = do
 -- superadmin bypass ('Core.Auth.Middleware.handleAuth') ensures that
 -- permission-checked routes go through the superadmin-only path; a
 -- non-superadmin with no matching role will get a 403.
-forceUnlockVsEditTrackerH :: VsUnlockReq -> Flow APIResponse
-forceUnlockVsEditTrackerH VsUnlockReq {..} = do
+forceUnlockVsEditTrackerH :: AuthedPerson -> VsUnlockReq -> Flow APIResponse
+forceUnlockVsEditTrackerH _ap VsUnlockReq {..} = do
   db <- getDBEnv
   now <- liftIO getCurrentTime
   case trackerId of
@@ -465,14 +466,14 @@ forceUnlockVsEditTrackerH VsUnlockReq {..} = do
               liftIO $ notifyVsEditUnlocked db "" p ""
               pure $ APIResponse "SUCCESS" ("VS force-unlocked for app_group=" <> p)
 
-revertVsEditTrackerH :: Text -> Flow APIResponse
-revertVsEditTrackerH _tid =
+revertVsEditTrackerH :: AuthedPerson -> Text -> Flow APIResponse
+revertVsEditTrackerH _ap _tid =
   pure $ APIResponse "ERROR" "VS edit revert is not supported. Create a new VS edit instead."
 
 -- | Fetch the current live VirtualService JSON from K8s
 -- Uses the deployment_config's vs_name (e.g. "atlas-vs"), NOT the service name
-fetchCurrentVsH :: Maybe Text -> Maybe Text -> Flow Value
-fetchCurrentVsH mProduct _mService = do
+fetchCurrentVsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow Value
+fetchCurrentVsH _ap mProduct _mService = do
   cfg <- getConfig
   db <- getDBEnv
   case mProduct of

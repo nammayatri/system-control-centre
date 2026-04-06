@@ -1,9 +1,21 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | Generic config registry utilities.
+--
+-- This module is deliberately product-agnostic. It exposes:
+--
+--   * 'globalConfigs' — truly cross-cutting flags (slack/email toggles) that
+--     any product's operator would expect to find.
+--   * 'findConfigEntryIn' — pure lookup over a list of 'ConfigEntry' values.
+--   * 'validateConfigValue' — type-level shape check for an incoming value.
+--
+-- It does NOT import any product module. Assembly of the full product-aware
+-- list lives one layer up in "Products.ConfigCatalog" so this module stays
+-- inside the 'Shared/' layer policy ("Shared must not import from Products"
+-- per the layer rules in CONTEXT.md).
 module Shared.Config.Registry
-  ( allConfigEntries,
-    globalConfigs,
-    findConfigEntry,
+  ( globalConfigs,
+    findConfigEntryIn,
     validateConfigValue,
   )
 where
@@ -11,11 +23,12 @@ where
 import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Products.Autopilot.Config (autopilotConfigs)
 import Shared.Config.Types
 import Text.Read (readMaybe)
 
--- | Global configs (product = Nothing)
+-- | Global configs (product = Nothing). These are cross-cutting flags that
+-- any product's operator would expect to exist — notification toggles,
+-- email toggles, etc.
 globalConfigs :: [ConfigEntry]
 globalConfigs =
   [ ConfigEntry
@@ -32,17 +45,14 @@ globalConfigs =
       Nothing
   ]
 
--- | Collect from all products
-allConfigEntries :: [ConfigEntry]
-allConfigEntries = globalConfigs ++ autopilotConfigs
+-- | Look up a config entry by key in a caller-supplied list. The list is
+-- passed in (rather than being a module constant) so this module remains
+-- product-agnostic — callers that need the full product-aware list should
+-- import 'Products.ConfigCatalog.allConfigEntries' and pass that here.
+findConfigEntryIn :: [ConfigEntry] -> Text -> Maybe ConfigEntry
+findConfigEntryIn entries key = find (\c -> ceKey c == key) entries
 
--- ++ frontendConfigs  <- add new product configs here
-
--- | Look up a config entry by key
-findConfigEntry :: Text -> Maybe ConfigEntry
-findConfigEntry key = find (\c -> ceKey c == key) allConfigEntries
-
--- | Validate that a value matches the expected type of a config entry
+-- | Validate that a value matches the expected type of a config entry.
 validateConfigValue :: ConfigEntry -> Text -> Either Text Text
 validateConfigValue entry val = case ceType entry of
   BoolConfig _ ->

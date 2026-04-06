@@ -15,13 +15,28 @@ import { apiClient } from '../../../lib/api-client';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
 
+// IST everywhere — NammaYatri ops convention. Backend stores UTC.
 const formatDate = (d?: string) => {
   if (!d) return '-';
   const date = new Date(d);
-  return date.toLocaleString('en-US', { month: 'short', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+  if (isNaN(date.getTime())) return '-';
+  return date.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    month: 'short', day: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  }) + ' IST';
 };
 
-const formatTs = (ts: string) => { if (!ts) return '-'; const d = new Date(ts); return d.toLocaleString('en-US', { month: 'short', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }); };
+const formatTs = (ts: string) => {
+  if (!ts) return '-';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return '-';
+  return d.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    month: 'short', day: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
+  }) + ' IST';
+};
 const tryFormatJson = (data: string): string => { try { return JSON.stringify(JSON.parse(data), null, 2); } catch { return data; } };
 
 const VSEditSummary: React.FC = () => {

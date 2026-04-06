@@ -1,3 +1,6 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Autopilot product permissions
@@ -5,6 +8,13 @@
 -- All permissions for the Autopilot product as a type-safe ADT.
 -- Adding a new permission here without handling in permissionDescription
 -- will cause a compiler warning with -Wall.
+--
+-- The data kind promotion ('DataKinds') makes each constructor also a type,
+-- which is consumed by the 'Protected' Servant combinator in
+-- "Core.Auth.Protected" for compile-time RBAC. The 'KnownPermission'
+-- instances below bridge each promoted constructor back to its runtime
+-- @(product, action)@ pair so the middleware-less Phase 3 auth check can do
+-- its lookup against @sc_person_product_access@.
 module Products.Autopilot.Types.Permission
   ( AutopilotPermission (..),
     autopilotPermissionToText,
@@ -13,6 +23,7 @@ module Products.Autopilot.Types.Permission
   )
 where
 
+import Core.Auth.Permission (KnownPermission (..))
 import Data.Text (Text)
 
 data AutopilotPermission
@@ -106,3 +117,96 @@ permissionDescription AP_CONFIG_EDIT = "Edit ConfigMap and VS edit releases"
 permissionDescription AP_CONFIG_DISCARD = "Discard ConfigMap and VS edit releases"
 permissionDescription AP_CONFIG_REVERT = "Revert ConfigMap releases"
 permissionDescription AP_FORCE_UNLOCK = "Force-release a VS edit lock held by another user (operator recovery; superadmin only)"
+
+-- ============================================================================
+-- KnownPermission instances — one per promoted constructor
+--
+-- These bridge the type-level permission tag used by 'Protected' at the API
+-- type-site back to a runtime @(product, action)@ pair that the auth check
+-- can match against @sc_person_product_access@.
+--
+-- 'permissionName' MUST match the Text value returned by
+-- 'autopilotPermissionToText' for the corresponding constructor — the RBAC
+-- check in 'Core.Auth.Protected.checkPermission' compares this string
+-- against the effective-permission list pulled from the DB.
+-- ============================================================================
+
+instance KnownPermission 'AP_RELEASE_VIEW where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_VIEW"
+
+instance KnownPermission 'AP_RELEASE_CREATE where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_CREATE"
+
+instance KnownPermission 'AP_RELEASE_APPROVE where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_APPROVE"
+
+instance KnownPermission 'AP_RELEASE_REVERT where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_REVERT"
+
+instance KnownPermission 'AP_RELEASE_DISCARD where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_DISCARD"
+
+instance KnownPermission 'AP_RELEASE_PAUSE where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_PAUSE"
+
+instance KnownPermission 'AP_RELEASE_RESUME where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_RESUME"
+
+instance KnownPermission 'AP_RELEASE_ABORT where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_ABORT"
+
+instance KnownPermission 'AP_RELEASE_UPDATE where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_UPDATE"
+
+instance KnownPermission 'AP_RELEASE_DELETE where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_DELETE"
+
+instance KnownPermission 'AP_MANAGE_STAGGER where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "MANAGE_STAGGER"
+
+instance KnownPermission 'AP_PRODUCT_CONFIG_VIEW where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "PRODUCT_CONFIG_VIEW"
+
+instance KnownPermission 'AP_PRODUCT_CONFIG_EDIT where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "PRODUCT_CONFIG_EDIT"
+
+instance KnownPermission 'AP_SERVICE_CONFIG_VIEW where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "SERVICE_CONFIG_VIEW"
+
+instance KnownPermission 'AP_SERVICE_CONFIG_EDIT where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "SERVICE_CONFIG_EDIT"
+
+instance KnownPermission 'AP_CONFIG_APPROVE where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "CONFIG_APPROVE"
+
+instance KnownPermission 'AP_CONFIG_EDIT where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "CONFIG_EDIT"
+
+instance KnownPermission 'AP_CONFIG_DISCARD where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "CONFIG_DISCARD"
+
+instance KnownPermission 'AP_CONFIG_REVERT where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "CONFIG_REVERT"
+
+instance KnownPermission 'AP_FORCE_UNLOCK where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "FORCE_UNLOCK"

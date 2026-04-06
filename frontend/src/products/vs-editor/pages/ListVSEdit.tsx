@@ -36,10 +36,16 @@ const getDateRange = (range: TimeRange, customFrom: string, customTo: string): {
   return { from, to };
 };
 
+// IST everywhere — NammaYatri ops convention. Backend stores UTC.
 const formatDate = (isoString?: string) => {
   if (!isoString) return '-';
   const date = new Date(isoString);
-  return date.toLocaleString('en-US', { month: 'short', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+  if (isNaN(date.getTime())) return '-';
+  return date.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    month: 'short', day: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  }) + ' IST';
 };
 
 const ListVSEdit: React.FC = () => {

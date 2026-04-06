@@ -46,6 +46,7 @@ module Core.Auth.Protected
 where
 
 import Control.Monad.IO.Class (liftIO)
+import Core.Auth.Permission (KnownPermission (..))
 import Core.Auth.Queries
   ( computeEffectivePermissions,
     findPersonById,
@@ -92,13 +93,6 @@ import Servant.Server.Internal.DelayedIO (DelayedIO, delayedFailFatal, withReque
 -- intentionally polymorphic so each product can use its own permission
 -- data kind (e.g. @AutopilotPermission@) without Core knowing about it.
 data Protected (perm :: k)
-
--- | Bridge from a type-level permission tag to its runtime @(product, action)@
--- pair. Products promote their permission ADT to a data kind (via 'DataKinds')
--- and provide one instance per constructor.
-class KnownPermission (perm :: k) where
-  permissionProduct :: Proxy perm -> Text
-  permissionName :: Proxy perm -> Text
 
 -- | The authenticated principal, handed to every 'Protected' handler as a
 -- fresh first argument — a type-level proof that the check ran.

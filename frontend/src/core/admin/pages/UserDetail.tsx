@@ -160,9 +160,17 @@ const UserDetail: React.FC = () => {
     onError: (err: any) => toast.error(err?.response?.data?.error || err.message || 'Failed to remove override'),
   });
 
+  // IST everywhere — NammaYatri ops convention.
   const formatDate = (d: string) => {
     if (!d) return '-';
-    return new Date(d).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' });
+    const date = new Date(d);
+    if (isNaN(date.getTime())) return '-';
+    return date.toLocaleDateString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      month: 'short',
+      day: '2-digit',
+      year: 'numeric',
+    });
   };
 
   const openEditDialog = () => {

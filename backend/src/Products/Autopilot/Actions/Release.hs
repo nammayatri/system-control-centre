@@ -41,6 +41,7 @@ module Products.Autopilot.Actions.Release (
 import Control.Applicative ((<|>))
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
+import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
 import Core.DB.Connection (withConn)
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
@@ -88,15 +89,15 @@ import Shared.API.Response (APIResponse (..))
 -- Product/Service Handlers
 -- ============================================================================
 
-upsertProductH :: UpsertProductReq -> Flow APIResponse
-upsertProductH UpsertProductReq{..} = do
+upsertProductH :: AuthedPerson -> UpsertProductReq -> Flow APIResponse
+upsertProductH _ap UpsertProductReq{..} = do
     db <- getDBEnv
     let rowId = fromMaybe 0 id
     liftIO $ upsertProduct db rowId appGroup cluster namespace vsName productType productAcronym syncCluster needInfraApproval
     pure $ APIResponse "SUCCESS" "product_config upserted"
 
-listProductsH :: Flow [ProductResponse]
-listProductsH = do
+listProductsH :: AuthedPerson -> Flow [ProductResponse]
+listProductsH _ap = do
     db <- getDBEnv
     rows <- liftIO $ listProducts db
     pure $
@@ -114,8 +115,8 @@ listProductsH = do
             )
             rows
 
-listServicesH :: Text -> Flow [ServiceResponse]
-listServicesH productName' = do
+listServicesH :: AuthedPerson -> Text -> Flow [ServiceResponse]
+listServicesH _ap productName' = do
     cfg <- getConfig
     db <- getDBEnv
     products <- liftIO $ listProductsByName db productName'
@@ -173,8 +174,8 @@ listServicesH productName' = do
                                         cfgServices
                             | otherwise -> pure $ map toResponse hosts
 
-upsertServiceH :: UpsertServiceReq -> Flow APIResponse
-upsertServiceH UpsertServiceReq{..} = do
+upsertServiceH :: AuthedPerson -> UpsertServiceReq -> Flow APIResponse
+upsertServiceH _ap UpsertServiceReq{..} = do
     db <- getDBEnv
     let rowId = fromMaybe 0 id
     liftIO $ upsertService db rowId rolloutStrategyText decisionConfigText service appGroup serviceType serviceHost revertStrategyText
@@ -184,8 +185,8 @@ upsertServiceH UpsertServiceReq{..} = do
 -- Release CRUD Handlers
 -- ============================================================================
 
-listReleasesH :: Maybe Text -> Maybe Text -> Flow [ReleaseTracker]
-listReleasesH mFrom mTo = do
+listReleasesH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow [ReleaseTracker]
+listReleasesH _ap mFrom mTo = do
     db <- getDBEnv
     case (mFrom >>= parseISO, mTo >>= parseISO) of
         (Just fromTime, Just toTime) -> do
@@ -204,8 +205,8 @@ listReleasesH mFrom mTo = do
             <|> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" (T.unpack t)
             <|> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q%Z" (T.unpack t)
 
-createReleaseH :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
-createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
+createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
+createReleaseH _ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
     cfg <- getConfig
     db <- getDBEnv
     p <- liftIO $ findProductByName db appGroup
@@ -361,6 +362,12 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                                                     _ -> syncEnabled
                                                                 , envOverrideData = envOverrideData
                                                                 , slackThreadTs = slackThreadTs
+                                                                , -- Seed from 'derivedContext' below so the tracker's public view
+                                                                  -- matches the 'K8sState' target state we're about to persist.
+                                                                  -- Without this field the record is partial and any access to
+                                                                  -- 'releaseContext' crashes at runtime with "Missing field in
+                                                                  -- record construction" (caught by -Wmissing-fields).
+                                                                  releaseContext = Just (toJSON derivedContext)
                                                                 }
                                                         targetState =
                                                             K8sState $
@@ -391,14 +398,14 @@ createReleaseH mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
                                                     liftIO $ notifyReleaseCreated db tracker
                                                     pure $ APIResponse "SUCCESS" ("Tracker created: " <> rid)
 
-getReleaseH :: Text -> Flow (Maybe ReleaseTracker)
-getReleaseH rid = do
+getReleaseH :: AuthedPerson -> Text -> Flow (Maybe ReleaseTracker)
+getReleaseH _ap rid = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     pure (fmap fst m)
 
-approveReleaseH :: Text -> ApproveReleaseReq -> Flow (Maybe ReleaseTracker)
-approveReleaseH rid req = do
+approveReleaseH :: AuthedPerson -> Text -> ApproveReleaseReq -> Flow (Maybe ReleaseTracker)
+approveReleaseH _ap rid req = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
@@ -417,8 +424,8 @@ approveReleaseH rid req = do
             liftIO $ notifyReleaseApproved db updated
             pure (Just updated)
 
-triggerReleaseH :: Text -> TriggerReleaseReq -> Flow APIResponse
-triggerReleaseH rid TriggerReleaseReq{..} = do
+triggerReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
+triggerReleaseH _ap rid TriggerReleaseReq{..} = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
@@ -437,8 +444,8 @@ triggerReleaseH rid TriggerReleaseReq{..} = do
                             pure $ APIResponse "SUCCESS" "Release scheduled for execution"
                         else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
-rollbackReleaseH :: Text -> TriggerReleaseReq -> Flow APIResponse
-rollbackReleaseH rid TriggerReleaseReq{..} = do
+rollbackReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
+rollbackReleaseH _ap rid TriggerReleaseReq{..} = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
@@ -456,8 +463,8 @@ rollbackReleaseH rid TriggerReleaseReq{..} = do
                             pure $ APIResponse "SUCCESS" "Rollback marked"
                         else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
-revertReleaseH :: Text -> RevertReleaseReq -> Flow APIResponse
-revertReleaseH rid req = do
+revertReleaseH :: AuthedPerson -> Text -> RevertReleaseReq -> Flow APIResponse
+revertReleaseH _ap rid req = do
     cfg <- getConfig
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
@@ -551,24 +558,24 @@ revertReleaseH rid req = do
                             triggerImmediateRevertSync cfg db tracker mTargetState
                     pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
 
-revertByGlobalIdH :: Text -> Flow APIResponse
-revertByGlobalIdH gid = do
+revertByGlobalIdH :: AuthedPerson -> Text -> Flow APIResponse
+revertByGlobalIdH ap gid = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTrackerByGlobalId db gid
     case m of
         Nothing -> pure $ APIResponse "ERROR" ("No release found with global_id=" <> gid)
-        Just (tracker, _) -> revertReleaseH (releaseId tracker) (RevertReleaseReq Nothing Nothing Nothing Nothing)
+        Just (tracker, _) -> revertReleaseH ap (releaseId tracker) (RevertReleaseReq Nothing Nothing Nothing Nothing)
 
-immediateRevertByGlobalIdH :: Text -> Flow APIResponse
-immediateRevertByGlobalIdH gid = do
+immediateRevertByGlobalIdH :: AuthedPerson -> Text -> Flow APIResponse
+immediateRevertByGlobalIdH ap gid = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTrackerByGlobalId db gid
     case m of
         Nothing -> pure $ APIResponse "ERROR" ("No release found with global_id=" <> gid)
-        Just (tracker, _) -> revertReleaseH (releaseId tracker) (RevertReleaseReq Nothing Nothing (Just True) Nothing)
+        Just (tracker, _) -> revertReleaseH ap (releaseId tracker) (RevertReleaseReq Nothing Nothing (Just True) Nothing)
 
-discardReleaseH :: Text -> DiscardReleaseReq -> Flow APIResponse
-discardReleaseH rid DiscardReleaseReq{..} = do
+discardReleaseH :: AuthedPerson -> Text -> DiscardReleaseReq -> Flow APIResponse
+discardReleaseH _ap rid DiscardReleaseReq{..} = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
@@ -588,8 +595,8 @@ discardReleaseH rid DiscardReleaseReq{..} = do
                             pure $ APIResponse "SUCCESS" "Release discarded"
                         else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
-deleteReleaseH :: Text -> Flow APIResponse
-deleteReleaseH rid = do
+deleteReleaseH :: AuthedPerson -> Text -> Flow APIResponse
+deleteReleaseH _ap rid = do
     db <- getDBEnv
     mTracker <- liftIO $ findReleaseTracker db rid
     case mTracker of
@@ -605,8 +612,8 @@ deleteReleaseH rid = do
                         execute conn "DELETE FROM release_tracker WHERE id = ?" (Only rid)
                     pure $ APIResponse "SUCCESS" ("Release deleted: " <> rid)
 
-updateTrackerH :: Text -> K8sUpdateTrackerReq -> Flow APIResponse
-updateTrackerH rid req = do
+updateTrackerH :: AuthedPerson -> Text -> K8sUpdateTrackerReq -> Flow APIResponse
+updateTrackerH _ap rid req = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
@@ -836,8 +843,8 @@ updateK8sContext :: Maybe TargetState -> (K8sReleaseContext -> K8sReleaseContext
 updateK8sContext (Just (K8sState k8s)) f = Just $ K8sState $ k8s{context = f (context k8s)}
 updateK8sContext other _ = other
 
-listEventsH :: Text -> Flow [ReleaseEventResponse]
-listEventsH rid = do
+listEventsH :: AuthedPerson -> Text -> Flow [ReleaseEventResponse]
+listEventsH _ap rid = do
     db <- getDBEnv
     events <- liftIO $ listReleaseEvents db rid
     pure $
@@ -852,8 +859,8 @@ listEventsH rid = do
             )
             events
 
-rolloutHistoryH :: Text -> Flow Value
-rolloutHistoryH rid = do
+rolloutHistoryH :: AuthedPerson -> Text -> Flow Value
+rolloutHistoryH _ap rid = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
@@ -864,8 +871,8 @@ rolloutHistoryH rid = do
 -- Logs Link Endpoint (GET /releases/:id/logslink)
 -- ============================================================================
 
-logsLinkH :: Text -> Flow Value
-logsLinkH rid = do
+logsLinkH :: AuthedPerson -> Text -> Flow Value
+logsLinkH _ap rid = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
@@ -883,8 +890,8 @@ logsLinkH rid = do
 -- Diff Endpoint (GET /releases/:id/diff)
 -- ============================================================================
 
-releaseDiffH :: Text -> Maybe Text -> Flow DiffResponse
-releaseDiffH rid mType = do
+releaseDiffH :: AuthedPerson -> Text -> Maybe Text -> Flow DiffResponse
+releaseDiffH _ap rid mType = do
     cfg <- getConfig
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
@@ -960,8 +967,8 @@ releaseDiffH rid mType = do
 -- Pod Health Endpoint (GET /releases/:id/pods/health)
 -- ============================================================================
 
-podHealthH :: Text -> Flow PodHealthResponse
-podHealthH rid = do
+podHealthH :: AuthedPerson -> Text -> Flow PodHealthResponse
+podHealthH _ap rid = do
     cfg <- getConfig
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
@@ -1068,8 +1075,8 @@ getTxt' key obj = case KM.lookup (K.fromText key) obj of Just (String t) -> Just
 -- Immediate Revert (POST /releases/:id/revert/immediate)
 -- ============================================================================
 
-immediateRevertH :: Text -> ImmediateRevertReq -> Flow APIResponse
-immediateRevertH rid req = do
+immediateRevertH :: AuthedPerson -> Text -> ImmediateRevertReq -> Flow APIResponse
+immediateRevertH _ap rid req = do
     cfg <- getConfig
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
@@ -1119,8 +1126,8 @@ immediateRevertH rid req = do
 -- Restart Release (POST /releases/:id/restart)
 -- ============================================================================
 
-restartReleaseH :: Text -> RestartReleaseReq -> Flow APIResponse
-restartReleaseH rid req = do
+restartReleaseH :: AuthedPerson -> Text -> RestartReleaseReq -> Flow APIResponse
+restartReleaseH _ap rid req = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
@@ -1160,8 +1167,8 @@ restartReleaseH rid req = do
 -- Fast Forward (POST /releases/:id/fast-forward)
 -- ============================================================================
 
-fastForwardH :: Text -> FastForwardReq -> Flow APIResponse
-fastForwardH rid req = do
+fastForwardH :: AuthedPerson -> Text -> FastForwardReq -> Flow APIResponse
+fastForwardH _ap rid req = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of

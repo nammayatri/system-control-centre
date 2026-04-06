@@ -551,15 +551,26 @@ findCompletedTrackersForScaleDown db now delayHours = do
       addDelay t = addUTCTime (realToFrac (delayHours * 3600) :: NominalDiffTime) t
   pure (filter isEligible parsed)
 
--- | Update slack_thread_ts field on a release tracker by ID.
--- Used to store Slack thread_ts.
+-- | Store the Slack thread_ts for the first message in a release's Slack
+-- thread. Write-once: only the FIRST writer succeeds, subsequent writers
+-- become no-ops. This closes a race (task #31) where two concurrent
+-- notifications each discovered @slack_thread_ts IS NULL@, each created a
+-- fresh Slack thread, and then raced to overwrite the stored thread_ts —
+-- losing one thread to orphaning.
+--
+-- The @AND slack_thread_ts IS NULL@ guard in the WHERE clause means the
+-- UPDATE is atomic: PostgreSQL's MVCC serializes the two concurrent writers
+-- and the loser's row-match count is zero, so its write silently no-ops.
+-- Callers do not need to check the row count — the contract is "best
+-- effort, if someone else already set it the value is preserved".
 updateReleaseTrackerSlackThreadTs :: DBEnv -> Text -> Text -> IO ()
 updateReleaseTrackerSlackThreadTs db rid value =
   withConn db $ \conn -> do
     _ <-
       execute
         conn
-        "UPDATE release_tracker SET slack_thread_ts = ? WHERE id = ?"
+        "UPDATE release_tracker SET slack_thread_ts = ? \
+        \WHERE id = ? AND slack_thread_ts IS NULL"
         (value, rid)
     pure ()
 

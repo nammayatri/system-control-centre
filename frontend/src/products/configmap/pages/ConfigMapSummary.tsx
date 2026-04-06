@@ -31,7 +31,17 @@ function formatConfigMapContent(raw: string): string {
 
 interface ConfigMapEvent { category: string; label: string; data: string; timestamp: string; }
 
-const formatTs = (ts: string) => { if (!ts) return '-'; const d = new Date(ts); return d.toLocaleString('en-US', { month: 'short', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }); };
+// IST everywhere — NammaYatri ops convention. Backend stores UTC.
+const formatTs = (ts: string) => {
+  if (!ts) return '-';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return '-';
+  return d.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    month: 'short', day: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
+  }) + ' IST';
+};
 const tryFormatJson = (data: string): string => { try { return JSON.stringify(JSON.parse(data), null, 2); } catch { return data; } };
 
 const ConfigMapSummary: React.FC = () => {

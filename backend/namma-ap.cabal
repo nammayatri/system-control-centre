@@ -25,6 +25,7 @@ library
       Core.Admin.Routes
       Core.Admin.Types
       Core.Auth.Middleware
+      Core.Auth.Permission
       Core.Auth.Protected
       Core.Auth.Queries
       Core.Auth.RouteCheck
@@ -80,6 +81,7 @@ library
       Products.Autopilot.Workflow.MobileAppAndroidWorkflow
       Products.Autopilot.Workflow.Recorded
       Products.Autopilot.Workflow.Types
+      Products.ConfigCatalog
       Products.Registry
       Products.Types
       Shared.API.Response

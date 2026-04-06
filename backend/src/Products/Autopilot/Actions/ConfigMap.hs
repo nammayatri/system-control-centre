@@ -16,6 +16,7 @@ import Control.Concurrent (forkIO)
 import Control.Exception (SomeException, try)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
+import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
 import Core.Environment (DBEnv)
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
@@ -47,8 +48,8 @@ import System.Process (readProcessWithExitCode)
 -- ConfigMap Tracker Handlers
 -- ============================================================================
 
-listConfigMapsH :: Maybe Text -> Maybe Text -> Flow ConfigMapListResponse
-listConfigMapsH mFrom mTo = do
+listConfigMapsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow ConfigMapListResponse
+listConfigMapsH _ap mFrom mTo = do
   db <- getDBEnv
   now <- liftIO getCurrentTime
   let tryParse t = case parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" (T.unpack t) of
@@ -59,16 +60,16 @@ listConfigMapsH mFrom mTo = do
   pairs <- liftIO $ findReleaseTrackersByCategory db "BackendConfig" from to
   pure $ ConfigMapListResponse (map (toConfigMapResponse . fst) pairs)
 
-getConfigMapH :: Text -> Flow Value
-getConfigMapH cmId' = do
+getConfigMapH :: AuthedPerson -> Text -> Flow Value
+getConfigMapH _ap cmId' = do
   db <- getDBEnv
   m <- liftIO $ findReleaseTracker db cmId'
   case m of
     Nothing -> pure Null
     Just (rt, _) -> pure $ toJSON (toConfigMapResponse rt)
 
-createConfigMapH :: Value -> Flow APIResponse
-createConfigMapH body = do
+createConfigMapH :: AuthedPerson -> Value -> Flow APIResponse
+createConfigMapH _ap body = do
   db <- getDBEnv
   rid <- liftIO (UUID.toText <$> UUID.nextRandom)
   case extractCmFields body of
@@ -114,7 +115,12 @@ createConfigMapH body = do
                 globalId = Nothing,
                 syncEnabled = Nothing,
                 envOverrideData = Nothing,
-                slackThreadTs = Nothing
+                slackThreadTs = Nothing,
+                -- ConfigMap releases don't carry a K8s release context (no
+                -- rolling deployment), but the record field MUST be initialised
+                -- or accessing it crashes at runtime with "Missing field in
+                -- record construction" (caught by -Wmissing-fields).
+                releaseContext = Nothing
               }
           targetState = ConfigState emptyConfigState
       liftIO $ insertReleaseTracker db tracker (Just targetState)
@@ -182,8 +188,8 @@ createConfigMapH body = do
                   insertReleaseEvent db rid "BUSINESS" "CONFIGMAP_SYNC_FAILED" (toJSON (T.pack (show e)))
       pure $ APIResponse "SUCCESS" ("ConfigMap tracker created: " <> rid)
 
-updateConfigMapH :: Text -> Value -> Flow APIResponse
-updateConfigMapH cmId' body = do
+updateConfigMapH :: AuthedPerson -> Text -> Value -> Flow APIResponse
+updateConfigMapH _ap cmId' body = do
   db <- getDBEnv
   m <- liftIO $ findReleaseTracker db cmId'
   case m of

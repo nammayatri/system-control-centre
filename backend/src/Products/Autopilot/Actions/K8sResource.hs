@@ -11,6 +11,7 @@ where
 
 import Control.Exception (SomeException, try)
 import Control.Monad.IO.Class (liftIO)
+import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
 import Data.Aeson (Value (..), object, (.=))
@@ -32,8 +33,8 @@ import System.Process (readProcessWithExitCode)
 -- Resources Endpoint (GET /resources?PRODUCT=&SERVICE=)
 -- ============================================================================
 
-fetchResourcesH :: Maybe Text -> Maybe Text -> Flow ResourcesResponse
-fetchResourcesH mProduct mService = do
+fetchResourcesH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow ResourcesResponse
+fetchResourcesH _ap mProduct mService = do
   cfg <- getConfig
   db <- getDBEnv
   let emptyResources = ResourcesResponse Nothing Nothing
@@ -70,8 +71,8 @@ fetchResourcesH mProduct mService = do
 -- Envs Endpoints
 -- ============================================================================
 
-fetchEnvsH :: Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
-fetchEnvsH mProduct mEnv mService = do
+fetchEnvsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
+fetchEnvsH _ap mProduct mEnv mService = do
   cfg <- getConfig
   db <- getDBEnv
   case (mProduct, mService) of
@@ -93,8 +94,8 @@ fetchEnvsH mProduct mEnv mService = do
 -- | Proxy env fetch to sync cluster URL for secondary cloud.
 -- Tries the namma-ap endpoint format (GET /envs) first, then falls back to
 -- ny-autopilot format (POST /release/getenvs/).
-fetchSecondaryEnvsH :: Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
-fetchSecondaryEnvsH mProduct mEnv mService = do
+fetchSecondaryEnvsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
+fetchSecondaryEnvsH _ap mProduct mEnv mService = do
   cfg <- getConfig
   case (mProduct, mEnv, mService) of
     (Just product', Just env', Just service') -> do
