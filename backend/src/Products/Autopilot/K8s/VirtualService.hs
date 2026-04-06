@@ -75,11 +75,11 @@ applyVirtualServiceRolloutSingle cfg ctx vsName oldW newW = go 1
                                     ExitSuccess -> pure (Right (K8sResult "vs-updated"))
                                     ExitFailure _ ->
                                         let err = K8sError (T.pack errStr)
-                                        in if isConflictError err && attempt < maxRetries
-                                            then do
-                                                putStrLn $ "[VS-ROLLOUT] Conflict on attempt " <> show attempt <> ", retrying..."
-                                                go (attempt + 1)
-                                            else pure (Left err)
+                                         in if isConflictError err && attempt < maxRetries
+                                                then do
+                                                    putStrLn $ "[VS-ROLLOUT] Conflict on attempt " <> show attempt <> ", retrying..."
+                                                    go (attempt + 1)
+                                                else pure (Left err)
     buildUpdatedVS (Object root) = do
         spec <- getObj "spec" root
         httpRules <- getArr "http" spec
