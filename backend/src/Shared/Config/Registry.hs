@@ -1,23 +1,24 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Generic config registry utilities.
---
--- This module is deliberately product-agnostic. It exposes:
---
---   * 'globalConfigs' — truly cross-cutting flags (slack/email toggles) that
---     any product's operator would expect to find.
---   * 'findConfigEntryIn' — pure lookup over a list of 'ConfigEntry' values.
---   * 'validateConfigValue' — type-level shape check for an incoming value.
---
--- It does NOT import any product module. Assembly of the full product-aware
--- list lives one layer up in "Products.ConfigCatalog" so this module stays
--- inside the 'Shared/' layer policy ("Shared must not import from Products"
--- per the layer rules in CONTEXT.md).
-module Shared.Config.Registry
-  ( globalConfigs,
+{- | Generic config registry utilities.
+
+This module is deliberately product-agnostic. It exposes:
+
+  * 'globalConfigs' — truly cross-cutting flags (slack/email toggles) that
+    any product's operator would expect to find.
+  * 'findConfigEntryIn' — pure lookup over a list of 'ConfigEntry' values.
+  * 'validateConfigValue' — type-level shape check for an incoming value.
+
+It does NOT import any product module. Assembly of the full product-aware
+list lives one layer up in "Products.ConfigCatalog" so this module stays
+inside the 'Shared/' layer policy ("Shared must not import from Products"
+per the layer rules in CONTEXT.md).
+-}
+module Shared.Config.Registry (
+    globalConfigs,
     findConfigEntryIn,
     validateConfigValue,
-  )
+)
 where
 
 import Data.List (find)
@@ -26,44 +27,46 @@ import qualified Data.Text as T
 import Shared.Config.Types
 import Text.Read (readMaybe)
 
--- | Global configs (product = Nothing). These are cross-cutting flags that
--- any product's operator would expect to exist — notification toggles,
--- email toggles, etc.
+{- | Global configs (product = Nothing). These are cross-cutting flags that
+any product's operator would expect to exist — notification toggles,
+email toggles, etc.
+-}
 globalConfigs :: [ConfigEntry]
 globalConfigs =
-  [ ConfigEntry
-      "mailing_enabled"
-      (BoolConfig False)
-      NotificationGroup
-      "Enable email notifications"
-      Nothing,
-    ConfigEntry
-      "slack_enabled"
-      (BoolConfig False)
-      NotificationGroup
-      "Enable Slack notifications for release events"
-      Nothing
-  ]
+    [ ConfigEntry
+        "mailing_enabled"
+        (BoolConfig False)
+        NotificationGroup
+        "Enable email notifications"
+        Nothing
+    , ConfigEntry
+        "slack_enabled"
+        (BoolConfig False)
+        NotificationGroup
+        "Enable Slack notifications for release events"
+        Nothing
+    ]
 
--- | Look up a config entry by key in a caller-supplied list. The list is
--- passed in (rather than being a module constant) so this module remains
--- product-agnostic — callers that need the full product-aware list should
--- import 'Products.ConfigCatalog.allConfigEntries' and pass that here.
+{- | Look up a config entry by key in a caller-supplied list. The list is
+passed in (rather than being a module constant) so this module remains
+product-agnostic — callers that need the full product-aware list should
+import 'Products.ConfigCatalog.allConfigEntries' and pass that here.
+-}
 findConfigEntryIn :: [ConfigEntry] -> Text -> Maybe ConfigEntry
 findConfigEntryIn entries key = find (\c -> ceKey c == key) entries
 
 -- | Validate that a value matches the expected type of a config entry.
 validateConfigValue :: ConfigEntry -> Text -> Either Text Text
 validateConfigValue entry val = case ceType entry of
-  BoolConfig _ ->
-    if T.toLower val `elem` ["true", "false", "1", "0", "yes", "no"]
-      then Right val
-      else Left "Must be true/false"
-  IntConfig _ -> case readMaybe (T.unpack val) :: Maybe Int of
-    Just _ -> Right val
-    Nothing -> Left "Must be an integer"
-  DoubleConfig _ -> case readMaybe (T.unpack val) :: Maybe Double of
-    Just _ -> Right val
-    Nothing -> Left "Must be a number"
-  TextConfig _ -> Right val
-  JsonConfig _ -> Right val -- could add JSON parse validation
+    BoolConfig _ ->
+        if T.toLower val `elem` ["true", "false", "1", "0", "yes", "no"]
+            then Right val
+            else Left "Must be true/false"
+    IntConfig _ -> case readMaybe (T.unpack val) :: Maybe Int of
+        Just _ -> Right val
+        Nothing -> Left "Must be an integer"
+    DoubleConfig _ -> case readMaybe (T.unpack val) :: Maybe Double of
+        Just _ -> Right val
+        Nothing -> Left "Must be a number"
+    TextConfig _ -> Right val
+    JsonConfig _ -> Right val -- could add JSON parse validation

@@ -1,5 +1,5 @@
-module Products.Autopilot.Types.Release
-  ( -- * Release Types
+module Products.Autopilot.Types.Release (
+    -- * Release Types
     RolloutStep (..),
     RolloutHistory (..),
     ReleaseTracker (..),
@@ -16,7 +16,7 @@ module Products.Autopilot.Types.Release
     -- * Common Enums
     Decision (..),
     Mode (..),
-  )
+)
 where
 
 import Data.Aeson (FromJSON, ToJSON, Value)
@@ -33,14 +33,14 @@ import Products.Autopilot.Types.Workflow (ReleaseCategory, ReleaseWFStatus)
 -- ============================================================================
 
 data Decision = Continue | Wait | Abort
-  deriving (Eq, Show, Read, Generic)
+    deriving (Eq, Show, Read, Generic)
 
 instance ToJSON Decision
 
 instance FromJSON Decision
 
 data Mode = AUTO | MANUAL
-  deriving (Eq, Show, Read, Generic)
+    deriving (Eq, Show, Read, Generic)
 
 instance ToJSON Mode
 
@@ -50,83 +50,86 @@ instance FromJSON Mode
 -- Release Status (user-facing lifecycle states)
 -- ============================================================================
 
--- | Release lifecycle status
---
--- These are the user-facing states that apply to ALL release types.
--- Platform-specific workflow progress is tracked separately in targetState.
---
--- Lifecycle (backend/config releases):
--- CREATED → INPROGRESS → COMPLETED
---                     → PAUSED → INPROGRESS (resume)
---                     → ABORTING → ABORTED / USER_ABORTED / GCLT_ABORTED
---                     → REVERTING → REVERTED
--- CREATED → DISCARDING → DISCARDED
---
--- VSEdit states (same table, category='VSEdit'):
--- CREATED → LOCKED → APPLIED → COMPLETED
---                 → UNLOCKED (abort / expiry / discard)
+{- | Release lifecycle status
+
+These are the user-facing states that apply to ALL release types.
+Platform-specific workflow progress is tracked separately in targetState.
+
+Lifecycle (backend/config releases):
+CREATED → INPROGRESS → COMPLETED
+                    → PAUSED → INPROGRESS (resume)
+                    → ABORTING → ABORTED / USER_ABORTED / GCLT_ABORTED
+                    → REVERTING → REVERTED
+CREATED → DISCARDING → DISCARDED
+
+VSEdit states (same table, category='VSEdit'):
+CREATED → LOCKED → APPLIED → COMPLETED
+                → UNLOCKED (abort / expiry / discard)
+-}
 data ReleaseStatus
-  = -- | Initial state, awaiting approval or scheduling
-    CREATED
-  | -- | Actively executing
-    INPROGRESS
-  | -- | Successfully finished
-    COMPLETED
-  | -- | System-initiated abort (errors, health check failures, etc.)
-    ABORTED
-  | -- | User-initiated abort
-    USER_ABORTED
-  | -- | DISCARDED before execution
-    DISCARDED
-  | -- | Transitioning to DISCARDED (async cleanup)
-    DISCARDING
-  | -- | PAUSED by user, can be resumed
-    PAUSED
-  | -- | Abort in progress (transitioning to ABORTED/USER_ABORTED)
-    ABORTING
-  | -- | REVERTING a completed release back to previous version
-    REVERTING
-  | -- | Revert completed successfully
-    REVERTED
-  | -- | Resuming after pause or transient failure
-    RESTARTING
-  | -- | ABORTED by decision engine (HS/AB) — distinct from user-initiated abort
-    GCLT_ABORTED
-  | -- | VSEdit: lock held on target virtual service
-    LOCKED
-  | -- | VSEdit: lock released (abort/expiry/discard)
-    UNLOCKED
-  | -- | VSEdit: edit applied to virtual service
-    APPLIED
-  deriving (Eq, Show, Read, Generic, Enum, Bounded)
+    = -- | Initial state, awaiting approval or scheduling
+      CREATED
+    | -- | Actively executing
+      INPROGRESS
+    | -- | Successfully finished
+      COMPLETED
+    | -- | System-initiated abort (errors, health check failures, etc.)
+      ABORTED
+    | -- | User-initiated abort
+      USER_ABORTED
+    | -- | DISCARDED before execution
+      DISCARDED
+    | -- | Transitioning to DISCARDED (async cleanup)
+      DISCARDING
+    | -- | PAUSED by user, can be resumed
+      PAUSED
+    | -- | Abort in progress (transitioning to ABORTED/USER_ABORTED)
+      ABORTING
+    | -- | REVERTING a completed release back to previous version
+      REVERTING
+    | -- | Revert completed successfully
+      REVERTED
+    | -- | Resuming after pause or transient failure
+      RESTARTING
+    | -- | ABORTED by decision engine (HS/AB) — distinct from user-initiated abort
+      GCLT_ABORTED
+    | -- | VSEdit: lock held on target virtual service
+      LOCKED
+    | -- | VSEdit: lock released (abort/expiry/discard)
+      UNLOCKED
+    | -- | VSEdit: edit applied to virtual service
+      APPLIED
+    deriving (Eq, Show, Read, Generic, Enum, Bounded)
 
 instance ToJSON ReleaseStatus
 
 instance FromJSON ReleaseStatus
 
--- | Canonical text form of a 'ReleaseStatus' — identical to the constructor
--- name and to the JSON wire format (Aeson default @allNullaryToStringTag@).
--- Single source of truth: both the DB layer and the JSON layer agree by
--- construction, no lookup tables to drift.
+{- | Canonical text form of a 'ReleaseStatus' — identical to the constructor
+name and to the JSON wire format (Aeson default @allNullaryToStringTag@).
+Single source of truth: both the DB layer and the JSON layer agree by
+construction, no lookup tables to drift.
+-}
 releaseStatusText :: ReleaseStatus -> Text
 releaseStatusText = T.pack . show
 
--- | Case-insensitive text → 'ReleaseStatus'. Derived from 'Enum'+'Bounded',
--- so adding a new constructor to 'ReleaseStatus' is the ONLY edit needed.
--- Legacy DB aliases (e.g. @USERABORTED@, @GCLTABORTED@ without the underscore)
--- are handled explicitly before the generic lookup. Unknown values default
--- to 'CREATED' to match prior behavior.
+{- | Case-insensitive text → 'ReleaseStatus'. Derived from 'Enum'+'Bounded',
+so adding a new constructor to 'ReleaseStatus' is the ONLY edit needed.
+Legacy DB aliases (e.g. @USERABORTED@, @GCLTABORTED@ without the underscore)
+are handled explicitly before the generic lookup. Unknown values default
+to 'CREATED' to match prior behavior.
+-}
 parseReleaseStatusText :: Text -> ReleaseStatus
 parseReleaseStatusText t = case T.toUpper t of
-  "USERABORTED" -> USER_ABORTED
-  "GCLTABORTED" -> GCLT_ABORTED
-  canon -> fromMaybe CREATED (lookup canon releaseStatusLookup)
+    "USERABORTED" -> USER_ABORTED
+    "GCLTABORTED" -> GCLT_ABORTED
+    canon -> fromMaybe CREATED (lookup canon releaseStatusLookup)
   where
     releaseStatusLookup :: [(Text, ReleaseStatus)]
     releaseStatusLookup =
-      [ (T.toUpper (releaseStatusText s), s)
+        [ (T.toUpper (releaseStatusText s), s)
         | s <- [minBound .. maxBound :: ReleaseStatus]
-      ]
+        ]
 
 -- ============================================================================
 -- Status Helpers
@@ -185,82 +188,82 @@ validateGlobalStatusTransition from to = to `elem` allowed from
 -- ============================================================================
 
 data RolloutStep = RolloutStep
-  { rolloutPercent :: Int,
-    -- | Cooloff duration in MINUTES. Matches Julia production semantics:
+    { rolloutPercent :: Int
+    , cooloffMinutes :: Int
+    -- ^ Cooloff duration in MINUTES. Matches Julia production semantics:
     -- the workflow multiplies by 60 before use.
-    cooloffMinutes :: Int,
-    podPercent :: Int
-  }
-  deriving (Eq, Show, Generic)
+    , podPercent :: Int
+    }
+    deriving (Eq, Show, Generic)
 
 instance ToJSON RolloutStep
 
 instance FromJSON RolloutStep
 
 data RolloutHistory = RolloutHistory
-  { historyRolloutPercent :: Int,
-    -- | Cooloff duration in minutes (same unit as 'cooloffMinutes').
-    historyCooloffMinutes :: Int,
-    historyPodsPercent :: Int,
-    historyDecision :: Maybe Decision,
-    historyDecisionReason :: Maybe Text,
-    historyStartedAt :: UTCTime,
-    historyCompletedAt :: Maybe UTCTime,
-    historyManualOverride :: Bool,
-    historyDecisionHs :: Maybe Decision,
-    historyDecisionHsReason :: Maybe Text
-  }
-  deriving (Eq, Show, Generic)
+    { historyRolloutPercent :: Int
+    , historyCooloffMinutes :: Int
+    -- ^ Cooloff duration in minutes (same unit as 'cooloffMinutes').
+    , historyPodsPercent :: Int
+    , historyDecision :: Maybe Decision
+    , historyDecisionReason :: Maybe Text
+    , historyStartedAt :: UTCTime
+    , historyCompletedAt :: Maybe UTCTime
+    , historyManualOverride :: Bool
+    , historyDecisionHs :: Maybe Decision
+    , historyDecisionHsReason :: Maybe Text
+    }
+    deriving (Eq, Show, Generic)
 
 instance ToJSON RolloutHistory
 
 instance FromJSON RolloutHistory
 
 data ReleaseTracker = ReleaseTracker
-  { releaseId :: Text,
-    -- | App group name (e.g., "Beckn", "rider-app", "BecknSchedulers")
+    { releaseId :: Text
+    , appGroup :: Text
+    -- ^ App group name (e.g., "Beckn", "rider-app", "BecknSchedulers")
     -- This is the WHAT - which group/product is being released
-    appGroup :: Text,
-    -- | Alias for product (for backward compatibility)
-    service :: Text,
-    env :: Text,
-    -- | Release category: BackendService, MobileAppAndroid, BackendConfig, etc.
+    , service :: Text
+    -- ^ Alias for product (for backward compatibility)
+    , env :: Text
+    , category :: ReleaseCategory
+    -- ^ Release category: BackendService, MobileAppAndroid, BackendConfig, etc.
     -- This is the HOW/WHERE - how/where to deploy it
-    category :: ReleaseCategory,
-    -- | Current release status: CREATED, INPROGRESS, COMPLETED, ABORTED, etc.
-    status :: ReleaseStatus,
-    -- | Generic workflow stage: INIT, PREPARING, DEPLOYING, MONITORING, FINALIZING, DONE
+    , status :: ReleaseStatus
+    -- ^ Current release status: CREATED, INPROGRESS, COMPLETED, ABORTED, etc.
+    , releaseWFStatus :: ReleaseWFStatus
+    -- ^ Generic workflow stage: INIT, PREPARING, DEPLOYING, MONITORING, FINALIZING, DONE
     -- Applies to ALL release categories (K8s, Play Store, App Store, etc.)
-    releaseWFStatus :: ReleaseWFStatus,
-    mode :: Mode,
-    createdBy :: Text,
-    approvedBy :: Maybe Text,
-    isApproved :: Bool,
-    isInfraApproved :: Bool,
-    releaseTag :: Maybe Text,
-    scheduleTime :: Maybe UTCTime,
-    dateCreated :: Maybe UTCTime,
-    lastUpdated :: Maybe UTCTime,
-    startTime :: Maybe UTCTime,
-    endTime :: Maybe UTCTime,
-    rolloutStrategy :: [RolloutStep],
-    rolloutHistory :: [RolloutHistory],
-    -- | Previous version (generic, applies to all release types)
-    oldVersion :: Text,
-    -- | New version being released (generic, applies to all release types)
-    newVersion :: Text,
-    info :: Maybe Text,
-    description :: Maybe Text,
-    changeLog :: Maybe Text,
-    metadata :: Maybe Value,
-    priority :: Int32,
-    globalId :: Maybe Text,
-    syncEnabled :: Maybe Text,
-    envOverrideData :: Maybe Text,
-    slackThreadTs :: Maybe Text,
-    releaseContext :: Maybe Value
-  }
-  deriving (Eq, Show, Generic)
+    , mode :: Mode
+    , createdBy :: Text
+    , approvedBy :: Maybe Text
+    , isApproved :: Bool
+    , isInfraApproved :: Bool
+    , releaseTag :: Maybe Text
+    , scheduleTime :: Maybe UTCTime
+    , dateCreated :: Maybe UTCTime
+    , lastUpdated :: Maybe UTCTime
+    , startTime :: Maybe UTCTime
+    , endTime :: Maybe UTCTime
+    , rolloutStrategy :: [RolloutStep]
+    , rolloutHistory :: [RolloutHistory]
+    , oldVersion :: Text
+    -- ^ Previous version (generic, applies to all release types)
+    , newVersion :: Text
+    -- ^ New version being released (generic, applies to all release types)
+    , info :: Maybe Text
+    , description :: Maybe Text
+    , changeLog :: Maybe Text
+    , metadata :: Maybe Value
+    , priority :: Int32
+    , globalId :: Maybe Text
+    , syncEnabled :: Maybe Text
+    , envOverrideData :: Maybe Text
+    , slackThreadTs :: Maybe Text
+    , releaseContext :: Maybe Value
+    }
+    deriving (Eq, Show, Generic)
 
 instance ToJSON ReleaseTracker
 

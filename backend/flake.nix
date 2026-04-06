@@ -38,6 +38,12 @@
 
         process-compose = { };
 
+        # Override treefmt: swap ormolu for fourmolu (this project uses .fourmolu.yaml)
+        treefmt.config = {
+          programs.ormolu.enable = lib.mkForce true;
+          programs.ormolu.package = lib.mkForce pkgs.haskellPackages.fourmolu;
+        };
+
         packages.default = self'.packages.namma-ap;
 
         # Quick-run app: nix run .#run
@@ -60,6 +66,7 @@
             cacert
             hpack
             gnumake
+            ghcid
 
             # Formatting
             haskellPackages.fourmolu

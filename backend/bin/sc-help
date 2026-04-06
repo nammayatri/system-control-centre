@@ -2,6 +2,7 @@
 echo ""
 echo "  System Control Centre"
 echo "  ─────────────────────"
+echo "  sc-dev         DB + ghcid auto-reload server (recommended for dev)"
 echo "  sc-setup-db    Setup local database (create + migrate + seed)"
 echo "  sc-build       Compile the backend"
 echo "  sc-run         Setup DB + build + start server (all-in-one)"

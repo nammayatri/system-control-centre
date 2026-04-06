@@ -5,7 +5,6 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-
 module Products.Autopilot.Actions.Release (
     -- * Release Handlers
     createReleaseH,
@@ -54,7 +53,6 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Char (isAlphaNum)
-import qualified Data.Yaml as Yaml
 import Data.List (find)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
@@ -65,12 +63,13 @@ import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
+import qualified Data.Yaml as Yaml
 import Database.PostgreSQL.Simple (Only (..), execute, withTransaction)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
+import Products.Autopilot.EventLog (logStatusUpdated)
 import Products.Autopilot.K8s.Deployment (deploymentExists)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
-import Products.Autopilot.EventLog (logStatusUpdated)
 import Products.Autopilot.Notifications
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ReleaseTracker
@@ -80,11 +79,11 @@ import Products.Autopilot.Sync (triggerImmediateRevertSync)
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.API
+import qualified Products.Autopilot.Types.Storage.Schema as S
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes
 import qualified Products.Autopilot.Types.Target.Kubernetes as K8s
 import Products.Autopilot.Workflow.Helpers (captureDeploymentPreview, captureDeploymentSnapshot)
-import qualified Products.Autopilot.Types.Storage.Schema as S
 import Shared.API.Response (APIResponse (..))
 
 -- ============================================================================
@@ -412,18 +411,22 @@ approveReleaseH _ap rid req = do
     case m of
         Nothing -> pure Nothing
         Just (tracker, mTargetState) -> do
-            let approver = req.approvedBy
-                infraApproval = req.isInfraApproved
-                updated =
-                    (tracker :: ReleaseTracker)
-                        { NT.approvedBy = Just approver
-                        , NT.isApproved = True
-                        , NT.isInfraApproved = fromMaybe (NT.isInfraApproved tracker) infraApproval
-                        }
-            liftIO $ insertReleaseTracker db updated mTargetState
-            liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_APPROVED" (toJSON approver)
-            liftIO $ notifyReleaseApproved db updated
-            pure (Just updated)
+            -- Only allow approval of CREATED trackers
+            if NT.status tracker /= CREATED
+                then throwM $ BadRequest ("Cannot approve release in status " <> T.pack (show (NT.status tracker)) <> ". Only CREATED releases can be approved.")
+                else do
+                    let approver = req.approvedBy
+                        infraApproval = req.isInfraApproved
+                        updated =
+                            (tracker :: ReleaseTracker)
+                                { NT.approvedBy = Just approver
+                                , NT.isApproved = True
+                                , NT.isInfraApproved = fromMaybe (NT.isInfraApproved tracker) infraApproval
+                                }
+                    liftIO $ insertReleaseTracker db updated mTargetState
+                    liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_APPROVED" (toJSON approver)
+                    liftIO $ notifyReleaseApproved db updated
+                    pure (Just updated)
 
 triggerReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
 triggerReleaseH _ap rid TriggerReleaseReq{..} = do
@@ -670,26 +673,27 @@ updateTrackerH _ap rid req = do
                                     pure $ APIResponse "SUCCESS" "Tracker updated"
                                 else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
--- | Validate an incoming 'K8sUpdateTrackerReq' against two independent sets
--- of rules, returning @Left reason@ on the first failure.
---
--- 1. __Rollout strategy invariants__ (apply at /every/ status): whenever the
--- request supplies a new @rolloutStrategy@, it must be non-empty, use only
--- valid cooloff/pod/percent values, have strictly-monotonic @rolloutPercent@
--- values, and end at 100. These are cheap shape checks that catch obviously
--- broken payloads before they hit the DB or the workflow loop.
---
--- 2. __Mid-flight immutability__ (apply to @INPROGRESS@ / @PAUSED@ /
--- @RESTARTING@ / @REVERTING@): while a release is live the ONLY fields a
--- user may touch are @status@ (pause/resume/abort transitions),
--- @rolloutStrategy@ (limited to future-stage edits — stages that already
--- appear in @rolloutHistory@ must be byte-identical), and @changeLog@
--- (informational, safe to append during a rollout). Everything else is
--- rejected because it would race the running workflow.
---
--- The separation matters: #1 runs even at @CREATED@ (catches bad initial
--- strategies); #2 only runs once the rollout is live, so @CREATED@ releases
--- can still be edited freely.
+{- | Validate an incoming 'K8sUpdateTrackerReq' against two independent sets
+of rules, returning @Left reason@ on the first failure.
+
+1. __Rollout strategy invariants__ (apply at /every/ status): whenever the
+request supplies a new @rolloutStrategy@, it must be non-empty, use only
+valid cooloff/pod/percent values, have strictly-monotonic @rolloutPercent@
+values, and end at 100. These are cheap shape checks that catch obviously
+broken payloads before they hit the DB or the workflow loop.
+
+2. __Mid-flight immutability__ (apply to @INPROGRESS@ / @PAUSED@ /
+@RESTARTING@ / @REVERTING@): while a release is live the ONLY fields a
+user may touch are @status@ (pause/resume/abort transitions),
+@rolloutStrategy@ (limited to future-stage edits — stages that already
+appear in @rolloutHistory@ must be byte-identical), and @changeLog@
+(informational, safe to append during a rollout). Everything else is
+rejected because it would race the running workflow.
+
+The separation matters: #1 runs even at @CREATED@ (catches bad initial
+strategies); #2 only runs once the rollout is live, so @CREATED@ releases
+can still be edited freely.
+-}
 validateUpdateRequest :: ReleaseTracker -> K8sUpdateTrackerReq -> Either Text ()
 validateUpdateRequest tracker req = do
     -- (1) Strategy shape invariants — always applied when a strategy is sent.
@@ -704,7 +708,8 @@ validateUpdateRequest tracker req = do
             case forbiddenFieldDuringMidFlight req of
                 Just fieldName ->
                     Left $
-                        "Cannot modify '" <> fieldName
+                        "Cannot modify '"
+                            <> fieldName
                             <> "' while release is "
                             <> releaseStatusText oldStatus
                             <> ". Pause it first."
@@ -739,9 +744,10 @@ validateUpdateRequest tracker req = do
     midFlightStatuses :: [ReleaseStatus]
     midFlightStatuses = [INPROGRESS, PAUSED, RESTARTING, REVERTING]
 
--- | Shape-level invariants on a proposed rollout strategy: non-empty, valid
--- numeric ranges, strictly monotonic rolloutPercent, and a terminal 100 stage.
--- Runs before any state-dependent checks.
+{- | Shape-level invariants on a proposed rollout strategy: non-empty, valid
+numeric ranges, strictly monotonic rolloutPercent, and a terminal 100 stage.
+Runs before any state-dependent checks.
+-}
 validateStrategyShape :: [RolloutStep] -> Either Text ()
 validateStrategyShape [] = Left "Rollout strategy must have at least one stage"
 validateStrategyShape steps = do
@@ -766,9 +772,10 @@ validateStrategyShape steps = do
             then xs
             else [] -- sentinel that never equals a valid list of length >= 1
 
--- | Identify the first mid-flight-forbidden field set in the request, if any.
--- During INPROGRESS/PAUSED/etc only status, rolloutStrategy, and changeLog
--- are legal. Returns @Just fieldName@ for the first violation.
+{- | Identify the first mid-flight-forbidden field set in the request, if any.
+During INPROGRESS/PAUSED/etc only status, rolloutStrategy, and changeLog
+are legal. Returns @Just fieldName@ for the first violation.
+-}
 forbiddenFieldDuringMidFlight :: K8sUpdateTrackerReq -> Maybe Text
 forbiddenFieldDuringMidFlight req
     | isJust (req.mode) = Just "mode"
@@ -916,32 +923,32 @@ releaseDiffH _ap rid _mType = do
                 (Just beforeEvt, Just afterEvt) ->
                     let b = payloadToText (S.rePayload beforeEvt)
                         a = payloadToText (S.rePayload afterEvt)
-                    in pure $ case trackerCat of
-                        BackendConfig -> DiffResponse (extractConfigMapDataSection b) (extractConfigMapDataSection a) diffLabel
-                        _ -> DiffResponse b a diffLabel
+                     in pure $ case trackerCat of
+                            BackendConfig -> DiffResponse (extractConfigMapDataSection b) (extractConfigMapDataSection a) diffLabel
+                            _ -> DiffResponse b a diffLabel
                 (Just beforeEvt, Nothing) -> do
                     -- For configmaps, extract data section from both sides so they're comparable
                     case trackerCat of
-                      BackendConfig -> do
-                        let beforeData = extractConfigMapDataSection (payloadToText (S.rePayload beforeEvt))
-                            rawProposed =
-                              case NT.metadata tracker of
-                                Just (Object o) ->
-                                  case KM.lookup (K.fromText "file") o of
-                                    Just (String f) -> f
-                                    _ -> case KM.lookup (K.fromText "config") o of
-                                      Just (String c) -> c
-                                      _ -> ""
-                                _ -> ""
-                            -- Normalize: if proposed is a K8s YAML manifest, extract data section
-                            proposedData = extractConfigMapDataSection rawProposed
-                        pure $ DiffResponse beforeData proposedData diffLabel
-                      _ ->
-                        pure $
-                            DiffResponse
-                                (payloadToText (S.rePayload beforeEvt))
-                                ""
-                                (diffLabel <> " (after snapshot pending)")
+                        BackendConfig -> do
+                            let beforeData = extractConfigMapDataSection (payloadToText (S.rePayload beforeEvt))
+                                rawProposed =
+                                    case NT.metadata tracker of
+                                        Just (Object o) ->
+                                            case KM.lookup (K.fromText "file") o of
+                                                Just (String f) -> f
+                                                _ -> case KM.lookup (K.fromText "config") o of
+                                                    Just (String c) -> c
+                                                    _ -> ""
+                                        _ -> ""
+                                -- Normalize: if proposed is a K8s YAML manifest, extract data section
+                                proposedData = extractConfigMapDataSection rawProposed
+                            pure $ DiffResponse beforeData proposedData diffLabel
+                        _ ->
+                            pure $
+                                DiffResponse
+                                    (payloadToText (S.rePayload beforeEvt))
+                                    ""
+                                    (diffLabel <> " (after snapshot pending)")
                 _ -> do
                     -- Fall back to live K8s diff (original behavior)
                     let mCtx = case mTargetState of
@@ -1208,8 +1215,9 @@ fastForwardH _ap rid req = do
                         -- Calculate elapsed minutes from step start
                         elapsedMins = case history of
                             [] -> 0
-                            steps -> let lastStep = last steps
-                                     in round (realToFrac (diffUTCTime now (historyStartedAt lastStep)) / 60 :: Double) :: Int
+                            steps ->
+                                let lastStep = last steps
+                                 in round (realToFrac (diffUTCTime now (historyStartedAt lastStep)) / 60 :: Double) :: Int
                         strategy = NT.rolloutStrategy tracker
                         updatedStrategy = case strategy of
                             [] -> []
@@ -1260,9 +1268,10 @@ isValidK8sVersion ver
             endsOk = case chars of [] -> False; _ -> isAlphaNum (Prelude.last chars)
          in all isValidChar chars && startsOk && endsOk
 
--- | Extract just the data section from a K8s ConfigMap YAML as JSON.
--- Input: full K8s YAML like "apiVersion: v1\ndata:\n  app.conf: |-\n    ...\nkind: ..."
--- Output: JSON like "{\"app.conf\":\"...\"}" so it matches the tracker's file format.
+{- | Extract just the data section from a K8s ConfigMap YAML as JSON.
+Input: full K8s YAML like "apiVersion: v1\ndata:\n  app.conf: |-\n    ...\nkind: ..."
+Output: JSON like "{\"app.conf\":\"...\"}" so it matches the tracker's file format.
+-}
 extractConfigMapDataSection :: Text -> Text
 extractConfigMapDataSection yamlText =
     case Yaml.decodeEither' (TE.encodeUtf8 yamlText) :: Either Yaml.ParseException Value of

@@ -1,10 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Shared.Error
-  ( APIError (..),
+module Shared.Error (
+    APIError (..),
     throwAPIError,
     toAPIResponse,
-  )
+)
 where
 
 import Data.Aeson (ToJSON (..), Value, encode, object, (.=))
@@ -12,21 +12,21 @@ import Data.Text (Text)
 import Servant (ServerError (..), err400, err403, err404, err409)
 
 data APIError
-  = NotFound Text -- 404
-  | BadRequest Text -- 400
-  | Forbidden Text -- 403
-  | Conflict Text -- 409
-  | InvalidTransition Text -- 422
-  | InternalError Text -- 500
-  deriving (Show)
+    = NotFound Text -- 404
+    | BadRequest Text -- 400
+    | Forbidden Text -- 403
+    | Conflict Text -- 409
+    | InvalidTransition Text -- 422
+    | InternalError Text -- 500
+    deriving (Show)
 
 instance ToJSON APIError where
-  toJSON err =
-    object
-      [ "status" .= ("ERROR" :: Text),
-        "message" .= errorMessage err,
-        "code" .= errorCode err
-      ]
+    toJSON err =
+        object
+            [ "status" .= ("ERROR" :: Text)
+            , "message" .= errorMessage err
+            , "code" .= errorCode err
+            ]
 
 errorMessage :: APIError -> Text
 errorMessage (NotFound msg) = msg

@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# One-command dev: DB setup + ghcid auto-reload server
+# Usage: sc-dev
+#
+# This:
+# 1. Ensures DB exists and is migrated
+# 2. Starts ghcid watching for changes
+# 3. Auto-restarts the server on every successful compile
+#
+# Press Ctrl+C to stop.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+cd "$PROJECT_DIR"
+
+DB_NAME="${SC_DB_NAME:-system_control}"
+DB_USER="${SC_DB_USER:-$(whoami)}"
+DB_HOST="${SC_DB_HOST:-localhost}"
+DB_PORT="${SC_DB_PORT:-5432}"
+SERVER_PORT="${PORT:-8012}"
+
+# Step 1: Ensure DB is ready (silent if already set up)
+echo "── Checking database ──"
+if psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME"; then
+  echo "  DB '$DB_NAME' exists, running migrations..."
+  bash scripts/migrate.sh 2>&1 | sed 's/^/  /'
+else
+  echo "  DB '$DB_NAME' not found, running full setup..."
+  bash scripts/setup-db.sh 2>&1 | sed 's/^/  /'
+fi
+
+# Step 2: Start ghcid with auto-restart
+echo ""
+echo "── Starting dev server (ghcid) ──"
+echo "  Port: $SERVER_PORT"
+echo "  DB:   postgres://$DB_USER@$DB_HOST:$DB_PORT/$DB_NAME"
+echo "  Watching for changes... (Ctrl+C to stop)"
+echo ""
+
+export SC_DATABASE_URL="postgres://$DB_USER@$DB_HOST:$DB_PORT/$DB_NAME"
+export PORT="$SERVER_PORT"
+
+exec ghcid \
+  --command "cabal repl exe:namma-ap-exe" \
+  --test "Main.main" \
+  --restart="package.yaml" \
+  --restart="dhall-configs/system-control.dhall" \
+  --reload="src"
