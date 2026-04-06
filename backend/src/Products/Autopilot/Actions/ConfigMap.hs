@@ -48,6 +48,7 @@ import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.API
 import qualified Products.Autopilot.Types.Storage.Schema as S
 import Products.Autopilot.Types.Target (TargetState (..), emptyConfigState)
+import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers (captureConfigMapSnapshot)
 import Shared.API.Response (APIResponse (..))
 import System.Exit (ExitCode (..))
@@ -287,6 +288,7 @@ handleConfigMapRevert db rt mts cmId' = do
             rt
               { NT.releaseId = newRid,
                 NT.status = CREATED,
+                NT.releaseWFStatus = INIT,
                 NT.isApproved = False,
                 NT.description = Just ("Revert of " <> cmId'),
                 NT.changeLog = Just ("REVERTED from tracker " <> cmId'),

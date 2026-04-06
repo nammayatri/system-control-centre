@@ -30,7 +30,7 @@ import qualified Data.Text.Lazy.Encoding as TLE
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd, shellQuote)
 import Products.Autopilot.Notifications (notifyConfigMapCompleted)
 import Products.Autopilot.Queries.ProductService (findProductByName, getProductNamespace)
-import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker, insertReleaseTracker)
+import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker, insertReleaseEvent, insertReleaseTracker)
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
 import Products.Autopilot.Types.Target (BackendConfigWFStatus (..), ConfigDeploymentState (..), TargetState (..), emptyConfigState)
 import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
@@ -203,8 +203,14 @@ applyConfigMap = do
           db <- lift getDBEnv
           liftIO $ captureConfigMapSnapshot cfg db (releaseId rt) (T.pack ns) (service rt) "CONFIGMAP_AFTER"
           logInfoS "ConfigMap applied successfully"
-        Left err -> liftIO $ throwIO $ WorkflowError "apply" ("kubectl replace failed: " <> err)
-    _ -> liftIO $ throwIO $ WorkflowError "apply" "Missing workflow metadata"
+        Left err -> do
+          db <- lift getDBEnv
+          liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (String err)
+          liftIO $ throwIO $ WorkflowError "apply" ("kubectl apply failed: " <> err)
+    _ -> do
+      db <- lift getDBEnv
+      liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (String "Missing workflow metadata (resolveConfigContent did not run?)")
+      liftIO $ throwIO $ WorkflowError "apply" "Missing workflow metadata"
 
 -- | Mark workflow as complete
 notifyComplete :: StateFlow ()
