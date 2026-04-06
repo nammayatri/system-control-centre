@@ -12,6 +12,7 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy.Char8 as BL
 import Data.Maybe (mapMaybe)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Text.Encoding (encodeUtf8)
 import Products.Autopilot.K8s.Kubectl (K8sError (..), getVirtualServiceJson)
@@ -57,4 +58,4 @@ extractHosts (A.Object root) =
 extractHosts _ = []
 
 uniq :: [Text] -> [Text]
-uniq = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
+uniq = Set.toList . Set.fromList

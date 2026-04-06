@@ -29,10 +29,11 @@ where
 import Control.Exception (SomeException, try)
 import Core.Config (Config (..))
 import Core.Environment (DBEnv)
-import Data.Aeson (Value (..), eitherDecode, object, (.=))
+import Data.Aeson (Value (..), object, (.=))
+import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
-import qualified Data.ByteString.Lazy as LBS
+import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -100,12 +101,12 @@ checkPromQueries db cfg tracker mDecisionConfig = do
 -- (Abort > Warn > OK).
 executePromChecks :: String -> Text -> ReleaseTracker -> IO PromCheckResult
 executePromChecks promUrl configJson tracker =
-  case eitherDecode (LBS.fromStrict (TE.encodeUtf8 configJson)) of
-    Left _ -> do
+  case A.decodeStrict' (TE.encodeUtf8 configJson) of
+    Nothing -> do
       -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
       putStrLn "[DECISION] Failed to parse decision_config JSON, skipping prom checks"
       pure PromOK -- Invalid config, skip (fail open)
-    Right configs -> checkAllConfigs promUrl configs tracker
+    Just configs -> checkAllConfigs promUrl configs tracker
 
 -- | Check all config entries, returning the worst result.
 -- Abort > Warn > OK.
@@ -155,7 +156,7 @@ checkConfigQueries promUrl (Object configObj) = do
     Just (Object innerConfig) ->
       case KM.lookup (K.fromText "experiments") innerConfig of
         Just (Array experiments) ->
-          checkExperiments promUrl (foldr (:) [] experiments)
+          checkExperiments promUrl (toList experiments)
         _ -> pure PromOK
     _ -> pure PromOK
 checkConfigQueries _ _ = pure PromOK
@@ -178,7 +179,7 @@ checkExperiments promUrl (exp' : rest) = do
 checkExperiment :: String -> Value -> IO PromCheckResult
 checkExperiment promUrl (Object expObj) = do
   let queries = case KM.lookup (K.fromText "queries") expObj of
-        Just (Array qs) -> foldr (:) [] qs
+        Just (Array qs) -> toList qs
         _ -> []
       abortThreshold = extractThreshold "abort" expObj
       warnThreshold = extractThreshold "warn" expObj
@@ -271,18 +272,18 @@ queryPrometheus promUrl query = do
 -- { "status": "success", "data": { "result": [{ "value": [timestamp, "value_string"] }] } }
 parsePromResponse :: String -> Maybe Double
 parsePromResponse raw =
-  case eitherDecode (LBS.fromStrict (TE.encodeUtf8 (T.pack raw))) :: Either String Value of
-    Left _ -> Nothing
-    Right (Object obj) ->
+  case A.decodeStrict' (TE.encodeUtf8 (T.pack raw)) :: Maybe Value of
+    Nothing -> Nothing
+    Just (Object obj) ->
       case KM.lookup (K.fromText "data") obj of
         Just (Object dataObj) ->
           case KM.lookup (K.fromText "result") dataObj of
             Just (Array results) ->
-              case foldr (:) [] results of
+              case toList results of
                 (Object r : _) ->
                   case KM.lookup (K.fromText "value") r of
                     Just (Array vals) ->
-                      case foldr (:) [] vals of
+                      case toList vals of
                         [_, String valStr] ->
                           case reads (T.unpack valStr) :: [(Double, String)] of
                             ((v, _) : _) -> Just v
@@ -433,8 +434,8 @@ httpGetJson url = do
   case result of
     Left e -> pure (Left (show e))
     Right (ExitSuccess, out, _) ->
-      case eitherDecode (LBS.fromStrict (TE.encodeUtf8 (T.pack out))) :: Either String Value of
-        Right val -> pure (Right val)
-        Left err -> pure (Left ("JSON parse error: " <> err))
+      case A.decodeStrict' (TE.encodeUtf8 (T.pack out)) :: Maybe Value of
+        Just val -> pure (Right val)
+        Nothing -> pure (Left "JSON parse error")
     Right (ExitFailure code, _, err) ->
       pure (Left ("curl failed (exit " <> show code <> "): " <> err))

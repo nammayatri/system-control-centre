@@ -20,8 +20,6 @@ import Core.Config (Config (..))
 import Data.Aeson (Value)
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as BSL
-import Data.Char (toLower)
-import Data.List (isInfixOf)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -70,13 +68,11 @@ executeWithRetry cfg cmd = go 1
 
 isIdempotentSuccess :: K8sError -> Bool
 isIdempotentSuccess (K8sError e) =
-  any (`isInfixOf` lowerMsg) ["alreadyexists", "already exists", "unchanged", "configured"]
-  where
-    lowerMsg = map toLower (T.unpack e)
+  let low = T.toLower e
+   in any (`T.isInfixOf` low) ["alreadyexists", "already exists", "unchanged", "configured"]
 
 -- | Detect K8s 409 Conflict error (resourceVersion mismatch during replace)
 isConflictError :: K8sError -> Bool
 isConflictError (K8sError e) =
-  any (`isInfixOf` lowerMsg) ["conflict", "the object has been modified", "please apply your changes to the latest version"]
-  where
-    lowerMsg = map toLower (T.unpack e)
+  let low = T.toLower e
+   in any (`T.isInfixOf` low) ["conflict", "the object has been modified", "please apply your changes to the latest version"]

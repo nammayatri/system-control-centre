@@ -1,7 +1,7 @@
 module Products.Autopilot.Runner where
 
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Monad (forM_, forever)
+import Control.Monad (filterM, forM_, forever)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
 import Core.Config (Config (..))
@@ -9,8 +9,10 @@ import Core.Environment (AppState (..), DBEnv)
 import Core.Logging (LoggerEnv, logErrorIO, logInfoIO, logWarningIO)
 import Core.Utils.FlowMonad
 import Data.Aeson (object, toJSON, (.=))
+import Data.List (sortBy)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
+import Data.Ord (Down (..), comparing)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
 import Products.Autopilot.EventLog (logStatusUpdated, logTrafficUpdatedWithMessage)
@@ -197,12 +199,6 @@ loop = forever $ do
 
   pollDelay <- liftIO $ getReleaseWatchDelay db
   liftIO $ threadDelay (pollDelay * 1000000)
-  where
-    filterM _ [] = pure []
-    filterM f (x : xs) = do
-      ok <- f x
-      rest <- filterM f xs
-      pure (if ok then x : rest else rest)
 
 -- | Get the full AppState from the Flow monad (for passing to forkIO threads)
 getAppState :: Flow AppState
@@ -248,12 +244,7 @@ pickJobs multi jobs
             else (rt, mts) : go (Map.insert key (picked + 1) counts) rest
 
 sortByPriority :: [TrackerWithTarget] -> [TrackerWithTarget]
-sortByPriority = foldr insert []
-  where
-    insert twt [] = [twt]
-    insert twt@(rt, _) (x@(xrt, _) : xs)
-      | priority rt > priority xrt = twt : x : xs
-      | otherwise = x : insert twt xs
+sortByPriority = sortBy (comparing (Down . priority . fst))
 
 -- ============================================================================
 -- Trigger — Only for CREATED trackers
