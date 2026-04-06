@@ -5,7 +5,8 @@ import Control.Monad (forM_, forever)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
 import Core.Config (Config (..))
-import Core.Environment (AppState, DBEnv)
+import Core.Environment (AppState (..), DBEnv)
+import Core.Logging (LoggerEnv, logInfoIO, logErrorIO, logWarningIO)
 import Core.Utils.FlowMonad
 import Data.Aeson (object, toJSON, (.=))
 import qualified Data.Map.Strict as Map
@@ -77,11 +78,9 @@ releaseExpiredVsLocksOnStartup :: Flow ()
 releaseExpiredVsLocksOnStartup = do
   db <- getDBEnv
   n <- liftIO $ releaseExpiredVsLocks db
-  liftIO $
-    putStrLn $
-      if n == 0
-        then "[STARTUP] No expired VS locks to release"
-        else "[STARTUP] Released " <> show n <> " expired VS lock(s)"
+  if n == 0
+    then logInfo "[STARTUP] No expired VS locks to release"
+    else logInfo $ "[STARTUP] Released " <> T.pack (show n) <> " expired VS lock(s)"
 
 -- ============================================================================
 -- Startup Rollback (Julia parity: rollbackReleaseInProgress)
@@ -95,16 +94,18 @@ rollbackInProgressOnStartup = do
   cfg <- getConfig
   db <- getDBEnv
   orphaned <- liftIO $ findInProgressReleaseTrackers db
+  st <- getAppState
+  let logEnv = loggerEnv st
   if null orphaned
-    then liftIO $ putStrLn "[STARTUP] No orphaned INPROGRESS releases found"
+    then logInfo "[STARTUP] No orphaned INPROGRESS releases found"
     else do
-      liftIO $ putStrLn $ "[STARTUP] Rolling back " <> show (length orphaned) <> " orphaned release(s)"
+      logInfo $ "[STARTUP] Rolling back " <> T.pack (show (length orphaned)) <> " orphaned release(s)"
       forM_ orphaned $ \(rt, mts) -> liftIO $ do
-        putStrLn $ "[STARTUP] Rolling back: " <> T.unpack (releaseId rt) <> " (status: " <> show (NT.status rt) <> ")"
+        logInfoIO logEnv $ "[STARTUP] Rolling back: " <> releaseId rt <> " (status: " <> T.pack (show (NT.status rt)) <> ")"
         -- Restore VS traffic to old version (best-effort). For REVERTING releases
         -- this is also the correct recovery action: the revert was mid-flight, so
         -- pointing traffic back to old version completes the revert's intent.
-        restoreVsTrafficOnFailure cfg db rt mts
+        restoreVsTrafficOnFailure logEnv cfg db rt mts
         now <- getCurrentTime
         -- Julia parity (api/rollback/rollback.jl:32-38): a REVERTING release
         -- whose thread was lost on restart should be treated as a *completed*
@@ -125,9 +126,9 @@ rollbackInProgressOnStartup = do
             ok <- conditionalUpdateTracker db reverted mts oldStatusText
             if not ok
               then
-                putStrLn $
+                logWarningIO logEnv $
                   "[STARTUP] Skipping revert completion for "
-                    <> T.unpack (releaseId rt)
+                    <> releaseId rt
                     <> " — status changed under us during restoreVsTrafficOnFailure"
               else do
                 logStatusUpdated db reverted "Revert completed on startup recovery"
@@ -142,9 +143,9 @@ rollbackInProgressOnStartup = do
             ok <- conditionalUpdateTracker db aborted mts oldStatusText
             if not ok
               then
-                putStrLn $
+                logWarningIO logEnv $
                   "[STARTUP] Skipping rollback for "
-                    <> T.unpack (releaseId rt)
+                    <> releaseId rt
                     <> " — status changed under us during restoreVsTrafficOnFailure"
               else do
                 -- Production parity (events.jl:251-286 rollbackEvent!):
@@ -160,7 +161,7 @@ rollbackInProgressOnStartup = do
                   "STARTUP_ROLLBACK"
                   (toJSON ("ABORTED due to server restart — VS traffic restored to old version" :: T.Text))
                 notifyReleaseAborted db aborted
-      liftIO $ putStrLn "[STARTUP] Rollback complete"
+      logInfo "[STARTUP] Rollback complete"
 
 -- ============================================================================
 -- Main Poll Loop
@@ -186,12 +187,13 @@ loop = forever $ do
 
   -- Step 3: Handle aborting trackers
   abortingTrackers <- liftIO $ findAbortingReleaseTrackers db
-  forM_ abortingTrackers $ \(rt, mts) -> liftIO $ handleAbortingRelease cfg db rt mts
+  let logEnv' = loggerEnv st
+  forM_ abortingTrackers $ \(rt, mts) -> liftIO $ handleAbortingRelease logEnv' cfg db rt mts
 
   -- Step 4: Handle scale-down of old deployments after delay
   scaleDownDelay <- liftIO $ getPodsScaleDownDelayFromConfig db
   completedTrackers <- liftIO $ findCompletedTrackersForScaleDown db now scaleDownDelay
-  forM_ completedTrackers $ \twt -> liftIO $ scaleDownOldDeployment db cfg twt
+  forM_ completedTrackers $ \twt -> liftIO $ scaleDownOldDeployment logEnv' db cfg twt
 
   pollDelay <- liftIO $ getReleaseWatchDelay db
   liftIO $ threadDelay (pollDelay * 1000000)
@@ -283,7 +285,7 @@ trigger db (rt, mts) = do
           row = toRow now now rtNew mts
       claimed <- liftIO $ conditionalUpdateTrackerRow db row "CREATED"
       if not claimed
-        then liftIO $ putStrLn $ "[RUNNER] Release " <> T.unpack (releaseId rt) <> " already claimed, skipping"
+        then logInfo $ "[RUNNER] Release " <> releaseId rt <> " already claimed, skipping"
         else do
           liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "RUNNER_PICKED" (toJSON rt)
           result <- dispatchWorkflow rtNew mts
@@ -299,14 +301,15 @@ trigger db (rt, mts) = do
               if isUserAbort
                 then do
                   -- Defer to handleAbortingRelease (Step 3 of poll loop)
-                  liftIO $ putStrLn $ "[RUNNER] Workflow exited due to user abort — deferring: " <> T.unpack (releaseId rt)
+                  logInfo $ "[RUNNER] Workflow exited due to user abort — deferring: " <> releaseId rt
                   liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "WORKFLOW_ABORT_EXIT" (toJSON (show err))
                 else do
                   endNow <- liftIO getCurrentTime
                   let abortedTracker = rtNew{status = ABORTED, releaseWFStatus = ROLLING_BACK, endTime = Just endNow}
                   liftIO $ insertReleaseTracker db abortedTracker mts
                   liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
-                  liftIO $ restoreVsTrafficOnFailure cfg' db rt mts
+                  st' <- getAppState
+                  liftIO $ restoreVsTrafficOnFailure (loggerEnv st') cfg' db rt mts
                   liftIO $ notifyReleaseAborted db abortedTracker
             Right finalState -> do
               liftIO $ insertReleaseTracker db (releaseTracker finalState) (targetState finalState)
@@ -351,27 +354,27 @@ validateRunningVersion cfg _db rt mts = do
 -- Failure Recovery: Restore VS Traffic
 -- ============================================================================
 
-restoreVsTrafficOnFailure :: Config -> DBEnv -> ReleaseTracker -> Maybe TargetState -> IO ()
-restoreVsTrafficOnFailure cfg db rt mts = do
+restoreVsTrafficOnFailure :: LoggerEnv -> Config -> DBEnv -> ReleaseTracker -> Maybe TargetState -> IO ()
+restoreVsTrafficOnFailure logEnv cfg db rt mts = do
   case mts of
     Just (K8sState k8s) -> do
       let ctx = context k8s
           oldVer = K8s.oldVersion ctx
           isNewSvc = newService k8s
       if isNewSvc || T.null oldVer || oldVer == "new" || oldVer == "unknown"
-        then putStrLn $ "[restoreVsTrafficOnFailure] Skipping VS restore for " <> T.unpack (releaseId rt) <> " (new service or no old version)"
+        then logInfoIO logEnv $ "[restoreVsTrafficOnFailure] Skipping VS restore for " <> releaseId rt <> " (new service or no old version)"
         else do
-          putStrLn $ "[restoreVsTrafficOnFailure] Restoring VS traffic to old version for " <> T.unpack (releaseId rt)
+          logInfoIO logEnv $ "[restoreVsTrafficOnFailure] Restoring VS traffic to old version for " <> releaseId rt
           vsResult <- applyVirtualServiceRollout cfg ctx 100 0
           case vsResult of
-            Left err -> putStrLn $ "[restoreVsTrafficOnFailure] WARNING: Failed to restore VS: " <> show err
-            Right _ -> putStrLn $ "[restoreVsTrafficOnFailure] VS traffic restored to old version"
+            Left err -> logWarningIO logEnv $ "[restoreVsTrafficOnFailure] WARNING: Failed to restore VS: " <> T.pack (show err)
+            Right _ -> logInfoIO logEnv "[restoreVsTrafficOnFailure] VS traffic restored to old version"
           let newDepName = deploymentName ctx
               ns = namespace ctx
           scaleResult <- runCmd (buildScaleNamedDeploymentCommand cfg ns newDepName 0)
           case scaleResult of
-            Left err -> putStrLn $ "[restoreVsTrafficOnFailure] WARNING: Failed to scale down new deployment: " <> show err
-            Right _ -> putStrLn $ "[restoreVsTrafficOnFailure] New deployment scaled down to 0"
+            Left err -> logWarningIO logEnv $ "[restoreVsTrafficOnFailure] WARNING: Failed to scale down new deployment: " <> T.pack (show err)
+            Right _ -> logInfoIO logEnv "[restoreVsTrafficOnFailure] New deployment scaled down to 0"
           insertReleaseEvent
             db
             (releaseId rt)
@@ -384,10 +387,10 @@ restoreVsTrafficOnFailure cfg db rt mts = do
 -- Abort Handling
 -- ============================================================================
 
-handleAbortingRelease :: Config -> DBEnv -> ReleaseTracker -> Maybe TargetState -> IO ()
-handleAbortingRelease cfg db rt mts = do
-  putStrLn $ "[handleAbortingRelease] Processing abort for " <> T.unpack (releaseId rt)
-  restoreVsTrafficOnFailure cfg db rt mts
+handleAbortingRelease :: LoggerEnv -> Config -> DBEnv -> ReleaseTracker -> Maybe TargetState -> IO ()
+handleAbortingRelease logEnv cfg db rt mts = do
+  logInfoIO logEnv $ "[handleAbortingRelease] Processing abort for " <> releaseId rt
+  restoreVsTrafficOnFailure logEnv cfg db rt mts
   now <- getCurrentTime
   let aborted = rt{status = USER_ABORTED, endTime = Just now}
   insertReleaseTracker db aborted mts
@@ -427,8 +430,8 @@ handleAbortingRelease cfg db rt mts = do
 --   status we saw at poll-pick time. If anything changed between re-read
 --   and CAS (narrow window but real), the blind insert is suppressed so
 --   we don't overwrite the user's concurrent edit.
-scaleDownOldDeployment :: DBEnv -> Config -> TrackerWithTarget -> IO ()
-scaleDownOldDeployment db cfg (rt, mts) = do
+scaleDownOldDeployment :: LoggerEnv -> DBEnv -> Config -> TrackerWithTarget -> IO ()
+scaleDownOldDeployment logEnv db cfg (rt, mts) = do
   case mts of
     Just (K8sState k8s) -> do
       -- Part A — re-verify the tracker is still scale-down-eligible.
@@ -444,12 +447,12 @@ scaleDownOldDeployment db cfg (rt, mts) = do
             if T.null oldVer || oldVer == "new" || oldVer == "unknown"
               then pure ()
               else do
-                putStrLn $ "[scaleDownOldDeployment] Scaling down old deployment: " <> T.unpack oldDepName <> " for release " <> T.unpack (releaseId rt)
+                logInfoIO logEnv $ "[scaleDownOldDeployment] Scaling down old deployment: " <> oldDepName <> " for release " <> releaseId rt
                 result <- runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName 0)
                 case result of
-                  Left err -> putStrLn $ "[scaleDownOldDeployment] WARNING: Failed to scale down: " <> show err
+                  Left err -> logWarningIO logEnv $ "[scaleDownOldDeployment] WARNING: Failed to scale down: " <> T.pack (show err)
                   Right _ -> do
-                    putStrLn $ "[scaleDownOldDeployment] Old deployment scaled down successfully"
+                    logInfoIO logEnv "[scaleDownOldDeployment] Old deployment scaled down successfully"
                     notifyPodsScaledDown db rt oldVer
                 let updatedCtx = ctx{podsScaleDownStatus = Just ScaleDownCompleted}
                     updatedK8s = k8s{context = updatedCtx}
@@ -458,9 +461,9 @@ scaleDownOldDeployment db cfg (rt, mts) = do
                 ok <- conditionalUpdateTracker db rt updatedMts (releaseStatusToText (NT.status rt))
                 if not ok
                   then
-                    putStrLn $
+                    logWarningIO logEnv $
                       "[scaleDownOldDeployment] Status changed under us; not persisting scale-down flag for "
-                        <> T.unpack (releaseId rt)
+                        <> releaseId rt
                   else
                     insertReleaseEvent
                       db
@@ -469,12 +472,12 @@ scaleDownOldDeployment db cfg (rt, mts) = do
                       "OLD_PODS_SCALED_DOWN"
                       (object ["oldDeployment" .= (oldDepName :: T.Text), "namespace" .= (ns :: T.Text)])
         _ ->
-          putStrLn $
+          logWarningIO logEnv $
             "[scaleDownOldDeployment] Skipping "
-              <> T.unpack (releaseId rt)
+              <> releaseId rt
               <> " — status no longer scale-down-eligible (was "
-              <> show (NT.status rt)
+              <> T.pack (show (NT.status rt))
               <> ", now "
-              <> show (fmap (NT.status . fst) freshM)
+              <> T.pack (show (fmap (NT.status . fst) freshM))
               <> ")"
     _ -> pure ()

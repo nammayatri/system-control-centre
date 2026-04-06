@@ -12,9 +12,8 @@ module Products.Autopilot.Workflow.Factory
 where
 
 import Control.Monad.Except (runExceptT, throwError)
-import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
-import Core.Utils.FlowMonad (Flow)
+import Core.Utils.FlowMonad (Flow, logWarning)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
@@ -109,10 +108,8 @@ notImplementedWorkflow :: Text -> WorkflowExecutor
 notImplementedWorkflow categoryName = do
   lift $
     lift $
-      liftIO $
-        putStrLn $
-          T.unpack $
-            "⚠️  Workflow not implemented for category: " <> categoryName
+      logWarning $
+        "Workflow not implemented for category: " <> categoryName
   throwError $
     DomainError $
       T.unpack $

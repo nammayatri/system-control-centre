@@ -24,6 +24,8 @@ where
 import Control.Concurrent (threadDelay)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
+import Control.Exception (throwIO)
+import Core.AppError (WorkflowError(..))
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.Config (Config (..))
@@ -143,7 +145,7 @@ getK8sCtx = do
   rs <- gets id
   case targetState rs of
     Just (K8sState k8s) -> pure (context k8s)
-    _ -> liftIO $ fail "BackendServiceWorkflow: missing K8sState in targetState"
+    _ -> liftIO $ throwIO $ WorkflowError "init" "Missing K8sState in targetState"
 
 -- | Check if this is a new service release (no existing deployment)
 isNewServiceRelease :: StateFlow Bool
@@ -159,7 +161,7 @@ runK8sIO action = do
   result <- liftIO action
   case result of
     Right a -> pure a
-    Left (K8sError err) -> liftIO $ fail ("K8s error: " <> T.unpack err)
+    Left (K8sError err) -> liftIO $ throwIO $ WorkflowError "k8s" err
 
 -- | Apply VS rollout with a pessimistic lock around the operation.
 -- Acquires vs_locked_by before the kubectl call, releases after (success or fail).
@@ -174,8 +176,8 @@ runVsRolloutWithLock cfg ctx oldW newW = do
       withVsLock db (appGroup rt) lockOwner $
         applyVirtualServiceRollout cfg ctx oldW newW
   case result of
-    Left err -> liftIO $ fail ("VS lock failed: " <> T.unpack err)
-    Right (Left (K8sError k8sErr)) -> liftIO $ fail ("K8s error: " <> T.unpack k8sErr)
+    Left err -> liftIO $ throwIO $ WorkflowError "vs-lock" err
+    Right (Left (K8sError k8sErr)) -> liftIO $ throwIO $ WorkflowError "k8s" k8sErr
     Right (Right _) -> pure ()
 
 -- ============================================================================
@@ -281,7 +283,7 @@ prepareK8sResources = do
               pure ()
             Nothing -> do
               liftIO $ putStrLn $ "  ERROR: New service requires deployFilePath"
-              liftIO $ fail "New service release requires deployFilePath to create deployment from scratch"
+              liftIO $ throwIO $ WorkflowError "deploy" "New service release requires deployFilePath"
         else do
           liftIO $ putStrLn $ "  Cloning deployment to " <> T.unpack (deploymentName ctx)
           _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg ctx)
@@ -435,7 +437,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
   case freshResult of
     Nothing -> do
       liftIO $ putStrLn "  [rolloutLoop] Tracker deleted from DB, aborting"
-      liftIO $ fail "Tracker deleted during rollout"
+      liftIO $ throwIO $ WorkflowError "rollout" "Tracker deleted during rollout"
     Just (freshRT, freshMts) -> do
       -- Sync our in-memory state with what the DB has
       updateRT $ \_ -> freshRT
@@ -447,13 +449,13 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
       case status freshRT of
         ABORTING -> do
           liftIO $ putStrLn $ "  [rolloutLoop] Release " <> T.unpack (releaseId freshRT) <> " is aborting, exiting workflow. Runner will handle cleanup."
-          liftIO $ fail "Release aborted by user — runner will restore traffic"
+          liftIO $ throwIO $ WorkflowError "rollout" "Release aborted by user"
         USER_ABORTED -> do
           liftIO $ putStrLn "  [rolloutLoop] Tracker is USER_ABORTED, stopping rollout"
-          liftIO $ fail "Release user-aborted during rollout"
+          liftIO $ throwIO $ WorkflowError "rollout" "Release user-aborted during rollout"
         ABORTED -> do
           liftIO $ putStrLn "  [rolloutLoop] Tracker is ABORTED, stopping rollout"
-          liftIO $ fail "Release aborted during rollout"
+          liftIO $ throwIO $ WorkflowError "rollout" "Release aborted during rollout"
         COMPLETED -> do
           liftIO $ putStrLn "  [rolloutLoop] Tracker is COMPLETED (externally), finishing"
           pure ()
@@ -530,7 +532,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                           currentRT' <- getRT
                           currentTS' <- gets targetState
                           liftIO $ insertReleaseTracker db currentRT' currentTS'
-                          liftIO $ fail ("Prometheus ABORT: " <> T.unpack reason)
+                          liftIO $ throwIO $ WorkflowError "decision" ("Prometheus ABORT: " <> reason)
                         PromWarn reason -> do
                           liftIO $ putStrLn $ "[DECISION] Prometheus WARN: " <> T.unpack reason
                           -- Production parity (service.jl:206-208): Slack only, no DB event
@@ -589,7 +591,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                           liftIO $ insertReleaseTracker db currentRT' currentTS'
                           -- Production parity (service.jl:222): second STATUS_UPDATED for rollback
                           liftIO $ logStatusUpdated db currentRT' ("Rolling back the traffic to version " <> oldVersion ctx)
-                          liftIO $ fail "Decision engine: ABORT"
+                          liftIO $ throwIO $ WorkflowError "decision" "Decision engine: ABORT"
 
                   if shouldAdvance
                     then do
@@ -662,7 +664,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
         _ -> do
           -- Unexpected status during rollout
           liftIO $ putStrLn $ "  [rolloutLoop] Unexpected status: " <> show (status freshRT) <> ", stopping"
-          liftIO $ fail $ "Unexpected tracker status during rollout: " <> show (status freshRT)
+          liftIO $ throwIO $ WorkflowError "rollout" ("Unexpected status: " <> T.pack (show (status freshRT)))
 
 -- | Create a RolloutHistory entry (matches production RolloutHistory struct)
 mkRolloutHistory :: Int -> Int -> Int -> UTCTime -> Maybe UTCTime -> RolloutHistory
@@ -716,7 +718,7 @@ monitorHealth = do
   case waitResult of
     Left errMsg -> do
       liftIO $ putStrLn $ "  Pod readiness check FAILED: " <> T.unpack errMsg
-      liftIO $ fail ("Pod readiness check failed: " <> T.unpack errMsg)
+      liftIO $ throwIO $ WorkflowError "monitoring" ("Pod readiness: " <> errMsg)
     Right () ->
       liftIO $ putStrLn "  All pods ready"
 
@@ -787,7 +789,7 @@ postMonitorLoop cfg db rt iteration = do
           currentRT <- getRT
           currentTS <- gets targetState
           liftIO $ insertReleaseTracker db currentRT currentTS
-          liftIO $ fail "Post-monitoring ABORT"
+          liftIO $ throwIO $ WorkflowError "monitoring" "Post-monitoring ABORT"
         Wait -> do
           collectDelay <- liftIO $ getCollectMetricsDelay db
           liftIO $ threadDelay (collectDelay * 1000000)

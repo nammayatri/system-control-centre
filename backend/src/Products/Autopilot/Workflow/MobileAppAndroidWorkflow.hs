@@ -16,6 +16,8 @@ where
 import Control.Concurrent (threadDelay)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (gets, modify)
+import Control.Monad.Trans.Class (lift)
+import Core.Utils.FlowMonad (logInfo, logWarning)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -66,6 +68,17 @@ mobileAppAndroidWorkflow = do
   DONE |>> notifyRelease
 
 -- ============================================================================
+-- Logging Helpers
+-- ============================================================================
+
+-- | StateFlow-level logging (lifts from Flow)
+logInfoS :: T.Text -> StateFlow ()
+logInfoS = lift . logInfo
+
+logWarningS :: T.Text -> StateFlow ()
+logWarningS = lift . logWarning
+
+-- ============================================================================
 -- Workflow Step Implementations
 -- ============================================================================
 
@@ -76,22 +89,22 @@ mobileAppAndroidWorkflow = do
 validateAPK :: StateFlow ()
 validateAPK = do
   rt <- getRT
-  liftIO $ putStrLn $ "🔍 Validating APK for " <> T.unpack (appGroup rt)
+  logInfoS $ "🔍 Validating APK for " <> appGroup rt
 
   -- Initialize Play Store deployment state with MAInit
   let playStoreState = emptyPlayStoreState{categoryWorkflowStatus = MAInit}
   modify $ \rs -> rs{targetState = Just (PlayStoreState playStoreState)}
 
   -- Validate APK signature
-  liftIO $ putStrLn "  ✓ Checking APK signature"
+  logInfoS "  ✓ Checking APK signature"
 
   -- Validate version code
-  liftIO $ putStrLn "  ✓ Validating version code"
+  logInfoS "  ✓ Validating version code"
 
   -- Check permissions
-  liftIO $ putStrLn "  ✓ Checking app permissions"
+  logInfoS "  ✓ Checking app permissions"
 
-  liftIO $ putStrLn "✅ APK validation complete"
+  logInfoS "✅ APK validation complete"
 
 -- | Upload to Play Store
 --
@@ -100,11 +113,11 @@ validateAPK = do
 uploadToPlayStore :: StateFlow ()
 uploadToPlayStore = do
   rt <- getRT
-  liftIO $ putStrLn $ "📤 Uploading APK to Play Store for " <> T.unpack (appGroup rt)
+  logInfoS $ "📤 Uploading APK to Play Store for " <> appGroup rt
 
   -- Upload APK
   updatePlayStoreStatus MAUploadAPK
-  liftIO $ putStrLn "  ✓ Uploading APK to Play Console"
+  logInfoS "  ✓ Uploading APK to Play Console"
 
   let versionCode = fromMaybe "unknown" (releaseTag rt)
   updatePlayStoreField (\ps -> ps{apkUploaded = Just versionCode})
@@ -113,19 +126,19 @@ uploadToPlayStore = do
 
   -- Submit for review
   updatePlayStoreStatus MASubmitForReview
-  liftIO $ putStrLn "  ✓ Submitting for Play Store review"
+  logInfoS "  ✓ Submitting for Play Store review"
   updatePlayStoreField (\ps -> ps{reviewStatus = UnderReview})
 
   -- Wait for review approval (simulated)
   updatePlayStoreStatus MAWaitingReview
-  liftIO $ putStrLn "  ⏱️  Waiting for review approval"
+  logInfoS "  ⏱️  Waiting for review approval"
   liftIO $ threadDelay 10000000 -- 10 seconds (simulated review)
 
   -- Review approved
-  liftIO $ putStrLn "  ✓ Review approved!"
+  logInfoS "  ✓ Review approved!"
   updatePlayStoreField (\ps -> ps{reviewStatus = Approved})
 
-  liftIO $ putStrLn "✅ APK uploaded and approved"
+  logInfoS "✅ APK uploaded and approved"
 
 -- | Staged rollout (0% → 25% → 50% → 100%)
 --
@@ -134,20 +147,20 @@ uploadToPlayStore = do
 stagedRollout :: StateFlow ()
 stagedRollout = do
   rt <- getRT
-  liftIO $ putStrLn $ "🚀 Starting staged rollout for " <> T.unpack (appGroup rt)
+  logInfoS $ "🚀 Starting staged rollout for " <> appGroup rt
 
   updatePlayStoreStatus MAStagedRollout
 
   -- Rollout in stages: 25% → 50% → 100%
   rolloutStaged [25, 50, 100]
 
-  liftIO $ putStrLn "✅ Staged rollout complete"
+  logInfoS "✅ Staged rollout complete"
 
 -- | Rollout in stages
 rolloutStaged :: [Int] -> StateFlow ()
 rolloutStaged [] = return ()
 rolloutStaged (pct : rest) = do
-  liftIO $ putStrLn $ "  📊 Releasing to " <> show pct <> "% of users"
+  logInfoS $ "  📊 Releasing to " <> T.pack (show pct) <> "% of users"
 
   -- Update rollout percentage
   updatePlayStoreField (\ps -> ps{stagedRolloutPercent = pct})
@@ -164,22 +177,22 @@ rolloutStaged (pct : rest) = do
 -- | Check health at current rollout level
 checkHealthAtRolloutLevel :: Int -> StateFlow ()
 checkHealthAtRolloutLevel pct = do
-  liftIO $ putStrLn $ "    🔍 Checking health at " <> show pct <> "% rollout"
+  logInfoS $ "    🔍 Checking health at " <> T.pack (show pct) <> "% rollout"
 
   -- Fetch crash rate from Play Console (simulated)
   let crashRate = 0.003 -- 0.3%
   updatePlayStoreField (\ps -> ps{crashRate = Just crashRate})
-  liftIO $ putStrLn $ "      ✓ Crash rate: " <> show (crashRate * 100) <> "%"
+  logInfoS $ "      ✓ Crash rate: " <> T.pack (show (crashRate * 100)) <> "%"
 
   -- Fetch ANR rate (simulated)
   let anrRate = 0.001 -- 0.1%
   updatePlayStoreField (\ps -> ps{anrRate = Just anrRate})
-  liftIO $ putStrLn $ "      ✓ ANR rate: " <> show (anrRate * 100) <> "%"
+  logInfoS $ "      ✓ ANR rate: " <> T.pack (show (anrRate * 100)) <> "%"
 
   -- Check user ratings (simulated)
   let rating = 4.5
   updatePlayStoreField (\ps -> ps{averageRating = Just rating})
-  liftIO $ putStrLn $ "      ✓ Average rating: " <> show rating
+  logInfoS $ "      ✓ Average rating: " <> T.pack (show rating)
 
 -- | Monitor crash rates
 --
@@ -188,12 +201,12 @@ checkHealthAtRolloutLevel pct = do
 monitorCrashRates :: StateFlow ()
 monitorCrashRates = do
   rt <- getRT
-  liftIO $ putStrLn $ "👀 MONITORING crash rates for " <> T.unpack (appGroup rt)
+  logInfoS $ "👀 MONITORING crash rates for " <> appGroup rt
 
   updatePlayStoreStatus MAMonitorCrashRate
 
   -- Monitor for 30 seconds
-  liftIO $ putStrLn "  ⏱️  MONITORING period (30s)"
+  logInfoS "  ⏱️  MONITORING period (30s)"
   liftIO $ threadDelay 30000000
 
   -- Check final metrics
@@ -204,11 +217,11 @@ monitorCrashRates = do
       let ar = fromMaybe 0 (anrRate ps)
 
       if cr > 0.01 || ar > 0.005
-        then liftIO $ putStrLn "  ⚠️  Warning: High crash/ANR rate detected"
-        else liftIO $ putStrLn "  ✓ Metrics within acceptable range"
+        then logWarningS "  ⚠️  Warning: High crash/ANR rate detected"
+        else logInfoS "  ✓ Metrics within acceptable range"
     _ -> return ()
 
-  liftIO $ putStrLn "✅ MONITORING complete"
+  logInfoS "✅ MONITORING complete"
 
 -- | Promote to full release
 --
@@ -217,14 +230,14 @@ monitorCrashRates = do
 promoteToFull :: StateFlow ()
 promoteToFull = do
   rt <- getRT
-  liftIO $ putStrLn $ "🎯 Promoting to full release for " <> T.unpack (appGroup rt)
+  logInfoS $ "🎯 Promoting to full release for " <> appGroup rt
 
   updatePlayStoreStatus MAPromoteToFull
-  liftIO $ putStrLn "  ✓ Promoting to 100% rollout"
+  logInfoS "  ✓ Promoting to 100% rollout"
 
   updatePlayStoreField (\ps -> ps{stagedRolloutPercent = 100})
 
-  liftIO $ putStrLn "✅ Promoted to full release"
+  logInfoS "✅ Promoted to full release"
 
 -- | Notify release complete
 --
@@ -235,20 +248,20 @@ notifyRelease = do
   rt <- getRT
   updatePlayStoreStatus MADone
 
-  liftIO $ putStrLn $ "🎉 Release " <> T.unpack (releaseId rt) <> " completed successfully!"
-  liftIO $ putStrLn $ "   App: " <> T.unpack (appGroup rt)
-  liftIO $ putStrLn $ "   Category: MobileAppAndroid"
-  liftIO $ putStrLn $ "   Status: COMPLETED"
+  logInfoS $ "🎉 Release " <> releaseId rt <> " completed successfully!"
+  logInfoS $ "   App: " <> appGroup rt
+  logInfoS $ "   Category: MobileAppAndroid"
+  logInfoS $ "   Status: COMPLETED"
 
   -- Display final metrics
   rs <- gets id
   case targetState rs of
     Just (PlayStoreState ps) -> do
-      liftIO $ putStrLn "   Final Metrics:"
-      liftIO $ putStrLn $ "     - Rollout: " <> show (stagedRolloutPercent ps) <> "%"
-      liftIO $ putStrLn $ "     - Crash rate: " <> show (fromMaybe 0 (crashRate ps) * 100) <> "%"
-      liftIO $ putStrLn $ "     - ANR rate: " <> show (fromMaybe 0 (anrRate ps) * 100) <> "%"
-      liftIO $ putStrLn $ "     - Average rating: " <> show (fromMaybe 0 (averageRating ps))
+      logInfoS "   Final Metrics:"
+      logInfoS $ "     - Rollout: " <> T.pack (show (stagedRolloutPercent ps)) <> "%"
+      logInfoS $ "     - Crash rate: " <> T.pack (show (fromMaybe 0 (crashRate ps) * 100)) <> "%"
+      logInfoS $ "     - ANR rate: " <> T.pack (show (fromMaybe 0 (anrRate ps) * 100)) <> "%"
+      logInfoS $ "     - Average rating: " <> T.pack (show (fromMaybe 0 (averageRating ps)))
     _ -> return ()
 
   -- Update global status to COMPLETED

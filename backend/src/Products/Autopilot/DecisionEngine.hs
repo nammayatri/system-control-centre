@@ -102,6 +102,7 @@ executePromChecks :: String -> Text -> ReleaseTracker -> IO PromCheckResult
 executePromChecks promUrl configJson tracker =
   case eitherDecode (LBS.fromStrict (TE.encodeUtf8 configJson)) of
     Left _ -> do
+      -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
       putStrLn "[DECISION] Failed to parse decision_config JSON, skipping prom checks"
       pure PromOK -- Invalid config, skip (fail open)
     Right configs -> checkAllConfigs promUrl configs tracker
@@ -141,6 +142,7 @@ checkSingleConfig url config _rt = do
   case result of
     Right r -> pure r
     Left e -> do
+      -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
       putStrLn $ "[DECISION] Prometheus check failed: " <> show e
       pure PromOK -- Fail open
 
@@ -223,6 +225,7 @@ checkSingleQuery promUrl (Object qObj) abortTh warnTh = do
       case mValue of
         Nothing -> pure PromOK -- Query failed, fail open
         Just val -> do
+          -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
           putStrLn $ "[DECISION] Prom query '" <> T.unpack mName <> "' = " <> show val
           case abortTh of
             Just threshold
@@ -252,11 +255,13 @@ queryPrometheus promUrl query = do
   result <- try (readProcessWithExitCode "curl" curlArgs "") :: IO (Either SomeException (ExitCode, String, String))
   case result of
     Left e -> do
+      -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
       putStrLn $ "[DECISION] Prometheus query failed: " <> show e
       pure Nothing
     Right (ExitSuccess, out, _) ->
       pure (parsePromResponse out)
     Right (ExitFailure code, _, err) -> do
+      -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
       putStrLn $ "[DECISION] Prometheus query failed (exit " <> show code <> "): " <> err
       pure Nothing
 
@@ -323,6 +328,7 @@ callABEngine abUrl trackerId = do
   result <- httpGetJson url
   case result of
     Left e -> do
+      -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
       putStrLn $ "[DECISION] AB Engine call failed: " <> show e
       pure (DecisionResult Continue (Just "AB Engine unreachable") "AB_ENGINE")
     Right val -> parseDecisionResponse val "AB_ENGINE"
@@ -364,6 +370,7 @@ callHSEngine hsUrl trackerId isPostMonitoring = do
   result <- httpGetJson url
   case result of
     Left e -> do
+      -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
       putStrLn $ "[DECISION] HS Engine call failed: " <> show e
       pure (DecisionResult Continue (Just "HS Engine unreachable") "HEALTH_SCORE")
     Right val -> parseDecisionResponse val "HEALTH_SCORE"
@@ -404,6 +411,7 @@ parseDecisionResponse (Object obj) source = do
         _ -> Nothing
   pure (DecisionResult decision reason source)
 parseDecisionResponse _ source = do
+  -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
   putStrLn $ "[DECISION] Could not parse decision response for " <> T.unpack source
   pure (DecisionResult Continue (Just "Invalid response format") source)
 

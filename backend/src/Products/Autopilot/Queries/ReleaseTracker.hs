@@ -79,7 +79,8 @@ type TrackerWithTarget = (ReleaseTracker, Maybe TargetState)
 insertReleaseTracker :: DBEnv -> ReleaseTracker -> Maybe TargetState -> IO ()
 insertReleaseTracker db rt mts = do
   now <- getCurrentTime
-  let row = toRow now now rt mts
+  let created = fromMaybe now (dateCreated rt)
+      row = toRow created now rt mts
   -- Atomic: DELETE+INSERT in a single transaction (if INSERT fails, DELETE is rolled back)
   withConn db $ \conn ->
     withTransaction conn $ do
@@ -92,7 +93,8 @@ insertReleaseTracker db rt mts = do
 conditionalUpdateTracker :: DBEnv -> ReleaseTracker -> Maybe TargetState -> Text -> IO Bool
 conditionalUpdateTracker db rt mts expectedStatus = do
   now <- getCurrentTime
-  let row = toRow now now rt mts
+  let created = fromMaybe now (dateCreated rt)
+      row = toRow created now rt mts
   withConn db $ \conn ->
     withTransaction conn $ do
       rowsDeleted <-

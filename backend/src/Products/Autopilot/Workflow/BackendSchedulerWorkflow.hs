@@ -16,6 +16,8 @@ where
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
+import Control.Exception (throwIO)
+import Core.AppError (WorkflowError(..))
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.Config (Config (..))
@@ -94,7 +96,7 @@ getK8sCtx = do
   rs <- gets id
   case targetState rs of
     Just (K8sState k8s) -> pure (context k8s)
-    _ -> liftIO $ fail "BackendSchedulerWorkflow: missing K8sState in targetState"
+    _ -> liftIO $ throwIO $ WorkflowError "init" "Missing K8sState in targetState"
 
 -- | Run an IO action that returns Either K8sError, lifting into StateFlow
 runK8sIO :: IO (Either K8sError a) -> StateFlow a
@@ -102,7 +104,7 @@ runK8sIO action = do
   result <- liftIO action
   case result of
     Right a -> pure a
-    Left (K8sError err) -> liftIO $ fail ("K8s error: " <> T.unpack err)
+    Left (K8sError err) -> liftIO $ throwIO $ WorkflowError "k8s" err
 
 -- ============================================================================
 -- Workflow Step Implementations

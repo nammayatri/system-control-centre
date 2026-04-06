@@ -16,6 +16,8 @@ where
 import Control.Concurrent (threadDelay)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
+import Control.Exception (throwIO)
+import Core.AppError (WorkflowError(..))
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.Config (Config (..))
@@ -85,7 +87,7 @@ getK8sCtx = do
   rs <- gets id
   case targetState rs of
     Just (K8sState k8s) -> pure (context k8s)
-    _ -> liftIO $ fail "BackendJobWorkflow: missing K8sState in targetState"
+    _ -> liftIO $ throwIO $ WorkflowError "init" "Missing K8sState in targetState"
 
 -- | Run an IO action that returns Either K8sError, lifting into StateFlow
 runK8sIO :: IO (Either K8sError a) -> StateFlow a
@@ -93,7 +95,7 @@ runK8sIO action = do
   result <- liftIO action
   case result of
     Right a -> pure a
-    Left (K8sError err) -> liftIO $ fail ("K8s error: " <> T.unpack err)
+    Left (K8sError err) -> liftIO $ throwIO $ WorkflowError "k8s" err
 
 -- ============================================================================
 -- Workflow Step Implementations
@@ -233,12 +235,12 @@ pollJobStatus :: Config -> String -> Int -> Int -> StateFlow ()
 pollJobStatus cfg getJobCmd maxPolls currentPoll = do
   when (currentPoll > maxPolls) $
     liftIO $
-      fail "Job timed out waiting for completion"
+      throwIO $ WorkflowError "wait" "Job timed out waiting for completion"
 
   liftIO $ putStrLn $ "  Poll " <> show currentPoll <> "/" <> show maxPolls <> ": checking job status"
   result <- liftIO $ runCmd getJobCmd
   case result of
-    Left (K8sError err) -> liftIO $ fail $ "Failed to get job status: " <> T.unpack err
+    Left (K8sError err) -> liftIO $ throwIO $ WorkflowError "k8s" ("Failed to get job status: " <> err)
     Right (K8sResult out) -> do
       let (succeeded, failed, backoffLimit) = parseJobStatus out
       liftIO $
@@ -263,7 +265,7 @@ pollJobStatus cfg getJobCmd maxPolls currentPoll = do
               db <- getDB
               rt <- getRT
               liftIO $ notifyReleaseAborted db rt
-              liftIO $ fail $ "Job failed: exceeded backoff limit (failed=" <> show failed <> ", backoffLimit=" <> show backoffLimit <> ")"
+              liftIO $ throwIO $ WorkflowError "wait" ("Job failed: backoff limit exceeded (failed=" <> T.pack (show failed) <> ")")
             else do
               -- Still running, wait and poll again
               liftIO $ threadDelay 10000000 -- 10 seconds

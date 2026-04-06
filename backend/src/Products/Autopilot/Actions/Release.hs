@@ -40,11 +40,13 @@ module Products.Autopilot.Actions.Release (
 
 import Control.Applicative ((<|>))
 import Control.Monad (void, when)
+import Control.Monad.Catch (throwM)
 import Control.Monad.IO.Class (liftIO)
+import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
 import Core.DB.Connection (withConn)
-import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
+import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv, logInfo)
 import Data.Aeson (Value (..), eitherDecode, object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -265,7 +267,7 @@ createReleaseH _ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = 
                                                         if fromMaybe False newService
                                                             then do
                                                                 -- New service: no old version to discover, set to "new"
-                                                                liftIO $ putStrLn $ "[createReleaseH] New service flag set, skipping old version discovery"
+                                                                logInfo "[createReleaseH] New service flag set, skipping old version discovery"
                                                                 pure (if T.null oldVersion then "new" else oldVersion)
                                                             else
                                                                 if T.toLower oldVersion == "unknown" || T.null oldVersion
@@ -864,7 +866,7 @@ rolloutHistoryH _ap rid = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
-        Nothing -> pure $ object ["error" .= ("Release not found" :: Text)]
+        Nothing -> throwM $ NotFound "Release not found"
         Just (tracker, _) -> pure $ toJSON (NT.rolloutHistory tracker)
 
 -- ============================================================================
@@ -876,7 +878,7 @@ logsLinkH _ap rid = do
     db <- getDBEnv
     m <- liftIO $ findReleaseTracker db rid
     case m of
-        Nothing -> pure $ object ["error" .= ("Release not found" :: Text)]
+        Nothing -> throwM $ NotFound "Release not found"
         Just (_tracker, _) ->
             -- Return placeholder links -- production generates Grafana URLs from config
             pure $

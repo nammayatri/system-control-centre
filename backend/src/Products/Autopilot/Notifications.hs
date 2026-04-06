@@ -105,6 +105,7 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
   mToken <- getSlackToken
   case mToken of
     Nothing -> do
+      -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
       putStrLn "[SLACK] No SLACK_BOT_TOKEN env var set, skipping"
       pure Nothing
     Just token -> do
@@ -142,10 +143,12 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
                   Just (String ts) -> Just ts
                   _ -> Nothing
                 _ -> Nothing
+        -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
         putStrLn $ "[SLACK] Sent to #" <> T.unpack channel <> maybe "" (\ts -> " (ts=" <> T.unpack ts <> ")") mTs
         pure mTs
       case result of
         Left (err :: SomeException) -> do
+          -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
           putStrLn $ "[SLACK] Error: " <> show err
           pure Nothing
         Right mTs -> pure mTs

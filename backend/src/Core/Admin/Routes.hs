@@ -9,9 +9,11 @@ module Core.Admin.Routes
   )
 where
 
+import Control.Monad.Catch (throwM)
 import Control.Monad.IO.Class (liftIO)
 import Core.Admin.Queries
 import Core.Admin.Types
+import Core.AppError (APIError (..), AuthError (..))
 import Core.Auth.Queries (TokenRow (..), findAllProductsForPerson, findPersonById, findProductAccessForPerson, findTokenByValue)
 import Core.Auth.Types (PersonAuth (..), PersonProductPerms (..))
 import Core.Utils.FlowMonad (Flow, getDBEnv)
@@ -24,7 +26,7 @@ import qualified Data.Text as T
 import Data.UUID (UUID)
 import qualified Data.UUID as UUID
 import Products.Types (ProductSlug (..), allPermissionsText, productSlugToText)
-import Servant
+import Servant hiding (Unauthorized)
 import Shared.API.Response (APIResponse (..))
 
 -- | Admin API type
@@ -137,7 +139,7 @@ listUsersH :: Maybe Text -> Flow Value
 listUsersH mAuth = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ object ["error" .= ("Unauthorized: superadmin required" :: Text)]
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just _ -> do
       db <- getDBEnv
       users <- liftIO $ listPersons db
@@ -147,7 +149,7 @@ createUserH :: Maybe Text -> Value -> Flow Value
 createUserH mAuth (Object obj) = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ object ["error" .= ("Unauthorized: superadmin required" :: Text)]
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just admin -> do
       db <- getDBEnv
       let email = getStr "email" obj
@@ -156,23 +158,23 @@ createUserH mAuth (Object obj) = do
           password = getStr "password" obj
           isSuperadmin = maybe False id (getBoolM "isSuperadmin" obj)
       if T.null email || T.null firstName || T.null password
-        then pure $ object ["error" .= ("email, firstName, and password are required" :: Text)]
+        then throwM $ BadRequest "email, firstName, and password are required"
         else do
           pid <- liftIO $ createPerson db email firstName lastName password isSuperadmin
           liftIO $ writeAuditLog db (personId admin) "USER_CREATED" (Just "person") (Just $ UUID.toText pid) Nothing
           pure $ object ["id" .= pid, "status" .= ("SUCCESS" :: Text)]
-createUserH _ _ = pure $ object ["error" .= ("Invalid request body" :: Text)]
+createUserH _ _ = throwM $ BadRequest "Invalid request body"
 
 getUserH :: UUID -> Maybe Text -> Flow Value
 getUserH userId mAuth = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ object ["error" .= ("Unauthorized: superadmin required" :: Text)]
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just _ -> do
       db <- getDBEnv
       mPerson <- liftIO $ findPersonDetailById db userId
       case mPerson of
-        Nothing -> pure $ object ["error" .= ("User not found" :: Text)]
+        Nothing -> throwM $ NotFound "User not found"
         Just pd -> do
           mAuth' <- liftIO $ findPersonById db userId
           products <- case mAuth' of
@@ -199,7 +201,7 @@ updateUserH :: UUID -> Maybe Text -> Value -> Flow APIResponse
 updateUserH userId mAuth (Object obj) = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ APIResponse "ERROR" "Unauthorized: superadmin required"
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just _ -> do
       db <- getDBEnv
       liftIO $
@@ -211,13 +213,13 @@ updateUserH userId mAuth (Object obj) = do
           (getBoolM "isActive" obj)
           (getBoolM "isSuperadmin" obj)
       pure $ APIResponse "SUCCESS" "User updated"
-updateUserH _ _ _ = pure $ APIResponse "ERROR" "Invalid request body"
+updateUserH _ _ _ = throwM $ BadRequest "Invalid request body"
 
 deleteUserH :: UUID -> Maybe Text -> Flow APIResponse
 deleteUserH userId mAuth = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ APIResponse "ERROR" "Unauthorized: superadmin required"
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just admin -> do
       db <- getDBEnv
       liftIO $ deactivatePerson db userId
@@ -228,24 +230,24 @@ assignRoleH :: UUID -> Maybe Text -> Value -> Flow APIResponse
 assignRoleH userId mAuth (Object obj) = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ APIResponse "ERROR" "Unauthorized: superadmin required"
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just admin -> do
       db <- getDBEnv
       let productSlug = getStr "productSlug" obj
           mRoleId = getUuidM "roleId" obj
       case mRoleId of
-        Nothing -> pure $ APIResponse "ERROR" "roleId is required"
+        Nothing -> throwM $ BadRequest "roleId is required"
         Just roleId -> do
           liftIO $ assignRole db userId productSlug roleId (Just (personId admin))
           liftIO $ writeAuditLog db (personId admin) "ROLE_ASSIGNED" (Just "person_product_access") (Just $ UUID.toText userId) Nothing
           pure $ APIResponse "SUCCESS" "Role assigned"
-assignRoleH _ _ _ = pure $ APIResponse "ERROR" "Invalid request body"
+assignRoleH _ _ _ = throwM $ BadRequest "Invalid request body"
 
 revokeAccessH :: UUID -> Text -> Maybe Text -> Flow APIResponse
 revokeAccessH userId productSlug mAuth = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ APIResponse "ERROR" "Unauthorized: superadmin required"
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just admin -> do
       db <- getDBEnv
       liftIO $ revokeProductAccess db userId productSlug
@@ -256,32 +258,32 @@ addOverrideH :: UUID -> Maybe Text -> Value -> Flow Value
 addOverrideH userId mAuth (Object obj) = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ object ["error" .= ("Unauthorized: superadmin required" :: Text)]
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just admin -> do
       db <- getDBEnv
       let productSlug = getStr "productSlug" obj
           permAction = getStr "permissionAction" obj
           overrideType = getStr "overrideType" obj
       if T.null productSlug || T.null permAction || T.null overrideType
-        then pure $ object ["error" .= ("productSlug, permissionAction, and overrideType are required" :: Text)]
+        then throwM $ BadRequest "productSlug, permissionAction, and overrideType are required"
         else
           if overrideType /= "GRANT" && overrideType /= "DENY"
-            then pure $ object ["error" .= ("overrideType must be GRANT or DENY" :: Text)]
+            then throwM $ BadRequest "overrideType must be GRANT or DENY"
             else do
               -- Validate permission against ADT (no DB lookup needed)
               let validPerms = allPermissionsText productSlug
               if permAction `notElem` validPerms
-                then pure $ object ["error" .= ("Invalid permission for product: " <> permAction :: Text)]
+                then throwM $ BadRequest ("Invalid permission for product: " <> permAction)
                 else do
                   oid <- liftIO $ addPermissionOverride db userId productSlug permAction overrideType (Just (personId admin))
                   pure $ object ["id" .= oid, "status" .= ("SUCCESS" :: Text)]
-addOverrideH _ _ _ = pure $ object ["error" .= ("Invalid request body" :: Text)]
+addOverrideH _ _ _ = throwM $ BadRequest "Invalid request body"
 
 removeOverrideH :: UUID -> UUID -> Maybe Text -> Flow APIResponse
 removeOverrideH _userId overrideId mAuth = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ APIResponse "ERROR" "Unauthorized: superadmin required"
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just _ -> do
       db <- getDBEnv
       liftIO $ removePermissionOverride db overrideId
@@ -291,7 +293,7 @@ listProductsH :: Maybe Text -> Flow Value
 listProductsH mAuth = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ object ["error" .= ("Unauthorized: superadmin required" :: Text)]
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just _ -> do
       -- Products are derived from ProductSlug ADT — no DB query needed
       let prods =
@@ -309,13 +311,13 @@ createProductH :: Maybe Text -> Value -> Flow Value
 createProductH _ _ = do
   -- Products are defined as Haskell ADTs — they cannot be created via API.
   -- To add a new product, add it to ProductSlug in Products/Types.hs
-  pure $ object ["error" .= ("Products are defined in code, not via API. Add to ProductSlug ADT." :: Text)]
+  throwM $ BadRequest "Products are defined in code, not via API"
 
 listRolesH :: Text -> Maybe Text -> Flow Value
 listRolesH slug mAuth = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ object ["error" .= ("Unauthorized: superadmin required" :: Text)]
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just _ -> do
       db <- getDBEnv
       roles <- liftIO $ listRolesForProduct db slug
@@ -325,37 +327,37 @@ createRoleH :: Text -> Maybe Text -> Value -> Flow Value
 createRoleH slug mAuth (Object obj) = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ object ["error" .= ("Unauthorized: superadmin required" :: Text)]
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just _ -> do
       db <- getDBEnv
       let name = getStr "name" obj
           desc = getStrM "description" obj
           permActions = getStrListM "permissions" obj
       if T.null name
-        then pure $ object ["error" .= ("name is required" :: Text)]
+        then throwM $ BadRequest "name is required"
         else do
           roleId <- liftIO $ createRole db slug name desc permActions
           pure $ object ["id" .= roleId, "status" .= ("SUCCESS" :: Text)]
-createRoleH _ _ _ = pure $ object ["error" .= ("Invalid request body" :: Text)]
+createRoleH _ _ _ = throwM $ BadRequest "Invalid request body"
 
 updateRoleH :: Text -> UUID -> Maybe Text -> Value -> Flow APIResponse
 updateRoleH _slug roleId mAuth (Object obj) = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ APIResponse "ERROR" "Unauthorized: superadmin required"
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just _ -> do
       db <- getDBEnv
       let desc = getStrM "description" obj
           permActions = getStrListM "permissions" obj
       liftIO $ updateRolePermissions db roleId desc permActions
       pure $ APIResponse "SUCCESS" "Role updated"
-updateRoleH _ _ _ _ = pure $ APIResponse "ERROR" "Invalid request body"
+updateRoleH _ _ _ _ = throwM $ BadRequest "Invalid request body"
 
 listPermissionsH :: Text -> Maybe Text -> Flow Value
 listPermissionsH slug mAuth = do
   mAdmin <- requireAdmin mAuth
   case mAdmin of
-    Nothing -> pure $ object ["error" .= ("Unauthorized: superadmin required" :: Text)]
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just _ -> do
       -- Permissions are derived from ADTs — no DB query needed
       let perms = allPermissionsText slug

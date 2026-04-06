@@ -9,7 +9,9 @@ module Core.Auth.Routes
   )
 where
 
+import Control.Monad.Catch (throwM)
 import Control.Monad.IO.Class (liftIO)
+import Core.AppError (APIError (..), AuthError (..))
 import Core.Auth.Queries
 import Core.Auth.Types
 import Core.Utils.FlowMonad (Flow, getDBEnv)
@@ -21,7 +23,7 @@ import qualified Data.Text as T
 import Data.Time.Clock (addUTCTime, getCurrentTime)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
-import Servant
+import Servant hiding (Unauthorized)
 import Shared.API.Response (APIResponse (..))
 
 -- | Auth API type
@@ -43,15 +45,15 @@ loginH :: Value -> Flow Value
 loginH body = do
   db <- getDBEnv
   case parseLoginBody body of
-    Nothing -> pure $ object ["error" .= ("Invalid request: email and password required" :: Text)]
+    Nothing -> throwM $ BadRequest "Email and password are required"
     Just (email, password) -> do
       mPerson <- liftIO $ findPersonByEmail db email
       case mPerson of
-        Nothing -> pure $ object ["error" .= ("Invalid credentials" :: Text)]
+        Nothing -> throwM $ Unauthorized "Invalid credentials"
         Just person -> do
           let valid = verifyPassword password (personPasswordHash person)
           if not valid
-            then pure $ object ["error" .= ("Invalid credentials" :: Text)]
+            then throwM $ Unauthorized "Invalid credentials"
             else do
               -- Don't deactivate old tokens — allow multiple sessions
               -- Old tokens expire naturally (24hr TTL)
@@ -90,7 +92,7 @@ logoutH :: Maybe Text -> Flow APIResponse
 logoutH mAuth = do
   db <- getDBEnv
   case extractToken mAuth of
-    Nothing -> pure $ APIResponse "ERROR" "Missing Authorization header"
+    Nothing -> throwM $ Unauthorized "Missing Authorization header"
     Just tok -> do
       liftIO $ deactivateToken db tok
       pure $ APIResponse "SUCCESS" "Logged out"
@@ -100,19 +102,19 @@ meH :: Maybe Text -> Flow Value
 meH mAuth = do
   db <- getDBEnv
   case extractToken mAuth of
-    Nothing -> pure $ object ["error" .= ("Missing Authorization header" :: Text)]
+    Nothing -> throwM $ Unauthorized "Missing Authorization header"
     Just tok -> do
       mToken <- liftIO $ findTokenByValue db tok
       case mToken of
-        Nothing -> pure $ object ["error" .= ("Invalid or expired token" :: Text)]
+        Nothing -> throwM $ InvalidToken "Invalid or expired token"
         Just tokenRow -> do
           now <- liftIO getCurrentTime
           if trExpiresAt tokenRow < now
-            then pure $ object ["error" .= ("Token expired" :: Text)]
+            then throwM TokenExpired
             else do
               mPerson <- liftIO $ findPersonById db (trPersonId tokenRow)
               case mPerson of
-                Nothing -> pure $ object ["error" .= ("Person not found" :: Text)]
+                Nothing -> throwM $ NotFound "Person not found"
                 Just person -> do
                   products <- liftIO $ findAllProductsForPerson db person
                   pure $
@@ -142,19 +144,19 @@ verifyH :: Value -> Flow Value
 verifyH body = do
   db <- getDBEnv
   case parseVerifyBody body of
-    Nothing -> pure $ object ["authorized" .= False, "error" .= ("Invalid request" :: Text)]
+    Nothing -> throwM $ BadRequest "Invalid request"
     Just (tok, productSlug, permission) -> do
       mToken <- liftIO $ findTokenByValue db tok
       case mToken of
-        Nothing -> pure $ object ["authorized" .= False, "error" .= ("Invalid token" :: Text)]
+        Nothing -> throwM $ InvalidToken "Invalid token"
         Just tokenRow -> do
           now <- liftIO getCurrentTime
           if trExpiresAt tokenRow < now
-            then pure $ object ["authorized" .= False, "error" .= ("Token expired" :: Text)]
+            then throwM TokenExpired
             else do
               mPerson <- liftIO $ findPersonById db (trPersonId tokenRow)
               case mPerson of
-                Nothing -> pure $ object ["authorized" .= False, "error" .= ("Person not found" :: Text)]
+                Nothing -> throwM $ NotFound "Person not found"
                 Just person -> do
                   if personIsSuperadmin person
                     then
@@ -166,7 +168,7 @@ verifyH body = do
                     else do
                       accesses <- liftIO $ findProductAccessForPerson db (personId person)
                       case filter (\pa -> paProductSlug pa == productSlug) accesses of
-                        [] -> pure $ object ["authorized" .= False, "error" .= ("No access to product" :: Text)]
+                        [] -> throwM $ PermissionDenied "No access to product"
                         (pa : _) -> do
                           perms <- liftIO $ computeEffectivePermissions db person productSlug (paRoleId pa)
                           if permission `elem` perms
@@ -176,7 +178,7 @@ verifyH body = do
                                   [ "authorized" .= True,
                                     "person" .= personToJson person
                                   ]
-                            else pure $ object ["authorized" .= False, "error" .= ("Permission denied" :: Text)]
+                            else throwM $ PermissionDenied "Permission denied"
 
 -- ── Helpers ─────────────────────────────────────────────────────────
 

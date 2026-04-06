@@ -110,23 +110,29 @@ fetchSecondaryEnvsH _ap mProduct mEnv mService = do
               authArgs = if null baseAuth then [] else ["-H", "Authorization: Basic " <> baseAuth]
               getUrl = normalised <> "envs?product=" <> T.unpack product' <> "&env=" <> T.unpack env' <> "&service=" <> T.unpack service'
               getCurlArgs = ["-s", "-X", "GET", getUrl, "--max-time", "15"] <> authArgs
+          -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
           liftIO $ putStrLn $ "[SYNC-ENV] Fetching secondary envs from: " <> getUrl
           getResult <- liftIO (try (readProcessWithExitCode "curl" getCurlArgs "") :: IO (Either SomeException (ExitCode, String, String)))
           case getResult of
             Right (ExitSuccess, out, _) | not (null out) && out /= "[]" -> do
+              -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
               liftIO $ putStrLn $ "[SYNC-ENV] GET success, response length=" <> show (length out)
               case A.decodeStrict' (encodeUtf8 (T.pack out)) :: Maybe Value of
                 Just v -> pure v
                 Nothing -> do
+                  -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
                   liftIO $ putStrLn $ "[SYNC-ENV] GET response not valid JSON, trying ny-autopilot format"
                   tryNyAutopilotFormat normalised baseAuth authArgs product' env' service'
             Right (ExitSuccess, out, _) -> do
+              -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
               liftIO $ putStrLn $ "[SYNC-ENV] GET returned empty/[], trying ny-autopilot format"
               tryNyAutopilotFormat normalised baseAuth authArgs product' env' service'
             Right (ExitFailure code, _, err) -> do
+              -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
               liftIO $ putStrLn $ "[SYNC-ENV] GET failed (exit=" <> show code <> "): " <> err <> ", trying ny-autopilot format"
               tryNyAutopilotFormat normalised baseAuth authArgs product' env' service'
             Left e -> do
+              -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
               liftIO $ putStrLn $ "[SYNC-ENV] GET exception: " <> show e <> ", trying ny-autopilot format"
               tryNyAutopilotFormat normalised baseAuth authArgs product' env' service'
     _ -> pure $ A.toJSON ([] :: [Value])
@@ -154,6 +160,7 @@ fetchSecondaryEnvsH _ap mProduct mEnv mService = do
               "15"
             ]
               <> authArgs
+      -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
       liftIO $ putStrLn $ "[SYNC-ENV] Trying ny-autopilot format: POST " <> postUrl
       postResult <- liftIO (try (readProcessWithExitCode "curl" postCurlArgs "") :: IO (Either SomeException (ExitCode, String, String)))
       case postResult of
@@ -216,6 +223,7 @@ fetchSecondaryConfigMapH mProduct mName = do
             _ -> ""
           getUrl = normalised <> "configmap" <> queryParams
           getCurlArgs = ["-s", "-X", "GET", getUrl, "--max-time", "15"] <> authArgs
+      -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
       liftIO $ putStrLn $ "[SYNC-CONFIGMAP] Fetching secondary configmap from: " <> getUrl
       getResult <- liftIO (try (readProcessWithExitCode "curl" getCurlArgs "") :: IO (Either SomeException (ExitCode, String, String)))
       case getResult of
@@ -223,9 +231,11 @@ fetchSecondaryConfigMapH mProduct mName = do
           case A.decodeStrict' (encodeUtf8 (T.pack out)) :: Maybe ConfigMapK8sResponse of
             Just v -> pure v
             Nothing -> do
+              -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
               liftIO $ putStrLn $ "[SYNC-CONFIGMAP] Response not valid JSON"
               pure emptyList
         Right (ExitFailure code, _, err) -> do
+          -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
           liftIO $ putStrLn $ "[SYNC-CONFIGMAP] GET failed (exit=" <> show code <> "): " <> err
           pure emptyList
         _ -> pure emptyList

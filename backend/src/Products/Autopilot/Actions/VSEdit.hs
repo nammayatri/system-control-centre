@@ -165,6 +165,7 @@ createVsEditTrackerH _ap CreateVsEditTrackerReq {..} = do
       liftIO $
         if discardedCount > 0
           then do
+            -- TODO: migrate to structured logging (plain IO inside liftIO block)
             putStrLn $
               "[VS-EDIT] DISCARDED "
                 <> show discardedCount
@@ -507,6 +508,7 @@ fetchCurrentVsH _ap mProduct _mService = do
 applyVsToK8s :: Config -> String -> Text -> IO (Either Text ())
 applyVsToK8s cfg ns content = do
   let cmd = unwords ["echo", shellQuote content, "|", kubectlBin cfg, "-n", ns, "replace -f -"]
+  -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
   putStrLn $ "[VS-APPLY] Running: kubectl -n " <> ns <> " replace -f -"
   result <- runCmd cmd
   case result of

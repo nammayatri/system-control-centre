@@ -1,29 +1,30 @@
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
--- | Typed exception hierarchy for the application.
---
--- Every error is an @Exception@ — throwable anywhere, caught at the
--- Servant boundary by the global error handler in 'Core.Server'.
+-- | Typed exception hierarchy — NammaYatri-style error codes, messages,
+-- and tags, but with a cleaner single-module design.
 --
 -- == Hierarchy
 --
 -- @
 -- SomeException
---   └── AppException (our root)
---         ├── APIError       — client-facing errors (400/403/404/409/422/500)
---         ├── DBError        — database failures (connection, query, constraint)
---         └── WorkflowError  — release workflow failures
+--   └── AppException (our root — carries ToAppError constraint)
+--         ├── APIError       — client-facing (400/403/404/409/422/500)
+--         ├── AuthError      — authentication/authorization failures (401/403)
+--         ├── DBError        — database failures (500)
+--         └── WorkflowError  — release workflow failures (500)
 -- @
 --
--- Handlers throw typed errors:
+-- == JSON response format (all errors)
 --
 -- @
--- throwM $ NotFound "Release r-123 not found"
--- throwM $ DBError "Connection timeout"
+-- {
+--   "status": "ERROR",
+--   "code": "NOT_FOUND",
+--   "message": "Release r-123 not found",
+--   "tag": "APIError"
+-- }
 -- @
---
--- The global handler catches 'AppException' and converts to structured
--- JSON. Anything else becomes a generic 500.
 module Core.AppError
   ( -- * Root exception
     AppException (..),
@@ -33,9 +34,9 @@ module Core.AppError
 
     -- * API errors (client-facing)
     APIError (..),
-    apiErrorToServant,
-    apiErrorCode,
-    apiErrorMessage,
+
+    -- * Auth errors
+    AuthError (..),
 
     -- * DB errors
     DBError (..),
@@ -46,21 +47,42 @@ module Core.AppError
     -- * Helpers
     fromMaybeM,
     fromEitherM,
+
+    -- * Error JSON builders (for global handler)
+    errorResponseJSON,
   )
 where
 
-import Control.Exception (Exception (..), SomeException)
+import Control.Exception (Exception (..))
 import Control.Monad.Catch (MonadThrow, throwM)
 import Data.Aeson (ToJSON (..), encode, object, (.=))
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Typeable (Typeable, cast)
-import Servant (ServerError (..), err400, err403, err404, err409, err500)
+import Network.HTTP.Types (Header)
+import Servant (ServerError (..), err400, err401, err403, err404, err409, err500)
+
+-- ── Structured error response ─────────────────────────────────────
+
+-- | Build a structured JSON error body (used by all error types).
+errorResponseJSON :: Text -> Text -> Text -> Text -> LBS.ByteString
+errorResponseJSON status code message tag =
+  encode $
+    object
+      [ "status" .= status,
+        "code" .= code,
+        "message" .= message,
+        "tag" .= tag
+      ]
+
+jsonHeaders :: [Header]
+jsonHeaders = [("Content-Type", "application/json")]
 
 -- ── Root exception ────────────────────────────────────────────────
 
 -- | Root of our exception hierarchy. The global error handler in
--- 'Core.Server.toHandler' catches this and converts to structured JSON.
+-- 'Core.Server.toHandler' catches this and calls 'toServantError'.
 data AppException = forall e. (Exception e, ToAppError e) => AppException e
 
 instance Show AppException where
@@ -68,11 +90,15 @@ instance Show AppException where
 
 instance Exception AppException
 
--- | Typeclass to convert domain exceptions to HTTP error responses.
+-- | Convert a domain exception to an HTTP error response.
+-- Every error type in the hierarchy implements this.
 class (Show e, Typeable e) => ToAppError e where
   toServantError :: e -> ServerError
+  toErrorCode :: e -> Text
+  toErrorTag :: e -> Text
+  toErrorMessage :: e -> Text
 
--- ── API errors ────────────────────────────────────────────────────
+-- ── APIError ──────────────────────────────────────────────────────
 
 data APIError
   = NotFound Text
@@ -90,48 +116,95 @@ instance Exception APIError where
     cast e
 
 instance ToAppError APIError where
-  toServantError = apiErrorToServant
+  toErrorTag _ = "APIError"
+
+  toErrorCode (NotFound _) = "NOT_FOUND"
+  toErrorCode (BadRequest _) = "BAD_REQUEST"
+  toErrorCode (Forbidden _) = "FORBIDDEN"
+  toErrorCode (Conflict _) = "CONFLICT"
+  toErrorCode (InvalidTransition _) = "INVALID_TRANSITION"
+  toErrorCode (InternalError _) = "INTERNAL_ERROR"
+
+  toErrorMessage (NotFound msg) = msg
+  toErrorMessage (BadRequest msg) = msg
+  toErrorMessage (Forbidden msg) = msg
+  toErrorMessage (Conflict msg) = msg
+  toErrorMessage (InvalidTransition msg) = msg
+  toErrorMessage (InternalError msg) = msg
+
+  toServantError err =
+    base
+      { errBody = errorResponseJSON "ERROR" (toErrorCode err) (toErrorMessage err) (toErrorTag err),
+        errHeaders = jsonHeaders
+      }
+    where
+      base = case err of
+        NotFound _ -> err404
+        BadRequest _ -> err400
+        Forbidden _ -> err403
+        Conflict _ -> err409
+        InvalidTransition _ -> ServerError 422 "Unprocessable Entity" "" []
+        InternalError _ -> err500
 
 instance ToJSON APIError where
   toJSON err =
     object
       [ "status" .= ("ERROR" :: Text),
-        "message" .= apiErrorMessage err,
-        "code" .= apiErrorCode err
+        "code" .= toErrorCode err,
+        "message" .= toErrorMessage err,
+        "tag" .= toErrorTag err
       ]
 
-apiErrorMessage :: APIError -> Text
-apiErrorMessage (NotFound msg) = msg
-apiErrorMessage (BadRequest msg) = msg
-apiErrorMessage (Forbidden msg) = msg
-apiErrorMessage (Conflict msg) = msg
-apiErrorMessage (InvalidTransition msg) = msg
-apiErrorMessage (InternalError msg) = msg
+-- ── AuthError ─────────────────────────────────────────────────────
 
-apiErrorCode :: APIError -> Text
-apiErrorCode (NotFound _) = "NOT_FOUND"
-apiErrorCode (BadRequest _) = "BAD_REQUEST"
-apiErrorCode (Forbidden _) = "FORBIDDEN"
-apiErrorCode (Conflict _) = "CONFLICT"
-apiErrorCode (InvalidTransition _) = "INVALID_TRANSITION"
-apiErrorCode (InternalError _) = "INTERNAL_ERROR"
+data AuthError
+  = Unauthorized Text
+  | InvalidToken Text
+  | TokenExpired
+  | TokenNotFound
+  | AccountDisabled Text
+  | PermissionDenied Text
+  deriving (Show, Typeable)
 
-apiErrorToServant :: APIError -> ServerError
-apiErrorToServant err = base {errBody = encode err, errHeaders = jsonHeaders}
-  where
-    jsonHeaders = [("Content-Type", "application/json")]
-    base = case err of
-      NotFound _ -> err404
-      BadRequest _ -> err400
-      Forbidden _ -> err403
-      Conflict _ -> err409
-      InvalidTransition _ -> ServerError 422 "Unprocessable Entity" "" []
-      InternalError _ -> err500
+instance Exception AuthError where
+  toException = toException . AppException
+  fromException x = do
+    AppException e <- fromException x
+    cast e
 
--- ── DB errors ─────────────────────────────────────────────────────
+instance ToAppError AuthError where
+  toErrorTag _ = "AuthError"
 
--- | Database errors — auto-wrapped by 'withDB' so handlers never see
--- raw PostgreSQL exceptions.
+  toErrorCode (Unauthorized _) = "UNAUTHORIZED"
+  toErrorCode (InvalidToken _) = "INVALID_TOKEN"
+  toErrorCode TokenExpired = "TOKEN_EXPIRED"
+  toErrorCode TokenNotFound = "TOKEN_NOT_FOUND"
+  toErrorCode (AccountDisabled _) = "ACCOUNT_DISABLED"
+  toErrorCode (PermissionDenied _) = "PERMISSION_DENIED"
+
+  toErrorMessage (Unauthorized msg) = msg
+  toErrorMessage (InvalidToken msg) = "Invalid token: " <> msg
+  toErrorMessage TokenExpired = "Token has expired"
+  toErrorMessage TokenNotFound = "Token not found"
+  toErrorMessage (AccountDisabled msg) = "Account disabled: " <> msg
+  toErrorMessage (PermissionDenied msg) = "Permission denied: " <> msg
+
+  toServantError err =
+    base
+      { errBody = errorResponseJSON "ERROR" (toErrorCode err) (toErrorMessage err) (toErrorTag err),
+        errHeaders = jsonHeaders
+      }
+    where
+      base = case err of
+        Unauthorized _ -> err401
+        InvalidToken _ -> err401
+        TokenExpired -> err401
+        TokenNotFound -> err401
+        AccountDisabled _ -> err403
+        PermissionDenied _ -> err403
+
+-- ── DBError ───────────────────────────────────────────────────────
+
 data DBError = DBError
   { dbErrorContext :: Text,
     dbErrorDetail :: Text
@@ -145,19 +218,17 @@ instance Exception DBError where
     cast e
 
 instance ToAppError DBError where
-  toServantError (DBError ctx detail) =
-    let body =
-          encode $
-            object
-              [ "status" .= ("ERROR" :: Text),
-                "code" .= ("DB_ERROR" :: Text),
-                "message" .= ("Database error in " <> ctx <> ": " <> detail)
-              ]
-     in err500 {errBody = body, errHeaders = [("Content-Type", "application/json")]}
+  toErrorTag _ = "DBError"
+  toErrorCode _ = "DB_ERROR"
+  toErrorMessage (DBError ctx detail) = "Database error in " <> ctx <> ": " <> detail
+  toServantError err =
+    err500
+      { errBody = errorResponseJSON "ERROR" (toErrorCode err) (toErrorMessage err) (toErrorTag err),
+        errHeaders = jsonHeaders
+      }
 
--- ── Workflow errors ───────────────────────────────────────────────
+-- ── WorkflowError ─────────────────────────────────────────────────
 
--- | Workflow/release execution errors.
 data WorkflowError = WorkflowError
   { wfErrorStep :: Text,
     wfErrorDetail :: Text
@@ -171,20 +242,18 @@ instance Exception WorkflowError where
     cast e
 
 instance ToAppError WorkflowError where
-  toServantError (WorkflowError step detail) =
-    let body =
-          encode $
-            object
-              [ "status" .= ("ERROR" :: Text),
-                "code" .= ("WORKFLOW_ERROR" :: Text),
-                "message" .= ("Workflow failed at " <> step <> ": " <> detail)
-              ]
-     in err500 {errBody = body, errHeaders = [("Content-Type", "application/json")]}
+  toErrorTag _ = "WorkflowError"
+  toErrorCode _ = "WORKFLOW_ERROR"
+  toErrorMessage (WorkflowError step detail) = "Workflow failed at " <> step <> ": " <> detail
+  toServantError err =
+    err500
+      { errBody = errorResponseJSON "ERROR" (toErrorCode err) (toErrorMessage err) (toErrorTag err),
+        errHeaders = jsonHeaders
+      }
 
 -- ── Error helpers ─────────────────────────────────────────────────
 
--- | Extract from Maybe or throw. Better than NammaYatri's version
--- because our errors are typed (not SomeException).
+-- | Extract from Maybe or throw typed error.
 --
 -- @
 -- release <- fromMaybeM (NotFound "Release not found") mRelease
@@ -192,7 +261,7 @@ instance ToAppError WorkflowError where
 fromMaybeM :: (MonadThrow m, Exception e) => e -> Maybe a -> m a
 fromMaybeM err = maybe (throwM err) pure
 
--- | Extract from Either or throw.
+-- | Extract from Either or throw, mapping the Left value.
 --
 -- @
 -- value <- fromEitherM (BadRequest . T.pack) parseResult

@@ -72,6 +72,7 @@ applyVirtualServiceRolloutSingle cfg ctx vsName oldW newW = go 1
                     Right ok -> pure (Right ok)
                     Left err
                       | isConflictError err && attempt < maxRetries -> do
+                        -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
                         putStrLn $ "[VS-ROLLOUT] Conflict on attempt " <> show attempt <> ", retrying..."
                         go (attempt + 1)
                       | otherwise -> pure (Left err)

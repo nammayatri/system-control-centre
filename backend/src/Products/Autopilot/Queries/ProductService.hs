@@ -394,6 +394,7 @@ releaseExpiredVsLocks db = do
         (Only (show expiryMins))
     mapM_
       ( \(ag, o) ->
+          -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
           putStrLn $
             "[STARTUP] Releasing expired VS lock: app_group="
               <> Data.Text.unpack ag
