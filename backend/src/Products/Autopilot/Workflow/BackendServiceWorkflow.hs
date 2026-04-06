@@ -191,8 +191,12 @@ runVsRolloutWithLock cfg ctx oldW newW = do
             withVsLock db (appGroup rt) lockOwner $
                 applyVirtualServiceRollout cfg ctx oldW newW
     case result of
-        Left err -> liftIO $ throwIO $ WorkflowError "vs-lock" err
-        Right (Left (K8sError k8sErr)) -> liftIO $ throwIO $ WorkflowError "k8s" k8sErr
+        Left err -> do
+            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "VS_LOCK_FAILED" (toJSON err)
+            liftIO $ throwIO $ WorkflowError "vs-lock" err
+        Right (Left (K8sError k8sErr)) -> do
+            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (toJSON k8sErr)
+            liftIO $ throwIO $ WorkflowError "k8s" k8sErr
         Right (Right _) -> pure ()
 
 -- ============================================================================
@@ -522,7 +526,7 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                     -- Production line 518: sleep(getCollectMetricsDelay(conn))
                                     collectDelay <- liftIO $ getCollectMetricsDelay db
                                     liftIO $ threadDelay (collectDelay * 1000000)
-                                    rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime
+                                    rolloutLoop cfg ctx db strategy currentIndex freshTotalSteps stepStartTime
                                 else do
                                     -- Cooloff exceeded - decide whether to advance
                                     shouldAdvance <- case currentMode of
@@ -675,12 +679,12 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                                 checkDeploymentHealth cfg ctx
 
                                             -- Continue loop with next index
-                                            rolloutLoop cfg ctx db strategy (currentIndex + 1) totalSteps newStepStart
+                                            rolloutLoop cfg ctx db strategy (currentIndex + 1) freshTotalSteps newStepStart
                                         else do
                                             -- Decision engine said wait/abort - re-loop
                                             collectDelay <- liftIO $ getCollectMetricsDelay db
                                             liftIO $ threadDelay (collectDelay * 1000000)
-                                            rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime
+                                            rolloutLoop cfg ctx db strategy currentIndex freshTotalSteps stepStartTime
                 _ -> do
                     -- Unexpected status during rollout
                     logInfoS $ "  [rolloutLoop] Unexpected status: " <> T.pack (show (status freshRT)) <> ", stopping"
