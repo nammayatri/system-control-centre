@@ -727,8 +727,7 @@ export async function createReleaseConfig(payload: Partial<ReleaseConfig>): Prom
         serviceType: payload.serviceType || 'SERVICE',
         serviceHost: payload.host,
         rolloutStrategyText: payload.rollout_strategy,
-        slackWebhookUrls: payload.slack_channel,
-        emails: payload.emails,
+        slackChannel: payload.slack_channel,
         revertStrategyText: payload.revert_strategy || null,
         decisionConfigText: payload.decision_config || null,
     };
@@ -744,8 +743,7 @@ export async function updateReleaseConfig(id: number, payload: Partial<ReleaseCo
         serviceType: payload.serviceType || 'SERVICE',
         serviceHost: payload.host,
         rolloutStrategyText: payload.rollout_strategy,
-        slackWebhookUrls: payload.slack_channel,
-        emails: payload.emails,
+        slackChannel: payload.slack_channel,
         revertStrategyText: payload.revert_strategy || null,
         decisionConfigText: payload.decision_config || null,
     };

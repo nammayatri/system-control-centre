@@ -187,8 +187,9 @@ upsertService ::
   Text ->
   Maybe Text ->
   Maybe Text ->
+  Maybe Text ->
   IO ()
-upsertService db _rowId rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy = do
+upsertService db _rowId rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy slackChannel' = do
   withConn db $ \conn ->
     withTransaction conn $ do
       runBeamPostgres conn $
@@ -216,7 +217,7 @@ upsertService db _rowId rolloutStrategy decisionConfig serviceName' product' sTy
                     dcRolloutStrategy = val_ rolloutStrategy,
                     dcRevertStrategy = val_ revertStrategy,
                     dcDecisionConfig = val_ decisionConfig,
-                    dcSlackChannel = val_ Nothing
+                    dcSlackChannel = val_ slackChannel'
                   }
               ]
 
