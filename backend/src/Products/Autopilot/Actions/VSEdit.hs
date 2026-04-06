@@ -20,6 +20,7 @@ import Control.Applicative ((<|>))
 import Control.Monad.IO.Class (liftIO)
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
+import Core.Environment (logInfo, logError, logWarning)
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
 import Data.Aeson (Value (..), eitherDecode, object, toJSON, (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS

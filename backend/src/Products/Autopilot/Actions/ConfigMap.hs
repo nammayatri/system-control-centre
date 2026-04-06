@@ -46,6 +46,7 @@ import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.API
 import qualified Products.Autopilot.Types.Storage.Schema as S
 import Products.Autopilot.Types.Target (TargetState (..), emptyConfigState)
+import Products.Autopilot.Workflow.Helpers (captureConfigMapSnapshot)
 import Shared.API.Response (APIResponse (..))
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
@@ -131,12 +132,17 @@ createConfigMapH _ap body = do
           targetState = ConfigState emptyConfigState
       liftIO $ insertReleaseTracker db tracker (Just targetState)
       liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
+      -- Capture CONFIGMAP_BEFORE snapshot at creation time so diff is available immediately
+      cfg <- getConfig
+      let cmName = fromMaybe service' name'
+      p <- liftIO $ findProductByName db product'
+      let ns = maybe product' getProductNamespace p
+      liftIO $ captureConfigMapSnapshot cfg db rid ns cmName "CONFIGMAP_BEFORE"
       liftIO $ notifyConfigMapCreated db tracker
       -- Handle sync to secondary cluster
       let isSync = case body of
             Object o -> isTruthy "isSync" o
             _ -> False
-      cfg <- getConfig
       when (isSync && not (null (syncClusterUrl cfg))) $ do
         let rawUrl = syncClusterUrl cfg
             normalised =
@@ -296,6 +302,12 @@ handleConfigMapRevert db rt mts cmId' = do
           targetState = ConfigState emptyConfigState
       liftIO $ insertReleaseTracker db finalTracker (Just targetState)
       liftIO $ insertReleaseEvent db newRid "BUSINESS" "REVERT_TRACKER_CREATED" (toJSON ("Revert of " <> cmId'))
+      -- Capture CONFIGMAP_BEFORE snapshot for the revert tracker (current K8s state)
+      cfg <- getConfig
+      let cmName = NT.service finalTracker
+      p <- liftIO $ findProductByName db (NT.appGroup finalTracker)
+      let ns = maybe (NT.appGroup finalTracker) getProductNamespace p
+      liftIO $ captureConfigMapSnapshot cfg db newRid ns cmName "CONFIGMAP_BEFORE"
       -- Mark original as REVERTING
       let reverted = rt{NT.status = REVERTING}
       liftIO $ insertReleaseTracker db reverted mts
@@ -356,7 +368,7 @@ fetchSecondaryConfigMapH _ap mProduct mName = do
           getUrl = normalised <> "configmap" <> queryParams
           getCurlArgs = ["-s", "-X", "GET", getUrl, "--max-time", "15"] <> authArgs
       -- TODO: migrate to structured logging
-      liftIO $ putStrLn $ "[SYNC-CONFIGMAP] Fetching secondary configmap from: " <> getUrl
+      logInfo $ "[SYNC-CONFIGMAP] Fetching secondary configmap from: " <> T.pack getUrl
       getResult <- liftIO (try (readProcessWithExitCode "curl" getCurlArgs "") :: IO (Either SomeException (ExitCode, String, String)))
       case getResult of
         Right (ExitSuccess, out, _) | not (null out) ->

@@ -25,29 +25,56 @@ module Core.Admin.Queries
 where
 
 import Core.Admin.Types
-import Core.DB.Connection (withConn)
+import Core.Auth.Schema
+import Core.DB.Connection (runDB, withConn)
 import Core.Environment (DBEnv (..))
 import qualified Data.Aeson as A
 import Data.Text (Text)
-import Data.Time.Clock (UTCTime)
 import Data.UUID (UUID)
-import Database.PostgreSQL.Simple
+import Database.Beam
+import Database.Beam.Postgres ()
+import Database.PostgreSQL.Simple (Only (..), execute, query)
 import Database.PostgreSQL.Simple.FromRow (FromRow (..), field)
 import Database.PostgreSQL.Simple.Types (PGArray (..))
 import Products.Types (defaultPermissionsText)
 
+-- ── Beam-row → domain-type converters ──────────────────────────────
+
+toPersonDetail :: ScPerson -> PersonDetail
+toPersonDetail ScPersonT {..} =
+  PersonDetail
+    { pdId = spId,
+      pdEmail = spEmail,
+      pdFirstName = spFirstName,
+      pdLastName = spLastName,
+      pdIsActive = spIsActive,
+      pdIsSuperadmin = spIsSuperadmin,
+      pdCreatedAt = spCreatedAt
+    }
+
+toOverrideDetail :: ScPersonPermissionOverride -> OverrideDetail
+toOverrideDetail ScPersonPermissionOverrideT {..} =
+  OverrideDetail
+    { odId = sppoId,
+      odPermissionAction = sppoPermissionAction,
+      odOverrideType = sppoOverrideType,
+      odProductSlug = sppoProductSlug
+    }
+
 -- ── Person CRUD ─────────────────────────────────────────────────────
 
-instance FromRow PersonDetail where
-  fromRow = PersonDetail <$> field <*> field <*> field <*> field <*> field <*> field <*> field
-
 listPersons :: DBEnv -> IO [PersonDetail]
-listPersons db = withConn db $ \conn ->
-  query_
-    conn
-    "SELECT id, email, first_name, last_name, is_active, is_superadmin, created_at \
-    \FROM sc_person ORDER BY created_at DESC"
+listPersons db = do
+  rows <-
+    runDB db $
+      runSelectReturningList $
+        select $
+          orderBy_ (\p -> desc_ (spCreatedAt p)) $
+            all_ (scPerson coreDb)
+  pure $ map toPersonDetail rows
 
+-- | INSERT RETURNING — kept as raw SQL (Beam RETURNING is Postgres-specific
+-- and verbose for a single-value return).
 createPerson :: DBEnv -> Text -> Text -> Text -> Text -> Bool -> IO UUID
 createPerson db email firstName lastName passwordHash isSuperadmin = withConn db $ \conn -> do
   [Only pid] <-
@@ -59,17 +86,20 @@ createPerson db email firstName lastName passwordHash isSuperadmin = withConn db
   pure pid
 
 findPersonDetailById :: DBEnv -> UUID -> IO (Maybe PersonDetail)
-findPersonDetailById db pid = withConn db $ \conn -> do
+findPersonDetailById db pid = do
   rows <-
-    query
-      conn
-      "SELECT id, email, first_name, last_name, is_active, is_superadmin, created_at \
-      \FROM sc_person WHERE id = ?"
-      (Only pid)
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          p <- all_ (scPerson coreDb)
+          guard_ (spId p ==. val_ pid)
+          pure p
   pure $ case rows of
-    [p] -> Just p
+    [p] -> Just (toPersonDetail p)
     _ -> Nothing
 
+-- | Dynamic COALESCE update — kept as raw SQL (Beam doesn't support
+-- COALESCE(?, column) in SET clauses cleanly).
 updatePerson :: DBEnv -> UUID -> Maybe Text -> Maybe Text -> Maybe Bool -> Maybe Bool -> IO ()
 updatePerson db pid mFirstName mLastName mIsActive mIsSuperadmin = withConn db $ \conn -> do
   case (mFirstName, mLastName, mIsActive, mIsSuperadmin) of
@@ -88,6 +118,9 @@ updatePerson db pid mFirstName mLastName mIsActive mIsSuperadmin = withConn db $
           (mFirstName, mLastName, mIsActive, mIsSuperadmin, pid)
       pure ()
 
+-- | Deactivate a person — kept as raw SQL because Beam's currentTimestamp_
+-- returns LocalTime (not UTCTime), so the UPDATE SET updated_at = now()
+-- is simpler in raw SQL.
 deactivatePerson :: DBEnv -> UUID -> IO ()
 deactivatePerson db pid = withConn db $ \conn -> do
   _ <-
@@ -97,7 +130,7 @@ deactivatePerson db pid = withConn db $ \conn -> do
       (Only pid)
   pure ()
 
--- ── Role Assignment (new schema: product_slug is TEXT, no FK to sc_product) ──
+-- ── Role Assignment (ON CONFLICT — kept as raw SQL) ─────────────────
 
 assignRole :: DBEnv -> UUID -> Text -> UUID -> Maybe UUID -> IO ()
 assignRole db personId productSlug roleId grantedBy = withConn db $ \conn -> do
@@ -111,16 +144,16 @@ assignRole db personId productSlug roleId grantedBy = withConn db $ \conn -> do
   pure ()
 
 revokeProductAccess :: DBEnv -> UUID -> Text -> IO ()
-revokeProductAccess db personId productSlug = withConn db $ \conn -> do
-  _ <-
-    execute
-      conn
-      "DELETE FROM sc_person_product_access WHERE person_id = ? AND product_slug = ?"
-      (personId, productSlug)
-  pure ()
+revokeProductAccess db personId productSlug =
+  runDB db $
+    runDelete $
+      delete
+        (scPersonProductAccess coreDb)
+        (\a -> sppaPersonId a ==. val_ personId &&. sppaProductSlug a ==. val_ productSlug)
 
--- ── Permission Overrides (new schema: permission_action TEXT, no FK to sc_permission) ──
+-- ── Permission Overrides ────────────────────────────────────────────
 
+-- | INSERT ON CONFLICT RETURNING — kept as raw SQL.
 addPermissionOverride :: DBEnv -> UUID -> Text -> Text -> Text -> Maybe UUID -> IO UUID
 addPermissionOverride db personId productSlug permAction overrideType grantedBy = withConn db $ \conn -> do
   [Only oid] <-
@@ -134,27 +167,25 @@ addPermissionOverride db personId productSlug permAction overrideType grantedBy 
   pure oid
 
 removePermissionOverride :: DBEnv -> UUID -> IO ()
-removePermissionOverride db oid = withConn db $ \conn -> do
-  _ <-
-    execute
-      conn
-      "DELETE FROM sc_person_permission_override WHERE id = ?"
-      (Only oid)
-  pure ()
-
-instance FromRow OverrideDetail where
-  fromRow = OverrideDetail <$> field <*> field <*> field <*> field
+removePermissionOverride db oid =
+  runDB db $
+    runDelete $
+      delete
+        (scPersonPermissionOverride coreDb)
+        (\o -> sppoId o ==. val_ oid)
 
 listOverridesForPerson :: DBEnv -> UUID -> IO [OverrideDetail]
-listOverridesForPerson db personId = withConn db $ \conn ->
-  query
-    conn
-    "SELECT id, permission_action, override_type, product_slug \
-    \FROM sc_person_permission_override \
-    \WHERE person_id = ?"
-    (Only personId)
+listOverridesForPerson db personId = do
+  rows <-
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          o <- all_ (scPersonPermissionOverride coreDb)
+          guard_ (sppoPersonId o ==. val_ personId)
+          pure o
+  pure $ map toOverrideDetail rows
 
--- ── Roles (new schema: product_slug TEXT, permissions TEXT[]) ────────
+-- ── Roles (PGArray queries — kept as raw SQL) ────────────────────────
 
 data RoleRow = RoleRow
   { rrId :: UUID,
@@ -210,11 +241,18 @@ updateRolePermissions db roleId mDesc permActions = withConn db $ \conn -> do
 -- ── Audit Log ──────────────────────────────────────────────────────
 
 writeAuditLog :: DBEnv -> UUID -> Text -> Maybe Text -> Maybe Text -> Maybe A.Value -> IO ()
-writeAuditLog db personId action entityType entityId details = withConn db $ \conn -> do
-  _ <-
-    execute
-      conn
-      "INSERT INTO sc_audit_log (person_id, action, entity_type, entity_id, details) \
-      \VALUES (?, ?, ?, ?, ?)"
-      (personId, action, entityType, entityId, A.encode <$> details)
-  pure ()
+writeAuditLog db personId action entityType entityId details =
+  runDB db $
+    runInsert $
+      insert (scAuditLog coreDb) $
+        insertExpressions
+          [ ScAuditLogT
+              { salId = default_,
+                salPersonId = val_ (Just personId),
+                salAction = val_ action,
+                salEntityType = val_ entityType,
+                salEntityId = val_ entityId,
+                salDetails = val_ details,
+                salCreatedAt = default_
+              }
+          ]

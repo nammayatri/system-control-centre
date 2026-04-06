@@ -9,13 +9,13 @@ module Products.Autopilot.Workflow.BackendConfigWorkflow
   )
 where
 
-import Control.Monad.IO.Class (liftIO)
 import Control.Exception (throwIO)
-import Core.AppError (WorkflowError(..))
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
+import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
-import Core.Utils.FlowMonad (getConfig, getDBEnv)
+import Core.Utils.FlowMonad (getConfig, getDBEnv, logInfo)
 import Data.Aeson (Value (..), eitherDecodeStrict', encode)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -63,6 +63,10 @@ backendConfigWorkflow = do
 getCfg :: StateFlow Config
 getCfg = lift getConfig
 
+-- | StateFlow-level logging (lifts from Flow)
+logInfoS :: T.Text -> StateFlow ()
+logInfoS = lift . logInfo
+
 -- | Get file content from metadata
 getFileContent :: StateFlow (Maybe Text)
 getFileContent = do
@@ -94,7 +98,7 @@ updateConfigStatus newStatus = do
 validateConfig :: StateFlow ()
 validateConfig = do
   rt <- getRT
-  liftIO $ putStrLn $ "Validating config for " <> T.unpack (appGroup rt)
+  logInfoS $ "Validating config for " <> appGroup rt
   updateConfigStatus BCInit
 
   fileContent <- getFileContent
@@ -103,14 +107,14 @@ validateConfig = do
     Just fc | T.null (T.strip fc) -> liftIO $ throwIO $ WorkflowError "validate" "Empty file/config content"
     Just _ -> pure ()
 
-  liftIO $ putStrLn "Config validation passed"
+  logInfoS "Config validation passed"
 
 -- | Resolve the config content: if raw K8s manifest use directly, otherwise patch existing ConfigMap
 resolveConfigContent :: StateFlow ()
 resolveConfigContent = do
   rt <- getRT
   cfg <- getCfg
-  liftIO $ putStrLn $ "Resolving config content for " <> T.unpack (appGroup rt)
+  logInfoS $ "Resolving config content for " <> appGroup rt
   updateConfigStatus BCApplyConfigMap
 
   fileContent <- getFileContent
@@ -141,12 +145,12 @@ resolveConfigContent = do
                       ("resolvedContent", String fc)
                     ]
           modify $ \s -> s{workflowMetadata = Just resolved}
-          liftIO $ putStrLn "  Content is raw K8s manifest, will apply directly"
+          logInfoS "  Content is raw K8s manifest, will apply directly"
         else do
           -- Fetch existing ConfigMap and patch it
           let cmName' = T.unpack (service rt)
               getCmd = unwords [kubectlBin cfg, "get configmap", cmName', "-n", ns, "-o json"]
-          liftIO $ putStrLn $ "  Fetching existing ConfigMap: " <> cmName'
+          logInfoS $ "  Fetching existing ConfigMap: " <> T.pack cmName'
           getRes <- liftIO $ runCmd getCmd
           case getRes of
             Left (K8sError err) -> liftIO $ throwIO $ WorkflowError "k8s" ("Failed to fetch ConfigMap: " <> err)
@@ -161,16 +165,16 @@ resolveConfigContent = do
                               ("resolvedContent", String patchedContent)
                             ]
                   modify $ \s -> s{workflowMetadata = Just resolved}
-                  liftIO $ putStrLn "  Patched existing ConfigMap with new data"
+                  logInfoS "  Patched existing ConfigMap with new data"
 
-  liftIO $ putStrLn "Config content resolved"
+  logInfoS "Config content resolved"
 
 -- | Apply the resolved ConfigMap content via kubectl replace
 applyConfigMap :: StateFlow ()
 applyConfigMap = do
   rt <- getRT
   cfg <- getCfg
-  liftIO $ putStrLn $ "Applying ConfigMap for " <> T.unpack (appGroup rt)
+  logInfoS $ "Applying ConfigMap for " <> appGroup rt
 
   rs <- gets id
   case workflowMetadata rs of
@@ -195,7 +199,7 @@ applyConfigMap = do
           -- Capture AFTER snapshot of configmap
           db <- lift getDBEnv
           liftIO $ captureConfigMapSnapshot cfg db (releaseId rt) (T.pack ns) (service rt) "CONFIGMAP_AFTER"
-          liftIO $ putStrLn "ConfigMap applied successfully"
+          logInfoS "ConfigMap applied successfully"
         Left err -> liftIO $ throwIO $ WorkflowError "apply" ("kubectl replace failed: " <> err)
     _ -> liftIO $ throwIO $ WorkflowError "apply" "Missing workflow metadata"
 
@@ -204,7 +208,7 @@ notifyComplete :: StateFlow ()
 notifyComplete = do
   rt <- getRT
   db <- lift getDBEnv
-  liftIO $ putStrLn $ "ConfigMap release " <> T.unpack (releaseId rt) <> " completed!"
+  logInfoS $ "ConfigMap release " <> releaseId rt <> " completed!"
   liftIO $ notifyConfigMapCompleted db rt
   updateRT $ \r -> r{status = COMPLETED}
 

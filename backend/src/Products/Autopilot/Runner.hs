@@ -6,7 +6,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
 import Core.Config (Config (..))
 import Core.Environment (AppState (..), DBEnv)
-import Core.Logging (LoggerEnv, logInfoIO, logErrorIO, logWarningIO)
+import Core.Logging (LoggerEnv, logErrorIO, logInfoIO, logWarningIO)
 import Core.Utils.FlowMonad
 import Data.Aeson (object, toJSON, (.=))
 import qualified Data.Map.Strict as Map

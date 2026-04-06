@@ -13,15 +13,15 @@ module Products.Autopilot.Workflow.BackendCronJobWorkflow
   )
 where
 
+import Control.Exception (throwIO)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
-import Control.Exception (throwIO)
-import Core.AppError (WorkflowError(..))
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
+import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
 import Core.Environment (DBEnv)
-import Core.Utils.FlowMonad (getConfig, getDBEnv)
+import Core.Utils.FlowMonad (getConfig, getDBEnv, logInfo)
 import qualified Data.Text as T
 import Products.Autopilot.K8s.Execute (K8sError (..), runCmd)
 import Products.Autopilot.Notifications
@@ -74,6 +74,10 @@ getCfg = lift getConfig
 getDB :: StateFlow DBEnv
 getDB = lift getDBEnv
 
+-- | StateFlow-level logging (lifts from Flow)
+logInfoS :: T.Text -> StateFlow ()
+logInfoS = lift . logInfo
+
 -- | Extract K8sReleaseContext from the current workflow state
 getK8sCtx :: StateFlow K8sReleaseContext
 getK8sCtx = do
@@ -107,7 +111,7 @@ validatePreconditions :: StateFlow ()
 validatePreconditions = do
   rt <- getRT
   cfg <- getCfg
-  liftIO $ putStrLn $ "Validating preconditions for cronjob " <> T.unpack (appGroup rt)
+  logInfoS $ "Validating preconditions for cronjob " <> appGroup rt
 
   -- Initialise or update K8s deployment state
   rs <- gets id
@@ -121,7 +125,7 @@ validatePreconditions = do
   ctx <- getK8sCtx
 
   -- Check cluster reachable by verifying namespace exists
-  liftIO $ putStrLn "  Checking cluster reachability"
+  logInfoS "  Checking cluster reachability"
   _ <-
     runK8sIO $
       runCmd
@@ -134,8 +138,8 @@ validatePreconditions = do
             ]
         )
 
-  liftIO $ putStrLn "  Cluster reachable, namespace exists"
-  liftIO $ putStrLn "Preconditions validated for cronjob"
+  logInfoS "  Cluster reachable, namespace exists"
+  logInfoS "Preconditions validated for cronjob"
 
 -- | Get current CronJob spec
 getCronJobSpec :: StateFlow ()
@@ -143,7 +147,7 @@ getCronJobSpec = do
   rt <- getRT
   cfg <- getCfg
   ctx <- getK8sCtx
-  liftIO $ putStrLn $ "Getting CronJob spec for " <> T.unpack (appGroup rt)
+  logInfoS $ "Getting CronJob spec for " <> appGroup rt
 
   updateK8sStatus BSCreateDeployment
 
@@ -159,10 +163,10 @@ getCronJobSpec = do
             ns,
             "-o json"
           ]
-  liftIO $ putStrLn $ "  Fetching CronJob: " <> cronJobName
+  logInfoS $ "  Fetching CronJob: " <> T.pack cronJobName
   _ <- runK8sIO $ runCmd getCmd
 
-  liftIO $ putStrLn "CronJob spec retrieved"
+  logInfoS "CronJob spec retrieved"
 
 -- | Update CronJob image
 updateCronJobImage :: StateFlow ()
@@ -170,7 +174,7 @@ updateCronJobImage = do
   rt <- getRT
   cfg <- getCfg
   ctx <- getK8sCtx
-  liftIO $ putStrLn $ "Updating CronJob image for " <> T.unpack (appGroup rt)
+  logInfoS $ "Updating CronJob image for " <> appGroup rt
 
   updateK8sStatus BSFlipVirtualService -- Reuse status for "deploying" phase
   let cronJobName = T.unpack (serviceName ctx)
@@ -189,11 +193,11 @@ updateCronJobImage = do
             ns
           ]
 
-  liftIO $ putStrLn $ "  Setting image: " <> newImg
+  logInfoS $ "  Setting image: " <> T.pack newImg
   _ <- runK8sIO $ runCmd setImageCmd
   updateK8sField (\k8s -> k8s{deploymentCreated = True, trafficPercentage = 100})
 
-  liftIO $ putStrLn "CronJob image updated"
+  logInfoS "CronJob image updated"
 
 -- | Handle CronJob suspend: optionally suspend old cronjob
 handleCronJobSuspend :: StateFlow ()
@@ -201,7 +205,7 @@ handleCronJobSuspend = do
   rt <- getRT
   cfg <- getCfg
   ctx <- getK8sCtx
-  liftIO $ putStrLn $ "Handling CronJob post-deploy for " <> T.unpack (appGroup rt)
+  logInfoS $ "Handling CronJob post-deploy for " <> appGroup rt
 
   updateK8sStatus BSMonitoring
 
@@ -220,11 +224,11 @@ handleCronJobSuspend = do
               "-p",
               "'{\"spec\":{\"suspend\":true}}'"
             ]
-    liftIO $ putStrLn $ "  Suspending CronJob: " <> cronJobName
+    logInfoS $ "  Suspending CronJob: " <> T.pack cronJobName
     _ <- runK8sIO $ runCmd suspendCmd
-    liftIO $ putStrLn "  CronJob suspended"
+    logInfoS "  CronJob suspended"
 
-  liftIO $ putStrLn "CronJob post-deploy handling complete"
+  logInfoS "CronJob post-deploy handling complete"
 
 -- | Notify complete
 notifyComplete :: StateFlow ()
@@ -233,10 +237,10 @@ notifyComplete = do
   db <- getDB
   updateK8sStatus BSDone
 
-  liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
-  liftIO $ putStrLn $ "   Service: " <> T.unpack (appGroup rt)
-  liftIO $ putStrLn $ "   Category: BackendCronJob"
-  liftIO $ putStrLn $ "   Status: COMPLETED"
+  logInfoS $ "Release " <> releaseId rt <> " completed successfully!"
+  logInfoS $ "   Service: " <> (appGroup rt)
+  logInfoS $ "   Category: BackendCronJob"
+  logInfoS $ "   Status: COMPLETED"
 
   updateRT $ \r -> r{status = COMPLETED}
 

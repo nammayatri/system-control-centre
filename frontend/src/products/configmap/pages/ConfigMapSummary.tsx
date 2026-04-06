@@ -5,6 +5,7 @@ import Editor from '@monaco-editor/react';
 import ReactDiffViewer from 'react-diff-viewer-continued';
 import { fetchConfigMapDetail, updateConfigMap } from '../api';
 import { fetchReleaseEvents } from '../../releases/api';
+import { useReleaseDiff } from '../../releases/hooks';
 import { Badge } from '../../../shared/ui/badge';
 import { StatusBadge } from '../../releases/components/StatusBadge';
 import { Button } from '../../../shared/ui/button';
@@ -43,6 +44,36 @@ const formatTs = (ts: string) => {
   }) + ' IST';
 };
 const tryFormatJson = (data: string): string => { try { return JSON.stringify(JSON.parse(data), null, 2); } catch { return data; } };
+
+const ConfigMapDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
+  const { data: diff, isLoading, error } = useReleaseDiff(releaseId, 'configmap');
+  return (
+    <div className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">ConfigMap Diff</h3>
+        {diff?.message && <span className="text-xs text-zinc-400">{diff.message}</span>}
+      </div>
+      {isLoading ? (
+        <div className="animate-pulse space-y-3"><div className="h-4 bg-zinc-100 rounded w-1/3" /><div className="h-64 bg-zinc-100 rounded" /></div>
+      ) : error || !diff ? (
+        <p className="text-sm text-zinc-400">No diff data available.</p>
+      ) : !diff.oldfile && !diff.newfile ? (
+        <p className="text-sm text-zinc-400">No ConfigMap diff data available.</p>
+      ) : (
+        <div className="border border-zinc-200 rounded-lg overflow-hidden">
+          <ReactDiffViewer
+            oldValue={formatConfigMapContent(diff.oldfile)}
+            newValue={formatConfigMapContent(diff.newfile)}
+            splitView={true}
+            leftTitle="Before"
+            rightTitle="After"
+            useDarkTheme={false}
+          />
+        </div>
+      )}
+    </div>
+  );
+};
 
 const ConfigMapSummary: React.FC = () => {
   const { id: rawId } = useParams<{ id: string }>();
@@ -114,9 +145,6 @@ const ConfigMapSummary: React.FC = () => {
     ? releaseEvents.map(e => ({ category: e.category, label: e.label, data: e.data, timestamp: e.timestamp }))
     : (data.events as ConfigMapEvent[] | undefined) || [];
   const sortedEvents = [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-
-  const beforeSnapshot = events.find(e => e.category === 'SNAPSHOT' && e.label === 'CONFIGMAP_BEFORE');
-  const afterSnapshot = events.find(e => e.category === 'SNAPSHOT' && e.label === 'CONFIGMAP_AFTER');
 
   return (
     <div className="flex flex-col w-full">
@@ -234,27 +262,7 @@ const ConfigMapSummary: React.FC = () => {
           </div>
         )}
 
-        {activeTab === 'ConfigMap Diff' && (
-          <div className="p-0">
-            {(beforeSnapshot || afterSnapshot) ? (
-              <div className="overflow-hidden">
-                <ReactDiffViewer
-                  oldValue={beforeSnapshot?.data ? formatConfigMapContent(beforeSnapshot.data) : ''}
-                  newValue={afterSnapshot?.data ? formatConfigMapContent(afterSnapshot.data) : ''}
-                  splitView={true}
-                  leftTitle="Before"
-                  rightTitle="After"
-                  useDarkTheme={false}
-                />
-              </div>
-            ) : data?.file ? (
-              <Editor height="60vh" defaultLanguage="yaml" theme="light" value={formatConfigMapContent(data.file)}
-                options={{ readOnly: true, minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', automaticLayout: true }} />
-            ) : (
-              <div className="p-6 text-sm text-zinc-400">No ConfigMap diff available. Snapshots are captured when the workflow runs.</div>
-            )}
-          </div>
-        )}
+        {activeTab === 'ConfigMap Diff' && <ConfigMapDiffTab releaseId={id} />}
       </div>
 
       <div className="flex justify-end pt-5">

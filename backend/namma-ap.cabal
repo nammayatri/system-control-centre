@@ -30,11 +30,13 @@ library
       Core.Auth.Queries
       Core.Auth.RouteCheck
       Core.Auth.Routes
+      Core.Auth.Schema
       Core.Auth.Types
       Core.AppError
       Core.AppM
       Core.Config
       Core.Logging
+      Core.Middleware.RequestId
       Shared.Config.Runtime
       Core.DB.Connection
       Core.Environment
@@ -111,6 +113,7 @@ library
     , beam-core
     , beam-postgres
     , bytestring
+    , case-insensitive
     , containers
     , directory
     , exceptions

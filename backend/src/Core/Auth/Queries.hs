@@ -15,46 +15,62 @@ module Core.Auth.Queries
   )
 where
 
+import Core.Auth.Schema
 import Core.Auth.Types
-import Core.DB.Connection (withConn)
+import Core.DB.Connection (runDB, withConn)
 import Core.Environment (DBEnv (..))
 import Data.Text (Text)
-import qualified Data.Text as T
 import Data.Time.Clock (UTCTime)
 import Data.UUID (UUID)
-import Database.PostgreSQL.Simple
-import Database.PostgreSQL.Simple.FromField (FromField (..))
+import Database.Beam
+import Database.Beam.Postgres ()
+import Database.PostgreSQL.Simple (Only (..), query)
 import Database.PostgreSQL.Simple.FromRow (FromRow (..), field)
 import Database.PostgreSQL.Simple.Types (PGArray (..))
-import Products.Types (ProductSlug, allPermissionsText, defaultPermissionsText, textToProductSlug)
+import Products.Types (allPermissionsText, defaultPermissionsText)
+
+-- ── Beam-row → domain-type converters ──────────────────────────────
+
+toPersonAuth :: ScPerson -> PersonAuth
+toPersonAuth ScPersonT {..} =
+  PersonAuth
+    { personId = spId,
+      personEmail = spEmail,
+      personFirstName = spFirstName,
+      personLastName = spLastName,
+      personPasswordHash = spPasswordHash,
+      personIsActive = spIsActive,
+      personIsSuperadmin = spIsSuperadmin,
+      personCreatedAt = spCreatedAt,
+      personUpdatedAt = spUpdatedAt
+    }
 
 -- ── Person ──────────────────────────────────────────────────────────
 
-instance FromRow PersonAuth where
-  fromRow = PersonAuth <$> field <*> field <*> field <*> field <*> field <*> field <*> field <*> field <*> field
-
 findPersonByEmail :: DBEnv -> Text -> IO (Maybe PersonAuth)
-findPersonByEmail db email = withConn db $ \conn -> do
+findPersonByEmail db email = do
   rows <-
-    query
-      conn
-      "SELECT id, email, first_name, last_name, password_hash, is_active, is_superadmin, created_at, updated_at \
-      \FROM sc_person WHERE email = ? AND is_active = true"
-      (Only email)
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          p <- all_ (scPerson coreDb)
+          guard_ (spEmail p ==. val_ email &&. spIsActive p ==. val_ True)
+          pure p
   pure $ case rows of
-    [p] -> Just p
+    [p] -> Just (toPersonAuth p)
     _ -> Nothing
 
 findPersonById :: DBEnv -> UUID -> IO (Maybe PersonAuth)
-findPersonById db pid = withConn db $ \conn -> do
+findPersonById db pid = do
   rows <-
-    query
-      conn
-      "SELECT id, email, first_name, last_name, password_hash, is_active, is_superadmin, created_at, updated_at \
-      \FROM sc_person WHERE id = ?"
-      (Only pid)
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          p <- all_ (scPerson coreDb)
+          guard_ (spId p ==. val_ pid)
+          pure p
   pure $ case rows of
-    [p] -> Just p
+    [p] -> Just (toPersonAuth p)
     _ -> Nothing
 
 -- ── Token ───────────────────────────────────────────────────────────
@@ -69,49 +85,65 @@ data TokenRow = TokenRow
   }
   deriving (Show)
 
-instance FromRow TokenRow where
-  fromRow = TokenRow <$> field <*> field <*> field <*> field <*> field <*> field
+toTokenRow :: ScRegistrationToken -> TokenRow
+toTokenRow ScRegistrationTokenT {..} =
+  TokenRow
+    { trId = srtId,
+      trPersonId = srtPersonId,
+      trToken = srtToken,
+      trIsActive = srtIsActive,
+      trCreatedAt = srtCreatedAt,
+      trExpiresAt = srtExpiresAt
+    }
 
 findTokenByValue :: DBEnv -> Text -> IO (Maybe TokenRow)
-findTokenByValue db tok = withConn db $ \conn -> do
+findTokenByValue db tok = do
   rows <-
-    query
-      conn
-      "SELECT id, person_id, token, is_active, created_at, expires_at \
-      \FROM sc_registration_token WHERE token = ? AND is_active = true"
-      (Only tok)
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          t <- all_ (scRegistrationToken coreDb)
+          guard_ (srtToken t ==. val_ tok &&. srtIsActive t ==. val_ True)
+          pure t
   pure $ case rows of
-    [t] -> Just t
+    [t] -> Just (toTokenRow t)
     _ -> Nothing
 
 insertToken :: DBEnv -> UUID -> Text -> UTCTime -> IO ()
-insertToken db personId tok expiresAt = withConn db $ \conn -> do
-  _ <-
-    execute
-      conn
-      "INSERT INTO sc_registration_token (person_id, token, expires_at) VALUES (?, ?, ?)"
-      (personId, tok, expiresAt)
-  pure ()
+insertToken db personId tok expiresAt =
+  runDB db $
+    runInsert $
+      insert (scRegistrationToken coreDb) $
+        insertExpressions
+          [ ScRegistrationTokenT
+              { srtId = default_,
+                srtPersonId = val_ personId,
+                srtToken = val_ tok,
+                srtIsActive = val_ True,
+                srtCreatedAt = default_,
+                srtExpiresAt = val_ expiresAt
+              }
+          ]
 
 deactivateToken :: DBEnv -> Text -> IO ()
-deactivateToken db tok = withConn db $ \conn -> do
-  _ <-
-    execute
-      conn
-      "UPDATE sc_registration_token SET is_active = false WHERE token = ?"
-      (Only tok)
-  pure ()
+deactivateToken db tok =
+  runDB db $
+    runUpdate $
+      update
+        (scRegistrationToken coreDb)
+        (\t -> srtIsActive t <-. val_ False)
+        (\t -> srtToken t ==. val_ tok)
 
 deactivateTokensByPerson :: DBEnv -> UUID -> IO ()
-deactivateTokensByPerson db pid = withConn db $ \conn -> do
-  _ <-
-    execute
-      conn
-      "UPDATE sc_registration_token SET is_active = false WHERE person_id = ?"
-      (Only pid)
-  pure ()
+deactivateTokensByPerson db pid =
+  runDB db $
+    runUpdate $
+      update
+        (scRegistrationToken coreDb)
+        (\t -> srtIsActive t <-. val_ False)
+        (\t -> srtPersonId t ==. val_ pid)
 
--- ── Product Access (simplified — no sc_product table) ──────────────
+-- ── Product Access (JOIN query — kept as raw SQL) ──────────────────
 
 data ProductAccessRow = ProductAccessRow
   { parProductSlug :: Text,
@@ -124,9 +156,6 @@ data ProductAccessRow = ProductAccessRow
 
 instance FromRow ProductAccessRow where
   fromRow = ProductAccessRow <$> field <*> field <*> field <*> field <*> field
-
--- Custom instance needed for TEXT[] → Maybe [Text]
--- postgresql-simple handles this via PGArray
 
 findProductAccessForPerson :: DBEnv -> UUID -> IO [ProductAccess]
 findProductAccessForPerson db pid = withConn db $ \conn -> do
@@ -166,9 +195,7 @@ computeEffectivePermissions db person productSlug roleId = do
           effective = filter (`notElem` denies) combined
       pure effective
 
--- | Get permissions for a role.
--- System roles (Admin/Manager/Viewer): derived from code
--- Custom roles: from DB permissions TEXT[] column
+-- | Get permissions for a role (PGArray — kept as raw SQL).
 getRolePermissions :: DBEnv -> Text -> UUID -> IO [Text]
 getRolePermissions db productSlug roleId = withConn db $ \conn -> do
   rows <-
@@ -179,38 +206,44 @@ getRolePermissions db productSlug roleId = withConn db $ \conn -> do
       IO [(Text, Bool, Maybe (PGArray Text))]
   case rows of
     [(roleName, True, _)] ->
-      -- System role: derive from code
       pure $ defaultPermissionsText productSlug roleName
     [(_, False, Just (PGArray perms))] ->
-      -- Custom role: from DB
       pure perms
     [(_, False, Nothing)] ->
       pure []
     _ -> pure []
 
--- ── Overrides (simplified — no sc_permission table) ─────────────────
+-- ── Overrides (Beam queries) ───────────────────────────────────────
 
 findGrantOverrides :: DBEnv -> UUID -> Text -> IO [Text]
-findGrantOverrides db pid productSlug = withConn db $ \conn -> do
+findGrantOverrides db pid productSlug = do
   rows <-
-    query
-      conn
-      "SELECT permission_action FROM sc_person_permission_override \
-      \WHERE person_id = ? AND product_slug = ? AND override_type = 'GRANT'"
-      (pid, productSlug) ::
-      IO [Only Text]
-  pure $ map (\(Only a) -> a) rows
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          o <- all_ (scPersonPermissionOverride coreDb)
+          guard_
+            ( sppoPersonId o ==. val_ pid
+                &&. sppoProductSlug o ==. val_ productSlug
+                &&. sppoOverrideType o ==. val_ "GRANT"
+            )
+          pure (sppoPermissionAction o)
+  pure rows
 
 findDenyOverrides :: DBEnv -> UUID -> Text -> IO [Text]
-findDenyOverrides db pid productSlug = withConn db $ \conn -> do
+findDenyOverrides db pid productSlug = do
   rows <-
-    query
-      conn
-      "SELECT permission_action FROM sc_person_permission_override \
-      \WHERE person_id = ? AND product_slug = ? AND override_type = 'DENY'"
-      (pid, productSlug) ::
-      IO [Only Text]
-  pure $ map (\(Only a) -> a) rows
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          o <- all_ (scPersonPermissionOverride coreDb)
+          guard_
+            ( sppoPersonId o ==. val_ pid
+                &&. sppoProductSlug o ==. val_ productSlug
+                &&. sppoOverrideType o ==. val_ "DENY"
+            )
+          pure (sppoPermissionAction o)
+  pure rows
 
 -- ── All products for person ────────────────────────────────────────
 

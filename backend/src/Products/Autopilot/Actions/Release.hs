@@ -53,6 +53,7 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Char (isAlphaNum)
+import qualified Data.Yaml as Yaml
 import Data.List (find)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
@@ -903,8 +904,10 @@ releaseDiffH _ap rid mType = do
             -- Check for stored SNAPSHOT events first
             events <- liftIO $ listReleaseEvents db rid
             let snapshotEvents = filter (\e -> S.reCategory e == "SNAPSHOT") events
-                diffType = fromMaybe "deployment" mType
-                (beforeLabel, afterLabel, diffLabel) = case diffType of
+                trackerCat = NT.category tracker
+                (beforeLabel, afterLabel, diffLabel) = case trackerCat of
+                    BackendConfig -> ("CONFIGMAP_BEFORE", "CONFIGMAP_AFTER", "ConfigMap diff")
+                    VSEdit -> ("VS_OLD", "VS_NEW", "VS diff")
                     _ -> ("DEPLOYMENT_BEFORE", "DEPLOYMENT_AFTER", "Deployment diff")
                 findSnapshot label = find (\e -> S.reLabel e == label) snapshotEvents
                 mBefore = findSnapshot beforeLabel
@@ -919,12 +922,29 @@ releaseDiffH _ap rid mType = do
                             (payloadToText (S.rePayload beforeEvt))
                             (payloadToText (S.rePayload afterEvt))
                             diffLabel
-                (Just beforeEvt, Nothing) ->
-                    pure $
-                        DiffResponse
-                            (payloadToText (S.rePayload beforeEvt))
-                            ""
-                            (diffLabel <> " (in progress -- after snapshot pending)")
+                (Just beforeEvt, Nothing) -> do
+                    -- For configmaps, extract data section from BEFORE and use tracker file as proposed
+                    case trackerCat of
+                      BackendConfig -> do
+                        let beforeYaml = payloadToText (S.rePayload beforeEvt)
+                            -- Extract just the JSON data from the K8s YAML snapshot
+                            beforeData = extractConfigMapDataSection beforeYaml
+                            proposedContent =
+                              case NT.metadata tracker of
+                                Just (Object o) ->
+                                  case KM.lookup (K.fromText "file") o of
+                                    Just (String f) -> f
+                                    _ -> case KM.lookup (K.fromText "config") o of
+                                      Just (String c) -> c
+                                      _ -> ""
+                                _ -> ""
+                        pure $ DiffResponse beforeData proposedContent diffLabel
+                      _ ->
+                        pure $
+                            DiffResponse
+                                (payloadToText (S.rePayload beforeEvt))
+                                ""
+                                (diffLabel <> " (after snapshot pending)")
                 _ -> do
                     -- Fall back to live K8s diff (original behavior)
                     let mCtx = case mTargetState of
@@ -1242,3 +1262,15 @@ isValidK8sVersion ver
             startsOk = case chars of (c : _) -> isAlphaNum c; [] -> False
             endsOk = case chars of [] -> False; _ -> isAlphaNum (Prelude.last chars)
          in all isValidChar chars && startsOk && endsOk
+
+-- | Extract just the data section from a K8s ConfigMap YAML as JSON.
+-- Input: full K8s YAML like "apiVersion: v1\ndata:\n  app.conf: |-\n    ...\nkind: ..."
+-- Output: JSON like "{\"app.conf\":\"...\"}" so it matches the tracker's file format.
+extractConfigMapDataSection :: Text -> Text
+extractConfigMapDataSection yamlText =
+    case Yaml.decodeEither' (TE.encodeUtf8 yamlText) :: Either Yaml.ParseException Value of
+        Right (Object obj) ->
+            case KM.lookup (K.fromText "data") obj of
+                Just dataVal -> TE.decodeUtf8 (LBS.toStrict (A.encode dataVal))
+                Nothing -> yamlText
+        _ -> yamlText

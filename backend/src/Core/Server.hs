@@ -13,6 +13,7 @@ import Core.Auth.Routes (AuthAPI, authServer)
 import Core.Config (port)
 import Core.Environment (AppState (..), DBEnv)
 import Core.Logging (logErrorIO, logInfoIO)
+import Core.Middleware.RequestId (requestIdMiddleware)
 import Core.Utils.FlowMonad (Flow)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -41,13 +42,14 @@ serverContext st = dbEnv st :. EmptyContext
 
 mkApp :: AppState -> Application
 mkApp st =
-  cors corsForRequest $
-    serveWithContext fullApi (serverContext st) $
-      hoistServerWithContext
-        fullApi
-        (Proxy :: Proxy '[DBEnv])
-        (toHandler st)
-        fullServer
+  requestIdMiddleware (loggerEnv st) $
+    cors corsForRequest $
+      serveWithContext fullApi (serverContext st) $
+        hoistServerWithContext
+          fullApi
+          (Proxy :: Proxy '[DBEnv])
+          (toHandler st)
+          fullServer
   where
     corsForRequest req =
       let origin = lookup "Origin" (requestHeaders req)
@@ -89,19 +91,19 @@ exceptionToServantError :: SomeException -> ServerError
 exceptionToServantError ex
   -- Our typed hierarchy: AppException carries ToAppError constraint
   | Just (AppException inner) <- fromException ex =
-      toServantError inner
+    toServantError inner
   -- Anything else: generic 500
   | otherwise =
-      ServerError
-        500
-        "Internal Server Error"
-        (errorResponseJSON "ERROR" "INTERNAL_ERROR" (T.pack (show ex)) "UnhandledException")
-        [("Content-Type", "application/json")]
+    ServerError
+      500
+      "Internal Server Error"
+      (errorResponseJSON "ERROR" "INTERNAL_ERROR" (T.pack (show ex)) "UnhandledException")
+      [("Content-Type", "application/json")]
 
 -- | Format exception for log line: [Tag:CODE] message
 formatExceptionLog :: SomeException -> Text
 formatExceptionLog ex
   | Just (AppException inner) <- fromException ex =
-      "[" <> toErrorTag inner <> ":" <> toErrorCode inner <> "] " <> toErrorMessage inner
+    "[" <> toErrorTag inner <> ":" <> toErrorCode inner <> "] " <> toErrorMessage inner
   | otherwise =
-      "[UnhandledException:INTERNAL_ERROR] " <> T.pack (show ex)
+    "[UnhandledException:INTERNAL_ERROR] " <> T.pack (show ex)

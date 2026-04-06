@@ -22,17 +22,19 @@ module Products.Autopilot.Workflow.BackendServiceWorkflow
 where
 
 import Control.Concurrent (threadDelay)
+import Control.Exception (throwIO)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
-import Control.Exception (throwIO)
-import Core.AppError (WorkflowError(..))
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
+import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
 -- getPodsCalculationFactor reserved for future pod-count calculation
 
 import Core.Environment (DBEnv)
-import Core.Utils.FlowMonad (getConfig, getDBEnv)
+import Core.Environment (getLoggerEnv)
+import Core.Logging (LoggerEnv, logErrorIO, logInfoIO)
+import Core.Utils.FlowMonad (getConfig, getDBEnv, logError, logInfo, logWarning)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -139,6 +141,16 @@ getCfg = lift getConfig
 getDB :: StateFlow DBEnv
 getDB = lift getDBEnv
 
+-- | StateFlow-level logging (lifts from Flow)
+logInfoS :: T.Text -> StateFlow ()
+logInfoS = lift . logInfo
+
+logWarningS :: T.Text -> StateFlow ()
+logWarningS = lift . logWarning
+
+logErrorS :: T.Text -> StateFlow ()
+logErrorS = lift . logError
+
 -- | Extract K8sReleaseContext from the current workflow state
 getK8sCtx :: StateFlow K8sReleaseContext
 getK8sCtx = do
@@ -189,7 +201,7 @@ validatePreconditions :: StateFlow ()
 validatePreconditions = do
   rt <- getRT
   cfg <- getCfg
-  liftIO $ putStrLn $ "Validating preconditions for " <> T.unpack (appGroup rt)
+  logInfoS $ "Validating preconditions for " <> appGroup rt
 
   -- Initialise or update K8s deployment state
   rs <- gets id
@@ -204,7 +216,7 @@ validatePreconditions = do
   isNew <- isNewServiceRelease
 
   -- Check cluster reachable by verifying namespace exists
-  liftIO $ putStrLn "  Checking cluster reachability"
+  logInfoS "  Checking cluster reachability"
   _ <-
     runK8sIO $
       runCmd
@@ -218,8 +230,7 @@ validatePreconditions = do
         )
 
   when isNew $
-    liftIO $
-      putStrLn "  New service release: skipping old version validation"
+    logInfoS "  New service release: skipping old version validation"
 
   -- Check internal VS (if exists) and log if found
   let internalVsName = serviceName ctx <> "-internal-vs"
@@ -229,7 +240,7 @@ validatePreconditions = do
     Right _ -> do
       db' <- getDB
       rt' <- getRT
-      liftIO $ putStrLn $ "  Internal VS found: " <> T.unpack internalVsName
+      logInfoS $ "  Internal VS found: " <> internalVsName
       liftIO $
         insertReleaseEvent
           db'
@@ -238,7 +249,7 @@ validatePreconditions = do
           "INTERNAL_VS_FOUND"
           (toJSON internalVsName)
 
-  liftIO $ putStrLn "  Cluster reachable, namespace exists"
+  logInfoS "  Cluster reachable, namespace exists"
 
   -- Persist state after validation (production persists status changes immediately)
   db <- getDB
@@ -246,7 +257,7 @@ validatePreconditions = do
   currentTS <- gets targetState
   liftIO $ insertReleaseTracker db currentRT currentTS
 
-  liftIO $ putStrLn "Preconditions validated"
+  logInfoS "Preconditions validated"
 
 -- | Prepare K8s resources: ConfigMap, clone/create deployment, service check, DestinationRule
 prepareK8sResources :: StateFlow ()
@@ -256,14 +267,14 @@ prepareK8sResources = do
   ctx <- getK8sCtx
   db <- getDB
   isNew <- isNewServiceRelease
-  liftIO $ putStrLn $ "PREPARING K8s resources for " <> T.unpack (appGroup rt) <> if isNew then " (NEW SERVICE)" else ""
+  logInfoS $ "PREPARING K8s resources for " <> appGroup rt <> if isNew then " (NEW SERVICE)" else ""
 
   -- BEFORE snapshots are captured at release creation time (createReleaseH)
   -- so diffs are available before the workflow starts.
 
   -- 1. Apply ConfigMap
   updateK8sStatus BSApplyConfigMap
-  liftIO $ putStrLn "  Applying ConfigMap"
+  logInfoS "  Applying ConfigMap"
   _ <- runK8sIO $ executeWithRetry cfg (buildConfigMapApplyCommand cfg ctx)
   updateK8sField (\k8s -> k8s{configMapApplied = True})
 
@@ -271,37 +282,36 @@ prepareK8sResources = do
   updateK8sStatus BSCreateDeployment
   newDepExists <- liftIO $ deploymentExists cfg (namespace ctx) (deploymentName ctx)
   if newDepExists
-    then liftIO $ putStrLn "  Deployment already exists, skipping create/clone"
+    then logInfoS "  Deployment already exists, skipping create/clone"
     else
       if isNew
         then do
           -- New service: create from deploy file path or error
           case deployFilePath ctx of
             Just fp -> do
-              liftIO $ putStrLn $ "  Creating new deployment from: " <> T.unpack fp
+              logInfoS $ "  Creating new deployment from: " <> fp
               _ <- runK8sIO $ executeWithRetry cfg (buildApplyFileCommand cfg fp)
               pure ()
             Nothing -> do
-              liftIO $ putStrLn $ "  ERROR: New service requires deployFilePath"
+              logErrorS $ "  ERROR: New service requires deployFilePath"
               liftIO $ throwIO $ WorkflowError "deploy" "New service release requires deployFilePath"
         else do
-          liftIO $ putStrLn $ "  Cloning deployment to " <> T.unpack (deploymentName ctx)
+          logInfoS $ "  Cloning deployment to " <> deploymentName ctx
           _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg ctx)
           pure ()
   updateK8sField (\k8s -> k8s{deploymentCreated = True})
 
   -- 3. Check Service exists
   updateK8sStatus BSUpdateService
-  liftIO $ putStrLn "  Checking Service exists"
+  logInfoS "  Checking Service exists"
   svcOk <- liftIO $ serviceExists cfg (namespace ctx) (serviceName ctx)
   when (not svcOk) $
-    liftIO $
-      putStrLn "  WARNING: Service not found (pods may still route via selector)"
+    logWarningS "  WARNING: Service not found (pods may still route via selector)"
   updateK8sField (\k8s -> k8s{serviceCreated = svcOk})
 
   -- 4. Ensure DestinationRule (creates if missing, adds subset if existing)
   updateK8sStatus BSApplyDestinationRule
-  liftIO $ putStrLn "  Ensuring DestinationRule"
+  logInfoS "  Ensuring DestinationRule"
   _ <- runK8sIO $ ensureDestinationRule cfg ctx
   updateK8sField (\k8s -> k8s{destinationRuleApplied = True})
 
@@ -312,7 +322,7 @@ prepareK8sResources = do
       let oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
       hpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
       when hpaFound $ do
-        liftIO $ putStrLn $ "  Cloning HPA from " <> T.unpack oldHpaName
+        logInfoS $ "  Cloning HPA from " <> oldHpaName
         hpaMinMaxFactor <- liftIO $ getHpaMinMaxFactor db
         -- Get current replicas from old deployment to calculate HPA min/max
         oldReplicaResult <- liftIO $ getDeploymentReplicaStatus cfg (namespace ctx) (serviceName ctx <> "-" <> oldVersion ctx)
@@ -324,7 +334,7 @@ prepareK8sResources = do
         cloneResult <- liftIO $ runCmd (buildCloneHpaCommand cfg (namespace ctx) (serviceName ctx) (oldVersion ctx) (newVersion ctx) oldHpaName hpaMin hpaMax)
         case cloneResult of
           Right _ -> do
-            liftIO $ putStrLn "  HPA cloned successfully"
+            logInfoS "  HPA cloned successfully"
             updateK8sField (\k8s -> k8s{hpaCreated = True})
             liftIO $
               insertReleaseEvent
@@ -333,9 +343,9 @@ prepareK8sResources = do
                 "BUSINESS"
                 "HPA_CLONED"
                 (toJSON (serviceName ctx <> "-" <> newVersion ctx <> "-hpa"))
-          Left (K8sError err) -> liftIO $ putStrLn $ "  [HPA] Clone failed (non-fatal): " <> T.unpack err
+          Left (K8sError err) -> logErrorS $ "  [HPA] Clone failed (non-fatal): " <> err
 
-  liftIO $ putStrLn "K8s resources prepared"
+  logInfoS "K8s resources prepared"
 
 -- | Progressive rollout: shift traffic old -> new following the tracker's rollout_strategy.
 --
@@ -352,7 +362,7 @@ progressiveRollout = do
   cfg <- getCfg
   ctx <- getK8sCtx
   isNew <- isNewServiceRelease
-  liftIO $ putStrLn $ "Starting progressive rollout for " <> T.unpack (appGroup rt)
+  logInfoS $ "Starting progressive rollout for " <> appGroup rt
 
   updateK8sStatus BSFlipVirtualService
   updateK8sField (\k8s -> k8s{virtualServiceApplied = True})
@@ -363,13 +373,13 @@ progressiveRollout = do
   -- Production: sleep(getReleaseStartDelay(conn)) before starting
   releaseStartDelay <- liftIO $ getReleaseStartDelay db
   when (releaseStartDelay > 0) $ do
-    liftIO $ putStrLn $ "  Release start delay: " <> show releaseStartDelay <> " seconds"
+    logInfoS $ "  Release start delay: " <> T.pack (show releaseStartDelay) <> " seconds"
     liftIO $ threadDelay (releaseStartDelay * 1000000)
 
   if isNew
     then do
       -- New service: route 100% traffic to new version directly (no old version)
-      liftIO $ putStrLn "  New service: routing 100% traffic to new version"
+      logInfoS "  New service: routing 100% traffic to new version"
       runVsRolloutWithLock cfg ctx 0 100
       updateK8sField (\k8s -> k8s{trafficPercentage = 100})
       -- Record rollout history for the 100% step
@@ -393,7 +403,7 @@ progressiveRollout = do
       if alreadyStarted
         then do
           let currentIndex = length existingHistory
-          liftIO $ putStrLn $ "  Resuming rollout from step " <> show currentIndex <> "/" <> show totalSteps
+          logInfoS $ "  Resuming rollout from step " <> T.pack (show currentIndex) <> "/" <> T.pack (show totalSteps)
           now <- liftIO getCurrentTime
           rolloutLoop cfg ctx db strategy currentIndex totalSteps now
         else do
@@ -401,7 +411,7 @@ progressiveRollout = do
           let firstStep = head strategy
               firstNewW = rolloutPercent firstStep
               firstOldW = max 0 (100 - firstNewW)
-          liftIO $ putStrLn $ "  Initial rollout step: new=" <> show firstNewW <> "%, cooloff=" <> show (cooloffMinutes firstStep) <> "min"
+          logInfoS $ "  Initial rollout step: new=" <> T.pack (show firstNewW) <> "%, cooloff=" <> T.pack (show (cooloffMinutes firstStep)) <> "min"
           runVsRolloutWithLock cfg ctx firstOldW firstNewW
           updateK8sField (\k8s -> k8s{trafficPercentage = firstNewW})
 
@@ -419,7 +429,7 @@ progressiveRollout = do
           -- index starts at 1 (0-based), first step already applied
           rolloutLoop cfg ctx db strategy 1 totalSteps stepStartTime
 
-  liftIO $ putStrLn "Progressive rollout complete"
+  logInfoS "Progressive rollout complete"
 
 -- | Re-entrant rollout loop matching production's while-true loop (service.jl line 459).
 --
@@ -436,7 +446,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
   freshResult <- liftIO $ findReleaseTracker db (releaseId rt)
   case freshResult of
     Nothing -> do
-      liftIO $ putStrLn "  [rolloutLoop] Tracker deleted from DB, aborting"
+      logErrorS "  [rolloutLoop] Tracker deleted from DB, aborting"
       liftIO $ throwIO $ WorkflowError "rollout" "Tracker deleted during rollout"
     Just (freshRT, freshMts) -> do
       -- Sync our in-memory state with what the DB has
@@ -448,20 +458,20 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
       -- Production line 462: isTrackerInTerminalState!
       case status freshRT of
         ABORTING -> do
-          liftIO $ putStrLn $ "  [rolloutLoop] Release " <> T.unpack (releaseId freshRT) <> " is aborting, exiting workflow. Runner will handle cleanup."
+          logErrorS $ "  [rolloutLoop] Release " <> releaseId freshRT <> " is aborting, exiting workflow. Runner will handle cleanup."
           liftIO $ throwIO $ WorkflowError "rollout" "Release aborted by user"
         USER_ABORTED -> do
-          liftIO $ putStrLn "  [rolloutLoop] Tracker is USER_ABORTED, stopping rollout"
+          logInfoS "  [rolloutLoop] Tracker is USER_ABORTED, stopping rollout"
           liftIO $ throwIO $ WorkflowError "rollout" "Release user-aborted during rollout"
         ABORTED -> do
-          liftIO $ putStrLn "  [rolloutLoop] Tracker is ABORTED, stopping rollout"
+          logErrorS "  [rolloutLoop] Tracker is ABORTED, stopping rollout"
           liftIO $ throwIO $ WorkflowError "rollout" "Release aborted during rollout"
         COMPLETED -> do
-          liftIO $ putStrLn "  [rolloutLoop] Tracker is COMPLETED (externally), finishing"
+          logInfoS "  [rolloutLoop] Tracker is COMPLETED (externally), finishing"
           pure ()
         PAUSED -> do
           -- Production line 195: if isReleasePaused(tracker) return (routePercent, coolOff, podsCount)
-          liftIO $ putStrLn "  [rolloutLoop] Tracker is PAUSED, waiting..."
+          logInfoS "  [rolloutLoop] Tracker is PAUSED, waiting..."
           collectDelay <- liftIO $ getCollectMetricsDelay db
           liftIO $ threadDelay (collectDelay * 1000000)
           rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime
@@ -475,7 +485,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
           if currentIndex >= totalSteps
             then do
               -- All steps complete - production line 134-181: final completion
-              liftIO $ putStrLn "  [rolloutLoop] All rollout steps completed"
+              logInfoS "  [rolloutLoop] All rollout steps completed"
               -- Update final rollout history entry with completion time
               now <- liftIO getCurrentTime
               let curHistory = rolloutHistory freshRT
@@ -510,12 +520,12 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                     MANUAL -> do
                       -- MANUAL: advance if cooloff exceeded and status is INPROGRESS
                       -- Production line 128: isCoolOffExceeded && tracker.status == INPROGRESS
-                      liftIO $ putStrLn "  [rolloutLoop] MANUAL mode: cooloff exceeded, advancing"
+                      logInfoS "  [rolloutLoop] MANUAL mode: cooloff exceeded, advancing"
                       pure True
                     AUTO -> do
                       -- AUTO: check health/decision engine first
                       -- Production lines 520-553: collect metrics, get decision
-                      liftIO $ putStrLn "  [rolloutLoop] AUTO mode: checking health before advancing"
+                      logInfoS "  [rolloutLoop] AUTO mode: checking health before advancing"
                       checkDeploymentHealth cfg ctx
 
                       -- 1. Prometheus query checks
@@ -524,7 +534,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                       promResult <- liftIO $ checkPromQueries db cfg freshRT mDecisionConfig
                       case promResult of
                         PromAbort reason -> do
-                          liftIO $ putStrLn $ "[DECISION] Prometheus ABORT: " <> T.unpack reason
+                          logErrorS $ "[DECISION] Prometheus ABORT: " <> reason
                           -- Production parity (service.jl:203): NOTIFICATION / STATUS_UPDATED
                           liftIO $ logStatusUpdated db freshRT ("ABORTING the release because prom query checks failing: " <> reason)
                           liftIO $ notifyGenericThreadMessage db freshRT ("Prometheus check ABORT: " <> reason)
@@ -534,7 +544,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                           liftIO $ insertReleaseTracker db currentRT' currentTS'
                           liftIO $ throwIO $ WorkflowError "decision" ("Prometheus ABORT: " <> reason)
                         PromWarn reason -> do
-                          liftIO $ putStrLn $ "[DECISION] Prometheus WARN: " <> T.unpack reason
+                          logWarningS $ "[DECISION] Prometheus WARN: " <> reason
                           -- Production parity (service.jl:206-208): Slack only, no DB event
                           liftIO $ notifyGenericThreadMessage db freshRT ("Prometheus warning: " <> reason)
                         -- Continue despite warning
@@ -618,17 +628,16 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                             case rolloutHistory freshRT of
                               [] -> 0
                               xs -> historyRolloutPercent (last xs)
-                      liftIO $
-                        putStrLn $
-                          "  Rollout step "
-                            <> show (currentIndex + 1)
-                            <> "/"
-                            <> show totalSteps
-                            <> ": new="
-                            <> show nextNewW
-                            <> "%, cooloff="
-                            <> show (cooloffMinutes nextStep)
-                            <> "min"
+                      logInfoS $
+                        "  Rollout step "
+                          <> T.pack (show (currentIndex + 1))
+                          <> "/"
+                          <> T.pack (show totalSteps)
+                          <> ": new="
+                          <> T.pack (show nextNewW)
+                          <> "%, cooloff="
+                          <> T.pack (show (cooloffMinutes nextStep))
+                          <> "min"
 
                       -- Apply VS rollout with lock
                       runVsRolloutWithLock cfg ctx nextOldW nextNewW
@@ -663,7 +672,7 @@ rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime = do
                       rolloutLoop cfg ctx db strategy currentIndex totalSteps stepStartTime
         _ -> do
           -- Unexpected status during rollout
-          liftIO $ putStrLn $ "  [rolloutLoop] Unexpected status: " <> show (status freshRT) <> ", stopping"
+          logInfoS $ "  [rolloutLoop] Unexpected status: " <> T.pack (show (status freshRT)) <> ", stopping"
           liftIO $ throwIO $ WorkflowError "rollout" ("Unexpected status: " <> T.pack (show (status freshRT)))
 
 -- | Create a RolloutHistory entry (matches production RolloutHistory struct)
@@ -688,17 +697,15 @@ checkDeploymentHealth cfg ctx = do
   (ready, available, desired) <-
     runK8sIO $
       getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
-  liftIO $
-    putStrLn $
-      "    Health: ready="
-        <> show ready
-        <> " available="
-        <> show available
-        <> " desired="
-        <> show desired
+  logInfoS $
+    "    Health: ready="
+      <> T.pack (show ready)
+      <> " available="
+      <> T.pack (show available)
+      <> " desired="
+      <> T.pack (show desired)
   when (ready < desired) $
-    liftIO $
-      putStrLn "    WARNING: Not all replicas ready yet"
+    logWarningS "    WARNING: Not all replicas ready yet"
 
 -- | Monitor health: poll pods until all are Running+Ready, max 5 minutes
 monitorHealth :: StateFlow ()
@@ -707,25 +714,26 @@ monitorHealth = do
   cfg <- getCfg
   ctx <- getK8sCtx
   db <- getDB
-  liftIO $ putStrLn $ "MONITORING health for " <> T.unpack (appGroup rt)
+  logInfoS $ "MONITORING health for " <> appGroup rt
 
   updateK8sStatus BSMonitoring
-  liftIO $ putStrLn "  Waiting for pods to be ready (max 5 min, polling every 10s)"
+  logInfoS "  Waiting for pods to be ready (max 5 min, polling every 10s)"
 
   updateK8sStatus BSStabilize
   let maxAttempts = 30 :: Int -- 30 * 10s = 300s = 5 minutes
-  waitResult <- liftIO $ waitForPodsReady cfg ctx maxAttempts
+  logEnv <- lift getLoggerEnv
+  waitResult <- liftIO $ waitForPodsReady logEnv cfg ctx maxAttempts
   case waitResult of
     Left errMsg -> do
-      liftIO $ putStrLn $ "  Pod readiness check FAILED: " <> T.unpack errMsg
+      logErrorS $ "  Pod readiness check FAILED: " <> errMsg
       liftIO $ throwIO $ WorkflowError "monitoring" ("Pod readiness: " <> errMsg)
     Right () ->
-      liftIO $ putStrLn "  All pods ready"
+      logInfoS "  All pods ready"
 
   -- Post-monitoring: after all pods are healthy at 100%, check HS decision
   postMonitoringEnabled <- liftIO $ getConfigBoolForProduct db "ab_hs_post_monitoring_enabled" (Just (appGroup rt)) False
   when postMonitoringEnabled $ do
-    liftIO $ putStrLn "[WORKFLOW] Starting post-monitoring phase"
+    logInfoS "[WORKFLOW] Starting post-monitoring phase"
     liftIO $
       insertReleaseEvent
         db
@@ -735,7 +743,7 @@ monitorHealth = do
         (toJSON ("Post-monitoring phase" :: T.Text))
     postMonitorLoop cfg db rt 0
 
-  liftIO $ putStrLn "Health monitoring complete"
+  logInfoS "Health monitoring complete"
 
 -- | Post-monitoring loop: poll HS decision engine after 100% traffic.
 -- Max 30 iterations with collectMetricsDelay between polls.
@@ -743,7 +751,7 @@ postMonitorLoop :: Config -> DBEnv -> ReleaseTracker -> Int -> StateFlow ()
 postMonitorLoop cfg db rt iteration = do
   if iteration > 30
     then do
-      liftIO $ putStrLn "[WORKFLOW] Post-monitoring: max iterations reached, continuing"
+      logInfoS "[WORKFLOW] Post-monitoring: max iterations reached, continuing"
       liftIO $
         insertReleaseEvent
           db
@@ -767,7 +775,7 @@ postMonitorLoop cfg db rt iteration = do
           )
       case drDecision hsResult of
         Continue -> do
-          liftIO $ putStrLn "[WORKFLOW] Post-monitoring: CONTINUE"
+          logInfoS "[WORKFLOW] Post-monitoring: CONTINUE"
           liftIO $
             insertReleaseEvent
               db
@@ -776,7 +784,7 @@ postMonitorLoop cfg db rt iteration = do
               "POST_MONITORING_RESULT"
               (object ["decision" .= ("Continue" :: T.Text)])
         Abort -> do
-          liftIO $ putStrLn "[WORKFLOW] Post-monitoring: ABORT"
+          logErrorS "[WORKFLOW] Post-monitoring: ABORT"
           liftIO $
             insertReleaseEvent
               db
@@ -796,8 +804,8 @@ postMonitorLoop cfg db rt iteration = do
           postMonitorLoop cfg db rt (iteration + 1)
 
 -- | Poll pods until all are Running+Ready or timeout/failure
-waitForPodsReady :: Config -> K8sReleaseContext -> Int -> IO (Either T.Text ())
-waitForPodsReady cfg ctx maxAttempts = go 0
+waitForPodsReady :: LoggerEnv -> Config -> K8sReleaseContext -> Int -> IO (Either T.Text ())
+waitForPodsReady logEnv cfg ctx maxAttempts = go 0
   where
     go attempt
       | attempt >= maxAttempts = pure (Left "Timeout waiting for pods to be ready (5 min)")
@@ -808,24 +816,25 @@ waitForPodsReady cfg ctx maxAttempts = go 0
           case result of
             Left _ -> pure (0, 0, 1)
             Right vals -> pure vals
-        putStrLn $
+        logInfoIO logEnv $
           "    Poll "
-            <> show (attempt + 1)
+            <> T.pack (show (attempt + 1))
             <> "/"
-            <> show maxAttempts
+            <> T.pack (show maxAttempts)
             <> ": ready="
-            <> show readyCount
+            <> T.pack (show readyCount)
             <> "/"
-            <> show desired
+            <> T.pack (show desired)
 
         -- Check for pod-level failures (CrashLoopBackOff, ImagePullBackOff, etc.)
         podHealth <- checkPodHealthDetailed cfg ctx
         case podHealth of
           Left errMsg -> do
-            putStrLn $ "    Pod health check FAILED: " <> T.unpack errMsg
+            logErrorIO logEnv $ "    Pod health check FAILED: " <> errMsg
             pure (Left errMsg)
           Right msg -> do
-            putStrLn $ "    Pod health: " <> T.unpack msg
+            -- TODO: migrate to structured logging
+            logInfoIO logEnv $ "    Pod health: " <> msg
             if readyCount >= desired && desired > 0
               then pure (Right ())
               else go (attempt + 1)
@@ -940,7 +949,7 @@ cleanupOldVersion = do
   ctx <- getK8sCtx
   isNew <- isNewServiceRelease
   db <- getDB
-  liftIO $ putStrLn $ "Cleaning up old version for " <> T.unpack (appGroup rt)
+  logInfoS $ "Cleaning up old version for " <> appGroup rt
 
   updateK8sStatus BSScaleDownOld
 
@@ -951,7 +960,7 @@ cleanupOldVersion = do
   if isNew
     then do
       -- New service: no old deployment to clean up
-      liftIO $ putStrLn "  New service: no old deployment to clean up"
+      logInfoS "  New service: no old deployment to clean up"
       updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
     else do
       let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
@@ -960,7 +969,7 @@ cleanupOldVersion = do
       -- This schedules scale-down to happen later via the Runner's poll loop.
       -- The Runner's findCompletedTrackersForScaleDown + scaleDownOldDeployment handles this.
       -- We mark the intent so the Runner knows to scale down.
-      liftIO $ putStrLn $ "  Scheduling scale-down for old deployment: " <> T.unpack oldDepName
+      logInfoS $ "  Scheduling scale-down for old deployment: " <> oldDepName
       updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = False})
       liftIO $
         insertReleaseEvent
@@ -976,7 +985,7 @@ cleanupOldVersion = do
       -- scaleDownOldDeployment on actual success — not here (avoids duplicates).
       shouldScaleDownNow <- liftIO $ isScaleDownPodsOnCompletion db
       when shouldScaleDownNow $ do
-        liftIO $ putStrLn $ "  Immediate scale-down: " <> T.unpack oldDepName
+        logInfoS $ "  Immediate scale-down: " <> oldDepName
         _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
         updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
 
@@ -989,11 +998,11 @@ cleanupOldVersion = do
       let oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
       oldHpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
       when oldHpaFound $ do
-        liftIO $ putStrLn $ "  Deleting old HPA: " <> T.unpack oldHpaName
+        logInfoS $ "  Deleting old HPA: " <> oldHpaName
         deleteResult <- liftIO $ runCmd (buildDeleteHpaCommand cfg (namespace ctx) oldHpaName)
         case deleteResult of
           Right _ -> do
-            liftIO $ putStrLn "  Old HPA deleted"
+            logInfoS "  Old HPA deleted"
             liftIO $
               insertReleaseEvent
                 db
@@ -1002,7 +1011,7 @@ cleanupOldVersion = do
                 "HPA_DELETED"
                 (toJSON oldHpaName)
           Left err ->
-            liftIO $ putStrLn $ "  WARNING: Failed to delete old HPA: " <> show err
+            logErrorS $ "  WARNING: Failed to delete old HPA: " <> T.pack (show err)
 
   -- Capture AFTER snapshots
   cfgAfter <- getCfg
@@ -1011,7 +1020,7 @@ cleanupOldVersion = do
   ctxAfter <- getK8sCtx
   liftIO $ captureDeploymentSnapshot cfgAfter dbAfter (releaseId rtAfter) (namespace ctxAfter) (deploymentName ctxAfter) "DEPLOYMENT_AFTER"
 
-  liftIO $ putStrLn "Cleanup complete"
+  logInfoS "Cleanup complete"
 
 -- | Notify complete.
 --
@@ -1026,10 +1035,10 @@ notifyComplete = do
   db <- getDB
   updateK8sStatus BSDone
 
-  liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
-  liftIO $ putStrLn $ "   Service: " <> T.unpack (appGroup rt)
-  liftIO $ putStrLn $ "   Category: BackendService"
-  liftIO $ putStrLn $ "   Status: COMPLETED"
+  logInfoS $ "Release " <> releaseId rt <> " completed successfully!"
+  logInfoS $ "   Service: " <> appGroup rt
+  logInfoS $ "   Category: BackendService"
+  logInfoS $ "   Status: COMPLETED"
 
   -- Production line 176: update_tracker_status!(conn, COMPLETED, tracker)
   now <- liftIO getCurrentTime

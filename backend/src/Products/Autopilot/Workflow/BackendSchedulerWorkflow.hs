@@ -14,15 +14,15 @@ module Products.Autopilot.Workflow.BackendSchedulerWorkflow
 where
 
 import Control.Concurrent (threadDelay)
+import Control.Exception (throwIO)
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
-import Control.Exception (throwIO)
-import Core.AppError (WorkflowError(..))
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
+import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
 import Core.Environment (DBEnv)
-import Core.Utils.FlowMonad (getConfig, getDBEnv)
+import Core.Utils.FlowMonad (getConfig, getDBEnv, logInfo, logWarning)
 import qualified Data.Text as T
 import Products.Autopilot.K8s.Deployment
   ( buildCloneDeploymentCommand,
@@ -90,6 +90,13 @@ getCfg = lift getConfig
 getDB :: StateFlow DBEnv
 getDB = lift getDBEnv
 
+-- | StateFlow-level logging (lifts from Flow)
+logInfoS :: T.Text -> StateFlow ()
+logInfoS = lift . logInfo
+
+logWarningS :: T.Text -> StateFlow ()
+logWarningS = lift . logWarning
+
 -- | Extract K8sReleaseContext from the current workflow state
 getK8sCtx :: StateFlow K8sReleaseContext
 getK8sCtx = do
@@ -115,7 +122,7 @@ validatePreconditions :: StateFlow ()
 validatePreconditions = do
   rt <- getRT
   cfg <- getCfg
-  liftIO $ putStrLn $ "Validating preconditions for scheduler " <> T.unpack (appGroup rt)
+  logInfoS $ "Validating preconditions for scheduler " <> appGroup rt
 
   -- Initialise or update K8s deployment state
   rs <- gets id
@@ -129,7 +136,7 @@ validatePreconditions = do
   ctx <- getK8sCtx
 
   -- Check cluster reachable by verifying namespace exists
-  liftIO $ putStrLn "  Checking cluster reachability"
+  logInfoS "  Checking cluster reachability"
   _ <-
     runK8sIO $
       runCmd
@@ -146,12 +153,10 @@ validatePreconditions = do
   let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
   oldExists <- liftIO $ deploymentExists cfg (namespace ctx) oldDepName
   when (not oldExists && not (T.null (oldVersion ctx)) && oldVersion ctx /= "new") $
-    liftIO $
-      putStrLn $
-        "  WARNING: Old deployment not found: " <> T.unpack oldDepName
+    logWarningS $ "  Old deployment not found: " <> oldDepName
 
-  liftIO $ putStrLn "  Cluster reachable, namespace exists"
-  liftIO $ putStrLn "Preconditions validated for scheduler"
+  logInfoS "  Cluster reachable, namespace exists"
+  logInfoS "Preconditions validated for scheduler"
 
 -- | Prepare K8s resources: ConfigMap, clone deployment with 1 pod for verification
 prepareK8sResources :: StateFlow ()
@@ -160,7 +165,7 @@ prepareK8sResources = do
   cfg <- getCfg
   ctx <- getK8sCtx
   db <- getDB
-  liftIO $ putStrLn $ "PREPARING K8s resources for scheduler " <> T.unpack (appGroup rt)
+  logInfoS $ "PREPARING K8s resources for scheduler " <> appGroup rt
 
   -- Capture BEFORE snapshot (old deployment)
   let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
@@ -168,7 +173,7 @@ prepareK8sResources = do
 
   -- 1. Apply ConfigMap
   updateK8sStatus BSApplyConfigMap
-  liftIO $ putStrLn "  Applying ConfigMap"
+  logInfoS "  Applying ConfigMap"
   _ <- runK8sIO $ executeWithRetry cfg (buildConfigMapApplyCommand cfg ctx)
   updateK8sField (\k8s -> k8s{configMapApplied = True})
 
@@ -176,9 +181,9 @@ prepareK8sResources = do
   updateK8sStatus BSCreateDeployment
   newDepExists <- liftIO $ deploymentExists cfg (namespace ctx) (deploymentName ctx)
   if newDepExists
-    then liftIO $ putStrLn "  Deployment already exists, skipping clone"
+    then logInfoS "  Deployment already exists, skipping clone"
     else do
-      liftIO $ putStrLn $ "  Cloning deployment to " <> T.unpack (deploymentName ctx) <> " with 1 pod for verification"
+      logInfoS $ "  Cloning deployment to " <> deploymentName ctx <> " with 1 pod for verification"
       _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg ctx)
       -- Scale to 1 pod for initial verification
       _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
@@ -186,11 +191,11 @@ prepareK8sResources = do
   updateK8sField (\k8s -> k8s{deploymentCreated = True})
 
   -- Wait for verification pod to be ready
-  liftIO $ putStrLn "  Waiting for verification pod"
+  logInfoS "  Waiting for verification pod"
   liftIO $ threadDelay 10000000 -- 10 seconds
   checkDeploymentHealth cfg ctx
 
-  liftIO $ putStrLn "K8s resources prepared for scheduler"
+  logInfoS "K8s resources prepared for scheduler"
 
 -- | Pod-count based rollout: scale old to 0, scale new up progressively
 podCountRollout :: StateFlow ()
@@ -199,13 +204,13 @@ podCountRollout = do
   cfg <- getCfg
   ctx <- getK8sCtx
   db <- getDB
-  liftIO $ putStrLn $ "Starting pod-count rollout for scheduler " <> T.unpack (appGroup rt)
+  logInfoS $ "Starting pod-count rollout for scheduler " <> appGroup rt
 
   updateK8sStatus BSProgressiveRollout
 
   -- Step 1: Scale old deployment to 0 replicas
   let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
-  liftIO $ putStrLn $ "  Scaling down old deployment to 0: " <> T.unpack oldDepName
+  logInfoS $ "  Scaling down old deployment to 0: " <> oldDepName
   _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
   updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
 
@@ -219,19 +224,18 @@ podCountRollout = do
     then do
       -- No rollout strategy defined, scale to full desired count
       -- Get the desired count from the old deployment's spec (use a reasonable default)
-      liftIO $ putStrLn "  No rollout strategy, scaling new deployment to desired count"
+      logInfoS "  No rollout strategy, scaling new deployment to desired count"
       _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
       updateK8sField (\k8s -> k8s{trafficPercentage = 100})
       liftIO $ notifyReleaseProgress db currentRT 100
     else do
       forM_ steps $ \step -> do
         let targetPods = max 1 (podPercent step)
-        liftIO $
-          putStrLn $
+        logInfoS $
             "  Scaling new deployment to "
-              <> show targetPods
+              <> T.pack (show targetPods)
               <> " pods (rollout "
-              <> show (rolloutPercent step)
+              <> T.pack (show (rolloutPercent step))
               <> "%)"
         _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx targetPods)
         updateK8sField (\k8s -> k8s{trafficPercentage = rolloutPercent step})
@@ -242,16 +246,15 @@ podCountRollout = do
 
         -- Cooloff between steps
         when (cooloffMinutes step > 0 && rolloutPercent step < 100) $ do
-          liftIO $
-            putStrLn $
-              "  Cooloff: " <> show (cooloffMinutes step) <> " seconds"
+          logInfoS $
+              "  Cooloff: " <> T.pack (show (cooloffMinutes step)) <> " seconds"
           liftIO $ threadDelay (cooloffMinutes step * 1000000)
 
         -- Health check between steps
         when (rolloutPercent step < 100) $
           checkDeploymentHealth cfg ctx
 
-  liftIO $ putStrLn "Pod-count rollout complete"
+  logInfoS "Pod-count rollout complete"
 
 -- | Check deployment health via replica status
 checkDeploymentHealth :: Config -> K8sReleaseContext -> StateFlow ()
@@ -259,17 +262,15 @@ checkDeploymentHealth cfg ctx = do
   (ready, available, desired) <-
     runK8sIO $
       getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
-  liftIO $
-    putStrLn $
+  logInfoS $
       "    Health: ready="
-        <> show ready
+        <> T.pack (show ready)
         <> " available="
-        <> show available
+        <> T.pack (show available)
         <> " desired="
-        <> show desired
+        <> T.pack (show desired)
   when (ready < desired) $
-    liftIO $
-      putStrLn "    WARNING: Not all replicas ready yet"
+    logWarningS "    WARNING: Not all replicas ready yet"
 
 -- | Monitor health: poll replica status for stabilisation period
 monitorHealth :: StateFlow ()
@@ -277,31 +278,30 @@ monitorHealth = do
   rt <- getRT
   cfg <- getCfg
   ctx <- getK8sCtx
-  liftIO $ putStrLn $ "MONITORING health for scheduler " <> T.unpack (appGroup rt)
+  logInfoS $ "MONITORING health for scheduler " <> appGroup rt
 
   updateK8sStatus BSMonitoring
-  liftIO $ putStrLn "  MONITORING pod health metrics"
+  logInfoS "  MONITORING pod health metrics"
 
   updateK8sStatus BSStabilize
-  liftIO $ putStrLn "  Stabilization period (30s)"
+  logInfoS "  Stabilization period (30s)"
   let checks = 6 :: Int -- 6 * 5s = 30s
   forM_ [1 .. checks] $ \i -> do
     liftIO $ threadDelay 5000000 -- 5 seconds
     (ready, _available, desired) <-
       runK8sIO $
         getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
-    liftIO $
-      putStrLn $
+    logInfoS $
         "    Check "
-          <> show i
+          <> T.pack (show i)
           <> "/"
-          <> show checks
+          <> T.pack (show checks)
           <> ": ready="
-          <> show ready
+          <> T.pack (show ready)
           <> "/"
-          <> show desired
+          <> T.pack (show desired)
 
-  liftIO $ putStrLn "Health monitoring complete for scheduler"
+  logInfoS "Health monitoring complete for scheduler"
 
 -- | Cleanup old version: optionally delete old deployment and its HPA
 cleanupOldVersion :: StateFlow ()
@@ -309,7 +309,7 @@ cleanupOldVersion = do
   rt <- getRT
   cfg <- getCfg
   ctx <- getK8sCtx
-  liftIO $ putStrLn $ "Cleaning up old version for scheduler " <> T.unpack (appGroup rt)
+  logInfoS $ "Cleaning up old version for scheduler " <> appGroup rt
 
   updateK8sStatus BSScaleDownOld
   let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
@@ -318,7 +318,7 @@ cleanupOldVersion = do
   -- Clean up old deployment's HPA if it exists
   oldHpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
   when oldHpaFound $ do
-    liftIO $ putStrLn $ "  Deleting old HPA: " <> T.unpack oldHpaName
+    logInfoS $ "  Deleting old HPA: " <> oldHpaName
     _ <- runK8sIO $ runCmd (buildDeleteHpaCommand cfg (namespace ctx) oldHpaName)
     pure ()
 
@@ -326,7 +326,7 @@ cleanupOldVersion = do
   db <- getDB
   shouldDelete <- liftIO $ isScaleDownPodsOnCompletion db
   when shouldDelete $ do
-    liftIO $ putStrLn $ "  Deleting old deployment: " <> T.unpack oldDepName
+    logInfoS $ "  Deleting old deployment: " <> oldDepName
     _ <- runK8sIO $ runCmd (buildDeleteDeploymentCommand cfg (namespace ctx) oldDepName)
     pure ()
 
@@ -337,7 +337,7 @@ cleanupOldVersion = do
   ctxAfter <- getK8sCtx
   liftIO $ captureDeploymentSnapshot cfgAfter dbAfter (releaseId rtAfter) (namespace ctxAfter) (deploymentName ctxAfter) "DEPLOYMENT_AFTER"
 
-  liftIO $ putStrLn "Cleanup complete for scheduler"
+  logInfoS "Cleanup complete for scheduler"
 
 -- | Notify complete
 notifyComplete :: StateFlow ()
@@ -346,10 +346,10 @@ notifyComplete = do
   db <- getDB
   updateK8sStatus BSDone
 
-  liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
-  liftIO $ putStrLn $ "   Service: " <> T.unpack (appGroup rt)
-  liftIO $ putStrLn $ "   Category: BackendScheduler"
-  liftIO $ putStrLn $ "   Status: COMPLETED"
+  logInfoS $ "Release " <> releaseId rt <> " completed successfully!"
+  logInfoS $ "   Service: " <> appGroup rt
+  logInfoS $ "   Category: BackendScheduler"
+  logInfoS $ "   Status: COMPLETED"
 
   updateRT $ \r -> r{status = COMPLETED}
 

@@ -14,15 +14,17 @@ module Products.Autopilot.Workflow.BackendJobWorkflow
 where
 
 import Control.Concurrent (threadDelay)
+import Control.Exception (throwIO)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Exception (throwIO)
 import Core.AppError (WorkflowError(..))
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
+import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
 import Core.Environment (DBEnv)
-import Core.Utils.FlowMonad (getConfig, getDBEnv)
+import Core.Utils.FlowMonad (getConfig, getDBEnv, logError, logInfo)
 import Data.Aeson (Value (..))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -81,6 +83,13 @@ getCfg = lift getConfig
 getDB :: StateFlow DBEnv
 getDB = lift getDBEnv
 
+-- | StateFlow-level logging
+logInfoS :: T.Text -> StateFlow ()
+logInfoS = lift . logInfo
+
+logErrorS :: T.Text -> StateFlow ()
+logErrorS = lift . logError
+
 -- | Extract K8sReleaseContext from the current workflow state
 getK8sCtx :: StateFlow K8sReleaseContext
 getK8sCtx = do
@@ -106,7 +115,7 @@ validatePreconditions :: StateFlow ()
 validatePreconditions = do
   rt <- getRT
   cfg <- getCfg
-  liftIO $ putStrLn $ "Validating preconditions for job " <> T.unpack (appGroup rt)
+  logInfoS $ "Validating preconditions for job " <> appGroup rt
 
   -- Initialise or update K8s deployment state
   rs <- gets id
@@ -120,7 +129,7 @@ validatePreconditions = do
   ctx <- getK8sCtx
 
   -- Check cluster reachable by verifying namespace exists
-  liftIO $ putStrLn "  Checking cluster reachability"
+  logInfoS "  Checking cluster reachability"
   _ <-
     runK8sIO $
       runCmd
@@ -133,8 +142,8 @@ validatePreconditions = do
             ]
         )
 
-  liftIO $ putStrLn "  Cluster reachable, namespace exists"
-  liftIO $ putStrLn "Preconditions validated for job"
+  logInfoS "  Cluster reachable, namespace exists"
+  logInfoS "Preconditions validated for job"
 
 -- | Create the job: apply from deployFilePath YAML or create from image
 createJob :: StateFlow ()
@@ -142,7 +151,7 @@ createJob = do
   rt <- getRT
   cfg <- getCfg
   ctx <- getK8sCtx
-  liftIO $ putStrLn $ "Creating job for " <> T.unpack (appGroup rt)
+  logInfoS $ "Creating job for " <> appGroup rt
 
   updateK8sStatus BSCreateDeployment
 
@@ -152,7 +161,7 @@ createJob = do
   case deployFilePath ctx of
     Just filePath -> do
       -- Apply job YAML from file path
-      liftIO $ putStrLn $ "  Applying job YAML from: " <> T.unpack filePath
+      logInfoS $ "  Applying job YAML from: " <> filePath
       let applyCmd =
             unwords
               [ kubectlBin cfg,
@@ -186,7 +195,7 @@ createJob = do
                   "        image: " <> newImg,
                   "      restartPolicy: Never"
                 ]
-      liftIO $ putStrLn $ "  Creating job: " <> jobName
+      logInfoS $ "  Creating job: " <> T.pack jobName
       _ <-
         runK8sIO $
           runCmd
@@ -203,7 +212,7 @@ createJob = do
       pure ()
 
   updateK8sField (\k8s -> k8s{deploymentCreated = True})
-  liftIO $ putStrLn "Job created"
+  logInfoS "Job created"
 
 -- | Monitor job status: poll until completed or failed
 monitorJobStatus :: StateFlow ()
@@ -211,7 +220,7 @@ monitorJobStatus = do
   rt <- getRT
   cfg <- getCfg
   ctx <- getK8sCtx
-  liftIO $ putStrLn $ "MONITORING job status for " <> T.unpack (appGroup rt)
+  logInfoS $ "MONITORING job status for " <> appGroup rt
 
   updateK8sStatus BSMonitoring
 
@@ -237,29 +246,28 @@ pollJobStatus cfg getJobCmd maxPolls currentPoll = do
     liftIO $
       throwIO $ WorkflowError "wait" "Job timed out waiting for completion"
 
-  liftIO $ putStrLn $ "  Poll " <> show currentPoll <> "/" <> show maxPolls <> ": checking job status"
+  logInfoS $ "  Poll " <> T.pack (show currentPoll) <> "/" <> T.pack (show maxPolls) <> ": checking job status"
   result <- liftIO $ runCmd getJobCmd
   case result of
     Left (K8sError err) -> liftIO $ throwIO $ WorkflowError "k8s" ("Failed to get job status: " <> err)
     Right (K8sResult out) -> do
       let (succeeded, failed, backoffLimit) = parseJobStatus out
-      liftIO $
-        putStrLn $
+      logInfoS $
           "    succeeded="
-            <> show succeeded
+            <> T.pack (show succeeded)
             <> " failed="
-            <> show failed
+            <> T.pack (show failed)
             <> " backoffLimit="
-            <> show backoffLimit
+            <> T.pack (show backoffLimit)
 
       if succeeded >= 1
         then do
-          liftIO $ putStrLn "  Job completed successfully"
+          logInfoS "  Job completed successfully"
           updateK8sField (\k8s -> k8s{trafficPercentage = 100})
         else
           if failed > backoffLimit
             then do
-              liftIO $ putStrLn "  Job FAILED: exceeded backoff limit"
+              logErrorS "  Job FAILED: exceeded backoff limit"
               -- Mark as aborted
               updateRT $ \r -> r{status = ABORTED}
               db <- getDB
@@ -306,12 +314,12 @@ notifyComplete = do
   -- Check if job was already marked as aborted
   case status rt of
     ABORTED -> do
-      liftIO $ putStrLn $ "Job " <> T.unpack (releaseId rt) <> " was aborted"
+      logErrorS $ "Job " <> releaseId rt <> " was aborted"
     _ -> do
-      liftIO $ putStrLn $ "Release " <> T.unpack (releaseId rt) <> " completed successfully!"
-      liftIO $ putStrLn $ "   Service: " <> T.unpack (appGroup rt)
-      liftIO $ putStrLn $ "   Category: BackendJob"
-      liftIO $ putStrLn $ "   Status: COMPLETED"
+      logInfoS $ "Release " <> releaseId rt <> " completed successfully!"
+      logInfoS $ "   Service: " <> appGroup rt
+      logInfoS $ "   Category: BackendJob"
+      logInfoS $ "   Status: COMPLETED"
 
       updateRT $ \r -> r{status = COMPLETED}
 

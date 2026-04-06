@@ -48,6 +48,7 @@ dependencies:
   - beam-core
   - beam-postgres
   - bytestring
+  - case-insensitive
   - containers
   - fast-logger
   - directory
@@ -69,6 +70,7 @@ dependencies:
   - transformers
   - unordered-containers
   - uuid
+  - vector
   - wai
   - wai-cors
   - warp
