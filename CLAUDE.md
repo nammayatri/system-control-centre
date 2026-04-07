@@ -7,7 +7,7 @@
 - Each product is fully self-contained -- owns its tables, types, queries, logic
 
 ## Common modules (use these — every product should reuse them)
-- `Core.Environment`      — defines `Flow = ReaderT AppState IO`, `AppState`, `getDBEnv`, `getConfig`, `inDB`, `inConfig`, `logInfo/Error/Warning/Debug`
+- `Core.Environment`      — defines `Flow = ReaderT AppState IO`, the `MonadFlow` constraint synonym, `AppState`, `getDBEnv`, `getConfig`, `withDb`, `withConfig`, `forkFlow`, `logInfo/Error/Warning/Debug`
 - `Core.Types.Id`         — `Id Person`, `Id Release`, etc. Phantom-typed Text (Show/JSON/HttpApi/SQL all derived)
 - `Core.Types.Time`       — `Seconds`, `Minutes`, `Hours`, `Days` + `threadDelay (Seconds 5)` instead of `threadDelay 5_000_000`
 - `Core.Http.Client`      — pooled `http-client` Manager + retry + timeout. Use `httpJson`/`httpRaw` instead of spawning curl
@@ -18,27 +18,36 @@
 
 ## Monad convention (read this before writing handlers)
 
-The whole codebase uses a small two-monad split:
+The codebase uses a `MonadFlow` constraint **synonym** (not a typeclass) defined in `Core/Environment.hs`:
+
+```haskell
+type MonadFlow m = (MonadIO m, MonadThrow m, MonadCatch m, MonadMask m, MonadReader AppState m)
+type Flow        = ReaderT AppState IO
+```
+
+This is the same shape NammaYatri uses internally — a ConstraintKinds alias, **not** a class with instances. Queries and reusable helpers are written polymorphic in `m` with a `MonadFlow m =>` constraint; Servant resolves them to concrete `Flow` at the handler boundary. The testability benefit: you can run queries in any `ReaderT AppState` stack (e.g. a test harness) without touching the call sites.
 
 | Layer | Monad | When |
 |---|---|---|
-| HTTP handlers | `Flow = ReaderT AppState IO` | Every Servant handler. AppState carries config + DB pool + logger. |
+| HTTP handlers | `Flow` | Every Servant handler. AppState carries config + DB pool + logger. |
 | Background workers | `Flow` | `Runner.hs` and friends. Use `runFlow appState (...)` to enter it from `IO`. |
-| Queries (`Queries/*.hs`) | `Flow a` (preferred) — `getDBEnv` reads DB from Reader | Callers don't need to pass DBEnv. Old `_io :: DBEnv -> ... -> IO a` versions kept as wrappers for background callers. |
-| Pure utilities (K8s wrappers, HTTP client, notifications, parsers) | Raw `IO` | Leaf functions called from `Flow` via `liftIO` or `inDB`. |
+| Queries (`Queries/*.hs`) | `MonadFlow m => ... -> m a` | Callers don't need to pass DBEnv. Use `withDb` / `withConfig` to reach the resources. |
+| Pure utilities (K8s wrappers, HTTP client, parsers) | Raw `IO` | Leaf functions called from `Flow` via `liftIO` or `withDb`. |
 
-**No `MonadFlow` typeclass, no `EsqDBFlow` / `CacheFlow` constraint stack.** SCC has one resource (Postgres) so the typeclass machinery would be pure overhead. NammaYatri uses the heavy pattern because they have Postgres + Redis + Kafka + ClickHouse + encryption — we don't.
+**Recommendation for new code:** use `MonadFlow m =>` for queries and reusable helpers, and concrete `Flow` for Servant handlers. `forkFlow` requires concrete `Flow` (not polymorphic `m`) because it captures `AppState` to spawn a background thread — don't try to make spawn sites polymorphic.
 
 **No `Core.AppM`** — that was a parallel "next-gen" framework that nobody used. Deleted. Don't recreate it.
 
 **Adding a new query:**
 ```haskell
-findFooById :: Id Foo -> Flow (Maybe Foo)
-findFooById fid = do
-    db <- getDBEnv
-    liftIO $ runDB db $ ...   -- exact same body as before
+findFooById :: MonadFlow m => Id Foo -> m (Maybe Foo)
+findFooById fid = withDb $ \db -> runDB db $ ...
 ```
 Calls in handlers become a one-liner: `result <- findFooById fid`.
+
+**`RuntimeConfigSnapshot`** (in `Products.Autopilot.RuntimeConfig`) — for hot loops (scheduler ticks, workflow steps) grab a snapshot once per iteration instead of reading each flag individually from DB.
+
+**`forkFlow` error handling** — `forkFlow` now wraps the child action with `try @SomeException` + `logErrorIO`, so async crashes are caught and logged instead of silently killing the thread. Don't rely on this as a general error strategy — typed errors should still propagate normally through `MonadThrow`/`MonadCatch`; this is just a last-resort safety net.
 
 ## Local Setup
 

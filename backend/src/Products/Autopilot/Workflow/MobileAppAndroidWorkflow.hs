@@ -18,7 +18,7 @@ import Control.Concurrent (threadDelay)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
-import Core.Utils.FlowMonad (logInfo, logWarning)
+import Core.Environment (logInfo, logWarning)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))

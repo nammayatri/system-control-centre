@@ -6,7 +6,7 @@
 module Products.Autopilot.Routes (CoreAPI, coreServer) where
 
 import Core.Auth.Protected (Protected)
-import Core.Utils.FlowMonad (Flow)
+import Core.Environment (Flow)
 import Data.Aeson (Value)
 import Data.Text (Text)
 import GHC.Int (Int32)

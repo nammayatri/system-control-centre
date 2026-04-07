@@ -43,7 +43,6 @@ library
       Core.DB.Connection
       Core.Environment
       Core.Server
-      Core.Utils.FlowMonad
       Products.Autopilot.Config
       Products.Autopilot.DecisionEngine
       Products.Autopilot.Discovery

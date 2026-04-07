@@ -21,8 +21,8 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
+import Core.Environment (getConfig, logError, logInfo)
 import Core.Types.Time (threadDelaySec)
-import Core.Utils.FlowMonad (getConfig, logError, logInfo)
 import Data.Aeson (Value (..))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K

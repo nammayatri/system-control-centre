@@ -14,7 +14,7 @@ where
 
 import Control.Monad.Except (runExceptT, throwError)
 import Control.Monad.Trans.Class (lift)
-import Core.Utils.FlowMonad (Flow, logWarning)
+import Core.Environment (Flow, logWarning)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Products.Autopilot.Types.Release (ReleaseTracker (..))

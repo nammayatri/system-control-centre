@@ -43,8 +43,7 @@ import Control.Monad.State.Strict (get, gets, modify)
 import Control.Monad.Trans.Class (lift)
 import qualified Core.AppError as AppErr
 import Core.Config (Config (..))
-import Core.Environment (MonadFlow)
-import Core.Utils.FlowMonad (Flow)
+import Core.Environment (Flow, MonadFlow)
 import Data.Aeson (Value (..), eitherDecode)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM

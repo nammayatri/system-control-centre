@@ -2,7 +2,7 @@ module Products.Autopilot.Workflow.Types where
 
 import Control.Monad.Except (ExceptT)
 import Control.Monad.State.Strict (StateT)
-import Core.Utils.FlowMonad (Flow)
+import Core.Environment (Flow)
 import Data.Aeson (Value)
 import Products.Autopilot.Types (Decision, ReleaseTracker)
 import Products.Autopilot.Types.Target (TargetState)

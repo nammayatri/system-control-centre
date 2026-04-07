@@ -14,7 +14,7 @@ import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..), AuthError (..))
 import Core.Auth.Queries
 import Core.Auth.Types
-import Core.Utils.FlowMonad (Flow)
+import Core.Environment (Flow)
 import Data.Aeson (Value (..), object, (.=))
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM

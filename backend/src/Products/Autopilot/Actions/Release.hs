@@ -46,7 +46,7 @@ import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
 import Core.DB.Connection (withConn)
-import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv, logInfo)
+import Core.Environment (Flow, getConfig, getDBEnv, logInfo)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -884,9 +884,8 @@ releaseDiffH _ap rid _mType = do
         Nothing -> pure $ DiffResponse "" "" "Release not found"
         Just (tracker, mTargetState) -> do
             -- Check for stored SNAPSHOT events first
-            events <- listReleaseEvents rid
-            let snapshotEvents = filter (\e -> S.reCategory e == "SNAPSHOT") events
-                trackerCat = NT.category tracker
+            snapshotEvents <- listReleaseEventsByCategory rid "SNAPSHOT"
+            let trackerCat = NT.category tracker
                 (beforeLabel, afterLabel, diffLabel) = case trackerCat of
                     BackendConfig -> ("CONFIGMAP_BEFORE", "CONFIGMAP_AFTER", "ConfigMap diff")
                     VSEdit -> ("VS_OLD", "VS_NEW", "VS diff")

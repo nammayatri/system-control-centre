@@ -9,6 +9,11 @@ module Products.Autopilot.RuntimeConfig (
     isScaleDownPodsOnCompletion,
     isGcltEnabled,
     isPromQueryCheckEnabled,
+    isABHSDecisionEnabledForProductService,
+    isABHSPostMonitoringDecisionEnabledForProductService,
+    getDecisionEngineFailClosed,
+    getABHSApiKey,
+    getABHSAllowedTimeDiffMins,
     isSyncClusterEnabled,
     isMultiReleasePerProduct,
     isUnderMaintenance,
@@ -20,6 +25,7 @@ module Products.Autopilot.RuntimeConfig (
     getPodsScaleDownDelayFromConfig,
     getPodsCalculationFactor,
     getHpaMinMaxFactor,
+    getHpaDefaultMinPods,
     getMaxJobCompletionHours,
     getRevertCooloff,
     getLockExpiryDelayMinutes,
@@ -73,8 +79,76 @@ isScaleDownPodsOnCompletion = getConfigBoolForProduct "scale_down_pods_on_comple
 isGcltEnabled :: (MonadFlow m) => m Bool
 isGcltEnabled = getConfigBoolForProduct "global_changelog_tracker_enabled" (Just "autopilot") False
 
+{- | Prometheus query check master gate. Reads Julia's
+@prom_query_check_enabled@ key first; falls back to the older
+@prom_checks_enabled@ key for backward compatibility with existing
+deployments.
+-}
 isPromQueryCheckEnabled :: (MonadFlow m) => m Bool
-isPromQueryCheckEnabled = getConfigBoolForProduct "prom_query_check_enabled" (Just "autopilot") False
+isPromQueryCheckEnabled = do
+    new <- getConfigBoolForProduct "prom_query_check_enabled" (Just "autopilot") False
+    if new
+        then pure True
+        else getConfigBoolForProduct "prom_checks_enabled" (Just "autopilot") False
+
+{- | Per-(product, service) gating for AB/HS decision consumption.
+Mirrors Julia's @isABHSDecisionEnabledForProduct@ in @configs.jl@:
+reads @ab_hs_decision_enabled_products@, expecting JSON shape:
+@{"EULER": ["ALL"], "EULER_SCHEDULER": ["payment-svc","auth-svc"]}@.
+Returns True iff @productName@ is a key AND the array contains
+either @"ALL"@ or @serviceName@. Case-sensitive (Julia parity).
+-}
+isABHSDecisionEnabledForProductService :: (MonadFlow m) => Text -> Text -> m Bool
+isABHSDecisionEnabledForProductService =
+    isProductServiceEnabledFromKey "ab_hs_decision_enabled_products"
+
+{- | Per-(product, service) gating for post-monitoring AB/HS consumption.
+Same shape as 'isABHSDecisionEnabledForProductService', different key:
+@ab_hs_post_monitoring_decision_enabled_products@.
+-}
+isABHSPostMonitoringDecisionEnabledForProductService :: (MonadFlow m) => Text -> Text -> m Bool
+isABHSPostMonitoringDecisionEnabledForProductService =
+    isProductServiceEnabledFromKey "ab_hs_post_monitoring_decision_enabled_products"
+
+isProductServiceEnabledFromKey :: (MonadFlow m) => Text -> Text -> Text -> m Bool
+isProductServiceEnabledFromKey key productName serviceName = withDb $ \db -> do
+    mVal <- getEnabledServerConfigValueForProduct_io db key (Just "autopilot")
+    pure $ case mVal of
+        Nothing -> False
+        Just raw ->
+            case eitherDecode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Either String Value of
+                Right (Object obj) ->
+                    case KM.lookup (K.fromText productName) obj of
+                        Just (Array arr) ->
+                            let svcs =
+                                    [ s | String s <- toListV arr
+                                    ]
+                             in "ALL" `elem` svcs || serviceName `elem` svcs
+                        _ -> False
+                _ -> False
+  where
+    toListV = foldr (:) []
+
+{- | Whether decision-engine HTTP errors should be treated as ABORT
+(fail-closed, Julia parity) or CONTINUE (lenient, original Haskell).
+Default True (fail-closed) to match Julia's conservative behavior.
+-}
+getDecisionEngineFailClosed :: (MonadFlow m) => m Bool
+getDecisionEngineFailClosed =
+    getConfigBoolForProduct "decision_engine_fail_closed" (Just "autopilot") True
+
+-- | API key sent as @x-api-key@ to the AB/HS engine. Empty string if unset.
+getABHSApiKey :: (MonadFlow m) => m Text
+getABHSApiKey = withDb $ \db -> do
+    v <- getEnabledServerConfigValueForProduct_io db "ab_hs_api_key" (Just "autopilot")
+    pure $ case v of
+        Just t -> t
+        Nothing -> ""
+
+-- | Allowed time-diff (minutes) sent in HS decision request body. Default 60.
+getABHSAllowedTimeDiffMins :: (MonadFlow m) => m Int
+getABHSAllowedTimeDiffMins =
+    getConfigIntForProduct "ab_hs_allowed_time_diff_mins" (Just "autopilot") 60
 
 isSyncClusterEnabled :: (MonadFlow m) => m Bool
 isSyncClusterEnabled = getConfigBoolForProduct "sync_cluster_enabled" (Just "autopilot") False
@@ -121,6 +195,9 @@ getPodsCalculationFactor = getConfigDoubleForProduct "pods_calculation_factor" (
 
 getHpaMinMaxFactor :: (MonadFlow m) => m Double
 getHpaMinMaxFactor = getConfigDoubleForProduct "hpa_min_max_ratio" (Just "autopilot") 1.0
+
+getHpaDefaultMinPods :: (MonadFlow m) => m Int
+getHpaDefaultMinPods = getConfigIntForProduct "hpa_default_min_pods_config" (Just "autopilot") 1
 
 getMaxJobCompletionHours :: (MonadFlow m) => m Int
 getMaxJobCompletionHours = getConfigIntForProduct "max_job_completion_hours" (Just "autopilot") 3
@@ -197,6 +274,7 @@ data RuntimeConfigSnapshot = RuntimeConfigSnapshot
     , rcsPodsScaleDownDelayFromConfig :: Double
     , rcsPodsCalculationFactor :: Double
     , rcsHpaMinMaxFactor :: Double
+    , rcsHpaDefaultMinPods :: Int
     , rcsMaxJobCompletionHours :: Int
     , rcsRevertCooloff :: Int
     , rcsLockExpiryDelayMinutes :: Int
@@ -223,6 +301,7 @@ loadRuntimeConfigSnapshot =
         <*> getPodsScaleDownDelayFromConfig
         <*> getPodsCalculationFactor
         <*> getHpaMinMaxFactor
+        <*> getHpaDefaultMinPods
         <*> getMaxJobCompletionHours
         <*> getRevertCooloff
         <*> getLockExpiryDelayMinutes

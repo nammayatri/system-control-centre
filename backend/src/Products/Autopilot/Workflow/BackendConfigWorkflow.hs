@@ -16,7 +16,7 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
-import Core.Utils.FlowMonad (getConfig, logInfo)
+import Core.Environment (getConfig, logInfo)
 import Data.Aeson (Value (..), eitherDecodeStrict', encode)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM

@@ -33,9 +33,8 @@ import Core.Types.Time (Seconds (..), threadDelay)
 
 -- getPodsCalculationFactor reserved for future pod-count calculation
 
-import Core.Environment (getLoggerEnv)
+import Core.Environment (getConfig, getLoggerEnv, logError, logInfo, logWarning)
 import Core.Logging (LoggerEnv, logErrorIO, logInfoIO)
-import Core.Utils.FlowMonad (getConfig, logError, logInfo, logWarning)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -52,6 +51,7 @@ import Products.Autopilot.DecisionEngine (
     getABDecision,
     getCombinedDecision,
     getHSDecision,
+    initiateABDecisionForRelease,
  )
 
 -- buildDeleteDeploymentCommand removed: scale-down handled by Runner
@@ -68,7 +68,7 @@ import Products.Autopilot.K8s.Deployment (
  )
 import Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
-import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildDeleteHpaCommand, hpaExists)
+import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildCreateHpaFromTemplateCommand, buildDeleteHpaCommand, buildPatchHpaReplicasCommand, hpaExists)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRolloutWithRetries, getVirtualServiceJson)
 import Products.Autopilot.Notifications (
     notifyGenericThreadMessage,
@@ -79,12 +79,16 @@ import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, w
 import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTracker, findReleaseTracker, insertReleaseEvent, insertReleaseTracker)
 import Products.Autopilot.RuntimeConfig (
     getCollectMetricsDelay,
+    getHpaDefaultMinPods,
     getHpaMinMaxFactor,
+    getHpaTemplate,
     getMaxK8sRetries,
     getPodReadinessMaxAttempts,
     getPodReadinessPollSeconds,
     getPodRestartCountThreshold,
     getReleaseStartDelay,
+    isABHSDecisionEnabledForProductService,
+    isABHSPostMonitoringDecisionEnabledForProductService,
     isHpaEnabledForProduct,
     isScaleDownPodsOnCompletion,
  )
@@ -213,6 +217,7 @@ data WorkflowConfig = WorkflowConfig
     , wcReleaseStartDelay :: Int
     , wcMaxK8sRetries :: Int
     , wcHpaMinMaxFactor :: Double
+    , wcHpaDefaultMinPods :: Int
     , wcHpaEnabled :: Bool
     , wcScaleDownOnCompletion :: Bool
     }
@@ -224,6 +229,7 @@ loadWorkflowConfig product_ = do
     rsd <- getReleaseStartDelay
     mkr <- getMaxK8sRetries
     hmf <- getHpaMinMaxFactor
+    hdm <- getHpaDefaultMinPods
     hpa <- isHpaEnabledForProduct product_
     scd <- isScaleDownPodsOnCompletion
     pure
@@ -232,6 +238,7 @@ loadWorkflowConfig product_ = do
             , wcReleaseStartDelay = rsd
             , wcMaxK8sRetries = mkr
             , wcHpaMinMaxFactor = hmf
+            , wcHpaDefaultMinPods = hdm
             , wcHpaEnabled = hpa
             , wcScaleDownOnCompletion = scd
             }
@@ -430,33 +437,83 @@ prepareK8sResources = do
     _ <- runK8sIO $ ensureDestinationRule cfg ctx
     updateK8sField (\k8s -> k8s{destinationRuleApplied = True})
 
-    -- 5. Clone HPA if exists for old version
-    when (not isNew) $ do
-        let hpaEnabled = wcHpaEnabled wfCfg
-        when hpaEnabled $ do
-            let oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
-            hpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
-            when hpaFound $ do
-                logInfoS $ "  Cloning HPA from " <> oldHpaName
-                let hpaMinMaxFactor = wcHpaMinMaxFactor wfCfg
-                -- Get current replicas from old deployment to calculate HPA min/max
-                oldReplicaResult <- liftIO $ getDeploymentReplicaStatus cfg (namespace ctx) (serviceName ctx <> "-" <> oldVersion ctx)
-                let (_, _, desiredReplicas) = case oldReplicaResult of
-                        Right v -> v
-                        Left _ -> (1, 1, 1)
-                    hpaMin = max 1 desiredReplicas
-                    hpaMax = max hpaMin (round (fromIntegral desiredReplicas * hpaMinMaxFactor))
-                cloneResult <- liftIO $ runCmd (buildCloneHpaCommand cfg (namespace ctx) (serviceName ctx) (oldVersion ctx) (newVersion ctx) oldHpaName hpaMin hpaMax)
-                case cloneResult of
+    -- 5. HPA: patch existing new / clone old / create from template (Julia parity, kubernetes.jl:1641-1698)
+    let hpaEnabled = wcHpaEnabled wfCfg
+    when hpaEnabled $ do
+        let newHpaName = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
+            oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
+            hpaMinMaxFactor = wcHpaMinMaxFactor wfCfg
+            defaultMinPods = wcHpaDefaultMinPods wfCfg
+            computeMinMax desired =
+                let hpaMin = max 1 desired
+                    hpaMax = max hpaMin (round (fromIntegral desired * hpaMinMaxFactor))
+                 in (hpaMin, hpaMax)
+
+        -- Read desired replicas from old deployment if it exists; otherwise fall back to default.
+        desiredFromOld <- liftIO $ getDeploymentReplicaStatus cfg (namespace ctx) (serviceName ctx <> "-" <> oldVersion ctx)
+        let desiredReplicas = case desiredFromOld of
+                Right (_, _, d) -> d
+                Left _ -> defaultMinPods
+
+        newHpaFound <- liftIO $ hpaExists cfg (namespace ctx) newHpaName
+        if newHpaFound
+            then do
+                -- Branch 1: new HPA already exists (retry / partial previous run). Patch min/max.
+                let (hpaMin, hpaMax) = computeMinMax desiredReplicas
+                logInfoS $ "  Patching existing HPA " <> newHpaName <> " (min=" <> T.pack (show hpaMin) <> " max=" <> T.pack (show hpaMax) <> ")"
+                patchResult <- liftIO $ runCmd (buildPatchHpaReplicasCommand cfg (namespace ctx) newHpaName hpaMin hpaMax)
+                case patchResult of
                     Right _ -> do
-                        logInfoS "  HPA cloned successfully"
+                        logInfoS "  HPA patched successfully"
                         updateK8sField (\k8s -> k8s{hpaCreated = True})
-                        insertReleaseEvent
-                            (releaseId rt)
-                            "BUSINESS"
-                            "HPA_CLONED"
-                            (toJSON (serviceName ctx <> "-" <> newVersion ctx <> "-hpa"))
-                    Left (K8sError err) -> logErrorS $ "  [HPA] Clone failed (non-fatal): " <> err
+                        insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_PATCHED" (toJSON newHpaName)
+                    Left (K8sError err) -> logErrorS $ "  [HPA] Patch failed (non-fatal): " <> err
+            else do
+                oldHpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
+                if oldHpaFound
+                    then do
+                        -- Branch 2: clone the old HPA into new
+                        let (hpaMin, hpaMax) = computeMinMax desiredReplicas
+                        logInfoS $ "  Cloning HPA from " <> oldHpaName
+                        cloneResult <- liftIO $ runCmd (buildCloneHpaCommand cfg (namespace ctx) (serviceName ctx) (oldVersion ctx) (newVersion ctx) oldHpaName hpaMin hpaMax)
+                        case cloneResult of
+                            Right _ -> do
+                                logInfoS "  HPA cloned successfully"
+                                updateK8sField (\k8s -> k8s{hpaCreated = True})
+                                insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_CLONED" (toJSON newHpaName)
+                            Left (K8sError err) -> logErrorS $ "  [HPA] Clone failed (non-fatal): " <> err
+                    else do
+                        -- Branch 3: first release. Create from template.
+                        mTemplate <- getHpaTemplate
+                        case mTemplate of
+                            Just tmpl | not (T.null tmpl) -> do
+                                let (hpaMin, hpaMax) = computeMinMax defaultMinPods
+                                logInfoS $ "  Creating HPA from template: " <> newHpaName
+                                createResult <- liftIO $ runCmd (buildCreateHpaFromTemplateCommand cfg (namespace ctx) (serviceName ctx) (newVersion ctx) tmpl hpaMin hpaMax)
+                                case createResult of
+                                    Right _ -> do
+                                        logInfoS "  HPA created from template"
+                                        updateK8sField (\k8s -> k8s{hpaCreated = True})
+                                        insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_CREATED_FROM_TEMPLATE" (toJSON newHpaName)
+                                    Left (K8sError err) -> logErrorS $ "  [HPA] Create from template failed (non-fatal): " <> err
+                            _ -> logInfoS "  No hpa_template configured; skipping HPA create"
+
+    -- Initiate AB decision pod ONCE per release (Julia parity, global_changelog.jl).
+    -- The verdict is read later by getHSDecision in the rollout loop using the
+    -- same run_id. Gated by master ab_decision_enabled AND per-service flag.
+    -- On fail-closed initiate failure, abort the release before rollout begins.
+    abInit <- lift $ initiateABDecisionForRelease cfg rt
+    case drDecision abInit of
+        Abort -> do
+            let reason = maybe "AB initiate failed" id (drReason abInit)
+            logErrorS $ "[DECISION] AB initiate failed: " <> reason
+            insertReleaseEvent
+                (releaseId rt)
+                "DECISION_ENGINE"
+                "AB_INITIATE_FAILED"
+                (object ["reason" .= reason])
+            liftIO $ throwIO $ WorkflowError "ab-initiate" reason
+        _ -> pure ()
 
     logInfoS "K8s resources prepared"
 
@@ -714,10 +771,26 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                                 -- Continue despite warning
                                                 PromOK -> pure ()
 
-                                            -- 2. AB Decision
-                                            abDecision <- getABDecision cfg freshRT
-                                            -- 3. HS Decision (pre-monitoring)
-                                            hsDecision <- getHSDecision cfg freshRT False
+                                            -- 2/3. AB + HS Decisions, gated per (product, service).
+                                            -- Master flags (ab_decision_enabled / ab_hs_enabled) are
+                                            -- enforced inside getABDecision/getHSDecision; here we
+                                            -- additionally enforce Julia's per-service granularity
+                                            -- (ab_hs_decision_enabled_products JSON map).
+                                            perServiceEnabled <-
+                                                isABHSDecisionEnabledForProductService
+                                                    (appGroup freshRT)
+                                                    (service freshRT)
+                                            (abDecision, hsDecision) <-
+                                                if perServiceEnabled
+                                                    then do
+                                                        ab <- getABDecision cfg freshRT
+                                                        hs <- getHSDecision cfg freshRT False
+                                                        pure (ab, hs)
+                                                    else
+                                                        pure
+                                                            ( DecisionResult Continue Nothing "AB_ENGINE"
+                                                            , DecisionResult Continue Nothing "HEALTH_SCORE"
+                                                            )
 
                                             -- Log combined decision event
                                             let combinedDecision = getCombinedDecision abDecision hsDecision
@@ -897,8 +970,13 @@ monitorHealth = do
             logInfoS "  All pods ready"
 
     -- Post-monitoring: after all pods are healthy at 100%, check HS decision
-    postMonitoringEnabled <- getConfigBoolForProduct "ab_hs_post_monitoring_enabled" (Just (appGroup rt)) False
-    when postMonitoringEnabled $ do
+    -- Master gate (legacy flat boolean, kept as a kill switch) AND per-service gate.
+    masterPostEnabled <- getConfigBoolForProduct "ab_hs_post_monitoring_enabled" (Just (appGroup rt)) False
+    perServicePostEnabled <-
+        if masterPostEnabled
+            then isABHSPostMonitoringDecisionEnabledForProductService (appGroup rt) (service rt)
+            else pure False
+    when perServicePostEnabled $ do
         logInfoS "[WORKFLOW] Starting post-monitoring phase"
         insertReleaseEvent
             (releaseId rt)

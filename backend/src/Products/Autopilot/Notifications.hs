@@ -122,7 +122,7 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
     mToken <- liftIO getSlackToken
     case mToken of
         Nothing -> do
-            liftIO $ logWarningG "[SLACK] No SLACK_BOT_TOKEN env var set, skipping"
+            logWarningG "[SLACK] No SLACK_BOT_TOKEN env var set, skipping"
             pure Nothing
         Just token -> do
             let attachment = object ["color" .= color, "blocks" .= blocks]
@@ -173,7 +173,7 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
                                         Just (String ts) -> Just ts
                                         _ -> Nothing
                                     _ -> Nothing
-                        liftIO $ logInfoG $ "[SLACK] Sent to #" <> channel <> maybe "" (\ts -> " (ts=" <> ts <> ")") mTs
+                        logInfoG $ "[SLACK] Sent to #" <> channel <> maybe "" (\ts -> " (ts=" <> ts <> ")") mTs
                         pure mTs
 
 -- | Build a section block with markdown text
@@ -202,13 +202,13 @@ whenSlackEnabled action = do
     enabled <- isSlackEnabled
     if enabled
         then void (forkFlow action)
-        else liftIO $ logInfoG "[SLACK] Disabled, skipping"
+        else logInfoG "[SLACK] Disabled, skipping"
 
 withChannel :: Text -> Text -> (Text -> Flow ()) -> Flow ()
 withChannel prod svc f = do
     mCh <- getSlackChannel prod
     case mCh of
-        Nothing -> liftIO $ logWarningG $ "[SLACK] No channel for " <> prod <> "/" <> svc
+        Nothing -> logWarningG $ "[SLACK] No channel for " <> prod <> "/" <> svc
         Just ch -> f ch
 
 {- | Read thread_ts fresh from DB. Use this only when the caller does

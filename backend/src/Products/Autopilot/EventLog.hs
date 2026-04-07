@@ -20,6 +20,56 @@ module Products.Autopilot.EventLog (
     logDecisionResult,
     logStatusUpdated,
     encodeProdRolloutHistory,
+
+    -- * Event categories
+    evCategoryBusiness,
+    evCategoryDecisionEngine,
+    evCategoryNotification,
+    evCategorySnapshot,
+
+    -- * Event labels
+    evTrafficUpdated,
+    evSyncRequest,
+    evSyncResponse,
+    evSyncFailedFinal,
+    evSyncGateCheck,
+    evSyncSkipped,
+    evSyncTriggered,
+    evRevertSyncGateCheck,
+    evRevertSyncTriggered,
+    evRevertSyncSkipped,
+    evImmediateRevertSyncRequest,
+    evRevertRestartFailed,
+    evAbortHandled,
+    evFailed,
+    evKubectlFailed,
+    evWorkflowAbortExit,
+    evWorkflowAborted,
+    evVersionMismatch,
+    evConfigmapSyncRequest,
+    evConfigmapSyncResponse,
+    evConfigmapSyncFailed,
+    evVsOld,
+    evVsNew,
+    evVsLockFailed,
+    evDuplicateDiscarded,
+    evTrackerCreated,
+    evTrackerApproved,
+    evTrackerTriggered,
+    evTrackerUpdated,
+    evRevertTrackerCreated,
+    evRollbackRequested,
+    evImmediateRevert,
+    evRunnerPicked,
+    evCompleted,
+    evDecisionResult,
+    evStatusUpdated,
+    evDeploymentBefore,
+    evDeploymentAfter,
+    evConfigmapBefore,
+    evConfigmapAfter,
+    evVsBefore,
+    evVsAfter,
 )
 where
 
@@ -131,3 +181,115 @@ logStatusUpdated rt message = do
 
 statusText :: ReleaseTracker -> Text
 statusText = releaseStatusToText . status
+
+-- ============================================================================
+
+-- * Event categories & labels — central registry
+
+-- ============================================================================
+
+{- | Typed constants for every release-event @(category, label)@ pair currently
+emitted across @Products.Autopilot.*@.
+
+This section is intentionally *additive only*. Existing call sites still pass
+string literals directly to 'insertReleaseEvent'; they are **not** migrated in
+this pass. Future work should gradually replace magic strings with these
+constants to eliminate typo risk and provide a single source of truth.
+
+Naming convention: category constants are prefixed @evCategory@; label
+constants are prefixed @ev@ followed by the camelCase form of the underlying
+@SNAKE_CASE@ label (e.g. @SYNC_REQUEST@ becomes 'evSyncRequest').
+-}
+evCategoryBusiness, evCategoryDecisionEngine, evCategoryNotification, evCategorySnapshot :: Text
+evCategoryBusiness = "BUSINESS"
+evCategoryDecisionEngine = "DECISION_ENGINE"
+evCategoryNotification = "NOTIFICATION"
+evCategorySnapshot = "SNAPSHOT"
+
+-- | BUSINESS category labels.
+evTrafficUpdated
+    , evSyncRequest
+    , evSyncResponse
+    , evSyncFailedFinal
+    , evSyncGateCheck
+    , evSyncSkipped
+    , evSyncTriggered
+    , evRevertSyncGateCheck
+    , evRevertSyncTriggered
+    , evRevertSyncSkipped
+    , evImmediateRevertSyncRequest
+    , evRevertRestartFailed
+    , evAbortHandled
+    , evFailed
+    , evKubectlFailed
+    , evWorkflowAbortExit
+    , evWorkflowAborted
+    , evVersionMismatch
+    , evConfigmapSyncRequest
+    , evConfigmapSyncResponse
+    , evConfigmapSyncFailed
+    , evVsOld
+    , evVsNew
+    , evVsLockFailed
+    , evDuplicateDiscarded
+    , evTrackerCreated
+    , evTrackerApproved
+    , evTrackerTriggered
+    , evTrackerUpdated
+    , evRevertTrackerCreated
+    , evRollbackRequested
+    , evImmediateRevert
+    , evRunnerPicked
+    , evCompleted ::
+        Text
+evTrafficUpdated = "TRAFFIC_UPDATED"
+evSyncRequest = "SYNC_REQUEST"
+evSyncResponse = "SYNC_RESPONSE"
+evSyncFailedFinal = "SYNC_FAILED_FINAL"
+evSyncGateCheck = "SYNC_GATE_CHECK"
+evSyncSkipped = "SYNC_SKIPPED"
+evSyncTriggered = "SYNC_TRIGGERED"
+evRevertSyncGateCheck = "REVERT_SYNC_GATE_CHECK"
+evRevertSyncTriggered = "REVERT_SYNC_TRIGGERED"
+evRevertSyncSkipped = "REVERT_SYNC_SKIPPED"
+evImmediateRevertSyncRequest = "IMMEDIATE_REVERT_SYNC_REQUEST"
+evRevertRestartFailed = "REVERT_RESTART_FAILED"
+evAbortHandled = "ABORT_HANDLED"
+evFailed = "FAILED"
+evKubectlFailed = "KUBECTL_FAILED"
+evWorkflowAbortExit = "WORKFLOW_ABORT_EXIT"
+evWorkflowAborted = "WORKFLOW_ABORTED"
+evVersionMismatch = "VERSION_MISMATCH"
+evConfigmapSyncRequest = "CONFIGMAP_SYNC_REQUEST"
+evConfigmapSyncResponse = "CONFIGMAP_SYNC_RESPONSE"
+evConfigmapSyncFailed = "CONFIGMAP_SYNC_FAILED"
+evVsOld = "VS_OLD"
+evVsNew = "VS_NEW"
+evVsLockFailed = "VS_LOCK_FAILED"
+evDuplicateDiscarded = "DUPLICATE_DISCARDED"
+evTrackerCreated = "TRACKER_CREATED"
+evTrackerApproved = "TRACKER_APPROVED"
+evTrackerTriggered = "TRACKER_TRIGGERED"
+evTrackerUpdated = "TRACKER_UPDATED"
+evRevertTrackerCreated = "REVERT_TRACKER_CREATED"
+evRollbackRequested = "ROLLBACK_REQUESTED"
+evImmediateRevert = "IMMEDIATE_REVERT"
+evRunnerPicked = "RUNNER_PICKED"
+evCompleted = "COMPLETED"
+
+-- | DECISION_ENGINE category labels.
+evDecisionResult :: Text
+evDecisionResult = "DECISION_RESULT"
+
+-- | NOTIFICATION category labels.
+evStatusUpdated :: Text
+evStatusUpdated = "STATUS_UPDATED"
+
+-- | SNAPSHOT category labels.
+evDeploymentBefore, evDeploymentAfter, evConfigmapBefore, evConfigmapAfter, evVsBefore, evVsAfter :: Text
+evDeploymentBefore = "DEPLOYMENT_BEFORE"
+evDeploymentAfter = "DEPLOYMENT_AFTER"
+evConfigmapBefore = "CONFIGMAP_BEFORE"
+evConfigmapAfter = "CONFIGMAP_AFTER"
+evVsBefore = "VS_BEFORE"
+evVsAfter = "VS_AFTER"

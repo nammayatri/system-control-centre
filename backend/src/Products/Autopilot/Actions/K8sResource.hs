@@ -12,10 +12,9 @@ where
 import Control.Monad.IO.Class (liftIO)
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
-import Core.Environment (logInfo)
+import Core.Environment (Flow, getConfig, logInfo)
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Types.Time (Seconds (..))
-import Core.Utils.FlowMonad (Flow, getConfig)
 import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as LBS

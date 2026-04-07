@@ -8,10 +8,9 @@ import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
 import Core.Config (Config (..))
-import Core.Environment (AppState (..), DBEnv, MonadFlow, forkFlow)
+import Core.Environment (AppState (..), DBEnv, Flow, MonadFlow, forkFlow, getConfig, getDBEnv, logError, logInfo, logWarning, runFlow)
 import Core.Logging (logInfoIO, logWarningIO)
 import Core.Types.Time (threadDelaySec)
-import Core.Utils.FlowMonad
 import Data.Aeson (object, toJSON, (.=))
 import Data.List (sortBy)
 import qualified Data.Map.Strict as Map
@@ -24,11 +23,12 @@ import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand)
 import Products.Autopilot.K8s.Execute (runCmd)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
-import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductVsLockedBy, releaseExpiredVsLocks)
+import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks)
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.RuntimeConfig (getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
+import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, dcAppGroup)
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (..), K8sReleaseContext (..), PodsScaleDownStatus (..))
 import qualified Products.Autopilot.Types.Target.Kubernetes as K8s
@@ -198,7 +198,17 @@ loop = forever $ do
         jobs <- findRunnableReleaseTrackers now
         ongoing <- findOngoingReleaseTrackers
         multiRelease <- isMultiReleasePerProduct
-        eligible <- filterM (isEligibleToRun multiRelease ongoing) jobs
+        -- Batch product lookup to collapse N+1 (one SELECT instead of one per job).
+        let jobPairs =
+                [ ( appGroup rt
+                  , case mts of
+                        Just (K8sState k8s) -> cluster (context k8s)
+                        _ -> ""
+                  )
+                | (rt, mts) <- jobs
+                ]
+        products <- getProductsByNamesAndClusters jobPairs
+        eligible <- filterM (isEligibleToRun products multiRelease ongoing) jobs
 
         -- Step 2: Pick jobs and fork each into a background thread for parallel execution
         let picked = pickJobs multiRelease eligible
@@ -222,8 +232,8 @@ getAppState = ask
 -- Eligibility & Job Selection
 -- ============================================================================
 
-isEligibleToRun :: (MonadFlow m) => Bool -> [TrackerWithTarget] -> TrackerWithTarget -> m Bool
-isEligibleToRun multiRelease ongoing (rt, mts) = case category rt of
+isEligibleToRun :: (MonadFlow m) => [DeploymentConfig] -> Bool -> [TrackerWithTarget] -> TrackerWithTarget -> m Bool
+isEligibleToRun products multiRelease ongoing (rt, mts) = case category rt of
     BackendService -> k8sEligible
     BackendScheduler -> k8sEligible
     BackendCronJob -> k8sEligible
@@ -239,7 +249,17 @@ isEligibleToRun multiRelease ongoing (rt, mts) = case category rt of
         let k8sCluster = case mts of
                 Just (K8sState k8s) -> cluster (context k8s)
                 _ -> ""
-        p <- findProductByNameAndCluster (appGroup rt) k8sCluster
+            sameName = filter (\dc -> dcAppGroup dc == appGroup rt) products
+            -- Mirror findProductByNameAndCluster semantics: prefer exact cluster
+            -- match, fall back to first row with matching name when cluster is
+            -- empty or no exact match exists.
+            p = case k8sCluster of
+                "" -> firstOf sameName
+                _ -> case filter (\q -> getProductCluster q == k8sCluster) sameName of
+                    (q : _) -> Just q
+                    [] -> firstOf sameName
+            firstOf [] = Nothing
+            firstOf (x : _) = Just x
         let vsLocked = maybe False (isJust . getProductVsLockedBy) p
             -- Block same-service concurrent releases (always, even with multi_release_per_product)
             hasOngoingSameService = any (\(o, _) -> appGroup o == appGroup rt && service o == service rt && env o == env rt) ongoing

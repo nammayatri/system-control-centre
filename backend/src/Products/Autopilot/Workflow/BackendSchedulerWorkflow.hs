@@ -21,8 +21,8 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
+import Core.Environment (getConfig, logInfo, logWarning)
 import Core.Types.Time (threadDelaySec)
-import Core.Utils.FlowMonad (getConfig, logInfo, logWarning)
 import qualified Data.Text as T
 import Products.Autopilot.K8s.Deployment (
     buildCloneDeploymentCommand,

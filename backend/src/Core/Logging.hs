@@ -251,14 +251,14 @@ logG lvl msg = do
         Just env -> logOutput env lvl full
         Nothing -> putStrLn ("[" <> show lvl <> "] " <> T.unpack full)
 
-logInfoG :: Text -> IO ()
-logInfoG = logG INFO
+logInfoG :: (MonadIO m) => Text -> m ()
+logInfoG = liftIO . logG INFO
 
-logErrorG :: Text -> IO ()
-logErrorG = logG ERROR
+logErrorG :: (MonadIO m) => Text -> m ()
+logErrorG = liftIO . logG ERROR
 
-logWarningG :: Text -> IO ()
-logWarningG = logG WARNING
+logWarningG :: (MonadIO m) => Text -> m ()
+logWarningG = liftIO . logG WARNING
 
-logDebugG :: Text -> IO ()
-logDebugG = logG DEBUG
+logDebugG :: (MonadIO m) => Text -> m ()
+logDebugG = liftIO . logG DEBUG

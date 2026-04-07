@@ -46,50 +46,66 @@ The system follows a two-layer architecture: **Core** (authentication, RBAC, adm
 
 ## Module Structure
 
-The Autopilot backend was refactored from a single Routes.hs into domain-specific Action modules. Routes.hs now contains only the Servant API type definitions and handler wiring.
+The backend is split into two layers: `Core/` (framework — auth, admin, server, DB) and `Products/` (self-contained product modules). `Shared/` holds truly cross-product utilities (JSON helpers, error types, generic config registry, generic `server_config` queries). The product-aware layer `Products/` (top level) hosts `Products.Types` (the `IsProduct` typeclass + `ProductSlug` / `Permission` union) and `Products.ConfigCatalog` so that `Shared/` can stay product-agnostic.
 
 ```
-Products/Autopilot/
-├── Actions/
-│   ├── Release.hs      (1035 lines — release lifecycle: CRUD, approve, trigger, revert, abort, restart, fast-forward, diff, pods, rollout history)
-│   ├── VSEdit.hs        (380 lines — VS editor: lock/unlock, apply, revert, list)
-│   ├── ConfigMap.hs     (322 lines — configmap tracker CRUD, K8s configmap fetch)
-│   ├── Config.hs        (241 lines — product config, service config, server config, discovery)
-│   └── K8sResource.hs   (232 lines — env vars, K8s resources, configmap K8s endpoints)
-├── Routes.hs            (146 lines — API type + wiring only)
-├── Queries.hs           (DB queries via Beam ORM)
-├── Workflows/           (category-specific deployment workflows)
-├── Runner.hs            (background polling loop)
-├── Types/
-│   ├── API.hs           (typed request/response types, newtypes)
-│   ├── Permission.hs    (permission ADT)
-│   ├── Schema.hs        (Beam table definitions)
-│   └── Release.hs       (status, category, workflow status ADTs)
-└── ...
+src/
+├── Core/
+│   ├── Auth/             (Permission, Protected, Queries, Routes, Types, Schema)
+│   ├── Admin/            (Routes, Queries, Types)
+│   ├── DB/Connection.hs
+│   ├── Environment.hs    (Flow monad, AppState, inDB / inConfig helpers)
+│   ├── Config.hs         (bootstrap config from env)
+│   ├── Server.hs         (Servant + Warp wiring with Context '[DBEnv])
+│   ├── Http/Client.hs, Logging.hs, AppError.hs, Types/{Id,Time}.hs
+│   └── Middleware/RequestId.hs
+├── Shared/
+│   ├── API/Response.hs, JSON.hs, Error.hs, Types/Id.hs
+│   ├── Config/{Registry,Runtime,Types}.hs
+│   ├── Queries/ServerConfig.hs
+│   └── Types/Storage/ServerConfig.hs
+└── Products/
+    ├── Types.hs          (IsProduct, ProductSlug, Permission union)
+    ├── ConfigCatalog.hs  (allConfigEntries = globalConfigs ++ autopilotConfigs)
+    └── Autopilot/
+        ├── Routes.hs            (Servant API type, every route carries `Protected '<perm>`)
+        ├── Actions/             (Release, VSEdit, ConfigMap, Config, K8sResource)
+        ├── Queries/             (ReleaseTracker, ProductService, VsEditTracker)
+        ├── Workflow/            (BackendService, BackendJob, BackendCronJob, BackendScheduler, BackendConfig, MobileAppAndroid, Factory, Helpers, Recorded, Types)
+        ├── K8s/                 (Deployment, DestinationRule, HPA, VirtualService, Kubectl, Execute)
+        ├── Types/               (API, Release, Workflow, Permission, Storage/Schema, Target/*)
+        ├── Runner.hs, Sync.hs, DecisionEngine.hs, EventLog.hs
+        ├── Notifications.hs, Discovery.hs, Config.hs, RuntimeConfig.hs
 ```
+
+`MonadFlow` is exported from `Core.Environment` as a constraint **synonym** (not a typeclass): `type MonadFlow m = (MonadIO m, MonadThrow m, MonadCatch m, MonadMask m, MonadReader AppState m)`. Queries and reusable helpers are written `MonadFlow m => ... -> m a`; Servant handlers use the concrete `Flow = ReaderT AppState IO`. Use `inDB :: (DBEnv -> IO a) -> Flow a` and `inConfig` from `Core.Environment` instead of the manual `getDBEnv >>= liftIO . f` pattern.
 
 ## Type Safety
 
 ### Typed Response Types
 
-48 of 57 endpoints return typed Haskell response types (the remaining 9 return dynamic K8s JSON from kubectl). 16 typed response types are defined in `Products/Autopilot/Types/API.hs`:
+Most endpoints return typed Haskell response types defined in `Products/Autopilot/Types/API.hs`; a handful return dynamic K8s JSON from kubectl. Typed response types include:
 
 `APIResponse`, `ProductResponse`, `ServiceResponse`, `ProductConfigResponse`, `ReleaseConfigResponse`, `PodHealthResponse`, `DiffResponse`, `ResourcesResponse`, `VsEditTrackerResponse`, `ServerConfigResponse`, `ConfigMapResponse`, `ConfigMapListResponse`, `ConfigMapK8sResponse`, `ReleaseEventResponse`, `ErrorResponse`, `VsLockErrorResponse`
 
-### Newtypes for IDs
+### Compile-time RBAC (Phase 3)
 
-3 newtypes prevent accidental parameter swaps in Servant route handlers:
+Every product route in `Products/Autopilot/Routes.hs` carries a `Protected '<permission>` Servant combinator immediately after its first path literal:
 
 ```haskell
-newtype ReleaseId   = ReleaseId   { unReleaseId   :: Text }
-newtype ProductSlug = ProductSlug { unProductSlug :: Text }
-newtype ServiceSlug = ServiceSlug { unServiceSlug :: Text }
+"releases" :> Protected 'AP_RELEASE_VIEW :> QueryParam "from" Text :> ... :> Get '[JSON] [ReleaseTracker]
 ```
+
+The `HasServer` instance in `Core.Auth.Protected` reads `DBEnv` from the Servant `Context '[DBEnv]`, validates the bearer token, looks up effective permissions, and passes an `AuthedPerson` proof to the handler as its first argument. Forgetting `Protected` on a new route is a compile error. There is no runtime route-walker, no `findRoutePermission`, no startup `assertAllRoutesMapped` — all of that Phase 2 machinery is gone. Admin and Auth routes intentionally use in-handler superadmin / token checks instead.
+
+`AutopilotPermission` has 20 constructors (see [Permissions List](#permissions-list)). Adding one without handling it in `permissionDescription` triggers a `-Wall` warning.
 
 ### Shared Utilities
 
-- **`Shared/JSON.hs`** -- Generic JSON deriving with shared options (camelCase field labels, tag encoding) used across all response types.
-- **`Shared/Error.hs`** -- Typed error ADT ready for migration from ad-hoc Text errors to structured error responses.
+- **`Shared/JSON.hs`** -- Generic JSON deriving with shared options (camelCase field labels, tag encoding).
+- **`Shared/Error.hs`** -- Typed error ADT for structured error responses.
+- **`Shared/API/Response.hs`** -- Generic `APIResponse` wire envelope.
+- **`Shared/Config/Registry.hs`** -- Generic `ConfigEntry` utilities; product-aware catalog lives in `Products.ConfigCatalog`.
 
 ## Performance
 
@@ -380,13 +396,7 @@ Push to ECR / GCR / Docker Hub and deploy on ECS / Cloud Run / Kubernetes / Noma
 
 ### Roles
 
-**System roles** (cannot be deleted, seeded per product):
-
-| Role    | Default Permissions |
-|---------|---------------------|
-| Admin   | All 15 permissions for the product |
-| Manager | All except `PRODUCT_CONFIG_EDIT` and `SERVICE_CONFIG_EDIT` (13 permissions) |
-| Viewer  | `RELEASE_VIEW`, `PRODUCT_CONFIG_VIEW`, `SERVICE_CONFIG_VIEW` only (3 permissions) |
+**System roles** (cannot be deleted, seeded per product): `Admin`, `Manager`, `Viewer`. Defaults are seeded by the RBAC seed in `dev/sql-seed/system-control-seed.sql`. Admin gets all permissions for the product; Manager gets all except the `*_CONFIG_EDIT` set; Viewer gets the `*_VIEW` permissions only.
 
 **Custom roles** can be created via the admin API with an explicit list of permissions.
 
@@ -409,7 +419,7 @@ Overrides are per-person, per-product, per-permission, stored in `sc_person_perm
 
 ### Permissions List
 
-All 15 Autopilot permissions:
+All 20 Autopilot permissions (defined as `AutopilotPermission` ADT in `Products/Autopilot/Types/Permission.hs`):
 
 | Permission             | Wire Name            | Description                              |
 |------------------------|----------------------|------------------------------------------|
@@ -422,12 +432,17 @@ All 15 Autopilot permissions:
 | AP_RELEASE_RESUME      | RELEASE_RESUME       | Resume paused releases                   |
 | AP_RELEASE_ABORT       | RELEASE_ABORT        | Abort in-progress releases               |
 | AP_RELEASE_UPDATE      | RELEASE_UPDATE       | Update release metadata                  |
-| AP_RELEASE_DELETE       | RELEASE_DELETE       | Delete releases                          |
+| AP_RELEASE_DELETE      | RELEASE_DELETE       | Delete releases                          |
 | AP_MANAGE_STAGGER      | MANAGE_STAGGER       | Manage rollout stagger configuration     |
 | AP_PRODUCT_CONFIG_VIEW | PRODUCT_CONFIG_VIEW  | View product configurations              |
 | AP_PRODUCT_CONFIG_EDIT | PRODUCT_CONFIG_EDIT  | Edit product configurations              |
 | AP_SERVICE_CONFIG_VIEW | SERVICE_CONFIG_VIEW  | View server configurations               |
 | AP_SERVICE_CONFIG_EDIT | SERVICE_CONFIG_EDIT  | Edit server configurations               |
+| AP_CONFIG_APPROVE      | CONFIG_APPROVE       | Approve ConfigMap and VS edit releases   |
+| AP_CONFIG_EDIT         | CONFIG_EDIT          | Edit ConfigMap and VS edit releases      |
+| AP_CONFIG_DISCARD      | CONFIG_DISCARD       | Discard ConfigMap and VS edit releases   |
+| AP_CONFIG_REVERT       | CONFIG_REVERT        | Revert ConfigMap releases                |
+| AP_FORCE_UNLOCK        | FORCE_UNLOCK         | Force-release a VS edit lock held by another user (operator recovery; superadmin only) |
 
 ## Release Manager
 
@@ -523,16 +538,18 @@ Releases support progressive rollout defined as a list of `RolloutStep`:
 
 ```json
 [
-  { "rolloutPercent": 10, "cooloffSeconds": 300, "podPercent": 20 },
-  { "rolloutPercent": 50, "cooloffSeconds": 600, "podPercent": 50 },
-  { "rolloutPercent": 100, "cooloffSeconds": 0, "podPercent": 100 }
+  { "rolloutPercent": 10, "cooloffMinutes": 5,  "podPercent": 20 },
+  { "rolloutPercent": 50, "cooloffMinutes": 10, "podPercent": 50 },
+  { "rolloutPercent": 100, "cooloffMinutes": 0, "podPercent": 100 }
 ]
 ```
 
 Each step specifies:
 - `rolloutPercent` -- percentage of traffic routed to new version (VirtualService weight).
-- `cooloffSeconds` -- wait time at this stage before proceeding or making a decision.
+- `cooloffMinutes` -- wait time **in minutes** at this stage (matches Julia production semantics; the legacy `cooloffSeconds` field name was renamed). The workflow multiplies by 60 internally.
 - `podPercent` -- percentage of pods to run the new version.
+
+The embedded `rollout_history` payload inside `TRAFFIC_UPDATED` / `DECISION_RESULT` event records still uses Julia's `cooloff` key for external consumer compatibility.
 
 Rollout history tracks each completed step with timestamps, decision (Continue/Wait/Abort), decision reason, whether a manual override occurred, and HS decision data. Rollout history is editable inline from the release summary page.
 
@@ -546,14 +563,15 @@ During workflow execution, YAML snapshots are captured before and after deployme
 
 The diff endpoint (`GET /releases/:id/diff?type=<type>`) retrieves these snapshots and returns before/after comparisons. Supported `type` values: `deployment`, `vs`, `configmap`. Diffs are displayed in YAML format (not JSON) on the frontend.
 
-### HPA Clone
+### HPA Flow (Julia parity)
 
-When `scaling_with_hpa_enabled` includes the product (JSON array in server_config), the workflow clones the HPA (Horizontal Pod Autoscaler) from the old version to the new version during the Preparing stage:
+When `scaling_with_hpa_enabled` includes the product (JSON array in server_config), the workflow ensures the new version has an HPA via three branches, in order:
 
-- Checks if an HPA exists for the old deployment (`<service>-<oldVersion>-hpa`).
-- Reads current replicas from the old deployment to calculate HPA min/max.
-- Clones with min = max(1, desiredReplicas) and max = max(min, round(desiredReplicas * hpa_min_max_ratio)).
-- Records `HPA_CLONED` event on success. Failure is non-fatal.
+1. **Branch 1 — patch existing new HPA**: if `<service>-<newVersion>-hpa` already exists, patch its min/max and target ref to point at the new deployment.
+2. **Branch 2 — clone old HPA**: if the old version's HPA (`<service>-<oldVersion>-hpa`) exists, clone it to the new version with min/max derived from current desired replicas (`hpa_default_min_pods_config`, `hpa_max_replicas_buffer`, `hpa_min_max_ratio`).
+3. **Branch 3 — create from template**: otherwise create the HPA from the template at the path stored in the `hpa_template` server_config key.
+
+Records `HPA_CLONED` (or equivalent) event on success. Failure is non-fatal. Old-version HPA deletion is performed as part of `cleanupOldVersion` after the rollout completes.
 
 ### Internal VS Validation
 
@@ -576,21 +594,24 @@ During the Init stage, the workflow checks for the existence of `<service>-inter
 
 ### Multi-Cloud Sync
 
-Sync to a secondary cluster is triggered after a release reaches `Completed` status. All gates must pass:
+Cross-cluster sync triggers from three points: forward sync after `Completed`, standard revert, and immediate revert. All require these gates:
 
 | Gate | Source |
 |------|--------|
 | `k8s_enabled` | server_config (must be true) |
 | `sync_cluster_enabled` | server_config (must be true) |
 | Product has `sync_cluster` | deployment_config.sync_cluster (must be non-empty) |
-| Release has `udf1 = "true"` | release_tracker.udf1 |
+| Release has `sync_enabled = "true"` | release_tracker.sync_enabled (legacy column name: `udf1`) |
 
 Sync behavior:
-- **Forward sync**: POSTs a new release to the sync cluster URL (`SYNC_CLUSTER_URL` env var) with the same version, rollout strategy (overridable via `syncClusterRolloutStrategy`), and metadata.
-- **Revert sync**: PUTs to the sync cluster to revert by global_id.
-- **Immediate revert sync**: PUTs to the immediate revert endpoint on the sync cluster.
+- **Forward sync** (on COMPLETED): POSTs a new release to the sync cluster URL (`SYNC_CLUSTER_URL` env var) with the same version, rollout strategy (overridable via `sync_rollout_strategy_config`), peer-specific env override forwarding (`env_override_data`), and metadata.
+- **Standard revert sync**: `PUT /release/revert/global/:globalId` on the sync cluster.
+- **Immediate revert sync**: `PUT /release/revert/immediate/global/:globalId` on the sync cluster.
+- **Idempotent receive**: the receive endpoints look up by `global_id`. The DB enforces uniqueness via the partial unique index `uq_release_tracker_global_id ON release_tracker (global_id) WHERE global_id IS NOT NULL`, making sync replay safe.
+- **Loop prevention**: the receiving cluster sets `isSystemTriggered` on the inbound tracker so it does not sync back to its source.
+- **Auto-approve**: the inbound payload may carry `is_approved = true` so the receiver runs without re-approval.
 - **Auth**: Pomerium JWT (`x-pomerium-jwt-assertion` header) is preferred; falls back to Basic auth (`SYNC_CLUSTER_BASE_AUTH` env var) if no forwarded headers are present.
-- **Retry**: 2 attempts with event logging for each attempt (SYNC_REQUEST, SYNC_RESPONSE, SYNC_FAILED, SYNC_FAILED_RETRY, SYNC_FAILED_FINAL).
+- **Retry**: 2 attempts with event logging (`SYNC_REQUEST`, `SYNC_RESPONSE`, `SYNC_FAILED`, `SYNC_FAILED_RETRY`, `SYNC_FAILED_FINAL`).
 
 ### Slack Notifications
 
@@ -651,15 +672,13 @@ Thread-aware Slack notifications using Block Kit with colored sidebars:
 **Generic (1):**
 34. `notifyGenericThreadMessage` -- generic message in a release's thread
 
-Threading: The first message (Created or ConfigMap Created) starts a Slack thread. All subsequent messages reply in that thread using the `thread_ts` stored in `release_tracker.udf3`.
+Threading: The first message (Created or ConfigMap Created) starts a Slack thread. All subsequent messages reply in that thread using the `thread_ts` stored in `release_tracker.slack_thread_ts` (legacy column name: `udf3`). The first writer wins by atomic CAS (`UPDATE ... AND slack_thread_ts IS NULL`); concurrent writers become no-ops, so duplicate threads are impossible.
 
 Requirements: `SLACK_BOT_TOKEN` env var, `slack_enabled = true` in server_config, and a Slack channel configured per service in `deployment_config.slack_channel`. HTTP timeout is 10 seconds.
 
 ## API Reference
 
-All endpoints require `Authorization: Bearer <token>` unless marked as public.
-
-**71 total endpoints** across 4 route groups + 1 health check.
+All endpoints require `Authorization: Bearer <token>` unless marked as public. Product routes are gated at compile time by the `Protected '<perm>` Servant combinator (Phase 3 RBAC) — see `Products/Autopilot/Routes.hs` for the canonical list. Auth and Admin routes use in-handler superadmin / token checks instead.
 
 ### 1. Auth (4 endpoints)
 
@@ -703,8 +722,8 @@ All admin endpoints require superadmin status. Non-superadmins receive `"Unautho
 | POST   | /releases/:id/trigger | RELEASE_CREATE | Schedule release for immediate execution |
 | POST   | /releases/:id/rollback | RELEASE_REVERT | Request rollback (sets status to Aborting) |
 | POST   | /releases/:id/revert | RELEASE_REVERT | Create a revert release tracker (swaps old/new version) |
-| PUT    | /release/revert/global/:globalId | RELEASE_REVERT | Revert by global ID |
-| PUT    | /release/revert/immediate/global/:globalId | RELEASE_REVERT | Immediate revert by global ID |
+| PUT    | /release/revert/global/:globalId | RELEASE_REVERT | Cross-cluster sync receive: standard revert by global ID (idempotent on `global_id`) |
+| PUT    | /release/revert/immediate/global/:globalId | RELEASE_REVERT | Cross-cluster sync receive: immediate revert by global ID |
 | POST   | /releases/:id/discard | RELEASE_DISCARD | Discard a created release |
 | POST   | /releases/:id/update | RELEASE_UPDATE | Update tracker fields (status, mode, priority, rollout, etc.) |
 | GET    | /releases/:id/events | RELEASE_VIEW | List release events (audit trail) |
@@ -715,11 +734,12 @@ All admin endpoints require superadmin status. Non-superadmins receive `"Unautho
 | POST   | /releases/:id/restart | RELEASE_CREATE | Restart a paused or failed release |
 | POST   | /releases/:id/fast-forward | RELEASE_UPDATE | Fast-forward to next rollout step |
 
-### 4. Rollout History (1 endpoint)
+### 4. Rollout History and Misc (2 endpoints)
 
 | Method | Path | Permission | Description |
 |--------|------|------------|-------------|
 | GET    | /releases/:id/rollout-history | RELEASE_VIEW | Get rollout history for a release |
+| GET    | /releases/:id/logslink | RELEASE_VIEW | Get observability link payload (Grafana / Kibana) for a release |
 
 ### 5. Product and Service Config (10 endpoints)
 
@@ -740,8 +760,9 @@ All admin endpoints require superadmin status. Non-superadmins receive `"Unautho
 
 | Method | Path | Permission | Description |
 |--------|------|------------|-------------|
-| GET    | /server-config | SERVICE_CONFIG_VIEW | List all server config entries with registry metadata |
+| GET    | /server-config | SERVICE_CONFIG_VIEW | List all server config entries with registry metadata. Optional: `?product=autopilot` |
 | POST   | /server-config | SERVICE_CONFIG_EDIT | Upsert a server config value |
+| DELETE | /server-config/:id | SERVICE_CONFIG_EDIT | Delete a server config entry by id |
 
 ### 7. VS Edit Tracker (8 endpoints)
 
@@ -751,7 +772,8 @@ All admin endpoints require superadmin status. Non-superadmins receive `"Unautho
 | GET    | /vs-edit-tracker/list | RELEASE_VIEW | List VS edit trackers. Optional: `?from=ISO&to=ISO` |
 | GET    | /vs-edit-tracker/current-vs | RELEASE_VIEW | Fetch current VirtualService YAML from K8s |
 | POST   | /vs-edit-tracker/lock | RELEASE_CREATE | Lock a VirtualService for editing |
-| POST   | /vs-edit-tracker/unlock | RELEASE_UPDATE | Unlock a VirtualService |
+| POST   | /vs-edit-tracker/unlock | RELEASE_UPDATE | Unlock a VirtualService (requires tracker ownership) |
+| POST   | /vs-edit-tracker/force-unlock | FORCE_UNLOCK | Force-release a VS edit lock held by another user (operator recovery; superadmin only) |
 | PUT    | /vs-edit-tracker/revert/:id | RELEASE_REVERT | Revert a VS edit (apply old_vs_data back) |
 | GET    | /vs-edit-tracker/:id | RELEASE_VIEW | Get single VS edit tracker |
 | PUT    | /vs-edit-tracker/:id | RELEASE_UPDATE | Update VS edit tracker (newVsData, status, approvedBy, info) |
@@ -772,8 +794,8 @@ All admin endpoints require superadmin status. Non-superadmins receive `"Unautho
 | GET    | /tracker/configmap/:id | RELEASE_VIEW | Get single ConfigMap release tracker |
 | POST   | /tracker/configmap | RELEASE_CREATE | Create a ConfigMap release tracker |
 | PUT    | /tracker/configmap/:id | RELEASE_UPDATE | Update ConfigMap tracker |
-| GET    | /configmap | RELEASE_VIEW | Fetch live ConfigMap from primary K8s cluster |
-| GET    | /configmap/secondary | RELEASE_VIEW | Fetch live ConfigMap from secondary K8s cluster |
+| GET    | /configmap | CONFIG_EDIT | Fetch live ConfigMap from primary K8s cluster |
+| GET    | /configmap/secondary | CONFIG_EDIT | Fetch live ConfigMap from secondary K8s cluster |
 
 ### 10. Product Discovery (4 endpoints)
 
@@ -796,16 +818,16 @@ All admin endpoints require superadmin status. Non-superadmins receive `"Unautho
 
 ### 1. release_tracker
 
-Tracks the lifecycle of every release (including VS edits with `category = 'VSEdit'`). 35 columns.
+Tracks the lifecycle of every release (including VS edits with `category = 'VSEdit'` and ConfigMap releases).
 
 | Column | Type | Nullable | Description |
 |--------|------|----------|-------------|
 | id | text | NOT NULL | Primary key (UUID) |
-| status | text | NOT NULL | Release lifecycle status (Created, InProgress, Completed, Aborted, UserAborted, Discarded, Discarding, Paused, Aborting, Reverting, Reverted, Restarting) |
+| status | text | NOT NULL | Release lifecycle status (see [status enum](#release-lifecycle)) |
 | description | text | YES | Human-readable description |
 | new_version | text | NOT NULL | Target version being deployed |
 | old_version | text | NOT NULL | Previous/current running version |
-| app_group | text | NOT NULL | Product/service group name (e.g., "Beckn") |
+| app_group | text | NOT NULL | Product/service group name (was `product` before migration 0007). API JSON accepts both `appGroup` and `product` for back-compat. |
 | service | text | NOT NULL | Specific service name (e.g., "rider-app") |
 | mode | text | YES | Execution mode: "Auto" or "Manual" |
 | date_created | timestamptz | NOT NULL | Creation timestamp (default: now()) |
@@ -822,9 +844,9 @@ Tracks the lifecycle of every release (including VS edits with `category = 'VSEd
 | change_log | text | YES | Changelog text |
 | release_context | text | YES | JSON-serialized target state (K8sDeploymentState, ConfigState, etc.) |
 | info | text | YES | Additional info or notes |
-| udf1 | text | YES | User-defined field 1 (used for sync flag: "true" = was synced) |
-| udf2 | text | YES | User-defined field 2 |
-| udf3 | text | YES | User-defined field 3 (stores Slack thread_ts for threaded notifications) |
+| sync_enabled | text | YES | Multi-cloud sync flag ("true" = sync to secondary cluster). Renamed from `udf1` in migration 0008. API JSON accepts both names. |
+| env_override_data | text | YES | Env var overrides from the Env Switch editor. Renamed from `udf2` in migration 0008. API JSON accepts both names. |
+| slack_thread_ts | text | YES | Slack `thread_ts` for threaded notifications (CAS write-once). Renamed from `udf3` in migration 0008. API JSON accepts both names. |
 | is_approved | boolean | YES | Whether the release has been approved for execution |
 | is_infra_approved | boolean | YES | Whether infrastructure team approval has been granted |
 | metadata | text | YES | JSON metadata (docker-image, internal-vs-name, etc.) |
@@ -836,8 +858,7 @@ Tracks the lifecycle of every release (including VS edits with `category = 'VSEd
 | release_wf_status | text | YES | Generic workflow stage: Init, Preparing, Deploying, Monitoring, Finalizing, Done, RollingBack |
 | approved_by | text | YES | Email of the person who approved the release |
 
-Indexes: `release_tracker_pkey` (btree on `id`).
-Trigger: `release_tracker_update_timestamp` -- auto-updates `last_updated` on every UPDATE.
+Indexes: `release_tracker_pkey` (btree on `id`); `uq_release_tracker_global_id` — partial UNIQUE on `global_id WHERE global_id IS NOT NULL` (idempotent cross-cluster sync receive); plus the perf indexes listed in [Performance](#performance).
 
 ### 2. release_events
 
@@ -859,7 +880,7 @@ Unified product and service deployment configuration (replaces the former `produ
 | Column | Type | Nullable | Description |
 |--------|------|----------|-------------|
 | id | integer | NOT NULL | Auto-incrementing primary key |
-| app_group | text | NOT NULL | Product/service group name (e.g., "Beckn") |
+| app_group | text | NOT NULL | Product/service group name (was `product` before migration 0007). API JSON accepts both `appGroup` and `product`. |
 | service | text | YES | Service name (NULL = product-level config) |
 | cluster | text | YES | Target K8s cluster |
 | namespace | text | YES | Target K8s namespace |
@@ -1067,6 +1088,11 @@ These configs are read from the `server_config` database table at runtime and ca
 | scaling_with_hpa_enabled | json | [] | Products with HPA scaling enabled (JSON array of product names) |
 | hpa_max_replicas_buffer | int | 1 | Buffer added to HPA max replicas calculation |
 | hpa_min_max_ratio | double | 1.0 | HPA min/max replica ratio |
+| hpa_default_min_pods_config | int | 1 | Default minimum pods used when cloning / creating an HPA |
+| hpa_template | text | (none) | Path to the HPA YAML template used by Branch 3 of the HPA flow (Julia parity) |
+| pod_readiness_max_attempts | int | 30 | Max polling attempts before declaring pod readiness failed |
+| pod_readiness_poll_seconds | int | 10 | Interval between pod readiness polls (seconds) |
+| pod_restart_count_threshold | int | 3 | Restart count above which a pod is considered unhealthy (CrashLoopBackOff guard) |
 
 **Autopilot -- A/B Testing:**
 
@@ -1100,7 +1126,7 @@ These configs are read from the `server_config` database table at runtime and ca
 - Docker image field (from metadata)
 - Rollout strategy stage editor: add/remove stages, configure rollout%, cooloff, pods%
 - Default 5 stages (5%, 25%, 50%, 75%, 100%)
-- Release sync toggle (udf1 = "true" for multi-cloud sync)
+- Release sync toggle (`sync_enabled = "true"` for multi-cloud sync)
 - Secondary cluster rollout strategy with separate stage editor
 - **Env Switch toggle**: Monaco editor for custom environment variables (injected into deployment)
 - **ConfigMap toggle**: Monaco editor for ConfigMap data (applied during release)
@@ -1156,11 +1182,9 @@ Workflow: Lock -> Edit -> Save (CREATED) -> Approve -> Apply (kubectl to K8s) / 
 
 ## Testing
 
-### Unit Tests (151 assertions)
+### Unit Tests
 
-Run with `cabal test` or `sc-test` in the Nix shell.
-
-7 test groups covering:
+Run with `cabal test` or `sc-test` in the Nix shell. Test groups cover:
 
 1. **Status transition tests** -- validates `validateStatusTransition` for all valid and invalid per-service transitions (Created->InProgress, InProgress->Paused, terminal state immutability, etc.)
 2. **Global status transition tests** -- validates `validateGlobalStatusTransition` for cross-service transitions (Completed->Reverting, InProgress->Restarting, Aborting->Restarting, etc.)
@@ -1170,11 +1194,9 @@ Run with `cabal test` or `sc-test` in the Nix shell.
 6. **Release tag generation tests** -- validates tag format (PRODUCT_YYYYMMDD_VERSION_SERVICE_MODE_ENV_PRIORITY), revert tag suffix, and component extraction
 7. **Terminal/aborted status helper tests** -- validates `isTerminalStatus` and `isAbortedStatus` for all status values
 
-### Integration Tests (44 assertions)
+### Integration Tests
 
-Run with `sc-test-api` (requires server to be running, e.g. via `sc-dev`).
-
-17 test sections:
+Run with `sc-test-api` (requires server to be running, e.g. via `sc-dev`). Test sections:
 
 1. **Auth tests** -- login with valid/invalid credentials, missing fields, GET /auth/me with valid/invalid/no token
 2. **Safety validations** -- same version rejection, empty version rejection, injection character rejection, valid data acceptance
@@ -1196,39 +1218,13 @@ Run with `sc-test-api` (requires server to be running, e.g. via `sc-dev`).
 
 ## Adding a New Product
 
-1. **Create the product module** -- add a new directory `backend/src/Products/MyProduct/` containing:
-   - `Types/Permission.hs` -- define a `MyProductPermission` ADT with all permissions and a `permissionDescription` function.
-   - `Config.hs` -- define runtime config entries as `[ConfigEntry]`.
-   - `Routes.hs` -- define the Servant API type and handler implementations.
+The canonical step-by-step is in [`backend/PRODUCTS.md`](backend/PRODUCTS.md). Summary:
 
-2. **Register in `Products/Types.hs`**:
-   - Add to `ProductSlug` ADT: `data ProductSlug = Autopilot | MyProduct`
-   - Add mapping cases in `productSlugToText` and `textToProductSlug`.
-   - Add to `Permission` union: `| MyProductPerm MyProductPermission`
-   - Add cases in `allPermissions`, `defaultPermissions`, `isViewPerm`, `isEditPerm`.
+1. **Create the product folder** under `backend/src/Products/MyProduct/` with `Routes.hs`, `Types/Permission.hs` (`MyProductPermission` ADT + `KnownPermission` instance per constructor), and `Actions/`, `Queries/`, `Types/` as needed. Mark every route in `Routes.hs` with `Protected '<MyProductPermission_Constructor>` so RBAC is enforced at compile time.
+2. **Register in `Products/Types.hs`**: add to `ProductSlug` ADT, extend `productSlugToText` / `textToProductSlug`, extend the `Permission` union, and update `allPermissions` / `isViewPerm` / `isEditPerm`.
+3. **Register configs in `Products/ConfigCatalog.hs`** if your product has runtime `server_config` entries (one-line append to `allConfigEntries`).
+4. **Mount the API in `Core/Server.hs`**: add to `FullAPI` and to `fullServer`.
+5. **Frontend**: create `frontend/src/products/my-product/` with `pages/`, `api.ts`, `hooks.ts`, `types.ts`, and register in `frontend/src/products/registry.ts` — routes and sidebar auto-wire from the registry.
+6. **Database**: seed system roles for the new slug in the RBAC seed (`dev/sql-seed/system-control-seed.sql`); add any product-specific tables.
 
-3. **Register routes in `Products/Registry.hs`**:
-   - Add route-to-permission mappings to `allProductPermissions`.
-
-4. **Wire into server** in `Core/Server.hs`:
-   - Add routes to `FullAPI` type.
-   - Add handler to `fullServer`.
-
-5. **Register configs** in `Shared/Config/Registry.hs`:
-   - Import your product's config module and add to `allConfigEntries`.
-
-6. **Frontend**:
-   - Create `frontend/src/products/my-product/` with `pages/`, `api.ts`, `hooks.ts`, `types.ts`.
-   - Register in `frontend/src/products/registry.ts`. Routes and sidebar auto-wire from the registry.
-
-7. **Database**:
-   - Seed system roles for the new product slug:
-     ```sql
-     INSERT INTO sc_role (product_slug, name, description, is_system_role, permissions) VALUES
-       ('my-product', 'Admin', 'Full access', true, ARRAY['PERM_1', 'PERM_2', ...]),
-       ('my-product', 'Manager', 'Standard access', true, ARRAY['PERM_1', ...]),
-       ('my-product', 'Viewer', 'Read-only', true, ARRAY['PERM_VIEW']);
-     ```
-   - Create any product-specific tables needed by your queries.
-
-Compile with `-Wall` to catch missing pattern matches on the new ADT constructors -- the compiler will flag every location that needs updating.
+Compile with `-Wall` — non-exhaustive matches on the new ADT constructors will be flagged at every site that needs updating, and forgetting `Protected` on a route is a `HasServer` type error.

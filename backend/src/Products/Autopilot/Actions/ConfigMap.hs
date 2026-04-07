@@ -21,11 +21,10 @@ import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
-import Core.Environment (forkFlow)
+import Core.Environment (Flow, forkFlow, getConfig, logInfo)
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Logging (logErrorG, logInfoG)
 import Core.Types.Time (Seconds (..))
-import Core.Utils.FlowMonad (Flow, getConfig, logInfo)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -186,13 +185,13 @@ createConfigMapH _ap body = do
                         syncResult <- liftIO $ httpRaw postReq
                         case syncResult of
                             Right HttpResponse{respStatus = s, respBody = b} | s < 400 -> do
-                                liftIO $ logInfoG $ "[CONFIGMAP-SYNC] success (" <> T.pack (show s) <> ")"
+                                logInfoG $ "[CONFIGMAP-SYNC] success (" <> T.pack (show s) <> ")"
                                 insertReleaseEvent rid "BUSINESS" "CONFIGMAP_SYNC_RESPONSE" (toJSON (T.pack (LBS.unpack b)))
                             Right HttpResponse{respStatus = s, respBody = b} -> do
-                                liftIO $ logErrorG $ "[CONFIGMAP-SYNC] failed (HTTP " <> T.pack (show s) <> ")"
+                                logErrorG $ "[CONFIGMAP-SYNC] failed (HTTP " <> T.pack (show s) <> ")"
                                 insertReleaseEvent rid "BUSINESS" "CONFIGMAP_SYNC_FAILED" (toJSON (T.pack (LBS.unpack b)))
                             Left e -> do
-                                liftIO $ logErrorG $ "[CONFIGMAP-SYNC] exception: " <> T.pack (show e)
+                                logErrorG $ "[CONFIGMAP-SYNC] exception: " <> T.pack (show e)
                                 insertReleaseEvent rid "BUSINESS" "CONFIGMAP_SYNC_FAILED" (toJSON (T.pack (show e)))
             pure $ APIResponse "SUCCESS" ("ConfigMap tracker created: " <> rid)
 

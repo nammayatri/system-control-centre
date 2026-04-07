@@ -17,6 +17,7 @@ they return Continue/PromOK so releases are never blocked by monitoring infrastr
 module Products.Autopilot.DecisionEngine (
     -- * Decision Functions
     checkPromQueries,
+    initiateABDecisionForRelease,
     getABDecision,
     getHSDecision,
     getCombinedDecision,
@@ -31,18 +32,26 @@ import Control.Exception (SomeException, try)
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
 import Core.Environment (MonadFlow)
-import Core.Http.Client (HttpReq (..), HttpResponse (..), defaultReq, httpRaw)
+import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Logging (logDebugG, logErrorG, logWarningG)
 import Core.Types.Time (Seconds (..))
-import Data.Aeson (Value (..))
+import Data.Aeson (Value (..), object, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
 import Data.Foldable (toList)
+import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Products.Autopilot.RuntimeConfig (
+    getABHSAllowedTimeDiffMins,
+    getABHSApiKey,
+    getDecisionEngineFailClosed,
+    isABHSDecisionEnabledForProductService,
+    isPromQueryCheckEnabled,
+ )
 import Products.Autopilot.Types.Release (Decision (..), ReleaseTracker (..))
 import Shared.Config.Runtime (getConfigBoolForProduct)
 import Prelude
@@ -88,7 +97,8 @@ Returns PromWarn if any metric exceeds warn_threshold (but not abort).
 -}
 checkPromQueries :: (MonadFlow m) => Config -> ReleaseTracker -> Maybe Text -> m PromCheckResult
 checkPromQueries cfg tracker mDecisionConfig = do
-    enabled <- getConfigBoolForProduct "prom_checks_enabled" (Just (appGroup tracker)) False
+    -- Master gate: Julia's @prom_query_check_enabled@ (with @prom_checks_enabled@ fallback)
+    enabled <- isPromQueryCheckEnabled
     if not enabled
         then pure PromOK
         else case mDecisionConfig of
@@ -301,57 +311,147 @@ parsePromResponse raw =
 -- AB Decision Engine
 -- ============================================================================
 
-{- | Get decision from AB testing engine.
+{- | Initiate the AB decision pod ONCE per release (Julia parity).
 
-Calls: GET {AB_ENGINE_URL}/decision/{trackerId}
-Returns Continue if:
-- ab_decision_enabled is false (gate)
-- No AB_ENGINE_URL configured
-- HTTP call fails (fail open)
+Mirrors Julia's @intiateDecisionEngine@ in @global_changelog.jl@: a single
+POST to @{AB_ENGINE_URL}initiate/ab@ at release start spawns the ephemeral
+decision pod. The actual decision verdict is read later via 'getHSDecision'
+polling the same @run_id@ during the rollout loop.
 
-Otherwise returns the decision from the response.
+This function should be called from the workflow's preparing phase (e.g.
+'prepareK8sResources'), not from the rollout step loop. Calling it once
+matches Julia's contract; per-step calls (the previous behavior) would
+re-spawn the pod on every iteration.
+
+Gates: master @ab_decision_enabled@ AND per-service
+@ab_hs_decision_enabled_products@ JSON. If either is false, returns
+Continue without contacting the engine.
+
+On HTTP error returns Abort (fail-closed) if @decision_engine_fail_closed@
+is true (default — Julia parity), Continue otherwise.
+
+NOTE: Julia's full flow includes a webhook callback path on the AB engine
+side; we implement only the synchronous initiate path. The decision result
+is read via 'getHSDecision', which polls the same run_id. See CONTEXT.md
+"AB engine: synchronous polling only" note.
 -}
-getABDecision :: (MonadFlow m) => Config -> ReleaseTracker -> m DecisionResult
-getABDecision cfg tracker = do
-    enabled <- getConfigBoolForProduct "ab_decision_enabled" (Just (appGroup tracker)) False
-    if not enabled
+initiateABDecisionForRelease :: (MonadFlow m) => Config -> ReleaseTracker -> m DecisionResult
+initiateABDecisionForRelease cfg tracker = do
+    masterEnabled <- getConfigBoolForProduct "ab_decision_enabled" (Just (appGroup tracker)) False
+    perServiceEnabled <- isABHSDecisionEnabledForProductService (appGroup tracker) (service tracker)
+    if not (masterEnabled && perServiceEnabled)
         then pure (DecisionResult Continue Nothing "AB_ENGINE")
         else do
             let abUrl = abEngineUrl cfg
             if null abUrl
                 then pure (DecisionResult Continue Nothing "AB_ENGINE")
-                else liftIO $ callABEngine abUrl (releaseId tracker)
+                else do
+                    apiKey <- getABHSApiKey
+                    failClosed <- getDecisionEngineFailClosed
+                    let body = mkInitiateAbBody tracker
+                    liftIO $ initiateABDecision abUrl apiKey (appGroup tracker) body failClosed
 
-{- | Internal: Call AB Engine HTTP API.
+{- | Per-rollout-step AB decision read.
 
-GET {abUrl}/decision/{trackerId}
-Expects JSON response: {"decision": "Continue|Wait|Abort", "reason": "..."}
+In Julia's flow, the AB engine never returns a verdict directly during the
+rollout — the decision pod runs in the background and emits its verdict via
+the HS GET poll using the shared @run_id@. So this function is structurally
+a no-op: it always returns Continue. The actual decision-making happens in
+'getHSDecision'.
+
+Kept as a separate function (rather than inlining) for symmetry with Julia's
+two-call shape (@getABDecision@ + @getHSDecision@) and to make the workflow
+call site read identically to Julia's @service.jl@.
 -}
-callABEngine :: String -> Text -> IO DecisionResult
-callABEngine abUrl trackerId = do
-    let url = abUrl <> "/decision/" <> T.unpack trackerId
-    result <- httpGetJson url
+getABDecision :: (MonadFlow m) => Config -> ReleaseTracker -> m DecisionResult
+getABDecision _cfg _tracker = pure (DecisionResult Continue Nothing "AB_ENGINE")
+
+{- | Internal: POST @{abUrl}initiate/ab@ to spawn the decision pod.
+Mirrors @intiateDecisionEngine@ in Julia's @global_changelog.jl@.
+On success returns @DecisionResult Continue@ — the actual decision
+comes back via the HS poll (which reads the same @run_id@).
+-}
+initiateABDecision :: String -> Text -> Text -> Value -> Bool -> IO DecisionResult
+initiateABDecision abUrl apiKey productName body failClosed = do
+    let url = ensureSlash (T.pack abUrl) <> "initiate/ab"
+        req =
+            (defaultReq url)
+                { reqMethod = POST
+                , reqHeaders =
+                    [ ("Content-Type", "application/json")
+                    , ("product", productName)
+                    , ("x-api-key", apiKey)
+                    ]
+                , reqBody = Just (A.encode body)
+                , reqTimeout = Seconds 10
+                , reqRetries = 1
+                , reqLogTag = "ab-init"
+                }
+    result <- httpRaw req
     case result of
+        Right HttpResponse{respStatus = s}
+            | s < 400 ->
+                pure (DecisionResult Continue (Just "AB initiated") "AB_ENGINE")
+        Right HttpResponse{respStatus = s} -> do
+            logErrorG $ "[DECISION] AB initiate failed (HTTP " <> T.pack (show s) <> ")"
+            pure (failOrContinue failClosed "AB_ENGINE" ("AB initiate HTTP " <> T.pack (show s)))
         Left e -> do
-            logErrorG $ "[DECISION] AB Engine call failed: " <> T.pack (show e)
-            pure (DecisionResult Continue (Just "AB Engine unreachable") "AB_ENGINE")
-        Right val -> parseDecisionResponse val "AB_ENGINE"
+            logErrorG $ "[DECISION] AB initiate failed: " <> T.pack (show e)
+            pure (failOrContinue failClosed "AB_ENGINE" "AB Engine unreachable")
+
+-- | Build the JSON body Julia POSTs to @initiate/ab@.
+mkInitiateAbBody :: ReleaseTracker -> Value
+mkInitiateAbBody tracker =
+    object
+        [ "product" .= appGroup tracker
+        , "service" .= service tracker
+        , "environment" .= extractCluster tracker
+        , "interval" .= (1 :: Int)
+        , "placeholders"
+            .= object
+                [ "version_a" .= oldVersion tracker
+                , "version_b" .= newVersion tracker
+                ]
+        , "run_id" .= releaseId tracker
+        ]
+
+-- | Pull "cluster" out of the tracker's releaseContext JSON blob.
+extractCluster :: ReleaseTracker -> Text
+extractCluster tracker = case releaseContext tracker of
+    Just (Object o) -> case KM.lookup (K.fromText "cluster") o of
+        Just (String c) -> c
+        _ -> ""
+    _ -> ""
 
 -- ============================================================================
 -- Health Score (HS) Decision Engine
 -- ============================================================================
 
-{- | Get decision from Health Score engine.
+{- | Get decision from Health Score / AB engine.
 
-Calls: GET {AB_HS_URL}/decision/{trackerId} (pre-monitoring)
- or: GET {AB_HS_URL}/decision/post/{trackerId} (post-monitoring)
+Wire format (Julia parity, @global_changelog.jl:191-216@):
 
-Returns Continue if:
-- ab_hs_enabled is false (gate)
-- No AB_HS_URL configured
-- HTTP call fails (fail open)
+@
+  GET  {AB_HS_URL}get/ab/decision/{run_id}
+  Headers: Content-Type: application/json
+           x-api-key: <ab_hs_api_key>
+  Body:    {"allowedTimeDiffInMins": <ab_hs_allowed_time_diff_mins>,
+            "ignoreMetricsForDecision": []}
+@
 
-The isPostMonitoring flag selects the endpoint path.
+Note: Julia's HTTP client allows a body on GET. We do the same via
+'Core.Http.Client'. Response is integer-encoded:
+
+  * @{"decision": 0}@ → Continue
+  * @{"decision": 1}@ → Abort
+  * @{"decision": 2}@ → Wait
+
+For post-monitoring, the run_id is suffixed with @"-post"@ (Julia
+@intiateDecisionEnginePostMonitoring@ uses @tracker.id * "-post"@).
+
+Returns Continue if @ab_hs_enabled@ is false or @AB_HS_URL@ unset.
+On HTTP error: Abort if @decision_engine_fail_closed@ is true (default,
+Julia parity), Continue otherwise.
 -}
 getHSDecision :: (MonadFlow m) => Config -> ReleaseTracker -> Bool -> m DecisionResult
 getHSDecision cfg tracker isPostMonitoring = do
@@ -362,23 +462,65 @@ getHSDecision cfg tracker isPostMonitoring = do
             let hsUrl = abHsUrl cfg
             if null hsUrl
                 then pure (DecisionResult Continue Nothing "HEALTH_SCORE")
-                else liftIO $ callHSEngine hsUrl (releaseId tracker) isPostMonitoring
+                else do
+                    apiKey <- getABHSApiKey
+                    diffMins <- getABHSAllowedTimeDiffMins
+                    failClosed <- getDecisionEngineFailClosed
+                    let runId =
+                            if isPostMonitoring
+                                then releaseId tracker <> "-post"
+                                else releaseId tracker
+                    liftIO $ pollHSDecision hsUrl apiKey diffMins runId failClosed
 
-{- | Internal: Call HS Engine HTTP API.
-
-GET {hsUrl}/decision/{trackerId} or GET {hsUrl}/decision/post/{trackerId}
-Expects JSON response: {"decision": "Continue|Wait|Abort", "reason": "..."}
+{- | Internal: GET @{hsUrl}get/ab/decision/{runId}@ with the Julia-parity
+JSON body and headers. Parses int-encoded decision.
 -}
-callHSEngine :: String -> Text -> Bool -> IO DecisionResult
-callHSEngine hsUrl trackerId isPostMonitoring = do
-    let endpoint = if isPostMonitoring then "/decision/post/" else "/decision/"
-        url = hsUrl <> endpoint <> T.unpack trackerId
-    result <- httpGetJson url
+pollHSDecision :: String -> Text -> Int -> Text -> Bool -> IO DecisionResult
+pollHSDecision hsUrl apiKey diffMins runId failClosed = do
+    let url = ensureSlash (T.pack hsUrl) <> "get/ab/decision/" <> runId
+        body =
+            object
+                [ "allowedTimeDiffInMins" .= diffMins
+                , "ignoreMetricsForDecision" .= ([] :: [Value])
+                ]
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders =
+                    [ ("Content-Type", "application/json")
+                    , ("x-api-key", apiKey)
+                    ]
+                , reqBody = Just (A.encode body)
+                , reqTimeout = Seconds 10
+                , reqRetries = 1
+                , reqLogTag = "hs-decision"
+                }
+    result <- httpRaw req
     case result of
+        Right HttpResponse{respStatus = s, respBody = b} | s < 400 ->
+            case A.decodeStrict' (LBS.toStrict b) :: Maybe Value of
+                Just v -> parseDecisionResponse v "HEALTH_SCORE"
+                Nothing -> do
+                    logWarningG "[DECISION] HS response: JSON decode error"
+                    pure (failOrContinue failClosed "HEALTH_SCORE" "HS JSON decode error")
+        Right HttpResponse{respStatus = s} -> do
+            logErrorG $ "[DECISION] HS Engine call failed (HTTP " <> T.pack (show s) <> ")"
+            pure (failOrContinue failClosed "HEALTH_SCORE" ("HS Engine HTTP " <> T.pack (show s)))
         Left e -> do
             logErrorG $ "[DECISION] HS Engine call failed: " <> T.pack (show e)
-            pure (DecisionResult Continue (Just "HS Engine unreachable") "HEALTH_SCORE")
-        Right val -> parseDecisionResponse val "HEALTH_SCORE"
+            pure (failOrContinue failClosed "HEALTH_SCORE" "HS Engine unreachable")
+
+-- | Choose Abort (fail-closed, Julia parity) or Continue (lenient) on error.
+failOrContinue :: Bool -> Text -> Text -> DecisionResult
+failOrContinue True src reason = DecisionResult Abort (Just reason) src
+failOrContinue False src reason = DecisionResult Continue (Just reason) src
+
+-- | Ensure a URL string ends with @/@ so we can append @initiate/ab@ etc.
+ensureSlash :: Text -> Text
+ensureSlash u
+    | T.null u = u
+    | T.last u == '/' = u
+    | otherwise = u <> "/"
 
 -- ============================================================================
 -- Combined Decision
@@ -399,44 +541,40 @@ getCombinedDecision ab hs = case (drDecision ab, drDecision hs) of
 
 {- | Parse a decision response JSON.
 
-Expected format: {"decision": "Continue|Wait|Abort", "reason": "optional reason"}
-Falls back to Continue on parse failure (fail open).
+Primary path (Julia parity, @decisionengine.jl:87-95@): the @"decision"@
+field is an integer:
+
+  * @0@ → Continue
+  * @1@ → Abort
+  * @2@ → Wait
+  * any other int → Continue (lenient)
+
+Fallback path (forward-compat with any string-emitting endpoint):
+recognises @"Abort"@/@"Wait"@/@"Continue"@ case-insensitively.
+
+If the field is missing entirely we return Continue (fail-open default
+for parse-only errors; HTTP-level errors honour @decision_engine_fail_closed@).
 -}
 parseDecisionResponse :: Value -> Text -> IO DecisionResult
 parseDecisionResponse (Object obj) source = do
     let decision = case KM.lookup (K.fromText "decision") obj of
-            Just (String "Abort") -> Abort
-            Just (String "ABORT") -> Abort
-            Just (String "abort") -> Abort
-            Just (String "Wait") -> Wait
-            Just (String "WAIT") -> Wait
-            Just (String "wait") -> Wait
+            Just (Number n) -> case toBoundedInteger n :: Maybe Int of
+                Just 0 -> Continue
+                Just 1 -> Abort
+                Just 2 -> Wait
+                _ -> Continue
+            Just (String s) -> case T.toLower (T.strip s) of
+                "abort" -> Abort
+                "wait" -> Wait
+                _ -> Continue
             _ -> Continue
         reason = case KM.lookup (K.fromText "reason") obj of
             Just (String r) | not (T.null r) -> Just r
+            Just (Array rs) ->
+                let xs = [r | String r <- toList rs, not (T.null r)]
+                 in if null xs then Nothing else Just (T.intercalate "; " xs)
             _ -> Nothing
     pure (DecisionResult decision reason source)
 parseDecisionResponse _ source = do
     logWarningG $ "[DECISION] Could not parse decision response for " <> source
     pure (DecisionResult Continue (Just "Invalid response format") source)
-
-{- | HTTP GET returning parsed JSON Value via the pooled client.
-Returns Left on any failure, Right Value on success.
--}
-httpGetJson :: String -> IO (Either String Value)
-httpGetJson url = do
-    let req =
-            (defaultReq (T.pack url))
-                { reqHeaders = [("Accept", "application/json")]
-                , reqTimeout = Seconds 10
-                , reqRetries = 0
-                , reqLogTag = "decision"
-                }
-    result <- httpRaw req
-    pure $ case result of
-        Right HttpResponse{respStatus = s, respBody = b} | s < 400 ->
-            case A.decodeStrict' (LBS.toStrict b) :: Maybe Value of
-                Just v -> Right v
-                Nothing -> Left "JSON parse error"
-        Right HttpResponse{respStatus = s} -> Left ("HTTP " <> show s)
-        Left e -> Left (show e)

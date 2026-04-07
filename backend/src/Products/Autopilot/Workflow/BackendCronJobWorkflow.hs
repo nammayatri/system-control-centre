@@ -21,7 +21,7 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
-import Core.Utils.FlowMonad (getConfig, logInfo)
+import Core.Environment (getConfig, logInfo)
 import qualified Data.Text as T
 import Products.Autopilot.K8s.Execute (K8sError (..), runCmd)
 import Products.Autopilot.Notifications (

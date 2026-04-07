@@ -26,7 +26,7 @@ where
 
 import Control.Applicative ((<|>))
 import Core.Auth.Protected (AuthedPerson)
-import Core.Utils.FlowMonad (Flow)
+import Core.Environment (Flow)
 import Data.Aeson (Value (..), toJSON)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
