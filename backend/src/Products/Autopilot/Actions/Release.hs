@@ -202,7 +202,21 @@ listReleasesH _ap mFrom mTo = do
             <|> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q%Z" (T.unpack t)
 
 createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
-createReleaseH _ap mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
+createReleaseH _ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
+    case globalId of
+        Just gid | not (T.null gid) -> do
+            existing <- findReleaseTrackerByGlobalId gid
+            case existing of
+                Just (existingTracker, _) -> do
+                    logInfo $ "Idempotent receive: tracker already exists for global_id=" <> gid
+                    pure $ APIResponse "SUCCESS" ("Tracker already exists: " <> NT.releaseId existingTracker)
+                Nothing -> normalCreatePath
+        _ -> normalCreatePath
+  where
+    normalCreatePath = createReleaseHBody mXForwardedEmail mXPomeriumJwt req
+
+createReleaseHBody :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
+createReleaseHBody mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
     cfg <- getConfig
     db <- getDBEnv
     p <- findProductByName appGroup
@@ -312,9 +326,10 @@ createReleaseH _ap mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
                                                             _ -> AUTO
                                                     approveAll <- isApproveAllReleases
                                                     now <- liftIO getCurrentTime
-                                                    let initialApproval = case isApproved of
+                                                    let isFromSync = fromMaybe False isSystemTriggered
+                                                        initialApproval = case isApproved of
                                                             Just True -> True
-                                                            _ -> approveAll && fromMaybe False isSystemTriggered
+                                                            _ -> approveAll && isFromSync
                                                         -- Auto-generate release tag if not provided
                                                         autoTag = case releaseTag of
                                                             Just t | not (T.null t) -> Just t
@@ -353,9 +368,12 @@ createReleaseH _ap mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
                                                                 , metadata = metadata
                                                                 , priority = fromMaybe 0 priority
                                                                 , globalId = globalId
-                                                                , syncEnabled = case isReleaseSync of
-                                                                    Just True -> Just "true"
-                                                                    _ -> syncEnabled
+                                                                , syncEnabled =
+                                                                    if isFromSync
+                                                                        then Nothing
+                                                                        else case isReleaseSync of
+                                                                            Just True -> Just "true"
+                                                                            _ -> syncEnabled
                                                                 , envOverrideData = envOverrideData
                                                                 , slackThreadTs = slackThreadTs
                                                                 , -- Seed from 'derivedContext' below so the tracker's public view

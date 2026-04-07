@@ -69,6 +69,7 @@ import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Products.Autopilot.Queries.ProductService (findProductByName, getSlackChannelDirect)
 import qualified Products.Autopilot.Queries.ReleaseTracker as RTQ
 import Products.Autopilot.RuntimeConfig (isSlackEnabled)
+import Products.Autopilot.Sync (triggerSyncIfEnabled)
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
 import System.Environment (lookupEnv)
 import Prelude
@@ -238,15 +239,17 @@ notifyReleaseProgress tracker percentage = whenSlackEnabled $
         pure ()
 
 notifyReleaseCompleted :: (MonadFlow m) => ReleaseTracker -> m ()
-notifyReleaseCompleted tracker = whenSlackEnabled $
-    withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        threadTs <- getThreadTs (releaseId tracker)
-        let blocks =
-                [ sectionBlock "*COMPLETED*  100%"
-                , contextBlock ["All traffic on `" <> newVersion tracker <> "`"]
-                ]
-        _ <- liftIO $ sendSlackRich channel "COMPLETED" colorCompleted blocks threadTs
-        pure ()
+notifyReleaseCompleted tracker = do
+    whenSlackEnabled $
+        withChannel (appGroup tracker) (service tracker) $ \channel -> do
+            threadTs <- getThreadTs (releaseId tracker)
+            let blocks =
+                    [ sectionBlock "*COMPLETED*  100%"
+                    , contextBlock ["All traffic on `" <> newVersion tracker <> "`"]
+                    ]
+            _ <- liftIO $ sendSlackRich channel "COMPLETED" colorCompleted blocks threadTs
+            pure ()
+    triggerSyncIfEnabled tracker Nothing
 
 notifyReleaseAborted :: (MonadFlow m) => ReleaseTracker -> m ()
 notifyReleaseAborted tracker = whenSlackEnabled $

@@ -30,6 +30,7 @@ import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.Notifications (notifyConfigMapCompleted)
 import Products.Autopilot.Queries.ProductService (findProductByName, getProductNamespace)
 import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker, insertReleaseEvent, insertReleaseTracker)
+import Products.Autopilot.Sync (triggerRevertSyncIfEnabled)
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
 import Products.Autopilot.Types.Target (BackendConfigWFStatus (..), ConfigDeploymentState (..), TargetState (..), emptyConfigState)
 import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
@@ -225,6 +226,7 @@ notifyComplete = do
                         Just (origRt, origTs) | status origRt == REVERTING -> do
                             let reverted = origRt{status = REVERTED}
                             insertReleaseTracker reverted origTs
+                            triggerRevertSyncIfEnabled reverted origTs
                             logInfoS $ "Marked original " <> origId <> " as REVERTED"
                         _ -> pure ()
                 Nothing -> pure ()

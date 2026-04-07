@@ -14,9 +14,11 @@ module Products.Autopilot.Sync (
 )
 where
 
+import Control.Concurrent (forkIO)
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Reader (ask)
 import Core.Config (Config (..))
-import Core.Environment (Flow, MonadFlow, forkFlow, getConfig)
+import Core.Environment (Flow, MonadFlow, forkFlow, getConfig, runFlow)
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value (..), eitherDecode, encode, object, toJSON, (.=))
@@ -129,7 +131,7 @@ sendSyncRequestNoReqLog tracker labelPrefix req = do
 -- Public entry points
 -- ──────────────────────────────────────────────────────────────────
 
-triggerSyncIfEnabled :: ReleaseTracker -> Maybe TargetState -> Flow ()
+triggerSyncIfEnabled :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m ()
 triggerSyncIfEnabled tracker mts = do
     cfg <- getConfig
     let syncUrl = syncClusterUrl cfg
@@ -151,7 +153,8 @@ triggerSyncIfEnabled tracker mts = do
                 then do
                     let target = maybe "" id mSyncCluster
                     insertReleaseEvent (releaseId tracker) "BUSINESS" "SYNC_TRIGGERED" (String ("Syncing to cluster: " <> target))
-                    _ <- forkFlow $ doCreate cfg tracker mts target
+                    st <- ask
+                    _ <- liftIO $ forkIO $ runFlow st (doCreate cfg tracker mts target)
                     pure ()
                 else
                     insertReleaseEvent
@@ -188,6 +191,7 @@ doCreate cfg tracker mts targetCluster = do
                 , "revert" .= revertValue tracker
                 , "global_id" .= globalId tracker
                 , "is_infra_approved" .= (1 :: Int)
+                , "is_approved" .= True
                 , "udf3" .= slackThreadTs tracker
                 , "isReleaseSync" .= False
                 , "isSystemTriggered" .= True
@@ -213,7 +217,7 @@ doCreate cfg tracker mts targetCluster = do
                 ]
     sendSyncRequest tracker "SYNC" req reqLog
 
-triggerRevertSyncIfEnabled :: ReleaseTracker -> Maybe TargetState -> Flow ()
+triggerRevertSyncIfEnabled :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m ()
 triggerRevertSyncIfEnabled tracker mts = do
     cfg <- getConfig
     let syncUrl = syncClusterUrl cfg
@@ -238,7 +242,8 @@ triggerRevertSyncIfEnabled tracker mts = do
                 then do
                     let gid = maybe "" id mGlobalId
                     insertReleaseEvent (releaseId tracker) "BUSINESS" "REVERT_SYNC_TRIGGERED" (String ("Triggering revert sync for global_id=" <> gid))
-                    _ <- forkFlow $ doRevert cfg tracker mts gid
+                    st <- ask
+                    _ <- liftIO $ forkIO $ runFlow st (doRevert cfg tracker mts gid)
                     pure ()
                 else
                     insertReleaseEvent
