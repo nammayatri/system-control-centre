@@ -166,7 +166,7 @@ instance FromJSON K8sCreateReleaseReq where
         isApproved <- parseBoolish o "is_approved"
         isInfraApproved <- parseBoolish o "is_infra_approved"
         priority <- o .:? "priority"
-        globalId <- o .:? "global_id"
+        globalId <- (o .:? "globalId" >>= maybe (o .:? "global_id") (pure . Just))
         newService <- o .:? "new_service"
         cronjobSuspend <- o .:? "cronjob_suspend"
         changeLog <- o .:? "change_log"

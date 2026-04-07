@@ -4,6 +4,7 @@ module Products.Autopilot.Queries.ReleaseTracker (
     -- * Insert / Update
     insertReleaseTracker,
     conditionalUpdateTracker,
+    conditionalUpdateApprove,
     conditionalUpdateTrackerRow,
     insertReleaseTrackerRow,
 
@@ -14,6 +15,7 @@ module Products.Autopilot.Queries.ReleaseTracker (
     listReleaseTrackers,
     listReleaseTrackersByDateRange,
     findRunnableReleaseTrackers,
+    findActiveTrackersForService,
     findInProgressReleaseTrackers,
     findCleanupScheduledTrackers,
     findAbortingReleaseTrackers,
@@ -171,6 +173,30 @@ conditionalUpdateTracker rt mts expectedStatus = withDb $ \db -> do
                     runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
                     pure True
 
+{- | Atomic approve. Like conditionalUpdateTracker but the precondition is
+    is_approved=false AND status='CREATED'. Two concurrent approve handlers
+    both pass the in-memory pre-check; only the one that wins this DELETE
+    gets to insert the updated row. The loser sees rowsDeleted=0 and returns
+    False so the handler can throw a friendly error.
+-}
+conditionalUpdateApprove :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m Bool
+conditionalUpdateApprove rt mts = withDb $ \db -> do
+    now <- getCurrentTime
+    let created = fromMaybe now (dateCreated rt)
+        row = toRow created now rt mts
+    withConn db $ \conn ->
+        withTransaction conn $ do
+            rowsDeleted <-
+                execute
+                    conn
+                    "DELETE FROM release_tracker WHERE id = ? AND status = 'CREATED' AND is_approved = false"
+                    (Only (releaseId rt))
+            if rowsDeleted == 0
+                then pure False
+                else do
+                    runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
+                    pure True
+
 {- | Like 'conditionalUpdateTracker' but accepts a raw 'ReleaseTrackerRow'.
 Returns True if the update succeeded, False if the status was changed by another thread.
 -}
@@ -270,6 +296,36 @@ findRunnableReleaseTrackers now = withDb $ \db -> do
                         pure rt
     pure (map fromRow rows)
 
+{- | Find any non-terminal tracker for the given (app_group, service). Used by
+the same-service concurrency guard at create time. Catches CREATED (whether
+approved or not), INPROGRESS, PAUSED, ABORTING, REVERTING, RESTARTING — i.e.
+anything that's still alive in the workflow state machine. Excludes terminal
+states (COMPLETED, ABORTED, USER_ABORTED, DISCARDED, REVERTED, RECORDED,
+GcltAborted) and VS-edit lock rows (LOCKED, UNLOCKED).
+-}
+findActiveTrackersForService :: (MonadFlow m) => Text -> Text -> m [TrackerWithTarget]
+findActiveTrackersForService ag svc = withDb $ \db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $
+                    orderBy_ (desc_ . rtCreatedAt) $ do
+                        rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (rtAppGroup rt ==. val_ ag)
+                        guard_ (rtService rt ==. val_ svc)
+                        guard_
+                            ( rtStatus rt
+                                `in_` [ val_ "CREATED"
+                                      , val_ "INPROGRESS"
+                                      , val_ "PAUSED"
+                                      , val_ "ABORTING"
+                                      , val_ "REVERTING"
+                                      , val_ "RESTARTING"
+                                      ]
+                            )
+                        pure rt
+    pure (map fromRow rows)
+
 findInProgressReleaseTrackers :: (MonadFlow m) => m [TrackerWithTarget]
 findInProgressReleaseTrackers = withDb $ \db -> do
     rows <-
@@ -278,7 +334,13 @@ findInProgressReleaseTrackers = withDb $ \db -> do
                 select $
                     orderBy_ (asc_ . rtCreatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
-                        guard_ (rtStatus rt `in_` [val_ "INPROGRESS", val_ "PAUSED", val_ "REVERTING"])
+                        -- Bug fix: PAUSED is an intentional user state. Restarting the
+                        -- backend should NOT silently ABORT user-paused releases. Only
+                        -- INPROGRESS/REVERTING releases need recovery (their workflow
+                        -- thread was lost on restart). PAUSED releases hold no in-flight
+                        -- kubectl state — the runner will pick them back up via the
+                        -- normal poll once they transition back to INPROGRESS.
+                        guard_ (rtStatus rt `in_` [val_ "INPROGRESS", val_ "REVERTING"])
                         pure rt
     pure (map fromRow rows)
 

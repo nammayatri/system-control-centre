@@ -39,6 +39,9 @@ import qualified Data.Yaml as Yaml
 import Products.Autopilot.K8s.Execute (K8sError (..), runCmd, shellQuote)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import Products.Autopilot.Notifications
+import Core.DB.Connection (withConn)
+import Core.Environment (getDBEnv)
+import qualified Database.PostgreSQL.Simple as PG
 import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductNamespace, getProductVsName, releaseVsLockIfOwner, tryAcquireVsLock, updateVsLockedBy)
 import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTrackerRow, insertReleaseEvent, insertReleaseTrackerRow, listReleaseEvents)
 import Products.Autopilot.Queries.VsEditTracker
@@ -58,6 +61,25 @@ vsStatusCreated, vsStatusApplied, vsStatusDiscarded :: Text
 vsStatusCreated = "CREATED"
 vsStatusApplied = "APPLIED"
 vsStatusDiscarded = "DISCARDED"
+
+{- | Flip every VS-edit tracker row that is currently LOCKED for the given
+app_group to UNLOCKED. Used by the force-unlock paths and the expired-lock
+sweep so the tracker bookkeeping stays in sync with the deployment_config
+source-of-truth lock state. Without this, every released lock leaves stale
+LOCKED tracker rows behind.
+-}
+unlockOrphanLockedTrackersForAppGroup :: Text -> Flow ()
+unlockOrphanLockedTrackersForAppGroup ag = do
+    db <- getDBEnv
+    liftIO $ withConn db $ \conn -> do
+        _ <-
+            PG.execute
+                conn
+                "UPDATE release_tracker \
+                \SET status = 'UNLOCKED', last_updated = NOW(), end_time = NOW() \
+                \WHERE category = 'VSEdit' AND status = 'LOCKED' AND app_group = ?"
+                (PG.Only ag)
+        pure ()
 
 {- | Convert a release_tracker row (category=VSEdit) to VsEditTrackerResponse
 VS-specific data: old_vs_data and new_vs_data are now stored as SNAPSHOT events.
@@ -151,16 +173,10 @@ createVsEditTrackerH _ap CreateVsEditTrackerReq{..} = do
     -- Atomically acquire VS lock. The UPDATE inside tryAcquireVsLock treats a
     -- lock whose vs_lock_timestamp is stale (> lock_expiry_delay_minutes old)
     -- as released, so a crashed-mid-edit lock no longer blocks all new edits.
+    -- Conflict throws HTTP 409 (was previously HTTP 200 with body-level error).
     acquired <- tryAcquireVsLock appGroup createdBy
     if not acquired
-        then
-            pure $
-                toJSON $
-                    VsLockErrorResponse
-                        { vleError = "VS is already locked"
-                        , vleLockedBy = Nothing
-                        , vleLockExpiry = Nothing
-                        }
+        then throwM (Conflict ("VS is already locked for app group " <> appGroup))
         else do
             let row = mkVsEditRow tid appGroup service env vsName (Just createdBy) vsStatusCreated now
             -- RACE WINDOW (task #34, M3): insertReleaseTrackerRow and the
@@ -344,7 +360,7 @@ lockVsEditTrackerH _ap VsLockReq{..} = do
     -- Atomically acquire VS lock (single UPDATE WHERE vs_locked_by IS NULL)
     acquired <- tryAcquireVsLock appGroup resolvedLockedBy
     if not acquired
-        then pure $ APIResponse "ERROR" "VS is already locked"
+        then throwM (Conflict ("VS is already locked for app group " <> appGroup))
         else do
             tid <- liftIO (UUID.toText <$> UUID.nextRandom)
             let durationSecs = fromIntegral (fromMaybe 15 lockDurationMinutes) * 60
@@ -455,6 +471,7 @@ forceUnlockVsEditTrackerH _ap VsUnlockReq{..} = do
                     case appGroup of
                         Just p | not (T.null p) -> do
                             updateVsLockedBy p Nothing
+                            unlockOrphanLockedTrackersForAppGroup p
                             notifyVsEditUnlocked "" p ""
                             pure $ APIResponse "SUCCESS" ("VS force-unlocked for app_group=" <> p <> " (tracker missing)")
                         _ -> pure $ APIResponse "ERROR" "Tracker not found and no appGroup provided"
@@ -486,15 +503,79 @@ forceUnlockVsEditTrackerH _ap VsUnlockReq{..} = do
                         Nothing -> pure $ APIResponse "ERROR" ("No active lock found for app_group=" <> p)
                         Just _existing -> do
                             updateVsLockedBy p Nothing
+                            -- Bug fix: also flip any orphan LOCKED tracker rows for this
+                            -- app group to UNLOCKED. The cluster lock is the source of
+                            -- truth; the tracker row is bookkeeping. Without this the
+                            -- LOCKED rows linger forever after every force-unlock.
+                            unlockOrphanLockedTrackersForAppGroup p
                             notifyVsEditUnlocked "" p ""
                             pure $ APIResponse "SUCCESS" ("VS force-unlocked for app_group=" <> p)
 
+{- | Revert a previously-applied VS edit by re-applying the VS_OLD snapshot
+captured at lock time. Only meaningful for trackers that reached the
+APPLIED state — anything earlier has nothing to undo.
+
+Symmetric to ConfigMap revert: creates a new tracker pointing at the original,
+captures CURRENT VS as the new tracker's VS_OLD, then re-applies the original's
+VS_OLD payload to k8s. Original tracker is left in COMPLETED — only the new
+tracker carries the revert audit trail.
+-}
 revertVsEditTrackerH :: AuthedPerson -> Text -> Flow APIResponse
-revertVsEditTrackerH _ap _tid =
-    -- Stub: VS edit revert isn't implemented (no rollback semantics defined for
-    -- raw VS replace). Throw rather than return a fake APIResponse so callers
-    -- get a 500 they cannot mistake for a successful no-op.
-    throwM (InternalError "revertVsEditTrackerH: not implemented")
+revertVsEditTrackerH _ap tid = do
+    cfg <- getConfig
+    m <- findVsEditTrackerRowById tid
+    case m of
+        Nothing -> pure $ APIResponse "ERROR" ("VS edit tracker not found: " <> tid)
+        Just orig -> do
+            -- Only allow revert of APPLIED trackers (others have no kubectl-side effect)
+            if S.rtStatus orig /= "APPLIED"
+                then pure $ APIResponse "ERROR" ("Cannot revert VS edit in status " <> S.rtStatus orig <> ". Only APPLIED edits can be reverted.")
+                else do
+                    -- Find the VS_OLD snapshot captured when the original was locked
+                    events <- listReleaseEvents tid
+                    let mOldVs = find (\e -> S.reCategory e == "SNAPSHOT" && S.reLabel e == "VS_OLD") events
+                    case mOldVs of
+                        Nothing -> pure $ APIResponse "ERROR" "No VS_OLD snapshot found — cannot revert."
+                        Just oldVsEvt -> do
+                            mProdCfg <- findProductByNameAndCluster (S.rtAppGroup orig) ""
+                            case mProdCfg of
+                                Nothing -> pure $ APIResponse "ERROR" "No product config found"
+                                Just pCfg -> do
+                                    let ns = getProductNamespace pCfg
+                                        oldVsContent = case S.rePayload oldVsEvt of
+                                            String s' -> s'
+                                            _ -> ""
+                                    if T.null oldVsContent
+                                        then pure $ APIResponse "ERROR" "Empty VS_OLD snapshot"
+                                        else do
+                                            -- Acquire VS lock for the revert
+                                            acquired <- tryAcquireVsLock (S.rtAppGroup orig) (S.rtCreatedBy orig <> "-revert")
+                                            if not acquired
+                                                then throwM (Conflict ("VS is already locked for app group " <> S.rtAppGroup orig))
+                                                else do
+                                                    now <- liftIO getCurrentTime
+                                                    newTid <- liftIO (UUID.toText <$> UUID.nextRandom)
+                                                    let revertRow =
+                                                            (mkVsEditRow newTid (S.rtAppGroup orig) (S.rtService orig) (S.rtEnv orig) (fromMaybe "" (S.rtMetadata orig)) (Just (S.rtCreatedBy orig <> "-revert")) "CREATED" now)
+                                                                { S.rtInfo = Just ("Revert of " <> tid)
+                                                                , S.rtDescription = Just ("Revert of " <> tid)
+                                                                }
+                                                    insertReleaseTrackerRow revertRow
+                                                    insertReleaseEvent newTid "BUSINESS" "REVERT_TRACKER_CREATED" (String ("Revert of " <> tid))
+                                                    -- Apply the original VS_OLD payload
+                                                    insertReleaseEvent newTid "SNAPSHOT" "VS_NEW" (String oldVsContent)
+                                                    applyResult <- liftIO $ applyVsToK8s cfg (T.unpack ns) oldVsContent
+                                                    case applyResult of
+                                                        Left err -> do
+                                                            _ <- releaseVsLockIfOwner (S.rtAppGroup orig) (S.rtCreatedBy orig <> "-revert")
+                                                            pure $ APIResponse "ERROR" ("K8s apply failed during revert: " <> err)
+                                                        Right () -> do
+                                                            -- Mark revert tracker APPLIED + release lock
+                                                            let appliedRow = revertRow{S.rtStatus = "APPLIED", S.rtUpdatedAt = now}
+                                                            _ <- conditionalUpdateTrackerRow appliedRow "CREATED"
+                                                            _ <- releaseVsLockIfOwner (S.rtAppGroup orig) (S.rtCreatedBy orig <> "-revert")
+                                                            notifyVsEditApplied newTid (S.rtAppGroup orig) (S.rtService orig) (S.rtCreatedBy orig <> "-revert")
+                                                            pure $ APIResponse "SUCCESS" ("VS edit reverted. New tracker: " <> newTid)
 
 {- | Fetch the current live VirtualService JSON from K8s
 Uses the deployment_config's vs_name (e.g. "atlas-vs"), NOT the service name

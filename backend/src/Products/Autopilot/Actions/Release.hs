@@ -39,14 +39,16 @@ module Products.Autopilot.Actions.Release (
 ) where
 
 import Control.Applicative ((<|>))
-import Control.Monad (when)
-import Control.Monad.Catch (throwM)
+import Control.Monad (void, when)
+import Control.Monad.Catch (throwM, try)
+import Database.PostgreSQL.Simple (SqlError (..))
+import qualified Data.ByteString.Char8 as B
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..))
-import Core.Auth.Protected (AuthedPerson)
+import Core.Auth.Protected (AuthedPerson (..))
 import Core.Config (Config (..))
 import Core.DB.Connection (withConn)
-import Core.Environment (Flow, getConfig, getDBEnv, logInfo)
+import Core.Environment (Flow, forkFlow, getConfig, getDBEnv, logInfo)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -68,6 +70,7 @@ import Database.PostgreSQL.Simple (Only (..), execute, withTransaction)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
 import Products.Autopilot.EventLog (logStatusUpdated)
 import Products.Autopilot.K8s.Deployment (deploymentExists)
+import Products.Autopilot.Runner (dispatchWorkflow)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Notifications
@@ -234,6 +237,89 @@ createReleaseH _ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = 
 
 createReleaseHBody :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseHBody mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
+    -- Same-service concurrency guard. Different services in the same app
+    -- group can run in parallel (serialised at kubectl-replace via VS lock
+    -- retry — see runVsRolloutWithLock). Same (appGroup, service) with any
+    -- in-flight tracker is rejected unconditionally.
+    mConflict <- findInFlightSameService appGroup service
+    case mConflict of
+        Just existing ->
+            pure $
+                APIResponse
+                    "ERROR"
+                    ( "Service "
+                        <> service
+                        <> " in app group "
+                        <> appGroup
+                        <> " already has an in-flight release "
+                        <> NT.releaseId existing
+                        <> " (status="
+                        <> T.pack (show (NT.status existing))
+                        <> "). Wait for it to complete, abort, or discard."
+                    )
+        Nothing -> createReleaseHBodyAfterGuard mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..}
+
+findInFlightSameService :: Text -> Text -> Flow (Maybe ReleaseTracker)
+findInFlightSameService ag svc = do
+    -- Single query that catches CREATED (approved or not), INPROGRESS, PAUSED,
+    -- ABORTING, REVERTING, RESTARTING for the (ag, svc) pair. Avoids the
+    -- prior bug where findRunnableReleaseTrackers filtered isApproved=true and
+    -- missed un-approved CREATED rows.
+    rows <- findActiveTrackersForService ag svc
+    logInfo $ "[same-svc-guard] " <> ag <> "/" <> svc <> " active=" <> T.pack (show (length rows))
+    pure $ case rows of
+        ((rt, _) : _) -> Just rt
+        [] -> Nothing
+
+{- | Insert a release tracker, translating partial-unique-index violations
+into the same friendly responses the application-level checks would have
+returned. Two indexes can fire here:
+
+1. uq_release_tracker_service_inflight (same-service in-flight guard) →
+   HTTP 409 Conflict, same shape the in-Haskell `findInFlightSameService`
+   path returns when it sees a duplicate.
+
+2. uq_release_tracker_global_id (cross-cloud sync idempotency guard) →
+   re-fetch the existing tracker by globalId and behave as if the original
+   `findReleaseTrackerByGlobalId` short-circuit had won the race. This
+   makes 10 parallel POSTs with the same global_id all succeed cleanly
+   (1 inserts, 9 see "already exists") instead of 9 leaking raw SQL 23505.
+
+Returns Just the existing tracker's id when the global_id idempotent path
+fired (so the caller can return the same SUCCESS message). Returns Nothing
+when a fresh insert succeeded.
+-}
+insertReleaseTrackerSafe :: ReleaseTracker -> TargetState -> Flow (Maybe Text)
+insertReleaseTrackerSafe trk ts = do
+    let go :: Flow (Either SqlError ())
+        go = try $ insertReleaseTracker trk (Just ts)
+    r <- go
+    case r of
+        Right () -> pure Nothing
+        Left e
+            | sqlState e == B.pack "23505"
+                && B.isInfixOf (B.pack "uq_release_tracker_service_inflight") (sqlErrorMsg e <> sqlErrorDetail e) ->
+                throwM $
+                    Conflict
+                        ( "Service "
+                            <> NT.service trk
+                            <> " in app group "
+                            <> NT.appGroup trk
+                            <> " already has an in-flight release. Wait for it to complete, abort, or discard."
+                        )
+            | sqlState e == B.pack "23505"
+                && B.isInfixOf (B.pack "uq_release_tracker_global_id") (sqlErrorMsg e <> sqlErrorDetail e) ->
+                case NT.globalId trk of
+                    Just gid -> do
+                        m <- findReleaseTrackerByGlobalId gid
+                        case m of
+                            Just (existing, _) -> pure (Just (NT.releaseId existing))
+                            Nothing -> throwM e -- shouldn't happen, but safer than swallowing
+                    Nothing -> throwM e
+            | otherwise -> throwM e
+
+createReleaseHBodyAfterGuard :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
+createReleaseHBodyAfterGuard mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
     cfg <- getConfig
     p <- findProductByName appGroup
     s <- findServiceByProductAndName appGroup service
@@ -406,24 +492,34 @@ createReleaseHBody mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
                                                                     , newService = fromMaybe False newService
                                                                     , cronjobSuspend = fromMaybe False cronjobSuspend
                                                                     }
-                                                    insertReleaseTracker tracker (Just targetState)
-                                                    insertReleaseEvent rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
-                                                    -- Capture BEFORE snapshots at creation time (so diff is available immediately)
-                                                    -- Also generate a preview AFTER by modifying version/image in the old deployment YAML
-                                                    let ns = getProductNamespace pCfg
-                                                        oldDepName = targetSvcHost <> "-" <> resolvedOldVersion
-                                                    captureDeploymentSnapshot cfg rid ns oldDepName "DEPLOYMENT_BEFORE"
-                                                    -- Generate preview AFTER: take old deployment, replace version + image
-                                                    captureDeploymentPreview
-                                                        cfg
-                                                        rid
-                                                        ns
-                                                        oldDepName
-                                                        newVersion
-                                                        (fromMaybe "" metadataDockerImage)
-                                                        "DEPLOYMENT_AFTER"
-                                                    notifyReleaseCreated tracker
-                                                    pure $ APIResponse "SUCCESS" ("Tracker created: " <> rid)
+                                                    -- insertReleaseTrackerSafe returns Just <existing-id>
+                                                    -- when the parallel global_id idempotency path fired
+                                                    -- (another thread already inserted this global_id);
+                                                    -- in that case, short-circuit with the same SUCCESS
+                                                    -- shape the createReleaseH idempotent fast-path uses.
+                                                    mIdem <- insertReleaseTrackerSafe tracker targetState
+                                                    case mIdem of
+                                                        Just existingRid -> do
+                                                            logInfo $ "Idempotent receive (DB-level): tracker already exists for global_id, returning existing id=" <> existingRid
+                                                            pure $ APIResponse "SUCCESS" ("Tracker already exists: " <> existingRid)
+                                                        Nothing -> do
+                                                            insertReleaseEvent rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
+                                                            -- Capture BEFORE snapshots at creation time (so diff is available immediately)
+                                                            -- Also generate a preview AFTER by modifying version/image in the old deployment YAML
+                                                            let ns = getProductNamespace pCfg
+                                                                oldDepName = targetSvcHost <> "-" <> resolvedOldVersion
+                                                            captureDeploymentSnapshot cfg rid ns oldDepName "DEPLOYMENT_BEFORE"
+                                                            -- Generate preview AFTER: take old deployment, replace version + image
+                                                            captureDeploymentPreview
+                                                                cfg
+                                                                rid
+                                                                ns
+                                                                oldDepName
+                                                                newVersion
+                                                                (fromMaybe "" metadataDockerImage)
+                                                                "DEPLOYMENT_AFTER"
+                                                            notifyReleaseCreated tracker
+                                                            pure $ APIResponse "SUCCESS" ("Tracker created: " <> rid)
 
 getReleaseH :: AuthedPerson -> Text -> Flow (Maybe ReleaseTracker)
 getReleaseH _ap rid = do
@@ -434,11 +530,13 @@ approveReleaseH :: AuthedPerson -> Text -> ApproveReleaseReq -> Flow (Maybe Rele
 approveReleaseH _ap rid req = do
     m <- findReleaseTracker rid
     case m of
-        Nothing -> pure Nothing
+        Nothing -> throwM $ NotFound ("Release not found: " <> rid)
         Just (tracker, mTargetState) -> do
-            -- Only allow approval of CREATED trackers
+            -- Pre-check (cheap, friendly errors)
             if NT.status tracker /= CREATED
                 then throwM $ BadRequest ("Cannot approve release in status " <> T.pack (show (NT.status tracker)) <> ". Only CREATED releases can be approved.")
+                else if NT.isApproved tracker
+                    then throwM $ BadRequest ("Release already approved by " <> fromMaybe "unknown" (NT.approvedBy tracker) <> ". Cannot approve again.")
                 else do
                     let approver = req.approvedBy
                         infraApproval = req.isInfraApproved
@@ -448,10 +546,17 @@ approveReleaseH _ap rid req = do
                                 , NT.isApproved = True
                                 , NT.isInfraApproved = fromMaybe (NT.isInfraApproved tracker) infraApproval
                                 }
-                    insertReleaseTracker updated mTargetState
-                    insertReleaseEvent rid "BUSINESS" "TRACKER_APPROVED" (toJSON approver)
-                    notifyReleaseApproved updated
-                    pure (Just updated)
+                    -- Atomic CAS: only update if status is still CREATED AND
+                    -- not yet approved. Two concurrent approve calls both pass
+                    -- the pre-check above; conditionalUpdateApprove uses an
+                    -- UPDATE WHERE clause that lets exactly one win.
+                    ok <- conditionalUpdateApprove updated mTargetState
+                    if not ok
+                        then throwM $ BadRequest "Release was approved or transitioned by a concurrent request."
+                        else do
+                            insertReleaseEvent rid "BUSINESS" "TRACKER_APPROVED" (toJSON approver)
+                            notifyReleaseApproved updated
+                            pure (Just updated)
 
 triggerReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
 triggerReleaseH _ap rid TriggerReleaseReq{..} = do
@@ -548,6 +653,19 @@ revertReleaseH _ap rid req = do
                                 , NT.releaseTag = fmap (<> "_REVERT") (NT.releaseTag tracker)
                                 , NT.info = (req :: RevertReleaseReq).info
                                 , NT.syncEnabled = if shouldSyncRevert then Just "true" else Nothing
+                                , -- Bug fix: swap oldVersion/newVersion on the domain record so that
+                                  -- Runner.validateRunningVersion (which compares NT.oldVersion against
+                                  -- the live VS subset) will match. Without this swap the runner
+                                  -- always sees the current VS at the original newVersion and
+                                  -- discards the revert tracker with VERSION_MISMATCH.
+                                  NT.oldVersion = NT.newVersion tracker
+                                , NT.newVersion = NT.oldVersion tracker
+                                , -- Bug fix (round 5): clear globalId on the revert tracker. The
+                                  -- partial unique index uq_release_tracker_global_id forbids two
+                                  -- rows with the same global_id; without this reset, every revert
+                                  -- of a release that ever had a global_id (i.e. every cross-cloud
+                                  -- replicated release) hit a raw SQL 23505 violation.
+                                  NT.globalId = Nothing
                                 }
                     insertReleaseTracker revertedTracker (Just revertedTargetState)
                     insertReleaseEvent
@@ -674,6 +792,18 @@ updateTrackerH _ap rid req = do
                                                         ABORTING -> notifyReleaseAborted updatedTracker
                                                         COMPLETED -> notifyReleaseCompleted updatedTracker updatedTargetState
                                                         _ -> notifyReleaseUpdated updatedTracker ("status changed to " <> newStatusText)
+                                                    -- Bug fix #3 (round 4): re-attach the workflow on PAUSED→INPROGRESS.
+                                                    -- Backend restart while paused leaves the in-memory worker dead.
+                                                    -- The user-facing resume must re-fork dispatchWorkflow so the
+                                                    -- rollout continues. If a worker is still alive (normal in-process
+                                                    -- pause/resume) the second worker will compete on conditional updates
+                                                    -- but cannot corrupt state — at worst a few duplicate Slack pings.
+                                                    when (oldStatus == PAUSED && newStatus == INPROGRESS) $
+                                                        void $ forkFlow $ do
+                                                            r <- dispatchWorkflow updatedTracker updatedTargetState
+                                                            case r of
+                                                                Right _ -> logInfo $ "[resume] workflow re-attached for " <> rid
+                                                                Left e -> logInfo $ "[resume] workflow exited for " <> rid <> ": " <> T.pack (show e)
                                                     pure $ APIResponse "SUCCESS" "Tracker updated"
                                                 else pure staleTrackerError
                         Nothing -> do
@@ -1193,7 +1323,7 @@ restartReleaseH _ap rid req = do
 -- ============================================================================
 
 fastForwardH :: AuthedPerson -> Text -> FastForwardReq -> Flow APIResponse
-fastForwardH _ap rid req = do
+fastForwardH ap rid req = do
     m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
@@ -1202,52 +1332,72 @@ fastForwardH _ap rid req = do
             if currentStatus /= INPROGRESS
                 then pure $ APIResponse "ERROR" ("Cannot fast-forward from status: " <> T.pack (show currentStatus) <> ". Must be INPROGRESS")
                 else do
-                    -- Fast-forward: match production Julia logic exactly.
-                    -- Sets rollout strategy cooloff to elapsed minutes (time since step started),
-                    -- so isCoolOffExceeded(cooloff, startedAt) returns true immediately:
-                    --   coolOffLimit = startedAt + Minute(elapsedMinutes) <= now  →  true
-                    -- Also marks historyManualOverride = True.
-                    now <- liftIO getCurrentTime
-                    let currentStepIdx = length (NT.rolloutHistory tracker) - 1
-                        history = NT.rolloutHistory tracker
-                        -- Calculate elapsed minutes from step start
-                        elapsedMins = case history of
-                            [] -> 0
-                            steps ->
-                                let lastStep = last steps
-                                 in round (realToFrac (diffUTCTime now (historyStartedAt lastStep)) / 60 :: Double) :: Int
-                        strategy = NT.rolloutStrategy tracker
-                        updatedStrategy = case strategy of
-                            [] -> []
-                            steps ->
-                                zipWith (\i s -> if i == currentStepIdx then s{cooloffMinutes = elapsedMins} else s) [0 ..] steps
-                        -- History keeps original cooloff for display; manualOverride=True shows it was fast-forwarded
-                        -- Strategy gets elapsedMins so workflow's isCoolOffExceeded passes immediately
-                        updatedHistory = case history of
-                            [] -> []
-                            steps ->
-                                let lastIdx = length steps - 1
-                                    updateStep i step =
-                                        if i == lastIdx
-                                            then step{historyManualOverride = True}
-                                            else step
-                                 in zipWith updateStep [0 ..] steps
-                        updated = (tracker :: ReleaseTracker){NT.rolloutHistory = updatedHistory, NT.rolloutStrategy = updatedStrategy}
-                    ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText currentStatus)
-                    if not ok
-                        then pure staleTrackerError
+                    -- Debounce: if the current stage is ALREADY marked manualOverride=true,
+                    -- a previous fast-forward already fired and the workflow just hasn't
+                    -- advanced yet (it polls every release_watch_delay seconds). Return a
+                    -- friendly no-op so we don't pollute the event log with duplicate
+                    -- FAST_FORWARD entries when the user clicks twice quickly.
+                    let history = NT.rolloutHistory tracker
+                        currentStepAlreadyForwarded = case history of
+                            [] -> False
+                            xs -> historyManualOverride (last xs)
+                    if currentStepAlreadyForwarded
+                        then pure $ APIResponse "SUCCESS" "Fast forward already in progress for current stage; runner will advance on next poll."
                         else do
-                            insertReleaseEvent
-                                rid
-                                "BUSINESS"
-                                "FAST_FORWARD"
-                                ( object
-                                    [ "requestedBy" .= (req :: FastForwardReq).requestedBy
-                                    , "reason" .= (req :: FastForwardReq).reason
-                                    ]
-                                )
-                            notifyReleaseFastForwarded updated
-                            pure $ APIResponse "SUCCESS" "Fast forward: cooloff period skipped, runner will advance on next poll"
+                            -- Fast-forward: match production Julia logic exactly.
+                            -- Sets rollout strategy cooloff to elapsed minutes (time since step started),
+                            -- so isCoolOffExceeded(cooloff, startedAt) returns true immediately:
+                            --   coolOffLimit = startedAt + Minute(elapsedMinutes) <= now  →  true
+                            -- Also marks historyManualOverride = True.
+                            now <- liftIO getCurrentTime
+                            let currentStepIdx = length history - 1
+                                -- Calculate elapsed minutes from step start
+                                elapsedMins = case history of
+                                    [] -> 0
+                                    steps ->
+                                        let lastStep = last steps
+                                         in round (realToFrac (diffUTCTime now (historyStartedAt lastStep)) / 60 :: Double) :: Int
+                                strategy = NT.rolloutStrategy tracker
+                                updatedStrategy = case strategy of
+                                    [] -> []
+                                    steps ->
+                                        zipWith (\i s -> if i == currentStepIdx then s{cooloffMinutes = elapsedMins} else s) [0 ..] steps
+                                -- History keeps original cooloff for display; manualOverride=True shows it was fast-forwarded
+                                -- Strategy gets elapsedMins so workflow's isCoolOffExceeded passes immediately
+                                updatedHistory = case history of
+                                    [] -> []
+                                    steps ->
+                                        let lastIdx = length steps - 1
+                                            updateStep i step =
+                                                if i == lastIdx
+                                                    then step{historyManualOverride = True}
+                                                    else step
+                                         in zipWith updateStep [0 ..] steps
+                                updated = (tracker :: ReleaseTracker){NT.rolloutHistory = updatedHistory, NT.rolloutStrategy = updatedStrategy}
+                            ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText currentStatus)
+                            if not ok
+                                then pure staleTrackerError
+                                else do
+                                    -- Default requestedBy to the authenticated person if frontend
+                                    -- omitted the field, so the audit log isn't full of nulls.
+                                    let actor = case (req :: FastForwardReq).requestedBy of
+                                            Just t | not (T.null t) -> t
+                                            _ -> apEmail ap
+                                        reasonText = case (req :: FastForwardReq).reason of
+                                            Just t | not (T.null t) -> Just t
+                                            _ -> Just "User-initiated fast-forward"
+                                    insertReleaseEvent
+                                        rid
+                                        "BUSINESS"
+                                        "FAST_FORWARD"
+                                        ( object
+                                            [ "requestedBy" .= actor
+                                            , "reason" .= reasonText
+                                            , "stage" .= (currentStepIdx + 1)
+                                            ]
+                                        )
+                                    notifyReleaseFastForwarded updated
+                                    pure $ APIResponse "SUCCESS" "Fast forward: cooloff period skipped, runner will advance on next poll"
 
 -- ============================================================================
 -- Validation Helpers
@@ -1260,11 +1410,16 @@ isValidK8sVersion :: Text -> Bool
 isValidK8sVersion ver
     | T.null ver = False
     | otherwise =
-        let lowered = T.toLower ver
-            chars = T.unpack lowered
-            isValidChar c = isAlphaNum c || c == '-'
-            startsOk = case chars of (c : _) -> isAlphaNum c; [] -> False
-            endsOk = case chars of [] -> False; _ -> isAlphaNum (Prelude.last chars)
+        -- K8s deployment names are case-sensitive and must be all-lowercase
+        -- (RFC 1123 label). Don't pre-lowercase the input — that masks bugs
+        -- like an UPPERCASE caller passing "V102BAD" which would fail later
+        -- at kubectl apply. Reject anything containing uppercase or chars
+        -- outside [a-z0-9-], with start/end alphanumeric.
+        let chars = T.unpack ver
+            isValidChar c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'
+            isAlnumLower c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+            startsOk = case chars of (c : _) -> isAlnumLower c; [] -> False
+            endsOk = case chars of [] -> False; _ -> isAlnumLower (Prelude.last chars)
          in all isValidChar chars && startsOk && endsOk
 
 {- | Extract just the data section from a K8s ConfigMap YAML as JSON.

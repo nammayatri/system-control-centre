@@ -1,6 +1,6 @@
 import React, { useState, Fragment, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import ReactDiffViewer from 'react-diff-viewer-continued';
 import { fetchConfigMapDetail, updateConfigMap } from '../api';
@@ -83,12 +83,19 @@ const ConfigMapSummary: React.FC = () => {
 
   const id = rawId?.includes('&&') ? rawId.split('&&')[1] : rawId || '';
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['configmap-detail', id],
     queryFn: () => fetchConfigMapDetail(id),
     enabled: !!id,
     refetchInterval: 10000,
   });
+  const qcCM = useQueryClient();
+  const handleRefresh = async () => {
+    await Promise.all([
+      refetch(),
+      qcCM.invalidateQueries({ queryKey: ['configmap-events', id] }),
+    ]);
+  };
 
   const { data: releaseEvents = [] } = useQuery({
     queryKey: ['configmap-events', id],
@@ -157,7 +164,7 @@ const ConfigMapSummary: React.FC = () => {
           </div>
           <div className="font-mono text-[11px] sm:text-xs text-zinc-500 break-all">ID: {data.id}</div>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap sm:justify-end">
           {data.status === 'CREATED' && data.is_approved === 0 && (
             <PermissionGate product="autopilot" permission="CONFIG_APPROVE">
               <Button size="sm" variant="success" onClick={() => handleAction('Approve')} loading={actionMut.isPending}><Check className="w-3.5 h-3.5" /> Approve</Button>
@@ -186,6 +193,9 @@ const ConfigMapSummary: React.FC = () => {
               <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" onClick={() => handleAction('Revert')} loading={actionMut.isPending}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
             </PermissionGate>
           )}
+          <SimpleTooltip content="Refresh">
+            <Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh"><RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /></Button>
+          </SimpleTooltip>
           <SimpleTooltip content="Clone">
             <Button size="icon" variant="ghost" onClick={() => navigate(`/configmap/new?clone_id=${data.id}`)}><Copy className="w-4 h-4" /></Button>
           </SimpleTooltip>
@@ -227,8 +237,8 @@ const ConfigMapSummary: React.FC = () => {
         )}
 
         {activeTab === 'Event Data' && (
-          <div className="overflow-x-auto -mx-0">
-            <table className="w-full text-sm text-left">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-left min-w-[720px]">
               <thead><tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
                 <th className="px-3 py-3 w-8"></th>
                 {['#', 'Timestamp', 'Category', 'Label', 'Value'].map(h => <th key={h} className="px-4 py-3">{h}</th>)}

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   useRelease, useReleaseEvents, useApproveRelease, useDiscardRelease,
   usePauseRelease, useResumeRelease, useAbortRelease, useRevertRelease,
@@ -604,8 +605,18 @@ const ReleaseSummary: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'env-diff' | 'json'>('summary');
   // Edit dialog removed — now uses full /releases/:id/edit page
 
-  const { data: release, isLoading, error, refetch } = useRelease(id);
+  const { data: release, isLoading, isFetching, error, refetch } = useRelease(id);
   const { data: events = [] } = useReleaseEvents(id);
+  const qc = useQueryClient();
+  const handleRefresh = async () => {
+    // Refresh both the release and its event log so the UI shows fully fresh state.
+    await Promise.all([
+      refetch(),
+      qc.invalidateQueries({ queryKey: ['release-events', id] }),
+      qc.invalidateQueries({ queryKey: ['release-pods', id] }),
+      qc.invalidateQueries({ queryKey: ['release-resources', id] }),
+    ]);
+  };
 
   // Revert sync checkbox defaults based on release.sync_enabled
   const [revertSyncChecked, setRevertSyncChecked] = useState(false);
@@ -634,11 +645,26 @@ const ReleaseSummary: React.FC = () => {
   const KIALI_URL = import.meta.env.VITE_KIALI_URL || '';
   const GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || '';
 
-  const doAction = async (label: string, fn: () => Promise<any>, isDanger = false) => {
+  // Capitalise the first letter of a string for titles/buttons.
+  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+  /** doAction takes a SHORT verb (e.g. "fast forward", "approve") for the
+   *  modal title + confirm-button label, and an OPTIONAL longer description
+   *  shown in the body. Previously the verb and description were the same
+   *  long string, which produced an unreadable modal title and a giant
+   *  button label for fast-forward. */
+  const doAction = async (
+    label: string,
+    fn: () => Promise<any>,
+    isDanger = false,
+    description?: string,
+  ) => {
     const ok = await confirmAction({
-      title: `${label.charAt(0).toUpperCase() + label.slice(1)} Release`,
-      description: `Are you sure you want to ${label} this release? This action cannot be undone.`,
-      confirmLabel: label.charAt(0).toUpperCase() + label.slice(1),
+      title: `${cap(label)} Release`,
+      description:
+        description ??
+        `Are you sure you want to ${label} this release? This action cannot be undone.`,
+      confirmLabel: cap(label),
       variant: isDanger ? 'danger' : 'primary',
     });
     if (!ok) return;
@@ -660,7 +686,7 @@ const ReleaseSummary: React.FC = () => {
 
   if (isLoading && !release) {
     return (
-      <div className="flex flex-col flex-1 w-full pb-12 w-full space-y-6">
+      <div className="flex flex-col flex-1 w-full pb-12 space-y-6">
         <CardSkeleton />
         <CardSkeleton />
       </div>
@@ -738,7 +764,7 @@ const ReleaseSummary: React.FC = () => {
             </a>
           )}
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap sm:justify-end">
           {s === 'CREATED' && release.is_approved === 0 && (
             <PermissionGate product="autopilot" permission="RELEASE_APPROVE">
               <Button size="sm" variant="success" loading={approveMut.isPending} onClick={() => doAction('approve', () => approveMut.mutateAsync({ releaseId: id!, approvedBy: 'admin' }))}><Check className="w-3.5 h-3.5" /> Approve</Button>
@@ -756,7 +782,7 @@ const ReleaseSummary: React.FC = () => {
                 <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
               </PermissionGate>
               <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
-                <Button size="sm" variant="outline" className="border-amber-300 bg-amber-600 text-white hover:bg-amber-700" loading={fastForwardMut.isPending} onClick={() => doAction('fast forward (skip current cooloff and advance to next rollout step)', () => fastForwardMut.mutateAsync(id!))}><FastForward className="w-3.5 h-3.5" /> Fast Forward</Button>
+                <Button size="sm" variant="outline" className="border-amber-300 bg-amber-600 text-white hover:bg-amber-700" loading={fastForwardMut.isPending} onClick={() => doAction('fast forward', () => fastForwardMut.mutateAsync(id!), false, 'Skip the current cooloff and advance to the next rollout step. The runner will pick up the change on its next poll.')}><FastForward className="w-3.5 h-3.5" /> Fast Forward</Button>
               </PermissionGate>
             </>
           )}
@@ -790,10 +816,10 @@ const ReleaseSummary: React.FC = () => {
 
           <div className="w-px h-6 bg-zinc-200 mx-1" />
           <PermissionGate product="autopilot" permission="RELEASE_DELETE">
-            <SimpleTooltip content="Delete"><Button size="icon" variant="ghost" className="text-red-500 hover:bg-red-50" loading={deleteMut.isPending} onClick={() => doAction('delete this release', async () => { await deleteMut.mutateAsync(id!); navigate('/releases'); }, true)}><Trash2 className="w-4 h-4" /></Button></SimpleTooltip>
+            <SimpleTooltip content="Delete"><Button size="icon" variant="ghost" className="text-red-500 hover:bg-red-50" loading={deleteMut.isPending} onClick={() => doAction('delete', async () => { await deleteMut.mutateAsync(id!); navigate('/releases'); }, true, 'Delete this release tracker permanently. This removes the audit trail and cannot be undone.')}><Trash2 className="w-4 h-4" /></Button></SimpleTooltip>
           </PermissionGate>
           <SimpleTooltip content="Clone"><Button size="icon" variant="ghost" onClick={() => navigate(`/releases/${id}/clone`)}><Copy className="w-4 h-4" /></Button></SimpleTooltip>
-          <SimpleTooltip content="Refresh"><Button size="icon" variant="ghost" onClick={() => refetch()}><RefreshCw className="w-4 h-4" /></Button></SimpleTooltip>
+          <SimpleTooltip content="Refresh"><Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh"><RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /></Button></SimpleTooltip>
         </div>
       </div>
 

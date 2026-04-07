@@ -67,7 +67,7 @@ const ListVSEdit: React.FC = () => {
 
   const dateRange = useMemo(() => getDateRange(timeRange, customFrom, customTo), [timeRange, customFrom, customTo]);
 
-  const { data: edits = [], isLoading, refetch } = useQuery({
+  const { data: edits = [], isLoading, isFetching, refetch } = useQuery({
     queryKey: ['vs-edits', dateRange.from.toISOString(), dateRange.to.toISOString()],
     queryFn: () => fetchVSEdits({ from: dateRange.from.toISOString(), to: dateRange.to.toISOString() }),
     refetchInterval: 30000,
@@ -157,8 +157,8 @@ const ListVSEdit: React.FC = () => {
           <div className="hidden md:block flex-1" />
 
           <div className="flex items-center gap-2">
-            <button onClick={() => refetch()} className="h-10 w-10 sm:h-9 sm:w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150">
-              <RefreshCw className="h-4 w-4" />
+            <button onClick={() => refetch()} aria-label="Refresh" className="h-10 w-10 sm:h-9 sm:w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150">
+              <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
             </button>
 
             <PermissionGate product="autopilot" permission="RELEASE_CREATE">

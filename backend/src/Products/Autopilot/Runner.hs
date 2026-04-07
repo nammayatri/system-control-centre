@@ -95,8 +95,11 @@ releaseExpiredVsLocksOnStartup = do
 -- Startup Rollback (Julia parity: rollbackReleaseInProgress)
 -- ============================================================================
 
-{- | Roll back all orphaned INPROGRESS/PAUSED/REVERTING releases on server startup.
+{- | Roll back all orphaned INPROGRESS/REVERTING releases on server startup.
 Restores VS traffic to old version and marks as ABORTED.
+PAUSED releases are intentionally NOT included — pause is a user state with
+no in-flight kubectl work to recover, so a backend restart must not silently
+abort them.
 Julia reference: api/rollback/rollback.jl lines 10-75
 -}
 rollbackInProgressOnStartup :: Flow ()
@@ -487,26 +490,41 @@ scaleDownOldDeployment cfg (rt, mts) = do
                                 logInfo $ "[scaleDownOldDeployment] Scaling down old deployment: " <> oldDepName <> " for release " <> releaseId rt
                                 result <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName 0)
                                 case result of
-                                    Left err -> logWarning $ "[scaleDownOldDeployment] WARNING: Failed to scale down: " <> T.pack (show err)
-                                    Right _ -> do
-                                        logInfo "[scaleDownOldDeployment] Old deployment scaled down successfully"
-                                        notifyPodsScaledDown rt oldVer
-                                let updatedCtx = ctx{podsScaleDownStatus = Just ScaleDownCompleted}
-                                    updatedK8s = k8s{context = updatedCtx}
-                                    updatedMts = Just (K8sState updatedK8s)
-                                -- Part B — CAS against the original poll-pick status.
-                                ok <- conditionalUpdateTracker rt updatedMts (releaseStatusToText (NT.status rt))
-                                if not ok
-                                    then
-                                        logWarning $
-                                            "[scaleDownOldDeployment] Status changed under us; not persisting scale-down flag for "
-                                                <> releaseId rt
-                                    else
+                                    Left err -> do
+                                        -- Bug fix (round 6 / Julia parity): on kubectl failure
+                                        -- KEEP the tracker in ScaleDownScheduled state so the
+                                        -- next runner poll retries. Previously we marked it
+                                        -- Completed regardless and the failure was silently
+                                        -- dropped — leaving stale old pods running forever.
+                                        -- Julia: watcher.jl:433-450 podsFailureHandler.
+                                        logWarning $ "[scaleDownOldDeployment] FAILED: " <> T.pack (show err) <> " — keeping ScaleDownScheduled for retry on next poll"
+                                        let retryCtx = ctx{podsScaleDownStatus = Just ScaleDownScheduled}
+                                            retryK8s = k8s{context = retryCtx}
+                                            retryMts = Just (K8sState retryK8s)
+                                        _ <- conditionalUpdateTracker rt retryMts (releaseStatusToText (NT.status rt))
                                         insertReleaseEvent
                                             (releaseId rt)
                                             "BUSINESS"
-                                            "OLD_PODS_SCALED_DOWN"
-                                            (object ["oldDeployment" .= (oldDepName :: T.Text), "namespace" .= (ns :: T.Text)])
+                                            "SCALE_DOWN_FAILED"
+                                            (object ["oldDeployment" .= (oldDepName :: T.Text), "error" .= T.pack (show err)])
+                                    Right _ -> do
+                                        logInfo "[scaleDownOldDeployment] Old deployment scaled down successfully"
+                                        notifyPodsScaledDown rt oldVer
+                                        let updatedCtx = ctx{podsScaleDownStatus = Just ScaleDownCompleted}
+                                            updatedK8s = k8s{context = updatedCtx}
+                                            updatedMts = Just (K8sState updatedK8s)
+                                        ok <- conditionalUpdateTracker rt updatedMts (releaseStatusToText (NT.status rt))
+                                        if not ok
+                                            then
+                                                logWarning $
+                                                    "[scaleDownOldDeployment] Status changed under us; not persisting scale-down flag for "
+                                                        <> releaseId rt
+                                            else
+                                                insertReleaseEvent
+                                                    (releaseId rt)
+                                                    "BUSINESS"
+                                                    "OLD_PODS_SCALED_DOWN"
+                                                    (object ["oldDeployment" .= (oldDepName :: T.Text), "namespace" .= (ns :: T.Text)])
                 _ ->
                     logWarning $
                         "[scaleDownOldDeployment] Skipping "

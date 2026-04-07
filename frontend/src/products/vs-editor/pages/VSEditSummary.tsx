@@ -47,12 +47,18 @@ const VSEditSummary: React.FC = () => {
   const [activeTab, setActiveTab] = useState('Summary');
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
 
-  const { data: edit, isLoading, error, refetch } = useQuery({
+  const { data: edit, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ['vs-edit', id],
     queryFn: () => fetchVSEditDetail(id!),
     enabled: !!id,
     refetchInterval: 10000,
   });
+  const handleRefresh = async () => {
+    await Promise.all([
+      refetch(),
+      queryClient.invalidateQueries({ queryKey: ['vs-events', id] }),
+    ]);
+  };
 
   const { data: vsEvents = [] } = useQuery({
     queryKey: ['vs-events', id],
@@ -131,7 +137,7 @@ const VSEditSummary: React.FC = () => {
           <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">VS Edit Summary</h1>
           <StatusBadge status={edit.status} />
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap sm:justify-end">
           {edit.status === 'LOCKED' && (
             <PermissionGate product="autopilot" permission="RELEASE_CREATE">
               <Button size="sm" variant="outline" loading={unlockMut.isPending}
@@ -169,7 +175,7 @@ const VSEditSummary: React.FC = () => {
             </PermissionGate>
           )}
 
-          <Button size="icon" variant="ghost" onClick={() => refetch()}><RefreshCw className="w-4 h-4" /></Button>
+          <Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh"><RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /></Button>
         </div>
       </div>
 
@@ -203,7 +209,7 @@ const VSEditSummary: React.FC = () => {
 
         {activeTab === 'Event Data' && (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left">
+            <table className="w-full text-sm text-left min-w-[720px]">
               <thead><tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
                 <th className="px-3 py-3 w-8"></th>
                 {['#', 'Timestamp', 'Category', 'Label', 'Value'].map(h => <th key={h} className="px-4 py-3">{h}</th>)}

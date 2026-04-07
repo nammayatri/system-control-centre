@@ -14,6 +14,26 @@ CREATE INDEX IF NOT EXISTS idx_rt_updated_at ON release_tracker(last_updated DES
 CREATE UNIQUE INDEX IF NOT EXISTS uq_release_tracker_global_id
     ON release_tracker (global_id) WHERE global_id IS NOT NULL;
 
+-- Same-service concurrency guard. The Haskell-level findInFlightSameService
+-- check is TOCTOU under parallel create — multiple POST /releases/create
+-- on the same (app_group, service) can all see zero in-flight rows and
+-- all insert. This partial unique index lets only ONE row exist for a
+-- (app_group, service) pair while it is still in a non-terminal state;
+-- subsequent inserts during the window fail with sqlState 23505 which
+-- the handler translates to the same user-friendly error.
+--
+-- IMPORTANT: filter by category='BackendService' so the index ONLY
+-- constrains rolling-deployment releases. ConfigMap and VS edit trackers
+-- share the same release_tracker table but use different category values
+-- ('BackendConfig' / no category) and have their own concurrency rules.
+-- Without the category filter, creating any configmap or VS-edit while a
+-- service has an in-flight release (or vice versa) hits the unique
+-- violation incorrectly.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_release_tracker_service_inflight
+    ON release_tracker (app_group, service)
+    WHERE status IN ('CREATED','INPROGRESS','PAUSED','ABORTING','REVERTING','RESTARTING','PREPARING')
+      AND category IN ('BackendService','BackendScheduler','BackendCronJob','BackendJob');
+
 -- release_events
 CREATE INDEX IF NOT EXISTS idx_re_release_id ON release_events(re_release_id);
 

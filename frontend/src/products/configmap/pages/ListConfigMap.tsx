@@ -73,7 +73,7 @@ const ListConfigMap: React.FC = () => {
 
   const dateRange = useMemo(() => getDateRange(timeRange, customFrom, customTo), [timeRange, customFrom, customTo]);
 
-  const { data: configMaps = [], isLoading, refetch } = useQuery({
+  const { data: configMaps = [], isLoading, isFetching, refetch } = useQuery({
     queryKey: ['configmaps', dateRange.from.toISOString(), dateRange.to.toISOString()],
     queryFn: () => fetchAPConfigMaps(dateRange.from.toISOString(), dateRange.to.toISOString()),
     refetchInterval: 60000,
@@ -156,7 +156,7 @@ const ListConfigMap: React.FC = () => {
 
           <div className="hidden md:block flex-1" />
           <div className="flex items-center gap-2">
-            <button onClick={() => refetch()} className="h-10 w-10 sm:h-9 sm:w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150"><RefreshCw className="h-4 w-4" /></button>
+            <button onClick={() => refetch()} aria-label="Refresh" className="h-10 w-10 sm:h-9 sm:w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150"><RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} /></button>
             <PermissionGate product="autopilot" permission="CONFIG_CREATE">
               <Link to="/configmap/new" className="flex-1 md:flex-none">
                 <Button size="md" fullWidth><Plus className="w-4 h-4" /> Create ConfigMap</Button>

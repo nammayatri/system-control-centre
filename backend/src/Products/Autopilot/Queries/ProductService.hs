@@ -14,7 +14,7 @@ import qualified Data.Text
 import qualified Data.Text.Read as TR
 import Database.Beam
 import Database.Beam.Postgres (runBeamPostgres)
-import Database.PostgreSQL.Simple (Only (..), execute, query, withTransaction)
+import Database.PostgreSQL.Simple (In (..), Only (..), execute, query, withTransaction)
 import GHC.Int (Int32)
 import Products.Autopilot.Types.Storage.Schema
 import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct_io)
@@ -446,6 +446,37 @@ releaseExpiredVsLocks = do
                 \  AND ( vs_lock_timestamp IS NULL \
                 \     OR vs_lock_timestamp < NOW() - (? || ' minutes')::interval )"
                 (Only (show expiryMins))
+        -- Bug fix: also transition orphan LOCKED tracker rows to UNLOCKED.
+        -- The deployment_config row is the source of truth for the cluster
+        -- lock; the release_tracker row is bookkeeping. Two cases:
+        --
+        -- 1. Locks just freed by the sweep above: their app_groups are in
+        --    `owners`. Their tracker rows must move from LOCKED to UNLOCKED.
+        --
+        -- 2. Pre-existing orphan LOCKED tracker rows whose end_time has
+        --    passed (or is null), regardless of whether the deployment_config
+        --    lock was already cleared by some other path. These accumulate
+        --    over time when force-unlock or app crashes leave the tracker
+        --    side untouched.
+        _ <-
+            case map fst owners of
+                [] -> pure 0
+                ags ->
+                    execute
+                        conn
+                        "UPDATE release_tracker \
+                        \SET status = 'UNLOCKED', last_updated = NOW(), end_time = NOW() \
+                        \WHERE category = 'VSEdit' AND status = 'LOCKED' \
+                        \  AND app_group IN ?"
+                        (Only (In ags))
+        _ <-
+            execute
+                conn
+                "UPDATE release_tracker \
+                \SET status = 'UNLOCKED', last_updated = NOW(), end_time = COALESCE(end_time, NOW()) \
+                \WHERE category = 'VSEdit' AND status = 'LOCKED' \
+                \  AND ( end_time IS NULL OR end_time < NOW() )"
+                ()
         pure (fromIntegral n)
 
 {- | Acquire VS lock, run an action, then release the lock.

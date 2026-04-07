@@ -23,12 +23,14 @@ module Products.Autopilot.Workflow.BackendServiceWorkflow (
 where
 
 import Control.Exception (throwIO)
-import Control.Monad (when)
+import Control.Applicative ((<|>))
+import Control.Monad (unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
+import qualified Control.Concurrent as CC
 import Core.Types.Time (Seconds (..), threadDelay)
 
 -- getPodsCalculationFactor reserved for future pod-count calculation
@@ -39,6 +41,8 @@ import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
+import qualified Data.Text.Lazy as TL
+import qualified Data.Text.Lazy.Encoding as TLE
 import qualified Data.Text as T
 
 -- (Data.ByteString.Lazy removed - not used after refactor)
@@ -61,6 +65,7 @@ import Products.Autopilot.K8s.Deployment (
     buildApplyFileCommand,
     buildCloneDeploymentCommand,
     buildConfigMapApplyCommand,
+    buildScaleDeploymentCommand,
     buildScaleNamedDeploymentCommand,
     deploymentExists,
     getDeploymentReplicaStatus,
@@ -86,6 +91,7 @@ import Products.Autopilot.RuntimeConfig (
     getPodReadinessMaxAttempts,
     getPodReadinessPollSeconds,
     getPodRestartCountThreshold,
+    getPodsCalculationFactor,
     getReleaseStartDelay,
     isABHSDecisionEnabledForAppGroupService,
     isABHSPostMonitoringDecisionEnabledForAppGroupService,
@@ -182,18 +188,208 @@ runK8sIO action = do
         Right a -> pure a
         Left (K8sError err) -> liftIO $ throwIO $ WorkflowError "k8s" err
 
+{- | Pick the primary destination subset for a host out of an istio
+VirtualService JSON document. Returns the subset of the highest-weighted
+route in the first http rule that targets `host`. Used by the internal-VS
+cross-validation in validatePreconditions.
+-}
+extractInternalVsPrimarySubset :: Value -> T.Text -> Maybe T.Text
+extractInternalVsPrimarySubset vsJson host =
+    case vsJson of
+        Object o ->
+            case KM.lookup (K.fromText "spec") o of
+                Just (Object spec) ->
+                    case KM.lookup (K.fromText "http") spec of
+                        Just (Array routes) ->
+                            let matchHost (Object rule) =
+                                    case KM.lookup (K.fromText "route") rule of
+                                        Just (Array dests) ->
+                                            let bestSubset = foldr pickBest Nothing dests
+                                             in bestSubset
+                                        _ -> Nothing
+                                matchHost _ = Nothing
+                                pickBest (Object dest) acc =
+                                    case KM.lookup (K.fromText "destination") dest of
+                                        Just (Object d) ->
+                                            let h = case KM.lookup (K.fromText "host") d of
+                                                    Just (String s) -> s
+                                                    _ -> ""
+                                                s = case KM.lookup (K.fromText "subset") d of
+                                                    Just (String x) -> Just x
+                                                    _ -> Nothing
+                                             in if h == host then s <|> acc else acc
+                                        _ -> acc
+                                pickBest _ acc = acc
+                                tryRules [] = Nothing
+                                tryRules (r : rs) = case matchHost r of
+                                    Just s -> Just s
+                                    Nothing -> tryRules rs
+                             in tryRules (foldr (:) [] routes)
+                        _ -> Nothing
+                _ -> Nothing
+        _ -> Nothing
+
+{- | Scale the new deployment for the upcoming rollout stage.
+
+FULL Julia formula (service.jl:426-431):
+
+  podsRolloutRatio       = pods_calculation_factor × oldDesiredPods / 100
+  predictionFromOldPods  = ceil(oldVersionPods × min(routePercent + 10, 100) / 100)
+  calculatedPods         = max(
+      currentNewPods,                                  -- never shrink
+      ceil(podsRolloutRatio × routePercent),           -- strategy target with factor buffer
+      currentNewAvailable,                             -- already-ready replicas
+      predictionFromOldPods                            -- 10% headroom over proportional old-pod share
+  )
+
+Then the floor is patched on the new deployment's HPA via `updateMinPods!`
+(if HPA exists). HPA reconciles every ~15s; a direct kubectl scale would
+be immediately undone, so we raise the HPA min instead. HPA can still
+scale UP above the floor under load, but cannot scale DOWN below it.
+
+Falls back to direct kubectl scale if no HPA on the new deployment.
+-}
+scaleNewDeploymentForStage ::
+    Config ->
+    K8sReleaseContext ->
+    -- | rolloutPercent (traffic %) for this stage — feeds the formula
+    Int ->
+    -- | podPercent from rollout strategy (operator's explicit floor)
+    Int ->
+    StateFlow ()
+scaleNewDeploymentForStage cfg ctx routePct podPct = do
+    rtNow <- getRT
+    wfCfg <- loadWorkflowConfig (appGroup rtNow)
+    let oldDep = serviceName ctx <> "-" <> oldVersion ctx
+        newDep = deploymentName ctx
+        newHpa = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
+        ns = namespace ctx
+    oldStatus <- liftIO $ getDeploymentReplicaStatus cfg ns oldDep
+    newStatus <- liftIO $ getDeploymentReplicaStatus cfg ns newDep
+    let -- (ready, available, desired)
+        (oldReady, _, oldDesired) = case oldStatus of
+            Right tup -> tup
+            Left _ -> (0, 0, 0)
+        (newReady, _, newDesired) = case newStatus of
+            Right tup -> tup
+            Left _ -> (0, 0, 0)
+        currentOld = max 0 oldDesired
+        currentNew = max 0 newDesired
+        oldVersionPods = max 0 oldReady
+        availableNew = max 0 newReady
+        factor = wcPodsCalculationFactor wfCfg
+        -- Strategy target: pods_calculation_factor × oldDesired/100 × routePct
+        --   matches Julia's `podsRolloutRatio × routePercent` (service.jl:17,429).
+        strategyByFactor =
+            ceiling
+                ( factor
+                    * (fromIntegral currentOld :: Double)
+                    / 100.0
+                    * fromIntegral routePct
+                )
+        -- Predict pods needed from current old-version load: take the share of
+        -- old pods proportional to (routePct + 10), capped at 100. The +10
+        -- gives ~10% headroom over a strict proportional share so we don't
+        -- under-provision while traffic is mid-shift.
+        --   Julia: getOldVersionRelationPodsCount (service.jl:117-120, 428).
+        predictedFromOld =
+            let pct = min (routePct + 10) 100
+             in ceiling
+                    ( (fromIntegral oldVersionPods :: Double)
+                        * fromIntegral pct
+                        / 100.0
+                    )
+        -- Operator's explicit floor: podPct% of currentOld, never below 1.
+        operatorFloor = max 1 (ceiling ((fromIntegral currentOld * fromIntegral podPct :: Double) / 100.0))
+        -- Final = max of every input. Never shrink, never under-provision.
+        target =
+            maximum
+                [ currentNew
+                , strategyByFactor
+                , availableNew
+                , predictedFromOld
+                , operatorFloor
+                ]
+    if currentOld <= 0
+        then logInfoS $ "  [pods] Skipping scale (old deployment " <> oldDep <> " has 0/unknown desired replicas)"
+        else
+            if currentNew >= target
+                then
+                    logInfoS $
+                        "  [pods] "
+                            <> newDep
+                            <> " already at "
+                            <> T.pack (show currentNew)
+                            <> " replicas (target="
+                            <> T.pack (show target)
+                            <> ", currentOld="
+                            <> T.pack (show currentOld)
+                            <> ", route%="
+                            <> T.pack (show routePct)
+                            <> "), no-op"
+                else do
+                    let logCtx =
+                            " (target="
+                                <> T.pack (show target)
+                                <> ", inputs: currentNew="
+                                <> T.pack (show currentNew)
+                                <> ", availableNew="
+                                <> T.pack (show availableNew)
+                                <> ", strategyByFactor="
+                                <> T.pack (show strategyByFactor)
+                                <> ", predictedFromOld="
+                                <> T.pack (show predictedFromOld)
+                                <> ", operatorFloor="
+                                <> T.pack (show operatorFloor)
+                                <> ", oldDesired="
+                                <> T.pack (show currentOld)
+                                <> ", oldVersionPods="
+                                <> T.pack (show oldVersionPods)
+                                <> ", route%="
+                                <> T.pack (show routePct)
+                                <> ", podPct%="
+                                <> T.pack (show podPct)
+                                <> ", factor="
+                                <> T.pack (show factor)
+                                <> ")"
+                    -- Prefer HPA min-floor patching; HPA holds the floor against
+                    -- its own scale-down reconciliation cycle.
+                    hpaPresent <- liftIO $ hpaExists cfg ns newHpa
+                    if hpaPresent
+                        then do
+                            let hpaMin = target
+                                hpaMax = max hpaMin (round (fromIntegral target * wcHpaMinMaxFactor wfCfg :: Double))
+                            logInfoS $ "  [pods] Patching HPA " <> newHpa <> " min=" <> T.pack (show hpaMin) <> " max=" <> T.pack (show hpaMax) <> logCtx
+                            _ <- liftIO $ runCmd (buildPatchHpaReplicasCommand cfg ns newHpa hpaMin hpaMax)
+                            pure ()
+                        else do
+                            logInfoS $ "  [pods] No HPA, direct scaling " <> newDep <> " to " <> T.pack (show target) <> logCtx
+                            _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx target)
+                            pure ()
+
 {- | Apply VS rollout with a pessimistic lock around the operation.
 Acquires vs_locked_by before the kubectl call, releases after (success or fail).
-If the lock is already held, fails with an error (caller should retry).
+If the lock is held by another release/editor, retries with exponential backoff
+(500ms → 1s → 2s → 4s → 8s, total ~15s) before giving up. This makes parallel
+releases on the same app group serialize cleanly instead of having the losing
+side abort immediately.
 -}
 runVsRolloutWithLock :: Config -> K8sReleaseContext -> Int -> Int -> Int -> StateFlow ()
 runVsRolloutWithLock cfg ctx maxRetries oldW newW = do
     rt <- getRT
     let lockOwner = "release:" <> releaseId rt
-    result <-
-        withVsLock (appGroup rt) lockOwner $
-            liftIO $
-                applyVirtualServiceRolloutWithRetries maxRetries cfg ctx oldW newW
+        delaysMs = [500, 1000, 2000, 4000, 8000] :: [Int]
+        attempt remainingDelays = do
+            r <- withVsLock (appGroup rt) lockOwner $
+                liftIO $ applyVirtualServiceRolloutWithRetries maxRetries cfg ctx oldW newW
+            case r of
+                Left _ -> case remainingDelays of
+                    [] -> pure r
+                    (d : ds) -> do
+                        liftIO (CC.threadDelay (d * 1000)) -- millis → micros
+                        attempt ds
+                _ -> pure r
+    result <- attempt delaysMs
     case result of
         Left err -> do
             insertReleaseEvent (releaseId rt) "BUSINESS" "VS_LOCK_FAILED" (toJSON err)
@@ -220,6 +416,10 @@ data WorkflowConfig = WorkflowConfig
     , wcHpaDefaultMinPods :: Int
     , wcHpaEnabled :: Bool
     , wcScaleDownOnCompletion :: Bool
+    , wcPodsCalculationFactor :: Double
+    -- ^ Multiplier on (oldDesiredPods × routePercent / 100) for the pod-count
+    -- formula. Matches Julia's pods_calculation_factor (default 1.2). Lets
+    -- operators add a global safety buffer above the strict ratio.
     }
 
 -- | Build a 'WorkflowConfig' by reading every relevant runtime knob once.
@@ -232,6 +432,7 @@ loadWorkflowConfig product_ = do
     hdm <- getHpaDefaultMinPods
     hpa <- isHpaEnabledForProduct product_
     scd <- isScaleDownPodsOnCompletion
+    pcf <- getPodsCalculationFactor
     pure
         WorkflowConfig
             { wcCollectMetricsDelay = cmd
@@ -241,6 +442,7 @@ loadWorkflowConfig product_ = do
             , wcHpaDefaultMinPods = hdm
             , wcHpaEnabled = hpa
             , wcScaleDownOnCompletion = scd
+            , wcPodsCalculationFactor = pcf
             }
 
 {- | Loop bail-out safety: max iterations and max wall-clock duration for
@@ -357,12 +559,16 @@ validatePreconditions = do
     when isNew $
         logInfoS "  New service release: skipping old version validation"
 
-    -- Check internal VS (if exists) and log if found
-    let internalVsName = serviceName ctx <> "-internal-vs"
+    -- Check internal VS (if exists) and cross-validate the version against
+    -- the external VS. Julia: validationInternalVSVersionFromExternalVS
+    -- (service.jl:338-343) — DISCARD on mismatch.
+    let internalVsName = case internalVirtualServiceName ctx of
+            Just t | not (T.null t) -> t
+            _ -> serviceName ctx <> "-internal-vs"
     internalResult <- liftIO $ getVirtualServiceJson cfg (namespace ctx) internalVsName
     case internalResult of
         Left _ -> pure () -- No internal VS, that's fine
-        Right _ -> do
+        Right internalText -> do
             rt' <- getRT
             logInfoS $ "  Internal VS found: " <> internalVsName
             insertReleaseEvent
@@ -370,6 +576,29 @@ validatePreconditions = do
                 "BUSINESS"
                 "INTERNAL_VS_FOUND"
                 (toJSON internalVsName)
+            -- Cross-validate the internal VS subset against the tracker's
+            -- oldVersion (Julia: validationInternalVSVersionFromExternalVS,
+            -- service.jl:338-343). DISCARD on mismatch.
+            unless isNew $ do
+                let host = serviceName ctx
+                    expectedOld = oldVersion ctx -- from K8sReleaseContext
+                    parsed = A.eitherDecode (TLE.encodeUtf8 (TL.fromStrict internalText)) :: Either String Value
+                    internalSubset = case parsed of
+                        Right v -> extractInternalVsPrimarySubset v host
+                        Left _ -> Nothing
+                case internalSubset of
+                    Nothing -> logInfoS "  Internal VS has no matching route for this host — skipping cross-check"
+                    Just subset
+                        | subset == expectedOld -> logInfoS $ "  Internal VS subset matches tracker oldVersion (" <> subset <> ")"
+                        | otherwise -> do
+                            let msg = "Internal VS subset (" <> subset <> ") does not match tracker oldVersion (" <> expectedOld <> ")"
+                            logErrorS $ "  " <> msg
+                            insertReleaseEvent (releaseId rt') "BUSINESS" "VERSION_MISMATCH_INTERNAL_VS" (toJSON msg)
+                            updateRT $ \r -> r{status = DISCARDED}
+                            currentRT <- getRT
+                            currentTS <- gets targetState
+                            _ <- conditionalUpdateTracker currentRT currentTS (releaseStatusText (status rt'))
+                            liftIO $ throwIO $ WorkflowError "vs-internal" msg
 
     logInfoS "  Cluster reachable, namespace exists"
 
@@ -544,11 +773,22 @@ progressiveRollout = do
 
     updateK8sStatus BSProgressiveRollout
 
-    -- Production: sleep(getReleaseStartDelay(conn)) before starting
+    -- Production: sleep(getReleaseStartDelay(conn)) before starting.
     let releaseStartDelay = wcReleaseStartDelay wfCfg
     when (releaseStartDelay > 0) $ do
         logInfoS $ "  Release start delay: " <> T.pack (show releaseStartDelay) <> " seconds"
         threadDelay (Seconds releaseStartDelay)
+    -- Bug fix (round 6 / Julia parity): re-fetch the tracker AFTER the start
+    -- delay so any RM edit (rollout strategy adjust, mode flip, etc.) lands
+    -- before the rollout actually begins. Julia: service.jl:352 — `tracker =
+    -- get_release_from_id(conn, tracker.id)[1]` immediately after sleep.
+    when (releaseStartDelay > 0) $ do
+        mFresh <- findReleaseTracker (releaseId rt)
+        case mFresh of
+            Just (freshRT, freshTS) -> do
+                modify $ \s -> s{releaseTracker = freshRT, targetState = freshTS}
+                logInfoS "  Re-read tracker after release-start delay"
+            Nothing -> pure ()
 
     if isNew
         then do
@@ -591,6 +831,8 @@ progressiveRollout = do
                                 firstNewW = rolloutPercent firstStep
                                 firstOldW = max 0 (100 - firstNewW)
                             logInfoS $ "  Initial rollout step: new=" <> T.pack (show firstNewW) <> "%, cooloff=" <> T.pack (show (cooloffMinutes firstStep)) <> "min"
+                            -- Scale new deployment via the Julia max() formula BEFORE shifting traffic.
+                            scaleNewDeploymentForStage cfg ctx firstNewW (podPercent firstStep)
                             runVsRolloutWithLock cfg ctx (wcMaxK8sRetries wfCfg) firstOldW firstNewW
                             updateK8sField (\k8s -> k8s{trafficPercentage = firstNewW})
 
@@ -874,6 +1116,15 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                                     <> T.pack (show (cooloffMinutes nextStep))
                                                     <> "min"
 
+                                            -- Scale new deployment via the Julia max() formula BEFORE shifting traffic.
+                                            scaleNewDeploymentForStage cfg ctx nextNewW (podPercent nextStep)
+                                            -- LOOKAHEAD: pre-warm next-next stage's HPA min during the upcoming
+                                            -- cooloff so the workflow doesn't pay a cold-start penalty when it
+                                            -- advances. Mirrors Julia's `service.jl:511-515` pattern.
+                                            case drop (currentIndex + 1) (rolloutStrategy freshRT) of
+                                                (lookahead : _) ->
+                                                    scaleNewDeploymentForStage cfg ctx (rolloutPercent lookahead) (podPercent lookahead)
+                                                [] -> pure ()
                                             -- Apply VS rollout with lock
                                             runVsRolloutWithLock cfg ctx (wcMaxK8sRetries wfCfg) nextOldW nextNewW
                                             updateK8sField (\k8s -> k8s{trafficPercentage = nextNewW})

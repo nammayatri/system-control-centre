@@ -97,7 +97,7 @@ const ListRelease: React.FC = () => {
   }, [search]);
 
   const dateRange = useMemo(() => getDateRange(timeRange, customFrom, customTo), [timeRange, customFrom, customTo]);
-  const { data: releases = [], isLoading, refetch } = useReleases(dateRange.from.toISOString(), dateRange.to.toISOString());
+  const { data: releases = [], isLoading, isFetching, refetch } = useReleases(dateRange.from.toISOString(), dateRange.to.toISOString());
 
   // Outside click
   useEffect(() => {
@@ -233,7 +233,7 @@ const ListRelease: React.FC = () => {
               className="h-10 w-10 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors"
               aria-label="Refresh"
             >
-              <RefreshCw className="h-4 w-4" />
+              <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
             </button>
           </div>
           {showMobileFilters && (
@@ -372,8 +372,8 @@ const ListRelease: React.FC = () => {
 
           <div className="flex-1" />
 
-          <button onClick={() => refetch()} className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150">
-            <RefreshCw className="h-4 w-4" />
+          <button onClick={() => refetch()} aria-label="Refresh" className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150">
+            <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
           </button>
 
           <PermissionGate product="autopilot" permission="RELEASE_CREATE">

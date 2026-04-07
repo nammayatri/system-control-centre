@@ -76,23 +76,23 @@ const DeploymentConfig: React.FC = () => {
 
   // ── Queries ──────────────────────────────────────────────────────
 
-  const { data: groupConfigs = [], isLoading: groupsLoading, refetch: refetchGroups } = useQuery({
+  const { data: groupConfigs = [], isLoading: groupsLoading, isFetching: groupsFetching, refetch: refetchGroups } = useQuery({
     queryKey: ['product-configs'],
     queryFn: fetchProductConfigs,
     staleTime: 60000,
   });
 
-  const { data: serviceConfigs = [], isLoading: servicesLoading, refetch: refetchServices } = useQuery({
+  const { data: serviceConfigs = [], isLoading: servicesLoading, isFetching: servicesFetching, refetch: refetchServices } = useQuery({
     queryKey: ['release-configs'],
     queryFn: () => fetchReleaseConfigs(),
     staleTime: 60000,
   });
 
   const isLoading = groupsLoading || servicesLoading;
+  const isFetching = groupsFetching || servicesFetching;
 
-  const refetchAll = () => {
-    refetchGroups();
-    refetchServices();
+  const refetchAll = async () => {
+    await Promise.all([refetchGroups(), refetchServices()]);
   };
 
   // ── Group mutations ──────────────────────────────────────────────
@@ -263,8 +263,8 @@ const DeploymentConfig: React.FC = () => {
               className="pl-9 pr-4 h-10 sm:h-9 w-full sm:w-72 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
             />
           </div>
-          <Button size="icon" variant="ghost" onClick={refetchAll}>
-            <RefreshCw className="w-4 h-4" />
+          <Button size="icon" variant="ghost" onClick={refetchAll} aria-label="Refresh">
+            <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} />
           </Button>
           <PermissionGate product="autopilot" permission="RELEASE_CREATE">
             <Button size="md" onClick={openCreateGroup}>
