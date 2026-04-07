@@ -12,3 +12,15 @@ WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'multi_release_per_pr
 INSERT INTO server_config (type, name, value, enabled, product)
 SELECT 'INT', 'hpa_max_replicas_buffer', '1', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'hpa_max_replicas_buffer');
+
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'pod_readiness_max_attempts', '30', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'pod_readiness_max_attempts');
+
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'pod_readiness_poll_seconds', '10', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'pod_readiness_poll_seconds');
+
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'pod_restart_count_threshold', '3', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'pod_restart_count_threshold');

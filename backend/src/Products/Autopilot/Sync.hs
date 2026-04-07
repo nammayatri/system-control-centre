@@ -34,7 +34,7 @@ import Products.Autopilot.Types
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (
     K8sDeploymentState (context),
-    K8sReleaseContext (dockerImage, revert, syncClusterEnvOverrideData, syncClusterRolloutStrategy, syncXForwardedEmail, syncXPomeriumJwt),
+    K8sReleaseContext (dockerImage, syncClusterEnvOverrideData, syncClusterRolloutStrategy, syncXForwardedEmail, syncXPomeriumJwt),
  )
 import Prelude
 
@@ -71,7 +71,10 @@ buildAuthHeaders cfg mCtx =
                     else ([], "none")
 
 revertValue :: ReleaseTracker -> Int
-revertValue _ = 0
+revertValue tracker = case status tracker of
+    REVERTING -> 1
+    REVERTED -> 1
+    _ -> 0
 
 getSyncRolloutStrategy :: ReleaseTracker -> Maybe K8sReleaseContext -> Value
 getSyncRolloutStrategy tracker mCtx =
@@ -221,8 +224,7 @@ triggerRevertSyncIfEnabled :: (MonadFlow m) => ReleaseTracker -> Maybe TargetSta
 triggerRevertSyncIfEnabled tracker mts = do
     cfg <- getConfig
     let syncUrl = syncClusterUrl cfg
-        mCtx = getK8sContext mts
-        isRevert = maybe False (maybe False (/= 0) . revert) mCtx
+        isRevert = status tracker == REVERTING || status tracker == REVERTED
         syncFlag = maybe False (\t -> T.toLower t == "true") (syncEnabled tracker)
         mGlobalId = globalId tracker
         hasGlobalId = maybe False (not . T.null) mGlobalId

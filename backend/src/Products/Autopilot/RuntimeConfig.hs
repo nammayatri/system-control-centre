@@ -24,6 +24,9 @@ module Products.Autopilot.RuntimeConfig (
     getRevertCooloff,
     getLockExpiryDelayMinutes,
     getMaxK8sRetries,
+    getPodReadinessMaxAttempts,
+    getPodReadinessPollSeconds,
+    getPodRestartCountThreshold,
     -- HPA (MonadFlow versions)
     isHpaEnabledForProduct,
     getHpaTemplate,
@@ -130,6 +133,15 @@ getLockExpiryDelayMinutes = getConfigIntForProduct "lock_expiry_delay_minutes" (
 
 getMaxK8sRetries :: (MonadFlow m) => m Int
 getMaxK8sRetries = getConfigIntForProduct "max_k8s_retries" (Just "autopilot") 3
+
+getPodReadinessMaxAttempts :: (MonadFlow m) => m Int
+getPodReadinessMaxAttempts = getConfigIntForProduct "pod_readiness_max_attempts" (Just "autopilot") 30
+
+getPodReadinessPollSeconds :: (MonadFlow m) => m Int
+getPodReadinessPollSeconds = getConfigIntForProduct "pod_readiness_poll_seconds" (Just "autopilot") 10
+
+getPodRestartCountThreshold :: (MonadFlow m) => m Int
+getPodRestartCountThreshold = getConfigIntForProduct "pod_restart_count_threshold" (Just "autopilot") 3
 
 {- | Check whether HPA scaling is enabled for the given product.
 

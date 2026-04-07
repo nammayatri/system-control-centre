@@ -81,6 +81,9 @@ import Products.Autopilot.RuntimeConfig (
     getCollectMetricsDelay,
     getHpaMinMaxFactor,
     getMaxK8sRetries,
+    getPodReadinessMaxAttempts,
+    getPodReadinessPollSeconds,
+    getPodRestartCountThreshold,
     getReleaseStartDelay,
     isHpaEnabledForProduct,
     isScaleDownPodsOnCompletion,
@@ -881,9 +884,11 @@ monitorHealth = do
     logInfoS "  Waiting for pods to be ready (max 5 min, polling every 10s)"
 
     updateK8sStatus BSStabilize
-    let maxAttempts = 30 :: Int -- 30 * 10s = 300s = 5 minutes
+    maxAttempts <- getPodReadinessMaxAttempts
+    pollSeconds <- getPodReadinessPollSeconds
+    restartThreshold <- getPodRestartCountThreshold
     logEnv <- lift getLoggerEnv
-    waitResult <- liftIO $ waitForPodsReady logEnv cfg ctx maxAttempts
+    waitResult <- liftIO $ waitForPodsReady logEnv cfg ctx maxAttempts pollSeconds restartThreshold
     case waitResult of
         Left errMsg -> do
             logErrorS $ "  Pod readiness check FAILED: " <> errMsg
@@ -963,13 +968,13 @@ postMonitorLoop wfCfg cfg rt iteration loopStart = do
                     postMonitorLoop wfCfg cfg rt (iteration + 1) loopStart
 
 -- | Poll pods until all are Running+Ready or timeout/failure
-waitForPodsReady :: LoggerEnv -> Config -> K8sReleaseContext -> Int -> IO (Either T.Text ())
-waitForPodsReady logEnv cfg ctx maxAttempts = go 0
+waitForPodsReady :: LoggerEnv -> Config -> K8sReleaseContext -> Int -> Int -> Int -> IO (Either T.Text ())
+waitForPodsReady logEnv cfg ctx maxAttempts pollSeconds restartThreshold = go 0
   where
     go attempt
-        | attempt >= maxAttempts = pure (Left "Timeout waiting for pods to be ready (5 min)")
+        | attempt >= maxAttempts = pure (Left "Timeout waiting for pods to be ready")
         | otherwise = do
-            threadDelay (Seconds 10)
+            threadDelay (Seconds pollSeconds)
             (readyCount, _available, desired) <- do
                 result <- getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
                 case result of
@@ -986,7 +991,7 @@ waitForPodsReady logEnv cfg ctx maxAttempts = go 0
                     <> T.pack (show desired)
 
             -- Check for pod-level failures (CrashLoopBackOff, ImagePullBackOff, etc.)
-            podHealth <- checkPodHealthDetailed cfg ctx
+            podHealth <- checkPodHealthDetailed cfg ctx restartThreshold
             case podHealth of
                 Left errMsg -> do
                     logErrorIO logEnv $ "    Pod health check FAILED: " <> errMsg
@@ -1001,8 +1006,8 @@ waitForPodsReady logEnv cfg ctx maxAttempts = go 0
 {- | Detailed pod health check: restart count, CrashLoopBackOff, ImagePullBackOff
 Returns Left errorMessage if pods are unhealthy, Right statusMessage if OK.
 -}
-checkPodHealthDetailed :: Config -> K8sReleaseContext -> IO (Either T.Text T.Text)
-checkPodHealthDetailed cfg ctx = do
+checkPodHealthDetailed :: Config -> K8sReleaseContext -> Int -> IO (Either T.Text T.Text)
+checkPodHealthDetailed cfg ctx restartThreshold = do
     let svcHost = serviceName ctx
         version = newVersion ctx
         ns = namespace ctx
@@ -1023,24 +1028,24 @@ checkPodHealthDetailed cfg ctx = do
         Right (K8sResult jsonStr) ->
             case A.decodeStrict' (TE.encodeUtf8 jsonStr) :: Maybe Value of
                 Nothing -> pure (Right "Could not parse pod JSON (non-fatal)")
-                Just podJson -> pure (analyzePodHealth podJson)
+                Just podJson -> pure (analyzePodHealth restartThreshold podJson)
 
 -- | Analyze pod health from kubectl JSON output
-analyzePodHealth :: Value -> Either T.Text T.Text
-analyzePodHealth (Object root) =
+analyzePodHealth :: Int -> Value -> Either T.Text T.Text
+analyzePodHealth restartThreshold (Object root) =
     case KM.lookup (K.fromText "items") root of
         Just (Array items) ->
-            let podResults = map checkSinglePod (foldr (:) [] items)
+            let podResults = map (checkSinglePod restartThreshold) (foldr (:) [] items)
                 errors = [e | Left e <- podResults]
              in if null errors
                     then Right ("All " <> T.pack (show (length podResults)) <> " pod(s) healthy")
                     else Left (T.intercalate "; " errors)
         _ -> Right "No pods found (non-fatal)"
-analyzePodHealth _ = Right "Unexpected JSON format (non-fatal)"
+analyzePodHealth _ _ = Right "Unexpected JSON format (non-fatal)"
 
 -- | Check a single pod for unhealthy conditions
-checkSinglePod :: Value -> Either T.Text T.Text
-checkSinglePod (Object podObj) =
+checkSinglePod :: Int -> Value -> Either T.Text T.Text
+checkSinglePod restartThreshold (Object podObj) =
     let podName = case KM.lookup (K.fromText "metadata") podObj >>= getObj' "name" of
             Just n -> n
             Nothing -> "unknown-pod"
@@ -1089,10 +1094,10 @@ checkSinglePod (Object podObj) =
                     <> [podName <> ": CrashLoopBackOff detected" | waitingReason == Just "CrashLoopBackOff"]
                     <> [podName <> ": ImagePullBackOff detected" | waitingReason == Just "ImagePullBackOff"]
                     <> [podName <> ": ErrImagePull detected" | waitingReason == Just "ErrImagePull"]
-                    <> [podName <> ": restartCount=" <> T.pack (show restartCount) <> " exceeds threshold (3)" | restartCount > 3]
+                    <> [podName <> ": restartCount=" <> T.pack (show restartCount) <> " exceeds threshold (" <> T.pack (show restartThreshold) <> ")" | restartCount > restartThreshold]
          in errs
     checkContainer _ _ = []
-checkSinglePod _ = Right "unknown"
+checkSinglePod _ _ = Right "unknown"
 
 {- | Cleanup old version.
 
