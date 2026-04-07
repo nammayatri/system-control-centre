@@ -57,6 +57,7 @@ where
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Core.Environment (Flow, forkFlow)
+import Core.Types.Time (Seconds (..))
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Logging (logErrorG, logInfoG, logWarningG)
 import Data.Aeson (Value (..), decode, encode, object, (.=))
@@ -143,6 +144,12 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
                             ]
                         , reqBody = Just (encode bodyObj)
                         , reqLogTag = "slack"
+                        , -- Bug fix (round 7 / E10): cap Slack POST at 5s so the
+                          -- synchronous notifyReleaseCreated/notifyConfigMapCreated
+                          -- /notifyVsEditLocked paths can never wedge an HTTP
+                          -- handler waiting for Slack. On timeout, we return
+                          -- Nothing — the caller logs and proceeds.
+                          reqTimeout = Seconds 5
                         }
             result <- liftIO (httpRaw req)
             case result of

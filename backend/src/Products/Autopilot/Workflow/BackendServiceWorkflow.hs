@@ -310,62 +310,76 @@ scaleNewDeploymentForStage cfg ctx routePct podPct = do
                 , predictedFromOld
                 , operatorFloor
                 ]
-    if currentOld <= 0
-        then logInfoS $ "  [pods] Skipping scale (old deployment " <> oldDep <> " has 0/unknown desired replicas)"
-        else
-            if currentNew >= target
-                then
-                    logInfoS $
-                        "  [pods] "
-                            <> newDep
-                            <> " already at "
-                            <> T.pack (show currentNew)
-                            <> " replicas (target="
-                            <> T.pack (show target)
-                            <> ", currentOld="
-                            <> T.pack (show currentOld)
-                            <> ", route%="
-                            <> T.pack (show routePct)
-                            <> "), no-op"
+    -- Bug fix (round 7 / B7+E1): if currentOld<=0 (old deployment manually
+    -- scaled to 0, never created, or get-status failed), do NOT silently skip
+    -- pod scaling — that leaves the new deployment at whatever the clone
+    -- produced (often replicas=1) and the VS shifts traffic onto a single
+    -- under-provisioned pod. Fall through to operatorFloor which is always
+    -- ≥1, so the workflow always raises at least the operator's explicit
+    -- minimum.
+    -- Bug fix (round 7 / B7+E1): if currentOld<=0, fall through to operatorFloor
+    -- (always ≥1) so we never silently leave the new deployment under-provisioned.
+    let safeTarget = if currentOld <= 0 then max 1 operatorFloor else target
+    if currentNew >= safeTarget
+        then
+            logInfoS $
+                "  [pods] "
+                    <> newDep
+                    <> " already at "
+                    <> T.pack (show currentNew)
+                    <> " replicas (safeTarget="
+                    <> T.pack (show safeTarget)
+                    <> ", currentOld="
+                    <> T.pack (show currentOld)
+                    <> ", route%="
+                    <> T.pack (show routePct)
+                    <> "), no-op"
+        else do
+            let logCtx =
+                    " (safeTarget="
+                        <> T.pack (show safeTarget)
+                        <> ", inputs: currentNew="
+                        <> T.pack (show currentNew)
+                        <> ", availableNew="
+                        <> T.pack (show availableNew)
+                        <> ", strategyByFactor="
+                        <> T.pack (show strategyByFactor)
+                        <> ", predictedFromOld="
+                        <> T.pack (show predictedFromOld)
+                        <> ", operatorFloor="
+                        <> T.pack (show operatorFloor)
+                        <> ", oldDesired="
+                        <> T.pack (show currentOld)
+                        <> ", oldVersionPods="
+                        <> T.pack (show oldVersionPods)
+                        <> ", route%="
+                        <> T.pack (show routePct)
+                        <> ", podPct%="
+                        <> T.pack (show podPct)
+                        <> ", factor="
+                        <> T.pack (show factor)
+                        <> ")"
+            -- Prefer HPA min-floor patching; HPA holds the floor against
+            -- its own scale-down reconciliation cycle.
+            hpaPresent <- liftIO $ hpaExists cfg ns newHpa
+            if hpaPresent
+                then do
+                    let hpaMin = safeTarget
+                        hpaMax = max hpaMin (round (fromIntegral safeTarget * wcHpaMinMaxFactor wfCfg :: Double))
+                    logInfoS $ "  [pods] Patching HPA " <> newHpa <> " min=" <> T.pack (show hpaMin) <> " max=" <> T.pack (show hpaMax) <> logCtx
+                    _ <- liftIO $ runCmd (buildPatchHpaReplicasCommand cfg ns newHpa hpaMin hpaMax)
+                    -- E2 fix: also issue a kubectl scale --replicas hint so the
+                    -- HPA controller doesn't have to wait for its 15-90s
+                    -- reconciliation cycle before honoring the new floor. The
+                    -- HPA still owns the long-term replica count; this is just
+                    -- a one-shot kick to bridge the under-replica window. If
+                    -- the HPA reconciles first, the scale is a no-op.
+                    _ <- liftIO $ runCmd (buildScaleDeploymentCommand cfg ctx safeTarget)
+                    pure ()
                 else do
-                    let logCtx =
-                            " (target="
-                                <> T.pack (show target)
-                                <> ", inputs: currentNew="
-                                <> T.pack (show currentNew)
-                                <> ", availableNew="
-                                <> T.pack (show availableNew)
-                                <> ", strategyByFactor="
-                                <> T.pack (show strategyByFactor)
-                                <> ", predictedFromOld="
-                                <> T.pack (show predictedFromOld)
-                                <> ", operatorFloor="
-                                <> T.pack (show operatorFloor)
-                                <> ", oldDesired="
-                                <> T.pack (show currentOld)
-                                <> ", oldVersionPods="
-                                <> T.pack (show oldVersionPods)
-                                <> ", route%="
-                                <> T.pack (show routePct)
-                                <> ", podPct%="
-                                <> T.pack (show podPct)
-                                <> ", factor="
-                                <> T.pack (show factor)
-                                <> ")"
-                    -- Prefer HPA min-floor patching; HPA holds the floor against
-                    -- its own scale-down reconciliation cycle.
-                    hpaPresent <- liftIO $ hpaExists cfg ns newHpa
-                    if hpaPresent
-                        then do
-                            let hpaMin = target
-                                hpaMax = max hpaMin (round (fromIntegral target * wcHpaMinMaxFactor wfCfg :: Double))
-                            logInfoS $ "  [pods] Patching HPA " <> newHpa <> " min=" <> T.pack (show hpaMin) <> " max=" <> T.pack (show hpaMax) <> logCtx
-                            _ <- liftIO $ runCmd (buildPatchHpaReplicasCommand cfg ns newHpa hpaMin hpaMax)
-                            pure ()
-                        else do
-                            logInfoS $ "  [pods] No HPA, direct scaling " <> newDep <> " to " <> T.pack (show target) <> logCtx
-                            _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx target)
-                            pure ()
+                    logInfoS $ "  [pods] No HPA, direct scaling " <> newDep <> " to " <> T.pack (show safeTarget) <> logCtx
+                    _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx safeTarget)
+                    pure ()
 
 {- | Apply VS rollout with a pessimistic lock around the operation.
 Acquires vs_locked_by before the kubectl call, releases after (success or fail).
@@ -1118,13 +1132,13 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
 
                                             -- Scale new deployment via the Julia max() formula BEFORE shifting traffic.
                                             scaleNewDeploymentForStage cfg ctx nextNewW (podPercent nextStep)
-                                            -- LOOKAHEAD: pre-warm next-next stage's HPA min during the upcoming
-                                            -- cooloff so the workflow doesn't pay a cold-start penalty when it
-                                            -- advances. Mirrors Julia's `service.jl:511-515` pattern.
-                                            case drop (currentIndex + 1) (rolloutStrategy freshRT) of
-                                                (lookahead : _) ->
-                                                    scaleNewDeploymentForStage cfg ctx (rolloutPercent lookahead) (podPercent lookahead)
-                                                [] -> pure ()
+                                            -- Round 7 audit B1/B2: removed the lookahead pre-warm. It
+                                            -- patched the next-next stage's HPA min during the current
+                                            -- stage's cooloff, over-provisioning capacity (and bill) for
+                                            -- the entire cooloff window. Per-stage scaling is sufficient
+                                            -- because HPA reconciles upward fast enough; the cold-start
+                                            -- penalty Julia worried about does not apply when we issue
+                                            -- the explicit kubectl scale hint after each HPA patch (E2 fix).
                                             -- Apply VS rollout with lock
                                             runVsRolloutWithLock cfg ctx (wcMaxK8sRetries wfCfg) nextOldW nextNewW
                                             updateK8sField (\k8s -> k8s{trafficPercentage = nextNewW})
@@ -1279,19 +1293,33 @@ postMonitorLoop wfCfg cfg rt iteration loopStart = do
                         "POST_MONITORING_RESULT"
                         (object ["decision" .= ("Continue" :: T.Text)])
                 Abort -> do
-                    logErrorS "[WORKFLOW] Post-monitoring: ABORT"
+                    -- Bug fix (round 7 / E4): Post-monitoring runs AFTER traffic
+                    -- already shifted to 100% on the new version. Auto-rolling
+                    -- back the VS to the OLD version at this point would kill
+                    -- live traffic on a deployment that just passed all stages.
+                    -- Julia treats post-monitoring abort as alert + leave at
+                    -- 100%, requiring an operator to decide. We do the same:
+                    -- emit a loud Slack alert + DECISION_ENGINE event + add a
+                    -- "needs operator attention" tracker hint, but let the
+                    -- workflow complete successfully so VS stays at 100%.
+                    logErrorS "[WORKFLOW] Post-monitoring ABORT — alerting (NOT auto-rolling back, traffic stays at 100%)"
                     insertReleaseEvent
                         (releaseId rt)
                         "DECISION_ENGINE"
                         "POST_MONITORING_RESULT"
-                        (object ["decision" .= ("Abort" :: T.Text), "reason" .= drReason hsResult])
-                    lift $ notifyGenericThreadMessage rt ("Post-monitoring ABORT: " <> maybe "no reason" id (drReason hsResult))
-                    updateRT $ \r -> r{status = ABORTING}
-                    currentRT <- getRT
-                    currentTS <- gets targetState
-                    -- CAS with the snapshot we read at the top of the loop iteration.
-                    casUpdateOrBail "postMonitorLoop/abort" currentRT currentTS (status rt)
-                    liftIO $ throwIO $ WorkflowError "monitoring" "Post-monitoring ABORT"
+                        ( object
+                            [ "decision" .= ("Abort" :: T.Text)
+                            , "reason" .= drReason hsResult
+                            , "action" .= ("alert_only_no_rollback" :: T.Text)
+                            ]
+                        )
+                    lift $
+                        notifyGenericThreadMessage
+                            rt
+                            ( "🚨 POST-MONITORING ABORT (NOT auto-reverted — traffic at 100%): "
+                                <> maybe "no reason" id (drReason hsResult)
+                                <> " — operator must decide whether to revert manually."
+                            )
                 Wait -> do
                     threadDelay (Seconds (wcCollectMetricsDelay wfCfg))
                     postMonitorLoop wfCfg cfg rt (iteration + 1) loopStart

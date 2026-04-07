@@ -62,11 +62,35 @@ vsStatusCreated = "CREATED"
 vsStatusApplied = "APPLIED"
 vsStatusDiscarded = "DISCARDED"
 
-{- | Flip every VS-edit tracker row that is currently LOCKED for the given
-app_group to UNLOCKED. Used by the force-unlock paths and the expired-lock
-sweep so the tracker bookkeeping stays in sync with the deployment_config
-source-of-truth lock state. Without this, every released lock leaves stale
-LOCKED tracker rows behind.
+{- | Atomically clear the deployment_config VS lock AND flip every LOCKED
+VS-edit tracker row to UNLOCKED for the given app_group, in a single
+transaction. Round 7 audit B3: doing the two updates in separate
+transactions risks half-state if the process dies between them
+(deployment_config.vs_locked_by=NULL while tracker rows still LOCKED).
+The single txn guarantees both succeed or neither does.
+-}
+forceUnlockAppGroupTransactional :: Text -> Flow ()
+forceUnlockAppGroupTransactional ag = do
+    db <- getDBEnv
+    liftIO $ withConn db $ \conn -> PG.withTransaction conn $ do
+        _ <-
+            PG.execute
+                conn
+                "UPDATE deployment_config \
+                \SET vs_locked_by = NULL, vs_lock_timestamp = NULL \
+                \WHERE app_group = ? AND service IS NULL"
+                (PG.Only ag)
+        _ <-
+            PG.execute
+                conn
+                "UPDATE release_tracker \
+                \SET status = 'UNLOCKED', last_updated = NOW(), end_time = NOW() \
+                \WHERE category = 'VSEdit' AND status = 'LOCKED' AND app_group = ?"
+                (PG.Only ag)
+        pure ()
+
+{- | Legacy single-table helper kept for the periodic expired-lock sweep
+which already updates deployment_config separately in its own txn.
 -}
 unlockOrphanLockedTrackersForAppGroup :: Text -> Flow ()
 unlockOrphanLockedTrackersForAppGroup ag = do
@@ -502,12 +526,9 @@ forceUnlockVsEditTrackerH _ap VsUnlockReq{..} = do
                     case mLock of
                         Nothing -> pure $ APIResponse "ERROR" ("No active lock found for app_group=" <> p)
                         Just _existing -> do
-                            updateVsLockedBy p Nothing
-                            -- Bug fix: also flip any orphan LOCKED tracker rows for this
-                            -- app group to UNLOCKED. The cluster lock is the source of
-                            -- truth; the tracker row is bookkeeping. Without this the
-                            -- LOCKED rows linger forever after every force-unlock.
-                            unlockOrphanLockedTrackersForAppGroup p
+                            -- Round 7 audit B3: single-transaction force-unlock
+                            -- (deployment_config + tracker rows in one txn).
+                            forceUnlockAppGroupTransactional p
                             notifyVsEditUnlocked "" p ""
                             pure $ APIResponse "SUCCESS" ("VS force-unlocked for app_group=" <> p)
 
@@ -570,12 +591,18 @@ revertVsEditTrackerH _ap tid = do
                                                             _ <- releaseVsLockIfOwner (S.rtAppGroup orig) (S.rtCreatedBy orig <> "-revert")
                                                             pure $ APIResponse "ERROR" ("K8s apply failed during revert: " <> err)
                                                         Right () -> do
-                                                            -- Mark revert tracker APPLIED + release lock
+                                                            -- Mark revert tracker APPLIED + release lock.
+                                                            -- Round 7 audit B8: surface a CAS miss instead of swallowing it
+                                                            -- silently. The VS itself has already been kubectl-applied so
+                                                            -- the side effect is real either way; the API response should
+                                                            -- tell the operator if the audit row drifted.
                                                             let appliedRow = revertRow{S.rtStatus = "APPLIED", S.rtUpdatedAt = now}
-                                                            _ <- conditionalUpdateTrackerRow appliedRow "CREATED"
+                                                            casOk <- conditionalUpdateTrackerRow appliedRow "CREATED"
                                                             _ <- releaseVsLockIfOwner (S.rtAppGroup orig) (S.rtCreatedBy orig <> "-revert")
                                                             notifyVsEditApplied newTid (S.rtAppGroup orig) (S.rtService orig) (S.rtCreatedBy orig <> "-revert")
-                                                            pure $ APIResponse "SUCCESS" ("VS edit reverted. New tracker: " <> newTid)
+                                                            if casOk
+                                                                then pure $ APIResponse "SUCCESS" ("VS edit reverted. New tracker: " <> newTid)
+                                                                else pure $ APIResponse "WARNING" ("VS edit applied to K8s but tracker row was modified concurrently. New tracker: " <> newTid)
 
 {- | Fetch the current live VirtualService JSON from K8s
 Uses the deployment_config's vs_name (e.g. "atlas-vs"), NOT the service name

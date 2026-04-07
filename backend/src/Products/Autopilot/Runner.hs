@@ -379,8 +379,20 @@ validateRunningVersion cfg rt mts = do
                 else do
                     result <- getPrimarySubsetFromVirtualService cfg ns vsName' svcHost
                     case result of
-                        Left _err -> pure Nothing
-                        Right Nothing -> pure Nothing
+                        -- Bug fix (round 7 / G7): Julia DISCARDs on VS lookup
+                        -- failure (service.jl:324) — silently treating an
+                        -- unknown VS state as "OK to proceed" can pick up a
+                        -- release that targets a deployment whose live state
+                        -- is unknown, leading to traffic shifts in the wrong
+                        -- direction. Surface the error so the runner discards.
+                        Left err ->
+                            pure $
+                                Just $
+                                    "Could not read VirtualService " <> vsName' <> " in " <> ns <> ": " <> T.pack (show err)
+                        Right Nothing ->
+                            pure $
+                                Just $
+                                    "VirtualService " <> vsName' <> " has no primary subset for host " <> svcHost
                         Right (Just runningVersion) ->
                             if runningVersion == trackerOldVer
                                 then pure Nothing

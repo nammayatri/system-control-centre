@@ -795,9 +795,12 @@ updateTrackerH _ap rid req = do
                                                     -- Bug fix #3 (round 4): re-attach the workflow on PAUSED→INPROGRESS.
                                                     -- Backend restart while paused leaves the in-memory worker dead.
                                                     -- The user-facing resume must re-fork dispatchWorkflow so the
-                                                    -- rollout continues. If a worker is still alive (normal in-process
-                                                    -- pause/resume) the second worker will compete on conditional updates
-                                                    -- but cannot corrupt state — at worst a few duplicate Slack pings.
+                                                    -- rollout continues. Race-safety (round 7 audit B6 verified):
+                                                    -- the conditionalUpdateTracker CAS above is the gate — only the
+                                                    -- single caller that wins the atomic PAUSED→INPROGRESS UPDATE
+                                                    -- reaches this fork. Rapid 5x resume calls all see PAUSED, all
+                                                    -- attempt the CAS, exactly one transitions, the other 4 get
+                                                    -- staleTrackerError. So no fork-storm is possible here.
                                                     when (oldStatus == PAUSED && newStatus == INPROGRESS) $
                                                         void $ forkFlow $ do
                                                             r <- dispatchWorkflow updatedTracker updatedTargetState
@@ -1337,11 +1340,25 @@ fastForwardH ap rid req = do
                     -- advanced yet (it polls every release_watch_delay seconds). Return a
                     -- friendly no-op so we don't pollute the event log with duplicate
                     -- FAST_FORWARD entries when the user clicks twice quickly.
+                    -- BUT (round 7 audit B5): if the previous fast-forward never landed
+                    -- (workflow stuck for >5 minutes since the manualOverride was set),
+                    -- ALLOW a fresh fast-forward attempt so the user can recover from a
+                    -- wedged workflow without aborting + restarting the whole release.
+                    nowFF <- liftIO getCurrentTime
                     let history = NT.rolloutHistory tracker
-                        currentStepAlreadyForwarded = case history of
-                            [] -> False
-                            xs -> historyManualOverride (last xs)
-                    if currentStepAlreadyForwarded
+                        (currentStepAlreadyForwarded, stuckTooLong) = case history of
+                            [] -> (False, False)
+                            xs ->
+                                let lastH = last xs
+                                    forwarded = historyManualOverride lastH
+                                    elapsedMin =
+                                        round
+                                            ( realToFrac (diffUTCTime nowFF (historyStartedAt lastH)) / 60.0
+                                                :: Double
+                                            ) ::
+                                            Int
+                                 in (forwarded, elapsedMin >= 5)
+                    if currentStepAlreadyForwarded && not stuckTooLong
                         then pure $ APIResponse "SUCCESS" "Fast forward already in progress for current stage; runner will advance on next poll."
                         else do
                             -- Fast-forward: match production Julia logic exactly.
