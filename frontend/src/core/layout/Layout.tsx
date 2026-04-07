@@ -27,26 +27,25 @@ const Layout: React.FC = () => {
         />
       </div>
 
-      {/* Mobile drawer */}
+      {/* Mobile drawer — only mount when open so the Sidebar's data hooks
+          don't fire alongside the desktop instance (caused duplicate API
+          calls on every navigation). */}
       {mobileOpen && (
-        <div
-          className="md:hidden fixed inset-0 z-40 bg-black/50 animate-in fade-in-0 duration-200"
-          onClick={() => setMobileOpen(false)}
-        />
+        <>
+          <div
+            className="md:hidden fixed inset-0 z-40 bg-black/50 animate-in fade-in-0 duration-200"
+            onClick={() => setMobileOpen(false)}
+          />
+          <div className="md:hidden fixed inset-y-0 left-0 z-50 w-[280px] max-w-[85vw] animate-in slide-in-from-left duration-200 ease-out">
+            <Sidebar
+              collapsed={false}
+              onToggle={() => setMobileOpen(false)}
+              onItemClick={() => setMobileOpen(false)}
+              forceExpanded
+            />
+          </div>
+        </>
       )}
-      <div
-        className={cn(
-          'md:hidden fixed inset-y-0 left-0 z-50 w-[280px] max-w-[85vw] transition-transform duration-200 ease-out',
-          mobileOpen ? 'translate-x-0' : '-translate-x-full'
-        )}
-      >
-        <Sidebar
-          collapsed={false}
-          onToggle={() => setMobileOpen(false)}
-          onItemClick={() => setMobileOpen(false)}
-          forceExpanded
-        />
-      </div>
 
       <div className="flex-1 flex flex-col h-screen overflow-hidden min-w-0">
         <TopBar onOpenMobileNav={() => setMobileOpen(true)} />

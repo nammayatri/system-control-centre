@@ -11,6 +11,7 @@ module Shared.Config.Runtime (
     getConfigDouble,
     getConfigDoubleForProduct,
     getConfigText,
+    getConfigTextForProduct,
 )
 where
 
@@ -57,6 +58,9 @@ getConfigDoubleForProduct name mProduct fallback = withDb $ \db -> do
         Nothing -> fallback
 
 getConfigText :: (MonadFlow m) => Text -> Text -> m Text
-getConfigText name fallback = withDb $ \db -> do
-    v <- getEnabledServerConfigValueForProduct_io db name Nothing
+getConfigText name fallback = getConfigTextForProduct name Nothing fallback
+
+getConfigTextForProduct :: (MonadFlow m) => Text -> Maybe Text -> Text -> m Text
+getConfigTextForProduct name mProduct fallback = withDb $ \db -> do
+    v <- getEnabledServerConfigValueForProduct_io db name mProduct
     pure $ fromMaybe fallback v

@@ -59,7 +59,15 @@ const EditVS: React.FC = () => {
     mutationFn: () => lockAndEditVS({ appGroup, service, env, vsName: '', lockedBy: lockerIdentity, oldVsData: vsData }),
     onSuccess: (data) => {
       toast.success('VS locked for editing');
-      setTrackerId(data.message?.includes('Tracker ID:') ? data.message.split('Tracker ID: ')[1] : data.id);
+      const resolvedId = data.message?.includes('Tracker ID:')
+        ? data.message.split('Tracker ID: ')[1]?.trim()
+        : data.id;
+      if (!resolvedId) {
+        toast.error('VS locked but tracker ID not returned — try force-unlock and retry');
+        setIsLocked(false);
+        return;
+      }
+      setTrackerId(resolvedId);
       setIsLocked(true);
     },
     onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to lock VS'),

@@ -9,7 +9,7 @@ import type { ProductConfig } from '../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
 import { DEFAULT_ENV, AVAILABLE_ENVS } from '../../../lib/constants';
-import { Trash2, Lock, ChevronDown } from 'lucide-react';
+import { Trash2, Lock, ChevronDown, Info } from 'lucide-react';
 import { toast } from 'sonner';
 
 // Valid status transitions for update mode (UPPERCASE canonical)
@@ -38,8 +38,8 @@ const CreateRelease: React.FC = () => {
 
   const [formData, setFormData] = useState({
     appGroup: '', service: '', env: DEFAULT_ENV, old_version: '', new_version: '', docker_image: '', change_log: '',
-    status: 'CREATED', mode: 'AUTO', priority: '0', info: '', custom_pods_scale_down_days: '1',
-    cluster: 'MOVING_TECH', scale_down_delay: '1',
+    status: 'CREATED', mode: 'AUTO', priority: '0', info: '',
+    cluster: 'MOVING_TECH',
     cronjob_suspend: false, description: '', schedule_time: '',
     // deploy_file_path, vs_file_path, dr_file_path removed (backend still accepts via API)
   });
@@ -131,9 +131,7 @@ const CreateRelease: React.FC = () => {
         mode: existingRelease.mode || 'AUTO',
         priority: String(existingRelease.priority ?? 0),
         info: existingRelease.info || '',
-        custom_pods_scale_down_days: String(existingRelease.custom_pod_scaledown_days ?? 1),
         cluster: existingRelease.release_context?.cluster || 'MOVING_TECH',
-        scale_down_delay: String(existingRelease.release_context?.pods_scale_down_delay ?? 1),
         cronjob_suspend: existingRelease.cronjob_suspend || false,
         description: existingRelease.description || '',
         schedule_time: existingRelease.schedule_time || '',
@@ -172,7 +170,11 @@ const CreateRelease: React.FC = () => {
             if (Array.isArray(parsed) && parsed.length > 0) setStages(parsed);
           } catch (e) { console.error('Failed to parse stages', e); }
         }
-      }).catch(() => { setError('Failed to load clone details'); });
+      }).catch((err: any) => {
+        const msg = err?.response?.data?.message || err.message || 'Failed to load clone details';
+        setError(msg);
+        toast.error(msg);
+      });
     }
   }, [isClone, id]);
 
@@ -214,8 +216,9 @@ const CreateRelease: React.FC = () => {
             toast.error('Could not load saved rollout stages for this service — using defaults');
           }
         }
-      }).catch((e) => {
+      }).catch((e: any) => {
         console.error('[CreateRelease] fetchReleaseConfigs failed:', e);
+        toast.error('Could not load rollout config for this service — using defaults');
       });
     }
   }, [formData.appGroup, formData.service, isClone, isUpdate]);
@@ -226,7 +229,13 @@ const CreateRelease: React.FC = () => {
   // Fetch envs
   useEffect(() => {
     if (isEnvSwitch && formData.appGroup && formData.service && formData.env) {
-      fetchEnvs(formData.appGroup, formData.env, formData.service).then(res => setEnvData(JSON.stringify(res, null, 2))).catch(console.error);
+      fetchEnvs(formData.appGroup, formData.env, formData.service)
+        .then(res => setEnvData(JSON.stringify(res, null, 2)))
+        .catch((e: any) => {
+          console.error(e);
+          toast.error('Failed to load env data');
+          setIsEnvSwitch(false);
+        });
     }
   }, [isEnvSwitch, formData.appGroup, formData.service, formData.env]);
 
@@ -368,7 +377,6 @@ const CreateRelease: React.FC = () => {
             priority: parseInt(formData.priority, 10) || 0,
             scheduleTime: formData.schedule_time || null,
             dockerImage: formData.docker_image,
-            podsScaleDownDelay: parseFloat(formData.scale_down_delay) || 1.0,
             info: formData.info,
             rolloutStrategy: stages.map(s => ({
               rolloutPercent: s.rollout,
@@ -379,7 +387,7 @@ const CreateRelease: React.FC = () => {
         });
         navigate(`/releases/${id}`);
       } catch (err: any) {
-        setError(err.message || 'Failed to update release');
+        setError(err?.response?.data?.message || err.message || 'Failed to update release');
       }
       return;
     }
@@ -399,7 +407,6 @@ const CreateRelease: React.FC = () => {
       new_version: formData.new_version, docker_image: formData.docker_image,
       change_log: formData.change_log, status: formData.status, mode: formData.mode,
       priority: parseInt(formData.priority, 10) || 0, info: formData.info,
-      pods_scale_down_delay: parseFloat(formData.scale_down_delay) || 1.0,
       cronjob_suspend: formData.cronjob_suspend,
       description: formData.description, schedule_time: formData.schedule_time,
       cluster: formData.cluster, new_service: false, rollout_strategy: stages,
@@ -415,18 +422,23 @@ const CreateRelease: React.FC = () => {
     try {
       if (selectedServices.length === 1) {
         await createMutation.mutateAsync({ isNewService, payload: buildPayload(selectedServices[0]) });
-        toast.success('Release created');
       } else {
-        let created = 0;
+        const failed: string[] = [];
         for (const svc of selectedServices) {
-          await createMutation.mutateAsync({ isNewService, payload: buildPayload(svc) });
-          created++;
+          try {
+            await createMutation.mutateAsync({ isNewService, payload: buildPayload(svc) });
+          } catch (err: any) {
+            failed.push(`${svc}: ${err?.response?.data?.message || err.message || 'failed'}`);
+          }
         }
-        toast.success(`Created ${created} releases`);
+        if (failed.length > 0) {
+          setError(`${selectedServices.length - failed.length} of ${selectedServices.length} releases created. Failed:\n${failed.join('\n')}`);
+          return;
+        }
       }
       navigate('/releases');
     } catch (err: any) {
-      setError(err.message || 'Failed to create release');
+      setError(err?.response?.data?.message || err.message || 'Failed to create release');
     }
   };
 
@@ -460,7 +472,25 @@ const CreateRelease: React.FC = () => {
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
       <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-6">
-        {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm">{error}</div>}
+        {error && (() => {
+          // Parse an in-flight release ID from messages like:
+          // "Service X in app group Y already has an in-flight release <uuid> (status=...)"
+          const uuidMatch = error.match(/in-flight release ([0-9a-f-]{36})/i);
+          const inFlightId = uuidMatch?.[1];
+          return (
+            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm flex items-start justify-between gap-3">
+              <span>{error}</span>
+              {inFlightId && (
+                <a
+                  href={`/releases/${inFlightId}`}
+                  className="shrink-0 underline font-medium whitespace-nowrap hover:text-red-900"
+                >
+                  View release →
+                </a>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Main Form Card */}
         <div className="bg-white rounded-xl border border-zinc-200">
@@ -501,7 +531,6 @@ const CreateRelease: React.FC = () => {
                 </select>
               </div>
               <div><FieldLabel>Info</FieldLabel><input type="text" name="info" value={formData.info} onChange={handleInputChange} placeholder="Any Valid JSON" className={inputClass} /></div>
-              <div><FieldLabel>Scale Down Days</FieldLabel><select name="custom_pods_scale_down_days" value={formData.custom_pods_scale_down_days} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>{[1,2,3,4,5,6].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
             </div>
 
             {/* Col 2 */}
@@ -604,7 +633,6 @@ const CreateRelease: React.FC = () => {
                 <input type="text" name="change_log" value={formData.change_log} onChange={handleInputChange}
                   required={!isUpdate} placeholder="v1.0.0" className={inputClass} />
               </div>
-              <div><FieldLabel>Scale Down Delay (hrs)</FieldLabel><input type="text" name="scale_down_delay" value={formData.scale_down_delay} onChange={handleInputChange} placeholder="1" className={inputClass} /></div>
             </div>
           </div>
 
@@ -629,7 +657,12 @@ const CreateRelease: React.FC = () => {
                     <th className="py-2 px-3 w-12">#</th>
                     <th className="py-2 px-3">Rollout %</th>
                     <th className="py-2 px-3">Cooloff (min)</th>
-                    <th className="py-2 px-3">Pods</th>
+                    <th className="py-2 px-3">
+                      <span className="flex items-center gap-1">
+                        Min Pods
+                        <span title="Minimum number of new pods at this stage. Actual count = max(this floor, factor-based target, old-pod prediction). Default 2 = at least 2 pods." className="cursor-help text-zinc-400 hover:text-zinc-600"><Info className="w-3 h-3" /></span>
+                      </span>
+                    </th>
                     <th className="py-2 px-3 w-16"></th>
                   </tr>
                 </thead>
@@ -754,7 +787,12 @@ const CreateRelease: React.FC = () => {
                           <th className="py-2 px-3 w-12">#</th>
                           <th className="py-2 px-3">Rollout %</th>
                           <th className="py-2 px-3">Cooloff</th>
-                          <th className="py-2 px-3">Pods</th>
+                          <th className="py-2 px-3">
+                            <span className="flex items-center gap-1">
+                              Min Pods
+                              <span title="Minimum number of new pods at this stage. Default 2 = at least 2 pods." className="cursor-help text-zinc-400 hover:text-zinc-600"><Info className="w-3 h-3" /></span>
+                            </span>
+                          </th>
                           <th className="py-2 px-3 w-16"></th>
                         </tr>
                       </thead>

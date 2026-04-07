@@ -80,9 +80,10 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
       toast.success(isUpdate ? 'ConfigMap updated' : 'ConfigMap created');
       navigate('/configmap');
     },
-    onError: (err: Error) => {
-      setError(err.message || `Failed to ${isUpdate ? 'update' : 'create'} ConfigMap`);
-      toast.error(err.message || `Failed to ${isUpdate ? 'update' : 'create'} ConfigMap`);
+    onError: (err: any) => {
+      const msg = err?.response?.data?.message || err.message || `Failed to ${isUpdate ? 'update' : 'create'} ConfigMap`;
+      setError(msg);
+      toast.error(msg);
     },
   });
 
@@ -103,7 +104,11 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
           const raw = typeof cm === 'string' ? cm : JSON.stringify(cm, null, 2);
           setSecondaryContent(jsonConfigToYaml(raw));
         })
-        .catch(() => setSecondaryContent(''))
+        .catch((err: any) => {
+          toast.error('Failed to load secondary cluster config — check sync_cluster setting');
+          console.error('[CreateConfigMap] secondary fetch failed:', err);
+          setSecondaryContent('');
+        })
         .finally(() => setSecondaryLoading(false));
     }
   }, [form.appGroup, form.name, syncCluster]);
@@ -113,7 +118,11 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
     if (!form.appGroup) return;
     fetchConfigMapNames(form.appGroup)
       .then(names => setNamesOptions(Array.isArray(names) ? names : []))
-      .catch(() => setNamesOptions([]));
+      .catch((err: any) => {
+        toast.error('Failed to load config map names');
+        console.error('[CreateConfigMap] fetchConfigMapNames failed:', err);
+        setNamesOptions([]);
+      });
   }, [form.appGroup]);
 
   // Load file content when name is selected
@@ -124,7 +133,11 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
         const content = typeof raw === 'string' ? raw : '';
         setFileContent(jsonConfigToYaml(content));
       })
-      .catch(() => setFileContent(''));
+      .catch((err: any) => {
+        toast.error('Failed to load file content');
+        console.error('[CreateConfigMap] fetchConfigMapData failed:', err);
+        setFileContent('');
+      });
   }, [form.appGroup, form.name]);
 
   // For update/clone: pre-populate form
@@ -146,7 +159,11 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
         mode: d.mode || 'AUTO',
       });
       setFileContent(jsonConfigToYaml(d.file || ''));
-    }).catch(console.error);
+    }).catch((err: any) => {
+      const msg = err?.response?.data?.message || err.message || 'Failed to load ConfigMap';
+      toast.error(msg);
+      navigate('/configmap');
+    });
   }, [id, cloneId, isUpdate]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {

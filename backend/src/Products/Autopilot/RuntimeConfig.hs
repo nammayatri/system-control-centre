@@ -30,6 +30,8 @@ module Products.Autopilot.RuntimeConfig (
     getRevertCooloff,
     getLockExpiryDelayMinutes,
     getMaxK8sRetries,
+    getCkhClusterName,
+    getDEPostMonitoringTimeout,
     getPodReadinessMaxAttempts,
     getPodReadinessPollSeconds,
     getPodRestartCountThreshold,
@@ -56,6 +58,7 @@ import Shared.Config.Runtime (
     getConfigBoolForProduct,
     getConfigDoubleForProduct,
     getConfigIntForProduct,
+    getConfigTextForProduct,
  )
 import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct_io)
 
@@ -207,6 +210,21 @@ getMaxJobCompletionHours = getConfigIntForProduct "max_job_completion_hours" (Ju
 
 getRevertCooloff :: (MonadFlow m) => m Int
 getRevertCooloff = getConfigIntForProduct "revert_cooloff" (Just "autopilot") 1
+
+{- | Julia's `ckh_cluster_name` global. Sent in the AB initiate
+placeholders.cluster field — picks which ClickHouse cluster the engine
+queries. Per CONTEXT.md the engine is external; this is just an opaque
+string we forward.
+-}
+getCkhClusterName :: (MonadFlow m) => m T.Text
+getCkhClusterName = getConfigTextForProduct "ckh_cluster_name" (Just "autopilot") ""
+
+{- | Julia's `getDEPostMonitoringTimeout` — sent as `self_closing_time` in
+the post-monitoring AB initiate body so the engine self-stops if SC
+crashes mid-monitoring. Default 1800s = 30 min, matching Julia.
+-}
+getDEPostMonitoringTimeout :: (MonadFlow m) => m Int
+getDEPostMonitoringTimeout = getConfigIntForProduct "de_post_monitoring_timeout" (Just "autopilot") 1800
 
 getLockExpiryDelayMinutes :: (MonadFlow m) => m Int
 getLockExpiryDelayMinutes = getConfigIntForProduct "lock_expiry_delay_minutes" (Just "autopilot") 15

@@ -319,6 +319,16 @@ insertReleaseTrackerSafe trk ts = do
 
 createReleaseHBodyAfterGuard :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseHBodyAfterGuard mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
+    -- G2 (Julia parity): reject malformed rollout strategies at create time
+    -- so operators get a friendly 4xx instead of a workflow that explodes
+    -- mid-rollout. validateStrategyShape enforces non-empty, monotonic
+    -- percents in [0,100], non-negative cooloffs, and a terminal 100% stage.
+    case validateStrategyShape rolloutStrategy of
+        Left errMsg -> pure $ APIResponse "ERROR" ("Invalid rollout strategy: " <> errMsg)
+        Right () -> createReleaseHBodyAfterStrategyCheck mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..}
+
+createReleaseHBodyAfterStrategyCheck :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
+createReleaseHBodyAfterStrategyCheck mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
     cfg <- getConfig
     p <- findProductByName appGroup
     s <- findServiceByProductAndName appGroup service

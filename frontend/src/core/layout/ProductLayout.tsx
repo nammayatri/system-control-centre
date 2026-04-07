@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
 import { PRODUCT_REGISTRY, type ProductDefinition } from '../../products/registry';
 import {
   Rocket, FileText, Settings, Package, Layers,
@@ -175,17 +174,12 @@ const ProductLayout: React.FC = () => {
       <div className="flex-1 flex flex-col h-screen overflow-hidden min-w-0">
         <TopBar onOpenMobileNav={() => setMobileOpen(true)} />
         <main className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={location.pathname}
-              initial={{ opacity: 0, y: 4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2, ease: 'easeOut' }}
-            >
-              <Outlet />
-            </motion.div>
-          </AnimatePresence>
+          {/* Outlet is rendered directly — wrapping it in AnimatePresence with
+              key={location.pathname} caused the destination page to mount
+              twice during a route transition (once in the exiting motion.div,
+              once in the entering one — both <Outlet /> resolve to the new
+              route), firing every page-level useQuery twice. */}
+          <Outlet />
         </main>
       </div>
     </div>

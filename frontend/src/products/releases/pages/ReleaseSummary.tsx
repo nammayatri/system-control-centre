@@ -19,7 +19,7 @@ import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import {
   Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap,
   Search, Trash2, ChevronRight as ChevronRightIcon, FastForward, RotateCw,
-  ExternalLink, Network, BarChart3, Pencil, Lock, Save,
+  ExternalLink, Network, BarChart3, Pencil, Lock, Save, Info,
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
@@ -347,7 +347,12 @@ const RolloutHistoryInline: React.FC<{ history: RolloutHistoryEvent[] }> = ({ hi
               <th className="py-2 px-3">HS Decision</th>
               <th className="py-2 px-3">Manual Override</th>
               <th className="py-2 px-3">Cooloff (min)</th>
-              <th className="py-2 px-3">Pods %</th>
+              <th className="py-2 px-3">
+                <span className="flex items-center gap-1">
+                  Min Pods
+                  <span title="Minimum number of new pods at this stage. Actual count = max(this floor, factor-based target, old-pod prediction). Default 2 = at least 2 pods." className="cursor-help text-zinc-400 hover:text-zinc-600"><Info className="w-3 h-3" /></span>
+                </span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -373,7 +378,7 @@ const RolloutHistoryInline: React.FC<{ history: RolloutHistoryEvent[] }> = ({ hi
                   </Badge>
                 </td>
                 <td className="py-2 px-3 font-mono">{h.cooloff}m</td>
-                <td className="py-2 px-3 font-mono">{h.pods}%</td>
+                <td className="py-2 px-3 font-mono">{h.pods}</td>
               </tr>
             ))}
           </tbody>
@@ -397,7 +402,6 @@ const K8sContextCard: React.FC<{ releaseContext: any }> = ({ releaseContext }) =
     { label: 'Deployment Name', value: ctx.deployment_name },
     { label: 'VS Name', value: ctx.vs_name },
     { label: 'Scale Down Status', value: ctx.pods_scale_down_status },
-    { label: 'Scale Down Delay', value: ctx.pods_scale_down_delay ? `${ctx.pods_scale_down_delay} hrs` : '' },
     { label: 'Scale Down Timestamp', value: ctx.pods_scale_down_timestamp ? formatDate(ctx.pods_scale_down_timestamp) : '' },
   ].filter(f => f.value);
 
@@ -476,7 +480,7 @@ const RolloutStrategyTab: React.FC<{
       setHasChanges(false);
       setIsEditing(false);
       toast.success('Rollout strategy updated');
-    } catch { toast.error('Failed to update strategy'); }
+    } catch (err: any) { toast.error(err?.response?.data?.message || err.message || 'Failed to update strategy'); }
   };
 
   const handleCancel = () => {
@@ -520,7 +524,12 @@ const RolloutStrategyTab: React.FC<{
               <th className="py-2.5 px-4 text-left w-20">#</th>
               <th className="py-2.5 px-4 text-left">Rollout %</th>
               <th className="py-2.5 px-4 text-left">Cooloff (min)</th>
-              <th className="py-2.5 px-4 text-left">Pods %</th>
+              <th className="py-2.5 px-4 text-left">
+                <span className="flex items-center gap-1">
+                  Min Pods
+                  <span title="Minimum number of new pods at this stage. Actual count = max(this floor, factor-based target, old-pod prediction). Default 2 = at least 2 pods." className="cursor-help text-zinc-400 hover:text-zinc-600"><Info className="w-3 h-3" /></span>
+                </span>
+              </th>
               <th className="py-2.5 px-4 text-left w-32">Progress</th>
               {isEditing && <th className="py-2.5 px-4 w-12"></th>}
             </tr>
@@ -558,11 +567,11 @@ const RolloutStrategyTab: React.FC<{
                   </td>
                   <td className="py-2.5 px-4">
                     {isEditing && !isLocked ? (
-                      <input type="number" min={1} max={100} value={stage.pods}
+                      <input type="number" min={1} value={stage.pods}
                         onChange={(e) => handleStageChange(idx, 'pods', parseInt(e.target.value) || 1)}
                         className="w-16 h-8 border border-zinc-300 rounded-lg px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400" />
                     ) : (
-                      <span className="text-sm font-mono text-zinc-600">{stage.pods}%</span>
+                      <span className="text-sm font-mono text-zinc-600">{stage.pods}</span>
                     )}
                   </td>
                   <td className="py-2.5 px-4">
@@ -673,7 +682,11 @@ const ReleaseSummary: React.FC = () => {
       variant: isDanger ? 'danger' : 'primary',
     });
     if (!ok) return;
-    try { await fn(); } catch {}
+    try { await fn(); } catch (err: any) {
+      // individual mutation onError handlers fire their own toasts;
+      // this is a safety net for any future mutation added without onError
+      console.error('[doAction]', err);
+    }
   };
 
   const doImmediateRevert = async () => {
@@ -686,7 +699,7 @@ const ReleaseSummary: React.FC = () => {
     if (!ok) return;
     try {
       await immRevertSyncMut.mutateAsync({ releaseId: id!, isRevertSync: revertSyncChecked });
-    } catch {}
+    } catch (err: any) { console.error('[doImmediateRevert]', err); }
   };
 
   if (isLoading && !release) {

@@ -25,6 +25,8 @@ module Products.Autopilot.Queries.ReleaseTracker (
     findReleaseTrackersByCategory,
     findReleaseTrackerByGlobalId,
     findCompletedTrackersForScaleDown,
+    findLeakedNewDeploymentTrackers,
+    resetStuckScaleDownInProgress,
 
     -- * Events
     insertReleaseEvent,
@@ -71,7 +73,7 @@ import qualified Data.Text.Lazy as LT
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Database.Beam
 import Database.Beam.Postgres
-import Database.PostgreSQL.Simple (Only (..), execute, withTransaction)
+import Database.PostgreSQL.Simple (Only (..), execute, execute_, withTransaction)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
 import qualified Debug.Trace as DT
 import Products.Autopilot.Types
@@ -367,6 +369,64 @@ findCleanupScheduledTrackers now = withDb $ \db -> do
                                     Nothing -> False
                 _ -> False
     pure (filter isDue parsed)
+
+{- | Julia parity (watcher.jl scaleDownPodsInProgress / rollback.jl):
+find terminal-state trackers whose NEW deployment leaked because the
+abort/cleanup path never reached @restoreVsTrafficOnFailure@'s scale-down
+(process kill, OOM, kubectl failure, etc).
+
+Eligibility:
+  * status IN (ABORTED, USER_ABORTED, DISCARDED)
+  * release_context has @cleanupTargetDeployment@ set (the new dep name)
+  * @cleanupStatus == "SCALE_DOWN_SCHEDULED"@
+  * @cleanupAt <= now@ (or unset, in which case we treat it as overdue)
+
+The poll worker 'scaleDownLeakedNewDeployment' issues @kubectl scale
+--replicas=0@ on the target deployment and flips @cleanupStatus@ to
+@SCALE_DOWN_COMPLETED@. The kubectl call is idempotent so re-runs on
+already-scaled deployments are harmless.
+-}
+findLeakedNewDeploymentTrackers :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
+findLeakedNewDeploymentTrackers now = withDb $ \db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $
+                    orderBy_ (asc_ . rtUpdatedAt) $ do
+                        rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (rtStatus rt `in_` [val_ "ABORTED", val_ "USER_ABORTED", val_ "DISCARDED"])
+                        pure rt
+    let parsed = map fromRow rows
+        isDue (_, mts) = case mts of
+            Just (K8sState k8s) ->
+                let ctx = context k8s
+                 in case (cleanupTargetDeployment ctx, cleanupStatus ctx) of
+                        (Just dep, Just "SCALE_DOWN_SCHEDULED") | not (T.null dep) ->
+                            case cleanupAt ctx of
+                                Just t -> t <= now
+                                Nothing -> True
+                        _ -> False
+            _ -> False
+    pure (filter isDue parsed)
+
+{- | Julia parity (rollback.jl scaleDownPodsInProgress): walks
+terminal-state trackers stuck in @SCALE_DOWN_INPROGRESS@ (worker crashed
+mid-flight) and resets them to @SCALE_DOWN_SCHEDULED@ so the next runner
+poll picks them up. Run once at startup before the poll loop.
+
+Returns the number of trackers reset (for log visibility).
+-}
+resetStuckScaleDownInProgress :: (MonadFlow m) => m Int
+resetStuckScaleDownInProgress = withDb $ \db ->
+    withConn db $ \conn -> do
+        n <-
+            execute_
+                conn
+                "UPDATE release_tracker \
+                \SET release_context = REPLACE(release_context, '\"SCALE_DOWN_INPROGRESS\"', '\"SCALE_DOWN_SCHEDULED\"') \
+                \WHERE status IN ('ABORTED','USER_ABORTED','DISCARDED','COMPLETED') \
+                \  AND release_context LIKE '%SCALE_DOWN_INPROGRESS%'"
+        pure (fromIntegral n)
 
 findAbortingReleaseTrackers :: (MonadFlow m) => m [TrackerWithTarget]
 findAbortingReleaseTrackers = withDb $ \db -> do

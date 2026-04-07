@@ -43,7 +43,6 @@ export interface ReleaseContext {
     vs_name: string;
     docker_image: string;
     matches: Matches[];
-    pods_scale_down_delay: number;
     pods_scale_down_timestamp: string;
     pods_scale_down_status: string;
     old_version_pod_count: number;
@@ -122,7 +121,6 @@ export interface APRelease {
     rollout_history: RolloutHistoryEvent[];
     events: RolloutEvent[];
     release_context: ReleaseContext;
-    custom_pod_scaledown_days: number;
 }
 
 // ── ConfigMap type ─────────────────────────────────────────────────
@@ -228,7 +226,6 @@ type NammaRelease = {
         newVersion?: string;
         dockerImage?: string | null;
         matches?: Array<{ matchHost: string; matchRunningVersion: string; matchWeight: number }>;
-        podsScaleDownDelay?: number | null;
         podsScaleDownTimestamp?: string | null;
         podsScaleDownStatus?: string | null;
         oldVersionPodCount?: number | null;
@@ -317,7 +314,6 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
             running_version: m.matchRunningVersion || '',
             weight: m.matchWeight || 0,
         })),
-        pods_scale_down_delay: r.releaseContext?.podsScaleDownDelay ?? 0,
         pods_scale_down_timestamp: r.releaseContext?.podsScaleDownTimestamp || '',
         pods_scale_down_status: r.releaseContext?.podsScaleDownStatus || '',
         old_version_pod_count: r.releaseContext?.oldVersionPodCount ?? 0,
@@ -352,7 +348,6 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     })),
 
     events: [],
-    custom_pod_scaledown_days: 0,
 });
 
 // ── Status color helpers (matching rescript dashboard) ──────────────

@@ -16,7 +16,7 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
-import Core.Environment (getConfig, logInfo)
+import Core.Environment (getConfig, logInfo, logWarning)
 import Data.Aeson (Value (..), eitherDecodeStrict', encode)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -29,7 +29,7 @@ import qualified Data.Text.Lazy.Encoding as TLE
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.Notifications (notifyConfigMapCompleted)
 import Products.Autopilot.Queries.ProductService (findProductByName, getProductNamespace)
-import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker, insertReleaseEvent, insertReleaseTracker)
+import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTracker, findReleaseTracker, insertReleaseEvent, insertReleaseTracker)
 import Products.Autopilot.Sync (triggerRevertSyncIfEnabled)
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
 import Products.Autopilot.Types.Target (BackendConfigWFStatus (..), ConfigDeploymentState (..), TargetState (..), emptyConfigState)
@@ -71,6 +71,9 @@ getCfg = lift getConfig
 -- | StateFlow-level logging (lifts from Flow)
 logInfoS :: T.Text -> StateFlow ()
 logInfoS = lift . logInfo
+
+logWarningS :: T.Text -> StateFlow ()
+logWarningS = lift . logWarning
 
 -- | Get file content from metadata
 getFileContent :: StateFlow (Maybe Text)
@@ -224,10 +227,21 @@ notifyComplete = do
                     mOrig <- findReleaseTracker origId
                     case mOrig of
                         Just (origRt, origTs) | status origRt == REVERTING -> do
+                            -- CAS: only transition REVERTING → REVERTED if nobody
+                            -- else has touched the original tracker since we read it.
+                            -- Prevents a concurrent abort/discard of the original
+                            -- being silently overwritten by this revert-completion.
                             let reverted = origRt{status = REVERTED}
-                            insertReleaseTracker reverted origTs
-                            lift $ triggerRevertSyncIfEnabled reverted origTs
-                            logInfoS $ "Marked original " <> origId <> " as REVERTED"
+                            ok <- conditionalUpdateTracker reverted origTs "REVERTING"
+                            if ok
+                                then do
+                                    lift $ triggerRevertSyncIfEnabled reverted origTs
+                                    logInfoS $ "Marked original " <> origId <> " as REVERTED"
+                                else
+                                    logWarningS $
+                                        "Skipped REVERTED write for "
+                                            <> origId
+                                            <> ": concurrent modification (CAS miss)"
                         _ -> pure ()
                 Nothing -> pure ()
         _ -> pure ()

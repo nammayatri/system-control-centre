@@ -43,7 +43,6 @@ data AutopilotPermission
     | AP_PRODUCT_CONFIG_EDIT
     | AP_SERVICE_CONFIG_VIEW
     | AP_SERVICE_CONFIG_EDIT
-    | AP_CONFIG_APPROVE
     | AP_CONFIG_EDIT
     | AP_CONFIG_DISCARD
     | AP_CONFIG_REVERT
@@ -66,7 +65,6 @@ autopilotPermissionToText AP_PRODUCT_CONFIG_VIEW = "PRODUCT_CONFIG_VIEW"
 autopilotPermissionToText AP_PRODUCT_CONFIG_EDIT = "PRODUCT_CONFIG_EDIT"
 autopilotPermissionToText AP_SERVICE_CONFIG_VIEW = "SERVICE_CONFIG_VIEW"
 autopilotPermissionToText AP_SERVICE_CONFIG_EDIT = "SERVICE_CONFIG_EDIT"
-autopilotPermissionToText AP_CONFIG_APPROVE = "CONFIG_APPROVE"
 autopilotPermissionToText AP_CONFIG_EDIT = "CONFIG_EDIT"
 autopilotPermissionToText AP_CONFIG_DISCARD = "CONFIG_DISCARD"
 autopilotPermissionToText AP_CONFIG_REVERT = "CONFIG_REVERT"
@@ -88,7 +86,6 @@ textToAutopilotPermission "PRODUCT_CONFIG_VIEW" = Just AP_PRODUCT_CONFIG_VIEW
 textToAutopilotPermission "PRODUCT_CONFIG_EDIT" = Just AP_PRODUCT_CONFIG_EDIT
 textToAutopilotPermission "SERVICE_CONFIG_VIEW" = Just AP_SERVICE_CONFIG_VIEW
 textToAutopilotPermission "SERVICE_CONFIG_EDIT" = Just AP_SERVICE_CONFIG_EDIT
-textToAutopilotPermission "CONFIG_APPROVE" = Just AP_CONFIG_APPROVE
 textToAutopilotPermission "CONFIG_EDIT" = Just AP_CONFIG_EDIT
 textToAutopilotPermission "CONFIG_DISCARD" = Just AP_CONFIG_DISCARD
 textToAutopilotPermission "CONFIG_REVERT" = Just AP_CONFIG_REVERT
@@ -114,7 +111,6 @@ permissionDescription AP_PRODUCT_CONFIG_VIEW = "View product configurations"
 permissionDescription AP_PRODUCT_CONFIG_EDIT = "Edit product configurations"
 permissionDescription AP_SERVICE_CONFIG_VIEW = "View server configurations"
 permissionDescription AP_SERVICE_CONFIG_EDIT = "Edit server configurations"
-permissionDescription AP_CONFIG_APPROVE = "Approve ConfigMap and VS edit releases"
 permissionDescription AP_CONFIG_EDIT = "Edit ConfigMap and VS edit releases"
 permissionDescription AP_CONFIG_DISCARD = "Discard ConfigMap and VS edit releases"
 permissionDescription AP_CONFIG_REVERT = "Revert ConfigMap releases"
@@ -192,10 +188,6 @@ instance KnownPermission 'AP_SERVICE_CONFIG_VIEW where
 instance KnownPermission 'AP_SERVICE_CONFIG_EDIT where
     permissionProduct _ = "autopilot"
     permissionName _ = "SERVICE_CONFIG_EDIT"
-
-instance KnownPermission 'AP_CONFIG_APPROVE where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "CONFIG_APPROVE"
 
 instance KnownPermission 'AP_CONFIG_EDIT where
     permissionProduct _ = "autopilot"

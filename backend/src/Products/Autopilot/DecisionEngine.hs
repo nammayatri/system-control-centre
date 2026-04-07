@@ -18,6 +18,8 @@ module Products.Autopilot.DecisionEngine (
     -- * Decision Functions
     checkPromQueries,
     initiateABDecisionForRelease,
+    initiatePostMonitoringABDecisionForRelease,
+    stopDecisionEngineHS,
     getABDecision,
     getHSDecision,
     getCombinedDecision,
@@ -32,7 +34,7 @@ import Control.Exception (SomeException, try)
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
 import Core.Environment (MonadFlow)
-import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
+import Core.Http.Client (HttpError, HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Logging (logDebugG, logErrorG, logWarningG)
 import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value (..), object, (.=))
@@ -45,9 +47,13 @@ import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Time (UTCTime, addUTCTime, defaultTimeLocale, formatTime, getCurrentTime)
+import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, getServiceHost)
 import Products.Autopilot.RuntimeConfig (
     getABHSAllowedTimeDiffMins,
     getABHSApiKey,
+    getCkhClusterName,
+    getDEPostMonitoringTimeout,
     getDecisionEngineFailClosed,
     isABHSDecisionEnabledForAppGroupService,
     isPromQueryCheckEnabled,
@@ -348,8 +354,76 @@ initiateABDecisionForRelease cfg tracker = do
                 else do
                     apiKey <- getABHSApiKey
                     failClosed <- getDecisionEngineFailClosed
-                    let body = mkInitiateAbBody tracker
+                    cluster <- getCkhClusterName
+                    svcHost <- do
+                        mSvc <- findServiceByProductAndName (appGroup tracker) (service tracker)
+                        pure $ maybe "" (fromMaybeT . getServiceHost) mSvc
+                    now <- liftIO getCurrentTime
+                    let body = mkInitiateAbBody tracker cluster svcHost now
                     liftIO $ initiateABDecision abUrl apiKey (appGroup tracker) body failClosed
+
+-- | Helper: Maybe Text -> Text with "" default.
+fromMaybeT :: Maybe Text -> Text
+fromMaybeT = maybe "" id
+
+{- | Julia-parity: POST a second initiate to spawn the POST-monitoring AB run.
+Mirrors Julia's @intiateDecisionEnginePostMonitoring@. Called once AFTER
+the new version reaches 100% traffic and pods are ready, BEFORE the
+post-monitor HS poll loop starts. The @run_id@ is @<release-id>-post@
+so the HS GET during post-monitoring reads a distinct verdict stream.
+-}
+initiatePostMonitoringABDecisionForRelease :: (MonadFlow m) => Config -> ReleaseTracker -> m DecisionResult
+initiatePostMonitoringABDecisionForRelease cfg tracker = do
+    let abUrl = abEngineUrl cfg
+    if null abUrl
+        then pure (DecisionResult Continue Nothing "AB_ENGINE")
+        else do
+            apiKey <- getABHSApiKey
+            failClosed <- getDecisionEngineFailClosed
+            cluster <- getCkhClusterName
+            svcHost <- do
+                mSvc <- findServiceByProductAndName (appGroup tracker) (service tracker)
+                pure $ maybe "" (fromMaybeT . getServiceHost) mSvc
+            selfClosingSec <- getDEPostMonitoringTimeout
+            now <- liftIO getCurrentTime
+            let body = mkInitiateAbBodyPostMonitoring tracker cluster svcHost selfClosingSec now
+            liftIO $ initiateABDecision abUrl apiKey (appGroup tracker) body failClosed
+
+{- | Julia parity: POST @{abUrl}stop/ab/{run_id}@ to terminate the decision
+pod when we abort or complete a release. Best-effort: logs on failure and
+never throws, so cleanup paths remain robust.
+-}
+stopDecisionEngineHS :: (MonadFlow m) => Config -> Text -> m ()
+stopDecisionEngineHS cfg runId = do
+    let abUrl = abEngineUrl cfg
+    if null abUrl || T.null runId
+        then pure ()
+        else do
+            apiKey <- getABHSApiKey
+            liftIO $ do
+                let url = ensureSlash (T.pack abUrl) <> "stop/ab/" <> runId
+                    req =
+                        (defaultReq url)
+                            { reqMethod = POST
+                            , reqHeaders =
+                                [ ("Content-Type", "application/json")
+                                , ("x-api-key", apiKey)
+                                ]
+                            , reqTimeout = Seconds 10
+                            , reqRetries = 1
+                            , reqLogTag = "ab-stop"
+                            }
+                result <- try (httpRaw req) :: IO (Either SomeException (Either HttpError HttpResponse))
+                case result of
+                    Right (Right HttpResponse{respStatus = s})
+                        | s < 400 ->
+                            logDebugG $ "[DECISION] Stopped AB engine for run_id " <> runId
+                    Right (Right HttpResponse{respStatus = s}) ->
+                        logWarningG $ "[DECISION] Stop AB engine HTTP " <> T.pack (show s) <> " for " <> runId
+                    Right (Left e) ->
+                        logWarningG $ "[DECISION] Stop AB engine failed: " <> T.pack (show e)
+                    Left e ->
+                        logWarningG $ "[DECISION] Stop AB engine threw: " <> T.pack (show e)
 
 {- | Per-rollout-step AB decision read.
 
@@ -399,21 +473,68 @@ initiateABDecision abUrl apiKey productName body failClosed = do
             logErrorG $ "[DECISION] AB initiate failed: " <> T.pack (show e)
             pure (failOrContinue failClosed "AB_ENGINE" "AB Engine unreachable")
 
--- | Build the JSON body Julia POSTs to @initiate/ab@.
-mkInitiateAbBody :: ReleaseTracker -> Value
-mkInitiateAbBody tracker =
-    object
-        [ "product" .= appGroup tracker
-        , "service" .= service tracker
-        , "environment" .= extractCluster tracker
-        , "interval" .= (1 :: Int)
-        , "placeholders"
-            .= object
-                [ "version_a" .= oldVersion tracker
-                , "version_b" .= newVersion tracker
-                ]
-        , "run_id" .= releaseId tracker
-        ]
+{- | Build the JSON body Julia POSTs to @initiate/ab@ — full Julia parity.
+Julia source: @global_changelog.jl:111-124@. Includes start_time, end_time
+(start+24h), cluster (ckh_cluster_name), and the deployment_config service host.
+-}
+mkInitiateAbBody :: ReleaseTracker -> Text -> Text -> UTCTime -> Value
+mkInitiateAbBody tracker cluster svcHost now =
+    let st = case startTime tracker of
+            Just t -> t
+            Nothing -> now
+        et = addUTCTime (24 * 3600) st
+     in object
+            [ "product" .= appGroup tracker
+            , "service" .= service tracker
+            , "environment" .= extractCluster tracker
+            , "interval" .= (1 :: Int)
+            , "placeholders"
+                .= object
+                    [ "version_a" .= oldVersion tracker
+                    , "version_b" .= newVersion tracker
+                    , "start_time" .= formatStdTime st
+                    , "end_time" .= formatStdTime et
+                    , "cluster" .= cluster
+                    , "service" .= svcHost
+                    ]
+            , "run_id" .= releaseId tracker
+            ]
+
+{- | Julia parity: post-monitoring AB initiate body. Source:
+@global_changelog.jl:144-188@. Differences from primary body:
+  * service suffixed with "_POST"
+  * interval = 5
+  * placeholders.start_time = now (not tracker.start_time)
+  * placeholders.global_time = now - 24h
+  * run_id suffixed with "-post"
+  * top-level self_closing_time field
+-}
+mkInitiateAbBodyPostMonitoring :: ReleaseTracker -> Text -> Text -> Int -> UTCTime -> Value
+mkInitiateAbBodyPostMonitoring tracker cluster svcHost selfClosingSec now =
+    let globalT = addUTCTime (negate (24 * 3600)) now
+     in object
+            [ "product" .= appGroup tracker
+            , "service" .= (service tracker <> "_POST")
+            , "environment" .= extractCluster tracker
+            , "interval" .= (5 :: Int)
+            , "placeholders"
+                .= object
+                    [ "version_a" .= oldVersion tracker
+                    , "version_b" .= newVersion tracker
+                    , "start_time" .= formatStdTime now
+                    , "cluster" .= cluster
+                    , "service" .= svcHost
+                    , "global_time" .= formatStdTime globalT
+                    ]
+            , "run_id" .= (releaseId tracker <> "-post")
+            , "self_closing_time" .= selfClosingSec
+            ]
+
+{- | Format a UTCTime the way Julia's @convertTimeToStandardFormat@ does:
+ISO-ish "YYYY-mm-ddTHH:MM:SS".
+-}
+formatStdTime :: UTCTime -> Text
+formatStdTime = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S"
 
 -- | Pull "cluster" out of the tracker's releaseContext JSON blob.
 extractCluster :: ReleaseTracker -> Text

@@ -56,6 +56,8 @@ import Products.Autopilot.DecisionEngine (
     getCombinedDecision,
     getHSDecision,
     initiateABDecisionForRelease,
+    initiatePostMonitoringABDecisionForRelease,
+    stopDecisionEngineHS,
  )
 
 -- buildDeleteDeploymentCommand removed: scale-down handled by Runner
@@ -254,7 +256,7 @@ scaleNewDeploymentForStage ::
     K8sReleaseContext ->
     -- | rolloutPercent (traffic %) for this stage — feeds the formula
     Int ->
-    -- | podPercent from rollout strategy (operator's explicit floor)
+    -- | minPods from rollout strategy (operator's explicit minimum pod count)
     Int ->
     StateFlow ()
 scaleNewDeploymentForStage cfg ctx routePct podPct = do
@@ -300,8 +302,10 @@ scaleNewDeploymentForStage cfg ctx routePct podPct = do
                         * fromIntegral pct
                         / 100.0
                     )
-        -- Operator's explicit floor: podPct% of currentOld, never below 1.
-        operatorFloor = max 1 (ceiling ((fromIntegral currentOld * fromIntegral podPct :: Double) / 100.0))
+        -- Operator's explicit floor: absolute minimum pod count, never below 1.
+        -- podPct is a raw pod count (not a percentage) — consistent with
+        -- BackendSchedulerWorkflow and K8s/Deployment which both use max 1 (podPercent step).
+        operatorFloor = max 1 podPct
         -- Final = max of every input. Never shrink, never under-provision.
         target =
             maximum
@@ -355,7 +359,7 @@ scaleNewDeploymentForStage cfg ctx routePct podPct = do
                         <> T.pack (show oldVersionPods)
                         <> ", route%="
                         <> T.pack (show routePct)
-                        <> ", podPct%="
+                        <> ", minPods="
                         <> T.pack (show podPct)
                         <> ", factor="
                         <> T.pack (show factor)
@@ -1251,8 +1255,15 @@ monitorHealth = do
             "BUSINESS"
             "POST_MONITORING_STARTED"
             (toJSON ("Post-monitoring phase" :: T.Text))
+        -- Julia parity: spawn the post-monitoring AB decision pod ONCE before
+        -- polling. The HS GET loop reads its verdict via run_id "<id>-post".
+        _ <- lift $ initiatePostMonitoringABDecisionForRelease cfg rt
         loopStart <- liftIO getCurrentTime
         postMonitorLoop wfCfg cfg rt 0 loopStart
+        -- Best-effort cleanup: stop the post-monitoring decision pod once
+        -- the loop has exited (Continue, Abort-alert, or timeout). Mirrors
+        -- Julia's stopDecisionEngineHS call after post-monitoring concludes.
+        lift $ stopDecisionEngineHS cfg (releaseId rt <> "-post")
 
     logInfoS "Health monitoring complete"
 
@@ -1476,6 +1487,10 @@ cleanupOldVersion = do
     isNew <- isNewServiceRelease
     wfCfg <- loadWorkflowConfig (appGroup rt)
     logInfoS $ "Cleaning up old version for " <> appGroup rt
+
+    -- Julia parity: best-effort stop of the primary AB decision pod once
+    -- we have reached the finalize stage (release success path).
+    lift $ stopDecisionEngineHS cfg (releaseId rt)
 
     updateK8sStatus BSScaleDownOld
 

@@ -116,7 +116,7 @@ const ConfigMapSummary: React.FC = () => {
       return updateConfigMap(id, body);
     },
     onSuccess: () => { toast.success('Action completed'); refetch(); },
-    onError: (err: Error) => { toast.error(err.message || 'Action failed'); },
+    onError: (err: any) => { toast.error(err?.response?.data?.message || err.message || 'Action failed'); },
   });
 
   const confirmAction = useConfirm();
@@ -174,7 +174,7 @@ const ConfigMapSummary: React.FC = () => {
         </div>
         <div className="flex items-center gap-2 flex-wrap sm:justify-end">
           {data.status === 'CREATED' && data.is_approved === 0 && (
-            <PermissionGate product="autopilot" permission="CONFIG_APPROVE">
+            <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
               <Button size="sm" variant="success" onClick={() => handleAction('Approve')} loading={actionMut.isPending}><Check className="w-3.5 h-3.5" /> Approve</Button>
             </PermissionGate>
           )}

@@ -372,8 +372,6 @@ testPermissions = do
         AutopilotPerm AP_RELEASE_APPROVE `elem` managerPerms
     assertBool "Manager has RELEASE_REVERT" $
         AutopilotPerm AP_RELEASE_REVERT `elem` managerPerms
-    assertBool "Manager has CONFIG_APPROVE" $
-        AutopilotPerm AP_CONFIG_APPROVE `elem` managerPerms
     assertBool "Manager DOES NOT have PRODUCT_CONFIG_EDIT" $
         AutopilotPerm AP_PRODUCT_CONFIG_EDIT `notElem` managerPerms
     assertBool "Manager DOES NOT have SERVICE_CONFIG_EDIT" $

@@ -73,6 +73,16 @@ This function performs two recovery actions:
 runnerStartupRecovery :: AppState -> IO ()
 runnerStartupRecovery st = do
     runFlow st rollbackInProgressOnStartup
+    -- Julia parity: reset any leaked-deployment scale-downs that were
+    -- stuck in SCALE_DOWN_INPROGRESS (worker crashed mid-scale-down) so
+    -- the next poll picks them back up.
+    runFlow st $ do
+        n <- resetStuckScaleDownInProgress
+        when (n > 0) $
+            logInfo $
+                "[STARTUP] Reset "
+                    <> T.pack (show n)
+                    <> " tracker(s) stuck in SCALE_DOWN_INPROGRESS → SCALE_DOWN_SCHEDULED"
     runFlow st releaseExpiredVsLocksOnStartup
 
 {- | Forever poll loop. Picks CREATED trackers, handles aborting releases,
@@ -153,6 +163,10 @@ rollbackInProgressOnStartup = do
                                     (toJSON ("Revert completed on startup recovery — VS traffic restored to old version" :: T.Text))
                     _ -> do
                         let aborted = rt{status = ABORTED, endTime = Just now}
+                        -- Julia parity: persist cleanup marker before flipping
+                        -- status so the poll worker has something to sweep even
+                        -- if restoreVsTrafficOnFailure's scale-down failed above.
+                        scheduleNewDeploymentCleanup aborted mts
                         ok <- conditionalUpdateTracker aborted mts oldStatusText
                         if not ok
                             then
@@ -227,6 +241,16 @@ loop = forever $ do
         scaleDownDelay <- getPodsScaleDownDelayFromConfig
         completedTrackers <- findCompletedTrackersForScaleDown now scaleDownDelay
         forM_ completedTrackers $ \twt -> scaleDownOldDeployment cfg twt
+
+        -- Step 5 (Julia parity): Handle scale-down of LEAKED NEW deployments.
+        -- If the workflow created a new deployment but crashed / was killed
+        -- before reaching restoreVsTrafficOnFailure, the new deployment is
+        -- left at full replicas. Mirrors Julia's scaleDownPodsInProgress +
+        -- watcher poll pattern: the abort paths mark the tracker with
+        -- cleanupTargetDeployment/cleanupStatus=SCALE_DOWN_SCHEDULED and
+        -- this worker sweeps them idempotently.
+        leakedTrackers <- findLeakedNewDeploymentTrackers now
+        forM_ leakedTrackers $ \twt -> scaleDownLeakedNewDeployment cfg twt
 
 -- | Get the full AppState from the Flow monad (for passing to forkIO threads)
 getAppState :: Flow AppState
@@ -346,6 +370,10 @@ trigger _db (rt, mts) = do
                                         else do
                                             insertReleaseEvent (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
                                             restoreVsTrafficOnFailure cfg' rt mts
+                                            -- Julia parity: mark for later poll-driven
+                                            -- cleanup in case restoreVsTrafficOnFailure's
+                                            -- kubectl scale-down itself failed.
+                                            scheduleNewDeploymentCleanup abortedTracker mts
                                             notifyReleaseAborted abortedTracker
                         Right _ -> do
                             -- The workflow persists state via persistWorkflowState in each cprV2
@@ -545,6 +573,9 @@ handleAbortingRelease :: Config -> ReleaseTracker -> Maybe TargetState -> Flow (
 handleAbortingRelease cfg rt mts = do
     logInfo $ "[handleAbortingRelease] Processing abort for " <> releaseId rt
     restoreVsTrafficOnFailure cfg rt mts
+    -- Julia parity: persist cleanup marker so a crash/kubectl-fail between
+    -- now and the next poll doesn't leak the new deployment. Idempotent.
+    scheduleNewDeploymentCleanup rt mts
     now <- liftIO getCurrentTime
     let aborted = rt{status = USER_ABORTED, endTime = Just now}
     -- Round 8 audit C2: CAS against ABORTING. If a parallel runner instance
@@ -666,5 +697,123 @@ scaleDownOldDeployment cfg (rt, mts) = do
                             <> T.pack (show (fmap (NT.status . fst) freshM))
                             <> ")"
         _ -> pure ()
+
+-- ============================================================================
+-- Leaked-new-deployment cleanup (Julia parity: scaleDownPodsInProgress)
+-- ============================================================================
+
+{- | Mark a tracker for later scale-down of its NEW deployment. Mirrors
+Julia's @scheduleScaleDownOfPods@ but targeted at the new (failed)
+deployment rather than the old one.
+
+Writes @cleanupTargetDeployment@ + @cleanupStatus = SCALE_DOWN_SCHEDULED@
++ @cleanupAt = now@ into the tracker's K8sState. The runner poll picks
+these up via 'findLeakedNewDeploymentTrackers'.
+
+Best-effort: silently no-ops if the tracker has no K8sState (non-K8s
+release types) or no @newDepName@ to target. Uses CAS against the
+current status so a concurrent state change isn't clobbered.
+-}
+scheduleNewDeploymentCleanup :: ReleaseTracker -> Maybe TargetState -> Flow ()
+scheduleNewDeploymentCleanup rt mts = case mts of
+    Just (K8sState k8s) -> do
+        let ctx = context k8s
+            newDepName = K8s.deploymentName ctx
+        if T.null newDepName
+            then pure ()
+            else do
+                now <- liftIO getCurrentTime
+                let updatedCtx =
+                        ctx
+                            { cleanupTargetDeployment = Just newDepName
+                            , cleanupStatus = Just "SCALE_DOWN_SCHEDULED"
+                            , cleanupAt = Just now
+                            }
+                    updatedMts = Just (K8sState k8s{context = updatedCtx})
+                ok <- conditionalUpdateTracker rt updatedMts (releaseStatusToText (NT.status rt))
+                if ok
+                    then
+                        logInfo $
+                            "[scheduleNewDeploymentCleanup] Marked "
+                                <> releaseId rt
+                                <> " for new-deployment cleanup ("
+                                <> newDepName
+                                <> ")"
+                    else
+                        logWarning $
+                            "[scheduleNewDeploymentCleanup] CAS miss for "
+                                <> releaseId rt
+                                <> " — concurrent modification, will be retried by next abort path"
+    _ -> pure ()
+
+{- | Worker (Julia parity: @scaleDownPods@ in watcher.jl): scale a leaked
+NEW deployment to 0 replicas. Idempotent on the kubectl side. On
+success flips @cleanupStatus@ to @SCALE_DOWN_COMPLETED@ via CAS; on
+failure leaves @SCALE_DOWN_SCHEDULED@ for the next poll to retry.
+-}
+scaleDownLeakedNewDeployment :: Config -> TrackerWithTarget -> Flow ()
+scaleDownLeakedNewDeployment cfg (rt, mts) = case mts of
+    Just (K8sState k8s) -> do
+        let ctx = context k8s
+            ns = (K8s.namespace :: K8s.K8sReleaseContext -> T.Text) ctx
+        case cleanupTargetDeployment ctx of
+            Nothing -> pure ()
+            Just depName | T.null depName -> pure ()
+            Just depName -> do
+                -- Mark in-progress so the in-flight recovery sweep can
+                -- distinguish "stuck mid-scale-down" from "scheduled".
+                let inProgressCtx = ctx{cleanupStatus = Just "SCALE_DOWN_INPROGRESS"}
+                    inProgressMts = Just (K8sState k8s{context = inProgressCtx})
+                _ <- conditionalUpdateTracker rt inProgressMts (releaseStatusToText (NT.status rt))
+
+                logInfo $
+                    "[scaleDownLeakedNewDeployment] Scaling leaked deployment "
+                        <> depName
+                        <> " to 0 (release "
+                        <> releaseId rt
+                        <> ")"
+                result <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns depName 0)
+                case result of
+                    Left err -> do
+                        logWarning $
+                            "[scaleDownLeakedNewDeployment] FAILED for "
+                                <> depName
+                                <> ": "
+                                <> T.pack (show err)
+                                <> " — resetting to SCHEDULED for retry"
+                        freshM <- findReleaseTracker (releaseId rt)
+                        case freshM of
+                            Just (freshRT, Just (K8sState freshK8s)) -> do
+                                let retryCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_SCHEDULED"}
+                                    retryMts = Just (K8sState freshK8s{context = retryCtx})
+                                _ <- conditionalUpdateTracker freshRT retryMts (releaseStatusToText (NT.status freshRT))
+                                pure ()
+                            _ -> pure ()
+                        insertReleaseEvent
+                            (releaseId rt)
+                            "BUSINESS"
+                            "LEAKED_DEPLOYMENT_SCALE_DOWN_FAILED"
+                            (object ["deployment" .= depName, "error" .= T.pack (show err)])
+                    Right _ -> do
+                        logInfo $ "[scaleDownLeakedNewDeployment] Scaled " <> depName <> " to 0 successfully"
+                        freshM <- findReleaseTracker (releaseId rt)
+                        case freshM of
+                            Just (freshRT, Just (K8sState freshK8s)) -> do
+                                let doneCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_COMPLETED"}
+                                    doneMts = Just (K8sState freshK8s{context = doneCtx})
+                                ok <- conditionalUpdateTracker freshRT doneMts (releaseStatusToText (NT.status freshRT))
+                                if ok
+                                    then
+                                        insertReleaseEvent
+                                            (releaseId rt)
+                                            "BUSINESS"
+                                            "LEAKED_DEPLOYMENT_SCALED_DOWN"
+                                            (object ["deployment" .= depName, "namespace" .= (ns :: T.Text)])
+                                    else
+                                        logWarning $
+                                            "[scaleDownLeakedNewDeployment] CAS miss persisting COMPLETED for "
+                                                <> releaseId rt
+                            _ -> pure ()
+    _ -> pure ()
 
 -- force rebuild 1775474191

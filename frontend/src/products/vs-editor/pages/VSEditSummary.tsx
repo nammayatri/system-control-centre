@@ -72,7 +72,7 @@ const VSEditSummary: React.FC = () => {
       return applyVSEdit(id!, newVsFromEvent?.data || edit?.new_vs_data || '');
     },
     onSuccess: () => { toast.success('VS edit applied'); queryClient.invalidateQueries({ queryKey: ['vs-edit', id] }); },
-    onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to apply'),
+    onError: (err: any) => toast.error(err?.response?.data?.message || err.message || 'Failed to apply'),
   });
 
   const unlockMut = useMutation({
@@ -101,7 +101,10 @@ const VSEditSummary: React.FC = () => {
       variant: isDanger ? 'danger' : 'primary',
     });
     if (!ok) return;
-    try { await fn(); } catch {}
+    try { await fn(); } catch (err: any) {
+      // individual mutation onError handlers fire their own toasts
+      console.error('[VSEditSummary doAction]', err);
+    }
   };
 
   const toggleRow = (idx: number) => { setExpandedRows(prev => { const next = new Set(prev); if (next.has(idx)) next.delete(idx); else next.add(idx); return next; }); };

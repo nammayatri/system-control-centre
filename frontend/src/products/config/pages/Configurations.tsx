@@ -59,7 +59,7 @@ const Configurations: React.FC = () => {
       setSelectedConfig(null);
       queryClient.invalidateQueries({ queryKey: ['server-configs'] });
     },
-    onError: (err: Error) => { toast.error(err.message || 'Failed to save'); },
+    onError: (err: any) => { toast.error(err?.response?.data?.message || err.message || 'Failed to save'); },
   });
 
   const openConfigModal = (cfg: ConfigItem) => {
