@@ -76,6 +76,9 @@ CREATE TABLE IF NOT EXISTS release_tracker (
   ab_hs_status TEXT DEFAULT 'Uninitiated'
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_release_tracker_global_id
+  ON release_tracker (global_id) WHERE global_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS release_events (
   re_id SERIAL PRIMARY KEY,
   re_release_id TEXT NOT NULL,
