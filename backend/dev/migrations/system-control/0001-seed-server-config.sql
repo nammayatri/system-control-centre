@@ -54,3 +54,20 @@ WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_post_monitorin
 INSERT INTO server_config (type, name, value, enabled, product)
 SELECT 'STRING', 'ab_hs_api_key', '', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_api_key');
+
+-- Decision engine toggles (all disabled by default; operator opts in).
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'DECISION', 'prom_checks_enabled', 'false', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'prom_checks_enabled');
+
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'DECISION', 'ab_decision_enabled', 'false', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_decision_enabled');
+
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'DECISION', 'ab_hs_enabled', 'false', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_enabled');
+
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'DECISION', 'ab_hs_post_monitoring_enabled', 'false', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_post_monitoring_enabled');

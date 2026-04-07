@@ -108,4 +108,85 @@ autopilotConfigs =
         NotificationGroup
         "Enable Slack notifications for release events"
         (Just "autopilot")
+    , -- Decision engine / AB / HS (grouped under ABTestingGroup)
+      ConfigEntry
+        "ab_decision_enabled"
+        (BoolConfig False)
+        ABTestingGroup
+        "Enable AB decision engine for release gating"
+        (Just "autopilot")
+    , ConfigEntry
+        "ab_hs_enabled"
+        (BoolConfig False)
+        ABTestingGroup
+        "Enable Health Score (HS) decision engine"
+        (Just "autopilot")
+    , ConfigEntry
+        "ab_hs_post_monitoring_enabled"
+        (BoolConfig False)
+        ABTestingGroup
+        "Enable post-monitoring HS decision after 100% rollout"
+        (Just "autopilot")
+    , ConfigEntry
+        "prom_checks_enabled"
+        (BoolConfig False)
+        ABTestingGroup
+        "Enable Prometheus metric checks during rollout"
+        (Just "autopilot")
+    , ConfigEntry
+        "decision_engine_fail_closed"
+        (BoolConfig True)
+        ABTestingGroup
+        "Decision engine HTTP errors → Abort (fail closed) vs Continue (lenient)"
+        (Just "autopilot")
+    , ConfigEntry
+        "ab_hs_allowed_time_diff_mins"
+        (IntConfig 60)
+        ABTestingGroup
+        "allowedTimeDiffInMins value sent in HS GET body"
+        (Just "autopilot")
+    , ConfigEntry
+        "ab_hs_api_key"
+        (TextConfig "")
+        ABTestingGroup
+        "x-api-key header value sent to Julia HS engine"
+        (Just "autopilot")
+    , ConfigEntry
+        "ab_hs_decision_enabled_app_groups"
+        (JsonConfig "{}")
+        ABTestingGroup
+        "Per-(app_group, service) gating for HS decision (JSON map)"
+        (Just "autopilot")
+    , ConfigEntry
+        "ab_hs_post_monitoring_decision_enabled_app_groups"
+        (JsonConfig "{}")
+        ABTestingGroup
+        "Per-(app_group, service) gating for post-monitoring HS decision (JSON map)"
+        (Just "autopilot")
+    , -- Pod readiness (grouped under DeploymentGroup)
+      ConfigEntry
+        "pod_readiness_max_attempts"
+        (IntConfig 30)
+        DeploymentGroup
+        "Pod readiness poll: max attempts before timeout"
+        (Just "autopilot")
+    , ConfigEntry
+        "pod_readiness_poll_seconds"
+        (IntConfig 10)
+        DeploymentGroup
+        "Pod readiness poll: seconds between attempts"
+        (Just "autopilot")
+    , ConfigEntry
+        "pod_restart_count_threshold"
+        (IntConfig 3)
+        DeploymentGroup
+        "Pod readiness: max container restart count before failing release"
+        (Just "autopilot")
+    , -- HPA default (grouped under ScalingGroup)
+      ConfigEntry
+        "hpa_default_min_pods_config"
+        (IntConfig 1)
+        ScalingGroup
+        "HPA minReplicas default for first-release create-from-template branch"
+        (Just "autopilot")
     ]

@@ -426,6 +426,7 @@ export async function fetchProductConfigs(): Promise<ProductConfig[]> {
         repo_name: p.repoName || '',
         sync_cluster: p.syncCluster || p.sync_cluster || null,
         need_infra_approval: p.needInfraApproval ? 1 : 0,
+        slack_channel: p.slackChannel ?? p.slack_channel ?? null,
         vs_locked_by: p.vsLockedBy || null,
     }));
 }
