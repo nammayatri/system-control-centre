@@ -1500,15 +1500,16 @@ cleanupOldVersion = do
                 "SCALE_DOWN_SCHEDULED"
                 (toJSON $ "Scale-down scheduled for " <> T.unpack oldDepName)
 
-            -- If scale_down_pods_on_completion is enabled, do it immediately too
-            -- (production has this commented out but the Runner handles it)
-            -- NOTE: Slack notification for pods scaled down is sent ONLY from the Runner's
-            -- scaleDownOldDeployment on actual success — not here (avoids duplicates).
-            let shouldScaleDownNow = wcScaleDownOnCompletion wfCfg
-            when shouldScaleDownNow $ do
-                logInfoS $ "  Immediate scale-down: " <> oldDepName
-                _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
-                updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
+            -- Bug fix (round 7): NEVER scale down the old deployment from
+            -- inside the workflow. We must only scale down AFTER the tracker
+            -- has transitioned to COMPLETED, otherwise a backend restart
+            -- between this scale-down and the COMPLETED transition would
+            -- find an orphan INPROGRESS tracker whose old deployment is at
+            -- 0 pods, and `restoreVsTrafficOnFailure` would point traffic
+            -- at a deployment with no pods (= 5xx outage).
+            -- The Runner's separate scale-down sweep (findCompletedTrackers
+            -- ForScaleDown) handles this safely AFTER status=COMPLETED.
+            let _ = wcScaleDownOnCompletion wfCfg -- read but no longer drives in-workflow scale
 
             -- Delete old version's HPA so a revert can re-create it cleanly and
             -- we don't leak HPAs across releases. Mirrors prepareK8sResources

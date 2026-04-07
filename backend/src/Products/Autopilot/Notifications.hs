@@ -300,8 +300,8 @@ notifyReleaseApproved tracker = whenSlackEnabled $
 notifyReleaseProgress :: ReleaseTracker -> Int -> Flow ()
 notifyReleaseProgress tracker percentage = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            pct = T.pack (show percentage)
+        threadTs <- resolveThreadTs tracker
+        let pct = T.pack (show percentage)
             blocks =
                 [ sectionBlock ("*INPROGRESS*  " <> pct <> "%")
                 , contextBlock ["Routing " <> pct <> "% traffic to `" <> newVersion tracker <> "` | " <> T.pack (show (100 - percentage)) <> "% on `" <> oldVersion tracker <> "`"]
@@ -313,8 +313,8 @@ notifyReleaseCompleted :: ReleaseTracker -> Maybe TargetState -> Flow ()
 notifyReleaseCompleted tracker mts = do
     whenSlackEnabled $
         withChannel (appGroup tracker) (service tracker) $ \channel -> do
-            let threadTs = getThreadTsFromTracker tracker
-                blocks =
+            threadTs <- resolveThreadTs tracker
+            let blocks =
                     [ sectionBlock "*COMPLETED*  100%"
                     , contextBlock ["All traffic on `" <> newVersion tracker <> "`"]
                     ]
@@ -325,8 +325,8 @@ notifyReleaseCompleted tracker mts = do
 notifyReleaseAborted :: ReleaseTracker -> Flow ()
 notifyReleaseAborted tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks =
+        threadTs <- resolveThreadTs tracker
+        let blocks =
                 [ sectionBlock "*ABORTED*"
                 , contextBlock ["Traffic restored to `" <> oldVersion tracker <> "`"]
                 ]
@@ -336,24 +336,24 @@ notifyReleaseAborted tracker = whenSlackEnabled $
 notifyReleasePaused :: ReleaseTracker -> Flow ()
 notifyReleasePaused tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks = [sectionBlock "*PAUSED*  — cooloff in progress"]
+        threadTs <- resolveThreadTs tracker
+        let blocks = [sectionBlock "*PAUSED*  — cooloff in progress"]
         _ <- sendSlackRich channel "PAUSED" colorPaused blocks threadTs
         pure ()
 
 notifyReleaseResumed :: ReleaseTracker -> Flow ()
 notifyReleaseResumed tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks = [sectionBlock "*RESUMED*"]
+        threadTs <- resolveThreadTs tracker
+        let blocks = [sectionBlock "*RESUMED*"]
         _ <- sendSlackRich channel "Resumed" colorInProgress blocks threadTs
         pure ()
 
 notifyReleaseReverted :: ReleaseTracker -> Flow ()
 notifyReleaseReverted tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks =
+        threadTs <- resolveThreadTs tracker
+        let blocks =
                 [ sectionBlock "*REVERTED*"
                 , contextBlock ["Rolled back to `" <> oldVersion tracker <> "`"]
                 ]
@@ -363,48 +363,48 @@ notifyReleaseReverted tracker = whenSlackEnabled $
 notifyReleaseDiscarded :: ReleaseTracker -> Flow ()
 notifyReleaseDiscarded tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks = [sectionBlock "*DISCARDED*"]
+        threadTs <- resolveThreadTs tracker
+        let blocks = [sectionBlock "*DISCARDED*"]
         _ <- sendSlackRich channel "DISCARDED" colorDefault blocks threadTs
         pure ()
 
 notifyReleaseDeleted :: ReleaseTracker -> Flow ()
 notifyReleaseDeleted tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks = [sectionBlock "*DELETED*"]
+        threadTs <- resolveThreadTs tracker
+        let blocks = [sectionBlock "*DELETED*"]
         _ <- sendSlackRich channel "Deleted" colorAborted blocks threadTs
         pure ()
 
 notifyReleaseUpdated :: ReleaseTracker -> Text -> Flow ()
 notifyReleaseUpdated tracker detail = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks = [sectionBlock ("*UPDATED*  " <> detail)]
+        threadTs <- resolveThreadTs tracker
+        let blocks = [sectionBlock ("*UPDATED*  " <> detail)]
         _ <- sendSlackRich channel ("Updated: " <> detail) colorDefault blocks threadTs
         pure ()
 
 notifyReleaseRestarted :: ReleaseTracker -> Flow ()
 notifyReleaseRestarted tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks = [sectionBlock "*RESTARTED*  — reset to CREATED"]
+        threadTs <- resolveThreadTs tracker
+        let blocks = [sectionBlock "*RESTARTED*  — reset to CREATED"]
         _ <- sendSlackRich channel "Restarted" colorCreated blocks threadTs
         pure ()
 
 notifyReleaseFastForwarded :: ReleaseTracker -> Flow ()
 notifyReleaseFastForwarded tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks = [sectionBlock "*FAST FORWARDED*  — advancing to next stage"]
+        threadTs <- resolveThreadTs tracker
+        let blocks = [sectionBlock "*FAST FORWARDED*  — advancing to next stage"]
         _ <- sendSlackRich channel "Fast Forwarded" colorInProgress blocks threadTs
         pure ()
 
 notifyImmediateReverted :: ReleaseTracker -> Flow ()
 notifyImmediateReverted tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks =
+        threadTs <- resolveThreadTs tracker
+        let blocks =
                 [ sectionBlock "*IMMEDIATE REVERT*"
                 , contextBlock ["Image swapped back to `" <> oldVersion tracker <> "` | rollout bypassed"]
                 ]
@@ -414,8 +414,8 @@ notifyImmediateReverted tracker = whenSlackEnabled $
 notifyPodsScaledDown :: ReleaseTracker -> Text -> Flow ()
 notifyPodsScaledDown tracker oldVer = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks = [sectionBlock ("Pods scaled down for `" <> oldVer <> "`")]
+        threadTs <- resolveThreadTs tracker
+        let blocks = [sectionBlock ("Pods scaled down for `" <> oldVer <> "`")]
         _ <- sendSlackRich channel ("Pods scaled down: " <> oldVer) colorDefault blocks threadTs
         pure ()
 
@@ -573,16 +573,16 @@ notifyConfigMapPaused tracker = whenSlackEnabled $
 notifyConfigMapResumed :: ReleaseTracker -> Flow ()
 notifyConfigMapResumed tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks = [sectionBlock "*RESUMED*"]
+        threadTs <- resolveThreadTs tracker
+        let blocks = [sectionBlock "*RESUMED*"]
         _ <- sendSlackRich channel "ConfigMap Resumed" colorInProgress blocks threadTs
         pure ()
 
 notifyConfigMapReverted :: ReleaseTracker -> Flow ()
 notifyConfigMapReverted tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks =
+        threadTs <- resolveThreadTs tracker
+        let blocks =
                 [ sectionBlock "*REVERTED*"
                 , contextBlock ["ConfigMap rolled back"]
                 ]
@@ -592,23 +592,23 @@ notifyConfigMapReverted tracker = whenSlackEnabled $
 notifyConfigMapDiscarded :: ReleaseTracker -> Flow ()
 notifyConfigMapDiscarded tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks = [sectionBlock "*DISCARDED*"]
+        threadTs <- resolveThreadTs tracker
+        let blocks = [sectionBlock "*DISCARDED*"]
         _ <- sendSlackRich channel "ConfigMap DISCARDED" colorDefault blocks threadTs
         pure ()
 
 notifyConfigMapFastForwarded :: ReleaseTracker -> Flow ()
 notifyConfigMapFastForwarded tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks = [sectionBlock "*FAST FORWARDED*  — advancing to next stage"]
+        threadTs <- resolveThreadTs tracker
+        let blocks = [sectionBlock "*FAST FORWARDED*  — advancing to next stage"]
         _ <- sendSlackRich channel "ConfigMap Fast Forwarded" colorInProgress blocks threadTs
         pure ()
 
 notifyGenericThreadMessage :: ReleaseTracker -> Text -> Flow ()
 notifyGenericThreadMessage tracker msg = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
-        let threadTs = getThreadTsFromTracker tracker
-            blocks = [sectionBlock msg]
+        threadTs <- resolveThreadTs tracker
+        let blocks = [sectionBlock msg]
         _ <- sendSlackRich channel msg colorDefault blocks threadTs
         pure ()

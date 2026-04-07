@@ -3,7 +3,7 @@
 module Products.Autopilot.Runner where
 
 import qualified Control.Exception as E
-import Control.Monad (filterM, forM_, forever)
+import Control.Monad (filterM, forM_, forever, when)
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
@@ -19,7 +19,8 @@ import Data.Ord (Down (..), comparing)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
 import Products.Autopilot.EventLog (logStatusUpdated, logTrafficUpdatedWithMessage)
-import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand)
+import qualified Control.Concurrent as CC
+import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getDeploymentReplicaStatus)
 import Products.Autopilot.K8s.Execute (runCmd)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
@@ -406,6 +407,20 @@ validateRunningVersion cfg rt mts = do
 -- Failure Recovery: Restore VS Traffic
 -- ============================================================================
 
+{- | Restore traffic to the old version after a failed/orphaned release.
+
+Order matters (round-7 audit + outage prevention):
+  1. Check old deployment's current replica count.
+  2. If 0 (someone manually scaled it down OR a previous COMPLETED release
+     scaled it down legitimately), SCALE IT BACK UP first to a sensible
+     count derived from the new deployment's current replicas (or default 1)
+     and wait briefly for at least one pod to be ready.
+  3. THEN flip the VS to point at oldVersion.
+  4. Then scale the new deployment to 0.
+
+Without step 2, restoring traffic to a 0-pod deployment would cause an
+immediate 5xx outage on the very route the rollback is supposed to protect.
+-}
 restoreVsTrafficOnFailure :: Config -> ReleaseTracker -> Maybe TargetState -> Flow ()
 restoreVsTrafficOnFailure cfg rt mts = do
     case mts of
@@ -416,23 +431,92 @@ restoreVsTrafficOnFailure cfg rt mts = do
             if isNewSvc || T.null oldVer || oldVer == "new" || oldVer == "unknown"
                 then logInfo $ "[restoreVsTrafficOnFailure] Skipping VS restore for " <> releaseId rt <> " (new service or no old version)"
                 else do
+                    let newDepName = deploymentName ctx
+                        ns = namespace ctx
+                        oldDepName = serviceName ctx <> "-" <> oldVer
+
+                    -- Step 1: probe old deployment's replica count
+                    oldStatus <- liftIO $ getDeploymentReplicaStatus cfg ns oldDepName
+                    let oldDesired = case oldStatus of
+                            Right (_, _, d) -> d
+                            Left _ -> 0
+                    -- Probe new deployment so we can target a sensible replica count.
+                    newStatus <- liftIO $ getDeploymentReplicaStatus cfg ns newDepName
+                    let newDesired = case newStatus of
+                            Right (_, _, d) -> d
+                            Left _ -> 0
+                        targetOldReplicas = max 1 (max oldDesired newDesired)
+
+                    -- Step 2: scale OLD UP first if it's at 0 — never restore
+                    -- traffic to a deployment with no pods.
+                    when (oldDesired <= 0) $ do
+                        logInfo $
+                            "[restoreVsTrafficOnFailure] Old deployment "
+                                <> oldDepName
+                                <> " has 0 replicas — scaling UP to "
+                                <> T.pack (show targetOldReplicas)
+                                <> " before VS restore"
+                        scaleUpRes <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName targetOldReplicas)
+                        case scaleUpRes of
+                            Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: scale-up of old failed: " <> T.pack (show err)
+                            Right _ -> do
+                                logInfo "[restoreVsTrafficOnFailure] Old deployment scale-up issued; waiting for first pod ready"
+                                _ <- liftIO $ waitForFirstPodReady cfg ns oldDepName
+                                pure ()
+                        insertReleaseEvent
+                            (releaseId rt)
+                            "BUSINESS"
+                            "OLD_DEPLOYMENT_SCALED_UP_FOR_ROLLBACK"
+                            ( object
+                                [ "oldDeployment" .= (oldDepName :: T.Text)
+                                , "targetReplicas" .= targetOldReplicas
+                                , "reason" .= ("Restoring traffic to a deployment that had 0 pods — scaling up first to avoid 5xx outage" :: T.Text)
+                                ]
+                            )
+
+                    -- Step 3: now flip the VS
                     logInfo $ "[restoreVsTrafficOnFailure] Restoring VS traffic to old version for " <> releaseId rt
                     vsResult <- liftIO $ applyVirtualServiceRollout cfg ctx 100 0
                     case vsResult of
                         Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to restore VS: " <> T.pack (show err)
                         Right _ -> logInfo "[restoreVsTrafficOnFailure] VS traffic restored to old version"
-                    let newDepName = deploymentName ctx
-                        ns = namespace ctx
+
+                    -- Step 4: scale the new deployment to 0 (the failed one)
                     scaleResult <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns newDepName 0)
                     case scaleResult of
                         Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to scale down new deployment: " <> T.pack (show err)
                         Right _ -> logInfo "[restoreVsTrafficOnFailure] New deployment scaled down to 0"
+
                     insertReleaseEvent
                         (releaseId rt)
                         "BUSINESS"
                         "VS_TRAFFIC_RESTORED"
-                        (object ["action" .= ("restore_on_failure" :: T.Text), "oldVersion" .= (oldVer :: T.Text), "newDeployment" .= (newDepName :: T.Text)])
+                        ( object
+                            [ "action" .= ("restore_on_failure" :: T.Text)
+                            , "oldVersion" .= (oldVer :: T.Text)
+                            , "newDeployment" .= (newDepName :: T.Text)
+                            , "oldDesiredAtRestore" .= oldDesired
+                            , "scaledOldUp" .= (oldDesired <= 0)
+                            ]
+                        )
         _ -> pure ()
+
+{- | Best-effort wait for at least one ready pod on a deployment, capped at
+~30s. Used by restoreVsTrafficOnFailure to bridge the gap after scaling
+the old deployment back up before flipping the VS. Returns even on
+timeout — the caller proceeds either way.
+-}
+waitForFirstPodReady :: Config -> T.Text -> T.Text -> IO ()
+waitForFirstPodReady cfg ns depName = go (15 :: Int)
+  where
+    go 0 = pure ()
+    go n = do
+        r <- getDeploymentReplicaStatus cfg ns depName
+        case r of
+            Right (ready, _, _) | ready >= 1 -> pure ()
+            _ -> do
+                CC.threadDelay 2000000 -- 2s
+                go (n - 1)
 
 -- ============================================================================
 -- Abort Handling

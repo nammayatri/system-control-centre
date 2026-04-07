@@ -68,11 +68,29 @@ transaction. Round 7 audit B3: doing the two updates in separate
 transactions risks half-state if the process dies between them
 (deployment_config.vs_locked_by=NULL while tracker rows still LOCKED).
 The single txn guarantees both succeed or neither does.
+
+Returns the id of the most recently LOCKED tracker that was just freed
+(or empty), so the caller can pass it to notifyVsEditUnlocked for proper
+Slack thread continuity. Without this, the unlock notification posts as
+a brand-new top-level Slack message instead of replying under the lock.
 -}
-forceUnlockAppGroupTransactional :: Text -> Flow ()
+forceUnlockAppGroupTransactional :: Text -> Flow Text
 forceUnlockAppGroupTransactional ag = do
     db <- getDBEnv
     liftIO $ withConn db $ \conn -> PG.withTransaction conn $ do
+        -- Snapshot the most-recent LOCKED tracker BEFORE flipping it,
+        -- so the caller can use its id for thread_ts lookup.
+        rows <-
+            PG.query
+                conn
+                "SELECT id FROM release_tracker \
+                \WHERE category = 'VSEdit' AND status = 'LOCKED' AND app_group = ? \
+                \ORDER BY date_created DESC LIMIT 1"
+                (PG.Only ag) ::
+                IO [PG.Only Text]
+        let tid = case rows of
+                (PG.Only t : _) -> t
+                _ -> ""
         _ <-
             PG.execute
                 conn
@@ -87,7 +105,7 @@ forceUnlockAppGroupTransactional ag = do
                 \SET status = 'UNLOCKED', last_updated = NOW(), end_time = NOW() \
                 \WHERE category = 'VSEdit' AND status = 'LOCKED' AND app_group = ?"
                 (PG.Only ag)
-        pure ()
+        pure tid
 
 {- | Legacy single-table helper kept for the periodic expired-lock sweep
 which already updates deployment_config separately in its own txn.
@@ -494,9 +512,10 @@ forceUnlockVsEditTrackerH _ap VsUnlockReq{..} = do
                     -- as long as the body also passed appGroup.
                     case appGroup of
                         Just p | not (T.null p) -> do
-                            updateVsLockedBy p Nothing
-                            unlockOrphanLockedTrackersForAppGroup p
-                            notifyVsEditUnlocked "" p ""
+                            -- Use the same atomic helper so the freed-tracker id
+                            -- is available for thread continuity.
+                            freedTid <- forceUnlockAppGroupTransactional p
+                            notifyVsEditUnlocked freedTid p ""
                             pure $ APIResponse "SUCCESS" ("VS force-unlocked for app_group=" <> p <> " (tracker missing)")
                         _ -> pure $ APIResponse "ERROR" "Tracker not found and no appGroup provided"
                 Just existing -> do
@@ -528,8 +547,12 @@ forceUnlockVsEditTrackerH _ap VsUnlockReq{..} = do
                         Just _existing -> do
                             -- Round 7 audit B3: single-transaction force-unlock
                             -- (deployment_config + tracker rows in one txn).
-                            forceUnlockAppGroupTransactional p
-                            notifyVsEditUnlocked "" p ""
+                            -- Returns the just-freed LOCKED tracker id so the
+                            -- unlock Slack notification threads under the
+                            -- original lock message instead of posting a new
+                            -- top-level thread.
+                            freedTid <- forceUnlockAppGroupTransactional p
+                            notifyVsEditUnlocked freedTid p ""
                             pure $ APIResponse "SUCCESS" ("VS force-unlocked for app_group=" <> p)
 
 {- | Revert a previously-applied VS edit by re-applying the VS_OLD snapshot
