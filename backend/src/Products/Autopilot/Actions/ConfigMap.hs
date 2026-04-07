@@ -23,6 +23,7 @@ import Control.Monad.IO.Class (liftIO)
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
 import Core.Environment (DBEnv)
+import Core.Logging (logErrorG, logInfoG)
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv, logInfo)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
@@ -188,21 +189,17 @@ createConfigMapH _ap body = do
                 liftIO $
                     void $
                         forkIO $ do
-                            -- TODO: migrate to structured logging
-                            putStrLn $ "[CONFIGMAP-SYNC] Posting to secondary: " <> postUrl
+                            logInfoG $ "[CONFIGMAP-SYNC] Posting to secondary: " <> T.pack postUrl
                             syncResult <- try (readProcessWithExitCode "curl" postCurlArgs "") :: IO (Either SomeException (ExitCode, String, String))
                             case syncResult of
                                 Right (ExitSuccess, out, _) -> do
-                                    -- TODO: migrate to structured logging
-                                    putStrLn $ "[CONFIGMAP-SYNC] Success, response: " <> out
+                                    logInfoG $ "[CONFIGMAP-SYNC] Success, response: " <> T.pack out
                                     insertReleaseEvent db rid "BUSINESS" "CONFIGMAP_SYNC_RESPONSE" (toJSON (T.pack out))
                                 Right (ExitFailure code, _, err) -> do
-                                    -- TODO: migrate to structured logging
-                                    putStrLn $ "[CONFIGMAP-SYNC] Failed (exit=" <> show code <> "): " <> err
+                                    logErrorG $ "[CONFIGMAP-SYNC] Failed (exit=" <> T.pack (show code) <> "): " <> T.pack err
                                     insertReleaseEvent db rid "BUSINESS" "CONFIGMAP_SYNC_FAILED" (toJSON (T.pack err))
                                 Left e -> do
-                                    -- TODO: migrate to structured logging
-                                    putStrLn $ "[CONFIGMAP-SYNC] Exception: " <> show e
+                                    logErrorG $ "[CONFIGMAP-SYNC] Exception: " <> T.pack (show e)
                                     insertReleaseEvent db rid "BUSINESS" "CONFIGMAP_SYNC_FAILED" (toJSON (T.pack (show e)))
             pure $ APIResponse "SUCCESS" ("ConfigMap tracker created: " <> rid)
 

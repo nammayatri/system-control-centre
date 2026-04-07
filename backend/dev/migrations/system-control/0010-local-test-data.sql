@@ -24,20 +24,22 @@ WHERE NOT EXISTS (
 
 -- ============================================================
 -- Test services (service-level rows)
+-- slack_channel is owned by the app group row above (one channel per group),
+-- not duplicated on each service.
 -- ============================================================
 INSERT INTO deployment_config (
-  app_group, service, service_host, service_type, slack_channel
+  app_group, service, service_host, service_type
 )
-SELECT 'TEST_AUTOPILOT', 'TEST_SVC', 'test-svc', 'SERVICE', 'oogway-test'
+SELECT 'TEST_AUTOPILOT', 'TEST_SVC', 'test-svc', 'SERVICE'
 WHERE NOT EXISTS (
   SELECT 1 FROM deployment_config
   WHERE app_group = 'TEST_AUTOPILOT' AND service = 'TEST_SVC'
 );
 
 INSERT INTO deployment_config (
-  app_group, service, service_host, service_type, slack_channel
+  app_group, service, service_host, service_type
 )
-SELECT 'TEST_AUTOPILOT', 'TEST_SVC_2', 'test-svc-2', 'SERVICE', 'oogway-test'
+SELECT 'TEST_AUTOPILOT', 'TEST_SVC_2', 'test-svc-2', 'SERVICE'
 WHERE NOT EXISTS (
   SELECT 1 FROM deployment_config
   WHERE app_group = 'TEST_AUTOPILOT' AND service = 'TEST_SVC_2'

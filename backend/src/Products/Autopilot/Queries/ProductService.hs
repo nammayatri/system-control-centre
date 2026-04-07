@@ -6,6 +6,7 @@ module Products.Autopilot.Queries.ProductService where
 import qualified Control.Exception
 import Core.DB.Connection (runDB, withConn)
 import Core.Environment (DBEnv)
+import Core.Logging (logInfoG)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text
@@ -188,9 +189,8 @@ upsertService ::
     Text ->
     Maybe Text ->
     Maybe Text ->
-    Maybe Text ->
     IO ()
-upsertService db _rowId rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy slackChannel' = do
+upsertService db _rowId rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy = do
     withConn db $ \conn ->
         withTransaction conn $ do
             runBeamPostgres conn $
@@ -218,7 +218,7 @@ upsertService db _rowId rolloutStrategy decisionConfig serviceName' product' sTy
                                 , dcRolloutStrategy = val_ rolloutStrategy
                                 , dcRevertStrategy = val_ revertStrategy
                                 , dcDecisionConfig = val_ decisionConfig
-                                , dcSlackChannel = val_ slackChannel'
+                                , dcSlackChannel = val_ Nothing
                                 }
                             ]
 
@@ -402,12 +402,11 @@ releaseExpiredVsLocks db = do
                 (Only (show expiryMins))
         mapM_
             ( \(ag, o) ->
-                -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
-                putStrLn $
+                logInfoG $
                     "[STARTUP] Releasing expired VS lock: app_group="
-                        <> Data.Text.unpack ag
+                        <> ag
                         <> " (was held by "
-                        <> Data.Text.unpack o
+                        <> o
                         <> ")"
             )
             owners

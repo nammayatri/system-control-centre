@@ -5,7 +5,7 @@ import Control.Exception (bracket)
 import Core.Config (Config (..), loadConfig)
 import Core.DB.Connection (mkDBEnv)
 import Core.Environment (AppState (..))
-import Core.Logging (LoggerConfig (..), loadLoggerConfigFromDhall, logInfoIO, prepareLoggerEnv, releaseLoggerEnv)
+import Core.Logging (LoggerConfig (..), loadLoggerConfigFromDhall, logInfoIO, prepareLoggerEnv, releaseLoggerEnv, setGlobalLoggerEnv)
 import Core.Server (serverLoop)
 import qualified Data.Text as T
 import Products.Autopilot.Runner (runnerLoop, runnerPollLoop, runnerStartupRecovery)
@@ -16,6 +16,7 @@ main = do
     db <- mkDBEnv cfg
     logCfg <- loadLoggerConfigFromDhall
     bracket (prepareLoggerEnv logCfg) releaseLoggerEnv $ \logEnv -> do
+        setGlobalLoggerEnv logEnv
         let st = AppState cfg db logEnv
         logInfoIO logEnv $
             "Starting system-control-centre (mode="

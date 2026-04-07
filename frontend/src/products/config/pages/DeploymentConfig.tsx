@@ -34,7 +34,7 @@ const EMPTY_GROUP_FORM: Partial<ProductConfig> = {
 
 const EMPTY_SERVICE_FORM: Partial<ReleaseConfig> = {
   appGroup: '', service: '', host: '', rollout_strategy: '',
-  slack_channel: '', serviceType: 'SERVICE', emails: '',
+  serviceType: 'SERVICE',
   revert_strategy: '', decision_config: '',
 };
 
@@ -154,8 +154,7 @@ const DeploymentConfig: React.FC = () => {
           (group.cluster || '').toLowerCase().includes(q);
         const serviceMatch = services.some((s: ReleaseConfig) =>
           s.service.toLowerCase().includes(q) ||
-          s.host.toLowerCase().includes(q) ||
-          (s.slack_channel || '').toLowerCase().includes(q)
+          s.host.toLowerCase().includes(q)
         );
         return groupMatch || serviceMatch;
       });
@@ -296,6 +295,7 @@ const DeploymentConfig: React.FC = () => {
                   <th className="py-3 px-4">Acronym</th>
                   <th className="py-3 px-4">Type</th>
                   <th className="py-3 px-4">Sync Cluster</th>
+                  <th className="py-3 px-4">Slack</th>
                   <th className="py-3 px-4">Infra Approval</th>
                   <th className="py-3 px-4">VS Locked</th>
                   <th className="py-3 px-4 w-24 text-center">Actions</th>
@@ -343,6 +343,9 @@ const DeploymentConfig: React.FC = () => {
                         <td className="py-3 px-4 text-xs text-zinc-500">
                           {group.sync_cluster || '-'}
                         </td>
+                        <td className="py-3 px-4 font-mono text-xs text-zinc-500">
+                          {group.slack_channel || '-'}
+                        </td>
                         <td className="py-3 px-4">
                           <Badge variant={group.need_infra_approval ? 'warning' : 'default'} size="sm">
                             {group.need_infra_approval ? 'Yes' : 'No'}
@@ -382,11 +385,9 @@ const DeploymentConfig: React.FC = () => {
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Service</td>
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Host</td>
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Type</td>
-                          <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Slack Channel</td>
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Rollout Strategy</td>
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Revert Strategy</td>
-                          <td className="py-2 px-4" colSpan={2}></td>
-                          <td className="py-2 px-4"></td>
+                          <td className="py-2 px-4" colSpan={4}></td>
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider text-center">Actions</td>
                         </tr>
                       )}
@@ -415,15 +416,13 @@ const DeploymentConfig: React.FC = () => {
                               </Badge>
                             ) : '-'}
                           </td>
-                          <td className="py-2.5 px-4 font-mono text-xs text-zinc-500">{svc.slack_channel || '-'}</td>
                           <td className="py-2.5 px-4 font-mono text-[11px] text-zinc-500 max-w-[180px] truncate" title={svc.rollout_strategy}>
                             {truncateJson(svc.rollout_strategy)}
                           </td>
                           <td className="py-2.5 px-4 font-mono text-[11px] text-zinc-500 max-w-[180px] truncate" title={svc.revert_strategy}>
                             {truncateJson(svc.revert_strategy || '')}
                           </td>
-                          <td className="py-2.5 px-4" colSpan={2}></td>
-                          <td className="py-2.5 px-4"></td>
+                          <td className="py-2.5 px-4" colSpan={4}></td>
                           <td className="py-2.5 px-4 text-center">
                             <div className="flex items-center justify-center gap-1">
                               <PermissionGate product="autopilot" permission="RELEASE_CREATE">
@@ -449,7 +448,7 @@ const DeploymentConfig: React.FC = () => {
                       {isExpanded && (
                         <tr className="border-b border-zinc-100 bg-zinc-50/10">
                           <td className="py-2 px-4"></td>
-                          <td className="py-2 px-4" colSpan={10}>
+                          <td className="py-2 px-4" colSpan={11}>
                             <div className="flex items-center">
                               <div className="border-l-2 border-zinc-200 h-5 mr-3"></div>
                               <PermissionGate product="autopilot" permission="RELEASE_CREATE">
@@ -518,6 +517,7 @@ const DeploymentConfig: React.FC = () => {
                       <div><span className="text-zinc-400">Namespace:</span> <span className="font-mono">{group.namespace || '-'}</span></div>
                       <div><span className="text-zinc-400">VS:</span> <span className="font-mono">{group.vs_name || '-'}</span></div>
                       <div><span className="text-zinc-400">Sync:</span> <span>{group.sync_cluster || '-'}</span></div>
+                      <div className="sm:col-span-2"><span className="text-zinc-400">Slack:</span> <span className="font-mono">{group.slack_channel || '-'}</span></div>
                     </div>
                     <div className="flex items-center gap-2 mt-2 ml-6 flex-wrap">
                       <Badge variant={typeBadgeVariant(group.product_type)} size="sm">{group.product_type || '-'}</Badge>
@@ -554,7 +554,6 @@ const DeploymentConfig: React.FC = () => {
                           <div className="text-[11px] text-zinc-500 font-mono break-all">{svc.host || '-'}</div>
                           <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                             {svc.serviceType && <Badge variant={typeBadgeVariant(svc.serviceType)} size="sm">{svc.serviceType}</Badge>}
-                            {svc.slack_channel && <span className="text-[10px] text-zinc-400 font-mono">{svc.slack_channel}</span>}
                           </div>
                         </div>
                       ))}
@@ -883,28 +882,7 @@ const DeploymentConfig: React.FC = () => {
                   placeholder='Optional decision config JSON'
                 />
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Slack Channel</label>
-                  <input
-                    type="text"
-                    value={serviceForm.slack_channel || ''}
-                    onChange={e => setServiceForm(prev => ({ ...prev, slack_channel: e.target.value }))}
-                    className={inputClass}
-                    placeholder="e.g. C085..."
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Emails</label>
-                  <input
-                    type="text"
-                    value={serviceForm.emails || ''}
-                    onChange={e => setServiceForm(prev => ({ ...prev, emails: e.target.value }))}
-                    className={inputClass}
-                    placeholder="e.g. team@example.com"
-                  />
-                </div>
-              </div>
+              {/* Slack Channel is configured at the App Group level, not per service. */}
             </div>
           </DialogBody>
           <DialogFooter>

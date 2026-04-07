@@ -179,7 +179,7 @@ upsertServiceH :: AuthedPerson -> UpsertServiceReq -> Flow APIResponse
 upsertServiceH _ap req@UpsertServiceReq{..} = do
     db <- getDBEnv
     let rowId = fromMaybe 0 (req.id)
-    liftIO $ upsertService db rowId rolloutStrategyText decisionConfigText service appGroup serviceType serviceHost revertStrategyText slackChannel
+    liftIO $ upsertService db rowId rolloutStrategyText decisionConfigText service appGroup serviceType serviceHost revertStrategyText
     pure $ APIResponse "SUCCESS" "release_config upserted"
 
 -- ============================================================================

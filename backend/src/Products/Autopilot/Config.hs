@@ -102,4 +102,10 @@ autopilotConfigs =
         DeploymentGroup
         "Allow multiple concurrent releases per product"
         (Just "autopilot")
+    , ConfigEntry
+        "slack_enabled"
+        (BoolConfig False)
+        NotificationGroup
+        "Enable Slack notifications for release events"
+        (Just "autopilot")
     ]

@@ -13,6 +13,7 @@ where
 
 import Control.Applicative ((<|>))
 import Core.Config (Config (..))
+import Core.Logging (logWarningG)
 import Data.Aeson (Value (..))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -80,7 +81,7 @@ applyVirtualServiceRolloutSingle cfg ctx maxRetries vsName oldW newW = go 1
                                         let err = K8sError (T.pack errStr)
                                          in if isConflictError err && attempt < maxRetries
                                                 then do
-                                                    putStrLn $ "[VS-ROLLOUT] Conflict on attempt " <> show attempt <> ", retrying..."
+                                                    logWarningG $ "[VS-ROLLOUT] Conflict on attempt " <> T.pack (show attempt) <> ", retrying..."
                                                     go (attempt + 1)
                                                 else pure (Left err)
     buildUpdatedVS (Object root) = do

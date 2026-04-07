@@ -20,6 +20,7 @@ import Control.Applicative ((<|>))
 import Control.Monad.IO.Class (liftIO)
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
+import Core.Logging (logInfoG)
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
 import Data.Aeson (Value (..), eitherDecode, object, toJSON, (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
@@ -167,14 +168,13 @@ createVsEditTrackerH _ap CreateVsEditTrackerReq{..} = do
             liftIO $
                 if discardedCount > 0
                     then do
-                        -- TODO: migrate to structured logging (plain IO inside liftIO block)
-                        putStrLn $
+                        logInfoG $
                             "[VS-EDIT] DISCARDED "
-                                <> show discardedCount
+                                <> T.pack (show discardedCount)
                                 <> " duplicate CREATED tracker(s) for app_group="
-                                <> T.unpack appGroup
+                                <> appGroup
                                 <> " (kept: "
-                                <> T.unpack tid
+                                <> tid
                                 <> ")"
                         insertReleaseEvent
                             db
@@ -514,8 +514,7 @@ in BackendConfigWorkflow)
 applyVsToK8s :: Config -> String -> Text -> IO (Either Text ())
 applyVsToK8s cfg ns content = do
     let cmd = unwords ["echo", shellQuote content, "|", kubectlBin cfg, "-n", ns, "replace -f -"]
-    -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
-    putStrLn $ "[VS-APPLY] Running: kubectl -n " <> ns <> " replace -f -"
+    logInfoG $ "[VS-APPLY] Running: kubectl -n " <> T.pack ns <> " replace -f -"
     result <- runCmd cmd
     case result of
         Right _ -> pure (Right ())

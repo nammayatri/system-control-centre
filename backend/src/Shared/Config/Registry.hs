@@ -4,8 +4,6 @@
 
 This module is deliberately product-agnostic. It exposes:
 
-  * 'globalConfigs' — truly cross-cutting flags (slack/email toggles) that
-    any product's operator would expect to find.
   * 'findConfigEntryIn' — pure lookup over a list of 'ConfigEntry' values.
   * 'validateConfigValue' — type-level shape check for an incoming value.
 
@@ -13,9 +11,12 @@ It does NOT import any product module. Assembly of the full product-aware
 list lives one layer up in "Products.ConfigCatalog" so this module stays
 inside the 'Shared/' layer policy ("Shared must not import from Products"
 per the layer rules in CONTEXT.md).
+
+There are intentionally no global (cross-product) configs at this layer —
+every config belongs to a specific product. If a future config genuinely
+needs to be cross-cutting, add a 'globalConfigs' list back here.
 -}
 module Shared.Config.Registry (
-    globalConfigs,
     findConfigEntryIn,
     validateConfigValue,
 )
@@ -26,26 +27,6 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Shared.Config.Types
 import Text.Read (readMaybe)
-
-{- | Global configs (product = Nothing). These are cross-cutting flags that
-any product's operator would expect to exist — notification toggles,
-email toggles, etc.
--}
-globalConfigs :: [ConfigEntry]
-globalConfigs =
-    [ ConfigEntry
-        "mailing_enabled"
-        (BoolConfig False)
-        NotificationGroup
-        "Enable email notifications"
-        Nothing
-    , ConfigEntry
-        "slack_enabled"
-        (BoolConfig False)
-        NotificationGroup
-        "Enable Slack notifications for release events"
-        Nothing
-    ]
 
 {- | Look up a config entry by key in a caller-supplied list. The list is
 passed in (rather than being a module constant) so this module remains

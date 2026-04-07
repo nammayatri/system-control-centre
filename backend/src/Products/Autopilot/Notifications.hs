@@ -49,6 +49,7 @@ where
 
 import Control.Exception (SomeException, try)
 import Core.Environment (DBEnv)
+import Core.Logging (logErrorG, logInfoG, logWarningG)
 import Data.Aeson (Value (..), decode, encode, object, (.=))
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -57,7 +58,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.HTTP.Client (RequestBody (..), httpLbs, method, newManager, parseRequest, requestBody, requestHeaders, responseBody, responseTimeout, responseTimeoutMicro)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
-import Products.Autopilot.Queries.ProductService (findProductByName, findServiceByProductAndName, getSlackChannelDirect)
+import Products.Autopilot.Queries.ProductService (findProductByName, getSlackChannelDirect)
 import qualified Products.Autopilot.Queries.ReleaseTracker as RTQ
 import Products.Autopilot.RuntimeConfig (isSlackEnabled)
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
@@ -91,15 +92,12 @@ getDashboardUrl = do
     mUrl <- lookupEnv "DASHBOARD_URL"
     pure $ T.pack $ maybe "http://localhost:5173" id mUrl
 
+-- | Slack channel is owned by the app group, not the service.
+-- One channel per app group covers all releases, configmaps, and VS edits.
 getSlackChannel :: DBEnv -> Text -> Text -> IO (Maybe Text)
-getSlackChannel db prod svc = do
-    mCfg <- findServiceByProductAndName db prod svc
-    case mCfg >>= getSlackChannelDirect of
-        Just ch | not (T.null ch) -> pure (Just ch)
-        -- Fall back to app group's slack_channel (covers configmaps, VS edits, etc.)
-        _ -> do
-            mProd <- findProductByName db prod
-            pure (mProd >>= getSlackChannelDirect)
+getSlackChannel db prod _svc = do
+    mProd <- findProductByName db prod
+    pure (mProd >>= getSlackChannelDirect)
 
 {- | Post a rich message to Slack using Block Kit attachments.
 Returns the message ts (thread ID) if successful.
@@ -109,8 +107,7 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
     mToken <- getSlackToken
     case mToken of
         Nothing -> do
-            -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
-            putStrLn "[SLACK] No SLACK_BOT_TOKEN env var set, skipping"
+            logWarningG "[SLACK] No SLACK_BOT_TOKEN env var set, skipping"
             pure Nothing
         Just token -> do
             result <- try $ do
@@ -147,13 +144,11 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
                                 Just (String ts) -> Just ts
                                 _ -> Nothing
                             _ -> Nothing
-                -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
-                putStrLn $ "[SLACK] Sent to #" <> T.unpack channel <> maybe "" (\ts -> " (ts=" <> T.unpack ts <> ")") mTs
+                logInfoG $ "[SLACK] Sent to #" <> channel <> maybe "" (\ts -> " (ts=" <> ts <> ")") mTs
                 pure mTs
             case result of
                 Left (err :: SomeException) -> do
-                    -- TODO: migrate to structured logging (plain IO, needs LoggerEnv parameter)
-                    putStrLn $ "[SLACK] Error: " <> show err
+                    logErrorG $ "[SLACK] Error: " <> T.pack (show err)
                     pure Nothing
                 Right mTs -> pure mTs
 
@@ -178,13 +173,13 @@ whenSlackEnabled db action = do
     enabled <- isSlackEnabled db
     if enabled
         then action
-        else putStrLn "[SLACK] Disabled, skipping"
+        else logInfoG "[SLACK] Disabled, skipping"
 
 withChannel :: DBEnv -> Text -> Text -> (Text -> IO ()) -> IO ()
 withChannel db prod svc f = do
     mCh <- getSlackChannel db prod svc
     case mCh of
-        Nothing -> putStrLn $ "[SLACK] No channel for " <> T.unpack prod <> "/" <> T.unpack svc
+        Nothing -> logWarningG $ "[SLACK] No channel for " <> prod <> "/" <> svc
         Just ch -> f ch
 
 {- | Read thread_ts fresh from DB every time (avoids stale in-memory tracker).

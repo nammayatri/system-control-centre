@@ -27,9 +27,8 @@ module Products.Autopilot.RuntimeConfig (
     -- HPA
     isHpaEnabledForProduct,
     getHpaTemplate,
-    -- Re-export global flags for convenience
+    -- Notifications
     isSlackEnabled,
-    isMailingEnabled,
 )
 where
 
@@ -45,10 +44,13 @@ import Shared.Config.Runtime (
     getConfigBoolForProduct,
     getConfigDoubleForProduct,
     getConfigIntForProduct,
-    isMailingEnabled,
-    isSlackEnabled,
  )
 import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
+
+-- ── Notifications ──────────────────────────────────────────────────
+
+isSlackEnabled :: DBEnv -> IO Bool
+isSlackEnabled db = getConfigBoolForProduct db "slack_enabled" (Just "autopilot") False
 
 -- ── Feature flags ──────────────────────────────────────────────────
 

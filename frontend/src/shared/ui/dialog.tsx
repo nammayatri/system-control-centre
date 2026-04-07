@@ -52,14 +52,16 @@ export const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        // Mobile: full-screen sheet anchored to bottom (or full screen)
+        // Base
+        'fixed z-50 bg-white flex flex-col shadow-sm',
+        // Mobile: bottom sheet (full width, anchored to bottom)
         fullScreenOnMobile
-          ? 'fixed inset-x-0 bottom-0 top-auto z-50 max-h-[92vh] w-full rounded-t-2xl border-x-0 border-b-0 border-t border-zinc-200 bg-white flex flex-col'
-          : 'fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 max-h-[92vh] rounded-2xl border border-zinc-200 bg-white flex flex-col',
-        // Desktop: centered modal
-        'sm:fixed sm:left-1/2 sm:top-1/2 sm:bottom-auto sm:inset-x-auto sm:w-full sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl sm:border sm:border-zinc-200 sm:max-h-[88vh]',
+          ? 'inset-x-0 bottom-0 max-h-[92vh] w-full rounded-t-2xl border-t border-zinc-200'
+          : 'left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[calc(100vw-2rem)] max-h-[92vh] rounded-2xl border border-zinc-200',
+        // Desktop overrides: centered modal — explicitly reset every mobile position prop
+        'sm:inset-x-auto sm:bottom-auto sm:left-1/2 sm:top-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2',
+        'sm:w-[calc(100vw-2rem)] sm:max-h-[88vh] sm:rounded-2xl sm:border sm:border-zinc-200',
         sizeMap[size],
-        'shadow-sm',
         // Animations: slide up on mobile, scale on desktop
         'data-[state=open]:animate-in data-[state=open]:fade-in-0',
         'data-[state=open]:slide-in-from-bottom-4 sm:data-[state=open]:slide-in-from-bottom-0 sm:data-[state=open]:zoom-in-95',

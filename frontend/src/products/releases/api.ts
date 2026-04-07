@@ -694,10 +694,8 @@ export interface ReleaseConfig {
     service: string;
     host: string;
     rollout_strategy: string;
-    slack_channel: string;
     serviceType?: string;
     serviceAcronym?: string;
-    emails?: string;
     revert_strategy?: string;
     decision_config?: string;
 }
@@ -713,10 +711,8 @@ export async function fetchReleaseConfigs(appGroup?: string): Promise<ReleaseCon
         service: d.serviceName || d.service || '',
         host: d.serviceHost || d.host || '',
         rollout_strategy: d.rolloutStrategy || d.rollout_strategy || '',
-        slack_channel: d.slackWebhookUrls || d.slack_channel || '',
         serviceType: d.serviceType || '',
         serviceAcronym: d.serviceAcronym || '',
-        emails: d.emails || '',
         revert_strategy: d.revertStrategy || d.revert_strategy || '',
         decision_config: d.decisionConfig || d.decision_config || '',
     }));
@@ -730,7 +726,6 @@ export async function createReleaseConfig(payload: Partial<ReleaseConfig>): Prom
         serviceType: payload.serviceType || 'SERVICE',
         serviceHost: payload.host,
         rolloutStrategyText: payload.rollout_strategy,
-        slackChannel: payload.slack_channel,
         revertStrategyText: payload.revert_strategy || null,
         decisionConfigText: payload.decision_config || null,
     };
@@ -746,7 +741,6 @@ export async function updateReleaseConfig(id: number, payload: Partial<ReleaseCo
         serviceType: payload.serviceType || 'SERVICE',
         serviceHost: payload.host,
         rolloutStrategyText: payload.rollout_strategy,
-        slackChannel: payload.slack_channel,
         revertStrategyText: payload.revert_strategy || null,
         decisionConfigText: payload.decision_config || null,
     };

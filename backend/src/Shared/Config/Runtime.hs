@@ -12,9 +12,6 @@ module Shared.Config.Runtime (
     getConfigDouble,
     getConfigDoubleForProduct,
     getConfigText,
-    -- Global feature flags
-    isSlackEnabled,
-    isMailingEnabled,
 )
 where
 
@@ -68,10 +65,3 @@ getConfigText db name fallback = do
     v <- getEnabledServerConfigValue db name
     pure $ fromMaybe fallback v
 
--- ── Global feature flags ──────────────────────────────────────────
-
-isSlackEnabled :: DBEnv -> IO Bool
-isSlackEnabled db = getConfigBool db "slack_enabled" False
-
-isMailingEnabled :: DBEnv -> IO Bool
-isMailingEnabled db = getConfigBool db "mailing_enabled" False

@@ -25,15 +25,15 @@ where
 
 import Data.Text (Text)
 import Products.Autopilot.Config (autopilotConfigs)
-import Shared.Config.Registry (findConfigEntryIn, globalConfigs)
+import Shared.Config.Registry (findConfigEntryIn)
 import Shared.Config.Types (ConfigEntry)
 
-{- | Every config entry the server knows about: global flags first, then
-every product's own list. If you add a new product, append its
-@<product>Configs@ here.
+{- | Every config entry the server knows about. There are no global
+(cross-product) configs — every entry is product-scoped. To add a new
+product, append its @<product>Configs@ here.
 -}
 allConfigEntries :: [ConfigEntry]
-allConfigEntries = globalConfigs ++ autopilotConfigs
+allConfigEntries = autopilotConfigs
 
 {- | Look up a config entry by key in the full product-aware catalog.
 Thin wrapper over 'Shared.Config.Registry.findConfigEntryIn' that

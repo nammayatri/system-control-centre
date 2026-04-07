@@ -93,7 +93,6 @@ data UpsertServiceReq = UpsertServiceReq
     , serviceType :: Text
     , serviceHost :: Maybe Text
     , revertStrategyText :: Maybe Text
-    , slackChannel :: Maybe Text
     }
     deriving (Show, Generic)
 
