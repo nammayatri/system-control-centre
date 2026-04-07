@@ -71,6 +71,7 @@ import qualified Products.Autopilot.Queries.ReleaseTracker as RTQ
 import Products.Autopilot.RuntimeConfig (isSlackEnabled)
 import Products.Autopilot.Sync (triggerSyncIfEnabled)
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
+import Products.Autopilot.Types.Target (TargetState)
 import System.Environment (lookupEnv)
 import Prelude
 
@@ -271,8 +272,8 @@ notifyReleaseProgress tracker percentage = whenSlackEnabled $
         _ <- sendSlackRich channel ("INPROGRESS " <> pct <> "%") colorInProgress blocks threadTs
         pure ()
 
-notifyReleaseCompleted :: ReleaseTracker -> Flow ()
-notifyReleaseCompleted tracker = do
+notifyReleaseCompleted :: ReleaseTracker -> Maybe TargetState -> Flow ()
+notifyReleaseCompleted tracker mts = do
     whenSlackEnabled $
         withChannel (appGroup tracker) (service tracker) $ \channel -> do
             let threadTs = getThreadTsFromTracker tracker
@@ -282,7 +283,7 @@ notifyReleaseCompleted tracker = do
                     ]
             _ <- sendSlackRich channel "COMPLETED" colorCompleted blocks threadTs
             pure ()
-    triggerSyncIfEnabled tracker Nothing
+    triggerSyncIfEnabled tracker mts
 
 notifyReleaseAborted :: ReleaseTracker -> Flow ()
 notifyReleaseAborted tracker = whenSlackEnabled $

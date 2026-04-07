@@ -671,7 +671,7 @@ updateTrackerH _ap rid req = do
                                                         PAUSED -> notifyReleasePaused updatedTracker
                                                         INPROGRESS -> notifyReleaseResumed updatedTracker
                                                         ABORTING -> notifyReleaseAborted updatedTracker
-                                                        COMPLETED -> notifyReleaseCompleted updatedTracker
+                                                        COMPLETED -> notifyReleaseCompleted updatedTracker updatedTargetState
                                                         _ -> notifyReleaseUpdated updatedTracker ("status changed to " <> newStatusText)
                                                     pure $ APIResponse "SUCCESS" "Tracker updated"
                                                 else pure staleTrackerError

@@ -315,7 +315,8 @@ notifyComplete = do
             updateRT $ \r -> r{status = COMPLETED}
 
             -- Notify Slack
-            lift $ notifyReleaseCompleted rt
+            currentTS <- gets targetState
+            lift $ notifyReleaseCompleted rt currentTS
 
 -- ============================================================================
 -- K8s State Helpers

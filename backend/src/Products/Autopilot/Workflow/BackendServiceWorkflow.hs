@@ -1216,7 +1216,7 @@ notifyComplete = do
     logStatusUpdated currentRT completionMsg
 
     -- Notify Slack
-    lift $ notifyReleaseCompleted currentRT
+    lift $ notifyReleaseCompleted currentRT currentTS
   where
     getTrafficPct Nothing = 100 :: Int
     getTrafficPct (Just (K8sState k8s)) = trafficPercentage k8s
