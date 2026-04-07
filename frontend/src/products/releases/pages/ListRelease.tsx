@@ -116,9 +116,9 @@ const ListRelease: React.FC = () => {
       const from = new Date(customFrom);
       const to = new Date(customTo);
       if (Math.ceil((to.getTime() - from.getTime()) / (1000 * 60 * 60 * 24)) > 30) {
-        alert('Custom range cannot exceed 30 days'); return;
+        toast.error('Custom range cannot exceed 30 days'); return;
       }
-      if (from > to) { alert('Start date cannot be after end date'); return; }
+      if (from > to) { toast.error('Start date cannot be after end date'); return; }
       setTimeRange('custom');
       setShowDatePicker(false);
     }

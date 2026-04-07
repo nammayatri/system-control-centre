@@ -134,7 +134,7 @@ sendSyncRequestNoReqLog tracker labelPrefix req = do
 -- Public entry points
 -- ──────────────────────────────────────────────────────────────────
 
-triggerSyncIfEnabled :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m ()
+triggerSyncIfEnabled :: ReleaseTracker -> Maybe TargetState -> Flow ()
 triggerSyncIfEnabled tracker mts = do
     cfg <- getConfig
     let syncUrl = syncClusterUrl cfg
@@ -156,8 +156,12 @@ triggerSyncIfEnabled tracker mts = do
                 then do
                     let target = maybe "" id mSyncCluster
                     insertReleaseEvent (releaseId tracker) "BUSINESS" "SYNC_TRIGGERED" (String ("Syncing to cluster: " <> target))
-                    st <- ask
-                    _ <- liftIO $ forkIO $ runFlow st (doCreate cfg tracker mts target)
+                    -- Round 8 audit C6: use forkFlow (not raw forkIO) so any
+                    -- exception inside doCreate is caught + logged via the
+                    -- forkFlow safety net. Raw forkIO swallowed exceptions
+                    -- silently — operator saw COMPLETED on primary, zero
+                    -- rows on secondary, no audit trail explaining why.
+                    _ <- forkFlow (doCreate cfg tracker mts target)
                     pure ()
                 else
                     insertReleaseEvent
@@ -220,7 +224,7 @@ doCreate cfg tracker mts targetCluster = do
                 ]
     sendSyncRequest tracker "SYNC" req reqLog
 
-triggerRevertSyncIfEnabled :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m ()
+triggerRevertSyncIfEnabled :: ReleaseTracker -> Maybe TargetState -> Flow ()
 triggerRevertSyncIfEnabled tracker mts = do
     cfg <- getConfig
     let syncUrl = syncClusterUrl cfg
@@ -244,8 +248,8 @@ triggerRevertSyncIfEnabled tracker mts = do
                 then do
                     let gid = maybe "" id mGlobalId
                     insertReleaseEvent (releaseId tracker) "BUSINESS" "REVERT_SYNC_TRIGGERED" (String ("Triggering revert sync for global_id=" <> gid))
-                    st <- ask
-                    _ <- liftIO $ forkIO $ runFlow st (doRevert cfg tracker mts gid)
+                    -- Round 8 audit C6: forkFlow not raw forkIO (see C1 sister fix above).
+                    _ <- forkFlow (doRevert cfg tracker mts gid)
                     pure ()
                 else
                     insertReleaseEvent

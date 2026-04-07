@@ -81,7 +81,15 @@ const ConfigMapSummary: React.FC = () => {
   const [activeTab, setActiveTab] = useState('Summary');
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
 
-  const id = rawId?.includes('&&') ? rawId.split('&&')[1] : rawId || '';
+  // Round 8 audit C4: param is `<cluster>&&<id>` (URL-encoded as %26%26 since &
+  // is reserved in URLs). Decode + split + URL-decode the parts.
+  const id = (() => {
+    if (!rawId) return '';
+    const decoded = decodeURIComponent(rawId);
+    const idx = decoded.indexOf('&&');
+    if (idx >= 0) return decoded.slice(idx + 2);
+    return decoded;
+  })();
 
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['configmap-detail', id],
@@ -130,7 +138,7 @@ const ConfigMapSummary: React.FC = () => {
       case 'Abort': body = { status: 'ABORTING' }; break;
       case 'Revert': body = { status: 'revert' }; break;
       case 'Restart': body = { status: 'restart' }; break;
-      case 'Fast Forward': body = { current_cool_off: 0 }; break;
+      case 'Fast Forward': body = { current_cool_off: '0' }; break; // backend getStrM expects string
     }
     actionMut.mutate(body);
   };
@@ -217,7 +225,7 @@ const ConfigMapSummary: React.FC = () => {
           <div className="p-4 sm:p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
             {[
               { title: 'APP GROUP', rows: [{ label: 'App Group', value: data.appGroup }, { label: 'Description', value: data.description }, { label: 'Release Manager', value: data.release_manager }, { label: 'Name', value: data.name }, { label: 'Change log', value: data.change_log }] },
-              { title: 'TIME SCHEDULE', rows: [{ label: 'Created at', value: data.date_created }, { label: 'Scheduled time', value: data.schedule_time }, { label: 'Last Updated', value: data.last_updated }, { label: 'Start time', value: data.start_time }, { label: 'End time', value: data.end_time }] },
+              { title: 'TIME SCHEDULE', rows: [{ label: 'Created at', value: data.date_created ? formatTs(data.date_created) : '' }, { label: 'Scheduled time', value: data.schedule_time ? formatTs(data.schedule_time) : '' }, { label: 'Last Updated', value: data.last_updated ? formatTs(data.last_updated) : '' }, { label: 'Start time', value: data.start_time ? formatTs(data.start_time) : '' }, { label: 'End time', value: data.end_time ? formatTs(data.end_time) : '' }] },
               { title: 'META DATA', rows: [{ label: 'Priority', value: String(data.priority) }, { label: 'Env', value: data.env }, { label: 'Approved', value: data.is_approved === 1 ? 'Yes' : 'No' }, { label: 'Slack Thread Id', value: data.slack_thread_id }] },
               { title: 'K8S INFO', rows: [{ label: 'Id', value: data.id }, { label: 'Cluster', value: data.cluster }] },
             ].map((card, ci) => (

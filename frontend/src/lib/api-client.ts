@@ -25,14 +25,26 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
-// Handle 401 — redirect to login
+// Handle 401 — clear ALL auth state + redirect to login.
+// Round 8 audit H3: previously only sc_token was cleared, leaving stale
+// auth_user / auth_products in localStorage AND react-query cache full of
+// the previous user's data. On a multi-user laptop the next user could see
+// the previous user's release list / configmap data until a hard refresh.
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem(TOKEN_KEY);
+      try {
+        localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem('auth_user');
+        localStorage.removeItem('auth_products');
+        localStorage.removeItem('sc_user');
+        localStorage.removeItem('sc_products');
+      } catch {}
       if (window.location.pathname !== '/login') {
-        window.location.href = '/login';
+        // Preserve the intended destination so login can return there.
+        const returnTo = encodeURIComponent(window.location.pathname + window.location.search);
+        window.location.href = `/login?returnTo=${returnTo}`;
       }
     }
     return Promise.reject(error);

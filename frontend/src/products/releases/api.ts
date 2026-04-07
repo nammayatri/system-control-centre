@@ -467,7 +467,12 @@ export async function fetchSecondaryEnvs(appGroup: string, env: string, service:
 
 export async function fetchAPConfigMaps(from: string, to: string): Promise<APConfigMap[]> {
     const { data } = await apiClient.get('/tracker/configmap/list', { params: { from, to } });
-    return data.list ?? [];
+    // Round 8 audit H1: defensive — backend returns either {list: [...]} or
+    // a plain array depending on handler. Handle both shapes so a contract
+    // change doesn't silently produce an empty list.
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.list)) return data.list;
+    return [];
 }
 
 export async function fetchConfigMapDetail(id: string): Promise<APConfigMap | null> {

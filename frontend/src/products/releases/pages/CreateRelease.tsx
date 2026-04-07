@@ -98,16 +98,27 @@ const CreateRelease: React.FC = () => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showServiceDropdown]);
 
-  // Fetch existing release for update mode
+  // Fetch existing release for update mode.
+  // Round 8 audit H16: disable the polling refetch on the edit page so the
+  // form state isn't overwritten mid-edit. Without staleTime/refetchInterval
+  // overrides this would inherit useRelease's 10s poll and reset every typed
+  // field every 10 seconds.
   const { data: existingRelease } = useQuery({
     queryKey: ['release', id],
     queryFn: () => fetchReleaseDetails(id!),
     enabled: isUpdate && !!id,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+    staleTime: Infinity,
   });
+  // Round 8 audit H16: only run the pre-fill effect ONCE per release id, not
+  // on every refetch — otherwise polling overwrites every keystroke.
+  const [prefilledOnce, setPrefilledOnce] = useState(false);
 
   // Pre-fill form when editing
   useEffect(() => {
-    if (existingRelease && isUpdate) {
+    if (existingRelease && isUpdate && !prefilledOnce) {
+      setPrefilledOnce(true);
       setFormData({
         appGroup: existingRelease.appGroup || '',
         service: existingRelease.service || '',
@@ -196,9 +207,16 @@ const CreateRelease: React.FC = () => {
                 })));
               }
             }
-          } catch {}
+          } catch (e) {
+            // Round 8 audit H6: surface parse errors so users know why their
+            // service config didn't load (instead of silently showing defaults).
+            console.error('[CreateRelease] failed to parse service rollout_strategy:', e);
+            toast.error('Could not load saved rollout stages for this service — using defaults');
+          }
         }
-      }).catch(() => {});
+      }).catch((e) => {
+        console.error('[CreateRelease] fetchReleaseConfigs failed:', e);
+      });
     }
   }, [formData.appGroup, formData.service, isClone, isUpdate]);
 

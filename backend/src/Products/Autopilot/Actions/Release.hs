@@ -667,7 +667,13 @@ revertReleaseH _ap rid req = do
                                   -- replicated release) hit a raw SQL 23505 violation.
                                   NT.globalId = Nothing
                                 }
-                    insertReleaseTracker revertedTracker (Just revertedTargetState)
+                    -- Round 8 audit C5: use insertReleaseTrackerSafe so the
+                    -- partial unique index uq_release_tracker_service_inflight
+                    -- catches a parallel revert call (or any other in-flight
+                    -- writer) and translates the SQL 23505 to a friendly
+                    -- Conflict, instead of leaving two revert trackers for the
+                    -- same (app_group, service) pair.
+                    _idem <- insertReleaseTrackerSafe revertedTracker revertedTargetState
                     insertReleaseEvent
                         newRid
                         "BUSINESS"
@@ -1303,6 +1309,14 @@ restartReleaseH _ap rid req = do
                                 , NT.endTime = Nothing
                                 , NT.scheduleTime = Just now
                                 , NT.rolloutHistory = []
+                                , -- Round 8 audit C3: clear globalId on restart so the
+                                  -- next sync to the secondary cluster lands as a fresh
+                                  -- tracker. Without this, the secondary's idempotent-
+                                  -- receive (findReleaseTrackerByGlobalId) sees the same
+                                  -- global_id and skips the insert — primary thinks the
+                                  -- restart replicated, secondary still has the old
+                                  -- aborted tracker.
+                                  NT.globalId = Nothing
                                 }
                     ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText currentStatus)
                     if not ok

@@ -226,7 +226,7 @@ notifyComplete = do
                         Just (origRt, origTs) | status origRt == REVERTING -> do
                             let reverted = origRt{status = REVERTED}
                             insertReleaseTracker reverted origTs
-                            triggerRevertSyncIfEnabled reverted origTs
+                            lift $ triggerRevertSyncIfEnabled reverted origTs
                             logInfoS $ "Marked original " <> origId <> " as REVERTED"
                         _ -> pure ()
                 Nothing -> pure ()

@@ -337,10 +337,16 @@ trigger _db (rt, mts) = do
                                 else do
                                     endNow <- liftIO getCurrentTime
                                     let abortedTracker = rtNew{status = ABORTED, releaseWFStatus = ROLLING_BACK, endTime = Just endNow}
-                                    insertReleaseTracker abortedTracker mts
-                                    insertReleaseEvent (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
-                                    restoreVsTrafficOnFailure cfg' rt mts
-                                    notifyReleaseAborted abortedTracker
+                                    -- Round 8 audit C1: CAS against INPROGRESS so a user
+                                    -- pause/abort/discard that landed mid-workflow isn't
+                                    -- silently overwritten by the workflow's failure path.
+                                    casOk <- conditionalUpdateTracker abortedTracker mts (releaseStatusToText INPROGRESS)
+                                    if not casOk
+                                        then logWarning $ "[RUNNER] Workflow failed but tracker " <> releaseId rt <> " was concurrently modified — leaving as-is, the user state wins"
+                                        else do
+                                            insertReleaseEvent (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
+                                            restoreVsTrafficOnFailure cfg' rt mts
+                                            notifyReleaseAborted abortedTracker
                         Right _ -> do
                             -- The workflow persists state via persistWorkflowState in each cprV2
                             -- stage, but the Recorded monad's bind may short-circuit the final
@@ -352,7 +358,13 @@ trigger _db (rt, mts) = do
                                     | NT.status freshRT /= COMPLETED -> do
                                         now' <- liftIO getCurrentTime
                                         let completed = freshRT{NT.status = COMPLETED, NT.endTime = Just now'}
-                                        insertReleaseTracker completed freshTS
+                                        -- Round 8 audit H1: CAS against the snapshot we just
+                                        -- read. If a parallel immediateRevert / abort flipped
+                                        -- the row between findReleaseTracker and now, leave
+                                        -- their status alone instead of clobbering it with
+                                        -- COMPLETED.
+                                        _ <- conditionalUpdateTracker completed freshTS (releaseStatusToText (NT.status freshRT))
+                                        pure ()
                                 _ -> pure ()
                             insertReleaseEvent (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
 
@@ -482,10 +494,17 @@ restoreVsTrafficOnFailure cfg rt mts = do
                         Right _ -> logInfo "[restoreVsTrafficOnFailure] VS traffic restored to old version"
 
                     -- Step 4: scale the new deployment to 0 (the failed one)
-                    scaleResult <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns newDepName 0)
-                    case scaleResult of
-                        Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to scale down new deployment: " <> T.pack (show err)
-                        Right _ -> logInfo "[restoreVsTrafficOnFailure] New deployment scaled down to 0"
+                    -- Round 8 audit H3: SKIP if newDep == oldDep (immediate-revert
+                    -- path replaces the new deployment's image with the old image
+                    -- in-place, so the names are the same row in k8s — scaling it
+                    -- to 0 would zero the only deployment with the correct image).
+                    if newDepName == oldDepName
+                        then logInfo $ "[restoreVsTrafficOnFailure] Skipping scale-down: newDep == oldDep (" <> newDepName <> ") — immediate-revert path, only one deployment exists"
+                        else do
+                            scaleResult <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns newDepName 0)
+                            case scaleResult of
+                                Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to scale down new deployment: " <> T.pack (show err)
+                                Right _ -> logInfo "[restoreVsTrafficOnFailure] New deployment scaled down to 0"
 
                     insertReleaseEvent
                         (releaseId rt)
@@ -528,18 +547,24 @@ handleAbortingRelease cfg rt mts = do
     restoreVsTrafficOnFailure cfg rt mts
     now <- liftIO getCurrentTime
     let aborted = rt{status = USER_ABORTED, endTime = Just now}
-    insertReleaseTracker aborted mts
-    -- Production parity (events.jl:251-286 rollbackEvent!):
-    -- BUSINESS / TRAFFIC_UPDATED with a message field on rollback.
-    let previousRollout = case rolloutHistory rt of
-            [] -> 0
-            xs -> historyRolloutPercent (last xs)
-        oldVer = case mts of
-            Just (K8sState k8s) -> K8s.oldVersion (context k8s)
-            _ -> ""
-    logTrafficUpdatedWithMessage aborted previousRollout ("Rolling back traffic to old version: " <> oldVer)
-    insertReleaseEvent (releaseId rt) "BUSINESS" "ABORT_HANDLED" (toJSON ("User abort processed" :: String))
-    notifyReleaseAborted aborted
+    -- Round 8 audit C2: CAS against ABORTING. If a parallel runner instance
+    -- or a user-initiated handler raced and already moved the row, log and
+    -- skip — abort/restore was already done.
+    casOk <- conditionalUpdateTracker aborted mts (releaseStatusToText ABORTING)
+    if not casOk
+        then logWarning $ "[handleAbortingRelease] CAS miss for " <> releaseId rt <> "; another writer already transitioned. Skipping notify+event."
+        else do
+            -- Production parity (events.jl:251-286 rollbackEvent!):
+            -- BUSINESS / TRAFFIC_UPDATED with a message field on rollback.
+            let previousRollout = case rolloutHistory rt of
+                    [] -> 0
+                    xs -> historyRolloutPercent (last xs)
+                oldVer = case mts of
+                    Just (K8sState k8s) -> K8s.oldVersion (context k8s)
+                    _ -> ""
+            logTrafficUpdatedWithMessage aborted previousRollout ("Rolling back traffic to old version: " <> oldVer)
+            insertReleaseEvent (releaseId rt) "BUSINESS" "ABORT_HANDLED" (toJSON ("User abort processed" :: String))
+            notifyReleaseAborted aborted
 
 -- ============================================================================
 -- Scale-Down of Old Deployments After Delay
@@ -589,15 +614,22 @@ scaleDownOldDeployment cfg (rt, mts) = do
                                     Left err -> do
                                         -- Bug fix (round 6 / Julia parity): on kubectl failure
                                         -- KEEP the tracker in ScaleDownScheduled state so the
-                                        -- next runner poll retries. Previously we marked it
-                                        -- Completed regardless and the failure was silently
-                                        -- dropped — leaving stale old pods running forever.
-                                        -- Julia: watcher.jl:433-450 podsFailureHandler.
+                                        -- next runner poll retries.
+                                        -- Round 8 audit H5: use FRESH tracker (freshRT/freshTS),
+                                        -- not the stale snapshot from poll-pick. Anything else
+                                        -- that updated releaseContext between pick and now
+                                        -- (e.g. immediate revert flipping revert=1) would be
+                                        -- clobbered if we wrote against `rt`+`mts`.
                                         logWarning $ "[scaleDownOldDeployment] FAILED: " <> T.pack (show err) <> " — keeping ScaleDownScheduled for retry on next poll"
-                                        let retryCtx = ctx{podsScaleDownStatus = Just ScaleDownScheduled}
-                                            retryK8s = k8s{context = retryCtx}
-                                            retryMts = Just (K8sState retryK8s)
-                                        _ <- conditionalUpdateTracker rt retryMts (releaseStatusToText (NT.status rt))
+                                        freshM' <- findReleaseTracker (releaseId rt)
+                                        case freshM' of
+                                            Just (freshRT', Just (K8sState freshK8s)) -> do
+                                                let retryCtx = (context freshK8s){podsScaleDownStatus = Just ScaleDownScheduled}
+                                                    retryK8s = freshK8s{context = retryCtx}
+                                                    retryMts = Just (K8sState retryK8s)
+                                                _ <- conditionalUpdateTracker freshRT' retryMts (releaseStatusToText (NT.status freshRT'))
+                                                pure ()
+                                            _ -> pure ()
                                         insertReleaseEvent
                                             (releaseId rt)
                                             "BUSINESS"
@@ -606,10 +638,13 @@ scaleDownOldDeployment cfg (rt, mts) = do
                                     Right _ -> do
                                         logInfo "[scaleDownOldDeployment] Old deployment scaled down successfully"
                                         notifyPodsScaledDown rt oldVer
-                                        let updatedCtx = ctx{podsScaleDownStatus = Just ScaleDownCompleted}
+                                        -- Same fix: use the fresh tracker we already
+                                        -- read at the top so the success-path CAS
+                                        -- doesn't overwrite a concurrent edit either.
+                                        let updatedCtx = (context k8s){podsScaleDownStatus = Just ScaleDownCompleted}
                                             updatedK8s = k8s{context = updatedCtx}
                                             updatedMts = Just (K8sState updatedK8s)
-                                        ok <- conditionalUpdateTracker rt updatedMts (releaseStatusToText (NT.status rt))
+                                        ok <- conditionalUpdateTracker freshRT updatedMts (releaseStatusToText (NT.status freshRT))
                                         if not ok
                                             then
                                                 logWarning $

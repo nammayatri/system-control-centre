@@ -10,6 +10,7 @@ import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
 import { Lock, Save, X } from 'lucide-react';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
+import { useAuth } from '../../../core/auth/AuthContext';
 
 const EditVS: React.FC = () => {
   const navigate = useNavigate();
@@ -18,9 +19,16 @@ const EditVS: React.FC = () => {
 
   const [appGroup, setAppGroup] = useState('');
   const [service, setService] = useState('');
+  // Round 8 audit H19: env was hardcoded to 'UAT', mis-attributing PROD VS
+  // edits in the audit trail. Make it user-selectable with sensible default.
+  const [env, setEnv] = useState('UAT');
   const [vsData, setVsData] = useState('');
   const [trackerId, setTrackerId] = useState<string | null>(null);
   const [isLocked, setIsLocked] = useState(false);
+
+  // Round 8 audit M10: use authenticated user's email for lockedBy.
+  const { user: authUser } = useAuth();
+  const lockerIdentity = authUser?.email || 'admin';
 
   const { data: productConfigs = [] } = useQuery({
     queryKey: ['product-configs'],
@@ -48,7 +56,7 @@ const EditVS: React.FC = () => {
   }, [currentVS]);
 
   const lockMut = useMutation({
-    mutationFn: () => lockAndEditVS({ appGroup, service, env: 'UAT', vsName: '', lockedBy: 'admin', oldVsData: vsData }),
+    mutationFn: () => lockAndEditVS({ appGroup, service, env, vsName: '', lockedBy: lockerIdentity, oldVsData: vsData }),
     onSuccess: (data) => {
       toast.success('VS locked for editing');
       setTrackerId(data.message?.includes('Tracker ID:') ? data.message.split('Tracker ID: ')[1] : data.id);

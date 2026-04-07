@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Search, RefreshCw, Calendar, Copy, ChevronLeft, ChevronRight, ChevronDown, X, Plus } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchAPConfigMaps } from '../api';
+import { toast } from 'sonner';
 import { StatusBadge } from '../../releases/components/StatusBadge';
 import { Button } from '../../../shared/ui/button';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
@@ -104,8 +105,8 @@ const ListConfigMap: React.FC = () => {
   const handleCustomRangeApply = useCallback(() => {
     if (customFrom && customTo) {
       const from = new Date(customFrom); const to = new Date(customTo);
-      if (Math.ceil((to.getTime() - from.getTime()) / (1000 * 60 * 60 * 24)) > 30) { alert('Max 30 days'); return; }
-      if (from > to) { alert('Invalid range'); return; }
+      if (Math.ceil((to.getTime() - from.getTime()) / (1000 * 60 * 60 * 24)) > 30) { toast.error('Max 30 days'); return; }
+      if (from > to) { toast.error('Invalid range'); return; }
       setTimeRange('custom'); setShowDatePicker(false);
     }
   }, [customFrom, customTo]);
@@ -189,7 +190,7 @@ const ListConfigMap: React.FC = () => {
                 ) : (
                   paginatedItems.map((cm, i) => (
                     <tr key={cm.id} className={cn('border-b border-zinc-100 hover:bg-zinc-100 cursor-pointer transition-colors duration-150', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}
-                      onClick={() => navigate(`/configmap/${cm.cluster}&&${cm.id}`)}>
+                      onClick={() => navigate(`/configmap/${encodeURIComponent(cm.cluster || '')}%26%26${encodeURIComponent(cm.id)}`)}>
                       <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + i + 1}</td>
                       <td className="py-3 px-4 font-medium text-zinc-800">{cm.appGroup}</td>
                       <td className="py-3 px-4 font-mono text-xs text-zinc-500 max-w-xs truncate" title={cm.id}>{cm.id}</td>
@@ -224,7 +225,7 @@ const ListConfigMap: React.FC = () => {
                 <div
                   key={cm.id}
                   className="p-4 cursor-pointer hover:bg-zinc-50 active:bg-zinc-100 transition-colors"
-                  onClick={() => navigate(`/configmap/${cm.cluster}&&${cm.id}`)}
+                  onClick={() => navigate(`/configmap/${encodeURIComponent(cm.cluster || '')}%26%26${encodeURIComponent(cm.id)}`)}
                 >
                   <div className="flex items-start justify-between gap-3 mb-2">
                     <div className="min-w-0 flex-1">

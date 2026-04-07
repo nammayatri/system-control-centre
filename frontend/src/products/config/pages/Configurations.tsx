@@ -8,6 +8,7 @@ import { Badge } from '../../../shared/ui/badge';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { Save, X, RefreshCw, Search, ChevronDown, ChevronRight, Info } from 'lucide-react';
 import { toast } from 'sonner';
+import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { cn } from '../../../lib/utils';
 
 interface ConfigItem {
@@ -86,13 +87,24 @@ const Configurations: React.FC = () => {
     }
   };
 
-  const handleModalUpdate = () => {
+  const confirmAction = useConfirm();
+  const handleModalUpdate = async () => {
     if (!selectedConfig) return;
     const err = validateValue(selectedConfig.type, modalValue);
     if (err) {
       setValidationError(err);
       return;
     }
+    // Round 8 audit H13: server config flags drive live system behaviour
+    // (decision engine, autopilot toggles, sync). Confirm before writing,
+    // especially for the "decision" / boolean kill-switch entries.
+    const ok = await confirmAction({
+      title: `Update ${selectedConfig.key}`,
+      description: `Set "${selectedConfig.key}" to "${modalValue}"? This affects production behaviour immediately.`,
+      confirmLabel: 'Update',
+      variant: 'primary',
+    });
+    if (!ok) return;
     saveMut.mutate({
       name: selectedConfig.key,
       value: modalValue,

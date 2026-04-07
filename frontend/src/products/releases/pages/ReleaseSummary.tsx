@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
+import { useAuth } from '../../../core/auth/AuthContext';
 import {
   useRelease, useReleaseEvents, useApproveRelease, useDiscardRelease,
   usePauseRelease, useResumeRelease, useAbortRelease, useRevertRelease,
@@ -608,6 +609,10 @@ const ReleaseSummary: React.FC = () => {
   const { data: release, isLoading, isFetching, error, refetch } = useRelease(id);
   const { data: events = [] } = useReleaseEvents(id);
   const qc = useQueryClient();
+  // Round 8 audit M9: use the authenticated user's email instead of the
+  // hardcoded "admin" string for approve/revert/restart audit attribution.
+  const { user: authUser } = useAuth();
+  const actor = authUser?.email || 'admin';
   const handleRefresh = async () => {
     // Refresh both the release and its event log so the UI shows fully fresh state.
     await Promise.all([
@@ -767,7 +772,7 @@ const ReleaseSummary: React.FC = () => {
         <div className="flex items-center gap-2 flex-wrap sm:justify-end">
           {s === 'CREATED' && release.is_approved === 0 && (
             <PermissionGate product="autopilot" permission="RELEASE_APPROVE">
-              <Button size="sm" variant="success" loading={approveMut.isPending} onClick={() => doAction('approve', () => approveMut.mutateAsync({ releaseId: id!, approvedBy: 'admin' }))}><Check className="w-3.5 h-3.5" /> Approve</Button>
+              <Button size="sm" variant="success" loading={approveMut.isPending} onClick={() => doAction('approve', () => approveMut.mutateAsync({ releaseId: id!, approvedBy: actor }))}><Check className="w-3.5 h-3.5" /> Approve</Button>
             </PermissionGate>
           )}
           {s === 'CREATED' && (
@@ -795,7 +800,7 @@ const ReleaseSummary: React.FC = () => {
           {s === 'COMPLETED' && (
             <>
               <PermissionGate product="autopilot" permission="RELEASE_REVERT">
-                <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: 'admin' }), true)}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
+                <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: actor }), true)}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
               </PermissionGate>
               <PermissionGate product="autopilot" permission="RELEASE_REVERT">
                 <div className="flex items-center gap-2">
