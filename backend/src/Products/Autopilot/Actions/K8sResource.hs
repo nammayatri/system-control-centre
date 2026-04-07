@@ -9,15 +9,16 @@ module Products.Autopilot.Actions.K8sResource (
 )
 where
 
-import Control.Exception (SomeException, try)
 import Control.Monad.IO.Class (liftIO)
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
 import Core.Environment (logInfo)
+import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
+import Core.Types.Time (Seconds (..))
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
-import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson as A
-import qualified Data.ByteString.Lazy.Char8 as LBS
+import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -27,8 +28,6 @@ import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Types.API (ResourcesResponse (..))
-import System.Exit (ExitCode (..))
-import System.Process (readProcessWithExitCode)
 
 -- ============================================================================
 -- Resources Endpoint (GET /resources?PRODUCT=&SERVICE=)
@@ -37,15 +36,14 @@ import System.Process (readProcessWithExitCode)
 fetchResourcesH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow ResourcesResponse
 fetchResourcesH _ap mProduct mService = do
     cfg <- getConfig
-    db <- getDBEnv
     let emptyResources = ResourcesResponse Nothing Nothing
     case (mProduct, mService) of
         (Just productName, Just serviceName') -> do
-            p <- liftIO $ findProductByName db productName
+            p <- findProductByName productName
             case p of
                 Nothing -> pure emptyResources
                 Just pCfg -> do
-                    svc <- liftIO $ findServiceByProductAndName db productName serviceName'
+                    svc <- findServiceByProductAndName productName serviceName'
                     let svcHost = case svc of
                             Just s -> fromMaybe serviceName' (getServiceHost s)
                             Nothing -> serviceName'
@@ -75,14 +73,13 @@ fetchResourcesH _ap mProduct mService = do
 fetchEnvsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
 fetchEnvsH _ap mProduct _mEnv mService = do
     cfg <- getConfig
-    db <- getDBEnv
     case (mProduct, mService) of
         (Just product', Just service') -> do
-            p <- liftIO $ findProductByName db product'
+            p <- findProductByName product'
             case p of
                 Nothing -> pure $ A.toJSON ([] :: [Value])
                 Just pCfg -> do
-                    svc <- liftIO $ findServiceByProductAndName db product' service'
+                    svc <- findServiceByProductAndName product' service'
                     let svcHost = case svc of
                             Just s -> fromMaybe service' (getServiceHost s)
                             Nothing -> service'
@@ -106,68 +103,52 @@ fetchSecondaryEnvsH _ap mProduct mEnv mService = do
                 then pure $ A.toJSON ([] :: [Value])
                 else do
                     let normalised =
-                            let u = if "http" `T.isPrefixOf` T.pack rawUrl then rawUrl else "http://" <> rawUrl
-                             in if not (null u) && Prelude.last u == '/' then u else u <> "/"
+                            let u = if "http" `T.isPrefixOf` T.pack rawUrl then T.pack rawUrl else "http://" <> T.pack rawUrl
+                             in if T.null u || T.last u == '/' then u else u <> "/"
                         baseAuth = syncClusterBaseAuth cfg
-                        authArgs = if null baseAuth then [] else ["-H", "Authorization: Basic " <> baseAuth]
-                        getUrl = normalised <> "envs?product=" <> T.unpack product' <> "&env=" <> T.unpack env' <> "&service=" <> T.unpack service'
-                        getCurlArgs = ["-s", "-X", "GET", getUrl, "--max-time", "15"] <> authArgs
-                    -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
-                    logInfo $ "[SYNC-ENV] Fetching secondary envs from: " <> T.pack getUrl
-                    getResult <- liftIO (try (readProcessWithExitCode "curl" getCurlArgs "") :: IO (Either SomeException (ExitCode, String, String)))
+                        auth =
+                            if null baseAuth
+                                then []
+                                else [("Authorization", "Basic " <> T.pack baseAuth)]
+                        getUrl = normalised <> "envs?product=" <> product' <> "&env=" <> env' <> "&service=" <> service'
+                        getReq = (defaultReq getUrl){reqHeaders = auth, reqTimeout = Seconds 15, reqRetries = 0, reqLogTag = "sync-env"}
+                    logInfo $ "[SYNC-ENV] Fetching secondary envs from: " <> getUrl
+                    getResult <- liftIO (httpRaw getReq)
                     case getResult of
-                        Right (ExitSuccess, out, _) | not (null out) && out /= "[]" -> do
-                            -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
-                            logInfo $ "[SYNC-ENV] GET success, response length=" <> T.pack (show (length out))
-                            case A.decodeStrict' (encodeUtf8 (T.pack out)) :: Maybe Value of
-                                Just v -> pure v
-                                Nothing -> do
-                                    -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
-                                    logInfo $ "[SYNC-ENV] GET response not valid JSON, trying ny-autopilot format"
-                                    tryNyAutopilotFormat normalised baseAuth authArgs product' env' service'
-                        Right (ExitSuccess, _out, _) -> do
-                            -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
-                            logInfo $ "[SYNC-ENV] GET returned empty/[], trying ny-autopilot format"
-                            tryNyAutopilotFormat normalised baseAuth authArgs product' env' service'
-                        Right (ExitFailure code, _, err) -> do
-                            -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
-                            logInfo $ "[SYNC-ENV] GET failed (exit=" <> T.pack (show code) <> "): " <> T.pack err <> ", trying ny-autopilot format"
-                            tryNyAutopilotFormat normalised baseAuth authArgs product' env' service'
+                        Right HttpResponse{respStatus = s, respBody = b}
+                            | s < 400 && b /= "[]" && not (LBS.null b) ->
+                                case A.decodeStrict' (LBS.toStrict b) :: Maybe Value of
+                                    Just v -> pure v
+                                    Nothing -> do
+                                        logInfo "[SYNC-ENV] GET response not valid JSON, trying ny-autopilot format"
+                                        tryNyAutopilotFormat normalised auth product' env' service'
+                        Right _ -> do
+                            logInfo "[SYNC-ENV] GET empty / non-200, trying ny-autopilot format"
+                            tryNyAutopilotFormat normalised auth product' env' service'
                         Left e -> do
-                            -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
                             logInfo $ "[SYNC-ENV] GET exception: " <> T.pack (show e) <> ", trying ny-autopilot format"
-                            tryNyAutopilotFormat normalised baseAuth authArgs product' env' service'
+                            tryNyAutopilotFormat normalised auth product' env' service'
         _ -> pure $ A.toJSON ([] :: [Value])
   where
-    tryNyAutopilotFormat normalised _baseAuth authArgs product' env' service' = do
+    tryNyAutopilotFormat normalised auth product' env' service' = do
         let postUrl = normalised <> "release/getenvs/"
             bodyJson =
-                A.encode $
-                    object
-                        [ "product" .= product'
-                        , "env" .= env'
-                        , "service" .= service'
-                        , "secondary" .= True
-                        ]
-            postCurlArgs =
-                [ "-s"
-                , "-X"
-                , "POST"
-                , postUrl
-                , "-H"
-                , "Content-Type: application/json"
-                , "-d"
-                , LBS.unpack bodyJson
-                , "--max-time"
-                , "15"
-                ]
-                    <> authArgs
-        -- TODO: migrate to structured logging (String-based URLs need T.pack conversion)
-        logInfo $ "[SYNC-ENV] Trying ny-autopilot format: POST " <> T.pack postUrl
-        postResult <- liftIO (try (readProcessWithExitCode "curl" postCurlArgs "") :: IO (Either SomeException (ExitCode, String, String)))
+                encode $
+                    object ["product" .= product', "env" .= env', "service" .= service', "secondary" .= True]
+            postReq =
+                (defaultReq postUrl)
+                    { reqMethod = POST
+                    , reqHeaders = ("Content-Type", "application/json") : auth
+                    , reqBody = Just bodyJson
+                    , reqTimeout = Seconds 15
+                    , reqRetries = 0
+                    , reqLogTag = "sync-env"
+                    }
+        logInfo $ "[SYNC-ENV] Trying ny-autopilot format: POST " <> postUrl
+        postResult <- liftIO (httpRaw postReq)
         case postResult of
-            Right (ExitSuccess, out, _) ->
-                case A.decodeStrict' (encodeUtf8 (T.pack out)) of
+            Right HttpResponse{respStatus = s, respBody = b} | s < 400 ->
+                case A.decodeStrict' (LBS.toStrict b) of
                     Just v -> pure v
                     Nothing -> pure $ A.toJSON ([] :: [Value])
             _ -> pure $ A.toJSON ([] :: [Value])

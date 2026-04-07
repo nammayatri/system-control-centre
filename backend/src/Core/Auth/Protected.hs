@@ -60,7 +60,7 @@ import Core.Auth.Types (
     PersonAuth (..),
     ProductAccess (..),
  )
-import Core.Environment (DBEnv)
+import Core.Environment (AppState, MonadFlow, runFlow)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson as A
 import qualified Data.ByteString as B
@@ -114,7 +114,7 @@ data AuthedPerson = AuthedPerson
 instance
     ( KnownPermission perm
     , HasServer api context
-    , HasContextEntry context DBEnv
+    , HasContextEntry context AppState
     ) =>
     HasServer (Protected (perm :: k) :> api) context
     where
@@ -126,8 +126,8 @@ instance
     route _ context subserver =
         route (Proxy :: Proxy api) context (subserver `addAuthCheck` check)
       where
-        db :: DBEnv
-        db = getContextEntry context
+        st :: AppState
+        st = getContextEntry context
         prodSlug :: Text
         prodSlug = permissionProduct (Proxy :: Proxy perm)
         permText :: Text
@@ -135,7 +135,7 @@ instance
 
         check :: DelayedIO AuthedPerson
         check = withRequest $ \req -> do
-            result <- liftIO (checkPermission db prodSlug permText req)
+            result <- liftIO (runFlow st (checkPermission prodSlug permText req))
             case result of
                 Right ap -> pure ap
                 Left (status, msg) -> delayedFailFatal (jsonError status msg)
@@ -149,31 +149,31 @@ Returns the authenticated person on success; a @(ServerError-template, msg)@
 pair on failure that is turned into a 401/403 JSON response.
 -}
 checkPermission ::
-    DBEnv ->
+    (MonadFlow m) =>
     Text ->
     Text ->
     Request ->
-    IO (Either (ServerError, Text) AuthedPerson)
-checkPermission db prodSlug permText req = do
+    m (Either (ServerError, Text) AuthedPerson)
+checkPermission prodSlug permText req = do
     case extractBearer (lookup "Authorization" (requestHeaders req)) of
         Nothing -> pure $ Left (err401, "Missing Authorization header")
         Just token -> do
-            mTok <- findTokenByValue db token
+            mTok <- findTokenByValue token
             case mTok of
                 Nothing -> pure $ Left (err401, "Invalid or expired token")
                 Just tokRow -> do
-                    now <- getCurrentTime
+                    now <- liftIO getCurrentTime
                     if trExpiresAt tokRow < now
                         then pure $ Left (err401, "Token expired")
                         else do
-                            mPerson <- findPersonById db (trPersonId tokRow)
+                            mPerson <- findPersonById (trPersonId tokRow)
                             case mPerson of
                                 Nothing -> pure $ Left (err401, "Person not found")
                                 Just person
                                     | not (personIsActive person) ->
                                         pure $ Left (err401, "Account deactivated")
                                     | personIsSuperadmin person -> do
-                                        accesses <- findProductAccessForPerson db (personId person)
+                                        accesses <- findProductAccessForPerson (personId person)
                                         pure $
                                             Right
                                                 AuthedPerson
@@ -183,12 +183,12 @@ checkPermission db prodSlug permText req = do
                                                     , apProductAccesses = accesses
                                                     }
                                     | otherwise -> do
-                                        accesses <- findProductAccessForPerson db (personId person)
+                                        accesses <- findProductAccessForPerson (personId person)
                                         case find (\pa -> paProductSlug pa == prodSlug) accesses of
                                             Nothing ->
                                                 pure $ Left (err403, "No access to product: " <> prodSlug)
                                             Just pa -> do
-                                                perms <- computeEffectivePermissions db person prodSlug (paRoleId pa)
+                                                perms <- computeEffectivePermissions person prodSlug (paRoleId pa)
                                                 if permText `elem` perms
                                                     then
                                                         pure $

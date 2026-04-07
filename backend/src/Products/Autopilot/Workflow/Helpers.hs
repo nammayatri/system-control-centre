@@ -39,8 +39,8 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (get, gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.Config (Config (..))
-import Core.Environment (DBEnv)
-import Core.Utils.FlowMonad (Flow, getDBEnv)
+import Core.Environment (MonadFlow)
+import Core.Utils.FlowMonad (Flow)
 import Data.Aeson (Value (..), eitherDecode)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -74,10 +74,9 @@ Saves both the ReleaseTracker and the target state.
 -}
 persistWorkflowState :: ReleaseState -> Flow ()
 persistWorkflowState rs = do
-    db <- getDBEnv
     let rt = releaseTracker rs
         mts = targetState rs
-    liftIO $ DB.insertReleaseTracker db rt mts
+    DB.insertReleaseTracker rt mts
 
 {- | Persist final state to database
 
@@ -134,26 +133,26 @@ updateRT f = modify $ \rs -> rs{releaseTracker = f (releaseTracker rs)}
 Fetches YAML from K8s, parses to Value, strips noise, re-encodes as clean YAML text.
 This matches production autopilot behavior (YAML.write(YAML.load_file(...))).
 -}
-captureDeploymentSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()
-captureDeploymentSnapshot cfg db releaseId ns depName label = do
-    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack depName, "-o", "yaml"])
+captureDeploymentSnapshot :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> m ()
+captureDeploymentSnapshot cfg releaseId ns depName label = do
+    result <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack depName, "-o", "yaml"])
     case result of
         Right (K8sResult yamlStr) ->
             case Yaml.decodeEither' (TE.encodeUtf8 yamlStr) :: Either Yaml.ParseException Value of
                 Right val -> do
                     let cleaned = stripK8sNoiseValue val
                         cleanYaml = TE.decodeUtf8 (Yaml.encode cleaned)
-                    DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String cleanYaml)
-                Left _ -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String yamlStr)
+                    DB.insertReleaseEvent releaseId "SNAPSHOT" label (String cleanYaml)
+                Left _ -> DB.insertReleaseEvent releaseId "SNAPSHOT" label (String yamlStr)
         Left _ -> pure ()
 
 {- | Generate a preview of what the deployment will look like after changes.
 Fetches old deployment YAML, strips noise, modifies fields (name, version, image),
 re-encodes as clean YAML text. Matches production autopilot behavior.
 -}
-captureDeploymentPreview :: Config -> DBEnv -> Text -> Text -> Text -> Text -> Text -> Text -> IO ()
-captureDeploymentPreview cfg db releaseId ns oldDepName newVer newImage label = do
-    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack oldDepName, "-o", "yaml"])
+captureDeploymentPreview :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> Text -> Text -> m ()
+captureDeploymentPreview cfg releaseId ns oldDepName newVer newImage label = do
+    result <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack oldDepName, "-o", "yaml"])
     case result of
         Right (K8sResult yamlStr) ->
             case Yaml.decodeEither' (TE.encodeUtf8 yamlStr) :: Either Yaml.ParseException Value of
@@ -161,7 +160,7 @@ captureDeploymentPreview cfg db releaseId ns oldDepName newVer newImage label = 
                     let cleaned = stripK8sNoiseValue val
                         preview = modifyDeploymentForPreview cleaned oldDepName newVer newImage
                         previewYaml = TE.decodeUtf8 (Yaml.encode preview)
-                    DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String previewYaml)
+                    DB.insertReleaseEvent releaseId "SNAPSHOT" label (String previewYaml)
                 Left _ -> pure ()
         Left _ -> pure ()
 
@@ -200,33 +199,33 @@ updateContainerImage img obj =
 {- | Capture VirtualService YAML snapshot and store as release event.
 VirtualService is fetched as JSON (existing API), parsed, stripped, re-encoded as YAML.
 -}
-captureVSSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()
-captureVSSnapshot cfg db releaseId ns vsName label = do
-    result <- getVirtualServiceJson cfg ns vsName
+captureVSSnapshot :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> m ()
+captureVSSnapshot cfg releaseId ns vsName label = do
+    result <- liftIO $ getVirtualServiceJson cfg ns vsName
     case result of
         Right vsJson ->
             case eitherDecode (LBS.fromStrict (TE.encodeUtf8 vsJson)) :: Either String Value of
                 Right val -> do
                     let cleaned = stripK8sNoiseValue val
                         cleanYaml = TE.decodeUtf8 (Yaml.encode cleaned)
-                    DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String cleanYaml)
-                Left _ -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String vsJson)
+                    DB.insertReleaseEvent releaseId "SNAPSHOT" label (String cleanYaml)
+                Left _ -> DB.insertReleaseEvent releaseId "SNAPSHOT" label (String vsJson)
         Left _ -> pure ()
 
 {- | Capture ConfigMap YAML snapshot and store as release event.
 Fetches YAML, strips noise, stores as clean YAML text.
 -}
-captureConfigMapSnapshot :: Config -> DBEnv -> Text -> Text -> Text -> Text -> IO ()
-captureConfigMapSnapshot cfg db releaseId ns cmName label = do
-    result <- runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get configmap", T.unpack cmName, "-o", "yaml"])
+captureConfigMapSnapshot :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> m ()
+captureConfigMapSnapshot cfg releaseId ns cmName label = do
+    result <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get configmap", T.unpack cmName, "-o", "yaml"])
     case result of
         Right (K8sResult yamlStr) ->
             case Yaml.decodeEither' (TE.encodeUtf8 yamlStr) :: Either Yaml.ParseException Value of
                 Right val -> do
                     let cleaned = stripK8sNoiseValue val
                         cleanYaml = TE.decodeUtf8 (Yaml.encode cleaned)
-                    DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String cleanYaml)
-                Left _ -> DB.insertReleaseEvent db releaseId "SNAPSHOT" label (String yamlStr)
+                    DB.insertReleaseEvent releaseId "SNAPSHOT" label (String cleanYaml)
+                Left _ -> DB.insertReleaseEvent releaseId "SNAPSHOT" label (String yamlStr)
         Left _ -> pure ()
 
 {- | Strip K8s noise from a parsed Value directly.

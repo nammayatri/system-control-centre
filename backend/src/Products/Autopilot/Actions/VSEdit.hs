@@ -142,7 +142,7 @@ createVsEditTrackerH _ap CreateVsEditTrackerReq{..} = do
     -- Atomically acquire VS lock. The UPDATE inside tryAcquireVsLock treats a
     -- lock whose vs_lock_timestamp is stale (> lock_expiry_delay_minutes old)
     -- as released, so a crashed-mid-edit lock no longer blocks all new edits.
-    acquired <- liftIO $ tryAcquireVsLock db appGroup createdBy
+    acquired <- tryAcquireVsLock appGroup createdBy
     if not acquired
         then
             pure $
@@ -154,20 +154,20 @@ createVsEditTrackerH _ap CreateVsEditTrackerReq{..} = do
                         }
         else do
             let row = mkVsEditRow tid appGroup service env vsName oldVsData (Just createdBy) "CREATED" now
-            liftIO $ insertReleaseTrackerRow db row
+            insertReleaseTrackerRow row
             -- Capture old VS data as SNAPSHOT event
             case oldVsData of
-                Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_OLD" (String d)
+                Just d -> insertReleaseEvent tid "SNAPSHOT" "VS_OLD" (String d)
                 Nothing -> pure ()
             -- Close the TOCTOU window: if another caller raced us (same owner,
             -- stale-lock expiry race, retry after transient error) and also
             -- created a CREATED tracker for this VS, mark those earlier trackers
             -- DISCARDED so only the latest one survives. Mirrors Julia's
             -- validateExistingVSTrackers + discardIfDuplicate (create.jl:46-62).
-            discardedCount <- liftIO $ discardDuplicateCreatedVsTrackers db appGroup tid
-            liftIO $
-                if discardedCount > 0
-                    then do
+            discardedCount <- discardDuplicateCreatedVsTrackers appGroup tid
+            if discardedCount > 0
+                then do
+                    liftIO $
                         logInfoG $
                             "[VS-EDIT] DISCARDED "
                                 <> T.pack (show discardedCount)
@@ -176,14 +176,13 @@ createVsEditTrackerH _ap CreateVsEditTrackerReq{..} = do
                                 <> " (kept: "
                                 <> tid
                                 <> ")"
-                        insertReleaseEvent
-                            db
-                            tid
-                            "BUSINESS"
-                            "DUPLICATE_DISCARDED"
-                            (toJSON (object ["discardedCount" .= discardedCount, "appGroup" .= appGroup]))
-                    else pure ()
-            liftIO $ notifyVsEditCreated db tid appGroup service (Just createdBy)
+                    insertReleaseEvent
+                        tid
+                        "BUSINESS"
+                        "DUPLICATE_DISCARDED"
+                        (toJSON (object ["discardedCount" .= discardedCount, "appGroup" .= appGroup]))
+                else pure ()
+            notifyVsEditCreated tid appGroup service (Just createdBy)
             pure $ toJSON $ releaseRowToVsResponse row
 
 listVsEditTrackersH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow [VsEditTrackerResponse]
@@ -194,17 +193,17 @@ listVsEditTrackersH _ap mFrom mTo = do
             Nothing -> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q%z" (T.unpack t)
         from = mFrom >>= tryParse
         to = mTo >>= tryParse
-    rows <- liftIO $ listVsEditTrackerRows db from to
+    rows <- listVsEditTrackerRows from to
     pure $ map releaseRowToVsResponse rows
 
 getVsEditTrackerH :: AuthedPerson -> Text -> Flow Value
 getVsEditTrackerH _ap tid = do
     db <- getDBEnv
-    m <- liftIO $ findVsEditTrackerRowById db tid
+    m <- findVsEditTrackerRowById tid
     case m of
         Nothing -> pure $ toJSON $ ErrorResponse "VS edit tracker not found" Nothing
         Just t -> do
-            events <- liftIO $ listReleaseEvents db tid
+            events <- listReleaseEvents tid
             pure $ toJSON $ releaseRowToVsResponseWithEvents t events
 
 updateVsEditTrackerH :: AuthedPerson -> Text -> UpdateVsEditTrackerReq -> Flow APIResponse
@@ -212,7 +211,7 @@ updateVsEditTrackerH _ap tid UpdateVsEditTrackerReq{..} = do
     db <- getDBEnv
     cfg <- getConfig
     now <- liftIO getCurrentTime
-    m <- liftIO $ findVsEditTrackerRowById db tid
+    m <- findVsEditTrackerRowById tid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "VS edit tracker not found"
         Just existing -> do
@@ -233,21 +232,21 @@ updateVsEditTrackerH _ap tid UpdateVsEditTrackerReq{..} = do
                 Just "CREATED" -> do
                     -- Saving changes: capture VS_NEW snapshot, VS stays locked until apply/discard
                     case newVsData of
-                        Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_NEW" (String d)
+                        Just d -> insertReleaseEvent tid "SNAPSHOT" "VS_NEW" (String d)
                         Nothing -> pure ()
-                    ok <- liftIO $ conditionalUpdateTrackerRow db updated oldStatusText
+                    ok <- conditionalUpdateTrackerRow updated oldStatusText
                     if ok
                         then pure $ APIResponse "SUCCESS" "VS edit saved"
                         else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
                 Just "APPLIED" -> do
                     -- Get the new VS data from SNAPSHOT events
-                    events <- liftIO $ listReleaseEvents db tid
+                    events <- listReleaseEvents tid
                     let mNewVs = find (\e -> S.reCategory e == "SNAPSHOT" && S.reLabel e == "VS_NEW") events
                     case mNewVs of
                         Nothing -> pure $ APIResponse "ERROR" "No new VS data found"
                         Just newVsEvt -> do
                             -- Get product config for namespace
-                            mProdCfg <- liftIO $ findProductByNameAndCluster db (S.rtAppGroup existing) ""
+                            mProdCfg <- findProductByNameAndCluster (S.rtAppGroup existing) ""
                             case mProdCfg of
                                 Nothing -> pure $ APIResponse "ERROR" "No product config found"
                                 Just pCfg -> do
@@ -276,34 +275,34 @@ updateVsEditTrackerH _ap tid UpdateVsEditTrackerReq{..} = do
                                             case result of
                                                 Left err -> pure $ APIResponse "ERROR" ("K8s apply failed: " <> err)
                                                 Right () -> do
-                                                    ok <- liftIO $ conditionalUpdateTrackerRow db updated oldStatusText
+                                                    ok <- conditionalUpdateTrackerRow updated oldStatusText
                                                     if ok
                                                         then do
                                                             -- Unlock VS after successful apply
-                                                            liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing
-                                                            liftIO $ notifyVsEditApplied db tid (S.rtAppGroup existing) (S.rtService existing) (fromMaybe "admin" approvedBy)
+                                                            updateVsLockedBy (S.rtAppGroup existing) Nothing
+                                                            notifyVsEditApplied tid (S.rtAppGroup existing) (S.rtService existing) (fromMaybe "admin" approvedBy)
                                                             pure $ APIResponse "SUCCESS" "VS edit applied to K8s"
                                                         else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
                 Just "DISCARDED" -> do
-                    ok <- liftIO $ conditionalUpdateTrackerRow db updated oldStatusText
+                    ok <- conditionalUpdateTrackerRow updated oldStatusText
                     if ok
                         then do
                             -- Clear lock if present
-                            liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing
-                            liftIO $ notifyVsEditDiscarded db tid (S.rtAppGroup existing) (S.rtService existing)
+                            updateVsLockedBy (S.rtAppGroup existing) Nothing
+                            notifyVsEditDiscarded tid (S.rtAppGroup existing) (S.rtService existing)
                             pure $ APIResponse "SUCCESS" "VS edit discarded"
                         else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
                 _ -> do
                     -- Generic update (approval, info change, etc.)
-                    ok <- liftIO $ conditionalUpdateTrackerRow db updated oldStatusText
+                    ok <- conditionalUpdateTrackerRow updated oldStatusText
                     if ok
                         then do
                             case newVsData of
-                                Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_NEW" (String d)
+                                Just d -> insertReleaseEvent tid "SNAPSHOT" "VS_NEW" (String d)
                                 Nothing -> pure ()
                             -- Notification for approval
                             case approvedBy of
-                                Just ab -> liftIO $ notifyVsEditApproved db tid (S.rtAppGroup existing) (S.rtService existing) ab
+                                Just ab -> notifyVsEditApproved tid (S.rtAppGroup existing) (S.rtService existing) ab
                                 Nothing -> pure ()
                             pure $ APIResponse "SUCCESS" "VS edit tracker updated"
                         else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
@@ -314,7 +313,7 @@ lockVsEditTrackerH _ap VsLockReq{..} = do
     cfg <- getConfig
     now <- liftIO getCurrentTime
     -- Resolve vsName from deployment_config if not provided
-    mProdCfg <- liftIO $ findProductByNameAndCluster db appGroup ""
+    mProdCfg <- findProductByNameAndCluster appGroup ""
     let resolvedVsName = case vsName of
             Just v | not (T.null v) -> v
             _ -> maybe "" getProductVsName mProdCfg
@@ -322,7 +321,7 @@ lockVsEditTrackerH _ap VsLockReq{..} = do
         resolvedService = fromMaybe "" service
         resolvedLockedBy = fromMaybe "admin" lockedBy
     -- Atomically acquire VS lock (single UPDATE WHERE vs_locked_by IS NULL)
-    acquired <- liftIO $ tryAcquireVsLock db appGroup resolvedLockedBy
+    acquired <- tryAcquireVsLock appGroup resolvedLockedBy
     if not acquired
         then pure $ APIResponse "ERROR" "VS is already locked"
         else do
@@ -331,12 +330,12 @@ lockVsEditTrackerH _ap VsLockReq{..} = do
                 lockExpiry = addUTCTime durationSecs now
                 row = mkVsEditRow tid appGroup resolvedService resolvedEnv resolvedVsName oldVsData (Just resolvedLockedBy) "LOCKED" now
                 rowWithExpiry = row{S.rtEndTime = Just lockExpiry}
-            liftIO $ insertReleaseTrackerRow db rowWithExpiry
+            insertReleaseTrackerRow rowWithExpiry
             -- Capture old VS data as SNAPSHOT event
             case oldVsData of
-                Just d -> liftIO $ insertReleaseEvent db tid "SNAPSHOT" "VS_OLD" (String d)
+                Just d -> insertReleaseEvent tid "SNAPSHOT" "VS_OLD" (String d)
                 Nothing -> pure ()
-            liftIO $ notifyVsEditLocked db tid appGroup (fromMaybe "" service) (fromMaybe "admin" lockedBy)
+            notifyVsEditLocked tid appGroup (fromMaybe "" service) (fromMaybe "admin" lockedBy)
             pure $ APIResponse "SUCCESS" ("VS locked. Tracker ID: " <> tid)
 
 {- | Ownership-checked unlock (task #10 audit, M6). Anyone holding the
@@ -369,12 +368,12 @@ unlockVsEditTrackerH _ap VsUnlockReq{..} = do
     now <- liftIO getCurrentTime
     case trackerId of
         Just tid -> do
-            m <- liftIO $ findVsEditTrackerRowById db tid
+            m <- findVsEditTrackerRowById tid
             case m of
                 Nothing -> pure $ APIResponse "ERROR" "Tracker not found"
                 Just existing -> do
                     let expectedOwner = S.rtCreatedBy existing
-                    released <- liftIO $ releaseVsLockIfOwner db (S.rtAppGroup existing) expectedOwner
+                    released <- releaseVsLockIfOwner (S.rtAppGroup existing) expectedOwner
                     if not released
                         then
                             pure $
@@ -392,10 +391,10 @@ unlockVsEditTrackerH _ap VsUnlockReq{..} = do
                             -- the lock-release outcome but flag the tracker as stale so
                             -- the UI refreshes rather than showing this handler's snapshot.
                             let updated = existing{S.rtStatus = "UNLOCKED", S.rtUpdatedAt = now, S.rtEndTime = Just now}
-                            ok <- liftIO $ conditionalUpdateTrackerRow db updated (S.rtStatus existing)
+                            ok <- conditionalUpdateTrackerRow updated (S.rtStatus existing)
                             if ok
                                 then do
-                                    liftIO $ notifyVsEditUnlocked db (S.rtId existing) (S.rtAppGroup existing) (S.rtService existing)
+                                    notifyVsEditUnlocked (S.rtId existing) (S.rtAppGroup existing) (S.rtService existing)
                                     pure $ APIResponse "SUCCESS" "VS unlocked"
                                 else
                                     pure $
@@ -429,29 +428,29 @@ forceUnlockVsEditTrackerH _ap VsUnlockReq{..} = do
     now <- liftIO getCurrentTime
     case trackerId of
         Just tid -> do
-            m <- liftIO $ findVsEditTrackerRowById db tid
+            m <- findVsEditTrackerRowById tid
             case m of
                 Nothing -> do
                     -- Allow force-unlock by app_group even if tracker lookup fails,
                     -- as long as the body also passed appGroup.
                     case appGroup of
                         Just p | not (T.null p) -> do
-                            liftIO $ updateVsLockedBy db p Nothing
-                            liftIO $ notifyVsEditUnlocked db "" p ""
+                            updateVsLockedBy p Nothing
+                            notifyVsEditUnlocked "" p ""
                             pure $ APIResponse "SUCCESS" ("VS force-unlocked for app_group=" <> p <> " (tracker missing)")
                         _ -> pure $ APIResponse "ERROR" "Tracker not found and no appGroup provided"
                 Just existing -> do
-                    liftIO $ updateVsLockedBy db (S.rtAppGroup existing) Nothing
+                    updateVsLockedBy (S.rtAppGroup existing) Nothing
                     -- CAS (task #34 M7): same fix as M6. Force-unlock is an operator
                     -- recovery path, so the tracker row MAY have been edited by an
                     -- unrelated writer in parallel; blind insert would silently
                     -- overwrite that. Lock has already been force-cleared, which is
                     -- the authoritative side effect; the tracker update is housekeeping.
                     let updated = existing{S.rtStatus = "UNLOCKED", S.rtUpdatedAt = now, S.rtEndTime = Just now}
-                    ok <- liftIO $ conditionalUpdateTrackerRow db updated (S.rtStatus existing)
+                    ok <- conditionalUpdateTrackerRow updated (S.rtStatus existing)
                     if ok
                         then do
-                            liftIO $ notifyVsEditUnlocked db (S.rtId existing) (S.rtAppGroup existing) (S.rtService existing)
+                            notifyVsEditUnlocked (S.rtId existing) (S.rtAppGroup existing) (S.rtService existing)
                             pure $ APIResponse "SUCCESS" "VS force-unlocked"
                         else
                             pure $
@@ -463,12 +462,12 @@ forceUnlockVsEditTrackerH _ap VsUnlockReq{..} = do
             if T.null p
                 then pure $ APIResponse "ERROR" "trackerId or appGroup required"
                 else do
-                    mLock <- liftIO $ findActiveLockFromConfig db p
+                    mLock <- findActiveLockFromConfig p
                     case mLock of
                         Nothing -> pure $ APIResponse "ERROR" ("No active lock found for app_group=" <> p)
                         Just _existing -> do
-                            liftIO $ updateVsLockedBy db p Nothing
-                            liftIO $ notifyVsEditUnlocked db "" p ""
+                            updateVsLockedBy p Nothing
+                            notifyVsEditUnlocked "" p ""
                             pure $ APIResponse "SUCCESS" ("VS force-unlocked for app_group=" <> p)
 
 revertVsEditTrackerH :: AuthedPerson -> Text -> Flow APIResponse
@@ -484,7 +483,7 @@ fetchCurrentVsH _ap mProduct _mService = do
     db <- getDBEnv
     case mProduct of
         Just prod -> do
-            mProdCfg <- liftIO $ findProductByNameAndCluster db prod ""
+            mProdCfg <- findProductByNameAndCluster prod ""
             case mProdCfg of
                 Nothing -> pure $ toJSON $ ErrorResponse ("No deployment_config found for " <> prod) (Just "Configure product first")
                 Just pCfg -> do

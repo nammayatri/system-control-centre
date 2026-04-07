@@ -16,7 +16,7 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
-import Core.Utils.FlowMonad (getConfig, getDBEnv, logInfo)
+import Core.Utils.FlowMonad (getConfig, logInfo)
 import Data.Aeson (Value (..), eitherDecodeStrict', encode)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -126,8 +126,7 @@ resolveConfigContent = do
         Nothing -> liftIO $ throwIO $ WorkflowError "resolve" "No file content"
         Just fc -> do
             -- Resolve namespace from product config
-            db <- lift getDBEnv
-            p <- liftIO $ findProductByName db (appGroup rt)
+            p <- findProductByName (appGroup rt)
             let ns = case p of
                     Just pCfg -> T.unpack (getProductNamespace pCfg)
                     Nothing -> case metadata rt of
@@ -137,7 +136,7 @@ resolveConfigContent = do
                         _ -> T.unpack (env rt)
 
             -- Capture BEFORE snapshot of configmap
-            liftIO $ captureConfigMapSnapshot cfg db (releaseId rt) (T.pack ns) (service rt) "CONFIGMAP_BEFORE"
+            captureConfigMapSnapshot cfg (releaseId rt) (T.pack ns) (service rt) "CONFIGMAP_BEFORE"
 
             if isK8sManifest fc
                 then do
@@ -201,35 +200,31 @@ applyConfigMap = do
                                     _ -> Just (ConfigState (emptyConfigState{configMapsUpdated = [service rt], rolloutComplete = True}))
                             }
                     -- Capture AFTER snapshot of configmap
-                    db <- lift getDBEnv
-                    liftIO $ captureConfigMapSnapshot cfg db (releaseId rt) (T.pack ns) (service rt) "CONFIGMAP_AFTER"
+                    captureConfigMapSnapshot cfg (releaseId rt) (T.pack ns) (service rt) "CONFIGMAP_AFTER"
                     logInfoS "ConfigMap applied successfully"
                 Left err -> do
-                    db <- lift getDBEnv
-                    liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (String err)
+                    insertReleaseEvent (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (String err)
                     liftIO $ throwIO $ WorkflowError "apply" ("kubectl apply failed: " <> err)
         _ -> do
-            db <- lift getDBEnv
-            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (String "Missing workflow metadata (resolveConfigContent did not run?)")
+            insertReleaseEvent (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (String "Missing workflow metadata (resolveConfigContent did not run?)")
             liftIO $ throwIO $ WorkflowError "apply" "Missing workflow metadata"
 
 -- | Mark workflow as complete
 notifyComplete :: StateFlow ()
 notifyComplete = do
     rt <- getRT
-    db <- lift getDBEnv
     logInfoS $ "ConfigMap release " <> releaseId rt <> " completed!"
-    liftIO $ notifyConfigMapCompleted db rt
+    notifyConfigMapCompleted rt
     -- If this is a revert tracker, mark the original as REVERTED
     case (info rt, description rt) of
         (Just "REVERT", Just desc) ->
             case T.stripPrefix "Revert of " desc of
                 Just origId -> do
-                    mOrig <- liftIO $ findReleaseTracker db origId
+                    mOrig <- findReleaseTracker origId
                     case mOrig of
                         Just (origRt, origTs) | status origRt == REVERTING -> do
                             let reverted = origRt{status = REVERTED}
-                            liftIO $ insertReleaseTracker db reverted origTs
+                            insertReleaseTracker reverted origTs
                             logInfoS $ "Marked original " <> origId <> " as REVERTED"
                         _ -> pure ()
                 Nothing -> pure ()

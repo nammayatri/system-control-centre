@@ -33,15 +33,20 @@ module Core.Logging (
     logErrorG,
     logWarningG,
     logDebugG,
+    -- Tag stack — context auto-prepended to every log line
+    withLogTag,
 )
 where
 
+import qualified Control.Concurrent as Conc
+import Control.Exception (bracket_)
 import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (FromJSON (..), withObject, withText, (.:))
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -189,17 +194,62 @@ logDebugIO env = logOutput env DEBUG
 globalLoggerRef :: IORef (Maybe LoggerEnv)
 globalLoggerRef = unsafePerformIO (newIORef Nothing)
 
--- | Install the process-wide LoggerEnv. Call once from Main after
--- 'prepareLoggerEnv'.
+{- | Per-thread tag stack. Tags pushed by 'withLogTag' get prepended to
+every log line emitted by the current thread (and only the current
+thread). On thread exit, the stack is cleaned up by the 'bracket_' in
+'withLogTag', so this map cannot leak across requests.
+-}
+{-# NOINLINE tagStackRef #-}
+tagStackRef :: IORef (Map.Map Conc.ThreadId [Text])
+tagStackRef = unsafePerformIO (newIORef Map.empty)
+
+{- | Install the process-wide LoggerEnv. Call once from Main after
+'prepareLoggerEnv'.
+-}
 setGlobalLoggerEnv :: LoggerEnv -> IO ()
 setGlobalLoggerEnv env = writeIORef globalLoggerRef (Just env)
 
+{- | Run an action with an extra tag pushed onto the current thread's
+log stack. The tag is automatically popped on exit (even on
+exceptions) so contexts can never leak.
+
+> withLogTag ("release-" <> releaseId rt) $ do
+>   logInfoG "starting"          -- → "[release-r-789] starting"
+>   withLogTag "stage-MONITORING" $
+>     logInfoG "checking metrics" -- → "[release-r-789][stage-MONITORING] checking metrics"
+-}
+withLogTag :: (MonadIO m) => Text -> IO a -> m a
+withLogTag tag action = liftIO $ do
+    tid <- Conc.myThreadId
+    bracket_ (push tid) (pop tid) action
+  where
+    push tid = atomicModifyIORef' tagStackRef $ \m ->
+        (Map.insertWith (++) tid [tag] m, ())
+    pop tid = atomicModifyIORef' tagStackRef $ \m ->
+        case Map.lookup tid m of
+            Just (_ : rest) | not (null rest) -> (Map.insert tid rest m, ())
+            _ -> (Map.delete tid m, ())
+
+{- | Look up the current thread's tag stack and format it as
+@\"[tag1][tag2] \"@ for log line prefixes.
+-}
+currentTagPrefix :: IO Text
+currentTagPrefix = do
+    tid <- Conc.myThreadId
+    m <- readIORef tagStackRef
+    case Map.lookup tid m of
+        Nothing -> pure ""
+        Just [] -> pure ""
+        Just tags -> pure (T.concat (map (\t -> "[" <> t <> "]") (reverse tags)) <> " ")
+
 logG :: LogLevel -> Text -> IO ()
 logG lvl msg = do
+    prefix <- currentTagPrefix
+    let full = prefix <> msg
     mEnv <- readIORef globalLoggerRef
     case mEnv of
-        Just env -> logOutput env lvl msg
-        Nothing -> putStrLn ("[" <> show lvl <> "] " <> T.unpack msg)
+        Just env -> logOutput env lvl full
+        Nothing -> putStrLn ("[" <> show lvl <> "] " <> T.unpack full)
 
 logInfoG :: Text -> IO ()
 logInfoG = logG INFO

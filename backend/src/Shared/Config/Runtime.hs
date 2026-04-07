@@ -4,7 +4,7 @@
 Product-specific configs live in each product's own RuntimeConfig module.
 -}
 module Shared.Config.Runtime (
-    -- Helpers (reusable by product RuntimeConfig modules)
+    -- Flow versions (preferred for handlers)
     getConfigBool,
     getConfigBoolForProduct,
     getConfigInt,
@@ -12,56 +12,84 @@ module Shared.Config.Runtime (
     getConfigDouble,
     getConfigDoubleForProduct,
     getConfigText,
+    -- IO versions (kept for background callers)
+    getConfigBool_io,
+    getConfigInt_io,
+    getConfigIntForProduct_io,
+    getConfigDouble_io,
+    getConfigDoubleForProduct_io,
+    getConfigText_io,
 )
 where
 
-import Core.Environment (DBEnv)
+import Core.Environment (DBEnv, MonadFlow, withDb)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Shared.Queries.ServerConfig (
-    getEnabledServerConfigValue,
-    getEnabledServerConfigValueForProduct,
+    getEnabledServerConfigValueForProduct_io,
+    getEnabledServerConfigValue_io,
  )
 import Text.Read (readMaybe)
 
 -- ── Helpers ────────────────────────────────────────────────────────
 
 -- | Read a boolean config. Tries product-specific first, then global.
-getConfigBool :: DBEnv -> Text -> Bool -> IO Bool
-getConfigBool db name fallback = getConfigBoolForProduct db name Nothing fallback
+getConfigBool_io :: DBEnv -> Text -> Bool -> IO Bool
+getConfigBool_io db name fallback = do
+    v <- getEnabledServerConfigValueForProduct_io db name Nothing
+    pure $ case v of
+        Just t -> T.toLower (T.strip t) `elem` ["true", "1", "yes"]
+        Nothing -> fallback
 
-getConfigBoolForProduct :: DBEnv -> Text -> Maybe Text -> Bool -> IO Bool
-getConfigBoolForProduct db name mProduct fallback = do
-    v <- getEnabledServerConfigValueForProduct db name mProduct
+getConfigBool :: (MonadFlow m) => Text -> Bool -> m Bool
+getConfigBool name fallback = withDb $ \db -> getConfigBool_io db name fallback
+
+getConfigBoolForProduct :: (MonadFlow m) => Text -> Maybe Text -> Bool -> m Bool
+getConfigBoolForProduct name mProduct fallback = withDb $ \db -> do
+    v <- getEnabledServerConfigValueForProduct_io db name mProduct
     pure $ case v of
         Just t -> T.toLower (T.strip t) `elem` ["true", "1", "yes"]
         Nothing -> fallback
 
 -- | Read an int config. Tries product-specific first, then global.
-getConfigInt :: DBEnv -> Text -> Int -> IO Int
-getConfigInt db name fallback = getConfigIntForProduct db name Nothing fallback
+getConfigInt_io :: DBEnv -> Text -> Int -> IO Int
+getConfigInt_io db name fallback = getConfigIntForProduct_io db name Nothing fallback
 
-getConfigIntForProduct :: DBEnv -> Text -> Maybe Text -> Int -> IO Int
-getConfigIntForProduct db name mProduct fallback = do
-    v <- getEnabledServerConfigValueForProduct db name mProduct
+getConfigInt :: (MonadFlow m) => Text -> Int -> m Int
+getConfigInt name fallback = withDb $ \db -> getConfigInt_io db name fallback
+
+getConfigIntForProduct_io :: DBEnv -> Text -> Maybe Text -> Int -> IO Int
+getConfigIntForProduct_io db name mProduct fallback = do
+    v <- getEnabledServerConfigValueForProduct_io db name mProduct
     pure $ case v of
         Just t -> fromMaybe fallback (readMaybe (T.unpack (T.strip t)))
         Nothing -> fallback
+
+getConfigIntForProduct :: (MonadFlow m) => Text -> Maybe Text -> Int -> m Int
+getConfigIntForProduct name mProduct fallback = withDb $ \db -> getConfigIntForProduct_io db name mProduct fallback
 
 -- | Read a double config. Tries product-specific first, then global.
-getConfigDouble :: DBEnv -> Text -> Double -> IO Double
-getConfigDouble db name fallback = getConfigDoubleForProduct db name Nothing fallback
+getConfigDouble_io :: DBEnv -> Text -> Double -> IO Double
+getConfigDouble_io db name fallback = getConfigDoubleForProduct_io db name Nothing fallback
 
-getConfigDoubleForProduct :: DBEnv -> Text -> Maybe Text -> Double -> IO Double
-getConfigDoubleForProduct db name mProduct fallback = do
-    v <- getEnabledServerConfigValueForProduct db name mProduct
+getConfigDouble :: (MonadFlow m) => Text -> Double -> m Double
+getConfigDouble name fallback = withDb $ \db -> getConfigDouble_io db name fallback
+
+getConfigDoubleForProduct_io :: DBEnv -> Text -> Maybe Text -> Double -> IO Double
+getConfigDoubleForProduct_io db name mProduct fallback = do
+    v <- getEnabledServerConfigValueForProduct_io db name mProduct
     pure $ case v of
         Just t -> fromMaybe fallback (readMaybe (T.unpack (T.strip t)))
         Nothing -> fallback
 
-getConfigText :: DBEnv -> Text -> Text -> IO Text
-getConfigText db name fallback = do
-    v <- getEnabledServerConfigValue db name
+getConfigDoubleForProduct :: (MonadFlow m) => Text -> Maybe Text -> Double -> m Double
+getConfigDoubleForProduct name mProduct fallback = withDb $ \db -> getConfigDoubleForProduct_io db name mProduct fallback
+
+getConfigText_io :: DBEnv -> Text -> Text -> IO Text
+getConfigText_io db name fallback = do
+    v <- getEnabledServerConfigValue_io db name
     pure $ fromMaybe fallback v
 
+getConfigText :: (MonadFlow m) => Text -> Text -> m Text
+getConfigText name fallback = withDb $ \db -> getConfigText_io db name fallback

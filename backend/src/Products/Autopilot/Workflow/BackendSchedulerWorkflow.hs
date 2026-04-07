@@ -167,12 +167,11 @@ prepareK8sResources = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    db <- getDB
     logInfoS $ "PREPARING K8s resources for scheduler " <> appGroup rt
 
     -- Capture BEFORE snapshot (old deployment)
     let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
-    liftIO $ captureDeploymentSnapshot cfg db (releaseId rt) (namespace ctx) oldDepName "DEPLOYMENT_BEFORE"
+    captureDeploymentSnapshot cfg (releaseId rt) (namespace ctx) oldDepName "DEPLOYMENT_BEFORE"
 
     -- 1. Apply ConfigMap
     updateK8sStatus BSApplyConfigMap
@@ -206,7 +205,6 @@ podCountRollout = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    db <- getDB
     logInfoS $ "Starting pod-count rollout for scheduler " <> appGroup rt
 
     updateK8sStatus BSProgressiveRollout
@@ -219,7 +217,7 @@ podCountRollout = do
 
     -- Notify Slack of old pods scaled down
     currentRT <- getRT
-    liftIO $ notifyPodsScaledDown db currentRT (oldVersion ctx)
+    notifyPodsScaledDown currentRT (oldVersion ctx)
 
     -- Step 2: Scale new deployment up progressively through rollout steps
     let steps = rolloutStrategy rt
@@ -230,7 +228,7 @@ podCountRollout = do
             logInfoS "  No rollout strategy, scaling new deployment to desired count"
             _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
             updateK8sField (\k8s -> k8s{trafficPercentage = 100})
-            liftIO $ notifyReleaseProgress db currentRT 100
+            notifyReleaseProgress currentRT 100
         else do
             forM_ steps $ \step -> do
                 let targetPods = max 1 (podPercent step)
@@ -245,7 +243,7 @@ podCountRollout = do
 
                 -- Notify Slack of progress
                 latestRT <- getRT
-                liftIO $ notifyReleaseProgress db latestRT (rolloutPercent step)
+                notifyReleaseProgress latestRT (rolloutPercent step)
 
                 -- Cooloff between steps
                 when (cooloffMinutes step > 0 && rolloutPercent step < 100) $ do
@@ -326,8 +324,7 @@ cleanupOldVersion = do
         pure ()
 
     -- Optionally delete old deployment
-    db <- getDB
-    shouldDelete <- liftIO $ isScaleDownPodsOnCompletion db
+    shouldDelete <- isScaleDownPodsOnCompletion
     when shouldDelete $ do
         logInfoS $ "  Deleting old deployment: " <> oldDepName
         _ <- runK8sIO $ runCmd (buildDeleteDeploymentCommand cfg (namespace ctx) oldDepName)
@@ -335,10 +332,9 @@ cleanupOldVersion = do
 
     -- Capture AFTER snapshot (new deployment)
     cfgAfter <- getCfg
-    dbAfter <- getDB
     rtAfter <- getRT
     ctxAfter <- getK8sCtx
-    liftIO $ captureDeploymentSnapshot cfgAfter dbAfter (releaseId rtAfter) (namespace ctxAfter) (deploymentName ctxAfter) "DEPLOYMENT_AFTER"
+    captureDeploymentSnapshot cfgAfter (releaseId rtAfter) (namespace ctxAfter) (deploymentName ctxAfter) "DEPLOYMENT_AFTER"
 
     logInfoS "Cleanup complete for scheduler"
 
@@ -346,7 +342,6 @@ cleanupOldVersion = do
 notifyComplete :: StateFlow ()
 notifyComplete = do
     rt <- getRT
-    db <- getDB
     updateK8sStatus BSDone
 
     logInfoS $ "Release " <> releaseId rt <> " completed successfully!"
@@ -357,7 +352,7 @@ notifyComplete = do
     updateRT $ \r -> r{status = COMPLETED}
 
     -- Notify Slack
-    liftIO $ notifyReleaseCompleted db rt
+    notifyReleaseCompleted rt
 
 -- ============================================================================
 -- K8s State Helpers

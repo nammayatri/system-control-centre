@@ -184,20 +184,19 @@ If the lock is already held, fails with an error (caller should retry).
 -}
 runVsRolloutWithLock :: Config -> K8sReleaseContext -> Int -> Int -> StateFlow ()
 runVsRolloutWithLock cfg ctx oldW newW = do
-    db <- getDB
     rt <- getRT
-    maxRetries <- liftIO $ getMaxK8sRetries db
+    maxRetries <- getMaxK8sRetries
     let lockOwner = "release:" <> releaseId rt
     result <-
-        liftIO $
-            withVsLock db (appGroup rt) lockOwner $
+        withVsLock (appGroup rt) lockOwner $
+            liftIO $
                 applyVirtualServiceRolloutWithRetries maxRetries cfg ctx oldW newW
     case result of
         Left err -> do
-            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "VS_LOCK_FAILED" (toJSON err)
+            insertReleaseEvent (releaseId rt) "BUSINESS" "VS_LOCK_FAILED" (toJSON err)
             liftIO $ throwIO $ WorkflowError "vs-lock" err
         Right (Left (K8sError k8sErr)) -> do
-            liftIO $ insertReleaseEvent db (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (toJSON k8sErr)
+            insertReleaseEvent (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (toJSON k8sErr)
             liftIO $ throwIO $ WorkflowError "k8s" k8sErr
         Right (Right _) -> pure ()
 
@@ -247,24 +246,20 @@ validatePreconditions = do
     case internalResult of
         Left _ -> pure () -- No internal VS, that's fine
         Right _ -> do
-            db' <- getDB
             rt' <- getRT
             logInfoS $ "  Internal VS found: " <> internalVsName
-            liftIO $
-                insertReleaseEvent
-                    db'
-                    (releaseId rt')
-                    "BUSINESS"
-                    "INTERNAL_VS_FOUND"
-                    (toJSON internalVsName)
+            insertReleaseEvent
+                (releaseId rt')
+                "BUSINESS"
+                "INTERNAL_VS_FOUND"
+                (toJSON internalVsName)
 
     logInfoS "  Cluster reachable, namespace exists"
 
     -- Persist state after validation (production persists status changes immediately)
-    db <- getDB
     currentRT <- getRT
     currentTS <- gets targetState
-    liftIO $ insertReleaseTracker db currentRT currentTS
+    insertReleaseTracker currentRT currentTS
 
     logInfoS "Preconditions validated"
 
@@ -274,7 +269,6 @@ prepareK8sResources = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    db <- getDB
     isNew <- isNewServiceRelease
     logInfoS $ "PREPARING K8s resources for " <> appGroup rt <> if isNew then " (NEW SERVICE)" else ""
 
@@ -326,13 +320,13 @@ prepareK8sResources = do
 
     -- 5. Clone HPA if exists for old version
     when (not isNew) $ do
-        hpaEnabled <- liftIO $ isHpaEnabledForProduct db (appGroup rt)
+        hpaEnabled <- isHpaEnabledForProduct (appGroup rt)
         when hpaEnabled $ do
             let oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
             hpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
             when hpaFound $ do
                 logInfoS $ "  Cloning HPA from " <> oldHpaName
-                hpaMinMaxFactor <- liftIO $ getHpaMinMaxFactor db
+                hpaMinMaxFactor <- getHpaMinMaxFactor
                 -- Get current replicas from old deployment to calculate HPA min/max
                 oldReplicaResult <- liftIO $ getDeploymentReplicaStatus cfg (namespace ctx) (serviceName ctx <> "-" <> oldVersion ctx)
                 let (_, _, desiredReplicas) = case oldReplicaResult of
@@ -345,13 +339,11 @@ prepareK8sResources = do
                     Right _ -> do
                         logInfoS "  HPA cloned successfully"
                         updateK8sField (\k8s -> k8s{hpaCreated = True})
-                        liftIO $
-                            insertReleaseEvent
-                                db
-                                (releaseId rt)
-                                "BUSINESS"
-                                "HPA_CLONED"
-                                (toJSON (serviceName ctx <> "-" <> newVersion ctx <> "-hpa"))
+                        insertReleaseEvent
+                            (releaseId rt)
+                            "BUSINESS"
+                            "HPA_CLONED"
+                            (toJSON (serviceName ctx <> "-" <> newVersion ctx <> "-hpa"))
                     Left (K8sError err) -> logErrorS $ "  [HPA] Clone failed (non-fatal): " <> err
 
     logInfoS "K8s resources prepared"
@@ -381,7 +373,7 @@ progressiveRollout = do
     db <- getDB
 
     -- Production: sleep(getReleaseStartDelay(conn)) before starting
-    releaseStartDelay <- liftIO $ getReleaseStartDelay db
+    releaseStartDelay <- getReleaseStartDelay
     when (releaseStartDelay > 0) $ do
         logInfoS $ "  Release start delay: " <> T.pack (show releaseStartDelay) <> " seconds"
         liftIO $ threadDelay (releaseStartDelay * 1000000)
@@ -397,8 +389,8 @@ progressiveRollout = do
             let histEntry = mkRolloutHistory 100 0 100 now (Just now)
             updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [histEntry]}
             currentRT <- getRT
-            liftIO $ insertReleaseTracker db currentRT (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = 100})))
-            liftIO $ notifyReleaseProgress db currentRT 100
+            insertReleaseTracker currentRT (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = 100})))
+            notifyReleaseProgress currentRT 100
         else do
             -- Use the tracker's rollout strategy (e.g. 5%/25%/50%/75%/100% with cooloffs)
             -- If rollout strategy is empty, fallback to a single 100% step
@@ -430,10 +422,10 @@ progressiveRollout = do
                     let firstHist = mkRolloutHistory firstNewW (cooloffMinutes firstStep) (podPercent firstStep) stepStartTime Nothing
                     updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [firstHist]}
                     currentRT <- getRT
-                    liftIO $ insertReleaseTracker db currentRT (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = firstNewW})))
-                    liftIO $ notifyReleaseProgress db currentRT firstNewW
+                    insertReleaseTracker currentRT (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = firstNewW})))
+                    notifyReleaseProgress currentRT firstNewW
                     -- Production parity: BUSINESS / TRAFFIC_UPDATED with previous_rollout=0 for first step
-                    liftIO $ logTrafficUpdated db currentRT 0
+                    logTrafficUpdated currentRT 0
 
                     -- Production while-loop: iterate through remaining steps with re-entrant checks
                     -- index starts at 1 (0-based), first step already applied
@@ -454,7 +446,7 @@ rolloutLoop :: Config -> K8sReleaseContext -> DBEnv -> [RolloutStep] -> Int -> I
 rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
     -- Production line 460: tracker = get_release_from_id(conn, tracker.id)[1]
     rt <- getRT
-    freshResult <- liftIO $ findReleaseTracker db (releaseId rt)
+    freshResult <- findReleaseTracker (releaseId rt)
     case freshResult of
         Nothing -> do
             logErrorS "  [rolloutLoop] Tracker deleted from DB, aborting"
@@ -487,7 +479,7 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                 PAUSED -> do
                     -- Production line 195: if isReleasePaused(tracker) return (routePercent, coolOff, podsCount)
                     logInfoS "  [rolloutLoop] Tracker is PAUSED, waiting..."
-                    collectDelay <- liftIO $ getCollectMetricsDelay db
+                    collectDelay <- getCollectMetricsDelay
                     liftIO $ threadDelay (collectDelay * 1000000)
                     rolloutLoop cfg ctx db strategy currentIndex freshTotalSteps stepStartTime
                 INPROGRESS -> do
@@ -510,7 +502,7 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                     updatedHistory = init curHistory <> [updatedLast]
                                 updateRT $ \r -> r{rolloutHistory = updatedHistory}
                                 currentRT <- getRT
-                                liftIO $ insertReleaseTracker db currentRT freshMts
+                                insertReleaseTracker currentRT freshMts
                             pure ()
                         else do
                             -- Check if cooloff has elapsed for current step
@@ -526,7 +518,7 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                 then do
                                     -- Cooloff not exceeded, sleep and re-check
                                     -- Production line 518: sleep(getCollectMetricsDelay(conn))
-                                    collectDelay <- liftIO $ getCollectMetricsDelay db
+                                    collectDelay <- getCollectMetricsDelay
                                     liftIO $ threadDelay (collectDelay * 1000000)
                                     rolloutLoop cfg ctx db strategy currentIndex freshTotalSteps stepStartTime
                                 else do
@@ -544,31 +536,31 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                             checkDeploymentHealth cfg ctx
 
                                             -- 1. Prometheus query checks
-                                            mSvcConfig <- liftIO $ findServiceByProductAndName db (appGroup freshRT) (service freshRT)
+                                            mSvcConfig <- findServiceByProductAndName (appGroup freshRT) (service freshRT)
                                             let mDecisionConfig = mSvcConfig >>= S.dcDecisionConfig
-                                            promResult <- liftIO $ checkPromQueries db cfg freshRT mDecisionConfig
+                                            promResult <- checkPromQueries cfg freshRT mDecisionConfig
                                             case promResult of
                                                 PromAbort reason -> do
                                                     logErrorS $ "[DECISION] Prometheus ABORT: " <> reason
                                                     -- Production parity (service.jl:203): NOTIFICATION / STATUS_UPDATED
-                                                    liftIO $ logStatusUpdated db freshRT ("ABORTING the release because prom query checks failing: " <> reason)
-                                                    liftIO $ notifyGenericThreadMessage db freshRT ("Prometheus check ABORT: " <> reason)
+                                                    logStatusUpdated freshRT ("ABORTING the release because prom query checks failing: " <> reason)
+                                                    notifyGenericThreadMessage freshRT ("Prometheus check ABORT: " <> reason)
                                                     updateRT $ \r -> r{status = ABORTING}
                                                     currentRT' <- getRT
                                                     currentTS' <- gets targetState
-                                                    liftIO $ insertReleaseTracker db currentRT' currentTS'
+                                                    insertReleaseTracker currentRT' currentTS'
                                                     liftIO $ throwIO $ WorkflowError "decision" ("Prometheus ABORT: " <> reason)
                                                 PromWarn reason -> do
                                                     logWarningS $ "[DECISION] Prometheus WARN: " <> reason
                                                     -- Production parity (service.jl:206-208): Slack only, no DB event
-                                                    liftIO $ notifyGenericThreadMessage db freshRT ("Prometheus warning: " <> reason)
+                                                    notifyGenericThreadMessage freshRT ("Prometheus warning: " <> reason)
                                                 -- Continue despite warning
                                                 PromOK -> pure ()
 
                                             -- 2. AB Decision
-                                            abDecision <- liftIO $ getABDecision db cfg freshRT
+                                            abDecision <- getABDecision cfg freshRT
                                             -- 3. HS Decision (pre-monitoring)
-                                            hsDecision <- liftIO $ getHSDecision db cfg freshRT False
+                                            hsDecision <- getHSDecision cfg freshRT False
 
                                             -- Log combined decision event
                                             let combinedDecision = getCombinedDecision abDecision hsDecision
@@ -599,24 +591,24 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                                 updateRT $ \r -> r{rolloutHistory = updatedHistoryDR}
                                                 currentRTDR <- getRT
                                                 currentTSDR <- gets targetState
-                                                liftIO $ insertReleaseTracker db currentRTDR currentTSDR
+                                                insertReleaseTracker currentRTDR currentTSDR
 
                                             -- Read back so the event payload sees the updated history
                                             rtForEvent <- getRT
-                                            liftIO $ logDecisionResult db rtForEvent combinedDecision combinedResultText combinedReasons
+                                            logDecisionResult rtForEvent combinedDecision combinedResultText combinedReasons
 
                                             case combinedDecision of
                                                 Continue -> pure True -- advance
                                                 Wait -> pure False -- stay at current step, re-loop
                                                 Abort -> do
                                                     -- Production parity (service.jl:213): first STATUS_UPDATED
-                                                    liftIO $ logStatusUpdated db rtForEvent "ABORTING the release because of the Decision Engine"
+                                                    logStatusUpdated rtForEvent "ABORTING the release because of the Decision Engine"
                                                     updateRT $ \r -> r{status = ABORTING}
                                                     currentRT' <- getRT
                                                     currentTS' <- gets targetState
-                                                    liftIO $ insertReleaseTracker db currentRT' currentTS'
+                                                    insertReleaseTracker currentRT' currentTS'
                                                     -- Production parity (service.jl:222): second STATUS_UPDATED for rollback
-                                                    liftIO $ logStatusUpdated db currentRT' ("Rolling back the traffic to version " <> oldVersion ctx)
+                                                    logStatusUpdated currentRT' ("Rolling back the traffic to version " <> oldVersion ctx)
                                                     liftIO $ throwIO $ WorkflowError "decision" "Decision engine: ABORT"
 
                                     if shouldAdvance
@@ -669,12 +661,12 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                             -- Persist to DB
                                             currentRT <- getRT
                                             currentTS <- gets targetState
-                                            liftIO $ insertReleaseTracker db currentRT currentTS
+                                            insertReleaseTracker currentRT currentTS
 
                                             -- Notify Slack
-                                            liftIO $ notifyReleaseProgress db currentRT nextNewW
+                                            notifyReleaseProgress currentRT nextNewW
                                             -- Production parity: BUSINESS / TRAFFIC_UPDATED
-                                            liftIO $ logTrafficUpdated db currentRT previousRolloutW
+                                            logTrafficUpdated currentRT previousRolloutW
 
                                             -- Check health after applying step
                                             when (nextNewW < 100) $
@@ -684,7 +676,7 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                             rolloutLoop cfg ctx db strategy (currentIndex + 1) freshTotalSteps newStepStart
                                         else do
                                             -- Decision engine said wait/abort - re-loop
-                                            collectDelay <- liftIO $ getCollectMetricsDelay db
+                                            collectDelay <- getCollectMetricsDelay
                                             liftIO $ threadDelay (collectDelay * 1000000)
                                             rolloutLoop cfg ctx db strategy currentIndex freshTotalSteps stepStartTime
                 _ -> do
@@ -748,16 +740,14 @@ monitorHealth = do
             logInfoS "  All pods ready"
 
     -- Post-monitoring: after all pods are healthy at 100%, check HS decision
-    postMonitoringEnabled <- liftIO $ getConfigBoolForProduct db "ab_hs_post_monitoring_enabled" (Just (appGroup rt)) False
+    postMonitoringEnabled <- getConfigBoolForProduct "ab_hs_post_monitoring_enabled" (Just (appGroup rt)) False
     when postMonitoringEnabled $ do
         logInfoS "[WORKFLOW] Starting post-monitoring phase"
-        liftIO $
-            insertReleaseEvent
-                db
-                (releaseId rt)
-                "BUSINESS"
-                "POST_MONITORING_STARTED"
-                (toJSON ("Post-monitoring phase" :: T.Text))
+        insertReleaseEvent
+            (releaseId rt)
+            "BUSINESS"
+            "POST_MONITORING_STARTED"
+            (toJSON ("Post-monitoring phase" :: T.Text))
         postMonitorLoop cfg db rt 0
 
     logInfoS "Health monitoring complete"
@@ -770,54 +760,46 @@ postMonitorLoop cfg db rt iteration = do
     if iteration > 30
         then do
             logInfoS "[WORKFLOW] Post-monitoring: max iterations reached, continuing"
-            liftIO $
-                insertReleaseEvent
-                    db
-                    (releaseId rt)
-                    "DECISION_ENGINE"
-                    "POST_MONITORING_TIMEOUT"
-                    (object ["iterations" .= (iteration :: Int)])
+            insertReleaseEvent
+                (releaseId rt)
+                "DECISION_ENGINE"
+                "POST_MONITORING_TIMEOUT"
+                (object ["iterations" .= (iteration :: Int)])
         else do
-            hsResult <- liftIO $ getHSDecision db cfg rt True -- isPostMonitoring=True
-            liftIO $
-                insertReleaseEvent
-                    db
-                    (releaseId rt)
-                    "DECISION_ENGINE"
-                    "POST_MONITORING_POLL"
-                    ( object
-                        [ "iteration" .= iteration
-                        , "decision" .= show (drDecision hsResult)
-                        , "reason" .= drReason hsResult
-                        ]
-                    )
+            hsResult <- getHSDecision cfg rt True -- isPostMonitoring=True
+            insertReleaseEvent
+                (releaseId rt)
+                "DECISION_ENGINE"
+                "POST_MONITORING_POLL"
+                ( object
+                    [ "iteration" .= iteration
+                    , "decision" .= show (drDecision hsResult)
+                    , "reason" .= drReason hsResult
+                    ]
+                )
             case drDecision hsResult of
                 Continue -> do
                     logInfoS "[WORKFLOW] Post-monitoring: CONTINUE"
-                    liftIO $
-                        insertReleaseEvent
-                            db
-                            (releaseId rt)
-                            "DECISION_ENGINE"
-                            "POST_MONITORING_RESULT"
-                            (object ["decision" .= ("Continue" :: T.Text)])
+                    insertReleaseEvent
+                        (releaseId rt)
+                        "DECISION_ENGINE"
+                        "POST_MONITORING_RESULT"
+                        (object ["decision" .= ("Continue" :: T.Text)])
                 Abort -> do
                     logErrorS "[WORKFLOW] Post-monitoring: ABORT"
-                    liftIO $
-                        insertReleaseEvent
-                            db
-                            (releaseId rt)
-                            "DECISION_ENGINE"
-                            "POST_MONITORING_RESULT"
-                            (object ["decision" .= ("Abort" :: T.Text), "reason" .= drReason hsResult])
-                    liftIO $ notifyGenericThreadMessage db rt ("Post-monitoring ABORT: " <> maybe "no reason" id (drReason hsResult))
+                    insertReleaseEvent
+                        (releaseId rt)
+                        "DECISION_ENGINE"
+                        "POST_MONITORING_RESULT"
+                        (object ["decision" .= ("Abort" :: T.Text), "reason" .= drReason hsResult])
+                    notifyGenericThreadMessage rt ("Post-monitoring ABORT: " <> maybe "no reason" id (drReason hsResult))
                     updateRT $ \r -> r{status = ABORTING}
                     currentRT <- getRT
                     currentTS <- gets targetState
-                    liftIO $ insertReleaseTracker db currentRT currentTS
+                    insertReleaseTracker currentRT currentTS
                     liftIO $ throwIO $ WorkflowError "monitoring" "Post-monitoring ABORT"
                 Wait -> do
-                    collectDelay <- liftIO $ getCollectMetricsDelay db
+                    collectDelay <- getCollectMetricsDelay
                     liftIO $ threadDelay (collectDelay * 1000000)
                     postMonitorLoop cfg db rt (iteration + 1)
 
@@ -968,7 +950,6 @@ cleanupOldVersion = do
     cfg <- getCfg
     ctx <- getK8sCtx
     isNew <- isNewServiceRelease
-    db <- getDB
     logInfoS $ "Cleaning up old version for " <> appGroup rt
 
     updateK8sStatus BSScaleDownOld
@@ -991,19 +972,17 @@ cleanupOldVersion = do
             -- We mark the intent so the Runner knows to scale down.
             logInfoS $ "  Scheduling scale-down for old deployment: " <> oldDepName
             updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = False})
-            liftIO $
-                insertReleaseEvent
-                    db
-                    (releaseId rt)
-                    "BUSINESS"
-                    "SCALE_DOWN_SCHEDULED"
-                    (toJSON $ "Scale-down scheduled for " <> T.unpack oldDepName)
+            insertReleaseEvent
+                (releaseId rt)
+                "BUSINESS"
+                "SCALE_DOWN_SCHEDULED"
+                (toJSON $ "Scale-down scheduled for " <> T.unpack oldDepName)
 
             -- If scale_down_pods_on_completion is enabled, do it immediately too
             -- (production has this commented out but the Runner handles it)
             -- NOTE: Slack notification for pods scaled down is sent ONLY from the Runner's
             -- scaleDownOldDeployment on actual success — not here (avoids duplicates).
-            shouldScaleDownNow <- liftIO $ isScaleDownPodsOnCompletion db
+            shouldScaleDownNow <- isScaleDownPodsOnCompletion
             when shouldScaleDownNow $ do
                 logInfoS $ "  Immediate scale-down: " <> oldDepName
                 _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
@@ -1023,22 +1002,19 @@ cleanupOldVersion = do
                 case deleteResult of
                     Right _ -> do
                         logInfoS "  Old HPA deleted"
-                        liftIO $
-                            insertReleaseEvent
-                                db
-                                (releaseId rt)
-                                "BUSINESS"
-                                "HPA_DELETED"
-                                (toJSON oldHpaName)
+                        insertReleaseEvent
+                            (releaseId rt)
+                            "BUSINESS"
+                            "HPA_DELETED"
+                            (toJSON oldHpaName)
                     Left err ->
                         logErrorS $ "  WARNING: Failed to delete old HPA: " <> T.pack (show err)
 
     -- Capture AFTER snapshots
     cfgAfter <- getCfg
-    dbAfter <- getDB
     rtAfter <- getRT
     ctxAfter <- getK8sCtx
-    liftIO $ captureDeploymentSnapshot cfgAfter dbAfter (releaseId rtAfter) (namespace ctxAfter) (deploymentName ctxAfter) "DEPLOYMENT_AFTER"
+    captureDeploymentSnapshot cfgAfter (releaseId rtAfter) (namespace ctxAfter) (deploymentName ctxAfter) "DEPLOYMENT_AFTER"
 
     logInfoS "Cleanup complete"
 
@@ -1053,7 +1029,6 @@ Production parity (service.jl line 176 + releaseCompletionActions):
 notifyComplete :: StateFlow ()
 notifyComplete = do
     rt <- getRT
-    db <- getDB
     updateK8sStatus BSDone
 
     logInfoS $ "Release " <> releaseId rt <> " completed successfully!"
@@ -1068,15 +1043,15 @@ notifyComplete = do
     -- Persist final state to DB immediately (production does this in update_tracker_status!)
     currentRT <- getRT
     currentTS <- gets targetState
-    liftIO $ insertReleaseTracker db currentRT currentTS
+    insertReleaseTracker currentRT currentTS
 
     -- Log completion event
     -- Production parity: NOTIFICATION / STATUS_UPDATED
     let completionMsg = "Tracker marked as COMPLETED with " <> T.pack (show (getTrafficPct currentTS)) <> "% traffic"
-    liftIO $ logStatusUpdated db currentRT completionMsg
+    logStatusUpdated currentRT completionMsg
 
     -- Notify Slack
-    liftIO $ notifyReleaseCompleted db currentRT
+    notifyReleaseCompleted currentRT
   where
     getTrafficPct Nothing = 100 :: Int
     getTrafficPct (Just (K8sState k8s)) = trafficPercentage k8s

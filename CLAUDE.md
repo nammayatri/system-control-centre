@@ -7,14 +7,38 @@
 - Each product is fully self-contained -- owns its tables, types, queries, logic
 
 ## Common modules (use these — every product should reuse them)
+- `Core.Environment`      — defines `Flow = ReaderT AppState IO`, `AppState`, `getDBEnv`, `getConfig`, `inDB`, `inConfig`, `logInfo/Error/Warning/Debug`
 - `Core.Types.Id`         — `Id Person`, `Id Release`, etc. Phantom-typed Text (Show/JSON/HttpApi/SQL all derived)
 - `Core.Types.Time`       — `Seconds`, `Minutes`, `Hours`, `Days` + `threadDelay (Seconds 5)` instead of `threadDelay 5_000_000`
 - `Core.Http.Client`      — pooled `http-client` Manager + retry + timeout. Use `httpJson`/`httpRaw` instead of spawning curl
 - `Core.Logging`          — `logInfoG`/`logErrorG` (global, write to file+console) + `withLogTag` for context propagation
-- `Core.AppM`             — typeclass-driven monad (`MonadDB`, `MonadLog`, `MonadAppConfig`) + `forkAppM` for context-preserving forks
 - `Core.AppError`         — `ToAppError` typeclass, `APIError`/`AuthError`/`DBError`/`WorkflowError` hierarchy, JSON error envelopes
 - `Core.Auth.Protected`   — type-level RBAC Servant combinator (`Protected 'AP_RELEASE_VIEW`)
 - `Shared.API.Response`   — `APISuccess` (preferred for action endpoints) + legacy `APIResponse`
+
+## Monad convention (read this before writing handlers)
+
+The whole codebase uses a small two-monad split:
+
+| Layer | Monad | When |
+|---|---|---|
+| HTTP handlers | `Flow = ReaderT AppState IO` | Every Servant handler. AppState carries config + DB pool + logger. |
+| Background workers | `Flow` | `Runner.hs` and friends. Use `runFlow appState (...)` to enter it from `IO`. |
+| Queries (`Queries/*.hs`) | `Flow a` (preferred) — `getDBEnv` reads DB from Reader | Callers don't need to pass DBEnv. Old `_io :: DBEnv -> ... -> IO a` versions kept as wrappers for background callers. |
+| Pure utilities (K8s wrappers, HTTP client, notifications, parsers) | Raw `IO` | Leaf functions called from `Flow` via `liftIO` or `inDB`. |
+
+**No `MonadFlow` typeclass, no `EsqDBFlow` / `CacheFlow` constraint stack.** SCC has one resource (Postgres) so the typeclass machinery would be pure overhead. NammaYatri uses the heavy pattern because they have Postgres + Redis + Kafka + ClickHouse + encryption — we don't.
+
+**No `Core.AppM`** — that was a parallel "next-gen" framework that nobody used. Deleted. Don't recreate it.
+
+**Adding a new query:**
+```haskell
+findFooById :: Id Foo -> Flow (Maybe Foo)
+findFooById fid = do
+    db <- getDBEnv
+    liftIO $ runDB db $ ...   -- exact same body as before
+```
+Calls in handlers become a one-liner: `result <- findFooById fid`.
 
 ## Local Setup
 

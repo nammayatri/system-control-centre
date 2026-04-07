@@ -2,12 +2,15 @@
 
 {- | VS Edit operations now use release_tracker with category='VSEdit'
 and deployment_config for VS lock state.
-This module provides thin wrappers for backward compatibility.
+
+Migrated to the 'MonadFlow' constraint pattern: callers no longer need to
+pass 'DBEnv' or wrap calls in 'liftIO'. Just call the query directly from
+any 'MonadFlow' computation.
 -}
 module Products.Autopilot.Queries.VsEditTracker where
 
 import Core.DB.Connection (runDB, withConn)
-import Core.Environment (DBEnv)
+import Core.Environment (MonadFlow, withDb)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import Database.Beam
@@ -15,8 +18,8 @@ import Database.PostgreSQL.Simple (execute)
 import Products.Autopilot.Types.Storage.Schema
 
 -- | Find active VS lock by checking deployment_config.vs_locked_by IS NOT NULL
-findActiveLockFromConfig :: DBEnv -> Text -> IO (Maybe DeploymentConfig)
-findActiveLockFromConfig db product' = do
+findActiveLockFromConfig :: (MonadFlow m) => Text -> m (Maybe DeploymentConfig)
+findActiveLockFromConfig product' = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -31,8 +34,8 @@ findActiveLockFromConfig db product' = do
         (x : _) -> Just x
 
 -- | List VS edit trackers = release_tracker WHERE category='VSEdit'
-listVsEditTrackerRows :: DBEnv -> Maybe UTCTime -> Maybe UTCTime -> IO [ReleaseTrackerRow]
-listVsEditTrackerRows db mFrom mTo =
+listVsEditTrackerRows :: (MonadFlow m) => Maybe UTCTime -> Maybe UTCTime -> m [ReleaseTrackerRow]
+listVsEditTrackerRows mFrom mTo = withDb $ \db ->
     runDB db $
         runSelectReturningList $
             select $
@@ -48,8 +51,8 @@ listVsEditTrackerRows db mFrom mTo =
                     pure t
 
 -- | Find VS edit tracker by ID = release_tracker WHERE id=? AND category='VSEdit'
-findVsEditTrackerRowById :: DBEnv -> Text -> IO (Maybe ReleaseTrackerRow)
-findVsEditTrackerRowById db tid = do
+findVsEditTrackerRowById :: (MonadFlow m) => Text -> m (Maybe ReleaseTrackerRow)
+findVsEditTrackerRowById tid = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -72,8 +75,8 @@ just as another call succeeds with the same owner).
 
 Returns the number of trackers discarded.
 -}
-discardDuplicateCreatedVsTrackers :: DBEnv -> Text -> Text -> IO Int
-discardDuplicateCreatedVsTrackers db appGroup' keepTrackerId =
+discardDuplicateCreatedVsTrackers :: (MonadFlow m) => Text -> Text -> m Int
+discardDuplicateCreatedVsTrackers appGroup' keepTrackerId = withDb $ \db ->
     withConn db $ \conn -> do
         n <-
             execute

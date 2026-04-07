@@ -33,9 +33,11 @@ library
       Core.Auth.Schema
       Core.Auth.Types
       Core.AppError
-      Core.AppM
       Core.Config
+      Core.Http.Client
       Core.Logging
+      Core.Types.Id
+      Core.Types.Time
       Core.Middleware.RequestId
       Shared.Config.Runtime
       Core.DB.Connection
@@ -101,10 +103,14 @@ library
   hs-source-dirs:
       src
   default-extensions:
-      OverloadedStrings
+      ConstraintKinds
+      DataKinds
       DeriveGeneric
-      RecordWildCards
       DuplicateRecordFields
+      FlexibleContexts
+      OverloadedStrings
+      RecordWildCards
+      TypeOperators
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields
   build-depends:
       aeson
@@ -149,10 +155,14 @@ executable namma-ap-exe
   hs-source-dirs:
       app
   default-extensions:
-      OverloadedStrings
+      ConstraintKinds
+      DataKinds
       DeriveGeneric
-      RecordWildCards
       DuplicateRecordFields
+      FlexibleContexts
+      OverloadedStrings
+      RecordWildCards
+      TypeOperators
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields -threaded -rtsopts
   build-depends:
       aeson
@@ -192,10 +202,14 @@ test-suite namma-ap-test
   hs-source-dirs:
       test
   default-extensions:
-      OverloadedStrings
+      ConstraintKinds
+      DataKinds
       DeriveGeneric
-      RecordWildCards
       DuplicateRecordFields
+      FlexibleContexts
+      OverloadedStrings
+      RecordWildCards
+      TypeOperators
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields
   build-depends:
       aeson

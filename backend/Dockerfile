@@ -98,6 +98,11 @@ COPY --from=build /app/dev/migrations   /srv/namma-ap/dev/migrations
 #
 # See README.md → Production deployment for the full pattern.
 
+# Entrypoint: decodes DHALL_CONFIGS (base64) when set, then execs the binary.
+# See scripts/scc-entrypoint.sh for the resolution logic.
+COPY --from=build /app/scripts/scc-entrypoint.sh /usr/local/bin/scc-entrypoint.sh
+RUN chmod +x /usr/local/bin/scc-entrypoint.sh
+
 RUN chown -R namma:namma /srv/namma-ap
 
 USER namma
@@ -113,5 +118,6 @@ EXPOSE 8012
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl --max-time 3 --silent --output /dev/null "http://localhost:${PORT}/" || exit 1
 
-# tini as PID 1 so signals + zombie reaping work correctly
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/namma-ap"]
+# tini as PID 1 so signals + zombie reaping work correctly.
+# scc-entrypoint.sh decodes DHALL_CONFIGS if set, then execs namma-ap.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/scc-entrypoint.sh"]

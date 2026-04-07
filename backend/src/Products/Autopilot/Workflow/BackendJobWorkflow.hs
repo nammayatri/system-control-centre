@@ -273,7 +273,7 @@ pollJobStatus cfg getJobCmd maxPolls currentPoll = do
                             updateRT $ \r -> r{status = ABORTED}
                             db <- getDB
                             rt <- getRT
-                            liftIO $ notifyReleaseAborted db rt
+                            notifyReleaseAborted rt
                             liftIO $ throwIO $ WorkflowError "wait" ("Job failed: backoff limit exceeded (failed=" <> T.pack (show failed) <> ")")
                         else do
                             -- Still running, wait and poll again
@@ -325,7 +325,7 @@ notifyComplete = do
             updateRT $ \r -> r{status = COMPLETED}
 
             -- Notify Slack
-            liftIO $ notifyReleaseCompleted db rt
+            notifyReleaseCompleted rt
 
 -- ============================================================================
 -- K8s State Helpers

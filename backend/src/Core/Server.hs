@@ -11,7 +11,7 @@ import Core.Admin.Routes (AdminAPI, adminServer)
 import Core.AppError (AppException (..), ToAppError (..), errorResponseJSON)
 import Core.Auth.Routes (AuthAPI, authServer)
 import Core.Config (port)
-import Core.Environment (AppState (..), DBEnv)
+import Core.Environment (AppState (..))
 import Core.Logging (logErrorIO, logInfoIO)
 import Core.Middleware.RequestId (requestIdMiddleware)
 import Core.Utils.FlowMonad (Flow)
@@ -37,8 +37,8 @@ serverLoop st = do
     logInfoIO (loggerEnv st) "[startup] Phase 3: route permissions enforced at compile time via Protected combinator."
     run (port (config st)) (mkApp st)
 
-serverContext :: AppState -> Context '[DBEnv]
-serverContext st = dbEnv st :. EmptyContext
+serverContext :: AppState -> Context '[AppState]
+serverContext st = st :. EmptyContext
 
 mkApp :: AppState -> Application
 mkApp st =
@@ -47,7 +47,7 @@ mkApp st =
             serveWithContext fullApi (serverContext st) $
                 hoistServerWithContext
                     fullApi
-                    (Proxy :: Proxy '[DBEnv])
+                    (Proxy :: Proxy '[AppState])
                     (toHandler st)
                     fullServer
   where

@@ -4,8 +4,9 @@
 module Products.Autopilot.Queries.ProductService where
 
 import qualified Control.Exception
+import qualified Control.Monad.Catch
 import Core.DB.Connection (runDB, withConn)
-import Core.Environment (DBEnv)
+import Core.Environment (MonadFlow, withDb)
 import Core.Logging (logInfoG)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -16,7 +17,7 @@ import Database.Beam.Postgres (runBeamPostgres)
 import Database.PostgreSQL.Simple (Only (..), execute, query, withTransaction)
 import GHC.Int (Int32)
 import Products.Autopilot.Types.Storage.Schema
-import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
+import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct_io)
 
 -- ============================================================================
 -- Product-level queries (service IS NULL)
@@ -46,8 +47,8 @@ getServiceHost = dcServiceHost
 getSlackChannelDirect :: DeploymentConfig -> Maybe Text
 getSlackChannelDirect = dcSlackChannel
 
-findProductByName :: DBEnv -> Text -> IO (Maybe DeploymentConfig)
-findProductByName db pName = do
+findProductByName :: (MonadFlow m) => Text -> m (Maybe DeploymentConfig)
+findProductByName pName = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -60,9 +61,9 @@ findProductByName db pName = do
         [] -> Nothing
         (x : _) -> Just x
 
-findProductByNameAndCluster :: DBEnv -> Text -> Text -> IO (Maybe DeploymentConfig)
-findProductByNameAndCluster db pName clusterName = do
-    rows <- listProductsByName db pName
+findProductByNameAndCluster :: (MonadFlow m) => Text -> Text -> m (Maybe DeploymentConfig)
+findProductByNameAndCluster pName clusterName = do
+    rows <- listProductsByName pName
     pure $ case clusterName of
         "" -> safeHead rows
         _ -> case filter (\p -> getProductCluster p == clusterName) rows of
@@ -72,8 +73,8 @@ findProductByNameAndCluster db pName clusterName = do
     safeHead [] = Nothing
     safeHead (x : _) = Just x
 
-listProductsByName :: DBEnv -> Text -> IO [DeploymentConfig]
-listProductsByName db pName =
+listProductsByName :: (MonadFlow m) => Text -> m [DeploymentConfig]
+listProductsByName pName = withDb $ \db ->
     runDB db $
         runSelectReturningList $
             select $ do
@@ -82,8 +83,8 @@ listProductsByName db pName =
                 guard_ (isNothing_ (dcService p))
                 pure p
 
-listProducts :: DBEnv -> IO [DeploymentConfig]
-listProducts db =
+listProducts :: (MonadFlow m) => m [DeploymentConfig]
+listProducts = withDb $ \db ->
     runDB db $
         runSelectReturningList $
             select $ do
@@ -91,12 +92,8 @@ listProducts db =
                 guard_ (isNothing_ (dcService p))
                 pure p
 
--- ============================================================================
--- Service-level queries (service IS NOT NULL)
--- ============================================================================
-
-findServiceByProductAndName :: DBEnv -> Text -> Text -> IO (Maybe DeploymentConfig)
-findServiceByProductAndName db pName sName = do
+findServiceByProductAndName :: (MonadFlow m) => Text -> Text -> m (Maybe DeploymentConfig)
+findServiceByProductAndName pName sName = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -109,8 +106,8 @@ findServiceByProductAndName db pName sName = do
         [] -> Nothing
         (x : _) -> Just x
 
-listReleaseConfigByProduct :: DBEnv -> Text -> IO [DeploymentConfig]
-listReleaseConfigByProduct db pName =
+listReleaseConfigByProduct :: (MonadFlow m) => Text -> m [DeploymentConfig]
+listReleaseConfigByProduct pName = withDb $ \db ->
     runDB db $
         runSelectReturningList $
             select $ do
@@ -119,8 +116,8 @@ listReleaseConfigByProduct db pName =
                 guard_ (isNothing_ (dcService s) ==. val_ False)
                 pure s
 
-listSchedulerServicesByProduct :: DBEnv -> Text -> IO [DeploymentConfig]
-listSchedulerServicesByProduct db pName =
+listSchedulerServicesByProduct :: (MonadFlow m) => Text -> m [DeploymentConfig]
+listSchedulerServicesByProduct pName = withDb $ \db ->
     runDB db $
         runSelectReturningList $
             select $ do
@@ -130,12 +127,8 @@ listSchedulerServicesByProduct db pName =
                 guard_ (dcServiceType s ==. val_ (Just "SCHEDULER"))
                 pure s
 
--- ============================================================================
--- Upsert operations (delete + insert pattern)
--- ============================================================================
-
 upsertProduct ::
-    DBEnv ->
+    (MonadFlow m) =>
     Int32 ->
     Text ->
     Text ->
@@ -146,8 +139,8 @@ upsertProduct ::
     Maybe Text ->
     Maybe Bool ->
     Maybe Text ->
-    IO ()
-upsertProduct db _rowId productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval slackChannel' = do
+    m ()
+upsertProduct _rowId productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval slackChannel' = withDb $ \db -> do
     withConn db $ \conn ->
         withTransaction conn $ do
             runBeamPostgres conn $
@@ -180,7 +173,7 @@ upsertProduct db _rowId productName' cluster' namespace' vsName' productType' pr
                             ]
 
 upsertService ::
-    DBEnv ->
+    (MonadFlow m) =>
     Int32 ->
     Maybe Text ->
     Maybe Text ->
@@ -189,8 +182,8 @@ upsertService ::
     Text ->
     Maybe Text ->
     Maybe Text ->
-    IO ()
-upsertService db _rowId rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy = do
+    m ()
+upsertService _rowId rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy = withDb $ \db -> do
     withConn db $ \conn ->
         withTransaction conn $ do
             runBeamPostgres conn $
@@ -222,12 +215,8 @@ upsertService db _rowId rolloutStrategy decisionConfig serviceName' product' sTy
                                 }
                             ]
 
--- ============================================================================
--- CRUD by ID (used by Config actions)
--- ============================================================================
-
-findProductConfigById :: DBEnv -> Int32 -> IO (Maybe DeploymentConfig)
-findProductConfigById db pid = do
+findProductConfigById :: (MonadFlow m) => Int32 -> m (Maybe DeploymentConfig)
+findProductConfigById pid = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -240,14 +229,14 @@ findProductConfigById db pid = do
         [] -> Nothing
         (x : _) -> Just x
 
-deleteProductConfig :: DBEnv -> Int32 -> IO ()
-deleteProductConfig db pid =
+deleteProductConfig :: (MonadFlow m) => Int32 -> m ()
+deleteProductConfig pid = withDb $ \db ->
     runDB db $
         runDelete $
             delete (deploymentConfig autopilotDb) (\p -> dcId p ==. val_ pid)
 
-listAllReleaseConfigs :: DBEnv -> IO [DeploymentConfig]
-listAllReleaseConfigs db =
+listAllReleaseConfigs :: (MonadFlow m) => m [DeploymentConfig]
+listAllReleaseConfigs = withDb $ \db ->
     runDB db $
         runSelectReturningList $
             select $ do
@@ -255,8 +244,8 @@ listAllReleaseConfigs db =
                 guard_ (isNothing_ (dcService s) ==. val_ False)
                 pure s
 
-findReleaseConfigById :: DBEnv -> Int32 -> IO (Maybe DeploymentConfig)
-findReleaseConfigById db rid = do
+findReleaseConfigById :: (MonadFlow m) => Int32 -> m (Maybe DeploymentConfig)
+findReleaseConfigById rid = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -269,15 +258,11 @@ findReleaseConfigById db rid = do
         [] -> Nothing
         (x : _) -> Just x
 
-deleteReleaseConfig :: DBEnv -> Int32 -> IO ()
-deleteReleaseConfig db rid =
+deleteReleaseConfig :: (MonadFlow m) => Int32 -> m ()
+deleteReleaseConfig rid = withDb $ \db ->
     runDB db $
         runDelete $
             delete (deploymentConfig autopilotDb) (\r -> dcId r ==. val_ rid)
-
--- ============================================================================
--- VS lock helpers (update deployment_config.vs_locked_by)
--- ============================================================================
 
 {- | Default stale-lock expiry (minutes). Used when server_config has no override.
 Matches Julia production default VS_LOCK_EXPIRY_DELAY_MINUTES.
@@ -288,9 +273,9 @@ defaultLockExpiryMinutes = 15
 {- | Read lock_expiry_delay_minutes from server_config, with fallback to default.
 Inlined here (rather than using RuntimeConfig) to keep Queries/ layering clean.
 -}
-getLockExpiryMins :: DBEnv -> IO Int
-getLockExpiryMins db = do
-    mVal <- getEnabledServerConfigValueForProduct db "lock_expiry_delay_minutes" (Just "autopilot")
+getLockExpiryMins :: (MonadFlow m) => m Int
+getLockExpiryMins = withDb $ \db -> do
+    mVal <- getEnabledServerConfigValueForProduct_io db "lock_expiry_delay_minutes" (Just "autopilot")
     case mVal of
         Nothing -> pure defaultLockExpiryMinutes
         Just raw -> case TR.decimal (Data.Text.strip raw) of
@@ -300,8 +285,8 @@ getLockExpiryMins db = do
 {- | Release the VS lock (or set a new owner). Clears vs_lock_timestamp when
 unlocking so that stale-lock expiry checks behave correctly.
 -}
-updateVsLockedBy :: DBEnv -> Text -> Maybe Text -> IO ()
-updateVsLockedBy db productName' mLockedBy = withConn db $ \conn ->
+updateVsLockedBy :: (MonadFlow m) => Text -> Maybe Text -> m ()
+updateVsLockedBy productName' mLockedBy = withDb $ \db -> withConn db $ \conn ->
     case mLockedBy of
         Just owner -> do
             _ <-
@@ -334,10 +319,10 @@ blocking all VS edits until manual intervention.
 
 Returns True iff this call installed the lock on behalf of 'lockOwner'.
 -}
-tryAcquireVsLock :: DBEnv -> Text -> Text -> IO Bool
-tryAcquireVsLock db productName' lockOwner = do
-    expiryMins <- getLockExpiryMins db
-    withConn db $ \conn -> do
+tryAcquireVsLock :: (MonadFlow m) => Text -> Text -> m Bool
+tryAcquireVsLock productName' lockOwner = do
+    expiryMins <- getLockExpiryMins
+    withDb $ \db -> withConn db $ \conn -> do
         rows <-
             execute
                 conn
@@ -366,8 +351,8 @@ the product row does not exist. Callers that need to bypass the ownership
 check (operator recovery) must go through the superadmin-gated
 force-unlock endpoint, which calls 'updateVsLockedBy db p Nothing' directly.
 -}
-releaseVsLockIfOwner :: DBEnv -> Text -> Text -> IO Bool
-releaseVsLockIfOwner db productName' expectedOwner =
+releaseVsLockIfOwner :: (MonadFlow m) => Text -> Text -> m Bool
+releaseVsLockIfOwner productName' expectedOwner = withDb $ \db ->
     withConn db $ \conn -> do
         rows <-
             execute
@@ -385,10 +370,10 @@ Intended for server startup after a crash, as a belt-and-braces companion
 to the expiry check inside 'tryAcquireVsLock'. Returns the number of
 deployment_config rows whose lock was cleared.
 -}
-releaseExpiredVsLocks :: DBEnv -> IO Int
-releaseExpiredVsLocks db = do
-    expiryMins <- getLockExpiryMins db
-    withConn db $ \conn -> do
+releaseExpiredVsLocks :: (MonadFlow m) => m Int
+releaseExpiredVsLocks = do
+    expiryMins <- getLockExpiryMins
+    withDb $ \db -> withConn db $ \conn -> do
         -- First, fetch the app_groups whose lock is being cleared — for logging.
         (owners :: [(Text, Text)]) <-
             query
@@ -451,18 +436,23 @@ of callers grows. Discards the 'Bool' result since finally expects 'IO ()';
 a 'False' return here is expected (lock already expired + reacquired) and
 not an error condition.
 -}
-withVsLock :: forall a. DBEnv -> Text -> Text -> IO a -> IO (Either Text a)
-withVsLock db productName' lockOwner action = do
-    acquired <- tryAcquireVsLock db productName' lockOwner
+withVsLock ::
+    forall m a.
+    (MonadFlow m, Control.Monad.Catch.MonadCatch m, Control.Monad.Catch.MonadMask m) =>
+    Text ->
+    Text ->
+    m a ->
+    m (Either Text a)
+withVsLock productName' lockOwner action = do
+    acquired <- tryAcquireVsLock productName' lockOwner
     if not acquired
         then pure (Left "VS is locked by another release/editor")
-        else -- Use finally to guarantee lock release even on async exceptions
-
-            Control.Exception.finally
+        else
+            Control.Monad.Catch.finally
                 ( do
-                    result <- Control.Exception.try action :: IO (Either Control.Exception.SomeException a)
+                    result <- Control.Monad.Catch.try action :: m (Either Control.Exception.SomeException a)
                     case result of
                         Right v -> pure (Right v)
                         Left ex -> pure (Left (Data.Text.pack (show ex)))
                 )
-                (releaseVsLockIfOwner db productName' lockOwner >> pure ())
+                (releaseVsLockIfOwner productName' lockOwner >> pure ())

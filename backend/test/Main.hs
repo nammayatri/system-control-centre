@@ -1,25 +1,26 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- |
--- System Control Centre — Unit Tests
---
--- These tests are PURE: no DB, no K8s, no HTTP. They cover the parts of
--- the codebase that can be reasoned about in isolation:
---
---   * Status state machine (per-service + global)
---   * Status helper predicates (terminal / aborted)
---   * Permission catalog (Admin/Manager/Viewer)
---   * Effective permission calculation (GRANT/DENY overrides)
---   * Config catalog (no global configs, slack is product-scoped)
---   * Config value validation
---   * Shell quoting (command-injection safety)
---   * K8s version validation (command-injection safety)
---   * Release tag formatting
---   * Rollout step semantics (cooloff = minutes, not seconds)
---
--- IO-bound concerns (DB queries, kubectl, Slack HTTP) are covered by the
--- API integration suite (`scripts/test-api.sh`) and the manual end-to-end
--- harness in CONTEXT.md.
+{- |
+System Control Centre — Unit Tests
+
+These tests are PURE: no DB, no K8s, no HTTP. They cover the parts of
+the codebase that can be reasoned about in isolation:
+
+  * Status state machine (per-service + global)
+  * Status helper predicates (terminal / aborted)
+  * Permission catalog (Admin/Manager/Viewer)
+  * Effective permission calculation (GRANT/DENY overrides)
+  * Config catalog (no global configs, slack is product-scoped)
+  * Config value validation
+  * Shell quoting (command-injection safety)
+  * K8s version validation (command-injection safety)
+  * Release tag formatting
+  * Rollout step semantics (cooloff = minutes, not seconds)
+
+IO-bound concerns (DB queries, kubectl, Slack HTTP) are covered by the
+API integration suite (`scripts/test-api.sh`) and the manual end-to-end
+harness in CONTEXT.md.
+-}
 module Main where
 
 import Data.Char (isAlphaNum)

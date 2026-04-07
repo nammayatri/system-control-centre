@@ -92,15 +92,13 @@ import Shared.API.Response (APIResponse (..))
 
 upsertProductH :: AuthedPerson -> UpsertProductReq -> Flow APIResponse
 upsertProductH _ap req@UpsertProductReq{..} = do
-    db <- getDBEnv
     let rowId = fromMaybe 0 (req.id)
-    liftIO $ upsertProduct db rowId appGroup cluster namespace vsName productType productAcronym syncCluster needInfraApproval slackChannel
+    upsertProduct rowId appGroup cluster namespace vsName productType productAcronym syncCluster needInfraApproval slackChannel
     pure $ APIResponse "SUCCESS" "product_config upserted"
 
 listProductsH :: AuthedPerson -> Flow [ProductResponse]
 listProductsH _ap = do
-    db <- getDBEnv
-    rows <- liftIO $ listProducts db
+    rows <- listProducts
     pure $
         map
             ( \p ->
@@ -119,20 +117,19 @@ listProductsH _ap = do
 listServicesH :: AuthedPerson -> Text -> Flow [ServiceResponse]
 listServicesH _ap productName' = do
     cfg <- getConfig
-    db <- getDBEnv
-    products <- liftIO $ listProductsByName db productName'
+    products <- listProductsByName productName'
     case products of
         [] -> pure []
         _ ->
             if any (\p -> S.dcAppGroupType p == Just "SCHEDULER") products
                 then do
-                    services <- liftIO $ listSchedulerServicesByProduct db productName'
+                    services <- listSchedulerServicesByProduct productName'
                     pure $
                         map
                             (\s -> ServiceResponse (fromMaybe "" (S.dcService s)) (getServiceHost s) (fromMaybe "SERVICE" (S.dcServiceType s)) "DB")
                             services
                 else do
-                    cfgServices <- liftIO $ listReleaseConfigByProduct db productName'
+                    cfgServices <- listReleaseConfigByProduct productName'
                     let configuredHosts = fmap getServiceHost cfgServices
                         normalizeHost h = T.takeWhile (/= '.') h
                         hostMatches configured vsHost =
@@ -177,9 +174,8 @@ listServicesH _ap productName' = do
 
 upsertServiceH :: AuthedPerson -> UpsertServiceReq -> Flow APIResponse
 upsertServiceH _ap req@UpsertServiceReq{..} = do
-    db <- getDBEnv
     let rowId = fromMaybe 0 (req.id)
-    liftIO $ upsertService db rowId rolloutStrategyText decisionConfigText service appGroup serviceType serviceHost revertStrategyText
+    upsertService rowId rolloutStrategyText decisionConfigText service appGroup serviceType serviceHost revertStrategyText
     pure $ APIResponse "SUCCESS" "release_config upserted"
 
 -- ============================================================================
@@ -188,16 +184,15 @@ upsertServiceH _ap req@UpsertServiceReq{..} = do
 
 listReleasesH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow [ReleaseTracker]
 listReleasesH _ap mFrom mTo = do
-    db <- getDBEnv
     case (mFrom >>= parseISO, mTo >>= parseISO) of
         (Just fromTime, Just toTime) -> do
-            pairs <- liftIO $ listReleaseTrackersByDateRange db fromTime toTime
+            pairs <- listReleaseTrackersByDateRange fromTime toTime
             pure (map fst pairs)
         _ -> do
             -- No valid date range -- default to last 30 days as safety limit
             now <- liftIO getCurrentTime
             let thirtyDaysAgo = addUTCTime (-30 * 86400) now
-            pairs <- liftIO $ listReleaseTrackersByDateRange db thirtyDaysAgo now
+            pairs <- listReleaseTrackersByDateRange thirtyDaysAgo now
             pure (map fst pairs)
   where
     parseISO :: Text -> Maybe UTCTime
@@ -210,8 +205,8 @@ createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseRe
 createReleaseH _ap mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
     cfg <- getConfig
     db <- getDBEnv
-    p <- liftIO $ findProductByName db appGroup
-    s <- liftIO $ findServiceByProductAndName db appGroup service
+    p <- findProductByName appGroup
+    s <- findServiceByProductAndName appGroup service
     case (p, s) of
         (Nothing, _) -> pure $ APIResponse "ERROR" "Product not configured"
         (_, Nothing) -> pure $ APIResponse "ERROR" "Service not configured for product"
@@ -221,7 +216,7 @@ createReleaseH _ap mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
                 then pure $ APIResponse "ERROR" "old_version and new_version cannot be the same"
                 else -- Safety check: maintenance mode
                 do
-                    maintenance <- liftIO $ isUnderMaintenance db
+                    maintenance <- isUnderMaintenance
                     if maintenance
                         then pure $ APIResponse "ERROR" "System is under maintenance. Release creation is disabled."
                         else -- Safety check: version format (K8s label: [a-z0-9]([-a-z0-9]*[a-z0-9])?)
@@ -315,7 +310,7 @@ createReleaseH _ap mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
                                                             Just "MANUAL" -> MANUAL
                                                             Just "manual" -> MANUAL
                                                             _ -> AUTO
-                                                    approveAll <- liftIO $ isApproveAllReleases db
+                                                    approveAll <- isApproveAllReleases
                                                     now <- liftIO getCurrentTime
                                                     let initialApproval = case isApproved of
                                                             Just True -> True
@@ -377,37 +372,35 @@ createReleaseH _ap mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
                                                                     , newService = fromMaybe False newService
                                                                     , cronjobSuspend = fromMaybe False cronjobSuspend
                                                                     }
-                                                    liftIO $ insertReleaseTracker db tracker (Just targetState)
-                                                    liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
+                                                    insertReleaseTracker tracker (Just targetState)
+                                                    insertReleaseEvent rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
                                                     -- Capture BEFORE snapshots at creation time (so diff is available immediately)
                                                     -- Also generate a preview AFTER by modifying version/image in the old deployment YAML
                                                     let ns = getProductNamespace pCfg
                                                         oldDepName = targetSvcHost <> "-" <> resolvedOldVersion
-                                                    liftIO $ captureDeploymentSnapshot cfg db rid ns oldDepName "DEPLOYMENT_BEFORE"
+                                                    captureDeploymentSnapshot cfg rid ns oldDepName "DEPLOYMENT_BEFORE"
                                                     -- Generate preview AFTER: take old deployment, replace version + image
-                                                    liftIO $
-                                                        captureDeploymentPreview
-                                                            cfg
-                                                            db
-                                                            rid
-                                                            ns
-                                                            oldDepName
-                                                            newVersion
-                                                            (fromMaybe "" metadataDockerImage)
-                                                            "DEPLOYMENT_AFTER"
-                                                    liftIO $ notifyReleaseCreated db tracker
+                                                    captureDeploymentPreview
+                                                        cfg
+                                                        rid
+                                                        ns
+                                                        oldDepName
+                                                        newVersion
+                                                        (fromMaybe "" metadataDockerImage)
+                                                        "DEPLOYMENT_AFTER"
+                                                    notifyReleaseCreated tracker
                                                     pure $ APIResponse "SUCCESS" ("Tracker created: " <> rid)
 
 getReleaseH :: AuthedPerson -> Text -> Flow (Maybe ReleaseTracker)
 getReleaseH _ap rid = do
     db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     pure (fmap fst m)
 
 approveReleaseH :: AuthedPerson -> Text -> ApproveReleaseReq -> Flow (Maybe ReleaseTracker)
 approveReleaseH _ap rid req = do
     db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> pure Nothing
         Just (tracker, mTargetState) -> do
@@ -423,15 +416,15 @@ approveReleaseH _ap rid req = do
                                 , NT.isApproved = True
                                 , NT.isInfraApproved = fromMaybe (NT.isInfraApproved tracker) infraApproval
                                 }
-                    liftIO $ insertReleaseTracker db updated mTargetState
-                    liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_APPROVED" (toJSON approver)
-                    liftIO $ notifyReleaseApproved db updated
+                    insertReleaseTracker updated mTargetState
+                    insertReleaseEvent rid "BUSINESS" "TRACKER_APPROVED" (toJSON approver)
+                    notifyReleaseApproved updated
                     pure (Just updated)
 
 triggerReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
 triggerReleaseH _ap rid TriggerReleaseReq{..} = do
     db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -441,17 +434,17 @@ triggerReleaseH _ap rid TriggerReleaseReq{..} = do
                 else do
                     now <- liftIO getCurrentTime
                     let updated = (tracker :: ReleaseTracker){NT.scheduleTime = Just now, NT.status = CREATED}
-                    ok <- liftIO $ conditionalUpdateTracker db updated mTargetState (releaseStatusToText oldStatus)
+                    ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText oldStatus)
                     if ok
                         then do
-                            liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_TRIGGERED" (toJSON reason)
+                            insertReleaseEvent rid "BUSINESS" "TRACKER_TRIGGERED" (toJSON reason)
                             pure $ APIResponse "SUCCESS" "Release scheduled for execution"
                         else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
 rollbackReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
 rollbackReleaseH _ap rid TriggerReleaseReq{..} = do
     db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -460,10 +453,10 @@ rollbackReleaseH _ap rid TriggerReleaseReq{..} = do
                 then pure $ APIResponse "ERROR" ("Cannot rollback from status: " <> T.pack (show oldStatus))
                 else do
                     let updated = (tracker :: ReleaseTracker){NT.status = ABORTING, NT.releaseWFStatus = ROLLING_BACK}
-                    ok <- liftIO $ conditionalUpdateTracker db updated mTargetState (releaseStatusToText oldStatus)
+                    ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText oldStatus)
                     if ok
                         then do
-                            liftIO $ insertReleaseEvent db rid "BUSINESS" "ROLLBACK_REQUESTED" (toJSON reason)
+                            insertReleaseEvent rid "BUSINESS" "ROLLBACK_REQUESTED" (toJSON reason)
                             pure $ APIResponse "SUCCESS" "Rollback marked"
                         else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
@@ -471,7 +464,7 @@ revertReleaseH :: AuthedPerson -> Text -> RevertReleaseReq -> Flow APIResponse
 revertReleaseH _ap rid req = do
     cfg <- getConfig
     db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -527,52 +520,45 @@ revertReleaseH _ap rid req = do
                                 , NT.info = (req :: RevertReleaseReq).info
                                 , NT.syncEnabled = if shouldSyncRevert then Just "true" else Nothing
                                 }
-                    liftIO $ insertReleaseTracker db revertedTracker (Just revertedTargetState)
-                    liftIO $
-                        insertReleaseEvent
-                            db
-                            newRid
-                            "BUSINESS"
-                            "REVERT_TRACKER_CREATED"
-                            ( object
-                                [ "originalId" .= rid
-                                , "shouldSyncRevert" .= shouldSyncRevert
-                                , "isImmediate" .= isImmediate
-                                , "origSyncEnabled" .= (origSyncEnabled :: Bool)
-                                ]
-                            )
+                    insertReleaseTracker revertedTracker (Just revertedTargetState)
+                    insertReleaseEvent
+                        newRid
+                        "BUSINESS"
+                        "REVERT_TRACKER_CREATED"
+                        ( object
+                            [ "originalId" .= rid
+                            , "shouldSyncRevert" .= shouldSyncRevert
+                            , "isImmediate" .= isImmediate
+                            , "origSyncEnabled" .= (origSyncEnabled :: Bool)
+                            ]
+                        )
                     -- Capture BEFORE snapshots for the revert release
                     let revertNs = (\(K8sReleaseContext{namespace = n}) -> n) oldCtx
                         revertNewDep = ctxServiceName <> "-" <> NT.newVersion tracker
-                    liftIO $ captureDeploymentSnapshot cfg db newRid revertNs revertNewDep "DEPLOYMENT_BEFORE"
-                    liftIO $
-                        captureDeploymentPreview
-                            cfg
-                            db
-                            newRid
-                            revertNs
-                            revertNewDep
-                            (NT.oldVersion tracker)
-                            (fromMaybe "" (K8s.dockerImage oldCtx))
-                            "DEPLOYMENT_AFTER"
-                    liftIO $ notifyReleaseReverted db revertedTracker
+                    captureDeploymentSnapshot cfg newRid revertNs revertNewDep "DEPLOYMENT_BEFORE"
+                    captureDeploymentPreview
+                        cfg
+                        newRid
+                        revertNs
+                        revertNewDep
+                        (NT.oldVersion tracker)
+                        (fromMaybe "" (K8s.dockerImage oldCtx))
+                        "DEPLOYMENT_AFTER"
+                    notifyReleaseReverted revertedTracker
                     when (isImmediate && shouldSyncRevert) $
-                        liftIO $
-                            triggerImmediateRevertSync cfg db tracker mTargetState
+                        triggerImmediateRevertSync tracker mTargetState
                     pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
 
 revertByGlobalIdH :: AuthedPerson -> Text -> Flow APIResponse
 revertByGlobalIdH ap gid = do
-    db <- getDBEnv
-    m <- liftIO $ findReleaseTrackerByGlobalId db gid
+    m <- findReleaseTrackerByGlobalId gid
     case m of
         Nothing -> pure $ APIResponse "ERROR" ("No release found with global_id=" <> gid)
         Just (tracker, _) -> revertReleaseH ap (releaseId tracker) (RevertReleaseReq Nothing Nothing Nothing Nothing)
 
 immediateRevertByGlobalIdH :: AuthedPerson -> Text -> Flow APIResponse
 immediateRevertByGlobalIdH ap gid = do
-    db <- getDBEnv
-    m <- liftIO $ findReleaseTrackerByGlobalId db gid
+    m <- findReleaseTrackerByGlobalId gid
     case m of
         Nothing -> pure $ APIResponse "ERROR" ("No release found with global_id=" <> gid)
         Just (tracker, _) -> revertReleaseH ap (releaseId tracker) (RevertReleaseReq Nothing Nothing (Just True) Nothing)
@@ -580,7 +566,7 @@ immediateRevertByGlobalIdH ap gid = do
 discardReleaseH :: AuthedPerson -> Text -> DiscardReleaseReq -> Flow APIResponse
 discardReleaseH _ap rid DiscardReleaseReq{..} = do
     db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -589,19 +575,19 @@ discardReleaseH _ap rid DiscardReleaseReq{..} = do
                 then pure $ APIResponse "ERROR" ("Cannot discard from status: " <> T.pack (show oldStatus))
                 else do
                     let updated = (tracker :: ReleaseTracker){NT.status = DISCARDED}
-                    ok <- liftIO $ conditionalUpdateTracker db updated mTargetState (releaseStatusToText oldStatus)
+                    ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText oldStatus)
                     if ok
                         then do
                             -- Production parity: NOTIFICATION / STATUS_UPDATED
-                            liftIO $ logStatusUpdated db updated ("Tracker marked as DISCARDED" <> maybe "" (": " <>) reason)
-                            liftIO $ notifyReleaseDiscarded db updated
+                            logStatusUpdated updated ("Tracker marked as DISCARDED" <> maybe "" (": " <>) reason)
+                            notifyReleaseDiscarded updated
                             pure $ APIResponse "SUCCESS" "Release discarded"
                         else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
 deleteReleaseH :: AuthedPerson -> Text -> Flow APIResponse
 deleteReleaseH _ap rid = do
     db <- getDBEnv
-    mTracker <- liftIO $ findReleaseTracker db rid
+    mTracker <- findReleaseTracker rid
     case mTracker of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, _) -> do
@@ -618,7 +604,7 @@ deleteReleaseH _ap rid = do
 updateTrackerH :: AuthedPerson -> Text -> K8sUpdateTrackerReq -> Flow APIResponse
 updateTrackerH _ap rid req = do
     db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -638,38 +624,38 @@ updateTrackerH _ap rid req = do
                             if newStatus == oldStatus
                                 then do
                                     -- Same status: just update other fields, but guard against concurrent status change
-                                    ok <- liftIO $ conditionalUpdateTracker db updatedTracker updatedTargetState oldStatusText
+                                    ok <- conditionalUpdateTracker updatedTracker updatedTargetState oldStatusText
                                     if ok
                                         then do
-                                            liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
-                                            liftIO $ notifyReleaseUpdated db updatedTracker "fields updated"
+                                            insertReleaseEvent rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
+                                            notifyReleaseUpdated updatedTracker "fields updated"
                                             pure $ APIResponse "SUCCESS" "Tracker updated"
                                         else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
                                 else
                                     if not (validateStatusTransition oldStatus newStatus)
                                         then pure $ APIResponse "ERROR" ("Invalid status transition: " <> T.pack (show oldStatus) <> " -> " <> newStatusText)
                                         else do
-                                            ok <- liftIO $ conditionalUpdateTracker db updatedTracker updatedTargetState oldStatusText
+                                            ok <- conditionalUpdateTracker updatedTracker updatedTargetState oldStatusText
                                             if ok
                                                 then do
                                                     -- Production parity: NOTIFICATION / STATUS_UPDATED
-                                                    liftIO $ logStatusUpdated db updatedTracker ("Tracker marked as " <> newStatusText)
+                                                    logStatusUpdated updatedTracker ("Tracker marked as " <> newStatusText)
                                                     -- Send status-specific Slack notifications
                                                     case newStatus of
-                                                        PAUSED -> liftIO $ notifyReleasePaused db updatedTracker
-                                                        INPROGRESS -> liftIO $ notifyReleaseResumed db updatedTracker
-                                                        ABORTING -> liftIO $ notifyReleaseAborted db updatedTracker
-                                                        COMPLETED -> liftIO $ notifyReleaseCompleted db updatedTracker
-                                                        _ -> liftIO $ notifyReleaseUpdated db updatedTracker ("status changed to " <> newStatusText)
+                                                        PAUSED -> notifyReleasePaused updatedTracker
+                                                        INPROGRESS -> notifyReleaseResumed updatedTracker
+                                                        ABORTING -> notifyReleaseAborted updatedTracker
+                                                        COMPLETED -> notifyReleaseCompleted updatedTracker
+                                                        _ -> notifyReleaseUpdated updatedTracker ("status changed to " <> newStatusText)
                                                     pure $ APIResponse "SUCCESS" "Tracker updated"
                                                 else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
                         Nothing -> do
                             -- No status change requested, but guard against concurrent status change
-                            ok <- liftIO $ conditionalUpdateTracker db updatedTracker updatedTargetState oldStatusText
+                            ok <- conditionalUpdateTracker updatedTracker updatedTargetState oldStatusText
                             if ok
                                 then do
-                                    liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
-                                    liftIO $ notifyReleaseUpdated db updatedTracker "status/fields updated"
+                                    insertReleaseEvent rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
+                                    notifyReleaseUpdated updatedTracker "status/fields updated"
                                     pure $ APIResponse "SUCCESS" "Tracker updated"
                                 else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
 
@@ -852,8 +838,7 @@ updateK8sContext other _ = other
 
 listEventsH :: AuthedPerson -> Text -> Flow [ReleaseEventResponse]
 listEventsH _ap rid = do
-    db <- getDBEnv
-    events <- liftIO $ listReleaseEvents db rid
+    events <- listReleaseEvents rid
     pure $
         fmap
             ( \e ->
@@ -868,8 +853,7 @@ listEventsH _ap rid = do
 
 rolloutHistoryH :: AuthedPerson -> Text -> Flow Value
 rolloutHistoryH _ap rid = do
-    db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> throwM $ NotFound "Release not found"
         Just (tracker, _) -> pure $ toJSON (NT.rolloutHistory tracker)
@@ -880,8 +864,7 @@ rolloutHistoryH _ap rid = do
 
 logsLinkH :: AuthedPerson -> Text -> Flow Value
 logsLinkH _ap rid = do
-    db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> throwM $ NotFound "Release not found"
         Just (_tracker, _) ->
@@ -900,13 +883,12 @@ logsLinkH _ap rid = do
 releaseDiffH :: AuthedPerson -> Text -> Maybe Text -> Flow DiffResponse
 releaseDiffH _ap rid _mType = do
     cfg <- getConfig
-    db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ DiffResponse "" "" "Release not found"
         Just (tracker, mTargetState) -> do
             -- Check for stored SNAPSHOT events first
-            events <- liftIO $ listReleaseEvents db rid
+            events <- listReleaseEvents rid
             let snapshotEvents = filter (\e -> S.reCategory e == "SNAPSHOT") events
                 trackerCat = NT.category tracker
                 (beforeLabel, afterLabel, diffLabel) = case trackerCat of
@@ -996,8 +978,7 @@ releaseDiffH _ap rid _mType = do
 podHealthH :: AuthedPerson -> Text -> Flow PodHealthResponse
 podHealthH _ap rid = do
     cfg <- getConfig
-    db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> pure emptyPodHealth
         Just (_tracker, mTargetState) -> do
@@ -1105,7 +1086,7 @@ immediateRevertH :: AuthedPerson -> Text -> ImmediateRevertReq -> Flow APIRespon
 immediateRevertH _ap rid req = do
     cfg <- getConfig
     db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -1138,14 +1119,13 @@ immediateRevertH _ap rid req = do
                                     _ <- liftIO $ executeWithRetry cfg restartCmd
                                     -- Step 3: Update tracker status
                                     let updated = (tracker :: ReleaseTracker){NT.status = REVERTED}
-                                    liftIO $ insertReleaseTracker db updated mTargetState
-                                    liftIO $ insertReleaseEvent db rid "BUSINESS" "IMMEDIATE_REVERT" (object ["requestedBy" .= (req :: ImmediateRevertReq).requestedBy, "info" .= (req :: ImmediateRevertReq).info])
-                                    liftIO $ notifyImmediateReverted db updated
+                                    insertReleaseTracker updated mTargetState
+                                    insertReleaseEvent rid "BUSINESS" "IMMEDIATE_REVERT" (object ["requestedBy" .= (req :: ImmediateRevertReq).requestedBy, "info" .= (req :: ImmediateRevertReq).info])
+                                    notifyImmediateReverted updated
                                     -- Step 4: Optionally trigger sync revert
                                     let shouldSync = fromMaybe False (isRevertSync (req :: ImmediateRevertReq))
                                     when shouldSync $
-                                        liftIO $
-                                            triggerImmediateRevertSync cfg db tracker mTargetState
+                                        triggerImmediateRevertSync tracker mTargetState
                                     pure $ APIResponse "SUCCESS" "Immediate revert: image swapped + pods restarting"
 
 -- ============================================================================
@@ -1155,7 +1135,7 @@ immediateRevertH _ap rid req = do
 restartReleaseH :: AuthedPerson -> Text -> RestartReleaseReq -> Flow APIResponse
 restartReleaseH _ap rid req = do
     db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -1173,20 +1153,18 @@ restartReleaseH _ap rid req = do
                                 , NT.scheduleTime = Just now
                                 , NT.rolloutHistory = []
                                 }
-                    liftIO $ insertReleaseTracker db updated mTargetState
-                    liftIO $
-                        insertReleaseEvent
-                            db
-                            rid
-                            "BUSINESS"
-                            "RELEASE_RESTARTED"
-                            ( object
-                                [ "requestedBy" .= (req :: RestartReleaseReq).requestedBy
-                                , "reason" .= (req :: RestartReleaseReq).reason
-                                , "previousStatus" .= T.pack (show currentStatus)
-                                ]
-                            )
-                    liftIO $ notifyReleaseRestarted db updated
+                    insertReleaseTracker updated mTargetState
+                    insertReleaseEvent
+                        rid
+                        "BUSINESS"
+                        "RELEASE_RESTARTED"
+                        ( object
+                            [ "requestedBy" .= (req :: RestartReleaseReq).requestedBy
+                            , "reason" .= (req :: RestartReleaseReq).reason
+                            , "previousStatus" .= T.pack (show currentStatus)
+                            ]
+                        )
+                    notifyReleaseRestarted updated
                     pure $ APIResponse "SUCCESS" "Release restarted"
 
 -- ============================================================================
@@ -1196,7 +1174,7 @@ restartReleaseH _ap rid req = do
 fastForwardH :: AuthedPerson -> Text -> FastForwardReq -> Flow APIResponse
 fastForwardH _ap rid req = do
     db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db rid
+    m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -1235,19 +1213,17 @@ fastForwardH _ap rid req = do
                                             else step
                                  in zipWith updateStep [0 ..] steps
                         updated = (tracker :: ReleaseTracker){NT.rolloutHistory = updatedHistory, NT.rolloutStrategy = updatedStrategy}
-                    liftIO $ insertReleaseTracker db updated mTargetState
-                    liftIO $
-                        insertReleaseEvent
-                            db
-                            rid
-                            "BUSINESS"
-                            "FAST_FORWARD"
-                            ( object
-                                [ "requestedBy" .= (req :: FastForwardReq).requestedBy
-                                , "reason" .= (req :: FastForwardReq).reason
-                                ]
-                            )
-                    liftIO $ notifyReleaseFastForwarded db updated
+                    insertReleaseTracker updated mTargetState
+                    insertReleaseEvent
+                        rid
+                        "BUSINESS"
+                        "FAST_FORWARD"
+                        ( object
+                            [ "requestedBy" .= (req :: FastForwardReq).requestedBy
+                            , "reason" .= (req :: FastForwardReq).reason
+                            ]
+                        )
+                    notifyReleaseFastForwarded updated
                     pure $ APIResponse "SUCCESS" "Fast forward: cooloff period skipped, runner will advance on next poll"
 
 -- ============================================================================

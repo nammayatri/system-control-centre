@@ -56,7 +56,7 @@ module Products.Autopilot.Queries.ReleaseTracker (
 where
 
 import Core.DB.Connection (runDB, withConn)
-import Core.Environment (DBEnv)
+import Core.Environment (MonadFlow, withDb)
 import Data.Aeson (FromJSON, ToJSON, Value, eitherDecode, encode, toJSON)
 import qualified Data.ByteString.Lazy as BSL
 import Data.Maybe (fromMaybe)
@@ -76,8 +76,8 @@ import Products.Autopilot.Types.Target.Kubernetes
 -- | Type alias for tracker + target state pair
 type TrackerWithTarget = (ReleaseTracker, Maybe TargetState)
 
-insertReleaseTracker :: DBEnv -> ReleaseTracker -> Maybe TargetState -> IO ()
-insertReleaseTracker db rt mts = do
+insertReleaseTracker :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m ()
+insertReleaseTracker rt mts = withDb $ \db -> do
     now <- getCurrentTime
     let created = fromMaybe now (dateCreated rt)
         row = toRow created now rt mts
@@ -91,8 +91,8 @@ insertReleaseTracker db rt mts = do
 Uses DELETE ... WHERE id = ? AND status = ? to prevent concurrent modifications.
 Returns True if the update succeeded, False if the status was changed by another thread.
 -}
-conditionalUpdateTracker :: DBEnv -> ReleaseTracker -> Maybe TargetState -> Text -> IO Bool
-conditionalUpdateTracker db rt mts expectedStatus = do
+conditionalUpdateTracker :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> Text -> m Bool
+conditionalUpdateTracker rt mts expectedStatus = withDb $ \db -> do
     now <- getCurrentTime
     let created = fromMaybe now (dateCreated rt)
         row = toRow created now rt mts
@@ -112,8 +112,8 @@ conditionalUpdateTracker db rt mts expectedStatus = do
 {- | Like 'conditionalUpdateTracker' but accepts a raw 'ReleaseTrackerRow'.
 Returns True if the update succeeded, False if the status was changed by another thread.
 -}
-conditionalUpdateTrackerRow :: DBEnv -> ReleaseTrackerRow -> Text -> IO Bool
-conditionalUpdateTrackerRow db row expectedStatus =
+conditionalUpdateTrackerRow :: (MonadFlow m) => ReleaseTrackerRow -> Text -> m Bool
+conditionalUpdateTrackerRow row expectedStatus = withDb $ \db ->
     withConn db $ \conn ->
         withTransaction conn $ do
             rowsDeleted <-
@@ -127,8 +127,8 @@ conditionalUpdateTrackerRow db row expectedStatus =
                     runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
                     pure True
 
-findReleaseTracker :: DBEnv -> Text -> IO (Maybe TrackerWithTarget)
-findReleaseTracker db rid = do
+findReleaseTracker :: (MonadFlow m) => Text -> m (Maybe TrackerWithTarget)
+findReleaseTracker rid = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -139,8 +139,8 @@ findReleaseTracker db rid = do
                         pure rt
     pure $ fmap fromRow (safeHead rows)
 
-listReleaseEvents :: DBEnv -> Text -> IO [ReleaseEvent]
-listReleaseEvents db rid =
+listReleaseEvents :: (MonadFlow m) => Text -> m [ReleaseEvent]
+listReleaseEvents rid = withDb $ \db ->
     runDB db $
         runSelectReturningList $
             select $ do
@@ -148,8 +148,8 @@ listReleaseEvents db rid =
                 guard_ (reReleaseId ev ==. val_ rid)
                 pure ev
 
-listReleaseTrackers :: DBEnv -> IO [TrackerWithTarget]
-listReleaseTrackers db = do
+listReleaseTrackers :: (MonadFlow m) => m [TrackerWithTarget]
+listReleaseTrackers = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -159,8 +159,8 @@ listReleaseTrackers db = do
                         pure rt
     pure (map fromRow rows)
 
-listReleaseTrackersByDateRange :: DBEnv -> UTCTime -> UTCTime -> IO [TrackerWithTarget]
-listReleaseTrackersByDateRange db fromTime toTime = do
+listReleaseTrackersByDateRange :: (MonadFlow m) => UTCTime -> UTCTime -> m [TrackerWithTarget]
+listReleaseTrackersByDateRange fromTime toTime = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -179,8 +179,8 @@ listReleaseTrackersByDateRange db fromTime toTime = do
 INPROGRESS releases are NOT re-dispatched — on server restart, they are
 rolled back (matching Julia production behavior: rollbackReleaseInProgress).
 -}
-findRunnableReleaseTrackers :: DBEnv -> UTCTime -> IO [TrackerWithTarget]
-findRunnableReleaseTrackers db now = do
+findRunnableReleaseTrackers :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
+findRunnableReleaseTrackers now = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -196,9 +196,8 @@ findRunnableReleaseTrackers db now = do
         isApproved' (tracker, _) = isApproved tracker
     pure (filter (\t -> isDue t && isApproved' t) parsed)
 
--- | Find all INPROGRESS releases (for rollback on startup).
-findInProgressReleaseTrackers :: DBEnv -> IO [TrackerWithTarget]
-findInProgressReleaseTrackers db = do
+findInProgressReleaseTrackers :: (MonadFlow m) => m [TrackerWithTarget]
+findInProgressReleaseTrackers = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -209,8 +208,8 @@ findInProgressReleaseTrackers db = do
                         pure rt
     pure (map fromRow rows)
 
-findCleanupScheduledTrackers :: DBEnv -> UTCTime -> IO [TrackerWithTarget]
-findCleanupScheduledTrackers db now = do
+findCleanupScheduledTrackers :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
+findCleanupScheduledTrackers now = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -233,8 +232,8 @@ findCleanupScheduledTrackers db now = do
                 _ -> False
     pure (filter isDue parsed)
 
-findAbortingReleaseTrackers :: DBEnv -> IO [TrackerWithTarget]
-findAbortingReleaseTrackers db = do
+findAbortingReleaseTrackers :: (MonadFlow m) => m [TrackerWithTarget]
+findAbortingReleaseTrackers = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -245,8 +244,8 @@ findAbortingReleaseTrackers db = do
                         pure rt
     pure (map fromRow rows)
 
-findOngoingReleaseTrackers :: DBEnv -> IO [TrackerWithTarget]
-findOngoingReleaseTrackers db = do
+findOngoingReleaseTrackers :: (MonadFlow m) => m [TrackerWithTarget]
+findOngoingReleaseTrackers = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -257,9 +256,8 @@ findOngoingReleaseTrackers db = do
                         pure rt
     pure (map fromRow rows)
 
--- | Find trackers with specific status and time filter
-findTrackersWithStatusAndTime :: DBEnv -> [Text] -> UTCTime -> IO [TrackerWithTarget]
-findTrackersWithStatusAndTime db statusList ts = do
+findTrackersWithStatusAndTime :: (MonadFlow m) => [Text] -> UTCTime -> m [TrackerWithTarget]
+findTrackersWithStatusAndTime statusList ts = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -271,9 +269,8 @@ findTrackersWithStatusAndTime db statusList ts = do
                         pure rt
     pure (map fromRow rows)
 
--- | Find approved releases with given statuses
-findApprovedReleasesWithStatus :: DBEnv -> [Text] -> IO [TrackerWithTarget]
-findApprovedReleasesWithStatus db statusList = do
+findApprovedReleasesWithStatus :: (MonadFlow m) => [Text] -> m [TrackerWithTarget]
+findApprovedReleasesWithStatus statusList = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -285,8 +282,8 @@ findApprovedReleasesWithStatus db statusList = do
                         pure rt
     pure (map fromRow rows)
 
-findReleaseTrackersByCategory :: DBEnv -> Text -> UTCTime -> UTCTime -> IO [TrackerWithTarget]
-findReleaseTrackersByCategory db cat from to = do
+findReleaseTrackersByCategory :: (MonadFlow m) => Text -> UTCTime -> UTCTime -> m [TrackerWithTarget]
+findReleaseTrackersByCategory cat from to = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -299,8 +296,8 @@ findReleaseTrackersByCategory db cat from to = do
                         pure rt
     pure (map fromRow rows)
 
-insertReleaseEvent :: DBEnv -> Text -> Text -> Text -> Value -> IO ()
-insertReleaseEvent db rid category label payload = do
+insertReleaseEvent :: (MonadFlow m) => Text -> Text -> Text -> Value -> m ()
+insertReleaseEvent rid category label payload = withDb $ \db -> do
     now <- getCurrentTime
     runDB db $
         runInsert $
@@ -497,8 +494,8 @@ parseJsonTextMaybe (Just t) =
         Left _ -> Nothing
         Right a -> Just a
 
-findReleaseTrackerByGlobalId :: DBEnv -> Text -> IO (Maybe TrackerWithTarget)
-findReleaseTrackerByGlobalId db gid = do
+findReleaseTrackerByGlobalId :: (MonadFlow m) => Text -> m (Maybe TrackerWithTarget)
+findReleaseTrackerByGlobalId gid = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -509,13 +506,13 @@ findReleaseTrackerByGlobalId db gid = do
                         pure rt
     pure $ fmap fromRow (safeHead rows)
 
-deleteReleaseTracker :: DBEnv -> Text -> IO ()
-deleteReleaseTracker db rid = withConn db $ \conn -> do
+deleteReleaseTracker :: (MonadFlow m) => Text -> m ()
+deleteReleaseTracker rid = withDb $ \db -> withConn db $ \conn -> do
     _ <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only rid)
     pure ()
 
-deleteReleaseEvents :: DBEnv -> Text -> IO ()
-deleteReleaseEvents db rid = withConn db $ \conn -> do
+deleteReleaseEvents :: (MonadFlow m) => Text -> m ()
+deleteReleaseEvents rid = withDb $ \db -> withConn db $ \conn -> do
     _ <- execute conn "DELETE FROM release_events WHERE re_release_id = ?" (Only rid)
     pure ()
 
@@ -531,8 +528,8 @@ A tracker is eligible if:
 - podsScaleDownStatus is NOT already ScaleDownCompleted
 When delay is 0, all completed trackers with end_time set are immediately eligible.
 -}
-findCompletedTrackersForScaleDown :: DBEnv -> UTCTime -> Double -> IO [TrackerWithTarget]
-findCompletedTrackersForScaleDown db now delayHours = do
+findCompletedTrackersForScaleDown :: (MonadFlow m) => UTCTime -> Double -> m [TrackerWithTarget]
+findCompletedTrackersForScaleDown now delayHours = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -575,8 +572,8 @@ and the loser's row-match count is zero, so its write silently no-ops.
 Callers do not need to check the row count — the contract is "best
 effort, if someone else already set it the value is preserved".
 -}
-updateReleaseTrackerSlackThreadTs :: DBEnv -> Text -> Text -> IO ()
-updateReleaseTrackerSlackThreadTs db rid value =
+updateReleaseTrackerSlackThreadTs :: (MonadFlow m) => Text -> Text -> m ()
+updateReleaseTrackerSlackThreadTs rid value = withDb $ \db ->
     withConn db $ \conn -> do
         _ <-
             execute
@@ -586,9 +583,8 @@ updateReleaseTrackerSlackThreadTs db rid value =
                 (value, rid)
         pure ()
 
--- | Insert a raw ReleaseTrackerRow (used by VSEdit handlers that build rows directly)
-insertReleaseTrackerRow :: DBEnv -> ReleaseTrackerRow -> IO ()
-insertReleaseTrackerRow db row =
+insertReleaseTrackerRow :: (MonadFlow m) => ReleaseTrackerRow -> m ()
+insertReleaseTrackerRow row = withDb $ \db ->
     withConn db $ \conn ->
         withTransaction conn $ do
             _ <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (rtId row))

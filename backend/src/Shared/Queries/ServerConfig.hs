@@ -13,18 +13,26 @@ boundary for "Shared" consumers like 'Shared.Config.Runtime'. Task #30
 moved them here.
 -}
 module Shared.Queries.ServerConfig (
+    -- Flow versions (preferred for handlers)
     getEnabledServerConfigValue,
     getEnabledServerConfigValueForProduct,
     listAllServerConfigs,
     listServerConfigsByProduct,
     upsertServerConfig,
     deleteServerConfig,
+    -- IO versions (kept for background callers / cross-module IO use)
+    getEnabledServerConfigValue_io,
+    getEnabledServerConfigValueForProduct_io,
+    listAllServerConfigs_io,
+    listServerConfigsByProduct_io,
+    upsertServerConfig_io,
+    deleteServerConfig_io,
 )
 where
 
 import Control.Applicative ((<|>))
 import Core.DB.Connection (runDB, withConn)
-import Core.Environment (DBEnv)
+import Core.Environment (DBEnv, MonadFlow, withDb)
 import Data.Text (Text)
 import Data.Time.Clock (getCurrentTime)
 import Database.Beam
@@ -36,8 +44,11 @@ import Shared.Types.Storage.ServerConfig
 Equivalent to 'getEnabledServerConfigValueForProduct' with @mProduct = Nothing@,
 kept as a thin wrapper for call-sites that truly want global-only semantics.
 -}
-getEnabledServerConfigValue :: DBEnv -> Text -> IO (Maybe Text)
-getEnabledServerConfigValue db name = getEnabledServerConfigValueForProduct db name Nothing
+getEnabledServerConfigValue_io :: DBEnv -> Text -> IO (Maybe Text)
+getEnabledServerConfigValue_io db name = getEnabledServerConfigValueForProduct_io db name Nothing
+
+getEnabledServerConfigValue :: (MonadFlow m) => Text -> m (Maybe Text)
+getEnabledServerConfigValue name = withDb $ \db -> getEnabledServerConfigValue_io db name
 
 {- | Product-aware config lookup.
 Queries all enabled rows matching the name, then picks:
@@ -45,8 +56,8 @@ Queries all enabled rows matching the name, then picks:
   2. Global match (product IS NULL)
   3. Any match (first found) — backward-compat fallback
 -}
-getEnabledServerConfigValueForProduct :: DBEnv -> Text -> Maybe Text -> IO (Maybe Text)
-getEnabledServerConfigValueForProduct db name mProduct = do
+getEnabledServerConfigValueForProduct_io :: DBEnv -> Text -> Maybe Text -> IO (Maybe Text)
+getEnabledServerConfigValueForProduct_io db name mProduct = do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -64,15 +75,21 @@ getEnabledServerConfigValueForProduct db name mProduct = do
             _ -> Nothing
     pure $ productMatch <|> globalMatch <|> anyMatch
 
+getEnabledServerConfigValueForProduct :: (MonadFlow m) => Text -> Maybe Text -> m (Maybe Text)
+getEnabledServerConfigValueForProduct name mProduct = withDb $ \db -> getEnabledServerConfigValueForProduct_io db name mProduct
+
 {- | List server_config rows, optionally filtered by product.
 If product given: returns product-specific + global (NULL) configs.
 If no product: returns all configs.
 -}
-listAllServerConfigs :: DBEnv -> IO [(Int, Text, Text, Text, Int, Maybe Text)]
-listAllServerConfigs db = listServerConfigsByProduct db Nothing
+listAllServerConfigs_io :: DBEnv -> IO [(Int, Text, Text, Text, Int, Maybe Text)]
+listAllServerConfigs_io db = listServerConfigsByProduct_io db Nothing
 
-listServerConfigsByProduct :: DBEnv -> Maybe Text -> IO [(Int, Text, Text, Text, Int, Maybe Text)]
-listServerConfigsByProduct db mProduct = do
+listAllServerConfigs :: (MonadFlow m) => m [(Int, Text, Text, Text, Int, Maybe Text)]
+listAllServerConfigs = withDb $ \db -> listAllServerConfigs_io db
+
+listServerConfigsByProduct_io :: DBEnv -> Maybe Text -> IO [(Int, Text, Text, Text, Int, Maybe Text)]
+listServerConfigsByProduct_io db mProduct = do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -95,12 +112,15 @@ listServerConfigsByProduct db mProduct = do
         , scProduct sc
         )
 
+listServerConfigsByProduct :: (MonadFlow m) => Maybe Text -> m [(Int, Text, Text, Text, Int, Maybe Text)]
+listServerConfigsByProduct mProduct = withDb $ \db -> listServerConfigsByProduct_io db mProduct
+
 {- | Upsert a server_config row by (name, product).
 Same name can exist for different products. Uses INSERT ON CONFLICT to
 avoid TOCTOU race between SELECT and UPDATE/INSERT.
 -}
-upsertServerConfig :: DBEnv -> Text -> Text -> Text -> Bool -> Maybe Text -> IO ()
-upsertServerConfig db name typ value enabled product_ = do
+upsertServerConfig_io :: DBEnv -> Text -> Text -> Text -> Bool -> Maybe Text -> IO ()
+upsertServerConfig_io db name typ value enabled product_ = do
     let enabledInt = if enabled then (1 :: Int32) else 0
     now <- getCurrentTime
     withConn db $ \conn -> do
@@ -115,11 +135,17 @@ upsertServerConfig db name typ value enabled product_ = do
                 (typ, name, value, now, enabledInt, product_)
         pure ()
 
+upsertServerConfig :: (MonadFlow m) => Text -> Text -> Text -> Bool -> Maybe Text -> m ()
+upsertServerConfig name typ value enabled product_ = withDb $ \db -> upsertServerConfig_io db name typ value enabled product_
+
 -- | Delete a server_config row by ID.
-deleteServerConfig :: DBEnv -> Int32 -> IO ()
-deleteServerConfig db configId =
+deleteServerConfig_io :: DBEnv -> Int32 -> IO ()
+deleteServerConfig_io db configId =
     runDB db $
         runDelete $
             delete
                 (serverConfigs serverConfigDb)
                 (\sc -> scId sc ==. val_ configId)
+
+deleteServerConfig :: (MonadFlow m) => Int32 -> m ()
+deleteServerConfig configId = withDb $ \db -> deleteServerConfig_io db configId

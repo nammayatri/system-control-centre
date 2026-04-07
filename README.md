@@ -244,32 +244,18 @@ The first run on a fresh DB needs schema bootstrap. Either:
 
 Final image ~280 MB.
 
-### Production deployment (Kubernetes)
+### Production deployment
 
-The dhall config file lives outside the image and gets mounted at runtime via a k8s `Secret` (encrypted at rest, audit-logged on read). Same image runs in UAT/staging/PROD — only the mounted Secret and the env vars change.
+The dhall config is passed in via a single base64-encoded env var, `DHALL_CONFIGS`. The container entrypoint (`scripts/scc-entrypoint.sh`) decodes it on startup, writes it to `/tmp/scc/system-control.dhall`, and execs the binary with `SC_CONFIG_PATH` set to that path. Same image runs everywhere — only the env var contents change per environment.
 
-**Step 1**: Create a Secret with the production dhall content. The dhall file can have inline values or reference other env vars via `env:VARNAME as Text`.
+**Step 1**: Encode your dhall once at deploy time.
 
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: scc-dhall
-type: Opaque
-stringData:
-  system-control.dhall: |
-    let LogLevel = < DEBUG | INFO | WARN | ERROR >
-    in  { loggerCfg =
-            { level = LogLevel.INFO
-            , logToFile = True
-            , logToConsole = True
-            , logFilePath = "/var/log/scc.log"
-            , prettyPrinting = False
-            }
-        }
+```bash
+base64 -w0 < dhall-configs/system-control.dhall
+# → ewogIGxvZ2dlckNmZyA9CiAgICB7IGxldmVsID0gIklORk8iCiAg...
 ```
 
-**Step 2**: Create a Secret with bootstrap env values (DB URL, Slack token, etc.). These are read directly by the Haskell binary — no dhall involved for these.
+**Step 2**: Create a single k8s Secret with the encoded dhall + bootstrap values.
 
 ```yaml
 apiVersion: v1
@@ -278,12 +264,16 @@ metadata:
   name: scc-secrets
 type: Opaque
 stringData:
+  # Base64-encoded dhall body — decoded by scc-entrypoint.sh on container start
+  DHALL_CONFIGS: "ewogIGxvZ2dlckNmZyA9CiAgICB7IGxldmVsID0gIklORk8iCiAg..."
+
+  # Bootstrap env vars — read directly by the Haskell binary
   SC_DATABASE_URL: "postgres://scc:strong-password@scc-pg.svc:5432/system_control?sslmode=require"
   SLACK_BOT_TOKEN: "xoxb-real-token"
   SYNC_CLUSTER_BASE_AUTH: "Basic dXNlcjpwYXNz"
 ```
 
-**Step 3**: Wire it into the Deployment. The dhall Secret is mounted as a file; the bootstrap Secret is mapped onto env vars.
+**Step 3**: Wire it into the Deployment. Every key in the Secret becomes an env var via `envFrom`.
 
 ```yaml
 apiVersion: apps/v1
@@ -291,7 +281,7 @@ kind: Deployment
 metadata:
   name: scc-backend
 spec:
-  replicas: 1                        # singleton: the runner takes a per-tracker DB lock
+  replicas: 1                        # singleton: runner takes per-tracker DB locks
   selector: { matchLabels: { app: scc-backend } }
   template:
     metadata: { labels: { app: scc-backend } }
@@ -302,22 +292,14 @@ spec:
           ports: [{ containerPort: 8012 }]
 
           env:
-            - { name: APP_STATE,    value: SERVER }
-            - { name: PORT,         value: "8012" }
-            - { name: SC_ENV,       value: production }
-            - { name: SC_CONFIG_PATH, value: /etc/scc/system-control.dhall }
-            - { name: DASHBOARD_URL,  value: https://scc.example.com }
+            - { name: APP_STATE,     value: SERVER }
+            - { name: PORT,          value: "8012" }
+            - { name: SC_ENV,        value: production }
+            - { name: DASHBOARD_URL, value: https://scc.example.com }
 
-          # Real secrets — every key in scc-secrets becomes an env var
+          # Single Secret holds DHALL_CONFIGS + all bootstrap env vars
           envFrom:
             - secretRef: { name: scc-secrets }
-
-          # Mount the production dhall file at the path SC_CONFIG_PATH points to
-          volumeMounts:
-            - name: scc-dhall
-              mountPath: /etc/scc/system-control.dhall
-              subPath: system-control.dhall
-              readOnly: true
 
           readinessProbe:
             tcpSocket: { port: 8012 }
@@ -325,27 +307,33 @@ spec:
           livenessProbe:
             tcpSocket: { port: 8012 }
             initialDelaySeconds: 30
-
-      volumes:
-        - name: scc-dhall
-          secret:
-            secretName: scc-dhall
-            items:
-              - key: system-control.dhall
-                path: system-control.dhall
 ```
+
+That's the entire production deploy. No volume mounts, no `subPath`, no separate ConfigMap.
+
+**How it works at startup**:
+
+```
+scc-entrypoint.sh:
+  if DHALL_CONFIGS is set:
+    echo "$DHALL_CONFIGS" | base64 -d > /tmp/scc/system-control.dhall
+    export SC_CONFIG_PATH=/tmp/scc/system-control.dhall
+  exec namma-ap
+```
+
+If `DHALL_CONFIGS` is unset, the entrypoint is a no-op and the binary uses its built-in default path — perfect for local dev / testing.
 
 **Why this pattern**:
 
-- **One image, many environments** — the same `scc-backend:1.0.0` image is what runs in UAT, staging, and prod. Only the mounted Secret changes.
-- **No secrets in the image** — `dhall-configs/` is `.dockerignore`d, so a developer's local `secrets.dhall` can never accidentally leak into a published image.
-- **Native k8s rotation** — `kubectl rollout restart deployment/scc-backend` after editing the Secret rotates secrets without rebuilding anything.
-- **Audit trail** — `kubectl describe secret scc-dhall` shows when the Secret was last updated and by whom (with audit logging enabled).
-- **Matches NammaYatri** — same `<APPNAME>_CONFIG_PATH` env-var-driven pattern used across NY's 50+ services.
+- **One image, many environments** — `scc-backend:1.0.0` runs in UAT/staging/PROD unchanged. Only the Secret changes per env.
+- **One Secret, one source of truth** — dhall body and bootstrap env vars live in the same place. Easier to audit, rotate, and reason about.
+- **Works on every platform** — k8s, ECS, Cloud Run, Nomad, plain `docker run` — anything that supports env vars works. No file mounts required.
+- **No secrets in the image** — `dhall-configs/` is `.dockerignore`d. A developer's local file can never leak.
+- **Native k8s rotation** — edit the Secret, then `kubectl rollout restart deployment/scc-backend`.
 
-### Local Docker run (without k8s)
+### Local Docker run
 
-For a quick smoke test of the production image on your laptop, mount a dev dhall file from disk:
+For a quick smoke test on your laptop, either mount a dev dhall file:
 
 ```bash
 docker run --platform=linux/amd64 -p 8012:8012 \
@@ -353,6 +341,16 @@ docker run --platform=linux/amd64 -p 8012:8012 \
   -e SC_CONFIG_PATH='/etc/scc/system-control.dhall' \
   -e SLACK_BOT_TOKEN='xoxb-...' \
   -v "$PWD/backend/dhall-configs/system-control.dhall:/etc/scc/system-control.dhall:ro" \
+  scc-backend:latest
+```
+
+…or pass it base64-encoded (same path as production):
+
+```bash
+docker run --platform=linux/amd64 -p 8012:8012 \
+  -e SC_DATABASE_URL='postgres://postgres:postgres@host.docker.internal:5434/system_control' \
+  -e DHALL_CONFIGS="$(base64 -w0 < backend/dhall-configs/system-control.dhall)" \
+  -e SLACK_BOT_TOKEN='xoxb-...' \
   scc-backend:latest
 ```
 

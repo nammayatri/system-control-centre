@@ -247,7 +247,7 @@ notifyComplete = do
     updateRT $ \r -> r{status = COMPLETED}
 
     -- Notify Slack
-    liftIO $ notifyReleaseCompleted db rt
+    notifyReleaseCompleted rt
 
 -- ============================================================================
 -- K8s State Helpers

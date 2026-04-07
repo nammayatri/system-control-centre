@@ -28,21 +28,23 @@ module Products.Autopilot.DecisionEngine (
 where
 
 import Control.Exception (SomeException, try)
+import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
-import Core.Environment (DBEnv)
+import Core.Environment (MonadFlow)
+import Core.Http.Client (HttpReq (..), HttpResponse (..), defaultReq, httpRaw)
 import Core.Logging (logDebugG, logErrorG, logWarningG)
+import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value (..))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString.Lazy as LBS
 import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Products.Autopilot.Types.Release (Decision (..), ReleaseTracker (..))
 import Shared.Config.Runtime (getConfigBoolForProduct)
-import System.Exit (ExitCode (..))
-import System.Process (readProcessWithExitCode)
 import Prelude
 
 -- ============================================================================
@@ -84,9 +86,9 @@ Returns PromOK if:
 Returns PromAbort if any metric exceeds abort_threshold.
 Returns PromWarn if any metric exceeds warn_threshold (but not abort).
 -}
-checkPromQueries :: DBEnv -> Config -> ReleaseTracker -> Maybe Text -> IO PromCheckResult
-checkPromQueries db cfg tracker mDecisionConfig = do
-    enabled <- getConfigBoolForProduct db "prom_checks_enabled" (Just (appGroup tracker)) False
+checkPromQueries :: (MonadFlow m) => Config -> ReleaseTracker -> Maybe Text -> m PromCheckResult
+checkPromQueries cfg tracker mDecisionConfig = do
+    enabled <- getConfigBoolForProduct "prom_checks_enabled" (Just (appGroup tracker)) False
     if not enabled
         then pure PromOK
         else case mDecisionConfig of
@@ -95,7 +97,7 @@ checkPromQueries db cfg tracker mDecisionConfig = do
                 let promUrl = prometheusUrl cfg
                 if null promUrl
                     then pure PromOK -- No Prometheus URL configured
-                    else executePromChecks promUrl configJson tracker
+                    else liftIO $ executePromChecks promUrl configJson tracker
 
 {- | Internal: Execute Prometheus checks against all configs in the decision_config JSON.
 
@@ -251,22 +253,18 @@ Returns Nothing on any failure (fail open).
 -}
 queryPrometheus :: String -> Text -> IO (Maybe Double)
 queryPrometheus promUrl query = do
-    let url = promUrl <> "/api/v1/query?query=" <> T.unpack query
-        curlArgs =
-            [ "-s"
-            , "--max-time"
-            , "10"
-            , url
-            ]
-    result <- try (readProcessWithExitCode "curl" curlArgs "") :: IO (Either SomeException (ExitCode, String, String))
+    let url = T.pack promUrl <> "/api/v1/query?query=" <> query
+        req = (defaultReq url){reqTimeout = Seconds 10, reqRetries = 0, reqLogTag = "prometheus"}
+    result <- httpRaw req
     case result of
+        Right HttpResponse{respStatus = s, respBody = b}
+            | s < 400 ->
+                pure (parsePromResponse (T.unpack (TE.decodeUtf8 (LBS.toStrict b))))
+        Right HttpResponse{respStatus = s} -> do
+            logErrorG $ "[DECISION] Prometheus query failed (HTTP " <> T.pack (show s) <> ")"
+            pure Nothing
         Left e -> do
             logErrorG $ "[DECISION] Prometheus query failed: " <> T.pack (show e)
-            pure Nothing
-        Right (ExitSuccess, out, _) ->
-            pure (parsePromResponse out)
-        Right (ExitFailure code, _, err) -> do
-            logErrorG $ "[DECISION] Prometheus query failed (exit " <> T.pack (show code) <> "): " <> T.pack err
             pure Nothing
 
 {- | Parse Prometheus query response JSON.
@@ -313,16 +311,16 @@ Returns Continue if:
 
 Otherwise returns the decision from the response.
 -}
-getABDecision :: DBEnv -> Config -> ReleaseTracker -> IO DecisionResult
-getABDecision db cfg tracker = do
-    enabled <- getConfigBoolForProduct db "ab_decision_enabled" (Just (appGroup tracker)) False
+getABDecision :: (MonadFlow m) => Config -> ReleaseTracker -> m DecisionResult
+getABDecision cfg tracker = do
+    enabled <- getConfigBoolForProduct "ab_decision_enabled" (Just (appGroup tracker)) False
     if not enabled
         then pure (DecisionResult Continue Nothing "AB_ENGINE")
         else do
             let abUrl = abEngineUrl cfg
             if null abUrl
                 then pure (DecisionResult Continue Nothing "AB_ENGINE")
-                else callABEngine abUrl (releaseId tracker)
+                else liftIO $ callABEngine abUrl (releaseId tracker)
 
 {- | Internal: Call AB Engine HTTP API.
 
@@ -355,16 +353,16 @@ Returns Continue if:
 
 The isPostMonitoring flag selects the endpoint path.
 -}
-getHSDecision :: DBEnv -> Config -> ReleaseTracker -> Bool -> IO DecisionResult
-getHSDecision db cfg tracker isPostMonitoring = do
-    enabled <- getConfigBoolForProduct db "ab_hs_enabled" (Just (appGroup tracker)) False
+getHSDecision :: (MonadFlow m) => Config -> ReleaseTracker -> Bool -> m DecisionResult
+getHSDecision cfg tracker isPostMonitoring = do
+    enabled <- getConfigBoolForProduct "ab_hs_enabled" (Just (appGroup tracker)) False
     if not enabled
         then pure (DecisionResult Continue Nothing "HEALTH_SCORE")
         else do
             let hsUrl = abHsUrl cfg
             if null hsUrl
                 then pure (DecisionResult Continue Nothing "HEALTH_SCORE")
-                else callHSEngine hsUrl (releaseId tracker) isPostMonitoring
+                else liftIO $ callHSEngine hsUrl (releaseId tracker) isPostMonitoring
 
 {- | Internal: Call HS Engine HTTP API.
 
@@ -422,27 +420,23 @@ parseDecisionResponse _ source = do
     logWarningG $ "[DECISION] Could not parse decision response for " <> source
     pure (DecisionResult Continue (Just "Invalid response format") source)
 
-{- | HTTP GET returning parsed JSON Value.
-
-Uses curl with a 10-second timeout, matching the existing pattern in Sync.hs.
+{- | HTTP GET returning parsed JSON Value via the pooled client.
 Returns Left on any failure, Right Value on success.
 -}
 httpGetJson :: String -> IO (Either String Value)
 httpGetJson url = do
-    let curlArgs =
-            [ "-s"
-            , "--max-time"
-            , "10"
-            , "-H"
-            , "Accept: application/json"
-            , url
-            ]
-    result <- try (readProcessWithExitCode "curl" curlArgs "") :: IO (Either SomeException (ExitCode, String, String))
-    case result of
-        Left e -> pure (Left (show e))
-        Right (ExitSuccess, out, _) ->
-            case A.decodeStrict' (TE.encodeUtf8 (T.pack out)) :: Maybe Value of
-                Just val -> pure (Right val)
-                Nothing -> pure (Left "JSON parse error")
-        Right (ExitFailure code, _, err) ->
-            pure (Left ("curl failed (exit " <> show code <> "): " <> err))
+    let req =
+            (defaultReq (T.pack url))
+                { reqHeaders = [("Accept", "application/json")]
+                , reqTimeout = Seconds 10
+                , reqRetries = 0
+                , reqLogTag = "decision"
+                }
+    result <- httpRaw req
+    pure $ case result of
+        Right HttpResponse{respStatus = s, respBody = b} | s < 400 ->
+            case A.decodeStrict' (LBS.toStrict b) :: Maybe Value of
+                Just v -> Right v
+                Nothing -> Left "JSON parse error"
+        Right HttpResponse{respStatus = s} -> Left ("HTTP " <> show s)
+        Left e -> Left (show e)

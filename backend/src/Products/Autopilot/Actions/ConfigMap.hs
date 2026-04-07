@@ -16,14 +16,15 @@ module Products.Autopilot.Actions.ConfigMap (
 )
 where
 
-import Control.Concurrent (forkIO)
 import Control.Exception (SomeException, try)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
-import Core.Environment (DBEnv)
+import Core.Environment (DBEnv, forkFlow)
+import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Logging (logErrorG, logInfoG)
+import Core.Types.Time (Seconds (..))
 import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv, logInfo)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
@@ -60,20 +61,18 @@ import System.Process (readProcessWithExitCode)
 
 listConfigMapsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow ConfigMapListResponse
 listConfigMapsH _ap mFrom mTo = do
-    db <- getDBEnv
     now <- liftIO getCurrentTime
     let tryParse t = case parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" (T.unpack t) of
             Just v -> Just v
             Nothing -> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q%z" (T.unpack t)
         from = fromMaybe (addUTCTime (-2592000) now) (mFrom >>= tryParse)
         to = fromMaybe now (mTo >>= tryParse)
-    pairs <- liftIO $ findReleaseTrackersByCategory db "BackendConfig" from to
+    pairs <- findReleaseTrackersByCategory "BackendConfig" from to
     pure $ ConfigMapListResponse (map (toConfigMapResponse . fst) pairs)
 
 getConfigMapH :: AuthedPerson -> Text -> Flow Value
 getConfigMapH _ap cmId' = do
-    db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db cmId'
+    m <- findReleaseTracker cmId'
     case m of
         Nothing -> pure Null
         Just (rt, _) -> pure $ toJSON (toConfigMapResponse rt)
@@ -133,15 +132,15 @@ createConfigMapH _ap body = do
                           releaseContext = Nothing
                         }
                 targetState = ConfigState emptyConfigState
-            liftIO $ insertReleaseTracker db tracker (Just targetState)
-            liftIO $ insertReleaseEvent db rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
+            insertReleaseTracker tracker (Just targetState)
+            insertReleaseEvent rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
             -- Capture CONFIGMAP_BEFORE snapshot at creation time so diff is available immediately
             cfg <- getConfig
             let cmName = fromMaybe service' name'
-            p <- liftIO $ findProductByName db product'
+            p <- findProductByName product'
             let ns = maybe product' getProductNamespace p
-            liftIO $ captureConfigMapSnapshot cfg db rid ns cmName "CONFIGMAP_BEFORE"
-            liftIO $ notifyConfigMapCreated db tracker
+            captureConfigMapSnapshot cfg rid ns cmName "CONFIGMAP_BEFORE"
+            notifyConfigMapCreated tracker
             -- Handle sync to secondary cluster
             let isSync = case body of
                     Object o -> isTruthy "isSync" o
@@ -149,10 +148,13 @@ createConfigMapH _ap body = do
             when (isSync && not (null (syncClusterUrl cfg))) $ do
                 let rawUrl = syncClusterUrl cfg
                     normalised =
-                        let u = if "http" `T.isPrefixOf` T.pack rawUrl then rawUrl else "http://" <> rawUrl
-                         in if not (null u) && Prelude.last u == '/' then u else u <> "/"
+                        let u = if "http" `T.isPrefixOf` T.pack rawUrl then T.pack rawUrl else "http://" <> T.pack rawUrl
+                         in if T.null u || T.last u == '/' then u else u <> "/"
                     baseAuth = syncClusterBaseAuth cfg
-                    authArgs = if null baseAuth then [] else ["-H", "Authorization: Basic " <> baseAuth]
+                    auth =
+                        if null baseAuth
+                            then []
+                            else [("Authorization", "Basic " <> T.pack baseAuth)]
                     secondaryFile = case body of
                         Object o -> getStrM "secondary_file" o
                         _ -> Nothing
@@ -166,47 +168,39 @@ createConfigMapH _ap body = do
                              in Object o3
                         v -> v
                     postUrl = normalised <> "tracker/configmap"
-                    postCurlArgs =
-                        [ "-s"
-                        , "-X"
-                        , "POST"
-                        , postUrl
-                        , "-H"
-                        , "Content-Type: application/json"
-                        , "-d"
-                        , LBS.unpack (A.encode syncBody)
-                        , "--max-time"
-                        , "30"
-                        ]
-                            <> authArgs
-                liftIO $
-                    insertReleaseEvent
-                        db
-                        rid
-                        "BUSINESS"
-                        "CONFIGMAP_SYNC_REQUEST"
-                        (toJSON (T.pack (LBS.unpack (A.encode syncBody))))
-                liftIO $
-                    void $
-                        forkIO $ do
-                            logInfoG $ "[CONFIGMAP-SYNC] Posting to secondary: " <> T.pack postUrl
-                            syncResult <- try (readProcessWithExitCode "curl" postCurlArgs "") :: IO (Either SomeException (ExitCode, String, String))
-                            case syncResult of
-                                Right (ExitSuccess, out, _) -> do
-                                    logInfoG $ "[CONFIGMAP-SYNC] Success, response: " <> T.pack out
-                                    insertReleaseEvent db rid "BUSINESS" "CONFIGMAP_SYNC_RESPONSE" (toJSON (T.pack out))
-                                Right (ExitFailure code, _, err) -> do
-                                    logErrorG $ "[CONFIGMAP-SYNC] Failed (exit=" <> T.pack (show code) <> "): " <> T.pack err
-                                    insertReleaseEvent db rid "BUSINESS" "CONFIGMAP_SYNC_FAILED" (toJSON (T.pack err))
-                                Left e -> do
-                                    logErrorG $ "[CONFIGMAP-SYNC] Exception: " <> T.pack (show e)
-                                    insertReleaseEvent db rid "BUSINESS" "CONFIGMAP_SYNC_FAILED" (toJSON (T.pack (show e)))
+                    postReq =
+                        (defaultReq postUrl)
+                            { reqMethod = POST
+                            , reqHeaders = ("Content-Type", "application/json") : auth
+                            , reqBody = Just (A.encode syncBody)
+                            , reqTimeout = Seconds 30
+                            , reqRetries = 0
+                            , reqLogTag = "configmap-sync"
+                            }
+                insertReleaseEvent
+                    rid
+                    "BUSINESS"
+                    "CONFIGMAP_SYNC_REQUEST"
+                    (toJSON (T.pack (LBS.unpack (A.encode syncBody))))
+                void $
+                    forkFlow $ do
+                        syncResult <- liftIO $ httpRaw postReq
+                        case syncResult of
+                            Right HttpResponse{respStatus = s, respBody = b} | s < 400 -> do
+                                liftIO $ logInfoG $ "[CONFIGMAP-SYNC] success (" <> T.pack (show s) <> ")"
+                                insertReleaseEvent rid "BUSINESS" "CONFIGMAP_SYNC_RESPONSE" (toJSON (T.pack (LBS.unpack b)))
+                            Right HttpResponse{respStatus = s, respBody = b} -> do
+                                liftIO $ logErrorG $ "[CONFIGMAP-SYNC] failed (HTTP " <> T.pack (show s) <> ")"
+                                insertReleaseEvent rid "BUSINESS" "CONFIGMAP_SYNC_FAILED" (toJSON (T.pack (LBS.unpack b)))
+                            Left e -> do
+                                liftIO $ logErrorG $ "[CONFIGMAP-SYNC] exception: " <> T.pack (show e)
+                                insertReleaseEvent rid "BUSINESS" "CONFIGMAP_SYNC_FAILED" (toJSON (T.pack (show e)))
             pure $ APIResponse "SUCCESS" ("ConfigMap tracker created: " <> rid)
 
 updateConfigMapH :: AuthedPerson -> Text -> Value -> Flow APIResponse
 updateConfigMapH _ap cmId' body = do
     db <- getDBEnv
-    m <- liftIO $ findReleaseTracker db cmId'
+    m <- findReleaseTracker cmId'
     case m of
         Nothing -> pure $ APIResponse "ERROR" "ConfigMap tracker not found"
         Just (rt, mts) -> do
@@ -218,28 +212,27 @@ updateConfigMapH _ap cmId' body = do
                 then handleConfigMapRevert db rt mts cmId'
                 else do
                     let updated = applyCmUpdates rt body
-                    liftIO $ insertReleaseTracker db updated mts
+                    insertReleaseTracker updated mts
                     -- Status-specific notifications
                     case body of
                         Object obj -> do
                             case getStrM "status" obj of
-                                Just "INPROGRESS" -> liftIO $ notifyConfigMapInProgress db updated
-                                Just "COMPLETED" -> liftIO $ notifyConfigMapCompleted db updated
+                                Just "INPROGRESS" -> notifyConfigMapInProgress updated
+                                Just "COMPLETED" -> notifyConfigMapCompleted updated
                                 Just "ABORTED" -> do
-                                    liftIO $ notifyConfigMapAborted db updated
+                                    notifyConfigMapAborted updated
                                     restoreOriginalOnRevertCancel db updated
-                                Just "PAUSED" -> liftIO $ notifyConfigMapPaused db updated
-                                Just "RESUMED" -> liftIO $ notifyConfigMapResumed db updated
+                                Just "PAUSED" -> notifyConfigMapPaused updated
+                                Just "RESUMED" -> notifyConfigMapResumed updated
                                 Just "DISCARDED" -> do
-                                    liftIO $ notifyConfigMapDiscarded db updated
+                                    notifyConfigMapDiscarded updated
                                     restoreOriginalOnRevertCancel db updated
-                                Just "restart" -> liftIO $ notifyConfigMapUpdated db updated "restarted"
+                                Just "restart" -> notifyConfigMapUpdated updated "restarted"
                                 _ -> pure ()
                             when (isTruthy "is_approved" obj) $
-                                liftIO $
-                                    notifyConfigMapApproved db updated
+                                notifyConfigMapApproved updated
                             case getStrM "current_cool_off" obj of
-                                Just "0" -> liftIO $ notifyConfigMapFastForwarded db updated
+                                Just "0" -> notifyConfigMapFastForwarded updated
                                 _ -> pure ()
                         _ -> pure ()
                     pure $ APIResponse "SUCCESS" "ConfigMap tracker updated"
@@ -248,18 +241,18 @@ updateConfigMapH _ap cmId' body = do
 tracker from REVERTING back to COMPLETED.
 -}
 restoreOriginalOnRevertCancel :: DBEnv -> ReleaseTracker -> Flow ()
-restoreOriginalOnRevertCancel db rt = do
+restoreOriginalOnRevertCancel _db rt = do
     case NT.info rt of
         Just "REVERT" -> do
             -- Extract original tracker ID from description "Revert of <id>"
             let origId = T.stripPrefix "Revert of " =<< NT.description rt
             case origId of
                 Just oid -> do
-                    mOrig <- liftIO $ findReleaseTracker db oid
+                    mOrig <- findReleaseTracker oid
                     case mOrig of
                         Just (origRt, origTs) | NT.status origRt == REVERTING -> do
                             let restored = origRt{NT.status = COMPLETED}
-                            liftIO $ insertReleaseTracker db restored origTs
+                            insertReleaseTracker restored origTs
                             logInfo $ "[CONFIGMAP] Restored original tracker " <> oid <> " from REVERTING to COMPLETED"
                         _ -> pure ()
                 Nothing -> pure ()
@@ -268,7 +261,7 @@ restoreOriginalOnRevertCancel db rt = do
 -- | Handle revert by creating a new tracker with old config data
 handleConfigMapRevert :: DBEnv -> ReleaseTracker -> Maybe TargetState -> Text -> Flow APIResponse
 handleConfigMapRevert db rt mts cmId' = do
-    events <- liftIO $ listReleaseEvents db cmId'
+    events <- listReleaseEvents cmId'
     let mBeforeSnap = find (\e -> S.reCategory e == "SNAPSHOT" && S.reLabel e == "CONFIGMAP_BEFORE") events
     case mBeforeSnap of
         Nothing -> pure $ APIResponse "ERROR" "No CONFIGMAP_BEFORE snapshot found to revert to"
@@ -304,18 +297,18 @@ handleConfigMapRevert db rt mts cmId' = do
                     Nothing -> oldMeta
                 finalTracker = revertTracker{NT.metadata = Just (Object revertMeta)}
                 targetState = ConfigState emptyConfigState
-            liftIO $ insertReleaseTracker db finalTracker (Just targetState)
-            liftIO $ insertReleaseEvent db newRid "BUSINESS" "REVERT_TRACKER_CREATED" (toJSON ("Revert of " <> cmId'))
+            insertReleaseTracker finalTracker (Just targetState)
+            insertReleaseEvent newRid "BUSINESS" "REVERT_TRACKER_CREATED" (toJSON ("Revert of " <> cmId'))
             -- Capture CONFIGMAP_BEFORE snapshot for the revert tracker (current K8s state)
             cfg <- getConfig
             let cmName = NT.service finalTracker
-            p <- liftIO $ findProductByName db (NT.appGroup finalTracker)
+            p <- findProductByName (NT.appGroup finalTracker)
             let ns = maybe (NT.appGroup finalTracker) getProductNamespace p
-            liftIO $ captureConfigMapSnapshot cfg db newRid ns cmName "CONFIGMAP_BEFORE"
+            captureConfigMapSnapshot cfg newRid ns cmName "CONFIGMAP_BEFORE"
             -- Mark original as REVERTING
             let reverted = rt{NT.status = REVERTING}
-            liftIO $ insertReleaseTracker db reverted mts
-            liftIO $ notifyConfigMapReverted db reverted
+            insertReleaseTracker reverted mts
+            notifyConfigMapReverted reverted
             pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
 
 -- ============================================================================
@@ -326,11 +319,10 @@ handleConfigMapRevert db rt mts cmId' = do
 fetchConfigMapFromK8sH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow Value
 fetchConfigMapFromK8sH _ap mProduct mName = do
     cfg <- getConfig
-    db <- getDBEnv
     case mProduct of
         Nothing -> pure $ object ["configMap" .= toJSON ([] :: [Text])]
         Just productName -> do
-            p <- liftIO $ findProductByName db productName
+            p <- findProductByName productName
             case p of
                 Nothing -> pure $ object ["configMap" .= toJSON ([] :: [Text])]
                 Just pCfg -> do

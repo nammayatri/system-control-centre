@@ -25,9 +25,8 @@ module Products.Autopilot.Actions.Config (
 where
 
 import Control.Applicative ((<|>))
-import Control.Monad.IO.Class (liftIO)
 import Core.Auth.Protected (AuthedPerson)
-import Core.Utils.FlowMonad (Flow, getDBEnv, inDB)
+import Core.Utils.FlowMonad (Flow)
 import Data.Aeson (Value (..), toJSON)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -49,7 +48,7 @@ import Shared.Queries.ServerConfig (deleteServerConfig, listServerConfigsByProdu
 -- ============================================================================
 
 listProductConfigsH :: AuthedPerson -> Flow [ProductConfigResponse]
-listProductConfigsH _ap = map toProductConfigResponse <$> inDB listProducts
+listProductConfigsH _ap = map toProductConfigResponse <$> listProducts
 
 toProductConfigResponse :: S.DeploymentConfig -> ProductConfigResponse
 toProductConfigResponse p =
@@ -71,7 +70,7 @@ createProductConfigH ap req = upsertProductH ap req
 
 getProductConfigH :: AuthedPerson -> Int32 -> Flow Value
 getProductConfigH _ap pid = do
-    m <- inDB $ \db -> findProductConfigById db pid
+    m <- findProductConfigById pid
     case m of
         Nothing -> pure $ toJSON $ ErrorResponse "Product config not found" Nothing
         Just p -> pure $ toJSON (toProductConfigResponse p)
@@ -81,7 +80,7 @@ updateProductConfigH ap pathId req = upsertProductH ap (req{Products.Autopilot.T
 
 deleteProductConfigH :: AuthedPerson -> Int32 -> Flow APIResponse
 deleteProductConfigH _ap pid = do
-    inDB $ \db -> deleteProductConfig db pid
+    deleteProductConfig pid
     pure $ APIResponse "SUCCESS" "Product config deleted"
 
 -- ============================================================================
@@ -91,8 +90,8 @@ deleteProductConfigH _ap pid = do
 listReleaseConfigsH :: AuthedPerson -> Maybe Text -> Flow [ReleaseConfigResponse]
 listReleaseConfigsH _ap mProduct =
     map toReleaseConfigResponse <$> case mProduct of
-        Just p -> inDB $ \db -> listReleaseConfigByProduct db p
-        Nothing -> inDB listAllReleaseConfigs
+        Just p -> listReleaseConfigByProduct p
+        Nothing -> listAllReleaseConfigs
 
 toReleaseConfigResponse :: S.DeploymentConfig -> ReleaseConfigResponse
 toReleaseConfigResponse r =
@@ -116,7 +115,7 @@ createReleaseConfigH ap req = upsertServiceH ap req
 
 getReleaseConfigH :: AuthedPerson -> Int32 -> Flow Value
 getReleaseConfigH _ap rid = do
-    m <- inDB $ \db -> findReleaseConfigById db rid
+    m <- findReleaseConfigById rid
     case m of
         Nothing -> pure $ toJSON $ ErrorResponse "Release config not found" Nothing
         Just r -> pure $ toJSON (toReleaseConfigResponse r)
@@ -126,7 +125,7 @@ updateReleaseConfigH ap _ req = upsertServiceH ap req
 
 deleteReleaseConfigH :: AuthedPerson -> Int32 -> Flow APIResponse
 deleteReleaseConfigH _ap rid = do
-    inDB $ \db -> deleteReleaseConfig db rid
+    deleteReleaseConfig rid
     pure $ APIResponse "SUCCESS" "Release config deleted"
 
 -- ============================================================================
@@ -135,8 +134,7 @@ deleteReleaseConfigH _ap rid = do
 
 listServerConfigH :: AuthedPerson -> Maybe Text -> Flow ServerConfigResponse
 listServerConfigH _ap mProduct = do
-    db <- getDBEnv
-    rows <- liftIO $ listServerConfigsByProduct db mProduct
+    rows <- listServerConfigsByProduct mProduct
     -- Build a map of DB rows by name
     let dbMap :: Map.Map Text (Int, Text, Text, Text, Int, Maybe Text)
         dbMap = Map.fromList [(n, row) | row@(_, _, n, _, _, _) <- rows]
@@ -212,7 +210,6 @@ listServerConfigH _ap mProduct = do
 
 upsertServerConfigH :: AuthedPerson -> UpsertServerConfigReq -> Flow APIResponse
 upsertServerConfigH _ap req = do
-    db <- getDBEnv
     let name = uscName req
         value = fromMaybe "" (uscValue req)
         enabled = maybe True (\t -> t == "1" || T.toLower t == "true") (uscEnabled req)
@@ -228,10 +225,10 @@ upsertServerConfigH _ap req = do
                     Right _ -> do
                         let typ = configTypeTag (ceType entry)
                             product_ = ceProduct entry
-                        liftIO $ upsertServerConfig db name typ value enabled product_
+                        upsertServerConfig name typ value enabled product_
                         pure $ APIResponse "SUCCESS" ("server_config upserted: " <> name)
 
 deleteServerConfigH :: AuthedPerson -> Int32 -> Flow APIResponse
 deleteServerConfigH _ap configId = do
-    inDB $ \db -> deleteServerConfig db configId
+    deleteServerConfig configId
     pure $ APIResponse "SUCCESS" "Server config deleted"
