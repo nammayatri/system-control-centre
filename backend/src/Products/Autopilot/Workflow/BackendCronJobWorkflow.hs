@@ -41,6 +41,7 @@ import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers (
     getRT,
     updateRT,
+    withK8sContext,
     (|>>),
  )
 import Products.Autopilot.Workflow.Types (
@@ -77,11 +78,7 @@ logInfoS = lift . logInfo
 
 -- | Extract K8sReleaseContext from the current workflow state
 getK8sCtx :: StateFlow K8sReleaseContext
-getK8sCtx = do
-    rs <- gets id
-    case targetState rs of
-        Just (K8sState k8s) -> pure (context k8s)
-        _ -> liftIO $ throwIO $ WorkflowError "init" "Missing K8sState in targetState"
+getK8sCtx = withK8sContext
 
 -- | Check if cronjob_suspend flag is set
 getCronJobSuspend :: StateFlow Bool
@@ -241,7 +238,7 @@ notifyComplete = do
     updateRT $ \r -> r{status = COMPLETED}
 
     -- Notify Slack
-    notifyReleaseCompleted rt
+    lift $ notifyReleaseCompleted rt
 
 -- ============================================================================
 -- K8s State Helpers

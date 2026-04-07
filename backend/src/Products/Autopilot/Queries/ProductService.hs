@@ -83,6 +83,39 @@ listProductsByName pName = withDb $ \db ->
                 guard_ (isNothing_ (dcService p))
                 pure p
 
+{- | Batch lookup for the (appGroup, cluster) pairs given. Used by Runner.hs
+'isEligibleToRun' to collapse an N+1 lookup into a single SELECT.
+
+Implementation note: Postgres supports row-value @WHERE (a,b) IN ((?,?), ...)@,
+but encoding that through Beam is awkward, so we issue a single
+@WHERE app_group IN (?,?,?)@ query and filter the cluster predicate in
+Haskell. Worst case: we over-fetch product rows that share an app_group with
+a row we wanted but live in a different cluster — still 1 query rather than N.
+-}
+getProductsByNamesAndClusters ::
+    (MonadFlow m) =>
+    [(Text, Text)] ->
+    m [DeploymentConfig]
+getProductsByNamesAndClusters [] = pure []
+getProductsByNamesAndClusters pairs = withDb $ \db -> do
+    let names = map fst pairs
+        wanted = map (\(n, c) -> (n, c)) pairs
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $ do
+                    p <- all_ (deploymentConfig autopilotDb)
+                    guard_ (dcAppGroup p `in_` map val_ names)
+                    guard_ (isNothing_ (dcService p))
+                    pure p
+    -- Filter clusters in Haskell. Empty cluster string in the wanted-set
+    -- matches any cluster (mirrors findProductByNameAndCluster fallback).
+    let matches p =
+            let pName = dcAppGroup p
+                pCluster = getProductCluster p
+             in any (\(n, c) -> n == pName && (c == "" || c == pCluster)) wanted
+    pure (filter matches rows)
+
 listProducts :: (MonadFlow m) => m [DeploymentConfig]
 listProducts = withDb $ \db ->
     runDB db $
@@ -127,9 +160,13 @@ listSchedulerServicesByProduct pName = withDb $ \db ->
                 guard_ (dcServiceType s ==. val_ (Just "SCHEDULER"))
                 pure s
 
+{- | NOTE: this function previously took an unused 'Int32' rowId as its first
+argument. Dropped 2026-04-07. Callers outside this file that may need to
+be fixed: anything in src/Products/Autopilot/Actions/ or
+src/Products/Autopilot/Workflow/ that calls 'upsertProduct'.
+-}
 upsertProduct ::
     (MonadFlow m) =>
-    Int32 ->
     Text ->
     Text ->
     Text ->
@@ -140,7 +177,7 @@ upsertProduct ::
     Maybe Bool ->
     Maybe Text ->
     m ()
-upsertProduct _rowId productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval slackChannel' = withDb $ \db -> do
+upsertProduct productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval slackChannel' = withDb $ \db -> do
     withConn db $ \conn ->
         withTransaction conn $ do
             runBeamPostgres conn $
@@ -172,9 +209,13 @@ upsertProduct _rowId productName' cluster' namespace' vsName' productType' produ
                                 }
                             ]
 
+{- | NOTE: this function previously took an unused 'Int32' rowId as its first
+argument. Dropped 2026-04-07. Callers outside this file that may need to
+be fixed: anything in src/Products/Autopilot/Actions/ or
+src/Products/Autopilot/Workflow/ that calls 'upsertService'.
+-}
 upsertService ::
     (MonadFlow m) =>
-    Int32 ->
     Maybe Text ->
     Maybe Text ->
     Text ->
@@ -183,7 +224,7 @@ upsertService ::
     Maybe Text ->
     Maybe Text ->
     m ()
-upsertService _rowId rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy = withDb $ \db -> do
+upsertService rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy = withDb $ \db -> do
     withConn db $ \conn ->
         withTransaction conn $ do
             runBeamPostgres conn $

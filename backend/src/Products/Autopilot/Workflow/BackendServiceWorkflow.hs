@@ -22,7 +22,6 @@ module Products.Autopilot.Workflow.BackendServiceWorkflow (
 )
 where
 
-import Control.Concurrent (threadDelay)
 import Control.Exception (throwIO)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
@@ -30,12 +29,13 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
+import Core.Types.Time (Seconds (..), threadDelay)
 
 -- getPodsCalculationFactor reserved for future pod-count calculation
 
-import Core.Environment (DBEnv, getLoggerEnv)
+import Core.Environment (getLoggerEnv)
 import Core.Logging (LoggerEnv, logErrorIO, logInfoIO)
-import Core.Utils.FlowMonad (getConfig, getDBEnv, logError, logInfo, logWarning)
+import Core.Utils.FlowMonad (getConfig, logError, logInfo, logWarning)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -76,7 +76,7 @@ import Products.Autopilot.Notifications (
     notifyReleaseProgress,
  )
 import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, withVsLock)
-import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker, insertReleaseEvent, insertReleaseTracker)
+import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTracker, findReleaseTracker, insertReleaseEvent, insertReleaseTracker)
 import Products.Autopilot.RuntimeConfig (
     getCollectMetricsDelay,
     getHpaMinMaxFactor,
@@ -94,6 +94,7 @@ import Products.Autopilot.Types.Release (
     ReleaseTracker (appGroup, endTime, mode, releaseId, rolloutHistory, rolloutStrategy, service, status),
     RolloutHistory (..),
     RolloutStep (..),
+    releaseStatusText,
  )
 import qualified Products.Autopilot.Types.Storage.Schema as S
 import Products.Autopilot.Types.Target (
@@ -140,10 +141,6 @@ backendServiceWorkflow = do
 getCfg :: StateFlow Config
 getCfg = lift getConfig
 
--- | Get DBEnv from the Flow (ReaderT) environment
-getDB :: StateFlow DBEnv
-getDB = lift getDBEnv
-
 -- | StateFlow-level logging (lifts from Flow)
 logInfoS :: T.Text -> StateFlow ()
 logInfoS = lift . logInfo
@@ -182,10 +179,9 @@ runK8sIO action = do
 Acquires vs_locked_by before the kubectl call, releases after (success or fail).
 If the lock is already held, fails with an error (caller should retry).
 -}
-runVsRolloutWithLock :: Config -> K8sReleaseContext -> Int -> Int -> StateFlow ()
-runVsRolloutWithLock cfg ctx oldW newW = do
+runVsRolloutWithLock :: Config -> K8sReleaseContext -> Int -> Int -> Int -> StateFlow ()
+runVsRolloutWithLock cfg ctx maxRetries oldW newW = do
     rt <- getRT
-    maxRetries <- getMaxK8sRetries
     let lockOwner = "release:" <> releaseId rt
     result <-
         withVsLock (appGroup rt) lockOwner $
@@ -199,6 +195,117 @@ runVsRolloutWithLock cfg ctx oldW newW = do
             insertReleaseEvent (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (toJSON k8sErr)
             liftIO $ throwIO $ WorkflowError "k8s" k8sErr
         Right (Right _) -> pure ()
+
+-- ============================================================================
+-- Workflow-local config snapshot + safe helpers
+-- ============================================================================
+
+{- | Snapshot of all RuntimeConfig values needed by the workflow.
+Loaded ONCE per workflow phase (instead of re-reading on every loop iteration)
+so a config change mid-rollout cannot cause inconsistent decisions inside a
+single loop body. The values are intentionally simple (Int / Bool / Double).
+-}
+data WorkflowConfig = WorkflowConfig
+    { wcCollectMetricsDelay :: Int
+    , wcReleaseStartDelay :: Int
+    , wcMaxK8sRetries :: Int
+    , wcHpaMinMaxFactor :: Double
+    , wcHpaEnabled :: Bool
+    , wcScaleDownOnCompletion :: Bool
+    }
+
+-- | Build a 'WorkflowConfig' by reading every relevant runtime knob once.
+loadWorkflowConfig :: T.Text -> StateFlow WorkflowConfig
+loadWorkflowConfig product_ = do
+    cmd <- getCollectMetricsDelay
+    rsd <- getReleaseStartDelay
+    mkr <- getMaxK8sRetries
+    hmf <- getHpaMinMaxFactor
+    hpa <- isHpaEnabledForProduct product_
+    scd <- isScaleDownPodsOnCompletion
+    pure
+        WorkflowConfig
+            { wcCollectMetricsDelay = cmd
+            , wcReleaseStartDelay = rsd
+            , wcMaxK8sRetries = mkr
+            , wcHpaMinMaxFactor = hmf
+            , wcHpaEnabled = hpa
+            , wcScaleDownOnCompletion = scd
+            }
+
+{- | Loop bail-out safety: max iterations and max wall-clock duration for
+the rollout/post-monitor loops. A paused-and-forgotten release must not
+spin a worker forever.
+-}
+maxLoopIterations :: Int
+maxLoopIterations = 10000
+
+maxLoopDurationSec :: Double
+maxLoopDurationSec = 24 * 60 * 60 -- 24 hours
+
+{- | CAS-protected persistence. Replaces blind 'insertReleaseTracker' inside
+loops: only writes if the on-disk status still matches the snapshot the
+loop computed against. On mismatch we BAIL with a 'WorkflowError' so the
+runner's exception handler can clean up — the alternative (silently
+overwriting concurrent state) is the bug class we are eliminating.
+-}
+casUpdateOrBail ::
+    -- | caller tag for log messages
+    T.Text ->
+    -- | updated tracker to write
+    ReleaseTracker ->
+    -- | updated target state
+    Maybe TargetState ->
+    -- | status of the snapshot we computed against
+    ReleaseStatus ->
+    StateFlow ()
+casUpdateOrBail tag updated mts oldStatus = do
+    ok <- conditionalUpdateTracker updated mts (releaseStatusText oldStatus)
+    when (not ok) $ do
+        logWarningS $ "[" <> tag <> "] CAS failed - concurrent state change, exiting loop"
+        liftIO $ throwIO $ WorkflowError "cas" "concurrent state change"
+
+{- | Safe last/init replacement: split a list into (init, last) without
+calling partial functions. Returns 'Nothing' for the empty list.
+-}
+unsnocList :: [a] -> Maybe ([a], a)
+unsnocList [] = Nothing
+unsnocList xs = Just (Prelude.init xs, Prelude.last xs)
+
+-- | Bounds-checked list indexing. Returns 'Nothing' for out-of-range indices.
+safeIndex :: [a] -> Int -> Maybe a
+safeIndex xs i
+    | i < 0 = Nothing
+    | otherwise = case drop i xs of
+        (x : _) -> Just x
+        [] -> Nothing
+
+{- | Apply a transformation to the LAST entry of the in-memory tracker's
+rollout history. No-op if history is empty. Pure state mutation only;
+caller is responsible for persistence (typically via 'casUpdateOrBail').
+-}
+updateLastHistoryEntry :: (RolloutHistory -> RolloutHistory) -> StateFlow ()
+updateLastHistoryEntry f = do
+    rt <- getRT
+    case unsnocList (rolloutHistory rt) of
+        Nothing -> pure ()
+        Just (initH, lastH) ->
+            updateRT $ \r -> r{rolloutHistory = initH <> [f lastH]}
+
+{- | Mark the workflow's tracker as ABORTED with a reason and persist
+unconditionally (we are intentionally exiting). Used for unrecoverable
+input errors like an empty rollout strategy.
+-}
+abortWithReason :: T.Text -> StateFlow a
+abortWithReason reason = do
+    logErrorS $ "[workflow] Aborting: " <> reason
+    rt <- getRT
+    updateRT $ \r -> r{status = ABORTED}
+    insertReleaseEvent (releaseId rt) "BUSINESS" "WORKFLOW_ABORTED" (toJSON reason)
+    currentRT <- getRT
+    currentTS <- gets targetState
+    insertReleaseTracker currentRT currentTS
+    liftIO $ throwIO $ WorkflowError "workflow" reason
 
 -- ============================================================================
 -- Workflow Step Implementations
@@ -270,6 +377,8 @@ prepareK8sResources = do
     cfg <- getCfg
     ctx <- getK8sCtx
     isNew <- isNewServiceRelease
+    -- Snapshot config once for this phase.
+    wfCfg <- loadWorkflowConfig (appGroup rt)
     logInfoS $ "PREPARING K8s resources for " <> appGroup rt <> if isNew then " (NEW SERVICE)" else ""
 
     -- BEFORE snapshots are captured at release creation time (createReleaseH)
@@ -320,13 +429,13 @@ prepareK8sResources = do
 
     -- 5. Clone HPA if exists for old version
     when (not isNew) $ do
-        hpaEnabled <- isHpaEnabledForProduct (appGroup rt)
+        let hpaEnabled = wcHpaEnabled wfCfg
         when hpaEnabled $ do
             let oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
             hpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
             when hpaFound $ do
                 logInfoS $ "  Cloning HPA from " <> oldHpaName
-                hpaMinMaxFactor <- getHpaMinMaxFactor
+                let hpaMinMaxFactor = wcHpaMinMaxFactor wfCfg
                 -- Get current replicas from old deployment to calculate HPA min/max
                 oldReplicaResult <- liftIO $ getDeploymentReplicaStatus cfg (namespace ctx) (serviceName ctx <> "-" <> oldVersion ctx)
                 let (_, _, desiredReplicas) = case oldReplicaResult of
@@ -364,72 +473,84 @@ progressiveRollout = do
     cfg <- getCfg
     ctx <- getK8sCtx
     isNew <- isNewServiceRelease
+    -- Snapshot RuntimeConfig ONCE for the entire rollout phase. Re-reading
+    -- inside the loop would let a config change mid-rollout produce
+    -- inconsistent decisions across iterations.
+    wfCfg <- loadWorkflowConfig (appGroup rt)
     logInfoS $ "Starting progressive rollout for " <> appGroup rt
 
     updateK8sStatus BSFlipVirtualService
     updateK8sField (\k8s -> k8s{virtualServiceApplied = True})
 
     updateK8sStatus BSProgressiveRollout
-    db <- getDB
 
     -- Production: sleep(getReleaseStartDelay(conn)) before starting
-    releaseStartDelay <- getReleaseStartDelay
+    let releaseStartDelay = wcReleaseStartDelay wfCfg
     when (releaseStartDelay > 0) $ do
         logInfoS $ "  Release start delay: " <> T.pack (show releaseStartDelay) <> " seconds"
-        liftIO $ threadDelay (releaseStartDelay * 1000000)
+        threadDelay (Seconds releaseStartDelay)
 
     if isNew
         then do
             -- New service: route 100% traffic to new version directly (no old version)
             logInfoS "  New service: routing 100% traffic to new version"
-            runVsRolloutWithLock cfg ctx 0 100
+            runVsRolloutWithLock cfg ctx (wcMaxK8sRetries wfCfg) 0 100
             updateK8sField (\k8s -> k8s{trafficPercentage = 100})
             -- Record rollout history for the 100% step
             now <- liftIO getCurrentTime
             let histEntry = mkRolloutHistory 100 0 100 now (Just now)
             updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [histEntry]}
             currentRT <- getRT
-            insertReleaseTracker currentRT (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = 100})))
-            notifyReleaseProgress currentRT 100
+            -- CAS: only persist if status hasn't changed under us.
+            casUpdateOrBail
+                "progressiveRollout/new"
+                currentRT
+                (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = 100})))
+                (status rt)
+            lift $ notifyReleaseProgress currentRT 100
         else do
             -- Use the tracker's rollout strategy (e.g. 5%/25%/50%/75%/100% with cooloffs)
-            -- If rollout strategy is empty, fallback to a single 100% step
-            let strategy = case rolloutStrategy rt of
-                    [] -> [RolloutStep 100 0 1]
-                    ss -> ss
-                totalSteps = length strategy
-                existingHistory = rolloutHistory rt
-                alreadyStarted = not (null existingHistory)
+            case rolloutStrategy rt of
+                [] -> abortWithReason "empty rolloutStrategy"
+                strategy -> do
+                    let totalSteps = length strategy
+                        existingHistory = rolloutHistory rt
+                        alreadyStarted = not (null existingHistory)
 
-            -- Resume from existing history if workflow was restarted (e.g., after VS lock failure)
-            if alreadyStarted
-                then do
-                    let currentIndex = length existingHistory
-                    logInfoS $ "  Resuming rollout from step " <> T.pack (show currentIndex) <> "/" <> T.pack (show totalSteps)
-                    now <- liftIO getCurrentTime
-                    rolloutLoop cfg ctx db strategy currentIndex totalSteps now
-                else do
-                    -- Apply first step immediately (production line 359: getInitialCoolOffAndRoutingPercentage)
-                    let firstStep = head strategy
-                        firstNewW = rolloutPercent firstStep
-                        firstOldW = max 0 (100 - firstNewW)
-                    logInfoS $ "  Initial rollout step: new=" <> T.pack (show firstNewW) <> "%, cooloff=" <> T.pack (show (cooloffMinutes firstStep)) <> "min"
-                    runVsRolloutWithLock cfg ctx firstOldW firstNewW
-                    updateK8sField (\k8s -> k8s{trafficPercentage = firstNewW})
+                    -- Resume from existing history if workflow was restarted (e.g., after VS lock failure)
+                    if alreadyStarted
+                        then do
+                            let currentIndex = length existingHistory
+                            logInfoS $ "  Resuming rollout from step " <> T.pack (show currentIndex) <> "/" <> T.pack (show totalSteps)
+                            loopStart <- liftIO getCurrentTime
+                            rolloutLoop wfCfg cfg ctx currentIndex totalSteps loopStart 0 loopStart
+                        else do
+                            -- Apply first step immediately (production line 359: getInitialCoolOffAndRoutingPercentage)
+                            -- Safe destructuring — strategy is non-empty by the case match above.
+                            let (firstStep : _) = strategy
+                                firstNewW = rolloutPercent firstStep
+                                firstOldW = max 0 (100 - firstNewW)
+                            logInfoS $ "  Initial rollout step: new=" <> T.pack (show firstNewW) <> "%, cooloff=" <> T.pack (show (cooloffMinutes firstStep)) <> "min"
+                            runVsRolloutWithLock cfg ctx (wcMaxK8sRetries wfCfg) firstOldW firstNewW
+                            updateK8sField (\k8s -> k8s{trafficPercentage = firstNewW})
 
-                    -- Record rollout history for first step
-                    stepStartTime <- liftIO getCurrentTime
-                    let firstHist = mkRolloutHistory firstNewW (cooloffMinutes firstStep) (podPercent firstStep) stepStartTime Nothing
-                    updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [firstHist]}
-                    currentRT <- getRT
-                    insertReleaseTracker currentRT (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = firstNewW})))
-                    notifyReleaseProgress currentRT firstNewW
-                    -- Production parity: BUSINESS / TRAFFIC_UPDATED with previous_rollout=0 for first step
-                    logTrafficUpdated currentRT 0
+                            -- Record rollout history for first step
+                            stepStartTime <- liftIO getCurrentTime
+                            let firstHist = mkRolloutHistory firstNewW (cooloffMinutes firstStep) (podPercent firstStep) stepStartTime Nothing
+                            updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [firstHist]}
+                            currentRT <- getRT
+                            casUpdateOrBail
+                                "progressiveRollout/first"
+                                currentRT
+                                (Just (K8sState (emptyK8sState{context = ctx, trafficPercentage = firstNewW})))
+                                (status rt)
+                            lift $ notifyReleaseProgress currentRT firstNewW
+                            -- Production parity: BUSINESS / TRAFFIC_UPDATED with previous_rollout=0 for first step
+                            logTrafficUpdated currentRT 0
 
-                    -- Production while-loop: iterate through remaining steps with re-entrant checks
-                    -- index starts at 1 (0-based), first step already applied
-                    rolloutLoop cfg ctx db strategy 1 totalSteps stepStartTime
+                            -- Production while-loop: iterate through remaining steps with re-entrant checks
+                            -- index starts at 1 (0-based), first step already applied
+                            rolloutLoop wfCfg cfg ctx 1 totalSteps stepStartTime 0 stepStartTime
 
     logInfoS "Progressive rollout complete"
 
@@ -442,8 +563,37 @@ Each iteration:
 4. If all steps done: mark as complete
 5. Otherwise: sleep collectMetricsDelay and loop
 -}
-rolloutLoop :: Config -> K8sReleaseContext -> DBEnv -> [RolloutStep] -> Int -> Int -> UTCTime -> StateFlow ()
-rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
+rolloutLoop ::
+    WorkflowConfig ->
+    Config ->
+    K8sReleaseContext ->
+    Int ->
+    Int ->
+    UTCTime ->
+    -- | iteration counter (bail-out safety)
+    Int ->
+    -- | loop wall-clock start (bail-out safety)
+    UTCTime ->
+    StateFlow ()
+rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopStart = do
+    -- Bail-out safety: a paused-and-forgotten release must not spin a worker forever.
+    nowGuard <- liftIO getCurrentTime
+    let elapsedTotal = realToFrac (diffUTCTime nowGuard loopStart) :: Double
+    when (iterCount > maxLoopIterations || elapsedTotal > maxLoopDurationSec) $ do
+        logErrorS $
+            "  [rolloutLoop] Bail-out: iter="
+                <> T.pack (show iterCount)
+                <> " elapsed="
+                <> T.pack (show elapsedTotal)
+                <> "s, aborting stuck rollout"
+        rtStuck <- getRT
+        updateRT $ \r -> r{status = ABORTED}
+        currentRT <- getRT
+        currentTS <- gets targetState
+        -- Best-effort CAS — if it loses, exception still flies.
+        _ <- conditionalUpdateTracker currentRT currentTS (releaseStatusText (status rtStuck))
+        liftIO $ throwIO $ WorkflowError "rollout" "Stuck rollout: max loop bail-out"
+
     -- Production line 460: tracker = get_release_from_id(conn, tracker.id)[1]
     rt <- getRT
     freshResult <- findReleaseTracker (releaseId rt)
@@ -461,9 +611,14 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
             -- Re-read strategy from DB on every iteration so mid-flight updates take effect
             let strategy = rolloutStrategy freshRT
                 freshTotalSteps = length strategy
+                freshStatus = status freshRT
+                recurse newIdx newStepStart =
+                    rolloutLoop wfCfg cfg ctx newIdx freshTotalSteps newStepStart (iterCount + 1) loopStart
+                recurseSame =
+                    rolloutLoop wfCfg cfg ctx currentIndex freshTotalSteps stepStartTime (iterCount + 1) loopStart
 
             -- Production line 462: isTrackerInTerminalState!
-            case status freshRT of
+            case freshStatus of
                 ABORTING -> do
                     logErrorS $ "  [rolloutLoop] Release " <> releaseId freshRT <> " is aborting, exiting workflow. Runner will handle cleanup."
                     liftIO $ throwIO $ WorkflowError "rollout" "Release aborted by user"
@@ -479,9 +634,8 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                 PAUSED -> do
                     -- Production line 195: if isReleasePaused(tracker) return (routePercent, coolOff, podsCount)
                     logInfoS "  [rolloutLoop] Tracker is PAUSED, waiting..."
-                    collectDelay <- getCollectMetricsDelay
-                    liftIO $ threadDelay (collectDelay * 1000000)
-                    rolloutLoop cfg ctx db strategy currentIndex freshTotalSteps stepStartTime
+                    threadDelay (Seconds (wcCollectMetricsDelay wfCfg))
+                    recurseSame
                 INPROGRESS -> do
                     -- Check AUTO vs MANUAL mode behavior
                     let currentMode = mode freshRT
@@ -495,21 +649,22 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                             logInfoS "  [rolloutLoop] All rollout steps completed"
                             -- Update final rollout history entry with completion time
                             now <- liftIO getCurrentTime
-                            let curHistory = rolloutHistory freshRT
-                            when (not (null curHistory)) $ do
-                                let lastH = last curHistory
-                                    updatedLast = lastH{historyCompletedAt = Just now, historyDecision = Just Continue}
-                                    updatedHistory = init curHistory <> [updatedLast]
-                                updateRT $ \r -> r{rolloutHistory = updatedHistory}
-                                currentRT <- getRT
-                                insertReleaseTracker currentRT freshMts
-                            pure ()
+                            case unsnocList (rolloutHistory freshRT) of
+                                Nothing -> pure ()
+                                Just _ -> do
+                                    updateLastHistoryEntry $ \lastH ->
+                                        lastH{historyCompletedAt = Just now, historyDecision = Just Continue}
+                                    currentRT <- getRT
+                                    casUpdateOrBail "rolloutLoop/finalHist" currentRT freshMts freshStatus
                         else do
                             -- Check if cooloff has elapsed for current step
                             -- Reads from rollout strategy (fast-forward sets strategy cooloff to 0)
                             now <- liftIO getCurrentTime
-                            let currentStep = (rolloutStrategy freshRT) !! (currentIndex - 1)
-                                cooloffMins = cooloffMinutes currentStep
+                            -- Bounds-checked indexing: production strategy may have shrunk under us.
+                            currentStep <- case safeIndex strategy (currentIndex - 1) of
+                                Just s -> pure s
+                                Nothing -> abortWithReason "rolloutStrategy index out of range (current step)"
+                            let cooloffMins = cooloffMinutes currentStep
                                 elapsed = diffUTCTime now stepStartTime
                                 cooloffSecs = fromIntegral cooloffMins * 60 :: Double
                                 cooloffExceeded = realToFrac elapsed >= cooloffSecs
@@ -518,9 +673,8 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                 then do
                                     -- Cooloff not exceeded, sleep and re-check
                                     -- Production line 518: sleep(getCollectMetricsDelay(conn))
-                                    collectDelay <- getCollectMetricsDelay
-                                    liftIO $ threadDelay (collectDelay * 1000000)
-                                    rolloutLoop cfg ctx db strategy currentIndex freshTotalSteps stepStartTime
+                                    threadDelay (Seconds (wcCollectMetricsDelay wfCfg))
+                                    recurseSame
                                 else do
                                     -- Cooloff exceeded - decide whether to advance
                                     shouldAdvance <- case currentMode of
@@ -544,16 +698,16 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                                     logErrorS $ "[DECISION] Prometheus ABORT: " <> reason
                                                     -- Production parity (service.jl:203): NOTIFICATION / STATUS_UPDATED
                                                     logStatusUpdated freshRT ("ABORTING the release because prom query checks failing: " <> reason)
-                                                    notifyGenericThreadMessage freshRT ("Prometheus check ABORT: " <> reason)
+                                                    lift $ notifyGenericThreadMessage freshRT ("Prometheus check ABORT: " <> reason)
                                                     updateRT $ \r -> r{status = ABORTING}
                                                     currentRT' <- getRT
                                                     currentTS' <- gets targetState
-                                                    insertReleaseTracker currentRT' currentTS'
+                                                    casUpdateOrBail "rolloutLoop/promAbort" currentRT' currentTS' freshStatus
                                                     liftIO $ throwIO $ WorkflowError "decision" ("Prometheus ABORT: " <> reason)
                                                 PromWarn reason -> do
                                                     logWarningS $ "[DECISION] Prometheus WARN: " <> reason
                                                     -- Production parity (service.jl:206-208): Slack only, no DB event
-                                                    notifyGenericThreadMessage freshRT ("Prometheus warning: " <> reason)
+                                                    lift $ notifyGenericThreadMessage freshRT ("Prometheus warning: " <> reason)
                                                 -- Continue despite warning
                                                 PromOK -> pure ()
 
@@ -577,21 +731,19 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                             -- the last rollout history entry BEFORE emitting DECISION_RESULT,
                                             -- so the embedded rollout_history in the event shows the decision.
                                             -- Do this for Continue, Wait AND Abort paths.
-                                            let curHistoryDR = rolloutHistory freshRT
-                                            when (not (null curHistoryDR)) $ do
-                                                let lastHDR = last curHistoryDR
-                                                    updatedLastDR =
+                                            case unsnocList (rolloutHistory freshRT) of
+                                                Nothing -> pure ()
+                                                Just _ -> do
+                                                    updateLastHistoryEntry $ \lastHDR ->
                                                         lastHDR
                                                             { historyDecision = Just combinedDecision
                                                             , historyDecisionReason = Just combinedResultText
                                                             , historyDecisionHs = Just (drDecision hsDecision)
                                                             , historyDecisionHsReason = drReason hsDecision
                                                             }
-                                                    updatedHistoryDR = init curHistoryDR <> [updatedLastDR]
-                                                updateRT $ \r -> r{rolloutHistory = updatedHistoryDR}
-                                                currentRTDR <- getRT
-                                                currentTSDR <- gets targetState
-                                                insertReleaseTracker currentRTDR currentTSDR
+                                                    currentRTDR <- getRT
+                                                    currentTSDR <- gets targetState
+                                                    casUpdateOrBail "rolloutLoop/decisionHist" currentRTDR currentTSDR freshStatus
 
                                             -- Read back so the event payload sees the updated history
                                             rtForEvent <- getRT
@@ -606,7 +758,7 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                                     updateRT $ \r -> r{status = ABORTING}
                                                     currentRT' <- getRT
                                                     currentTS' <- gets targetState
-                                                    insertReleaseTracker currentRT' currentTS'
+                                                    casUpdateOrBail "rolloutLoop/decisionAbort" currentRT' currentTS' freshStatus
                                                     -- Production parity (service.jl:222): second STATUS_UPDATED for rollback
                                                     logStatusUpdated currentRT' ("Rolling back the traffic to version " <> oldVersion ctx)
                                                     liftIO $ throwIO $ WorkflowError "decision" "Decision engine: ABORT"
@@ -616,27 +768,25 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                             -- Complete current step in rollout history
                                             -- Production line 481: updateTrackerRolloutHistory
                                             -- Decision was Continue (otherwise we wouldn't advance)
-                                            let curHistory = rolloutHistory freshRT
-                                            when (not (null curHistory)) $ do
-                                                let lastH = last curHistory
-                                                    updatedLast =
-                                                        lastH
-                                                            { historyCompletedAt = Just now
-                                                            , historyDecision = Just Continue
-                                                            }
-                                                    updatedHistory = init curHistory <> [updatedLast]
-                                                updateRT $ \r -> r{rolloutHistory = updatedHistory}
+                                            updateLastHistoryEntry $ \lastH ->
+                                                lastH
+                                                    { historyCompletedAt = Just now
+                                                    , historyDecision = Just Continue
+                                                    }
 
                                             -- Apply next step
                                             -- Production line 129: index = index + 1
-                                            let nextStep = strategy !! currentIndex
-                                                nextNewW = rolloutPercent nextStep
+                                            -- Bounds-checked: strategy may have shrunk under us.
+                                            nextStep <- case safeIndex strategy currentIndex of
+                                                Just s -> pure s
+                                                Nothing -> abortWithReason "rolloutStrategy index out of range (next step)"
+                                            let nextNewW = rolloutPercent nextStep
                                                 nextOldW = max 0 (100 - nextNewW)
                                                 -- Capture previous rollout % before we append the new history entry
                                                 previousRolloutW =
-                                                    case rolloutHistory freshRT of
-                                                        [] -> 0
-                                                        xs -> historyRolloutPercent (last xs)
+                                                    case unsnocList (rolloutHistory freshRT) of
+                                                        Nothing -> 0
+                                                        Just (_, lastEntry) -> historyRolloutPercent lastEntry
                                             logInfoS $
                                                 "  Rollout step "
                                                     <> T.pack (show (currentIndex + 1))
@@ -649,7 +799,7 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                                     <> "min"
 
                                             -- Apply VS rollout with lock
-                                            runVsRolloutWithLock cfg ctx nextOldW nextNewW
+                                            runVsRolloutWithLock cfg ctx (wcMaxK8sRetries wfCfg) nextOldW nextNewW
                                             updateK8sField (\k8s -> k8s{trafficPercentage = nextNewW})
 
                                             -- Record new rollout history entry
@@ -658,13 +808,14 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                             let newHist = mkRolloutHistory nextNewW (cooloffMinutes nextStep) (podPercent nextStep) newStepStart Nothing
                                             updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [newHist]}
 
-                                            -- Persist to DB
+                                            -- Persist to DB via CAS — bail if a concurrent state
+                                            -- change overtook us between the snapshot and now.
                                             currentRT <- getRT
                                             currentTS <- gets targetState
-                                            insertReleaseTracker currentRT currentTS
+                                            casUpdateOrBail "rolloutLoop/advance" currentRT currentTS freshStatus
 
                                             -- Notify Slack
-                                            notifyReleaseProgress currentRT nextNewW
+                                            lift $ notifyReleaseProgress currentRT nextNewW
                                             -- Production parity: BUSINESS / TRAFFIC_UPDATED
                                             logTrafficUpdated currentRT previousRolloutW
 
@@ -673,12 +824,11 @@ rolloutLoop cfg ctx db _strategy currentIndex totalSteps stepStartTime = do
                                                 checkDeploymentHealth cfg ctx
 
                                             -- Continue loop with next index
-                                            rolloutLoop cfg ctx db strategy (currentIndex + 1) freshTotalSteps newStepStart
+                                            recurse (currentIndex + 1) newStepStart
                                         else do
                                             -- Decision engine said wait/abort - re-loop
-                                            collectDelay <- getCollectMetricsDelay
-                                            liftIO $ threadDelay (collectDelay * 1000000)
-                                            rolloutLoop cfg ctx db strategy currentIndex freshTotalSteps stepStartTime
+                                            threadDelay (Seconds (wcCollectMetricsDelay wfCfg))
+                                            recurseSame
                 _ -> do
                     -- Unexpected status during rollout
                     logInfoS $ "  [rolloutLoop] Unexpected status: " <> T.pack (show (status freshRT)) <> ", stopping"
@@ -722,7 +872,9 @@ monitorHealth = do
     rt <- getRT
     cfg <- getCfg
     ctx <- getK8sCtx
-    db <- getDB
+    -- Snapshot config for the monitor phase as well — postMonitorLoop polls
+    -- in a tight loop and must not re-read on every iteration.
+    wfCfg <- loadWorkflowConfig (appGroup rt)
     logInfoS $ "MONITORING health for " <> appGroup rt
 
     updateK8sStatus BSMonitoring
@@ -748,15 +900,22 @@ monitorHealth = do
             "BUSINESS"
             "POST_MONITORING_STARTED"
             (toJSON ("Post-monitoring phase" :: T.Text))
-        postMonitorLoop cfg db rt 0
+        loopStart <- liftIO getCurrentTime
+        postMonitorLoop wfCfg cfg rt 0 loopStart
 
     logInfoS "Health monitoring complete"
 
 {- | Post-monitoring loop: poll HS decision engine after 100% traffic.
 Max 30 iterations with collectMetricsDelay between polls.
 -}
-postMonitorLoop :: Config -> DBEnv -> ReleaseTracker -> Int -> StateFlow ()
-postMonitorLoop cfg db rt iteration = do
+postMonitorLoop :: WorkflowConfig -> Config -> ReleaseTracker -> Int -> UTCTime -> StateFlow ()
+postMonitorLoop wfCfg cfg rt iteration loopStart = do
+    -- Bail-out safety: cap iterations and wall-clock duration.
+    nowGuard <- liftIO getCurrentTime
+    let elapsedTotal = realToFrac (diffUTCTime nowGuard loopStart) :: Double
+    when (iteration > maxLoopIterations || elapsedTotal > maxLoopDurationSec) $ do
+        logErrorS "  [postMonitorLoop] Bail-out: max iterations / duration exceeded"
+        liftIO $ throwIO $ WorkflowError "monitoring" "Stuck post-monitor: max loop bail-out"
     if iteration > 30
         then do
             logInfoS "[WORKFLOW] Post-monitoring: max iterations reached, continuing"
@@ -792,16 +951,16 @@ postMonitorLoop cfg db rt iteration = do
                         "DECISION_ENGINE"
                         "POST_MONITORING_RESULT"
                         (object ["decision" .= ("Abort" :: T.Text), "reason" .= drReason hsResult])
-                    notifyGenericThreadMessage rt ("Post-monitoring ABORT: " <> maybe "no reason" id (drReason hsResult))
+                    lift $ notifyGenericThreadMessage rt ("Post-monitoring ABORT: " <> maybe "no reason" id (drReason hsResult))
                     updateRT $ \r -> r{status = ABORTING}
                     currentRT <- getRT
                     currentTS <- gets targetState
-                    insertReleaseTracker currentRT currentTS
+                    -- CAS with the snapshot we read at the top of the loop iteration.
+                    casUpdateOrBail "postMonitorLoop/abort" currentRT currentTS (status rt)
                     liftIO $ throwIO $ WorkflowError "monitoring" "Post-monitoring ABORT"
                 Wait -> do
-                    collectDelay <- getCollectMetricsDelay
-                    liftIO $ threadDelay (collectDelay * 1000000)
-                    postMonitorLoop cfg db rt (iteration + 1)
+                    threadDelay (Seconds (wcCollectMetricsDelay wfCfg))
+                    postMonitorLoop wfCfg cfg rt (iteration + 1) loopStart
 
 -- | Poll pods until all are Running+Ready or timeout/failure
 waitForPodsReady :: LoggerEnv -> Config -> K8sReleaseContext -> Int -> IO (Either T.Text ())
@@ -810,7 +969,7 @@ waitForPodsReady logEnv cfg ctx maxAttempts = go 0
     go attempt
         | attempt >= maxAttempts = pure (Left "Timeout waiting for pods to be ready (5 min)")
         | otherwise = do
-            threadDelay 10000000 -- 10 seconds
+            threadDelay (Seconds 10)
             (readyCount, _available, desired) <- do
                 result <- getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
                 case result of
@@ -950,6 +1109,7 @@ cleanupOldVersion = do
     cfg <- getCfg
     ctx <- getK8sCtx
     isNew <- isNewServiceRelease
+    wfCfg <- loadWorkflowConfig (appGroup rt)
     logInfoS $ "Cleaning up old version for " <> appGroup rt
 
     updateK8sStatus BSScaleDownOld
@@ -982,7 +1142,7 @@ cleanupOldVersion = do
             -- (production has this commented out but the Runner handles it)
             -- NOTE: Slack notification for pods scaled down is sent ONLY from the Runner's
             -- scaleDownOldDeployment on actual success — not here (avoids duplicates).
-            shouldScaleDownNow <- isScaleDownPodsOnCompletion
+            let shouldScaleDownNow = wcScaleDownOnCompletion wfCfg
             when shouldScaleDownNow $ do
                 logInfoS $ "  Immediate scale-down: " <> oldDepName
                 _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
@@ -1051,7 +1211,7 @@ notifyComplete = do
     logStatusUpdated currentRT completionMsg
 
     -- Notify Slack
-    notifyReleaseCompleted currentRT
+    lift $ notifyReleaseCompleted currentRT
   where
     getTrafficPct Nothing = 100 :: Int
     getTrafficPct (Just (K8sState k8s)) = trafficPercentage k8s

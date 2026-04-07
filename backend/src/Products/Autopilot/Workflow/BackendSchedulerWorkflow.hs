@@ -14,7 +14,6 @@ module Products.Autopilot.Workflow.BackendSchedulerWorkflow (
 )
 where
 
-import Control.Concurrent (threadDelay)
 import Control.Exception (throwIO)
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
@@ -22,6 +21,7 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
+import Core.Types.Time (threadDelaySec)
 import Core.Utils.FlowMonad (getConfig, logInfo, logWarning)
 import qualified Data.Text as T
 import Products.Autopilot.K8s.Deployment (
@@ -56,6 +56,7 @@ import Products.Autopilot.Workflow.Helpers (
     captureDeploymentSnapshot,
     getRT,
     updateRT,
+    withK8sContext,
     (|>>),
  )
 import Products.Autopilot.Workflow.Types (
@@ -96,11 +97,7 @@ logWarningS = lift . logWarning
 
 -- | Extract K8sReleaseContext from the current workflow state
 getK8sCtx :: StateFlow K8sReleaseContext
-getK8sCtx = do
-    rs <- gets id
-    case targetState rs of
-        Just (K8sState k8s) -> pure (context k8s)
-        _ -> liftIO $ throwIO $ WorkflowError "init" "Missing K8sState in targetState"
+getK8sCtx = withK8sContext
 
 -- | Run an IO action that returns Either K8sError, lifting into StateFlow
 runK8sIO :: IO (Either K8sError a) -> StateFlow a
@@ -189,7 +186,7 @@ prepareK8sResources = do
 
     -- Wait for verification pod to be ready
     logInfoS "  Waiting for verification pod"
-    liftIO $ threadDelay 10000000 -- 10 seconds
+    liftIO $ threadDelaySec 10
     checkDeploymentHealth cfg ctx
 
     logInfoS "K8s resources prepared for scheduler"
@@ -212,7 +209,7 @@ podCountRollout = do
 
     -- Notify Slack of old pods scaled down
     currentRT <- getRT
-    notifyPodsScaledDown currentRT (oldVersion ctx)
+    lift $ notifyPodsScaledDown currentRT (oldVersion ctx)
 
     -- Step 2: Scale new deployment up progressively through rollout steps
     let steps = rolloutStrategy rt
@@ -223,7 +220,7 @@ podCountRollout = do
             logInfoS "  No rollout strategy, scaling new deployment to desired count"
             _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
             updateK8sField (\k8s -> k8s{trafficPercentage = 100})
-            notifyReleaseProgress currentRT 100
+            lift $ notifyReleaseProgress currentRT 100
         else do
             forM_ steps $ \step -> do
                 let targetPods = max 1 (podPercent step)
@@ -238,13 +235,13 @@ podCountRollout = do
 
                 -- Notify Slack of progress
                 latestRT <- getRT
-                notifyReleaseProgress latestRT (rolloutPercent step)
+                lift $ notifyReleaseProgress latestRT (rolloutPercent step)
 
                 -- Cooloff between steps
                 when (cooloffMinutes step > 0 && rolloutPercent step < 100) $ do
                     logInfoS $
                         "  Cooloff: " <> T.pack (show (cooloffMinutes step)) <> " seconds"
-                    liftIO $ threadDelay (cooloffMinutes step * 1000000)
+                    liftIO $ threadDelaySec (cooloffMinutes step)
 
                 -- Health check between steps
                 when (rolloutPercent step < 100) $
@@ -283,7 +280,7 @@ monitorHealth = do
     logInfoS "  Stabilization period (30s)"
     let checks = 6 :: Int -- 6 * 5s = 30s
     forM_ [1 .. checks] $ \i -> do
-        liftIO $ threadDelay 5000000 -- 5 seconds
+        liftIO $ threadDelaySec 5
         (ready, _available, desired) <-
             runK8sIO $
                 getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
@@ -347,7 +344,7 @@ notifyComplete = do
     updateRT $ \r -> r{status = COMPLETED}
 
     -- Notify Slack
-    notifyReleaseCompleted rt
+    lift $ notifyReleaseCompleted rt
 
 -- ============================================================================
 -- K8s State Helpers

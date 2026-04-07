@@ -2,7 +2,7 @@
 {-# LANGUAGE RecordWildCards #-}
 
 module Core.Admin.Queries (
-    -- Person CRUD (polymorphic wrappers — preferred)
+    -- Person CRUD
     listPersons,
     createPerson,
     findPersonDetailById,
@@ -21,28 +21,13 @@ module Core.Admin.Queries (
     updateRolePermissions,
     -- Audit
     writeAuditLog,
-    -- IO versions (kept for IO callers)
-    listPersons_io,
-    createPerson_io,
-    findPersonDetailById_io,
-    updatePerson_io,
-    deactivatePerson_io,
-    assignRole_io,
-    revokeProductAccess_io,
-    addPermissionOverride_io,
-    removePermissionOverride_io,
-    listOverridesForPerson_io,
-    listRolesForProduct_io,
-    createRole_io,
-    updateRolePermissions_io,
-    writeAuditLog_io,
 )
 where
 
 import Core.Admin.Types
 import Core.Auth.Schema
 import Core.DB.Connection (runDB, withConn)
-import Core.Environment (DBEnv (..), MonadFlow, withDb)
+import Core.Environment (MonadFlow, withDb)
 import qualified Data.Aeson as A
 import Data.Text (Text)
 import Data.UUID (UUID)
@@ -78,8 +63,8 @@ toOverrideDetail ScPersonPermissionOverrideT{..} =
 
 -- ── Person CRUD ─────────────────────────────────────────────────────
 
-listPersons_io :: DBEnv -> IO [PersonDetail]
-listPersons_io db = do
+listPersons :: (MonadFlow m) => m [PersonDetail]
+listPersons = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -88,14 +73,11 @@ listPersons_io db = do
                         all_ (scPerson coreDb)
     pure $ map toPersonDetail rows
 
-listPersons :: (MonadFlow m) => m [PersonDetail]
-listPersons = withDb $ \db -> listPersons_io db
-
 {- | INSERT RETURNING — kept as raw SQL (Beam RETURNING is Postgres-specific
 and verbose for a single-value return).
 -}
-createPerson_io :: DBEnv -> Text -> Text -> Text -> Text -> Bool -> IO UUID
-createPerson_io db email firstName lastName passwordHash isSuperadmin = withConn db $ \conn -> do
+createPerson :: (MonadFlow m) => Text -> Text -> Text -> Text -> Bool -> m UUID
+createPerson email firstName lastName passwordHash isSuperadmin = withDb $ \db -> withConn db $ \conn -> do
     [Only pid] <-
         query
             conn
@@ -104,12 +86,8 @@ createPerson_io db email firstName lastName passwordHash isSuperadmin = withConn
             (email, firstName, lastName, passwordHash, isSuperadmin)
     pure pid
 
-createPerson :: (MonadFlow m) => Text -> Text -> Text -> Text -> Bool -> m UUID
-createPerson email firstName lastName passwordHash isSuperadmin =
-    withDb $ \db -> createPerson_io db email firstName lastName passwordHash isSuperadmin
-
-findPersonDetailById_io :: DBEnv -> UUID -> IO (Maybe PersonDetail)
-findPersonDetailById_io db pid = do
+findPersonDetailById :: (MonadFlow m) => UUID -> m (Maybe PersonDetail)
+findPersonDetailById pid = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -121,14 +99,11 @@ findPersonDetailById_io db pid = do
         [p] -> Just (toPersonDetail p)
         _ -> Nothing
 
-findPersonDetailById :: (MonadFlow m) => UUID -> m (Maybe PersonDetail)
-findPersonDetailById pid = withDb $ \db -> findPersonDetailById_io db pid
-
 {- | Dynamic COALESCE update — kept as raw SQL (Beam doesn't support
 COALESCE(?, column) in SET clauses cleanly).
 -}
-updatePerson_io :: DBEnv -> UUID -> Maybe Text -> Maybe Text -> Maybe Bool -> Maybe Bool -> IO ()
-updatePerson_io db pid mFirstName mLastName mIsActive mIsSuperadmin = withConn db $ \conn -> do
+updatePerson :: (MonadFlow m) => UUID -> Maybe Text -> Maybe Text -> Maybe Bool -> Maybe Bool -> m ()
+updatePerson pid mFirstName mLastName mIsActive mIsSuperadmin = withDb $ \db -> withConn db $ \conn -> do
     case (mFirstName, mLastName, mIsActive, mIsSuperadmin) of
         (Nothing, Nothing, Nothing, Nothing) -> pure ()
         _ -> do
@@ -145,16 +120,12 @@ updatePerson_io db pid mFirstName mLastName mIsActive mIsSuperadmin = withConn d
                     (mFirstName, mLastName, mIsActive, mIsSuperadmin, pid)
             pure ()
 
-updatePerson :: (MonadFlow m) => UUID -> Maybe Text -> Maybe Text -> Maybe Bool -> Maybe Bool -> m ()
-updatePerson pid mFirstName mLastName mIsActive mIsSuperadmin =
-    withDb $ \db -> updatePerson_io db pid mFirstName mLastName mIsActive mIsSuperadmin
-
 {- | Deactivate a person — kept as raw SQL because Beam's currentTimestamp_
 returns LocalTime (not UTCTime), so the UPDATE SET updated_at = now()
 is simpler in raw SQL.
 -}
-deactivatePerson_io :: DBEnv -> UUID -> IO ()
-deactivatePerson_io db pid = withConn db $ \conn -> do
+deactivatePerson :: (MonadFlow m) => UUID -> m ()
+deactivatePerson pid = withDb $ \db -> withConn db $ \conn -> do
     _ <-
         execute
             conn
@@ -162,13 +133,10 @@ deactivatePerson_io db pid = withConn db $ \conn -> do
             (Only pid)
     pure ()
 
-deactivatePerson :: (MonadFlow m) => UUID -> m ()
-deactivatePerson pid = withDb $ \db -> deactivatePerson_io db pid
-
 -- ── Role Assignment (ON CONFLICT — kept as raw SQL) ─────────────────
 
-assignRole_io :: DBEnv -> UUID -> Text -> UUID -> Maybe UUID -> IO ()
-assignRole_io db personId productSlug roleId grantedBy = withConn db $ \conn -> do
+assignRole :: (MonadFlow m) => UUID -> Text -> UUID -> Maybe UUID -> m ()
+assignRole personId productSlug roleId grantedBy = withDb $ \db -> withConn db $ \conn -> do
     _ <-
         execute
             conn
@@ -178,26 +146,19 @@ assignRole_io db personId productSlug roleId grantedBy = withConn db $ \conn -> 
             (personId, productSlug, roleId, grantedBy, roleId, grantedBy)
     pure ()
 
-assignRole :: (MonadFlow m) => UUID -> Text -> UUID -> Maybe UUID -> m ()
-assignRole personId productSlug roleId grantedBy =
-    withDb $ \db -> assignRole_io db personId productSlug roleId grantedBy
-
-revokeProductAccess_io :: DBEnv -> UUID -> Text -> IO ()
-revokeProductAccess_io db personId productSlug =
+revokeProductAccess :: (MonadFlow m) => UUID -> Text -> m ()
+revokeProductAccess personId productSlug = withDb $ \db ->
     runDB db $
         runDelete $
             delete
                 (scPersonProductAccess coreDb)
                 (\a -> sppaPersonId a ==. val_ personId &&. sppaProductSlug a ==. val_ productSlug)
 
-revokeProductAccess :: (MonadFlow m) => UUID -> Text -> m ()
-revokeProductAccess personId productSlug = withDb $ \db -> revokeProductAccess_io db personId productSlug
-
 -- ── Permission Overrides ────────────────────────────────────────────
 
 -- | INSERT ON CONFLICT RETURNING — kept as raw SQL.
-addPermissionOverride_io :: DBEnv -> UUID -> Text -> Text -> Text -> Maybe UUID -> IO UUID
-addPermissionOverride_io db personId productSlug permAction overrideType grantedBy = withConn db $ \conn -> do
+addPermissionOverride :: (MonadFlow m) => UUID -> Text -> Text -> Text -> Maybe UUID -> m UUID
+addPermissionOverride personId productSlug permAction overrideType grantedBy = withDb $ \db -> withConn db $ \conn -> do
     [Only oid] <-
         query
             conn
@@ -208,23 +169,16 @@ addPermissionOverride_io db personId productSlug permAction overrideType granted
             (personId, productSlug, permAction, overrideType, grantedBy, overrideType, grantedBy)
     pure oid
 
-addPermissionOverride :: (MonadFlow m) => UUID -> Text -> Text -> Text -> Maybe UUID -> m UUID
-addPermissionOverride personId productSlug permAction overrideType grantedBy =
-    withDb $ \db -> addPermissionOverride_io db personId productSlug permAction overrideType grantedBy
-
-removePermissionOverride_io :: DBEnv -> UUID -> IO ()
-removePermissionOverride_io db oid =
+removePermissionOverride :: (MonadFlow m) => UUID -> m ()
+removePermissionOverride oid = withDb $ \db ->
     runDB db $
         runDelete $
             delete
                 (scPersonPermissionOverride coreDb)
                 (\o -> sppoId o ==. val_ oid)
 
-removePermissionOverride :: (MonadFlow m) => UUID -> m ()
-removePermissionOverride oid = withDb $ \db -> removePermissionOverride_io db oid
-
-listOverridesForPerson_io :: DBEnv -> UUID -> IO [OverrideDetail]
-listOverridesForPerson_io db personId = do
+listOverridesForPerson :: (MonadFlow m) => UUID -> m [OverrideDetail]
+listOverridesForPerson personId = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -233,9 +187,6 @@ listOverridesForPerson_io db personId = do
                     guard_ (sppoPersonId o ==. val_ personId)
                     pure o
     pure $ map toOverrideDetail rows
-
-listOverridesForPerson :: (MonadFlow m) => UUID -> m [OverrideDetail]
-listOverridesForPerson personId = withDb $ \db -> listOverridesForPerson_io db personId
 
 -- ── Roles (PGArray queries — kept as raw SQL) ────────────────────────
 
@@ -251,8 +202,8 @@ data RoleRow = RoleRow
 instance FromRow RoleRow where
     fromRow = RoleRow <$> field <*> field <*> field <*> field <*> field
 
-listRolesForProduct_io :: DBEnv -> Text -> IO [RoleDetail]
-listRolesForProduct_io db productSlug = withConn db $ \conn -> do
+listRolesForProduct :: (MonadFlow m) => Text -> m [RoleDetail]
+listRolesForProduct productSlug = withDb $ \db -> withConn db $ \conn -> do
     roleRows <-
         query
             conn
@@ -271,11 +222,8 @@ listRolesForProduct_io db productSlug = withConn db $ \conn -> do
             )
             roleRows
 
-listRolesForProduct :: (MonadFlow m) => Text -> m [RoleDetail]
-listRolesForProduct productSlug = withDb $ \db -> listRolesForProduct_io db productSlug
-
-createRole_io :: DBEnv -> Text -> Text -> Maybe Text -> [Text] -> IO UUID
-createRole_io db productSlug name desc permActions = withConn db $ \conn -> do
+createRole :: (MonadFlow m) => Text -> Text -> Maybe Text -> [Text] -> m UUID
+createRole productSlug name desc permActions = withDb $ \db -> withConn db $ \conn -> do
     [Only roleId] <-
         query
             conn
@@ -283,12 +231,8 @@ createRole_io db productSlug name desc permActions = withConn db $ \conn -> do
             (productSlug, name, desc, PGArray permActions)
     pure roleId
 
-createRole :: (MonadFlow m) => Text -> Text -> Maybe Text -> [Text] -> m UUID
-createRole productSlug name desc permActions =
-    withDb $ \db -> createRole_io db productSlug name desc permActions
-
-updateRolePermissions_io :: DBEnv -> UUID -> Maybe Text -> [Text] -> IO ()
-updateRolePermissions_io db roleId mDesc permActions = withConn db $ \conn -> do
+updateRolePermissions :: (MonadFlow m) => UUID -> Maybe Text -> [Text] -> m ()
+updateRolePermissions roleId mDesc permActions = withDb $ \db -> withConn db $ \conn -> do
     case mDesc of
         Just d -> do
             _ <- execute conn "UPDATE sc_role SET description = ? WHERE id = ?" (d, roleId)
@@ -297,14 +241,10 @@ updateRolePermissions_io db roleId mDesc permActions = withConn db $ \conn -> do
     _ <- execute conn "UPDATE sc_role SET permissions = ? WHERE id = ?" (PGArray permActions, roleId)
     pure ()
 
-updateRolePermissions :: (MonadFlow m) => UUID -> Maybe Text -> [Text] -> m ()
-updateRolePermissions roleId mDesc permActions =
-    withDb $ \db -> updateRolePermissions_io db roleId mDesc permActions
-
 -- ── Audit Log ──────────────────────────────────────────────────────
 
-writeAuditLog_io :: DBEnv -> UUID -> Text -> Maybe Text -> Maybe Text -> Maybe A.Value -> IO ()
-writeAuditLog_io db personId action entityType entityId details =
+writeAuditLog :: (MonadFlow m) => UUID -> Text -> Maybe Text -> Maybe Text -> Maybe A.Value -> m ()
+writeAuditLog personId action entityType entityId details = withDb $ \db ->
     runDB db $
         runInsert $
             insert (scAuditLog coreDb) $
@@ -319,7 +259,3 @@ writeAuditLog_io db personId action entityType entityId details =
                         , salCreatedAt = default_
                         }
                     ]
-
-writeAuditLog :: (MonadFlow m) => UUID -> Text -> Maybe Text -> Maybe Text -> Maybe A.Value -> m ()
-writeAuditLog personId action entityType entityId details =
-    withDb $ \db -> writeAuditLog_io db personId action entityType entityId details

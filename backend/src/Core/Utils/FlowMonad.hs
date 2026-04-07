@@ -1,15 +1,13 @@
 {- | Backwards-compatible re-export for existing handlers.
 
 Existing handlers: @import Core.Utils.FlowMonad@
-New handlers:      @import Core.AppM@ + @import Core.AppError@
+New handlers:      @import Core.Environment@
 -}
 module Core.Utils.FlowMonad (
     Flow,
     runFlow,
     getConfig,
     getDBEnv,
-    inDB,
-    inConfig,
     logInfo,
     logError,
     logWarning,
@@ -17,4 +15,4 @@ module Core.Utils.FlowMonad (
 )
 where
 
-import Core.Environment (Flow, getConfig, getDBEnv, inConfig, inDB, logDebug, logError, logInfo, logWarning, runFlow)
+import Core.Environment (Flow, getConfig, getDBEnv, logDebug, logError, logInfo, logWarning, runFlow)

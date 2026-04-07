@@ -1,5 +1,6 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeApplications #-}
 
 {- | Application environment, the canonical 'Flow' monad, and the
 'MonadFlow' constraint that every product reuses.
@@ -67,8 +68,6 @@ module Core.Environment (
     -- * Convenience: lift an IO action that needs DBEnv / Config
     withDb,
     withConfig,
-    inDB,
-    inConfig,
 
     -- * Concurrency
     forkFlow,
@@ -82,13 +81,15 @@ module Core.Environment (
 where
 
 import Control.Concurrent (ThreadId, forkIO)
+import qualified Control.Exception as E
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, ReaderT, ask, asks, runReaderT)
 import Core.Config (Config)
-import Core.Logging (LogLevel (..), LoggerEnv, logOutput)
+import Core.Logging (LogLevel (..), LoggerEnv, logErrorIO, logOutput)
 import Data.Pool (Pool)
 import Data.Text (Text)
+import qualified Data.Text as T
 import Database.PostgreSQL.Simple (Connection)
 
 -- ── Environment carriers ──────────────────────────────────────────
@@ -177,15 +178,14 @@ needing to thread @AppState@ around manually.
 forkFlow :: Flow () -> Flow ThreadId
 forkFlow action = do
     st <- ask
-    liftIO $ forkIO (runFlow st action)
-
--- | Backwards-compatible alias for 'withDb'. Prefer 'withDb' in new code.
-inDB :: (MonadFlow m) => (DBEnv -> IO a) -> m a
-inDB = withDb
-
--- | Backwards-compatible alias for 'withConfig'. Prefer 'withConfig' in new code.
-inConfig :: (MonadFlow m) => (Config -> IO a) -> m a
-inConfig = withConfig
+    liftIO $ forkIO $ do
+        result <- E.try @E.SomeException (runFlow st action)
+        case result of
+            Left e ->
+                logErrorIO (loggerEnv st) $
+                    "[forkFlow] Worker thread died with exception: "
+                        <> T.pack (show e)
+            Right _ -> pure ()
 
 -- ── Logging (polymorphic in MonadFlow) ────────────────────────────
 

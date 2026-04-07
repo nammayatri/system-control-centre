@@ -87,13 +87,30 @@ import Products.Autopilot.Workflow.Helpers (captureDeploymentPreview, captureDep
 import Shared.API.Response (APIResponse (..))
 
 -- ============================================================================
+-- Shared helpers
+-- ============================================================================
+
+{- | Standard error returned when a CAS update fails because another request
+mutated the tracker between snapshot read and write.
+-}
+staleTrackerError :: APIResponse
+staleTrackerError = APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
+
+{- | Apply an update function to a value only when the optional input is 'Just'.
+Used to collapse long sequential @case req.field of Just x -> ...; Nothing -> acc@
+chains in 'applyUpdates' into a single combinator.
+-}
+applyMaybe :: Maybe a -> (a -> b -> b) -> b -> b
+applyMaybe Nothing _ acc = acc
+applyMaybe (Just x) f acc = f x acc
+
+-- ============================================================================
 -- Product/Service Handlers
 -- ============================================================================
 
 upsertProductH :: AuthedPerson -> UpsertProductReq -> Flow APIResponse
 upsertProductH _ap req = do
-    let rowId = fromMaybe 0 (req.id)
-    upsertProduct rowId req.appGroup req.cluster req.namespace req.vsName req.productType req.productAcronym req.syncCluster req.needInfraApproval req.slackChannel
+    upsertProduct req.appGroup req.cluster req.namespace req.vsName req.productType req.productAcronym req.syncCluster req.needInfraApproval req.slackChannel
     pure $ APIResponse "SUCCESS" "product_config upserted"
 
 listProductsH :: AuthedPerson -> Flow [ProductResponse]
@@ -174,8 +191,7 @@ listServicesH _ap productName' = do
 
 upsertServiceH :: AuthedPerson -> UpsertServiceReq -> Flow APIResponse
 upsertServiceH _ap req = do
-    let rowId = fromMaybe 0 (req.id)
-    upsertService rowId req.rolloutStrategyText req.decisionConfigText req.service req.appGroup req.serviceType req.serviceHost req.revertStrategyText
+    upsertService req.rolloutStrategyText req.decisionConfigText req.service req.appGroup req.serviceType req.serviceHost req.revertStrategyText
     pure $ APIResponse "SUCCESS" "release_config upserted"
 
 -- ============================================================================
@@ -453,7 +469,7 @@ triggerReleaseH _ap rid TriggerReleaseReq{..} = do
                         then do
                             insertReleaseEvent rid "BUSINESS" "TRACKER_TRIGGERED" (toJSON reason)
                             pure $ APIResponse "SUCCESS" "Release scheduled for execution"
-                        else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
+                        else pure staleTrackerError
 
 rollbackReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
 rollbackReleaseH _ap rid TriggerReleaseReq{..} = do
@@ -471,7 +487,7 @@ rollbackReleaseH _ap rid TriggerReleaseReq{..} = do
                         then do
                             insertReleaseEvent rid "BUSINESS" "ROLLBACK_REQUESTED" (toJSON reason)
                             pure $ APIResponse "SUCCESS" "Rollback marked"
-                        else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
+                        else pure staleTrackerError
 
 revertReleaseH :: AuthedPerson -> Text -> RevertReleaseReq -> Flow APIResponse
 revertReleaseH _ap rid req = do
@@ -593,7 +609,7 @@ discardReleaseH _ap rid DiscardReleaseReq{..} = do
                             logStatusUpdated updated ("Tracker marked as DISCARDED" <> maybe "" (": " <>) reason)
                             notifyReleaseDiscarded updated
                             pure $ APIResponse "SUCCESS" "Release discarded"
-                        else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
+                        else pure staleTrackerError
 
 deleteReleaseH :: AuthedPerson -> Text -> Flow APIResponse
 deleteReleaseH _ap rid = do
@@ -640,7 +656,7 @@ updateTrackerH _ap rid req = do
                                             insertReleaseEvent rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
                                             notifyReleaseUpdated updatedTracker "fields updated"
                                             pure $ APIResponse "SUCCESS" "Tracker updated"
-                                        else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
+                                        else pure staleTrackerError
                                 else
                                     if not (validateStatusTransition oldStatus newStatus)
                                         then pure $ APIResponse "ERROR" ("Invalid status transition: " <> T.pack (show oldStatus) <> " -> " <> newStatusText)
@@ -658,7 +674,7 @@ updateTrackerH _ap rid req = do
                                                         COMPLETED -> notifyReleaseCompleted updatedTracker
                                                         _ -> notifyReleaseUpdated updatedTracker ("status changed to " <> newStatusText)
                                                     pure $ APIResponse "SUCCESS" "Tracker updated"
-                                                else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
+                                                else pure staleTrackerError
                         Nothing -> do
                             -- No status change requested, but guard against concurrent status change
                             ok <- conditionalUpdateTracker updatedTracker updatedTargetState oldStatusText
@@ -667,7 +683,7 @@ updateTrackerH _ap rid req = do
                                     insertReleaseEvent rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
                                     notifyReleaseUpdated updatedTracker "status/fields updated"
                                     pure $ APIResponse "SUCCESS" "Tracker updated"
-                                else pure $ APIResponse "ERROR" "Release was modified by another request. Please refresh and try again."
+                                else pure staleTrackerError
 
 {- | Validate an incoming 'K8sUpdateTrackerReq' against two independent sets
 of rules, returning @Left reason@ on the first failure.
@@ -791,56 +807,29 @@ forbiddenFieldDuringMidFlight req
 
 applyUpdates :: ReleaseTracker -> Maybe TargetState -> K8sUpdateTrackerReq -> (ReleaseTracker, Maybe TargetState)
 applyUpdates tracker mts req =
-    let t1 = case req.status of
-            Just s -> (tracker :: ReleaseTracker){NT.status = parseReleaseStatus s}
-            Nothing -> tracker
-        t2 = case req.mode of
-            Just "MANUAL" -> t1{NT.mode = MANUAL}
-            Just "AUTO" -> t1{NT.mode = AUTO}
-            _ -> t1
-        t3 = case req.releaseManager of
-            Just rm -> t2{NT.createdBy = rm}
-            Nothing -> t2
-        t4 = case req.priority of
-            Just p -> t3{NT.priority = p}
-            Nothing -> t3
-        t5 = case req.scheduleTime of
-            Just st -> t4{NT.scheduleTime = Just st}
-            Nothing -> t4
-        t6 = case req.description of
-            Just d -> t5{NT.description = Just d}
-            Nothing -> t5
-        t7 = case req.info of
-            Just i -> t6{NT.info = Just i}
-            Nothing -> t6
-        t8 = case req.rolloutStrategy of
-            Just rs -> t7{NT.rolloutStrategy = rs}
-            Nothing -> t7
-        t9 = case req.changeLog of
-            Just cl -> t8{NT.changeLog = Just cl}
-            Nothing -> t8
-        t10 = case req.isApproved of
-            Just a -> t9{NT.isApproved = a}
-            Nothing -> t9
-        t11 = case req.isInfraApproved of
-            Just a -> t10{NT.isInfraApproved = a}
-            Nothing -> t10
-        t12 = case req.syncEnabled of
-            Just u -> t11{NT.syncEnabled = Just u}
-            Nothing -> t11
-        t13 = case req.envOverrideData of
-            Just u -> t12{NT.envOverrideData = Just u}
-            Nothing -> t12
-        t14 = case req.slackThreadTs of
-            Just u -> t13{NT.slackThreadTs = Just u}
-            Nothing -> t13
-        ts1 = case req.dockerImage of
-            Just img -> updateK8sContext mts (\ctx -> ctx{K8s.dockerImage = Just img})
-            Nothing -> mts
-        ts2 = case req.podsScaleDownDelay of
-            Just d -> updateK8sContext ts1 (\ctx -> ctx{K8s.podsScaleDownDelay = Just d})
-            Nothing -> ts1
-     in (t14, ts2)
+    let setMode m t = case m of
+            "MANUAL" -> t{NT.mode = MANUAL}
+            "AUTO" -> t{NT.mode = AUTO}
+            _ -> t
+        updatedTracker =
+            applyMaybe req.status (\s t -> (t :: ReleaseTracker){NT.status = parseReleaseStatus s}) $
+                applyMaybe req.mode setMode $
+                    applyMaybe req.releaseManager (\rm t -> t{NT.createdBy = rm}) $
+                        applyMaybe req.priority (\p t -> t{NT.priority = p}) $
+                            applyMaybe req.scheduleTime (\st t -> t{NT.scheduleTime = Just st}) $
+                                applyMaybe req.description (\d t -> t{NT.description = Just d}) $
+                                    applyMaybe req.info (\i t -> t{NT.info = Just i}) $
+                                        applyMaybe req.rolloutStrategy (\rs t -> t{NT.rolloutStrategy = rs}) $
+                                            applyMaybe req.changeLog (\cl t -> t{NT.changeLog = Just cl}) $
+                                                applyMaybe req.isApproved (\a t -> t{NT.isApproved = a}) $
+                                                    applyMaybe req.isInfraApproved (\a t -> t{NT.isInfraApproved = a}) $
+                                                        applyMaybe req.syncEnabled (\u t -> t{NT.syncEnabled = Just u}) $
+                                                            applyMaybe req.envOverrideData (\u t -> t{NT.envOverrideData = Just u}) $
+                                                                applyMaybe req.slackThreadTs (\u t -> t{NT.slackThreadTs = Just u}) tracker
+        updatedTargetState =
+            applyMaybe req.dockerImage (\img s -> updateK8sContext s (\ctx -> ctx{K8s.dockerImage = Just img})) $
+                applyMaybe req.podsScaleDownDelay (\d s -> updateK8sContext s (\ctx -> ctx{K8s.podsScaleDownDelay = Just d})) mts
+     in (updatedTracker, updatedTargetState)
 
 updateK8sContext :: Maybe TargetState -> (K8sReleaseContext -> K8sReleaseContext) -> Maybe TargetState
 updateK8sContext (Just (K8sState k8s)) f = Just $ K8sState $ k8s{context = f (context k8s)}
@@ -877,14 +866,11 @@ logsLinkH _ap rid = do
     m <- findReleaseTracker rid
     case m of
         Nothing -> throwM $ NotFound "Release not found"
-        Just (_tracker, _) ->
-            -- Return placeholder links -- production generates Grafana URLs from config
-            pure $
-                object
-                    [ "grafana_dashboard" .= ("" :: Text)
-                    , "kibana_logs" .= ("" :: Text)
-                    , "pod_logs" .= ("" :: Text)
-                    ]
+        Just _ ->
+            -- Stub: production generates Grafana/Kibana URLs from config; not yet
+            -- wired up here. Surface explicitly instead of returning empty links
+            -- so callers don't silently render broken UI.
+            throwM $ InternalError "logsLinkH not yet implemented"
 
 -- ============================================================================
 -- Diff Endpoint (GET /releases/:id/diff)
@@ -1125,17 +1111,41 @@ immediateRevertH _ap rid req@ImmediateRevertReq{isRevertSync = mIsRevertSync} = 
                                 Right _ -> do
                                     -- Step 2: Rollout restart to force pod restart with old image
                                     let restartCmd = unwords [kubectlBin cfg, "rollout", "restart", "deployment/" <> depQ, "-n", nsQ]
-                                    _ <- liftIO $ executeWithRetry cfg restartCmd
-                                    -- Step 3: Update tracker status
+                                    restartResult <- liftIO $ executeWithRetry cfg restartCmd
+                                    let mRestartErr = case restartResult of
+                                            Left (K8sError e) -> Just e
+                                            Right _ -> Nothing
+                                    -- Step 3: CAS update tracker status against snapshot
                                     let updated = (tracker :: ReleaseTracker){NT.status = REVERTED}
-                                    insertReleaseTracker updated mTargetState
-                                    insertReleaseEvent rid "BUSINESS" "IMMEDIATE_REVERT" (object ["requestedBy" .= (req :: ImmediateRevertReq).requestedBy, "info" .= (req :: ImmediateRevertReq).info])
-                                    notifyImmediateReverted updated
-                                    -- Step 4: Optionally trigger sync revert
-                                    let shouldSync = fromMaybe False mIsRevertSync
-                                    when shouldSync $
-                                        triggerImmediateRevertSync tracker mTargetState
-                                    pure $ APIResponse "SUCCESS" "Immediate revert: image swapped + pods restarting"
+                                    ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText currentStatus)
+                                    if not ok
+                                        then pure staleTrackerError
+                                        else do
+                                            insertReleaseEvent rid "BUSINESS" "IMMEDIATE_REVERT" (object ["requestedBy" .= (req :: ImmediateRevertReq).requestedBy, "info" .= (req :: ImmediateRevertReq).info])
+                                            notifyImmediateReverted updated
+                                            -- Step 4: Optionally trigger sync revert
+                                            let shouldSync = fromMaybe False mIsRevertSync
+                                            when shouldSync $
+                                                triggerImmediateRevertSync tracker mTargetState
+                                            -- Step 5: surface restart failure as WARNING (image swap already succeeded;
+                                            -- caller decides whether to roll back manually).
+                                            case mRestartErr of
+                                                Just err -> do
+                                                    logInfo $ "[immediateRevertH] rollout restart failed for " <> rid <> ": " <> err
+                                                    insertReleaseEvent
+                                                        rid
+                                                        "BUSINESS"
+                                                        "REVERT_RESTART_FAILED"
+                                                        (object ["error" .= err])
+                                                    pure $
+                                                        APIResponse
+                                                            "WARNING"
+                                                            ( "Immediate revert: image swapped, but rollout restart failed: "
+                                                                <> err
+                                                                <> ". Pods may still be running the new image; manual intervention may be required."
+                                                            )
+                                                Nothing ->
+                                                    pure $ APIResponse "SUCCESS" "Immediate revert: image swapped + pods restarting"
 
 -- ============================================================================
 -- Restart Release (POST /releases/:id/restart)
@@ -1161,19 +1171,22 @@ restartReleaseH _ap rid req = do
                                 , NT.scheduleTime = Just now
                                 , NT.rolloutHistory = []
                                 }
-                    insertReleaseTracker updated mTargetState
-                    insertReleaseEvent
-                        rid
-                        "BUSINESS"
-                        "RELEASE_RESTARTED"
-                        ( object
-                            [ "requestedBy" .= (req :: RestartReleaseReq).requestedBy
-                            , "reason" .= (req :: RestartReleaseReq).reason
-                            , "previousStatus" .= T.pack (show currentStatus)
-                            ]
-                        )
-                    notifyReleaseRestarted updated
-                    pure $ APIResponse "SUCCESS" "Release restarted"
+                    ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText currentStatus)
+                    if not ok
+                        then pure staleTrackerError
+                        else do
+                            insertReleaseEvent
+                                rid
+                                "BUSINESS"
+                                "RELEASE_RESTARTED"
+                                ( object
+                                    [ "requestedBy" .= (req :: RestartReleaseReq).requestedBy
+                                    , "reason" .= (req :: RestartReleaseReq).reason
+                                    , "previousStatus" .= T.pack (show currentStatus)
+                                    ]
+                                )
+                            notifyReleaseRestarted updated
+                            pure $ APIResponse "SUCCESS" "Release restarted"
 
 -- ============================================================================
 -- Fast Forward (POST /releases/:id/fast-forward)
@@ -1220,18 +1233,21 @@ fastForwardH _ap rid req = do
                                             else step
                                  in zipWith updateStep [0 ..] steps
                         updated = (tracker :: ReleaseTracker){NT.rolloutHistory = updatedHistory, NT.rolloutStrategy = updatedStrategy}
-                    insertReleaseTracker updated mTargetState
-                    insertReleaseEvent
-                        rid
-                        "BUSINESS"
-                        "FAST_FORWARD"
-                        ( object
-                            [ "requestedBy" .= (req :: FastForwardReq).requestedBy
-                            , "reason" .= (req :: FastForwardReq).reason
-                            ]
-                        )
-                    notifyReleaseFastForwarded updated
-                    pure $ APIResponse "SUCCESS" "Fast forward: cooloff period skipped, runner will advance on next poll"
+                    ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText currentStatus)
+                    if not ok
+                        then pure staleTrackerError
+                        else do
+                            insertReleaseEvent
+                                rid
+                                "BUSINESS"
+                                "FAST_FORWARD"
+                                ( object
+                                    [ "requestedBy" .= (req :: FastForwardReq).requestedBy
+                                    , "reason" .= (req :: FastForwardReq).reason
+                                    ]
+                                )
+                            notifyReleaseFastForwarded updated
+                            pure $ APIResponse "SUCCESS" "Fast forward: cooloff period skipped, runner will advance on next poll"
 
 -- ============================================================================
 -- Validation Helpers

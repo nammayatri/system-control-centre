@@ -27,34 +27,41 @@ module Products.Autopilot.Workflow.Helpers (
     -- * Utility Functions
     continueIf,
     scheduleAfter,
+    nowS,
     getRT,
     getReleaseTracker,
     updateRT,
+    withK8sContext,
 )
 where
 
+import Control.Exception (throwIO)
 import Control.Monad (unless)
 import Control.Monad.Except (throwError)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State.Strict (get, gets, modify)
 import Control.Monad.Trans.Class (lift)
+import qualified Core.AppError as AppErr
 import Core.Config (Config (..))
 import Core.Environment (MonadFlow)
 import Core.Utils.FlowMonad (Flow)
 import Data.Aeson (Value (..), eitherDecode)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
+import Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Time.Clock (NominalDiffTime, addUTCTime, getCurrentTime)
+import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import qualified Data.Vector as V
 import qualified Data.Yaml as Yaml
 import Products.Autopilot.K8s.Execute (K8sResult (..), runCmd)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import qualified Products.Autopilot.Queries.ReleaseTracker as DB
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
+import Products.Autopilot.Types.Target (K8sDeploymentState (..), TargetState (..))
+import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext)
 import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Recorded (recordedWithPersist)
 import Products.Autopilot.Workflow.Types (
@@ -100,13 +107,17 @@ continueIf predicate = do
     unless (predicate rs) $
         throwError (DomainError "Condition not met for workflow continuation")
 
+-- | Get current UTC time inside any MonadIO (use in StateFlow / ReleaseWorkFlow)
+nowS :: (MonadIO m) => m UTCTime
+nowS = liftIO getCurrentTime
+
 {- | Schedule workflow to resume after a delay
 
 Updates scheduleTime in ReleaseTracker
 -}
 scheduleAfter :: NominalDiffTime -> ReleaseWorkFlow ()
 scheduleAfter delay = do
-    now <- lift $ lift $ liftIO getCurrentTime -- ExceptT -> Recorded -> Flow -> IO
+    now <- nowS
     let scheduledTime = addUTCTime delay now
     modify $ \rs ->
         let rt = releaseTracker rs
@@ -125,44 +136,100 @@ getReleaseTracker = getRT
 updateRT :: (ReleaseTracker -> ReleaseTracker) -> StateFlow ()
 updateRT f = modify $ \rs -> rs{releaseTracker = f (releaseTracker rs)}
 
+{- | Extract K8sReleaseContext from current StateFlow, throwing a
+'Core.AppError.WorkflowError' if the target state is not a K8sState.
+Replaces the duplicated @getK8sCtx@ helpers across backend workflows.
+-}
+withK8sContext :: StateFlow K8sReleaseContext
+withK8sContext = do
+    rs <- get
+    case targetState rs of
+        Just (K8sState k8s) -> pure (context k8s)
+        _ -> liftIO $ throwIO $ AppErr.WorkflowError "init" "Missing K8sState in targetState"
+
 -- ============================================================================
 -- Snapshot Capture Functions
 -- ============================================================================
 
-{- | Capture deployment YAML snapshot and store as release event.
-Fetches YAML from K8s, parses to Value, strips noise, re-encodes as clean YAML text.
-This matches production autopilot behavior (YAML.write(YAML.load_file(...))).
--}
-captureDeploymentSnapshot :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> m ()
-captureDeploymentSnapshot cfg releaseId ns depName label = do
-    result <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack depName, "-o", "yaml"])
-    case result of
-        Right (K8sResult yamlStr) ->
-            case Yaml.decodeEither' (TE.encodeUtf8 yamlStr) :: Either Yaml.ParseException Value of
-                Right val -> do
-                    let cleaned = stripK8sNoiseValue val
-                        cleanYaml = TE.decodeUtf8 (Yaml.encode cleaned)
-                    DB.insertReleaseEvent releaseId "SNAPSHOT" label (String cleanYaml)
-                Left _ -> DB.insertReleaseEvent releaseId "SNAPSHOT" label (String yamlStr)
-        Left _ -> pure ()
+{- | Internal: shared snapshot pipeline.
 
-{- | Generate a preview of what the deployment will look like after changes.
-Fetches old deployment YAML, strips noise, modifies fields (name, version, image),
-re-encodes as clean YAML text. Matches production autopilot behavior.
+Takes a fetch action that yields either a fallback raw text (Left) or
+a parsed JSON/YAML 'Value' (Right). The Value is stripped of K8s noise
+and re-encoded as YAML before being persisted as a release event.
 -}
+captureK8sYamlSnapshot ::
+    (MonadFlow m) =>
+    Text -> -- releaseId
+    Text -> -- label
+    IO (Maybe (Either Text Value)) ->
+    m ()
+captureK8sYamlSnapshot releaseId label fetch = do
+    mResult <- liftIO fetch
+    case mResult of
+        Nothing -> pure ()
+        Just (Left raw) -> DB.insertReleaseEvent releaseId "SNAPSHOT" label (String raw)
+        Just (Right val) ->
+            let cleaned = stripK8sNoiseValue val
+                cleanYaml = TE.decodeUtf8 (Yaml.encode cleaned)
+             in DB.insertReleaseEvent releaseId "SNAPSHOT" label (String cleanYaml)
+
+-- | Decode YAML bytes into 'Either fallback Value' for the snapshot pipeline.
+decodeYamlForSnapshot :: ByteString -> Text -> Either Text Value
+decodeYamlForSnapshot bs fallback =
+    case Yaml.decodeEither' bs :: Either Yaml.ParseException Value of
+        Right v -> Right v
+        Left _ -> Left fallback
+
+-- | Build a kubectl command line from a list of Text args.
+kubectlCmd :: Config -> [Text] -> String
+kubectlCmd cfg args = kubectlBin cfg <> " " <> T.unpack (T.intercalate " " args)
+
+-- | Run a kubectl command and parse its YAML output, suitable for the snapshot pipeline.
+runKubectlYaml :: Config -> [Text] -> IO (Maybe (Either Text Value))
+runKubectlYaml cfg args = do
+    res <- runCmd (kubectlCmd cfg args)
+    case res of
+        Right (K8sResult yamlStr) -> pure (Just (decodeYamlForSnapshot (TE.encodeUtf8 yamlStr) yamlStr))
+        Left _ -> pure Nothing
+
+-- | Capture deployment YAML snapshot and store as release event.
+captureDeploymentSnapshot :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> m ()
+captureDeploymentSnapshot cfg releaseId ns depName label =
+    captureK8sYamlSnapshot releaseId label $
+        runKubectlYaml cfg ["-n", ns, "get deployment", depName, "-o", "yaml"]
+
+-- | Generate a preview of the deployment after applying name/version/image changes.
 captureDeploymentPreview :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> Text -> Text -> m ()
-captureDeploymentPreview cfg releaseId ns oldDepName newVer newImage label = do
-    result <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack oldDepName, "-o", "yaml"])
-    case result of
-        Right (K8sResult yamlStr) ->
-            case Yaml.decodeEither' (TE.encodeUtf8 yamlStr) :: Either Yaml.ParseException Value of
-                Right val -> do
-                    let cleaned = stripK8sNoiseValue val
-                        preview = modifyDeploymentForPreview cleaned oldDepName newVer newImage
-                        previewYaml = TE.decodeUtf8 (Yaml.encode preview)
-                    DB.insertReleaseEvent releaseId "SNAPSHOT" label (String previewYaml)
-                Left _ -> pure ()
-        Left _ -> pure ()
+captureDeploymentPreview cfg releaseId ns oldDepName newVer newImage label =
+    captureK8sYamlSnapshot releaseId label $ do
+        res <- runCmd (kubectlCmd cfg ["-n", ns, "get deployment", oldDepName, "-o", "yaml"])
+        case res of
+            Right (K8sResult yamlStr) ->
+                case Yaml.decodeEither' (TE.encodeUtf8 yamlStr) :: Either Yaml.ParseException Value of
+                    Right val ->
+                        let cleaned = stripK8sNoiseValue val
+                            preview = modifyDeploymentForPreview cleaned oldDepName newVer newImage
+                         in pure (Just (Right preview))
+                    Left _ -> pure Nothing
+            Left _ -> pure Nothing
+
+-- | Capture VirtualService YAML snapshot and store as release event.
+captureVSSnapshot :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> m ()
+captureVSSnapshot cfg releaseId ns vsName label =
+    captureK8sYamlSnapshot releaseId label $ do
+        res <- getVirtualServiceJson cfg ns vsName
+        case res of
+            Right vsJson ->
+                case eitherDecode (LBS.fromStrict (TE.encodeUtf8 vsJson)) :: Either String Value of
+                    Right v -> pure (Just (Right v))
+                    Left _ -> pure (Just (Left vsJson))
+            Left _ -> pure Nothing
+
+-- | Capture ConfigMap YAML snapshot and store as release event.
+captureConfigMapSnapshot :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> m ()
+captureConfigMapSnapshot cfg releaseId ns cmName label =
+    captureK8sYamlSnapshot releaseId label $
+        runKubectlYaml cfg ["-n", ns, "get configmap", cmName, "-o", "yaml"]
 
 -- | Update a nested text field in a JSON object
 updateNestedText :: [Text] -> Text -> KM.KeyMap Value -> KM.KeyMap Value
@@ -196,41 +263,8 @@ updateContainerImage img obj =
             _ -> obj
         _ -> obj
 
-{- | Capture VirtualService YAML snapshot and store as release event.
-VirtualService is fetched as JSON (existing API), parsed, stripped, re-encoded as YAML.
--}
-captureVSSnapshot :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> m ()
-captureVSSnapshot cfg releaseId ns vsName label = do
-    result <- liftIO $ getVirtualServiceJson cfg ns vsName
-    case result of
-        Right vsJson ->
-            case eitherDecode (LBS.fromStrict (TE.encodeUtf8 vsJson)) :: Either String Value of
-                Right val -> do
-                    let cleaned = stripK8sNoiseValue val
-                        cleanYaml = TE.decodeUtf8 (Yaml.encode cleaned)
-                    DB.insertReleaseEvent releaseId "SNAPSHOT" label (String cleanYaml)
-                Left _ -> DB.insertReleaseEvent releaseId "SNAPSHOT" label (String vsJson)
-        Left _ -> pure ()
-
-{- | Capture ConfigMap YAML snapshot and store as release event.
-Fetches YAML, strips noise, stores as clean YAML text.
--}
-captureConfigMapSnapshot :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> m ()
-captureConfigMapSnapshot cfg releaseId ns cmName label = do
-    result <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get configmap", T.unpack cmName, "-o", "yaml"])
-    case result of
-        Right (K8sResult yamlStr) ->
-            case Yaml.decodeEither' (TE.encodeUtf8 yamlStr) :: Either Yaml.ParseException Value of
-                Right val -> do
-                    let cleaned = stripK8sNoiseValue val
-                        cleanYaml = TE.decodeUtf8 (Yaml.encode cleaned)
-                    DB.insertReleaseEvent releaseId "SNAPSHOT" label (String cleanYaml)
-                Left _ -> DB.insertReleaseEvent releaseId "SNAPSHOT" label (String yamlStr)
-        Left _ -> pure ()
-
 {- | Strip K8s noise from a parsed Value directly.
 Removes status, strips metadata to only name/namespace/labels.
-Works on the Value tree so callers can parse once and re-encode to any format (YAML/JSON).
 -}
 stripK8sNoiseValue :: Value -> Value
 stripK8sNoiseValue (Object obj) =
@@ -243,9 +277,7 @@ stripK8sNoiseValue (Object obj) =
      in Object cleanMeta
 stripK8sNoiseValue other = other
 
-{- | Modify a deployment Value for preview: update name, version labels, image.
-Used to produce the "after" YAML for diff comparison.
--}
+-- | Modify a deployment Value for preview: update name, version labels, image.
 modifyDeploymentForPreview :: Value -> Text -> Text -> Text -> Value
 modifyDeploymentForPreview (Object obj) oldDepName newVer newImage =
     let parts = T.splitOn "-" oldDepName
@@ -263,40 +295,22 @@ modifyDeploymentForPreview other _ _ _ = other
 -- ReleaseWFStatus-based Helpers
 -- ============================================================================
 
-{- | Check if workflow has reached a particular checkpoint
-
-Returns Just () if releaseWFStatus >= target checkpoint
-Returns Nothing if not yet reached (should execute the step)
--}
+-- | Check if workflow has reached a particular checkpoint
 stateCheckFuncV2 :: ReleaseWFStatus -> ReleaseState -> Maybe ()
 stateCheckFuncV2 targetStatus rs =
     let rt = releaseTracker rs
         currentStatus = releaseWFStatus rt
      in if currentStatus >= targetStatus
-            then Just () -- Already completed this checkpoint
-            else Nothing -- Not yet completed, need to execute
+            then Just ()
+            else Nothing
 
-{- | Checkpoint-resume operator
-
-Automatically checks if step is complete via releaseWFStatus, skips if done.
-After execution, persists state to DB.
-
-Usage:
-@
-workflow = do
-INIT |>> validatePreconditions
-DEPLOYING |>> deployApplication
-MONITORING |>> monitorHealth
-FINALIZING |>> cleanup
-@
--}
+-- | Checkpoint-resume operator
 cprV2 :: ReleaseWFStatus -> StateFlow () -> ReleaseWorkFlow ()
 cprV2 targetStatus func =
     lift $ recordedWithPersist persistWorkflowState funcExec (stateCheckFuncV2 targetStatus)
   where
     funcExec = do
         func
-        -- Update releaseWFStatus after execution
         modify $ \rs ->
             let rt = releaseTracker rs
                 rt' = rt{releaseWFStatus = targetStatus}

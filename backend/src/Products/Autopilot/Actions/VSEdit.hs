@@ -17,7 +17,9 @@ module Products.Autopilot.Actions.VSEdit (
 where
 
 import Control.Applicative ((<|>))
+import Control.Monad.Catch (throwM)
 import Control.Monad.IO.Class (liftIO)
+import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
 import Core.Logging (logInfoG)
@@ -48,6 +50,14 @@ import Shared.API.Response (APIResponse (..))
 -- ============================================================================
 -- VS Edit Tracker CRUD (using release_tracker with category=VSEdit)
 -- ============================================================================
+
+{- | String constants for rtStatus values used by VS edit trackers.
+Centralised so the case branches in updateVsEditTrackerH stop drifting.
+-}
+vsStatusCreated, vsStatusApplied, vsStatusDiscarded :: Text
+vsStatusCreated = "CREATED"
+vsStatusApplied = "APPLIED"
+vsStatusDiscarded = "DISCARDED"
 
 {- | Convert a release_tracker row (category=VSEdit) to VsEditTrackerResponse
 VS-specific data: old_vs_data and new_vs_data are now stored as SNAPSHOT events.
@@ -97,8 +107,8 @@ releaseRowToVsResponseWithEvents t events =
 VS data (old/new) is now stored as SNAPSHOT events, not in udf fields.
 Lock info is in deployment_config.vs_locked_by only.
 -}
-mkVsEditRow :: Text -> Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Text -> UTCTime -> S.ReleaseTrackerRow
-mkVsEditRow tid product' service' env' vsName' _oldVsData' createdBy' status' now =
+mkVsEditRow :: Text -> Text -> Text -> Text -> Text -> Maybe Text -> Text -> UTCTime -> S.ReleaseTrackerRow
+mkVsEditRow tid product' service' env' vsName' createdBy' status' now =
     S.ReleaseTrackerT
         { rtId = tid
         , rtOldVersion = ""
@@ -152,7 +162,20 @@ createVsEditTrackerH _ap CreateVsEditTrackerReq{..} = do
                         , vleLockExpiry = Nothing
                         }
         else do
-            let row = mkVsEditRow tid appGroup service env vsName oldVsData (Just createdBy) "CREATED" now
+            let row = mkVsEditRow tid appGroup service env vsName (Just createdBy) vsStatusCreated now
+            -- RACE WINDOW (task #34, M3): insertReleaseTrackerRow and the
+            -- discardDuplicateCreatedVsTrackers sweep below run in two separate
+            -- DB connections, NOT a single transaction. Between them, another
+            -- caller can insert its own CREATED tracker that this sweep will
+            -- not see (and that sweep will not see ours either if it runs
+            -- first). Wrapping both in one withTransaction would require
+            -- pushing both queries through a shared `Connection`, which the
+            -- current Queries layer (Flow + per-call withDb) does not expose.
+            -- Mitigated in practice by tryAcquireVsLock holding the VS lock
+            -- across this whole handler — only the lock-owner reaches this
+            -- code path, so a true racing duplicate requires the same owner
+            -- double-clicking. Revisit when the query layer grows a
+            -- transaction-scoped variant.
             insertReleaseTrackerRow row
             -- Capture old VS data as SNAPSHOT event
             case oldVsData of
@@ -225,7 +248,7 @@ updateVsEditTrackerH _ap tid UpdateVsEditTrackerReq{..} = do
                         }
             -- Handle status-specific logic
             case status of
-                Just "CREATED" -> do
+                Just s | s == vsStatusCreated -> do
                     -- Saving changes: capture VS_NEW snapshot, VS stays locked until apply/discard
                     case newVsData of
                         Just d -> insertReleaseEvent tid "SNAPSHOT" "VS_NEW" (String d)
@@ -234,7 +257,7 @@ updateVsEditTrackerH _ap tid UpdateVsEditTrackerReq{..} = do
                     if ok
                         then pure $ APIResponse "SUCCESS" "VS edit saved"
                         else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
-                Just "APPLIED" -> do
+                Just s | s == vsStatusApplied -> do
                     -- Get the new VS data from SNAPSHOT events
                     events <- listReleaseEvents tid
                     let mNewVs = find (\e -> S.reCategory e == "SNAPSHOT" && S.reLabel e == "VS_NEW") events
@@ -248,7 +271,7 @@ updateVsEditTrackerH _ap tid UpdateVsEditTrackerReq{..} = do
                                 Just pCfg -> do
                                     let ns = getProductNamespace pCfg
                                         vsContent = case S.rePayload newVsEvt of
-                                            String s -> s
+                                            String s' -> s'
                                             _ -> ""
                                     if T.null vsContent
                                         then pure $ APIResponse "ERROR" "Empty VS data"
@@ -274,17 +297,20 @@ updateVsEditTrackerH _ap tid UpdateVsEditTrackerReq{..} = do
                                                     ok <- conditionalUpdateTrackerRow updated oldStatusText
                                                     if ok
                                                         then do
-                                                            -- Unlock VS after successful apply
-                                                            updateVsLockedBy (S.rtAppGroup existing) Nothing
+                                                            -- Ownership-checked unlock: if the lock-expiry sweep
+                                                            -- reassigned the lock to a new owner mid-apply, do NOT
+                                                            -- clobber it. (task #34: avoid blind release.)
+                                                            _ <- releaseVsLockIfOwner (S.rtAppGroup existing) (S.rtCreatedBy existing)
                                                             notifyVsEditApplied tid (S.rtAppGroup existing) (S.rtService existing) (fromMaybe "admin" approvedBy)
                                                             pure $ APIResponse "SUCCESS" "VS edit applied to K8s"
                                                         else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
-                Just "DISCARDED" -> do
+                Just s | s == vsStatusDiscarded -> do
                     ok <- conditionalUpdateTrackerRow updated oldStatusText
                     if ok
                         then do
-                            -- Clear lock if present
-                            updateVsLockedBy (S.rtAppGroup existing) Nothing
+                            -- Ownership-checked release (task #34): expiry sweep may
+                            -- have reassigned the lock; only clear if we still hold it.
+                            _ <- releaseVsLockIfOwner (S.rtAppGroup existing) (S.rtCreatedBy existing)
                             notifyVsEditDiscarded tid (S.rtAppGroup existing) (S.rtService existing)
                             pure $ APIResponse "SUCCESS" "VS edit discarded"
                         else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
@@ -323,7 +349,7 @@ lockVsEditTrackerH _ap VsLockReq{..} = do
             tid <- liftIO (UUID.toText <$> UUID.nextRandom)
             let durationSecs = fromIntegral (fromMaybe 15 lockDurationMinutes) * 60
                 lockExpiry = addUTCTime durationSecs now
-                row = mkVsEditRow tid appGroup resolvedService resolvedEnv resolvedVsName oldVsData (Just resolvedLockedBy) "LOCKED" now
+                row = mkVsEditRow tid appGroup resolvedService resolvedEnv resolvedVsName (Just resolvedLockedBy) "LOCKED" now
                 rowWithExpiry = row{S.rtEndTime = Just lockExpiry}
             insertReleaseTrackerRow rowWithExpiry
             -- Capture old VS data as SNAPSHOT event
@@ -465,7 +491,10 @@ forceUnlockVsEditTrackerH _ap VsUnlockReq{..} = do
 
 revertVsEditTrackerH :: AuthedPerson -> Text -> Flow APIResponse
 revertVsEditTrackerH _ap _tid =
-    pure $ APIResponse "ERROR" "VS edit revert is not supported. Create a new VS edit instead."
+    -- Stub: VS edit revert isn't implemented (no rollback semantics defined for
+    -- raw VS replace). Throw rather than return a fake APIResponse so callers
+    -- get a 500 they cannot mistake for a successful no-op.
+    throwM (InternalError "revertVsEditTrackerH: not implemented")
 
 {- | Fetch the current live VirtualService JSON from K8s
 Uses the deployment_config's vs_name (e.g. "atlas-vs"), NOT the service name

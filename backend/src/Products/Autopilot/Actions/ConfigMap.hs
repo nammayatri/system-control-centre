@@ -21,11 +21,11 @@ import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
-import Core.Environment (DBEnv, forkFlow)
+import Core.Environment (forkFlow)
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Logging (logErrorG, logInfoG)
 import Core.Types.Time (Seconds (..))
-import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv, logInfo)
+import Core.Utils.FlowMonad (Flow, getConfig, logInfo)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -198,7 +198,6 @@ createConfigMapH _ap body = do
 
 updateConfigMapH :: AuthedPerson -> Text -> Value -> Flow APIResponse
 updateConfigMapH _ap cmId' body = do
-    db <- getDBEnv
     m <- findReleaseTracker cmId'
     case m of
         Nothing -> pure $ APIResponse "ERROR" "ConfigMap tracker not found"
@@ -211,36 +210,44 @@ updateConfigMapH _ap cmId' body = do
                 then handleConfigMapRevert rt mts cmId'
                 else do
                     let updated = applyCmUpdates rt body
-                    insertReleaseTracker updated mts
-                    -- Status-specific notifications
-                    case body of
-                        Object obj -> do
-                            case getStrM "status" obj of
-                                Just "INPROGRESS" -> notifyConfigMapInProgress updated
-                                Just "COMPLETED" -> notifyConfigMapCompleted updated
-                                Just "ABORTED" -> do
-                                    notifyConfigMapAborted updated
-                                    restoreOriginalOnRevertCancel db updated
-                                Just "PAUSED" -> notifyConfigMapPaused updated
-                                Just "RESUMED" -> notifyConfigMapResumed updated
-                                Just "DISCARDED" -> do
-                                    notifyConfigMapDiscarded updated
-                                    restoreOriginalOnRevertCancel db updated
-                                Just "restart" -> notifyConfigMapUpdated updated "restarted"
+                    -- CAS (task #34): replace blind insertReleaseTracker with a
+                    -- conditional update keyed on the snapshot status. If the
+                    -- ConfigMap row was mutated by a concurrent request between
+                    -- our findReleaseTracker and now, fail loudly so the UI
+                    -- refreshes rather than silently overwriting that change.
+                    casOk <- conditionalUpdateTracker updated mts (releaseStatusToText (NT.status rt))
+                    if not casOk
+                        then pure $ APIResponse "ERROR" "ConfigMap was modified by another request. Please refresh and try again."
+                        else do
+                            -- Status-specific notifications
+                            case body of
+                                Object obj -> do
+                                    case getStrM "status" obj of
+                                        Just "INPROGRESS" -> notifyConfigMapInProgress updated
+                                        Just "COMPLETED" -> notifyConfigMapCompleted updated
+                                        Just "ABORTED" -> do
+                                            notifyConfigMapAborted updated
+                                            restoreOriginalOnRevertCancel updated
+                                        Just "PAUSED" -> notifyConfigMapPaused updated
+                                        Just "RESUMED" -> notifyConfigMapResumed updated
+                                        Just "DISCARDED" -> do
+                                            notifyConfigMapDiscarded updated
+                                            restoreOriginalOnRevertCancel updated
+                                        Just "restart" -> notifyConfigMapUpdated updated "restarted"
+                                        _ -> pure ()
+                                    when (isTruthy "is_approved" obj) $
+                                        notifyConfigMapApproved updated
+                                    case getStrM "current_cool_off" obj of
+                                        Just "0" -> notifyConfigMapFastForwarded updated
+                                        _ -> pure ()
                                 _ -> pure ()
-                            when (isTruthy "is_approved" obj) $
-                                notifyConfigMapApproved updated
-                            case getStrM "current_cool_off" obj of
-                                Just "0" -> notifyConfigMapFastForwarded updated
-                                _ -> pure ()
-                        _ -> pure ()
-                    pure $ APIResponse "SUCCESS" "ConfigMap tracker updated"
+                            pure $ APIResponse "SUCCESS" "ConfigMap tracker updated"
 
 {- | When a revert tracker is discarded or aborted, restore the original
 tracker from REVERTING back to COMPLETED.
 -}
-restoreOriginalOnRevertCancel :: DBEnv -> ReleaseTracker -> Flow ()
-restoreOriginalOnRevertCancel _db rt = do
+restoreOriginalOnRevertCancel :: ReleaseTracker -> Flow ()
+restoreOriginalOnRevertCancel rt = do
     case NT.info rt of
         Just "REVERT" -> do
             -- Extract original tracker ID from description "Revert of <id>"
@@ -251,8 +258,13 @@ restoreOriginalOnRevertCancel _db rt = do
                     case mOrig of
                         Just (origRt, origTs) | NT.status origRt == REVERTING -> do
                             let restored = origRt{NT.status = COMPLETED}
-                            insertReleaseTracker restored origTs
-                            logInfo $ "[CONFIGMAP] Restored original tracker " <> oid <> " from REVERTING to COMPLETED"
+                            -- CAS (task #34): only restore if the original tracker is
+                            -- still REVERTING. If something else moved it (e.g. a
+                            -- second revert flow), do NOT clobber.
+                            casOk <- conditionalUpdateTracker restored origTs (releaseStatusToText (NT.status origRt))
+                            if casOk
+                                then logInfo $ "[CONFIGMAP] Restored original tracker " <> oid <> " from REVERTING to COMPLETED"
+                                else logInfo $ "[CONFIGMAP] CAS miss restoring original tracker " <> oid <> "; concurrent writer wins."
                         _ -> pure ()
                 Nothing -> pure ()
         _ -> pure ()
@@ -304,11 +316,15 @@ handleConfigMapRevert rt mts cmId' = do
             p <- findProductByName (NT.appGroup finalTracker)
             let ns = maybe (NT.appGroup finalTracker) getProductNamespace p
             captureConfigMapSnapshot cfg newRid ns cmName "CONFIGMAP_BEFORE"
-            -- Mark original as REVERTING
-            let reverted = rt{NT.status = REVERTING}
-            insertReleaseTracker reverted mts
-            notifyConfigMapReverted reverted
-            pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
+            -- Mark original as REVERTING via CAS (task #34): another request
+            -- (status update, abort) may have raced us between findReleaseTracker
+            -- and now; we must not overwrite their change.
+            casOk <- conditionalUpdateTracker (rt{NT.status = REVERTING}) mts (releaseStatusToText (NT.status rt))
+            if not casOk
+                then pure $ APIResponse "ERROR" "ConfigMap was modified by another request. Please refresh and try again."
+                else do
+                    notifyConfigMapReverted (rt{NT.status = REVERTING})
+                    pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
 
 -- ============================================================================
 -- K8s ConfigMap Lookup (kubectl)

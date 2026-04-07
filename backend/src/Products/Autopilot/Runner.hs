@@ -1,12 +1,16 @@
+{-# LANGUAGE TypeApplications #-}
+
 module Products.Autopilot.Runner where
 
-import Control.Concurrent (threadDelay)
+import qualified Control.Exception as E
 import Control.Monad (filterM, forM_, forever)
+import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
 import Core.Config (Config (..))
 import Core.Environment (AppState (..), DBEnv, MonadFlow, forkFlow)
 import Core.Logging (logInfoIO, logWarningIO)
+import Core.Types.Time (threadDelaySec)
 import Core.Utils.FlowMonad
 import Data.Aeson (object, toJSON, (.=))
 import Data.List (sortBy)
@@ -174,32 +178,41 @@ rollbackInProgressOnStartup = do
 
 loop :: Flow ()
 loop = forever $ do
-    cfg <- getConfig
-    db <- getDBEnv
-    now <- liftIO getCurrentTime
-
-    -- Step 1: Find runnable trackers (CREATED only — never INPROGRESS).
-    -- conditionalUpdateTrackerRow provides atomic claim if two polls overlap.
-    jobs <- findRunnableReleaseTrackers now
-    ongoing <- findOngoingReleaseTrackers
-    multiRelease <- isMultiReleasePerProduct
-    eligible <- filterM (isEligibleToRun multiRelease ongoing) jobs
-
-    -- Step 2: Pick jobs and fork each into a background thread for parallel execution
-    let picked = pickJobs multiRelease eligible
-    forM_ picked $ \twt -> forkFlow (trigger db twt)
-
-    -- Step 3: Handle aborting trackers
-    abortingTrackers <- findAbortingReleaseTrackers
-    forM_ abortingTrackers $ \(rt, mts) -> handleAbortingRelease cfg rt mts
-
-    -- Step 4: Handle scale-down of old deployments after delay
-    scaleDownDelay <- getPodsScaleDownDelayFromConfig
-    completedTrackers <- findCompletedTrackersForScaleDown now scaleDownDelay
-    forM_ completedTrackers $ \twt -> scaleDownOldDeployment cfg twt
-
+    result <- MC.try @_ @E.SomeException iteration
+    case result of
+        Left e ->
+            logError $
+                "[RUNNER] Poll iteration failed (continuing): " <> T.pack (show e)
+        Right () -> pure ()
+    -- Always honour the poll delay, even after a failed iteration, so we
+    -- don't spin-loop on a persistent error.
     pollDelay <- getReleaseWatchDelay
-    liftIO $ threadDelay (pollDelay * 1000000)
+    threadDelaySec pollDelay
+  where
+    iteration = do
+        cfg <- getConfig
+        now <- liftIO getCurrentTime
+
+        -- Step 1: Find runnable trackers (CREATED only — never INPROGRESS).
+        -- conditionalUpdateTrackerRow provides atomic claim if two polls overlap.
+        jobs <- findRunnableReleaseTrackers now
+        ongoing <- findOngoingReleaseTrackers
+        multiRelease <- isMultiReleasePerProduct
+        eligible <- filterM (isEligibleToRun multiRelease ongoing) jobs
+
+        -- Step 2: Pick jobs and fork each into a background thread for parallel execution
+        let picked = pickJobs multiRelease eligible
+        db <- getDBEnv
+        forM_ picked $ \twt -> forkFlow (trigger db twt)
+
+        -- Step 3: Handle aborting trackers
+        abortingTrackers <- findAbortingReleaseTrackers
+        forM_ abortingTrackers $ \(rt, mts) -> handleAbortingRelease cfg rt mts
+
+        -- Step 4: Handle scale-down of old deployments after delay
+        scaleDownDelay <- getPodsScaleDownDelayFromConfig
+        completedTrackers <- findCompletedTrackersForScaleDown now scaleDownDelay
+        forM_ completedTrackers $ \twt -> scaleDownOldDeployment cfg twt
 
 -- | Get the full AppState from the Flow monad (for passing to forkIO threads)
 getAppState :: Flow AppState
@@ -211,10 +224,10 @@ getAppState = ask
 
 isEligibleToRun :: (MonadFlow m) => Bool -> [TrackerWithTarget] -> TrackerWithTarget -> m Bool
 isEligibleToRun multiRelease ongoing (rt, mts) = case category rt of
-    BackendService -> k8sEligible multiRelease
-    BackendScheduler -> k8sEligible True
-    BackendCronJob -> k8sEligible True
-    BackendJob -> k8sEligible True
+    BackendService -> k8sEligible
+    BackendScheduler -> k8sEligible
+    BackendCronJob -> k8sEligible
+    BackendJob -> k8sEligible
     BackendConfig -> pure True
     MobileAppAndroid -> pure True
     MobileAppIOS -> pure True
@@ -222,7 +235,7 @@ isEligibleToRun multiRelease ongoing (rt, mts) = case category rt of
     Infrastructure -> pure True
     VSEdit -> pure True
   where
-    k8sEligible _skipOngoingCheck = do
+    k8sEligible = do
         let k8sCluster = case mts of
                 Just (K8sState k8s) -> cluster (context k8s)
                 _ -> ""
@@ -258,10 +271,10 @@ sortByPriority = sortBy (comparing (Down . priority . fst))
 Atomically claims via conditionalUpdateTrackerRow (prevents double-pick).
 -}
 trigger :: DBEnv -> TrackerWithTarget -> Flow ()
-trigger db (rt, mts) = do
+trigger _db (rt, mts) = do
     cfg <- getConfig
     -- Version validation
-    versionOk <- liftIO $ validateRunningVersion cfg db rt mts
+    versionOk <- liftIO $ validateRunningVersion cfg rt mts
     case versionOk of
         Just mismatchMsg -> do
             let discarded = rt{status = DISCARDED}
@@ -302,10 +315,9 @@ trigger db (rt, mts) = do
                                     let abortedTracker = rtNew{status = ABORTED, releaseWFStatus = ROLLING_BACK, endTime = Just endNow}
                                     insertReleaseTracker abortedTracker mts
                                     insertReleaseEvent (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
-                                    _st' <- getAppState
                                     restoreVsTrafficOnFailure cfg' rt mts
                                     notifyReleaseAborted abortedTracker
-                        Right _finalState -> do
+                        Right _ -> do
                             -- The workflow persists state via persistWorkflowState in each cprV2
                             -- stage, but the Recorded monad's bind may short-circuit the final
                             -- stage's persist. Re-read from DB to verify, and force COMPLETED if
@@ -329,8 +341,8 @@ dispatchWorkflow rt mts = do
 -- Version Validation
 -- ============================================================================
 
-validateRunningVersion :: Config -> DBEnv -> ReleaseTracker -> Maybe TargetState -> IO (Maybe T.Text)
-validateRunningVersion cfg _db rt mts = do
+validateRunningVersion :: Config -> ReleaseTracker -> Maybe TargetState -> IO (Maybe T.Text)
+validateRunningVersion cfg rt mts = do
     case mts of
         Just (K8sState k8s) -> do
             let ctx = context k8s

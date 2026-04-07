@@ -215,7 +215,7 @@ notifyComplete :: StateFlow ()
 notifyComplete = do
     rt <- getRT
     logInfoS $ "ConfigMap release " <> releaseId rt <> " completed!"
-    notifyConfigMapCompleted rt
+    lift $ notifyConfigMapCompleted rt
     -- If this is a revert tracker, mark the original as REVERTED
     case (info rt, description rt) of
         (Just "REVERT", Just desc) ->

@@ -10,6 +10,7 @@ module Products.Autopilot.Queries.ReleaseTracker (
     -- * Queries
     findReleaseTracker,
     listReleaseEvents,
+    listReleaseEventsByCategory,
     listReleaseTrackers,
     listReleaseTrackersByDateRange,
     findRunnableReleaseTrackers,
@@ -57,16 +58,20 @@ where
 
 import Core.DB.Connection (runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
-import Data.Aeson (FromJSON, ToJSON, Value, eitherDecode, encode, toJSON)
-import qualified Data.ByteString.Lazy as BSL
+import Data.Aeson (FromJSON, ToJSON, Value, fromJSON, toJSON)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Text as AesonText
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Lazy as LT
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Database.Beam
 import Database.Beam.Postgres
 import Database.PostgreSQL.Simple (Only (..), execute, withTransaction)
+import Database.PostgreSQL.Simple.Types ((:.) (..))
+import qualified Debug.Trace as DT
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.Storage.Schema
@@ -81,11 +86,68 @@ insertReleaseTracker rt mts = withDb $ \db -> do
     now <- getCurrentTime
     let created = fromMaybe now (dateCreated rt)
         row = toRow created now rt mts
-    -- Atomic: DELETE+INSERT in a single transaction (if INSERT fails, DELETE is rolled back)
-    withConn db $ \conn ->
-        withTransaction conn $ do
-            _deleted <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (releaseId rt))
-            runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
+    -- Real UPSERT — single statement, no transaction needed.
+    -- Every non-PK column must be listed in BOTH the INSERT column list AND
+    -- the DO UPDATE SET clause, otherwise that column would silently retain
+    -- its old value on conflict (which would corrupt the rollout state).
+    withConn db $ \conn -> do
+        _ <-
+            execute
+                conn
+                "INSERT INTO release_tracker \
+                \  ( id, old_version, new_version, app_group, service, priority, env \
+                \  , category, status, release_wf_status, mode, release_manager, approved_by \
+                \  , is_approved, is_infra_approved, release_tag, schedule_time, start_time \
+                \  , end_time, rollout_strategy, rollout_history, release_context, info \
+                \  , description, change_log, metadata, global_id, sync_enabled \
+                \  , env_override_data, slack_thread_ts, date_created, last_updated ) \
+                \VALUES \
+                \  ( ?, ?, ?, ?, ?, ?, ? \
+                \  , ?, ?, ?, ?, ?, ? \
+                \  , ?, ?, ?, ?, ? \
+                \  , ?, ?, ?, ?, ? \
+                \  , ?, ?, ?, ?, ? \
+                \  , ?, ?, ?, ? ) \
+                \ON CONFLICT (id) DO UPDATE SET \
+                \    old_version       = EXCLUDED.old_version \
+                \  , new_version       = EXCLUDED.new_version \
+                \  , app_group         = EXCLUDED.app_group \
+                \  , service           = EXCLUDED.service \
+                \  , priority          = EXCLUDED.priority \
+                \  , env               = EXCLUDED.env \
+                \  , category          = EXCLUDED.category \
+                \  , status            = EXCLUDED.status \
+                \  , release_wf_status = EXCLUDED.release_wf_status \
+                \  , mode              = EXCLUDED.mode \
+                \  , release_manager   = EXCLUDED.release_manager \
+                \  , approved_by       = EXCLUDED.approved_by \
+                \  , is_approved       = EXCLUDED.is_approved \
+                \  , is_infra_approved = EXCLUDED.is_infra_approved \
+                \  , release_tag       = EXCLUDED.release_tag \
+                \  , schedule_time     = EXCLUDED.schedule_time \
+                \  , start_time        = EXCLUDED.start_time \
+                \  , end_time          = EXCLUDED.end_time \
+                \  , rollout_strategy  = EXCLUDED.rollout_strategy \
+                \  , rollout_history   = EXCLUDED.rollout_history \
+                \  , release_context   = EXCLUDED.release_context \
+                \  , info              = EXCLUDED.info \
+                \  , description       = EXCLUDED.description \
+                \  , change_log        = EXCLUDED.change_log \
+                \  , metadata          = EXCLUDED.metadata \
+                \  , global_id         = EXCLUDED.global_id \
+                \  , sync_enabled      = EXCLUDED.sync_enabled \
+                \  , env_override_data = EXCLUDED.env_override_data \
+                \  , slack_thread_ts   = EXCLUDED.slack_thread_ts \
+                \  , date_created      = EXCLUDED.date_created \
+                \  , last_updated      = EXCLUDED.last_updated"
+                ( (rtId row, rtOldVersion row, rtNewVersion row, rtAppGroup row, rtService row, rtPriority row, rtEnv row)
+                    :. (rtCategory row, rtStatus row, rtReleaseWFStatus row, rtMode row, rtCreatedBy row, rtApprovedBy row)
+                    :. (rtIsApproved row, rtIsInfraApproved row, rtReleaseTag row, rtScheduleTime row, rtStartTime row)
+                    :. (rtEndTime row, rtRolloutStrategy row, rtRolloutHistory row, rtTargetState row, rtInfo row)
+                    :. (rtDescription row, rtChangeLog row, rtMetadata row, rtGlobalId row, rtSyncEnabled row)
+                    :. (rtEnvOverrideData row, rtSlackThreadTs row, rtCreatedAt row, rtUpdatedAt row)
+                )
+        pure ()
 
 {- | Atomically update a release tracker only if its current status matches the expected value.
 Uses DELETE ... WHERE id = ? AND status = ? to prevent concurrent modifications.
@@ -148,6 +210,21 @@ listReleaseEvents rid = withDb $ \db ->
                 guard_ (reReleaseId ev ==. val_ rid)
                 pure ev
 
+{- | Like 'listReleaseEvents' but filters by event category in SQL. Used by
+release-diff handlers that only care about a single category (e.g.
+"SNAPSHOT") and don't want to pull every event for the release just to
+discard most of them in Haskell.
+-}
+listReleaseEventsByCategory :: (MonadFlow m) => Text -> Text -> m [ReleaseEvent]
+listReleaseEventsByCategory rid cat = withDb $ \db ->
+    runDB db $
+        runSelectReturningList $
+            select $ do
+                ev <- all_ (releaseEvents autopilotDb)
+                guard_ (reReleaseId ev ==. val_ rid)
+                guard_ (reCategory ev ==. val_ cat)
+                pure ev
+
 listReleaseTrackers :: (MonadFlow m) => m [TrackerWithTarget]
 listReleaseTrackers = withDb $ \db -> do
     rows <-
@@ -188,13 +265,10 @@ findRunnableReleaseTrackers now = withDb $ \db -> do
                     orderBy_ (asc_ . rtCreatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
                         guard_ (rtStatus rt ==. val_ "CREATED")
+                        guard_ (rtIsApproved rt ==. val_ (Just True))
+                        guard_ (isNothing_ (rtScheduleTime rt) ||. rtScheduleTime rt <=. just_ (val_ now))
                         pure rt
-    let parsed = map fromRow rows
-        isDue (tracker, _) = case scheduleTime tracker of
-            Nothing -> True
-            Just t -> t <= now
-        isApproved' (tracker, _) = isApproved tracker
-    pure (filter (\t -> isDue t && isApproved' t) parsed)
+    pure (map fromRow rows)
 
 findInProgressReleaseTrackers :: (MonadFlow m) => m [TrackerWithTarget]
 findInProgressReleaseTrackers = withDb $ \db -> do
@@ -353,12 +427,16 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
 fromRow :: ReleaseTrackerRow -> TrackerWithTarget
 fromRow ReleaseTrackerT{..} =
     let
-        -- Deserialize full TargetState; fall back to legacy K8sReleaseContext JSON
-        mTargetState = case parseJsonTextMaybe rtTargetState :: Maybe TargetState of
-            Just ts -> Just ts
-            Nothing -> case parseJsonTextMaybe rtTargetState :: Maybe K8sReleaseContext of
-                Just ctx -> Just $ K8sState $ emptyK8sState{context = ctx}
-                Nothing -> Nothing
+        -- Deserialize the target_state column once into a generic Aeson Value,
+        -- then try TargetState first and fall back to legacy K8sReleaseContext.
+        -- This avoids paying for two full JSON parses on every row.
+        mTargetState = case parseJsonTextMaybe rtTargetState :: Maybe Value of
+            Nothing -> Nothing
+            Just v -> case fromJSON v :: Aeson.Result TargetState of
+                Aeson.Success ts -> Just ts
+                Aeson.Error _ -> case fromJSON v :: Aeson.Result K8sReleaseContext of
+                    Aeson.Success ctx -> Just $ K8sState $ emptyK8sState{context = ctx}
+                    Aeson.Error _ -> Nothing
         -- Extract the K8s context as a JSON Value so the frontend can display
         -- cluster / namespace / pods scale-down status / etc.
         mReleaseContext = case mTargetState of
@@ -416,7 +494,10 @@ parseReleaseCategory t =
         "WEBAPPLICATION" -> WebApplication
         "INFRASTRUCTURE" -> Infrastructure
         "VSEDIT" -> VSEdit
-        _ -> BackendService -- Default fallback
+        _ ->
+            DT.trace
+                ("[parseReleaseCategory] WARNING: unknown category " <> show t <> ", defaulting to BackendService")
+                BackendService
 
 {- | Parse ReleaseWFStatus from DB text. Explicit case at the DB boundary
 (haskell-reviewer Trap 7 — avoid 'read' which is strict about whitespace and
@@ -434,7 +515,10 @@ parseReleaseWFStatus t =
         "DONE" -> DONE
         "ROLLING_BACK" -> ROLLING_BACK
         "ROLLINGBACK" -> ROLLING_BACK -- legacy pascalCase-without-underscore
-        _ -> INIT -- safe default; unknown values shouldn't exist after DB cleanup
+        _ ->
+            DT.trace
+                ("[parseReleaseWFStatus] WARNING: unknown status " <> show t <> ", defaulting to INIT")
+                INIT
 
 {- | Parse ReleaseStatus from DB text. Delegates to 'parseReleaseStatusText'
 in "Products.Autopilot.Types.Release", which derives the lookup from the
@@ -450,7 +534,10 @@ parseMode (Just t) =
     case T.toUpper t of
         "MANUAL" -> MANUAL
         "AUTO" -> AUTO
-        _ -> AUTO
+        _ ->
+            DT.trace
+                ("[parseMode] WARNING: unknown mode " <> show t <> ", defaulting to AUTO")
+                AUTO
 
 {- | Convert ReleaseStatus to UPPERCASE Text for DB storage.
 Re-export of 'releaseStatusText' from "Products.Autopilot.Types.Release"
@@ -475,22 +562,33 @@ parseDecisionEngineHSStatus (Just t) =
         "STOPPED" -> Stopped
         "AB_HS_EXCEPTION" -> AbHsException
         "ABHSEXCEPTION" -> AbHsException
-        _ -> Uninitiated
+        _ ->
+            DT.trace
+                ("[parseDecisionEngineHSStatus] WARNING: unknown status " <> show t <> ", defaulting to Uninitiated")
+                Uninitiated
 
+-- NOTE: target_state is currently a 'text' column. Migrating it to 'jsonb'
+-- would let us drop the encode/decode round-trip entirely, but that
+-- migration is out of scope for this file (no migrations live under
+-- backend/dev/migrations/system-control/ for this change).
+--
+-- For now, encode goes Value -> Text via aeson's text builder (skips the
+-- ByteString step), and decode goes Text -> ByteString via TE.encodeUtf8
+-- straight into eitherDecodeStrict (skips the lazy ByteString step).
 encodeJsonText :: (ToJSON a) => a -> Text
-encodeJsonText = TE.decodeUtf8 . BSL.toStrict . encode
+encodeJsonText = LT.toStrict . AesonText.encodeToLazyText
 
 parseJsonTextOr :: (FromJSON a) => a -> Maybe Text -> a
 parseJsonTextOr fallback Nothing = fallback
 parseJsonTextOr fallback (Just t) =
-    case eitherDecode (BSL.fromStrict (TE.encodeUtf8 t)) of
+    case Aeson.eitherDecodeStrict (TE.encodeUtf8 t) of
         Left _ -> fallback
         Right a -> a
 
 parseJsonTextMaybe :: (FromJSON a) => Maybe Text -> Maybe a
 parseJsonTextMaybe Nothing = Nothing
 parseJsonTextMaybe (Just t) =
-    case eitherDecode (BSL.fromStrict (TE.encodeUtf8 t)) of
+    case Aeson.eitherDecodeStrict (TE.encodeUtf8 t) of
         Left _ -> Nothing
         Right a -> Just a
 
@@ -530,6 +628,9 @@ When delay is 0, all completed trackers with end_time set are immediately eligib
 -}
 findCompletedTrackersForScaleDown :: (MonadFlow m) => UTCTime -> Double -> m [TrackerWithTarget]
 findCompletedTrackersForScaleDown now delayHours = withDb $ \db -> do
+    -- Push end_time + delay <= now into SQL so we don't pull every completed
+    -- row across the wire only to discard most of them in Haskell.
+    let cutoff = addUTCTime (realToFrac (negate (delayHours * 3600)) :: NominalDiffTime) now
     rows <-
         runDB db $
             runSelectReturningList $
@@ -537,26 +638,22 @@ findCompletedTrackersForScaleDown now delayHours = withDb $ \db -> do
                     orderBy_ (asc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
                         guard_ (rtStatus rt `in_` [val_ "COMPLETED", val_ "ABORTED", val_ "USER_ABORTED"])
+                        guard_ (rtEndTime rt <=. just_ (val_ cutoff))
                         pure rt
     let parsed = map fromRow rows
+        -- end_time + delay <= now is now enforced in SQL above. The remaining
+        -- predicates (old-version sanity + JSON podsScaleDownStatus) stay in
+        -- Haskell because they require parsing the target_state JSON blob.
         isEligible (tracker, mts) =
             let oldVer = NT.oldVersion tracker
                 hasOldVersion = not (T.null oldVer) && T.toLower oldVer /= "unknown" && oldVer /= "new"
-                endTimeOk = case NT.endTime tracker of
-                    Just et -> addDelay et <= now
-                    Nothing ->
-                        -- Fallback: use lastUpdated if endTime not set
-                        case NT.lastUpdated tracker of
-                            Just lu -> addDelay lu <= now
-                            Nothing -> False
                 notAlreadyScaledDown = case mts of
                     Just (K8sState k8s) ->
                         case podsScaleDownStatus (context k8s) of
                             Just ScaleDownCompleted -> False
                             _ -> True
                     _ -> False -- Non-K8s: not applicable
-             in hasOldVersion && endTimeOk && notAlreadyScaledDown
-        addDelay t = addUTCTime (realToFrac (delayHours * 3600) :: NominalDiffTime) t
+             in hasOldVersion && notAlreadyScaledDown
     pure (filter isEligible parsed)
 
 {- | Store the Slack thread_ts for the first message in a release's Slack

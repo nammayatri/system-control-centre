@@ -29,6 +29,9 @@ module Products.Autopilot.RuntimeConfig (
     getHpaTemplate,
     -- Notifications (MonadFlow versions)
     isSlackEnabled,
+    -- Snapshot
+    RuntimeConfigSnapshot (..),
+    loadRuntimeConfigSnapshot,
 )
 where
 
@@ -128,13 +131,88 @@ getLockExpiryDelayMinutes = getConfigIntForProduct "lock_expiry_delay_minutes" (
 getMaxK8sRetries :: (MonadFlow m) => m Int
 getMaxK8sRetries = getConfigIntForProduct "max_k8s_retries" (Just "autopilot") 3
 
+{- | Check whether HPA scaling is enabled for the given product.
+
+Reads the "scaling_with_hpa_enabled" server_config value. The stored value
+may be:
+  * A JSON array string: @["FOO","BAR"]@
+  * A comma-separated list: @FOO,BAR@
+
+Tries JSON decode first; falls back to the comma-splitter on parse failure.
+-}
 isHpaEnabledForProduct :: (MonadFlow m) => Text -> m Bool
 isHpaEnabledForProduct productName = withDb $ \db -> do
     dbConfig <- getEnabledServerConfigValueForProduct_io db "scaling_with_hpa_enabled" (Just "autopilot")
     let dbProducts = case dbConfig of
-            Just val -> map T.strip (T.splitOn "," (T.filter (\c -> c /= '[' && c /= ']' && c /= '"') val))
             Nothing -> []
+            Just val -> parseProductList val
     pure $ T.toUpper productName `elem` map T.toUpper (filter (not . T.null) dbProducts)
+  where
+    parseProductList :: Text -> [Text]
+    parseProductList val =
+        case eitherDecode (LBS.fromStrict (TE.encodeUtf8 val)) :: Either String [Text] of
+            Right xs -> map T.strip xs
+            Left _ -> map T.strip (T.splitOn "," val)
 
 getHpaTemplate :: (MonadFlow m) => m (Maybe Text)
 getHpaTemplate = withDb $ \db -> getEnabledServerConfigValueForProduct_io db "hpa_template" (Just "autopilot")
+
+-- ── Snapshot ───────────────────────────────────────────────────────
+
+{- | Snapshot of all runtime config values, fetched in a single batch via
+'loadRuntimeConfigSnapshot'. Purely additive: existing per-value functions
+still hit the DB on every call. Callers that want to avoid repeated lookups
+within a single workflow step can opt in to the snapshot.
+
+Note: 'isHpaEnabledForProduct' is not included since it's parameterised on
+the product name; call it directly. 'isUnderMaintenance' is also omitted
+(it's checked at request entry rather than per workflow step).
+-}
+data RuntimeConfigSnapshot = RuntimeConfigSnapshot
+    { rcsSlackEnabled :: Bool
+    , rcsK8sEnabled :: Bool
+    , rcsWatcherEnabled :: Bool
+    , rcsApproveAllReleases :: Bool
+    , rcsScaleDownPodsOnCompletion :: Bool
+    , rcsGcltEnabled :: Bool
+    , rcsPromQueryCheckEnabled :: Bool
+    , rcsSyncClusterEnabled :: Bool
+    , rcsMultiReleasePerProduct :: Bool
+    , rcsReleaseWatchDelay :: Int
+    , rcsReleaseStartDelay :: Int
+    , rcsCollectMetricsDelay :: Int
+    , rcsPodsCreationDelay :: Int
+    , rcsPodsScaleDownDelayFromConfig :: Double
+    , rcsPodsCalculationFactor :: Double
+    , rcsHpaMinMaxFactor :: Double
+    , rcsMaxJobCompletionHours :: Int
+    , rcsRevertCooloff :: Int
+    , rcsLockExpiryDelayMinutes :: Int
+    , rcsMaxK8sRetries :: Int
+    , rcsHpaTemplate :: Maybe Text
+    }
+
+loadRuntimeConfigSnapshot :: (MonadFlow m) => m RuntimeConfigSnapshot
+loadRuntimeConfigSnapshot =
+    RuntimeConfigSnapshot
+        <$> isSlackEnabled
+        <*> isK8sEnabled
+        <*> isWatcherEnabled
+        <*> isApproveAllReleases
+        <*> isScaleDownPodsOnCompletion
+        <*> isGcltEnabled
+        <*> isPromQueryCheckEnabled
+        <*> isSyncClusterEnabled
+        <*> isMultiReleasePerProduct
+        <*> getReleaseWatchDelay
+        <*> getReleaseStartDelay
+        <*> getCollectMetricsDelay
+        <*> getPodsCreationDelay
+        <*> getPodsScaleDownDelayFromConfig
+        <*> getPodsCalculationFactor
+        <*> getHpaMinMaxFactor
+        <*> getMaxJobCompletionHours
+        <*> getRevertCooloff
+        <*> getLockExpiryDelayMinutes
+        <*> getMaxK8sRetries
+        <*> getHpaTemplate

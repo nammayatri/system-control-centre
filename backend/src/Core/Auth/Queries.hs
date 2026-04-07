@@ -2,7 +2,6 @@
 {-# LANGUAGE RecordWildCards #-}
 
 module Core.Auth.Queries (
-    -- Polymorphic (MonadFlow) wrappers — preferred
     findPersonByEmail,
     findPersonById,
     findTokenByValue,
@@ -12,14 +11,6 @@ module Core.Auth.Queries (
     findProductAccessForPerson,
     computeEffectivePermissions,
     findAllProductsForPerson,
-    -- IO versions (kept for IO callers like Servant DelayedIO)
-    findTokenByValue_io,
-    insertToken_io,
-    deactivateToken_io,
-    deactivateTokensByPerson_io,
-    findProductAccessForPerson_io,
-    computeEffectivePermissions_io,
-    findAllProductsForPerson_io,
     TokenRow (..),
 )
 where
@@ -105,8 +96,8 @@ toTokenRow ScRegistrationTokenT{..} =
         , trExpiresAt = srtExpiresAt
         }
 
-findTokenByValue_io :: DBEnv -> Text -> IO (Maybe TokenRow)
-findTokenByValue_io db tok = do
+findTokenByValue :: (MonadFlow m) => Text -> m (Maybe TokenRow)
+findTokenByValue tok = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -118,11 +109,8 @@ findTokenByValue_io db tok = do
         [t] -> Just (toTokenRow t)
         _ -> Nothing
 
-findTokenByValue :: (MonadFlow m) => Text -> m (Maybe TokenRow)
-findTokenByValue tok = withDb $ \db -> findTokenByValue_io db tok
-
-insertToken_io :: DBEnv -> UUID -> Text -> UTCTime -> IO ()
-insertToken_io db personId tok expiresAt =
+insertToken :: (MonadFlow m) => UUID -> Text -> UTCTime -> m ()
+insertToken personId tok expiresAt = withDb $ \db ->
     runDB db $
         runInsert $
             insert (scRegistrationToken coreDb) $
@@ -137,11 +125,8 @@ insertToken_io db personId tok expiresAt =
                         }
                     ]
 
-insertToken :: (MonadFlow m) => UUID -> Text -> UTCTime -> m ()
-insertToken personId tok expiresAt = withDb $ \db -> insertToken_io db personId tok expiresAt
-
-deactivateToken_io :: DBEnv -> Text -> IO ()
-deactivateToken_io db tok =
+deactivateToken :: (MonadFlow m) => Text -> m ()
+deactivateToken tok = withDb $ \db ->
     runDB db $
         runUpdate $
             update
@@ -149,20 +134,14 @@ deactivateToken_io db tok =
                 (\t -> srtIsActive t <-. val_ False)
                 (\t -> srtToken t ==. val_ tok)
 
-deactivateToken :: (MonadFlow m) => Text -> m ()
-deactivateToken tok = withDb $ \db -> deactivateToken_io db tok
-
-deactivateTokensByPerson_io :: DBEnv -> UUID -> IO ()
-deactivateTokensByPerson_io db pid =
+deactivateTokensByPerson :: (MonadFlow m) => UUID -> m ()
+deactivateTokensByPerson pid = withDb $ \db ->
     runDB db $
         runUpdate $
             update
                 (scRegistrationToken coreDb)
                 (\t -> srtIsActive t <-. val_ False)
                 (\t -> srtPersonId t ==. val_ pid)
-
-deactivateTokensByPerson :: (MonadFlow m) => UUID -> m ()
-deactivateTokensByPerson pid = withDb $ \db -> deactivateTokensByPerson_io db pid
 
 -- ── Product Access (JOIN query — kept as raw SQL) ──────────────────
 
@@ -178,8 +157,9 @@ data ProductAccessRow = ProductAccessRow
 instance FromRow ProductAccessRow where
     fromRow = ProductAccessRow <$> field <*> field <*> field <*> field <*> field
 
-findProductAccessForPerson_io :: DBEnv -> UUID -> IO [ProductAccess]
-findProductAccessForPerson_io db pid = withConn db $ \conn -> do
+-- | Internal IO helper used by computeEffectivePermissions / findAllProductsForPerson.
+findProductAccessForPersonIO :: DBEnv -> UUID -> IO [ProductAccess]
+findProductAccessForPersonIO db pid = withConn db $ \conn -> do
     rows <-
         query
             conn
@@ -196,7 +176,7 @@ findProductAccessForPerson_io db pid = withConn db $ \conn -> do
             rows
 
 findProductAccessForPerson :: (MonadFlow m) => UUID -> m [ProductAccess]
-findProductAccessForPerson pid = withDb $ \db -> findProductAccessForPerson_io db pid
+findProductAccessForPerson pid = withDb $ \db -> findProductAccessForPersonIO db pid
 
 -- ── Permission Computation (uses code-derived defaults) ─────────────
 
@@ -205,24 +185,21 @@ System roles: permissions derived from Haskell ADTs via defaultPermissionsText
 Custom roles: permissions from sc_role.permissions TEXT[] column
 Then apply GRANT/DENY overrides from sc_person_permission_override
 -}
-computeEffectivePermissions_io :: DBEnv -> PersonAuth -> Text -> UUID -> IO [Text]
-computeEffectivePermissions_io db person productSlug roleId = do
+computeEffectivePermissionsIO :: DBEnv -> PersonAuth -> Text -> UUID -> IO [Text]
+computeEffectivePermissionsIO db person productSlug roleId = do
     if personIsSuperadmin person
-        then pure $ allPermissionsText productSlug -- superadmin gets all (from code)
+        then pure $ allPermissionsText productSlug
         else do
-            -- Get role info
             basePerms <- getRolePermissions db productSlug roleId
-            -- Get overrides
             grants <- findGrantOverrides db (personId person) productSlug
             denies <- findDenyOverrides db (personId person) productSlug
-            -- Compute: base + GRANTs - DENYs
             let combined = basePerms ++ filter (`notElem` basePerms) grants
                 effective = filter (`notElem` denies) combined
             pure effective
 
 computeEffectivePermissions :: (MonadFlow m) => PersonAuth -> Text -> UUID -> m [Text]
 computeEffectivePermissions person productSlug roleId =
-    withDb $ \db -> computeEffectivePermissions_io db person productSlug roleId
+    withDb $ \db -> computeEffectivePermissionsIO db person productSlug roleId
 
 -- | Get permissions for a role (PGArray — kept as raw SQL).
 getRolePermissions :: DBEnv -> Text -> UUID -> IO [Text]
@@ -276,15 +253,12 @@ findDenyOverrides db pid productSlug = do
 
 -- ── All products for person ────────────────────────────────────────
 
-findAllProductsForPerson_io :: DBEnv -> PersonAuth -> IO [PersonProductPerms]
-findAllProductsForPerson_io db person = do
-    accesses <- findProductAccessForPerson_io db (personId person)
+findAllProductsForPerson :: (MonadFlow m) => PersonAuth -> m [PersonProductPerms]
+findAllProductsForPerson person = withDb $ \db -> do
+    accesses <- findProductAccessForPersonIO db (personId person)
     mapM
         ( \pa -> do
-            perms <- computeEffectivePermissions_io db person (paProductSlug pa) (paRoleId pa)
+            perms <- computeEffectivePermissionsIO db person (paProductSlug pa) (paRoleId pa)
             pure $ PersonProductPerms (paProductSlug pa) (paRoleName pa) perms
         )
         accesses
-
-findAllProductsForPerson :: (MonadFlow m) => PersonAuth -> m [PersonProductPerms]
-findAllProductsForPerson person = withDb $ \db -> findAllProductsForPerson_io db person

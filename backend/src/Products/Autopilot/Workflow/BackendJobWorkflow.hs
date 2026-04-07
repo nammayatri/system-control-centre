@@ -14,7 +14,6 @@ module Products.Autopilot.Workflow.BackendJobWorkflow (
 )
 where
 
-import Control.Concurrent (threadDelay)
 import Control.Exception (throwIO)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
@@ -22,6 +21,7 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
+import Core.Types.Time (threadDelaySec)
 import Core.Utils.FlowMonad (getConfig, logError, logInfo)
 import Data.Aeson (Value (..))
 import qualified Data.Aeson as A
@@ -49,6 +49,7 @@ import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers (
     getRT,
     updateRT,
+    withK8sContext,
     (|>>),
  )
 import Products.Autopilot.Workflow.Types (
@@ -87,11 +88,7 @@ logErrorS = lift . logError
 
 -- | Extract K8sReleaseContext from the current workflow state
 getK8sCtx :: StateFlow K8sReleaseContext
-getK8sCtx = do
-    rs <- gets id
-    case targetState rs of
-        Just (K8sState k8s) -> pure (context k8s)
-        _ -> liftIO $ throwIO $ WorkflowError "init" "Missing K8sState in targetState"
+getK8sCtx = withK8sContext
 
 -- | Run an IO action that returns Either K8sError, lifting into StateFlow
 runK8sIO :: IO (Either K8sError a) -> StateFlow a
@@ -267,11 +264,11 @@ pollJobStatus cfg getJobCmd maxPolls currentPoll = do
                             -- Mark as aborted
                             updateRT $ \r -> r{status = ABORTED}
                             rt <- getRT
-                            notifyReleaseAborted rt
+                            lift $ notifyReleaseAborted rt
                             liftIO $ throwIO $ WorkflowError "wait" ("Job failed: backoff limit exceeded (failed=" <> T.pack (show failed) <> ")")
                         else do
                             -- Still running, wait and poll again
-                            liftIO $ threadDelay 10000000 -- 10 seconds
+                            liftIO $ threadDelaySec 10
                             pollJobStatus cfg getJobCmd maxPolls (currentPoll + 1)
 
 -- | Parse job status JSON to extract succeeded, failed, backoffLimit
@@ -318,7 +315,7 @@ notifyComplete = do
             updateRT $ \r -> r{status = COMPLETED}
 
             -- Notify Slack
-            notifyReleaseCompleted rt
+            lift $ notifyReleaseCompleted rt
 
 -- ============================================================================
 -- K8s State Helpers
