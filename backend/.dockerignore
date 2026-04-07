@@ -1,3 +1,31 @@
+# Build artifacts
 dist-newstyle
 .stack-work
+
+# Local state
+.local
 .env
+.env.local
+.envrc
+
+# Editor / VCS
+.git
+.github
+.vscode
+.idea
+*.swp
+*.swo
+
+# Nix
+result
+result-*
+flake.lock
+
+# Logs
+*.log
+
+# Dhall configs are NOT baked into the runtime image (matches NammaYatri's
+# pattern). Production mounts a real dhall file at runtime via k8s Secret.
+# Excluded from the build context entirely so a developer's local
+# secrets.dhall can never leak into the image.
+dhall-configs/

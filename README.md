@@ -171,6 +171,202 @@ To reset the DB: `rm -rf backend/.local/data/pg && sc-dev`
 
 This is the superadmin account with full access to all products and admin operations.
 
+## Docker
+
+Both services build into standalone `linux/amd64` images and deploy independently. The local dev workflow is `nix run .#dev` — Docker is for production / staging / anywhere nix isn't available.
+
+### Frontend image
+
+`VITE_*` env vars are baked into the JS bundle at build time. Build a separate image per environment with the right `--build-arg` values. The defaults match local dev so an unconfigured `docker build` still produces a runnable image.
+
+| Build arg | Default | Purpose |
+|---|---|---|
+| `VITE_API_BASE_URL` | `http://localhost:8012` | Backend URL |
+| `VITE_AUTH_API_BASE_URL` | *(empty)* | Auth URL — empty falls back to `VITE_API_BASE_URL` |
+| `VITE_DEFAULT_ENV` | `UAT` | Initial env in the env switcher |
+| `VITE_AVAILABLE_ENVS` | `UAT,PROD,INTEG_CLUSTER` | Comma-separated list shown in switcher |
+
+```bash
+# UAT build
+cd frontend
+docker build --platform=linux/amd64 \
+  --build-arg VITE_API_BASE_URL=https://api.uat.example.com \
+  --build-arg VITE_DEFAULT_ENV=UAT \
+  --build-arg VITE_AVAILABLE_ENVS=UAT,PROD,INTEG_CLUSTER \
+  -t scc-frontend:uat .
+
+# PROD build
+docker build --platform=linux/amd64 \
+  --build-arg VITE_API_BASE_URL=https://api.example.com \
+  --build-arg VITE_DEFAULT_ENV=PROD \
+  --build-arg VITE_AVAILABLE_ENVS=PROD \
+  -t scc-frontend:prod .
+
+# Run locally
+docker run --platform=linux/amd64 -p 8080:80 scc-frontend:uat
+# → http://localhost:8080
+```
+
+The image is nginx-1.27-alpine serving the static `dist/` output. Includes:
+- SPA fallback to `/index.html` for React Router
+- gzip + long-cache for hashed `/assets/`
+- `/healthz` endpoint for k8s/docker probes
+- Final image ~50 MB
+
+### Backend image
+
+The backend is a Haskell binary built with GHC 9.2.7 (matches the nix-flake dev toolchain). The image bundles `kubectl`, `dhall-to-json`, `tini` for PID 1 / signal handling, runs as non-root user `namma:1001`, and ships the seed SQL + migrations so you can bootstrap a fresh DB from inside the container.
+
+**The image is environment-agnostic** — no `dhall-configs/` and no secrets are baked in. Production provides the dhall config file at runtime via a mounted volume (matches NammaYatri's `<APPNAME>_CONFIG_PATH` pattern).
+
+```bash
+cd backend
+docker build --platform=linux/amd64 -t scc-backend:latest .
+```
+
+| Env var | Required | Purpose |
+|---|---|---|
+| `SC_CONFIG_PATH` | yes | Path to the dhall config file (e.g., a mounted k8s Secret) |
+| `SC_DATABASE_URL` | yes | Postgres connection string (or set `SC_POSTGRES_*` individually) |
+| `APP_STATE` | no (default `SERVER`) | `SERVER` runs HTTP + runner; `RUNNER` runs only the worker |
+| `PORT` | no (default `8012`) | HTTP listen port |
+| `SLACK_BOT_TOKEN` | no | Slack bot token for release notifications |
+| `DASHBOARD_URL` | no | Frontend URL embedded in Slack messages |
+| `SC_KUBECTL_BIN` | no (default `kubectl`) | Path to kubectl binary inside the container |
+| `SYNC_CLUSTER_URL` / `SYNC_CLUSTER_BASE_AUTH` | no | Secondary cluster sync endpoint + basic auth |
+
+The first run on a fresh DB needs schema bootstrap. Either:
+1. Mount the host's `dev/sql-seed/` and `dev/migrations/system-control/` into the postgres init dir, OR
+2. Exec into the container and run the bundled SQL files manually:
+   ```bash
+   docker exec -it scc-backend sh -c 'psql "$SC_DATABASE_URL" -f /srv/namma-ap/dev/sql-seed/system-control-seed.sql'
+   ```
+
+Final image ~280 MB.
+
+### Production deployment (Kubernetes)
+
+The dhall config file lives outside the image and gets mounted at runtime via a k8s `Secret` (encrypted at rest, audit-logged on read). Same image runs in UAT/staging/PROD — only the mounted Secret and the env vars change.
+
+**Step 1**: Create a Secret with the production dhall content. The dhall file can have inline values or reference other env vars via `env:VARNAME as Text`.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: scc-dhall
+type: Opaque
+stringData:
+  system-control.dhall: |
+    let LogLevel = < DEBUG | INFO | WARN | ERROR >
+    in  { loggerCfg =
+            { level = LogLevel.INFO
+            , logToFile = True
+            , logToConsole = True
+            , logFilePath = "/var/log/scc.log"
+            , prettyPrinting = False
+            }
+        }
+```
+
+**Step 2**: Create a Secret with bootstrap env values (DB URL, Slack token, etc.). These are read directly by the Haskell binary — no dhall involved for these.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: scc-secrets
+type: Opaque
+stringData:
+  SC_DATABASE_URL: "postgres://scc:strong-password@scc-pg.svc:5432/system_control?sslmode=require"
+  SLACK_BOT_TOKEN: "xoxb-real-token"
+  SYNC_CLUSTER_BASE_AUTH: "Basic dXNlcjpwYXNz"
+```
+
+**Step 3**: Wire it into the Deployment. The dhall Secret is mounted as a file; the bootstrap Secret is mapped onto env vars.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scc-backend
+spec:
+  replicas: 1                        # singleton: the runner takes a per-tracker DB lock
+  selector: { matchLabels: { app: scc-backend } }
+  template:
+    metadata: { labels: { app: scc-backend } }
+    spec:
+      containers:
+        - name: scc-backend
+          image: ghcr.io/your-org/scc-backend:1.0.0
+          ports: [{ containerPort: 8012 }]
+
+          env:
+            - { name: APP_STATE,    value: SERVER }
+            - { name: PORT,         value: "8012" }
+            - { name: SC_ENV,       value: production }
+            - { name: SC_CONFIG_PATH, value: /etc/scc/system-control.dhall }
+            - { name: DASHBOARD_URL,  value: https://scc.example.com }
+
+          # Real secrets — every key in scc-secrets becomes an env var
+          envFrom:
+            - secretRef: { name: scc-secrets }
+
+          # Mount the production dhall file at the path SC_CONFIG_PATH points to
+          volumeMounts:
+            - name: scc-dhall
+              mountPath: /etc/scc/system-control.dhall
+              subPath: system-control.dhall
+              readOnly: true
+
+          readinessProbe:
+            tcpSocket: { port: 8012 }
+            initialDelaySeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 8012 }
+            initialDelaySeconds: 30
+
+      volumes:
+        - name: scc-dhall
+          secret:
+            secretName: scc-dhall
+            items:
+              - key: system-control.dhall
+                path: system-control.dhall
+```
+
+**Why this pattern**:
+
+- **One image, many environments** — the same `scc-backend:1.0.0` image is what runs in UAT, staging, and prod. Only the mounted Secret changes.
+- **No secrets in the image** — `dhall-configs/` is `.dockerignore`d, so a developer's local `secrets.dhall` can never accidentally leak into a published image.
+- **Native k8s rotation** — `kubectl rollout restart deployment/scc-backend` after editing the Secret rotates secrets without rebuilding anything.
+- **Audit trail** — `kubectl describe secret scc-dhall` shows when the Secret was last updated and by whom (with audit logging enabled).
+- **Matches NammaYatri** — same `<APPNAME>_CONFIG_PATH` env-var-driven pattern used across NY's 50+ services.
+
+### Local Docker run (without k8s)
+
+For a quick smoke test of the production image on your laptop, mount a dev dhall file from disk:
+
+```bash
+docker run --platform=linux/amd64 -p 8012:8012 \
+  -e SC_DATABASE_URL='postgres://postgres:postgres@host.docker.internal:5434/system_control' \
+  -e SC_CONFIG_PATH='/etc/scc/system-control.dhall' \
+  -e SLACK_BOT_TOKEN='xoxb-...' \
+  -v "$PWD/backend/dhall-configs/system-control.dhall:/etc/scc/system-control.dhall:ro" \
+  scc-backend:latest
+```
+
+### Build for both at once
+
+```bash
+docker build --platform=linux/amd64 -t scc-backend:latest backend/
+docker build --platform=linux/amd64 \
+  --build-arg VITE_API_BASE_URL=https://api.example.com \
+  -t scc-frontend:latest frontend/
+```
+
+Push to ECR / GCR / Docker Hub and deploy on ECS / Cloud Run / Kubernetes / Nomad / etc. The two services are fully independent — no shared state, no docker-compose required.
+
 ## RBAC System
 
 ### How It Works

@@ -1,4 +1,19 @@
 node_modules
 dist
-.git
 .vite
+
+# Editor / VCS
+.git
+.github
+.vscode
+.idea
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local env
+.env
+.env.local
+.env.*.local

@@ -6,6 +6,16 @@
 - Products + permissions derived from Haskell ADTs (not DB)
 - Each product is fully self-contained -- owns its tables, types, queries, logic
 
+## Common modules (use these — every product should reuse them)
+- `Core.Types.Id`         — `Id Person`, `Id Release`, etc. Phantom-typed Text (Show/JSON/HttpApi/SQL all derived)
+- `Core.Types.Time`       — `Seconds`, `Minutes`, `Hours`, `Days` + `threadDelay (Seconds 5)` instead of `threadDelay 5_000_000`
+- `Core.Http.Client`      — pooled `http-client` Manager + retry + timeout. Use `httpJson`/`httpRaw` instead of spawning curl
+- `Core.Logging`          — `logInfoG`/`logErrorG` (global, write to file+console) + `withLogTag` for context propagation
+- `Core.AppM`             — typeclass-driven monad (`MonadDB`, `MonadLog`, `MonadAppConfig`) + `forkAppM` for context-preserving forks
+- `Core.AppError`         — `ToAppError` typeclass, `APIError`/`AuthError`/`DBError`/`WorkflowError` hierarchy, JSON error envelopes
+- `Core.Auth.Protected`   — type-level RBAC Servant combinator (`Protected 'AP_RELEASE_VIEW`)
+- `Shared.API.Response`   — `APISuccess` (preferred for action endpoints) + legacy `APIResponse`
+
 ## Local Setup
 
 ### Quick Start (one command)
