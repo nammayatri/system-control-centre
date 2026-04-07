@@ -76,7 +76,21 @@ getProductConfigH _ap pid = do
         Just p -> pure $ toJSON (toProductConfigResponse p)
 
 updateProductConfigH :: AuthedPerson -> Int32 -> UpsertProductReq -> Flow APIResponse
-updateProductConfigH ap pathId req = upsertProductH ap (req{Products.Autopilot.Types.API.id = Just pathId})
+updateProductConfigH ap pathId UpsertProductReq{appGroup = appGroup', cluster = cluster', namespace = namespace', vsName = vsName', productType = productType', productAcronym = productAcronym', syncCluster = syncCluster', needInfraApproval = needInfraApproval', slackChannel = slackChannel'} =
+    upsertProductH
+        ap
+        UpsertProductReq
+            { id = Just pathId
+            , appGroup = appGroup'
+            , cluster = cluster'
+            , namespace = namespace'
+            , vsName = vsName'
+            , productType = productType'
+            , productAcronym = productAcronym'
+            , syncCluster = syncCluster'
+            , needInfraApproval = needInfraApproval'
+            , slackChannel = slackChannel'
+            }
 
 deleteProductConfigH :: AuthedPerson -> Int32 -> Flow APIResponse
 deleteProductConfigH _ap pid = do

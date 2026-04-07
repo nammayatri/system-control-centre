@@ -79,7 +79,6 @@ getConfigMapH _ap cmId' = do
 
 createConfigMapH :: AuthedPerson -> Value -> Flow APIResponse
 createConfigMapH _ap body = do
-    db <- getDBEnv
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     case extractCmFields body of
         Left err -> pure $ APIResponse "ERROR" err
@@ -209,7 +208,7 @@ updateConfigMapH _ap cmId' body = do
                     Object obj -> getStrM "status" obj == Just "revert"
                     _ -> False
             if isRevert
-                then handleConfigMapRevert db rt mts cmId'
+                then handleConfigMapRevert rt mts cmId'
                 else do
                     let updated = applyCmUpdates rt body
                     insertReleaseTracker updated mts
@@ -259,8 +258,8 @@ restoreOriginalOnRevertCancel _db rt = do
         _ -> pure ()
 
 -- | Handle revert by creating a new tracker with old config data
-handleConfigMapRevert :: DBEnv -> ReleaseTracker -> Maybe TargetState -> Text -> Flow APIResponse
-handleConfigMapRevert db rt mts cmId' = do
+handleConfigMapRevert :: ReleaseTracker -> Maybe TargetState -> Text -> Flow APIResponse
+handleConfigMapRevert rt mts cmId' = do
     events <- listReleaseEvents cmId'
     let mBeforeSnap = find (\e -> S.reCategory e == "SNAPSHOT" && S.reLabel e == "CONFIGMAP_BEFORE") events
     case mBeforeSnap of

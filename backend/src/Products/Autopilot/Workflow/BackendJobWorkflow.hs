@@ -22,8 +22,7 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
-import Core.Environment (DBEnv)
-import Core.Utils.FlowMonad (getConfig, getDBEnv, logError, logInfo)
+import Core.Utils.FlowMonad (getConfig, logError, logInfo)
 import Data.Aeson (Value (..))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -78,10 +77,6 @@ backendJobWorkflow = do
 -- | Get bootstrap config from the Flow (ReaderT) environment
 getCfg :: StateFlow Config
 getCfg = lift getConfig
-
--- | Get DBEnv from the Flow (ReaderT) environment
-getDB :: StateFlow DBEnv
-getDB = lift getDBEnv
 
 -- | StateFlow-level logging
 logInfoS :: T.Text -> StateFlow ()
@@ -271,7 +266,6 @@ pollJobStatus cfg getJobCmd maxPolls currentPoll = do
                             logErrorS "  Job FAILED: exceeded backoff limit"
                             -- Mark as aborted
                             updateRT $ \r -> r{status = ABORTED}
-                            db <- getDB
                             rt <- getRT
                             notifyReleaseAborted rt
                             liftIO $ throwIO $ WorkflowError "wait" ("Job failed: backoff limit exceeded (failed=" <> T.pack (show failed) <> ")")
@@ -309,7 +303,6 @@ parseJobStatus jsonText =
 notifyComplete :: StateFlow ()
 notifyComplete = do
     rt <- getRT
-    db <- getDB
     updateK8sStatus BSDone
 
     -- Check if job was already marked as aborted

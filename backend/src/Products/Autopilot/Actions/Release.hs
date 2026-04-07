@@ -91,9 +91,9 @@ import Shared.API.Response (APIResponse (..))
 -- ============================================================================
 
 upsertProductH :: AuthedPerson -> UpsertProductReq -> Flow APIResponse
-upsertProductH _ap req@UpsertProductReq{..} = do
+upsertProductH _ap req = do
     let rowId = fromMaybe 0 (req.id)
-    upsertProduct rowId appGroup cluster namespace vsName productType productAcronym syncCluster needInfraApproval slackChannel
+    upsertProduct rowId req.appGroup req.cluster req.namespace req.vsName req.productType req.productAcronym req.syncCluster req.needInfraApproval req.slackChannel
     pure $ APIResponse "SUCCESS" "product_config upserted"
 
 listProductsH :: AuthedPerson -> Flow [ProductResponse]
@@ -173,9 +173,9 @@ listServicesH _ap productName' = do
                             | otherwise -> pure $ map toResponse hosts
 
 upsertServiceH :: AuthedPerson -> UpsertServiceReq -> Flow APIResponse
-upsertServiceH _ap req@UpsertServiceReq{..} = do
+upsertServiceH _ap req = do
     let rowId = fromMaybe 0 (req.id)
-    upsertService rowId rolloutStrategyText decisionConfigText service appGroup serviceType serviceHost revertStrategyText
+    upsertService rowId req.rolloutStrategyText req.decisionConfigText req.service req.appGroup req.serviceType req.serviceHost req.revertStrategyText
     pure $ APIResponse "SUCCESS" "release_config upserted"
 
 -- ============================================================================
@@ -218,7 +218,6 @@ createReleaseH _ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = 
 createReleaseHBody :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseHBody mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
     cfg <- getConfig
-    db <- getDBEnv
     p <- findProductByName appGroup
     s <- findServiceByProductAndName appGroup service
     case (p, s) of
@@ -411,13 +410,11 @@ createReleaseHBody mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
 
 getReleaseH :: AuthedPerson -> Text -> Flow (Maybe ReleaseTracker)
 getReleaseH _ap rid = do
-    db <- getDBEnv
     m <- findReleaseTracker rid
     pure (fmap fst m)
 
 approveReleaseH :: AuthedPerson -> Text -> ApproveReleaseReq -> Flow (Maybe ReleaseTracker)
 approveReleaseH _ap rid req = do
-    db <- getDBEnv
     m <- findReleaseTracker rid
     case m of
         Nothing -> pure Nothing
@@ -441,7 +438,6 @@ approveReleaseH _ap rid req = do
 
 triggerReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
 triggerReleaseH _ap rid TriggerReleaseReq{..} = do
-    db <- getDBEnv
     m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
@@ -461,7 +457,6 @@ triggerReleaseH _ap rid TriggerReleaseReq{..} = do
 
 rollbackReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
 rollbackReleaseH _ap rid TriggerReleaseReq{..} = do
-    db <- getDBEnv
     m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
@@ -481,7 +476,6 @@ rollbackReleaseH _ap rid TriggerReleaseReq{..} = do
 revertReleaseH :: AuthedPerson -> Text -> RevertReleaseReq -> Flow APIResponse
 revertReleaseH _ap rid req = do
     cfg <- getConfig
-    db <- getDBEnv
     m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
@@ -583,7 +577,6 @@ immediateRevertByGlobalIdH ap gid = do
 
 discardReleaseH :: AuthedPerson -> Text -> DiscardReleaseReq -> Flow APIResponse
 discardReleaseH _ap rid DiscardReleaseReq{..} = do
-    db <- getDBEnv
     m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
@@ -621,7 +614,6 @@ deleteReleaseH _ap rid = do
 
 updateTrackerH :: AuthedPerson -> Text -> K8sUpdateTrackerReq -> Flow APIResponse
 updateTrackerH _ap rid req = do
-    db <- getDBEnv
     m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
@@ -843,10 +835,10 @@ applyUpdates tracker mts req =
             Just u -> t13{NT.slackThreadTs = Just u}
             Nothing -> t13
         ts1 = case req.dockerImage of
-            Just img -> updateK8sContext mts (\ctx -> ctx{dockerImage = Just img})
+            Just img -> updateK8sContext mts (\ctx -> ctx{K8s.dockerImage = Just img})
             Nothing -> mts
         ts2 = case req.podsScaleDownDelay of
-            Just d -> updateK8sContext ts1 (\ctx -> ctx{podsScaleDownDelay = Just d})
+            Just d -> updateK8sContext ts1 (\ctx -> ctx{K8s.podsScaleDownDelay = Just d})
             Nothing -> ts1
      in (t14, ts2)
 
@@ -1101,9 +1093,8 @@ getTxt' key obj = case KM.lookup (K.fromText key) obj of Just (String t) -> Just
 -- ============================================================================
 
 immediateRevertH :: AuthedPerson -> Text -> ImmediateRevertReq -> Flow APIResponse
-immediateRevertH _ap rid req = do
+immediateRevertH _ap rid req@ImmediateRevertReq{isRevertSync = mIsRevertSync} = do
     cfg <- getConfig
-    db <- getDBEnv
     m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
@@ -1141,7 +1132,7 @@ immediateRevertH _ap rid req = do
                                     insertReleaseEvent rid "BUSINESS" "IMMEDIATE_REVERT" (object ["requestedBy" .= (req :: ImmediateRevertReq).requestedBy, "info" .= (req :: ImmediateRevertReq).info])
                                     notifyImmediateReverted updated
                                     -- Step 4: Optionally trigger sync revert
-                                    let shouldSync = fromMaybe False (isRevertSync (req :: ImmediateRevertReq))
+                                    let shouldSync = fromMaybe False mIsRevertSync
                                     when shouldSync $
                                         triggerImmediateRevertSync tracker mTargetState
                                     pure $ APIResponse "SUCCESS" "Immediate revert: image swapped + pods restarting"
@@ -1152,7 +1143,6 @@ immediateRevertH _ap rid req = do
 
 restartReleaseH :: AuthedPerson -> Text -> RestartReleaseReq -> Flow APIResponse
 restartReleaseH _ap rid req = do
-    db <- getDBEnv
     m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
@@ -1191,7 +1181,6 @@ restartReleaseH _ap rid req = do
 
 fastForwardH :: AuthedPerson -> Text -> FastForwardReq -> Flow APIResponse
 fastForwardH _ap rid req = do
-    db <- getDBEnv
     m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"

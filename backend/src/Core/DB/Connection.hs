@@ -8,13 +8,13 @@ where
 import Core.Config (Config (..))
 import Core.Environment (DBEnv (..))
 import qualified Data.ByteString.Char8 as BS
-import Data.Pool (createPool, withResource)
+import Data.Pool (defaultPoolConfig, newPool, withResource)
 import Database.Beam.Postgres (Pg, runBeamPostgres)
 import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 
 mkDBEnv :: Config -> IO DBEnv
 mkDBEnv cfg = do
-    pool <- createPool (connectPostgreSQL (mkConnString cfg)) close 4 30 20
+    pool <- newPool $ defaultPoolConfig (connectPostgreSQL (mkConnString cfg)) close 30 20
     pure (DBEnv pool)
 
 runDB :: DBEnv -> Pg a -> IO a

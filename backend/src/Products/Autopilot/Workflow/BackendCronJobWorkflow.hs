@@ -21,8 +21,7 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
-import Core.Environment (DBEnv)
-import Core.Utils.FlowMonad (getConfig, getDBEnv, logInfo)
+import Core.Utils.FlowMonad (getConfig, logInfo)
 import qualified Data.Text as T
 import Products.Autopilot.K8s.Execute (K8sError (..), runCmd)
 import Products.Autopilot.Notifications (
@@ -71,10 +70,6 @@ backendCronJobWorkflow = do
 -- | Get bootstrap config from the Flow (ReaderT) environment
 getCfg :: StateFlow Config
 getCfg = lift getConfig
-
--- | Get DBEnv from the Flow (ReaderT) environment
-getDB :: StateFlow DBEnv
-getDB = lift getDBEnv
 
 -- | StateFlow-level logging (lifts from Flow)
 logInfoS :: T.Text -> StateFlow ()
@@ -236,7 +231,6 @@ handleCronJobSuspend = do
 notifyComplete :: StateFlow ()
 notifyComplete = do
     rt <- getRT
-    db <- getDB
     updateK8sStatus BSDone
 
     logInfoS $ "Release " <> releaseId rt <> " completed successfully!"

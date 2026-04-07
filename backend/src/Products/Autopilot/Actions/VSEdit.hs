@@ -21,7 +21,7 @@ import Control.Monad.IO.Class (liftIO)
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
 import Core.Logging (logInfoG)
-import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
+import Core.Utils.FlowMonad (Flow, getConfig)
 import Data.Aeson (Value (..), eitherDecode, object, toJSON, (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.List (find)
@@ -136,7 +136,6 @@ mkVsEditRow tid product' service' env' vsName' _oldVsData' createdBy' status' no
 
 createVsEditTrackerH :: AuthedPerson -> CreateVsEditTrackerReq -> Flow Value
 createVsEditTrackerH _ap CreateVsEditTrackerReq{..} = do
-    db <- getDBEnv
     now <- liftIO getCurrentTime
     tid <- liftIO (UUID.toText <$> UUID.nextRandom)
     -- Atomically acquire VS lock. The UPDATE inside tryAcquireVsLock treats a
@@ -187,7 +186,6 @@ createVsEditTrackerH _ap CreateVsEditTrackerReq{..} = do
 
 listVsEditTrackersH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow [VsEditTrackerResponse]
 listVsEditTrackersH _ap mFrom mTo = do
-    db <- getDBEnv
     let tryParse t = case parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" (T.unpack t) of
             Just v -> Just v
             Nothing -> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q%z" (T.unpack t)
@@ -198,7 +196,6 @@ listVsEditTrackersH _ap mFrom mTo = do
 
 getVsEditTrackerH :: AuthedPerson -> Text -> Flow Value
 getVsEditTrackerH _ap tid = do
-    db <- getDBEnv
     m <- findVsEditTrackerRowById tid
     case m of
         Nothing -> pure $ toJSON $ ErrorResponse "VS edit tracker not found" Nothing
@@ -208,7 +205,6 @@ getVsEditTrackerH _ap tid = do
 
 updateVsEditTrackerH :: AuthedPerson -> Text -> UpdateVsEditTrackerReq -> Flow APIResponse
 updateVsEditTrackerH _ap tid UpdateVsEditTrackerReq{..} = do
-    db <- getDBEnv
     cfg <- getConfig
     now <- liftIO getCurrentTime
     m <- findVsEditTrackerRowById tid
@@ -309,7 +305,6 @@ updateVsEditTrackerH _ap tid UpdateVsEditTrackerReq{..} = do
 
 lockVsEditTrackerH :: AuthedPerson -> VsLockReq -> Flow APIResponse
 lockVsEditTrackerH _ap VsLockReq{..} = do
-    db <- getDBEnv
     cfg <- getConfig
     now <- liftIO getCurrentTime
     -- Resolve vsName from deployment_config if not provided
@@ -364,7 +359,6 @@ check. Callers in that situation must use the superadmin force-unlock.
 -}
 unlockVsEditTrackerH :: AuthedPerson -> VsUnlockReq -> Flow APIResponse
 unlockVsEditTrackerH _ap VsUnlockReq{..} = do
-    db <- getDBEnv
     now <- liftIO getCurrentTime
     case trackerId of
         Just tid -> do
@@ -424,7 +418,6 @@ non-superadmin with no matching role will get a 403.
 -}
 forceUnlockVsEditTrackerH :: AuthedPerson -> VsUnlockReq -> Flow APIResponse
 forceUnlockVsEditTrackerH _ap VsUnlockReq{..} = do
-    db <- getDBEnv
     now <- liftIO getCurrentTime
     case trackerId of
         Just tid -> do
@@ -480,7 +473,6 @@ Uses the deployment_config's vs_name (e.g. "atlas-vs"), NOT the service name
 fetchCurrentVsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow Value
 fetchCurrentVsH _ap mProduct _mService = do
     cfg <- getConfig
-    db <- getDBEnv
     case mProduct of
         Just prod -> do
             mProdCfg <- findProductByNameAndCluster prod ""

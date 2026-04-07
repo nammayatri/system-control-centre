@@ -10,13 +10,12 @@ module Core.Admin.Routes (
 where
 
 import Control.Monad.Catch (throwM)
-import Control.Monad.IO.Class (liftIO)
 import Core.Admin.Queries
 import Core.Admin.Types
 import Core.AppError (APIError (..), AuthError (..))
 import Core.Auth.Queries (TokenRow (..), findAllProductsForPerson, findPersonById, findTokenByValue)
 import Core.Auth.Types (PersonAuth (..), PersonProductPerms (..))
-import Core.Utils.FlowMonad (Flow, getDBEnv)
+import Core.Utils.FlowMonad (Flow)
 import Data.Aeson (Value (..), object, (.=))
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM

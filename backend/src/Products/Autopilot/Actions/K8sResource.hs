@@ -15,7 +15,7 @@ import Core.Config (Config (..))
 import Core.Environment (logInfo)
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Types.Time (Seconds (..))
-import Core.Utils.FlowMonad (Flow, getConfig, getDBEnv)
+import Core.Utils.FlowMonad (Flow, getConfig)
 import Data.Aeson (Value (..), encode, object, (.=))
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as LBS
