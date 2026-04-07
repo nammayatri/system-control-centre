@@ -22,15 +22,15 @@ module Products.Autopilot.Workflow.BackendServiceWorkflow (
 )
 where
 
-import Control.Exception (throwIO)
 import Control.Applicative ((<|>))
+import qualified Control.Concurrent as CC
+import Control.Exception (throwIO)
 import Control.Monad (unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
-import qualified Control.Concurrent as CC
 import Core.Types.Time (Seconds (..), threadDelay)
 
 -- getPodsCalculationFactor reserved for future pod-count calculation
@@ -41,9 +41,9 @@ import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
+import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
-import qualified Data.Text as T
 
 -- (Data.ByteString.Lazy removed - not used after refactor)
 import qualified Data.Text.Encoding as TE
@@ -266,7 +266,8 @@ scaleNewDeploymentForStage cfg ctx routePct podPct = do
         ns = namespace ctx
     oldStatus <- liftIO $ getDeploymentReplicaStatus cfg ns oldDep
     newStatus <- liftIO $ getDeploymentReplicaStatus cfg ns newDep
-    let -- (ready, available, desired)
+    let
+        -- (ready, available, desired)
         (oldReady, _, oldDesired) = case oldStatus of
             Right tup -> tup
             Left _ -> (0, 0, 0)
@@ -394,8 +395,10 @@ runVsRolloutWithLock cfg ctx maxRetries oldW newW = do
     let lockOwner = "release:" <> releaseId rt
         delaysMs = [500, 1000, 2000, 4000, 8000] :: [Int]
         attempt remainingDelays = do
-            r <- withVsLock (appGroup rt) lockOwner $
-                liftIO $ applyVirtualServiceRolloutWithRetries maxRetries cfg ctx oldW newW
+            r <-
+                withVsLock (appGroup rt) lockOwner $
+                    liftIO $
+                        applyVirtualServiceRolloutWithRetries maxRetries cfg ctx oldW newW
             case r of
                 Left _ -> case remainingDelays of
                     [] -> pure r

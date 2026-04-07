@@ -22,7 +22,8 @@ import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson)
 import Core.Config (Config (..))
-import Core.Environment (Flow, getConfig)
+import Core.DB.Connection (withConn)
+import Core.Environment (Flow, getConfig, getDBEnv)
 import Core.Logging (logInfoG)
 import Data.Aeson (Value (..), eitherDecode, object, toJSON, (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
@@ -36,12 +37,10 @@ import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import qualified Data.Yaml as Yaml
+import qualified Database.PostgreSQL.Simple as PG
 import Products.Autopilot.K8s.Execute (K8sError (..), runCmd, shellQuote)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import Products.Autopilot.Notifications
-import Core.DB.Connection (withConn)
-import Core.Environment (getDBEnv)
-import qualified Database.PostgreSQL.Simple as PG
 import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductNamespace, getProductVsName, releaseVsLockIfOwner, tryAcquireVsLock, updateVsLockedBy)
 import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTrackerRow, insertReleaseEvent, insertReleaseTrackerRow, listReleaseEvents)
 import Products.Autopilot.Queries.VsEditTracker

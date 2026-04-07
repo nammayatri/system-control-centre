@@ -2,6 +2,7 @@
 
 module Products.Autopilot.Runner where
 
+import qualified Control.Concurrent as CC
 import qualified Control.Exception as E
 import Control.Monad (filterM, forM_, forever, when)
 import qualified Control.Monad.Catch as MC
@@ -19,7 +20,6 @@ import Data.Ord (Down (..), comparing)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
 import Products.Autopilot.EventLog (logStatusUpdated, logTrafficUpdatedWithMessage)
-import qualified Control.Concurrent as CC
 import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getDeploymentReplicaStatus)
 import Products.Autopilot.K8s.Execute (runCmd)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)

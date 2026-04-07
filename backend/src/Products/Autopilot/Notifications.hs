@@ -57,9 +57,9 @@ where
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Core.Environment (Flow, forkFlow)
-import Core.Types.Time (Seconds (..))
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Logging (logErrorG, logInfoG, logWarningG)
+import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value (..), decode, encode, object, (.=))
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM

@@ -41,8 +41,6 @@ module Products.Autopilot.Actions.Release (
 import Control.Applicative ((<|>))
 import Control.Monad (void, when)
 import Control.Monad.Catch (throwM, try)
-import Database.PostgreSQL.Simple (SqlError (..))
-import qualified Data.ByteString.Char8 as B
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..))
@@ -53,6 +51,7 @@ import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Char (isAlphaNum)
 import Data.List (find)
@@ -66,17 +65,17 @@ import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import qualified Data.Yaml as Yaml
-import Database.PostgreSQL.Simple (Only (..), execute, withTransaction)
+import Database.PostgreSQL.Simple (Only (..), SqlError (..), execute, withTransaction)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
 import Products.Autopilot.EventLog (logStatusUpdated)
 import Products.Autopilot.K8s.Deployment (deploymentExists)
-import Products.Autopilot.Runner (dispatchWorkflow)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Notifications
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.Queries.VsEditTracker ()
+import Products.Autopilot.Runner (dispatchWorkflow)
 import Products.Autopilot.RuntimeConfig (isApproveAllReleases, isUnderMaintenance)
 import Products.Autopilot.Sync (triggerImmediateRevertSync)
 import Products.Autopilot.Types
@@ -535,28 +534,29 @@ approveReleaseH _ap rid req = do
             -- Pre-check (cheap, friendly errors)
             if NT.status tracker /= CREATED
                 then throwM $ BadRequest ("Cannot approve release in status " <> T.pack (show (NT.status tracker)) <> ". Only CREATED releases can be approved.")
-                else if NT.isApproved tracker
-                    then throwM $ BadRequest ("Release already approved by " <> fromMaybe "unknown" (NT.approvedBy tracker) <> ". Cannot approve again.")
-                else do
-                    let approver = req.approvedBy
-                        infraApproval = req.isInfraApproved
-                        updated =
-                            (tracker :: ReleaseTracker)
-                                { NT.approvedBy = Just approver
-                                , NT.isApproved = True
-                                , NT.isInfraApproved = fromMaybe (NT.isInfraApproved tracker) infraApproval
-                                }
-                    -- Atomic CAS: only update if status is still CREATED AND
-                    -- not yet approved. Two concurrent approve calls both pass
-                    -- the pre-check above; conditionalUpdateApprove uses an
-                    -- UPDATE WHERE clause that lets exactly one win.
-                    ok <- conditionalUpdateApprove updated mTargetState
-                    if not ok
-                        then throwM $ BadRequest "Release was approved or transitioned by a concurrent request."
+                else
+                    if NT.isApproved tracker
+                        then throwM $ BadRequest ("Release already approved by " <> fromMaybe "unknown" (NT.approvedBy tracker) <> ". Cannot approve again.")
                         else do
-                            insertReleaseEvent rid "BUSINESS" "TRACKER_APPROVED" (toJSON approver)
-                            notifyReleaseApproved updated
-                            pure (Just updated)
+                            let approver = req.approvedBy
+                                infraApproval = req.isInfraApproved
+                                updated =
+                                    (tracker :: ReleaseTracker)
+                                        { NT.approvedBy = Just approver
+                                        , NT.isApproved = True
+                                        , NT.isInfraApproved = fromMaybe (NT.isInfraApproved tracker) infraApproval
+                                        }
+                            -- Atomic CAS: only update if status is still CREATED AND
+                            -- not yet approved. Two concurrent approve calls both pass
+                            -- the pre-check above; conditionalUpdateApprove uses an
+                            -- UPDATE WHERE clause that lets exactly one win.
+                            ok <- conditionalUpdateApprove updated mTargetState
+                            if not ok
+                                then throwM $ BadRequest "Release was approved or transitioned by a concurrent request."
+                                else do
+                                    insertReleaseEvent rid "BUSINESS" "TRACKER_APPROVED" (toJSON approver)
+                                    notifyReleaseApproved updated
+                                    pure (Just updated)
 
 triggerReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
 triggerReleaseH _ap rid TriggerReleaseReq{..} = do
@@ -808,11 +808,12 @@ updateTrackerH _ap rid req = do
                                                     -- attempt the CAS, exactly one transitions, the other 4 get
                                                     -- staleTrackerError. So no fork-storm is possible here.
                                                     when (oldStatus == PAUSED && newStatus == INPROGRESS) $
-                                                        void $ forkFlow $ do
-                                                            r <- dispatchWorkflow updatedTracker updatedTargetState
-                                                            case r of
-                                                                Right _ -> logInfo $ "[resume] workflow re-attached for " <> rid
-                                                                Left e -> logInfo $ "[resume] workflow exited for " <> rid <> ": " <> T.pack (show e)
+                                                        void $
+                                                            forkFlow $ do
+                                                                r <- dispatchWorkflow updatedTracker updatedTargetState
+                                                                case r of
+                                                                    Right _ -> logInfo $ "[resume] workflow re-attached for " <> rid
+                                                                    Left e -> logInfo $ "[resume] workflow exited for " <> rid <> ": " <> T.pack (show e)
                                                     pure $ APIResponse "SUCCESS" "Tracker updated"
                                                 else pure staleTrackerError
                         Nothing -> do
@@ -1367,8 +1368,8 @@ fastForwardH ap rid req = do
                                     forwarded = historyManualOverride lastH
                                     elapsedMin =
                                         round
-                                            ( realToFrac (diffUTCTime nowFF (historyStartedAt lastH)) / 60.0
-                                                :: Double
+                                            ( realToFrac (diffUTCTime nowFF (historyStartedAt lastH)) / 60.0 ::
+                                                Double
                                             ) ::
                                             Int
                                  in (forwarded, elapsedMin >= 5)
