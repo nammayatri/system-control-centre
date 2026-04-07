@@ -513,6 +513,7 @@ data ProductResponse = ProductResponse
     , productType :: Text
     , productAcronym :: Text
     , syncCluster :: Maybe Text
+    , slackChannel :: Maybe Text
     }
     deriving (Show, Generic)
 
@@ -545,6 +546,7 @@ data ProductConfigResponse = ProductConfigResponse
     , vsName :: Maybe Text
     , syncCluster :: Maybe Text
     , vsLockedBy :: Maybe Text
+    , slackChannel :: Maybe Text
     }
     deriving (Show, Generic)
 

@@ -49,7 +49,7 @@ import Products.Autopilot.RuntimeConfig (
     getABHSAllowedTimeDiffMins,
     getABHSApiKey,
     getDecisionEngineFailClosed,
-    isABHSDecisionEnabledForProductService,
+    isABHSDecisionEnabledForAppGroupService,
     isPromQueryCheckEnabled,
  )
 import Products.Autopilot.Types.Release (Decision (..), ReleaseTracker (..))
@@ -324,7 +324,7 @@ matches Julia's contract; per-step calls (the previous behavior) would
 re-spawn the pod on every iteration.
 
 Gates: master @ab_decision_enabled@ AND per-service
-@ab_hs_decision_enabled_products@ JSON. If either is false, returns
+@ab_hs_decision_enabled_app_groups@ JSON. If either is false, returns
 Continue without contacting the engine.
 
 On HTTP error returns Abort (fail-closed) if @decision_engine_fail_closed@
@@ -338,7 +338,7 @@ is read via 'getHSDecision', which polls the same run_id. See CONTEXT.md
 initiateABDecisionForRelease :: (MonadFlow m) => Config -> ReleaseTracker -> m DecisionResult
 initiateABDecisionForRelease cfg tracker = do
     masterEnabled <- getConfigBoolForProduct "ab_decision_enabled" (Just (appGroup tracker)) False
-    perServiceEnabled <- isABHSDecisionEnabledForProductService (appGroup tracker) (service tracker)
+    perServiceEnabled <- isABHSDecisionEnabledForAppGroupService (appGroup tracker) (service tracker)
     if not (masterEnabled && perServiceEnabled)
         then pure (DecisionResult Continue Nothing "AB_ENGINE")
         else do

@@ -87,8 +87,8 @@ import Products.Autopilot.RuntimeConfig (
     getPodReadinessPollSeconds,
     getPodRestartCountThreshold,
     getReleaseStartDelay,
-    isABHSDecisionEnabledForProductService,
-    isABHSPostMonitoringDecisionEnabledForProductService,
+    isABHSDecisionEnabledForAppGroupService,
+    isABHSPostMonitoringDecisionEnabledForAppGroupService,
     isHpaEnabledForProduct,
     isScaleDownPodsOnCompletion,
  )
@@ -775,9 +775,9 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                             -- Master flags (ab_decision_enabled / ab_hs_enabled) are
                                             -- enforced inside getABDecision/getHSDecision; here we
                                             -- additionally enforce Julia's per-service granularity
-                                            -- (ab_hs_decision_enabled_products JSON map).
+                                            -- (ab_hs_decision_enabled_app_groups JSON map).
                                             perServiceEnabled <-
-                                                isABHSDecisionEnabledForProductService
+                                                isABHSDecisionEnabledForAppGroupService
                                                     (appGroup freshRT)
                                                     (service freshRT)
                                             (abDecision, hsDecision) <-
@@ -974,7 +974,7 @@ monitorHealth = do
     masterPostEnabled <- getConfigBoolForProduct "ab_hs_post_monitoring_enabled" (Just (appGroup rt)) False
     perServicePostEnabled <-
         if masterPostEnabled
-            then isABHSPostMonitoringDecisionEnabledForProductService (appGroup rt) (service rt)
+            then isABHSPostMonitoringDecisionEnabledForAppGroupService (appGroup rt) (service rt)
             else pure False
     when perServicePostEnabled $ do
         logInfoS "[WORKFLOW] Starting post-monitoring phase"

@@ -6,7 +6,7 @@ SELECT 'INT', 'max_k8s_retries', '3', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'max_k8s_retries');
 
 INSERT INTO server_config (type, name, value, enabled, product)
-SELECT 'BOOL', 'multi_release_per_product', 'false', 1, 'autopilot'
+SELECT 'BOOL', 'multi_release_per_product', 'true', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'multi_release_per_product');
 
 INSERT INTO server_config (type, name, value, enabled, product)
@@ -40,15 +40,15 @@ INSERT INTO server_config (type, name, value, enabled, product)
 SELECT 'INT', 'ab_hs_allowed_time_diff_mins', '60', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_allowed_time_diff_mins');
 
--- Decision engine: per-(product, service) AB/HS gating. Empty map = nothing enabled.
--- Shape: {"PRODUCT_NAME": ["ALL"] | ["service-a","service-b"]}
+-- Decision engine: per-(app-group, service) AB/HS gating. Empty map = nothing enabled.
+-- Shape: {"APP_GROUP_NAME": ["ALL"] | ["service-a","service-b"]}
 INSERT INTO server_config (type, name, value, enabled, product)
-SELECT 'JSON', 'ab_hs_decision_enabled_products', '{}', 1, 'autopilot'
-WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_decision_enabled_products');
+SELECT 'JSON', 'ab_hs_decision_enabled_app_groups', '{}', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_decision_enabled_app_groups');
 
 INSERT INTO server_config (type, name, value, enabled, product)
-SELECT 'JSON', 'ab_hs_post_monitoring_decision_enabled_products', '{}', 1, 'autopilot'
-WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_post_monitoring_decision_enabled_products');
+SELECT 'JSON', 'ab_hs_post_monitoring_decision_enabled_app_groups', '{}', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_post_monitoring_decision_enabled_app_groups');
 
 -- Decision engine: API key sent as x-api-key header. Empty by default; operator must set.
 INSERT INTO server_config (type, name, value, enabled, product)

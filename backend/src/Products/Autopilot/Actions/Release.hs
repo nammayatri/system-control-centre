@@ -127,6 +127,7 @@ listProductsH _ap = do
                     , productType = fromMaybe "SERVICE" (S.dcAppGroupType p)
                     , productAcronym = fromMaybe "" (S.dcAppGroupAcronym p)
                     , syncCluster = getProductSyncCluster p
+                    , slackChannel = S.dcSlackChannel p
                     }
             )
             rows

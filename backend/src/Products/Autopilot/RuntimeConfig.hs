@@ -9,8 +9,8 @@ module Products.Autopilot.RuntimeConfig (
     isScaleDownPodsOnCompletion,
     isGcltEnabled,
     isPromQueryCheckEnabled,
-    isABHSDecisionEnabledForProductService,
-    isABHSPostMonitoringDecisionEnabledForProductService,
+    isABHSDecisionEnabledForAppGroupService,
+    isABHSPostMonitoringDecisionEnabledForAppGroupService,
     getDecisionEngineFailClosed,
     getABHSApiKey,
     getABHSAllowedTimeDiffMins,
@@ -91,34 +91,37 @@ isPromQueryCheckEnabled = do
         then pure True
         else getConfigBoolForProduct "prom_checks_enabled" (Just "autopilot") False
 
-{- | Per-(product, service) gating for AB/HS decision consumption.
-Mirrors Julia's @isABHSDecisionEnabledForProduct@ in @configs.jl@:
-reads @ab_hs_decision_enabled_products@, expecting JSON shape:
+{- | Per-(app-group, service) gating for AB/HS decision consumption.
+Reads @ab_hs_decision_enabled_app_groups@, expecting JSON shape:
 @{"EULER": ["ALL"], "EULER_SCHEDULER": ["payment-svc","auth-svc"]}@.
-Returns True iff @productName@ is a key AND the array contains
-either @"ALL"@ or @serviceName@. Case-sensitive (Julia parity).
--}
-isABHSDecisionEnabledForProductService :: (MonadFlow m) => Text -> Text -> m Bool
-isABHSDecisionEnabledForProductService =
-    isProductServiceEnabledFromKey "ab_hs_decision_enabled_products"
+Returns True iff @appGroupName@ is a key AND the array contains
+either @"ALL"@ or @serviceName@. Case-sensitive.
 
-{- | Per-(product, service) gating for post-monitoring AB/HS consumption.
-Same shape as 'isABHSDecisionEnabledForProductService', different key:
-@ab_hs_post_monitoring_decision_enabled_products@.
+Julia's equivalent is @isABHSDecisionEnabledForProduct@ in @configs.jl@,
+where Julia's "product" is what we now call "app_group" (renamed in
+migration 0007). The JSON wire format is identical.
 -}
-isABHSPostMonitoringDecisionEnabledForProductService :: (MonadFlow m) => Text -> Text -> m Bool
-isABHSPostMonitoringDecisionEnabledForProductService =
-    isProductServiceEnabledFromKey "ab_hs_post_monitoring_decision_enabled_products"
+isABHSDecisionEnabledForAppGroupService :: (MonadFlow m) => Text -> Text -> m Bool
+isABHSDecisionEnabledForAppGroupService =
+    isAppGroupServiceEnabledFromKey "ab_hs_decision_enabled_app_groups"
 
-isProductServiceEnabledFromKey :: (MonadFlow m) => Text -> Text -> Text -> m Bool
-isProductServiceEnabledFromKey key productName serviceName = withDb $ \db -> do
+{- | Per-(app-group, service) gating for post-monitoring AB/HS consumption.
+Same shape as 'isABHSDecisionEnabledForAppGroupService', different key:
+@ab_hs_post_monitoring_decision_enabled_app_groups@.
+-}
+isABHSPostMonitoringDecisionEnabledForAppGroupService :: (MonadFlow m) => Text -> Text -> m Bool
+isABHSPostMonitoringDecisionEnabledForAppGroupService =
+    isAppGroupServiceEnabledFromKey "ab_hs_post_monitoring_decision_enabled_app_groups"
+
+isAppGroupServiceEnabledFromKey :: (MonadFlow m) => Text -> Text -> Text -> m Bool
+isAppGroupServiceEnabledFromKey key appGroupName serviceName = withDb $ \db -> do
     mVal <- getEnabledServerConfigValueForProduct_io db key (Just "autopilot")
     pure $ case mVal of
         Nothing -> False
         Just raw ->
             case eitherDecode (LBS.fromStrict (TE.encodeUtf8 raw)) :: Either String Value of
                 Right (Object obj) ->
-                    case KM.lookup (K.fromText productName) obj of
+                    case KM.lookup (K.fromText appGroupName) obj of
                         Just (Array arr) ->
                             let svcs =
                                     [ s | String s <- toListV arr

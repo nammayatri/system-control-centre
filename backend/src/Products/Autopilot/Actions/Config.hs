@@ -63,6 +63,7 @@ toProductConfigResponse p =
         , vsName = S.dcVsName p
         , syncCluster = S.dcSyncCluster p
         , vsLockedBy = S.dcVsLockedBy p
+        , slackChannel = S.dcSlackChannel p
         }
 
 createProductConfigH :: AuthedPerson -> UpsertProductReq -> Flow APIResponse
