@@ -200,26 +200,26 @@ const UserDetail: React.FC = () => {
   const userStatus = user.status || (user.isActive !== false ? 'active' : 'inactive');
 
   return (
-    <div className="flex flex-col w-full max-w-4xl">
+    <div className="flex flex-col w-full max-w-4xl pb-12">
       {/* Back button + header */}
       <button
         onClick={() => navigate('/admin/users')}
-        className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-700 cursor-pointer mb-4 transition-colors duration-150"
+        className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-700 cursor-pointer mb-4 transition-colors duration-150 h-9 -ml-1 px-2 rounded-md hover:bg-zinc-100 self-start"
       >
         <ArrowLeft className="w-4 h-4" />
         Back to Users
       </button>
 
-      <div className="flex items-center justify-between mb-5">
-        <div>
-          <h1 className="text-lg font-semibold text-zinc-900">
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4 sm:mb-5">
+        <div className="min-w-0">
+          <h1 className="text-lg sm:text-xl font-semibold text-zinc-900 truncate">
             {userName}
           </h1>
-          <p className="text-sm text-zinc-500 mt-0.5 font-mono">
+          <p className="text-sm text-zinc-500 mt-0.5 font-mono break-all">
             {user.email}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
           <Badge variant={userStatus === 'active' ? 'success' : 'muted'} dot>
             {userStatus}
           </Badge>
@@ -230,11 +230,11 @@ const UserDetail: React.FC = () => {
       </div>
 
       {/* User Info Card */}
-      <div className="bg-white rounded-xl border border-zinc-200 p-5 mb-5">
+      <div className="bg-white rounded-xl border border-zinc-200 p-4 sm:p-5 mb-4 sm:mb-5">
         <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">
           User Information
         </h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+        <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 text-sm">
           <div>
             <span className="text-zinc-400 text-[11px] uppercase tracking-wider block">First Name</span>
             <div className="text-zinc-800 font-medium mt-0.5">{user.firstName || '-'}</div>
@@ -273,18 +273,20 @@ const UserDetail: React.FC = () => {
       </div>
 
       {/* Product Access */}
-      <div className="bg-white rounded-xl border border-zinc-200 p-5 mb-5">
-        <div className="flex items-center justify-between mb-4">
+      <div className="bg-white rounded-xl border border-zinc-200 p-4 sm:p-5 mb-4 sm:mb-5">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
           <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">
             Product Access
           </h2>
           <Button size="sm" variant="secondary" onClick={() => setAssignOpen(true)}>
             <Plus className="w-3.5 h-3.5" />
-            Add Product Access
+            <span className="hidden sm:inline">Add Product Access</span>
+            <span className="sm:hidden">Add Access</span>
           </Button>
         </div>
         {userProducts && userProducts.length > 0 ? (
-          <div className="overflow-x-auto">
+          <>
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-sm text-left">
               <thead>
                 <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
@@ -325,14 +327,43 @@ const UserDetail: React.FC = () => {
               </tbody>
             </table>
           </div>
+          {/* Mobile cards */}
+          <div className="md:hidden space-y-2">
+            {userProducts.map((p: any, i: number) => (
+              <div key={p.slug || i} className="border border-zinc-200 rounded-lg p-3">
+                <div className="flex items-start justify-between gap-2 mb-1.5">
+                  <div className="text-sm font-medium text-zinc-800 min-w-0 flex-1 break-all">{p.slug}</div>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="text-red-600 hover:text-red-700 hover:bg-red-50 shrink-0"
+                    onClick={() => {
+                      if (window.confirm(`Remove access to ${p.slug}?`)) {
+                        revokeMut.mutate(p.slug);
+                      }
+                    }}
+                    loading={revokeMut.isPending}
+                    aria-label="Remove access"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Badge variant="info" size="sm">{p.role || p.roleName || '-'}</Badge>
+                  <span className="text-xs text-zinc-500 font-mono">{(p.permissions || []).length} perms</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          </>
         ) : (
           <p className="text-sm text-zinc-400">No product access assigned.</p>
         )}
       </div>
 
       {/* Permission Overrides */}
-      <div className="bg-white rounded-xl border border-zinc-200 p-5 mb-5">
-        <div className="flex items-center justify-between mb-4">
+      <div className="bg-white rounded-xl border border-zinc-200 p-4 sm:p-5 mb-4 sm:mb-5">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
           <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">
             Permission Overrides
           </h2>
@@ -342,7 +373,8 @@ const UserDetail: React.FC = () => {
           </Button>
         </div>
         {userOverrides && userOverrides.length > 0 ? (
-          <div className="overflow-x-auto">
+          <>
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-sm text-left">
               <thead>
                 <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
@@ -385,6 +417,35 @@ const UserDetail: React.FC = () => {
               </tbody>
             </table>
           </div>
+          {/* Mobile cards */}
+          <div className="md:hidden space-y-2">
+            {userOverrides.map((o: any, i: number) => (
+              <div key={o.id || i} className="border border-zinc-200 rounded-lg p-3">
+                <div className="flex items-start justify-between gap-2 mb-1.5">
+                  <div className="text-sm font-medium text-zinc-800 break-all min-w-0 flex-1">{o.productSlug}</div>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="text-red-600 hover:text-red-700 hover:bg-red-50 shrink-0"
+                    onClick={() => {
+                      if (window.confirm('Remove this permission override?')) {
+                        removeOverrideMut.mutate(o.id);
+                      }
+                    }}
+                    loading={removeOverrideMut.isPending}
+                    aria-label="Remove override"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                </div>
+                <div className="text-xs text-zinc-600 font-mono break-all mb-1.5">{o.permissionAction || o.permission}</div>
+                <Badge variant={o.overrideType === 'GRANT' || o.type === 'GRANT' ? 'success' : 'danger'} size="sm">
+                  {o.overrideType || o.type}
+                </Badge>
+              </div>
+            ))}
+          </div>
+          </>
         ) : (
           <p className="text-sm text-zinc-400">No permission overrides.</p>
         )}
@@ -411,7 +472,7 @@ const UserDetail: React.FC = () => {
             }}
           >
             <DialogBody className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <Input
                   label="First Name"
                   value={editForm.firstName}
@@ -529,7 +590,7 @@ const UserDetail: React.FC = () => {
 
       {/* ── Add Override Dialog (multi-select) ── */}
       <Dialog open={overrideOpen} onOpenChange={setOverrideOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent size="lg">
           <DialogHeader>
             <DialogTitle>Add Permission Overrides</DialogTitle>
             <DialogDescription>Select one or more permissions to grant or deny for this user.</DialogDescription>

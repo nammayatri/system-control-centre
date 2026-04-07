@@ -1,36 +1,38 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <!-- Background -->
-  <rect width="64" height="64" rx="14" fill="#1E293B"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!--
+    System Control Centre
+    Concept: Traffic Split (Canary Release)
+    A single incoming path branches into two destinations — the visual
+    signature of every release this product orchestrates. The right
+    destination is green = the new version receiving promoted traffic.
+  -->
 
-  <!-- Central hub -->
-  <circle cx="32" cy="32" r="9" fill="#3B82F6" opacity="0.9"/>
-  <circle cx="32" cy="32" r="4" fill="#1E293B"/>
-  <circle cx="32" cy="32" r="2" fill="#60A5FA"/>
+  <!-- White rounded background with subtle border -->
+  <rect width="64" height="64" rx="14" fill="#FFFFFF" stroke="#E4E4E7" stroke-width="1"/>
 
-  <!-- Top node (deploy - green) -->
-  <circle cx="32" cy="13" r="5.5" fill="#22C55E"/>
-  <path d="M30 13.5l2-2.5 2 2.5h-1.3v2h-1.4v-2z" fill="#1E293B"/>
+  <!-- Traffic split path: stem rises, then forks left + right -->
+  <path
+    d="M32 54 L32 36 L18 20"
+    stroke="#0F172A"
+    stroke-width="6"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    fill="none"/>
+  <path
+    d="M32 36 L46 20"
+    stroke="#0F172A"
+    stroke-width="6"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    fill="none"/>
 
-  <!-- Bottom-left node (config - amber) -->
-  <circle cx="15" cy="47" r="5.5" fill="#F59E0B"/>
-  <rect x="13" y="45" width="4" height="4" rx="0.8" fill="#1E293B"/>
+  <!-- Source node (incoming traffic) -->
+  <circle cx="32" cy="54" r="4" fill="#0F172A"/>
 
-  <!-- Bottom-right node (VS - violet) -->
-  <circle cx="49" cy="47" r="5.5" fill="#8B5CF6"/>
-  <path d="M47.5 45.5h3v1.2h-1.8v1.8h-1.2z" fill="#1E293B"/>
+  <!-- Old version destination (left, dark) -->
+  <circle cx="18" cy="20" r="5.5" fill="#FFFFFF" stroke="#0F172A" stroke-width="3.5"/>
 
-  <!-- Connection lines -->
-  <line x1="32" y1="18.5" x2="32" y2="23" stroke="#60A5FA" stroke-width="1.8" stroke-linecap="round" opacity="0.8"/>
-  <line x1="26" y1="38" x2="19" y2="43" stroke="#60A5FA" stroke-width="1.8" stroke-linecap="round" opacity="0.8"/>
-  <line x1="38" y1="38" x2="45" y2="43" stroke="#60A5FA" stroke-width="1.8" stroke-linecap="round" opacity="0.8"/>
-
-  <!-- Flow dots -->
-  <circle cx="32" cy="20.5" r="1.5" fill="#93C5FD"/>
-  <circle cx="22.5" cy="40.5" r="1.5" fill="#93C5FD"/>
-  <circle cx="41.5" cy="40.5" r="1.5" fill="#93C5FD"/>
-
-  <!-- Outer arc indicators -->
-  <path d="M32 5a27 27 0 0 1 23 13" stroke="#22C55E" stroke-width="2.5" stroke-linecap="round" fill="none" opacity="0.6"/>
-  <path d="M9 32a27 27 0 0 1 4-15" stroke="#F59E0B" stroke-width="2.5" stroke-linecap="round" fill="none" opacity="0.5"/>
-  <path d="M55 45a27 27 0 0 1-10 13" stroke="#8B5CF6" stroke-width="2.5" stroke-linecap="round" fill="none" opacity="0.5"/>
+  <!-- New version destination (right, green — promoted) -->
+  <circle cx="46" cy="20" r="5.5" fill="#10B981"/>
+  <circle cx="46" cy="20" r="2" fill="#FFFFFF"/>
 </svg>

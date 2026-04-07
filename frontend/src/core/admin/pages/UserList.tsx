@@ -81,33 +81,32 @@ const UserList: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col w-full">
+    <div className="flex flex-col w-full pb-12">
       {/* Page header */}
-      <div className="flex items-center justify-between mb-5">
-        <h1 className="text-lg font-semibold text-zinc-900">
-          Users
-        </h1>
-        <div className="flex items-center gap-3">
-          <div className="relative">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 sm:mb-5">
+        <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Users</h1>
+        <div className="flex items-center gap-2 sm:gap-3">
+          <div className="relative flex-1 sm:flex-none">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
             <input
               type="text"
               placeholder="Search by name or email"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="pl-9 pr-4 h-9 border border-zinc-300 rounded-lg text-sm w-64 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+              className="pl-9 pr-4 h-10 sm:h-9 w-full sm:w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
             />
           </div>
-          <Button size="sm" onClick={() => setAddOpen(true)}>
+          <Button size="md" onClick={() => setAddOpen(true)}>
             <Plus className="w-4 h-4" />
-            Add User
+            <span className="hidden sm:inline">Add User</span>
+            <span className="sm:hidden">Add</span>
           </Button>
         </div>
       </div>
 
       {/* Users table */}
       <div className="bg-white rounded-xl border border-zinc-200 overflow-hidden">
-        <div className="overflow-x-auto">
+        <div className="hidden md:block overflow-x-auto">
           {isLoading ? (
             <TableSkeleton rows={6} cols={6} />
           ) : (
@@ -175,6 +174,39 @@ const UserList: React.FC = () => {
             </table>
           )}
         </div>
+
+        {/* Mobile cards */}
+        <div className="md:hidden">
+          {isLoading ? (
+            <TableSkeleton rows={4} cols={3} />
+          ) : filtered.length === 0 ? (
+            <div className="py-16 text-center text-zinc-400 text-sm">No users found.</div>
+          ) : (
+            <div className="divide-y divide-zinc-100">
+              {filtered.map((user: any) => (
+                <div
+                  key={user.id}
+                  onClick={() => navigate(`/admin/users/${user.id}`)}
+                  className="p-4 cursor-pointer hover:bg-zinc-50 active:bg-zinc-100 transition-colors"
+                >
+                  <div className="flex items-start justify-between gap-2 mb-1">
+                    <div className="text-sm font-medium text-zinc-900 truncate min-w-0 flex-1">
+                      {user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim() || '-'}
+                    </div>
+                    <Badge variant={user.status === 'active' || user.isActive !== false ? 'success' : 'muted'} dot size="sm">
+                      {user.status || (user.isActive !== false ? 'active' : 'inactive')}
+                    </Badge>
+                  </div>
+                  <div className="text-xs text-zinc-500 font-mono truncate">{user.email}</div>
+                  <div className="flex items-center gap-2 text-[11px] text-zinc-500 mt-1.5">
+                    {user.isSuperadmin && <Badge variant="purple" size="sm">Superadmin</Badge>}
+                    <span className="font-mono">{formatDate(user.createdAt)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Add User Dialog */}
@@ -186,7 +218,7 @@ const UserList: React.FC = () => {
           </DialogHeader>
           <form onSubmit={handleSubmit}>
             <DialogBody className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <Input
                   label="First Name"
                   required

@@ -418,8 +418,8 @@ const CreateRelease: React.FC = () => {
     </label>
   );
 
-  const inputClass = "w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
-  const disabledInputClass = "w-full h-9 border border-zinc-200 rounded-lg px-3 text-sm bg-zinc-100 text-zinc-500 cursor-not-allowed";
+  const inputClass = "w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
+  const disabledInputClass = "w-full h-10 sm:h-9 border border-zinc-200 rounded-lg px-3 text-sm bg-zinc-100 text-zinc-500 cursor-not-allowed";
 
   const Toggle = ({ checked, onChange, disabled }: { checked: boolean; onChange: () => void; disabled?: boolean }) => (
     <button type="button" onClick={onChange} disabled={disabled}
@@ -441,16 +441,16 @@ const CreateRelease: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
-      <form onSubmit={handleSubmit} className="space-y-6">
-        {error && <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-xl text-sm">{error}</div>}
+      <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-6">
+        {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm">{error}</div>}
 
         {/* Main Form Card */}
         <div className="bg-white rounded-xl border border-zinc-200">
-          <div className="px-6 py-4 border-b border-zinc-100 flex justify-between items-center">
-            <h2 className="text-lg font-semibold text-zinc-900">{pageTitle}</h2>
+          <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex justify-between items-center">
+            <h2 className="text-base sm:text-lg font-semibold text-zinc-900">{pageTitle}</h2>
           </div>
 
-          <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-5">
+          <div className="p-4 sm:p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-6 lg:gap-x-8 gap-y-4 sm:gap-y-5">
             {/* Col 1 */}
             <div className="space-y-4">
               <div>
@@ -595,16 +595,16 @@ const CreateRelease: React.FC = () => {
 
         {/* Stages Card */}
         <div className="bg-white rounded-xl border border-zinc-200">
-          <div className="px-6 py-4 border-b border-zinc-100">
-            <h2 className="text-lg font-semibold text-zinc-900">Stages</h2>
+          <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
+            <h2 className="text-base sm:text-lg font-semibold text-zinc-900">Stages</h2>
             {isUpdate && rolloutHistoryLength > 0 && (
               <p className="text-xs text-zinc-500 mt-1">
                 Stages 1-{rolloutHistoryLength} are locked (already executed). Only future stages can be edited.
               </p>
             )}
           </div>
-          <div className="p-6">
-            <div className="overflow-x-auto">
+          <div className="p-4 sm:p-6">
+            <div className="overflow-x-auto -mx-4 sm:mx-0">
               <table className="w-full text-sm text-left">
                 <thead>
                   <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
@@ -666,13 +666,13 @@ const CreateRelease: React.FC = () => {
         {/* Env Switch */}
         {!isNewService && (
           <div className="bg-white rounded-xl border border-zinc-200">
-            <div className="px-6 py-4 border-b border-zinc-100 flex items-center gap-3">
-              <h2 className="text-lg font-semibold text-zinc-900">Env Switch</h2>
+            <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex items-center gap-3 flex-wrap">
+              <h2 className="text-base sm:text-lg font-semibold text-zinc-900">Env Switch</h2>
               <Toggle checked={isEnvSwitch} onChange={() => canToggleEnvSwitch && formData.service && setIsEnvSwitch(!isEnvSwitch)} disabled={!canToggleEnvSwitch || !formData.service} />
               {!canToggleEnvSwitch && selectedServices.length > 1 && <span className="text-xs text-zinc-400 ml-2">Single service only</span>}
             </div>
             {isEnvSwitch && (
-              <div className="p-6">
+              <div className="p-4 sm:p-6">
                 <FieldLabel>Environment Variables JSON</FieldLabel>
                 <div className="border border-zinc-200 rounded-lg overflow-hidden mt-1">
                   <Editor height="320px" defaultLanguage="json" theme="light" value={envData} onChange={(val) => setEnvData(val || '')}
@@ -686,13 +686,13 @@ const CreateRelease: React.FC = () => {
         {/* Get Resources */}
         {!isNewService && (
           <div className="bg-white rounded-xl border border-zinc-200">
-            <div className="px-6 py-4 border-b border-zinc-100 flex items-center gap-3">
-              <h2 className="text-lg font-semibold text-zinc-900">Get Resources</h2>
+            <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex items-center gap-3 flex-wrap">
+              <h2 className="text-base sm:text-lg font-semibold text-zinc-900">Get Resources</h2>
               <Toggle checked={isResourcesSwitch} onChange={() => canToggleResourcesSwitch && formData.service && setIsResourcesSwitch(!isResourcesSwitch)} disabled={!canToggleResourcesSwitch || !formData.service} />
               {!canToggleResourcesSwitch && selectedServices.length > 1 && <span className="text-xs text-zinc-400 ml-2">Single service only</span>}
             </div>
             {isResourcesSwitch && (
-              <div className="p-6">
+              <div className="p-4 sm:p-6">
                 <FieldLabel>Resource Limits (CPU / Memory)</FieldLabel>
                 <div className="border border-zinc-200 rounded-lg overflow-hidden mt-1">
                   <Editor height="280px" defaultLanguage="json" theme="light" value={resourcesData}
@@ -706,13 +706,13 @@ const CreateRelease: React.FC = () => {
         {/* Sync Release */}
         {syncCluster && !isUpdate && (
           <div className="bg-white rounded-xl border border-zinc-200">
-            <div className="px-6 py-4 border-b border-zinc-100 flex items-center gap-3">
-              <h2 className="text-lg font-semibold text-zinc-900">Sync Release to Other Cloud</h2>
+            <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex items-center gap-3 flex-wrap">
+              <h2 className="text-base sm:text-lg font-semibold text-zinc-900">Sync Release to Other Cloud</h2>
               <Toggle checked={isReleaseSync} onChange={() => setIsReleaseSync(!isReleaseSync)} />
               <span className="text-sm text-zinc-500">{isReleaseSync ? `Sync to ${syncCluster}` : 'Single cloud only'}</span>
             </div>
             {isReleaseSync && (
-              <div className="p-6 space-y-6">
+              <div className="p-4 sm:p-6 space-y-6">
                 <div>
                   <div className="flex items-center gap-3 mb-3">
                     <h3 className="text-base font-semibold text-zinc-900">Env Switch (Secondary)</h3>
@@ -767,7 +767,7 @@ const CreateRelease: React.FC = () => {
         )}
 
         {/* Action Buttons */}
-        <div className="flex justify-end gap-3 pt-2">
+        <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3 pt-2">
           <Button type="button" variant="secondary" onClick={() => isUpdate ? navigate(`/releases/${id}`) : navigate('/releases')}>Cancel</Button>
           <Button type="submit" loading={isSubmitting}>{submitLabel}</Button>
         </div>

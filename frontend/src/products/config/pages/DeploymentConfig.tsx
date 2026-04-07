@@ -240,7 +240,7 @@ const DeploymentConfig: React.FC = () => {
 
   // ── Shared styles ────────────────────────────────────────────────
 
-  const inputClass = "w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
+  const inputClass = "w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
   const productOptions = useMemo(() =>
     [...new Set(groupConfigs.map((c: ProductConfig) => c.appGroup).filter(Boolean))],
     [groupConfigs]
@@ -249,33 +249,33 @@ const DeploymentConfig: React.FC = () => {
   // ── Render ───────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col w-full">
+    <div className="flex flex-col w-full pb-12">
       {/* Header */}
-      <div className="flex items-center justify-between mb-5">
-        <h1 className="text-lg font-semibold text-zinc-900">Deployment Config</h1>
-        <div className="flex items-center gap-3">
-          <div className="relative">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 sm:mb-5">
+        <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Deployment Config</h1>
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+          <div className="relative flex-1 sm:flex-none min-w-0">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
             <input
               type="text"
               placeholder="Search groups or services..."
               value={search}
               onChange={e => setSearch(e.target.value)}
-              className="pl-9 pr-4 h-9 border border-zinc-300 rounded-lg text-sm w-72 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+              className="pl-9 pr-4 h-10 sm:h-9 w-full sm:w-72 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
             />
           </div>
           <Button size="icon" variant="ghost" onClick={refetchAll}>
             <RefreshCw className="w-4 h-4" />
           </Button>
           <PermissionGate product="autopilot" permission="RELEASE_CREATE">
-            <Button size="sm" onClick={openCreateGroup}>
+            <Button size="md" onClick={openCreateGroup}>
               <Plus className="w-4 h-4" /> Add Group
             </Button>
           </PermissionGate>
         </div>
       </div>
 
-      {/* Table */}
+      {/* Table — desktop */}
       <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
         {isLoading ? (
           <TableSkeleton rows={8} cols={7} />
@@ -284,7 +284,7 @@ const DeploymentConfig: React.FC = () => {
             {search ? 'No matching groups or services found.' : 'No deployment groups configured.'}
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="hidden lg:block overflow-x-auto">
             <table className="w-full text-left whitespace-nowrap">
               <thead>
                 <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
@@ -472,11 +472,115 @@ const DeploymentConfig: React.FC = () => {
             </table>
           </div>
         )}
+
+        {/* Mobile/tablet card list */}
+        {!isLoading && groupedData.length > 0 && (
+          <div className="lg:hidden divide-y divide-zinc-200">
+            {groupedData.map(({ group, services }) => {
+              const isExpanded = expandedGroups.has(group.appGroup);
+              return (
+                <div key={group.id || group.appGroup}>
+                  <div
+                    className="p-4 cursor-pointer hover:bg-zinc-50 active:bg-zinc-100 transition-colors"
+                    onClick={() => toggleGroup(group.appGroup)}
+                  >
+                    <div className="flex items-start justify-between gap-2 mb-2">
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        {isExpanded
+                          ? <ChevronDown className="w-4 h-4 text-zinc-400 shrink-0" />
+                          : <ChevronRight className="w-4 h-4 text-zinc-400 shrink-0" />}
+                        <span className="font-semibold text-zinc-900 truncate">{group.appGroup}</span>
+                        <span className="text-xs text-zinc-400 shrink-0">
+                          {services.length} svc
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
+                        <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                          <button
+                            onClick={() => openEditGroup(group)}
+                            className="w-9 h-9 flex items-center justify-center rounded-lg text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer"
+                            aria-label="Edit group"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteGroup(group)}
+                            className="w-9 h-9 flex items-center justify-center rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 cursor-pointer"
+                            aria-label="Delete group"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </PermissionGate>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1 text-xs text-zinc-500 ml-6">
+                      <div><span className="text-zinc-400">Cluster:</span> <span className="font-mono">{group.cluster || '-'}</span></div>
+                      <div><span className="text-zinc-400">Namespace:</span> <span className="font-mono">{group.namespace || '-'}</span></div>
+                      <div><span className="text-zinc-400">VS:</span> <span className="font-mono">{group.vs_name || '-'}</span></div>
+                      <div><span className="text-zinc-400">Sync:</span> <span>{group.sync_cluster || '-'}</span></div>
+                    </div>
+                    <div className="flex items-center gap-2 mt-2 ml-6 flex-wrap">
+                      <Badge variant={typeBadgeVariant(group.product_type)} size="sm">{group.product_type || '-'}</Badge>
+                      {group.need_infra_approval ? <Badge variant="warning" size="sm">Infra Approval</Badge> : null}
+                      {group.vs_locked_by ? <Badge variant="danger" size="sm">Locked: {group.vs_locked_by}</Badge> : null}
+                    </div>
+                  </div>
+
+                  {isExpanded && (
+                    <div className="bg-zinc-50/60 border-t border-zinc-100">
+                      {services.map(svc => (
+                        <div key={svc.id || svc.service} className="p-4 pl-8 border-b border-zinc-100 last:border-b-0">
+                          <div className="flex items-start justify-between gap-2 mb-1">
+                            <div className="text-sm font-medium text-zinc-800 break-all min-w-0 flex-1">{svc.service}</div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                                <button
+                                  onClick={() => openEditService(svc)}
+                                  className="w-9 h-9 flex items-center justify-center rounded-lg text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer"
+                                  aria-label="Edit service"
+                                >
+                                  <Pencil className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteService(svc)}
+                                  className="w-9 h-9 flex items-center justify-center rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 cursor-pointer"
+                                  aria-label="Delete service"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </PermissionGate>
+                            </div>
+                          </div>
+                          <div className="text-[11px] text-zinc-500 font-mono break-all">{svc.host || '-'}</div>
+                          <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                            {svc.serviceType && <Badge variant={typeBadgeVariant(svc.serviceType)} size="sm">{svc.serviceType}</Badge>}
+                            {svc.slack_channel && <span className="text-[10px] text-zinc-400 font-mono">{svc.slack_channel}</span>}
+                          </div>
+                        </div>
+                      ))}
+                      <div className="p-3 pl-8">
+                        <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                          <button
+                            onClick={() => openCreateService(group.appGroup)}
+                            className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-700 transition-colors cursor-pointer h-9"
+                          >
+                            <Plus className="w-4 h-4" />
+                            Add Service
+                          </button>
+                        </PermissionGate>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* ── Group Modal ──────────────────────────────────────────── */}
       <Dialog open={groupModalOpen} onOpenChange={setGroupModalOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent size="lg">
           <DialogHeader>
             <DialogTitle>{editingGroup ? 'Edit Deployment Group' : 'Create Deployment Group'}</DialogTitle>
             <DialogDescription>
@@ -496,7 +600,7 @@ const DeploymentConfig: React.FC = () => {
                   disabled={!!editingGroup}
                 />
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Cluster *</label>
                   <input
@@ -518,7 +622,7 @@ const DeploymentConfig: React.FC = () => {
                   />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">VS Name *</label>
                   <input
@@ -540,7 +644,7 @@ const DeploymentConfig: React.FC = () => {
                   />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Type</label>
                   <select
@@ -584,8 +688,8 @@ const DeploymentConfig: React.FC = () => {
             </div>
           </DialogBody>
           <DialogFooter>
-            <Button variant="secondary" size="sm" onClick={() => setGroupModalOpen(false)}>Cancel</Button>
-            <Button size="sm" onClick={handleGroupSubmit} loading={createGroupMut.isPending || updateGroupMut.isPending}>
+            <Button variant="secondary" size="md" onClick={() => setGroupModalOpen(false)}>Cancel</Button>
+            <Button size="md" onClick={handleGroupSubmit} loading={createGroupMut.isPending || updateGroupMut.isPending}>
               {editingGroup ? 'Update' : 'Create'}
             </Button>
           </DialogFooter>
@@ -594,7 +698,7 @@ const DeploymentConfig: React.FC = () => {
 
       {/* ── Service Modal ────────────────────────────────────────── */}
       <Dialog open={serviceModalOpen} onOpenChange={setServiceModalOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent size="xl">
           <DialogHeader>
             <DialogTitle>{editingService ? 'Edit Service' : 'Add Service'}</DialogTitle>
             <DialogDescription>
@@ -606,7 +710,7 @@ const DeploymentConfig: React.FC = () => {
           </DialogHeader>
           <DialogBody>
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Group *</label>
                   <select
@@ -779,7 +883,7 @@ const DeploymentConfig: React.FC = () => {
                   placeholder='Optional decision config JSON'
                 />
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Slack Channel</label>
                   <input
@@ -804,8 +908,8 @@ const DeploymentConfig: React.FC = () => {
             </div>
           </DialogBody>
           <DialogFooter>
-            <Button variant="secondary" size="sm" onClick={() => setServiceModalOpen(false)}>Cancel</Button>
-            <Button size="sm" onClick={handleServiceSubmit} loading={createServiceMut.isPending || updateServiceMut.isPending}>
+            <Button variant="secondary" size="md" onClick={() => setServiceModalOpen(false)}>Cancel</Button>
+            <Button size="md" onClick={handleServiceSubmit} loading={createServiceMut.isPending || updateServiceMut.isPending}>
               {editingService ? 'Update' : 'Create'}
             </Button>
           </DialogFooter>

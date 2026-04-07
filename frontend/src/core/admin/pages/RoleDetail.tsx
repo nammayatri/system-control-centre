@@ -118,23 +118,23 @@ const RoleDetail: React.FC = () => {
   const permList: string[] = allPermissions.map((p: any) => (typeof p === 'string' ? p : p.action || p.name));
 
   return (
-    <div className="flex flex-col w-full max-w-3xl">
+    <div className="flex flex-col w-full max-w-3xl pb-12">
       {/* Back button */}
       <button
         onClick={() => navigate('/admin/roles')}
-        className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-700 cursor-pointer mb-4 transition-colors duration-150"
+        className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-700 cursor-pointer mb-4 transition-colors duration-150 h-9 -ml-1 px-2 rounded-md hover:bg-zinc-100 self-start"
       >
         <ArrowLeft className="w-4 h-4" />
         Back to Roles
       </button>
 
       {/* Header */}
-      <div className="flex items-center justify-between mb-5">
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4 sm:mb-5">
         <div>
-          <h1 className="text-lg font-semibold text-zinc-900">
+          <h1 className="text-lg sm:text-xl font-semibold text-zinc-900 break-all">
             {role.name}
           </h1>
-          <div className="flex items-center gap-2 mt-1">
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
             <Badge variant={isSystem ? 'info' : 'default'} size="sm">
               {role.type || 'custom'}
             </Badge>
@@ -149,11 +149,11 @@ const RoleDetail: React.FC = () => {
       </div>
 
       {/* Role info card */}
-      <div className="bg-white rounded-xl border border-zinc-200 p-5 mb-5">
+      <div className="bg-white rounded-xl border border-zinc-200 p-4 sm:p-5 mb-4 sm:mb-5">
         <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-3">
           Role Information
         </h2>
-        <div className="grid grid-cols-2 gap-4 text-sm">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
           <div>
             <span className="text-zinc-400 text-[11px] uppercase tracking-wider block">Name</span>
             <div className="text-zinc-800 font-medium mt-0.5">{role.name}</div>
@@ -182,7 +182,7 @@ const RoleDetail: React.FC = () => {
                   setDescription(e.target.value);
                   setDirty(true);
                 }}
-                className="mt-0.5 w-full h-8 border border-zinc-300 rounded-lg px-2 text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+                className="mt-0.5 w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
                 placeholder="Add a description"
               />
             )}
@@ -191,7 +191,7 @@ const RoleDetail: React.FC = () => {
       </div>
 
       {/* Permissions */}
-      <div className="bg-white rounded-xl border border-zinc-200 p-5">
+      <div className="bg-white rounded-xl border border-zinc-200 p-4 sm:p-5">
         <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">
           Permissions ({selectedPerms.length})
         </h2>

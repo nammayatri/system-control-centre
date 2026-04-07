@@ -47,3 +47,5 @@ frontend/.vite/
 # ── Context (not for git) ──
 CONTEXT.md
 backend/CONTEXT.md
+
+backend/.local/

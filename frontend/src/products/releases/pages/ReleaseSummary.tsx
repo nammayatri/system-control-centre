@@ -62,17 +62,17 @@ const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
     .filter(e => !eventSearch || e.label?.toLowerCase().includes(eventSearch.toLowerCase()) || e.category?.toLowerCase().includes(eventSearch.toLowerCase()) || e.data?.toLowerCase().includes(eventSearch.toLowerCase()));
 
   return (
-    <div className="p-6">
-      <div className="flex items-center justify-between mb-4">
+    <div className="p-4 sm:p-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
         <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">Release Events</h3>
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" />
           <input type="text" placeholder="Filter events..." value={eventSearch} onChange={(e) => setEventSearch(e.target.value)}
-            className="pl-8 pr-3 h-9 border border-zinc-300 rounded-lg text-sm w-56 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
+            className="pl-8 pr-3 h-10 sm:h-9 border border-zinc-300 rounded-lg text-sm w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
         </div>
       </div>
       {sorted.length > 0 ? (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto -mx-4 sm:mx-0">
           <table className="w-full text-sm text-left border-collapse">
             <thead>
               <tr className="bg-zinc-50 border-y border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
@@ -152,8 +152,8 @@ const EnvDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
   const { data: diff, isLoading, error } = useReleaseDiff(releaseId, diffType);
 
   return (
-    <div className="p-6">
-      <div className="flex items-center justify-between mb-4">
+    <div className="p-4 sm:p-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
         <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">Deployment Diff</h3>
         {diff?.message && <span className="text-xs text-zinc-400">{diff.message}</span>}
       </div>
@@ -164,7 +164,7 @@ const EnvDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
       ) : !diff.oldfile && !diff.newfile ? (
         <div><p className="text-sm text-zinc-400">No {DIFF_TYPE_LABELS[diffType]} diff data available.</p>{diff.message && <p className="text-xs text-zinc-400 mt-1">{diff.message}</p>}</div>
       ) : (
-        <div className="border border-zinc-200 rounded-lg overflow-hidden">
+        <div className="border border-zinc-200 rounded-lg overflow-hidden text-xs sm:text-sm overflow-x-auto">
           <ReactDiffViewer
             oldValue={formatDiff(diff.oldfile)}
             newValue={formatDiff(diff.newfile)}
@@ -253,7 +253,7 @@ const PodHealthSection: React.FC<{ releaseId: string; release: any }> = ({ relea
 
       <div className="border border-zinc-200 rounded-lg p-4 mb-6">
         <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Pods</h3>
-        <div className="grid grid-cols-4 gap-3 mb-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
           {summaryCards.map((card) => (
             <div key={card.label} className="border border-zinc-100 rounded-lg px-3 py-2">
               <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider mb-1">{card.label}</div>
@@ -265,7 +265,7 @@ const PodHealthSection: React.FC<{ releaseId: string; release: any }> = ({ relea
           ))}
         </div>
         {pods.length > 0 && (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto -mx-4 sm:mx-0">
             <table className="w-full text-sm text-left border-collapse">
               <thead>
                 <tr className="bg-zinc-50 border-y border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
@@ -333,7 +333,7 @@ const RolloutHistoryInline: React.FC<{ history: RolloutHistoryEvent[] }> = ({ hi
   return (
     <div className="border border-zinc-200 rounded-lg p-4 mb-6">
       <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-3">Rollout History</h3>
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto -mx-4 sm:mx-0">
         <table className="w-full text-sm text-left border-collapse">
           <thead>
             <tr className="bg-zinc-50 border-y border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
@@ -404,7 +404,7 @@ const K8sContextCard: React.FC<{ releaseContext: any }> = ({ releaseContext }) =
   return (
     <div className="border border-zinc-200 rounded-lg p-4 mb-6">
       <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-3">K8s Context</h3>
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-4 sm:gap-x-6 gap-y-3">
         {fields.map(f => (
           <div key={f.label}>
             <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">{f.label}</div>
@@ -487,9 +487,9 @@ const RolloutStrategyTab: React.FC<{
 
   return (
     <div className="border border-zinc-200 rounded-lg p-4 mb-6">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
         <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">Rollout Strategy</h3>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           {canEdit && !isEditing && (
             <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
               <Button size="sm" variant="outline" onClick={() => setIsEditing(true)}>
@@ -511,8 +511,8 @@ const RolloutStrategyTab: React.FC<{
         </div>
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-zinc-200">
-        <table className="w-full text-sm">
+      <div className="overflow-x-auto -mx-4 sm:mx-0 rounded-lg sm:border border-zinc-200">
+        <table className="w-full text-sm min-w-[600px]">
           <thead>
             <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
               <th className="py-2.5 px-4 text-left w-20">#</th>
@@ -694,19 +694,20 @@ const ReleaseSummary: React.FC = () => {
   const cronjobSuspend = release.cronjob_suspend;
 
   return (
-    <div className="flex flex-col flex-1 w-full pb-12 w-full">
+    <div className="flex flex-col flex-1 w-full pb-12">
       {/* Breadcrumb */}
-      <div className="flex items-center text-sm text-zinc-500 font-medium mb-4">
+      <div className="flex items-center text-sm text-zinc-500 font-medium mb-3 sm:mb-4 flex-wrap gap-y-1">
         <Link to="/releases" className="hover:text-zinc-700 transition-colors duration-150">Releases</Link>
-        <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300" />
+        <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300 shrink-0" />
         <span className="text-zinc-600">{release.release_context?.cluster || release.env || ''}</span>
-        <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300" />
-        <span className="font-mono text-xs text-zinc-800 truncate max-w-[200px]">{release.release_tag || id}</span>
+        <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300 shrink-0" />
+        <span className="font-mono text-xs text-zinc-800 truncate max-w-[150px] sm:max-w-[200px]">{release.release_tag || id}</span>
         {(s === 'CREATED' || s === 'INPROGRESS' || s === 'PAUSED') && (
           <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
             <button
               onClick={() => navigate(`/releases/${id}/edit`)}
-              className="p-1 rounded text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
+              className="p-1 ml-1 rounded text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
+              aria-label="Edit release"
             >
               <Pencil className="w-3.5 h-3.5" />
             </button>
@@ -715,9 +716,9 @@ const ReleaseSummary: React.FC = () => {
       </div>
 
       {/* Header */}
-      <div className="flex items-center justify-between mb-5">
-        <div className="flex items-center gap-3">
-          <h1 className="text-lg font-semibold text-zinc-900">Release Summary</h1>
+      <div className="flex flex-col gap-3 mb-4 sm:mb-5">
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+          <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Release Summary</h1>
           <StatusBadge status={release.status} />
           {release.release_context?.revert === 1 && <Badge variant="purple" dot>REVERT</Badge>}
           {release.ab_hs_status && release.ab_hs_status !== 'Uninitiated' && <Badge variant="info">AB: {release.ab_hs_status}</Badge>}
@@ -737,7 +738,7 @@ const ReleaseSummary: React.FC = () => {
             </a>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           {s === 'CREATED' && release.is_approved === 0 && (
             <PermissionGate product="autopilot" permission="RELEASE_APPROVE">
               <Button size="sm" variant="success" loading={approveMut.isPending} onClick={() => doAction('approve', () => approveMut.mutateAsync({ releaseId: id!, approvedBy: 'admin' }))}><Check className="w-3.5 h-3.5" /> Approve</Button>
@@ -798,10 +799,10 @@ const ReleaseSummary: React.FC = () => {
 
       {/* Main Card with Tabs */}
       <div className="bg-white rounded-xl border border-zinc-200">
-        <div className="flex border-b border-zinc-200 px-5">
+        <div className="flex border-b border-zinc-200 px-2 sm:px-5 overflow-x-auto">
           {tabs.map(tab => (
             <button key={tab.key} onClick={() => setActiveTab(tab.key)}
-              className={cn('py-3 px-4 text-sm font-medium border-b-2 transition-colors duration-150 cursor-pointer', activeTab === tab.key ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-400 hover:text-zinc-600')}>
+              className={cn('py-3 px-3 sm:px-4 text-sm font-medium border-b-2 transition-colors duration-150 cursor-pointer whitespace-nowrap', activeTab === tab.key ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-400 hover:text-zinc-600')}>
               {tab.label}
             </button>
           ))}
@@ -809,9 +810,9 @@ const ReleaseSummary: React.FC = () => {
 
         {/* Summary */}
         {activeTab === 'summary' && (
-          <div className="p-6">
+          <div className="p-4 sm:p-6">
             {/* Info Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 mb-6">
               {[
                 {
                   title: 'TIME SCHEDULE',
@@ -877,7 +878,7 @@ const ReleaseSummary: React.FC = () => {
             {/* Release Details — consolidated (no duplicate data) */}
             <div className="border border-zinc-200 rounded-lg p-4 mb-6">
               <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Release Details</h3>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 sm:gap-x-6 gap-y-3">
                 <InfoField label="App Group" value={release.appGroup} />
                 <InfoField label="Service" value={release.service} />
                 <InfoField label="Old Version" value={release.old_version} mono />
@@ -901,8 +902,8 @@ const ReleaseSummary: React.FC = () => {
 
         {/* JSON Data */}
         {activeTab === 'json' && (
-          <div className="p-6">
-            <pre className="bg-zinc-50 border border-zinc-200 rounded-lg p-4 text-xs font-mono text-zinc-700 overflow-auto max-h-[600px] whitespace-pre-wrap">
+          <div className="p-4 sm:p-6">
+            <pre className="bg-zinc-50 border border-zinc-200 rounded-lg p-3 sm:p-4 text-[11px] sm:text-xs font-mono text-zinc-700 overflow-auto max-h-[600px] whitespace-pre-wrap break-all">
               {JSON.stringify(release, null, 2)}
             </pre>
           </div>

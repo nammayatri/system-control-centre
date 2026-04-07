@@ -166,21 +166,21 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
     createMut.mutate(payload);
   };
 
-  const inputClass = "w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
+  const inputClass = "w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
   const FieldLabel = ({ children, required }: { children: React.ReactNode; required?: boolean }) => (
     <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">{children} {required && <span className="text-red-500">*</span>}</label>
   );
 
   return (
     <div className="flex flex-col w-full pb-12">
-      <form onSubmit={handleSubmit} className="space-y-6">
-        {error && <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-xl text-sm">{error}</div>}
+      <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-6">
+        {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm">{error}</div>}
 
         <div className="bg-white rounded-xl border border-zinc-200">
-          <div className="px-6 py-4 border-b border-zinc-100">
-            <h2 className="text-lg font-semibold text-zinc-900">{isUpdate ? 'Update ConfigMap' : cloneId ? 'Clone ConfigMap' : 'Create ConfigMap'}</h2>
+          <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
+            <h2 className="text-base sm:text-lg font-semibold text-zinc-900">{isUpdate ? 'Update ConfigMap' : cloneId ? 'Clone ConfigMap' : 'Create ConfigMap'}</h2>
           </div>
-          <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-5">
+          <div className="p-4 sm:p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-6 lg:gap-x-8 gap-y-4 sm:gap-y-5">
             {/* LEFT column */}
             <div className="space-y-4">
               <div><FieldLabel required>App Group</FieldLabel><select name="appGroup" value={form.appGroup} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select App Group</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
@@ -202,17 +202,17 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
 
           {/* Editors */}
           {(!!fileContent || syncCluster) && (
-            <div className="px-6 pb-6">
+            <div className="px-4 pb-4 sm:px-6 sm:pb-6">
               {syncCluster ? (
                 <>
                   <div className="flex items-center gap-3 mb-3">
                     <label className="flex items-center gap-2 text-sm text-zinc-600 cursor-pointer">
-                      <input type="checkbox" checked={showDiff} onChange={() => setShowDiff(!showDiff)} className="rounded border-zinc-300 accent-zinc-900" />
+                      <input type="checkbox" checked={showDiff} onChange={() => setShowDiff(!showDiff)} className="rounded border-zinc-300 accent-zinc-900 w-4 h-4" />
                       Compare with Secondary (Diff View)
                     </label>
                   </div>
                   {showDiff && fileContent && secondaryContent ? (
-                    <div className="border border-zinc-200 rounded-lg overflow-hidden">
+                    <div className="border border-zinc-200 rounded-lg overflow-hidden overflow-x-auto text-xs sm:text-sm">
                       <ReactDiffViewer
                         oldValue={fileContent}
                         newValue={secondaryContent}
@@ -223,19 +223,19 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
                       />
                     </div>
                   ) : (
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                       <div>
                         <div className="text-sm font-semibold text-zinc-700 mb-2">Primary ConfigMap</div>
                         <div className="border border-zinc-200 rounded-lg overflow-hidden">
                           <Editor height="55vh" defaultLanguage="yaml" theme="light" value={fileContent} onChange={(val) => setFileContent(val || '')}
-                            options={{ minimap: { enabled: true }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
+                            options={{ minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
                         </div>
                       </div>
                       <div>
                         <div className="text-sm font-semibold text-zinc-700 mb-2">Secondary ConfigMap {secondaryLoading && <span className="text-zinc-400 font-normal ml-2">Loading...</span>}</div>
                         <div className="border border-zinc-200 rounded-lg overflow-hidden">
                           <Editor height="55vh" defaultLanguage="yaml" theme="light" value={secondaryContent} onChange={(val) => setSecondaryContent(val || '')}
-                            options={{ minimap: { enabled: true }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
+                            options={{ minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
                         </div>
                       </div>
                     </div>
@@ -246,7 +246,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
                   <div className="text-sm font-semibold text-zinc-700 mb-2">Config File Content</div>
                   <div className="border border-zinc-200 rounded-lg overflow-hidden">
                     <Editor height="55vh" defaultLanguage="yaml" theme="light" value={fileContent} onChange={(val) => setFileContent(val || '')}
-                      options={{ minimap: { enabled: true }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
+                      options={{ minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
                   </div>
                 </>
               )}
@@ -254,7 +254,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
           )}
         </div>
 
-        <div className="flex justify-end gap-3 pt-2">
+        <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3 pt-2">
           <Button type="button" variant="secondary" onClick={() => navigate('/configmap')}>Cancel</Button>
           <PermissionGate product="autopilot" permission="CONFIG_CREATE">
             <Button type="submit" loading={createMut.isPending}>{createMut.isPending ? 'Saving...' : isUpdate ? 'Update' : 'Create ConfigMap'}</Button>

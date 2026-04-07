@@ -103,17 +103,17 @@ const EditVS: React.FC = () => {
     if (ok) unlockMut.mutate();
   };
 
-  const inputClass = "w-full h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
+  const inputClass = "w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
-      <div className="flex items-center justify-between mb-5">
-        <h1 className="text-lg font-semibold text-zinc-900">VS Editor</h1>
+      <div className="flex items-center justify-between mb-4 sm:mb-5">
+        <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">VS Editor</h1>
       </div>
 
       {/* Selection */}
-      <div className="bg-white rounded-xl border border-zinc-200 p-6 mb-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div className="bg-white rounded-xl border border-zinc-200 p-4 sm:p-6 mb-4 sm:mb-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
           <div>
             <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">App Group *</label>
             <select value={appGroup} onChange={e => { setAppGroup(e.target.value); setService(''); setVsData(''); setIsLocked(false); setTrackerId(null); }} disabled={isLocked} className={cn(inputClass, 'cursor-pointer', isLocked && 'bg-zinc-50 cursor-not-allowed')}>
@@ -135,9 +135,9 @@ const EditVS: React.FC = () => {
       {/* Editor */}
       {appGroup && service && (
         <div className="bg-white rounded-xl border border-zinc-200">
-          <div className="px-6 py-4 border-b border-zinc-100 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <h2 className="text-base font-semibold text-zinc-900">VirtualService Data</h2>
+          <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+              <h2 className="text-sm sm:text-base font-semibold text-zinc-900">VirtualService Data</h2>
               {isLocked && (
                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-medium uppercase tracking-wide bg-amber-50 text-amber-700 border border-amber-200">
                   <Lock className="w-3 h-3" /> Locked
@@ -145,7 +145,7 @@ const EditVS: React.FC = () => {
               )}
               {loadingVS && <span className="text-xs text-zinc-400">Loading...</span>}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               {!isLocked && (
                 <PermissionGate product="autopilot" permission="RELEASE_CREATE">
                   <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" loading={lockMut.isPending} onClick={handleLock}>

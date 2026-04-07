@@ -36,22 +36,29 @@ const iconMap: Record<string, React.ReactNode> = {
 interface SidebarProps {
   collapsed: boolean;
   onToggle: () => void;
+  onItemClick?: () => void;
+  forceExpanded?: boolean;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
+const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle, onItemClick, forceExpanded }) => {
   const location = useLocation();
   const { user } = useAuth();
   const { isAdmin, hasPermission } = usePermissions();
 
+  // When inside the mobile drawer, always behave as expanded.
+  const effectiveCollapsed = forceExpanded ? false : collapsed;
+
   const [openSections, setOpenSections] = useState<Record<string, boolean>>(() => {
     const initial: Record<string, boolean> = {};
     PRODUCT_REGISTRY.forEach((p) => {
-      initial[p.slug] = location.pathname.startsWith(p.basePath);
+      initial[p.slug + p.basePath] = location.pathname.startsWith(p.basePath);
     });
+    initial['admin'] = location.pathname.startsWith('/admin');
     return initial;
   });
 
-  const isActive = (path: string) => location.pathname === path || location.pathname.startsWith(path + '/');
+  const isActive = (path: string) =>
+    location.pathname === path || location.pathname.startsWith(path + '/');
 
   const toggleSection = (key: string) => {
     setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -68,40 +75,41 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
     return (
       <div key={key} className="mb-1">
         <button
-          onClick={() => !collapsed && toggleSection(key)}
+          onClick={() => !effectiveCollapsed && toggleSection(key)}
           className={cn(
-            'w-full flex items-center gap-3 px-4 h-10 text-sm cursor-pointer transition-colors duration-150',
-            'text-[#a1a1aa] hover:text-white hover:bg-[#171717]',
-            collapsed && 'justify-center px-0'
+            'w-full flex items-center gap-3 px-4 h-11 md:h-10 text-sm cursor-pointer transition-colors duration-150',
+            'text-zinc-400 hover:text-white hover:bg-zinc-900',
+            effectiveCollapsed && 'justify-center px-0'
           )}
         >
-          <span className="text-zinc-500">{iconMap[product.icon] || <Package className="w-4 h-4" />}</span>
-          {!collapsed && (
+          <span className="text-zinc-500 shrink-0">{iconMap[product.icon] || <Package className="w-4 h-4" />}</span>
+          {!effectiveCollapsed && (
             <>
-              <span className="flex-1 text-left font-medium">{product.label}</span>
+              <span className="flex-1 text-left font-medium truncate">{product.label}</span>
               {isOpen ? (
-                <ChevronDown className="w-3.5 h-3.5 text-zinc-600" />
+                <ChevronDown className="w-3.5 h-3.5 text-zinc-600 shrink-0" />
               ) : (
-                <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />
+                <ChevronRight className="w-3.5 h-3.5 text-zinc-600 shrink-0" />
               )}
             </>
           )}
         </button>
-        {!collapsed && isOpen && (
+        {!effectiveCollapsed && isOpen && (
           <div className="mt-0.5 space-y-0.5">
             {product.navItems.map((item) => (
               <Link
                 key={item.path}
                 to={item.path}
+                onClick={onItemClick}
                 className={cn(
-                  'flex items-center gap-2.5 pl-11 pr-4 h-9 text-sm cursor-pointer transition-colors duration-150',
+                  'flex items-center gap-2.5 pl-11 pr-4 h-10 md:h-9 text-sm cursor-pointer transition-colors duration-150',
                   isActive(item.path)
-                    ? 'text-[#fafafa] bg-[#262626] border-l-2 border-emerald-500'
-                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-[#171717] border-l-2 border-transparent'
+                    ? 'text-zinc-50 bg-zinc-800 border-l-2 border-emerald-500'
+                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900 border-l-2 border-transparent'
                 )}
               >
                 {iconMap[item.icon] || null}
-                <span>{item.label}</span>
+                <span className="truncate">{item.label}</span>
               </Link>
             ))}
           </div>
@@ -113,17 +121,17 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
   return (
     <aside
       className={cn(
-        'bg-[#0a0a0a] flex-shrink-0 flex flex-col h-screen transition-all duration-200 border-r border-zinc-800',
-        collapsed ? 'w-[60px]' : 'w-[260px]'
+        'bg-zinc-950 flex-shrink-0 flex flex-col h-screen transition-all duration-200 border-r border-zinc-800',
+        effectiveCollapsed ? 'w-[60px]' : 'w-[240px] lg:w-[260px]'
       )}
     >
       {/* Logo */}
       <div className={cn(
         'h-14 flex items-center border-b border-zinc-800 shrink-0',
-        collapsed ? 'justify-center px-2' : 'px-4 gap-3'
+        effectiveCollapsed ? 'justify-center px-2' : 'px-4 gap-3'
       )}>
         <img src={nyLogo} alt="Logo" className="h-7 w-auto" />
-        {!collapsed && (
+        {!effectiveCollapsed && (
           <span className="text-sm font-semibold text-white tracking-tight">System Control</span>
         )}
       </div>
@@ -138,15 +146,15 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
             <div className="mx-4 my-3 border-t border-zinc-800" />
             <div className="mb-1">
               <button
-                onClick={() => !collapsed && toggleSection('admin')}
+                onClick={() => !effectiveCollapsed && toggleSection('admin')}
                 className={cn(
-                  'w-full flex items-center gap-3 px-4 h-10 text-sm cursor-pointer transition-colors duration-150',
-                  'text-[#a1a1aa] hover:text-white hover:bg-[#171717]',
-                  collapsed && 'justify-center px-0'
+                  'w-full flex items-center gap-3 px-4 h-11 md:h-10 text-sm cursor-pointer transition-colors duration-150',
+                  'text-zinc-400 hover:text-white hover:bg-zinc-900',
+                  effectiveCollapsed && 'justify-center px-0'
                 )}
               >
-                <span className="text-zinc-500"><Shield className="w-4 h-4" /></span>
-                {!collapsed && (
+                <span className="text-zinc-500 shrink-0"><Shield className="w-4 h-4" /></span>
+                {!effectiveCollapsed && (
                   <>
                     <span className="flex-1 text-left font-medium">Admin</span>
                     {openSections['admin'] ? (
@@ -157,7 +165,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
                   </>
                 )}
               </button>
-              {!collapsed && openSections['admin'] && (
+              {!effectiveCollapsed && openSections['admin'] && (
                 <div className="mt-0.5 space-y-0.5">
                   {[
                     { label: 'Users', path: '/admin/users', icon: 'Users' },
@@ -166,11 +174,12 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
                     <Link
                       key={item.path}
                       to={item.path}
+                      onClick={onItemClick}
                       className={cn(
-                        'flex items-center gap-2.5 pl-11 pr-4 h-9 text-sm cursor-pointer transition-colors duration-150',
+                        'flex items-center gap-2.5 pl-11 pr-4 h-10 md:h-9 text-sm cursor-pointer transition-colors duration-150',
                         isActive(item.path)
-                          ? 'text-[#fafafa] bg-[#262626] border-l-2 border-emerald-500'
-                          : 'text-zinc-500 hover:text-zinc-300 hover:bg-[#171717] border-l-2 border-transparent'
+                          ? 'text-zinc-50 bg-zinc-800 border-l-2 border-emerald-500'
+                          : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900 border-l-2 border-transparent'
                       )}
                     >
                       {iconMap[item.icon] || null}
@@ -186,9 +195,9 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
 
       {/* Bottom */}
       <div className="shrink-0 border-t border-zinc-800">
-        {!collapsed && user && (
+        {!effectiveCollapsed && user && (
           <div className="px-4 py-3 flex items-center gap-3">
-            <div className="w-7 h-7 rounded-full bg-zinc-700 flex items-center justify-center text-xs font-bold text-white uppercase">
+            <div className="w-7 h-7 rounded-full bg-zinc-700 flex items-center justify-center text-xs font-bold text-white uppercase shrink-0">
               {user.name?.[0] || user.email?.[0] || '?'}
             </div>
             <div className="flex-1 min-w-0">
@@ -198,12 +207,15 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
           </div>
         )}
 
-        <button
-          onClick={onToggle}
-          className="w-full flex items-center justify-center py-3 text-zinc-600 hover:text-zinc-400 cursor-pointer transition-colors duration-150"
-        >
-          {collapsed ? <PanelLeft className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
-        </button>
+        {!forceExpanded && (
+          <button
+            onClick={onToggle}
+            className="w-full flex items-center justify-center py-3 text-zinc-600 hover:text-zinc-400 cursor-pointer transition-colors duration-150"
+            aria-label={effectiveCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            {effectiveCollapsed ? <PanelLeft className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
+          </button>
+        )}
       </div>
     </aside>
   );

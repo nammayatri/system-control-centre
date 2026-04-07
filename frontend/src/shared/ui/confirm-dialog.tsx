@@ -56,27 +56,27 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
     <ConfirmContext.Provider value={confirm}>
       {children}
       <Dialog open={open} onOpenChange={(v) => { if (!v) handleCancel(); }}>
-        <DialogContent className="max-w-sm">
+        <DialogContent size="sm">
           <DialogHeader>
             <div className="flex items-start gap-3">
               {options.variant === 'danger' && (
-                <div className="mt-0.5 w-9 h-9 rounded-full bg-red-50 flex items-center justify-center shrink-0">
-                  <AlertTriangle className="w-4.5 h-4.5 text-red-500" />
+                <div className="mt-0.5 w-9 h-9 rounded-full bg-red-50 border border-red-100 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-4 h-4 text-red-600" />
                 </div>
               )}
-              <div>
+              <div className="min-w-0 flex-1">
                 <DialogTitle>{options.title}</DialogTitle>
                 <DialogDescription>{options.description}</DialogDescription>
               </div>
             </div>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="secondary" size="sm" onClick={handleCancel}>
+            <Button variant="secondary" size="md" onClick={handleCancel}>
               {options.cancelLabel || 'Cancel'}
             </Button>
             <Button
               variant={options.variant === 'danger' ? 'danger' : 'primary'}
-              size="sm"
+              size="md"
               onClick={handleConfirm}
             >
               {options.confirmLabel || 'Confirm'}

@@ -48,8 +48,8 @@ const tryFormatJson = (data: string): string => { try { return JSON.stringify(JS
 const ConfigMapDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
   const { data: diff, isLoading, error } = useReleaseDiff(releaseId, 'configmap');
   return (
-    <div className="p-6">
-      <div className="flex items-center justify-between mb-4">
+    <div className="p-4 sm:p-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
         <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">ConfigMap Diff</h3>
         {diff?.message && <span className="text-xs text-zinc-400">{diff.message}</span>}
       </div>
@@ -60,7 +60,7 @@ const ConfigMapDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
       ) : !diff.oldfile && !diff.newfile ? (
         <p className="text-sm text-zinc-400">No ConfigMap diff data available.</p>
       ) : (
-        <div className="border border-zinc-200 rounded-lg overflow-hidden">
+        <div className="border border-zinc-200 rounded-lg overflow-hidden overflow-x-auto text-xs sm:text-sm">
           <ReactDiffViewer
             oldValue={formatConfigMapContent(diff.oldfile)}
             newValue={formatConfigMapContent(diff.newfile)}
@@ -147,17 +147,17 @@ const ConfigMapSummary: React.FC = () => {
   const sortedEvents = [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
   return (
-    <div className="flex flex-col w-full">
+    <div className="flex flex-col w-full pb-12">
       {/* Header */}
-      <div className="flex items-start justify-between mb-5">
+      <div className="flex flex-col gap-3 mb-4 sm:mb-5">
         <div>
-          <div className="flex items-center gap-3 mb-1">
-            <h1 className="text-lg font-semibold text-zinc-900">ConfigMap Details</h1>
+          <div className="flex items-center gap-2 sm:gap-3 mb-1 flex-wrap">
+            <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">ConfigMap Details</h1>
             <StatusBadge status={data.status} />
           </div>
-          <div className="font-mono text-xs text-zinc-500">ID: {data.id}</div>
+          <div className="font-mono text-[11px] sm:text-xs text-zinc-500 break-all">ID: {data.id}</div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           {data.status === 'CREATED' && data.is_approved === 0 && (
             <PermissionGate product="autopilot" permission="CONFIG_APPROVE">
               <Button size="sm" variant="success" onClick={() => handleAction('Approve')} loading={actionMut.isPending}><Check className="w-3.5 h-3.5" /> Approve</Button>
@@ -194,17 +194,17 @@ const ConfigMapSummary: React.FC = () => {
 
       {/* Tabs */}
       <div className="bg-white rounded-xl border border-zinc-200">
-        <div className="flex border-b border-zinc-200 px-5">
+        <div className="flex border-b border-zinc-200 px-2 sm:px-5 overflow-x-auto">
           {tabs.map(t => (
             <button key={t} onClick={() => setActiveTab(t)}
-              className={cn('py-3 px-4 text-sm font-medium border-b-2 transition-colors duration-150 cursor-pointer', activeTab === t ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-400 hover:text-zinc-600')}>
+              className={cn('py-3 px-3 sm:px-4 text-sm font-medium border-b-2 transition-colors duration-150 cursor-pointer whitespace-nowrap', activeTab === t ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-400 hover:text-zinc-600')}>
               {t}
             </button>
           ))}
         </div>
 
         {activeTab === 'Summary' && (
-          <div className="p-6 grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="p-4 sm:p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
             {[
               { title: 'APP GROUP', rows: [{ label: 'App Group', value: data.appGroup }, { label: 'Description', value: data.description }, { label: 'Release Manager', value: data.release_manager }, { label: 'Name', value: data.name }, { label: 'Change log', value: data.change_log }] },
               { title: 'TIME SCHEDULE', rows: [{ label: 'Created at', value: data.date_created }, { label: 'Scheduled time', value: data.schedule_time }, { label: 'Last Updated', value: data.last_updated }, { label: 'Start time', value: data.start_time }, { label: 'End time', value: data.end_time }] },
@@ -227,7 +227,7 @@ const ConfigMapSummary: React.FC = () => {
         )}
 
         {activeTab === 'Event Data' && (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto -mx-0">
             <table className="w-full text-sm text-left">
               <thead><tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
                 <th className="px-3 py-3 w-8"></th>

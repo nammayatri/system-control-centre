@@ -9,14 +9,16 @@ export const TooltipTrigger = TooltipPrimitive.Trigger;
 export const TooltipContent = React.forwardRef<
   React.ComponentRef<typeof TooltipPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof TooltipPrimitive.Content>
->(({ className, sideOffset = 4, children, ...props }, ref) => (
+>(({ className, sideOffset = 6, children, ...props }, ref) => (
   <TooltipPrimitive.Portal>
     <TooltipPrimitive.Content
       ref={ref}
       sideOffset={sideOffset}
       className={cn(
-        'z-50 overflow-hidden rounded-md bg-zinc-900 px-2.5 py-1.5 text-xs text-white shadow-md',
-        'animate-in fade-in-0 zoom-in-95',
+        'z-50 overflow-hidden rounded-md bg-zinc-900 px-2.5 py-1.5 text-xs text-white border border-zinc-800',
+        'animate-in fade-in-0 zoom-in-95 duration-150',
+        // Hide tooltips on touch devices where hover is unreliable
+        'hidden sm:block',
         className
       )}
       {...props}
@@ -28,11 +30,19 @@ export const TooltipContent = React.forwardRef<
 
 TooltipContent.displayName = 'TooltipContent';
 
-export function SimpleTooltip({ children, content }: { children: React.ReactNode; content: string }) {
+export function SimpleTooltip({
+  children,
+  content,
+  side = 'top',
+}: {
+  children: React.ReactNode;
+  content: string;
+  side?: 'top' | 'right' | 'bottom' | 'left';
+}) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent>{content}</TooltipContent>
+      <TooltipContent side={side}>{content}</TooltipContent>
     </Tooltip>
   );
 }

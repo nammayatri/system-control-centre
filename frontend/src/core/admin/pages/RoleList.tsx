@@ -102,8 +102,8 @@ const RoleList: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col w-full">
-      <h1 className="text-lg font-semibold text-zinc-900 mb-5">
+    <div className="flex flex-col w-full pb-12">
+      <h1 className="text-lg sm:text-xl font-semibold text-zinc-900 mb-4 sm:mb-5">
         Roles
       </h1>
 
@@ -118,13 +118,14 @@ const RoleList: React.FC = () => {
         <div className="space-y-5">
           {productData.map((product) => (
             <div key={product.slug} className="bg-white rounded-xl border border-zinc-200 overflow-hidden">
-              <div className="px-4 py-3 bg-zinc-50 border-b border-zinc-200 flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">
+              <div className="px-3 sm:px-4 py-3 bg-zinc-50 border-b border-zinc-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider truncate">
                   {product.name}
                 </h2>
                 <Button size="sm" variant="secondary" onClick={() => openCreateDialog(product.slug)}>
                   <Plus className="w-3.5 h-3.5" />
-                  Create Custom Role
+                  <span className="hidden sm:inline">Create Custom Role</span>
+                  <span className="sm:hidden">Add Custom Role</span>
                 </Button>
               </div>
               {product.roles.length === 0 ? (
@@ -171,7 +172,7 @@ const RoleList: React.FC = () => {
 
       {/* ── Create Custom Role Dialog ── */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-xl">
+        <DialogContent size="xl">
           <DialogHeader>
             <DialogTitle>Create Custom Role</DialogTitle>
             <DialogDescription>

@@ -119,19 +119,19 @@ const VSEditSummary: React.FC = () => {
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
       {/* Breadcrumb */}
-      <div className="flex items-center text-sm text-zinc-500 font-medium mb-4">
+      <div className="flex items-center text-sm text-zinc-500 font-medium mb-3 sm:mb-4 flex-wrap gap-y-1">
         <Link to="/vs-editor" className="hover:text-zinc-700 transition-colors duration-150">VS Edits</Link>
-        <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300" />
-        <span className="font-mono text-xs text-zinc-800 truncate max-w-[200px]">{edit.id}</span>
+        <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300 shrink-0" />
+        <span className="font-mono text-xs text-zinc-800 truncate max-w-[150px] sm:max-w-[200px]">{edit.id}</span>
       </div>
 
       {/* Header */}
-      <div className="flex items-center justify-between mb-5">
-        <div className="flex items-center gap-3">
-          <h1 className="text-lg font-semibold text-zinc-900">VS Edit Summary</h1>
+      <div className="flex flex-col gap-3 mb-4 sm:mb-5">
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+          <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">VS Edit Summary</h1>
           <StatusBadge status={edit.status} />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           {edit.status === 'LOCKED' && (
             <PermissionGate product="autopilot" permission="RELEASE_CREATE">
               <Button size="sm" variant="outline" loading={unlockMut.isPending}
@@ -175,18 +175,18 @@ const VSEditSummary: React.FC = () => {
 
       {/* Tabs */}
       <div className="bg-white rounded-xl border border-zinc-200">
-        <div className="flex border-b border-zinc-200 px-5">
+        <div className="flex border-b border-zinc-200 px-2 sm:px-5 overflow-x-auto">
           {tabs.map(t => (
             <button key={t} onClick={() => setActiveTab(t)}
-              className={cn('py-3 px-4 text-sm font-medium border-b-2 transition-colors duration-150 cursor-pointer', activeTab === t ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-400 hover:text-zinc-600')}>
+              className={cn('py-3 px-3 sm:px-4 text-sm font-medium border-b-2 transition-colors duration-150 cursor-pointer whitespace-nowrap', activeTab === t ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-400 hover:text-zinc-600')}>
               {t}
             </button>
           ))}
         </div>
 
         {activeTab === 'Summary' && (
-          <div className="p-6">
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-3">
+          <div className="p-4 sm:p-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-4 sm:gap-x-6 gap-y-3">
               <InfoField label="ID" value={edit.id} mono />
               <InfoField label="App Group" value={edit.appGroup} />
               <InfoField label="Service" value={edit.service} />
@@ -240,7 +240,7 @@ const VSEditSummary: React.FC = () => {
         {activeTab === 'VS Diff' && (
           <div className="p-0">
             {(oldVsEvent || newVsEvent) ? (
-              <div className="overflow-hidden">
+              <div className="overflow-x-auto text-xs sm:text-sm">
                 <ReactDiffViewer
                   oldValue={oldVsEvent?.data || edit.old_vs_data || ''}
                   newValue={newVsEvent?.data || edit.new_vs_data || ''}

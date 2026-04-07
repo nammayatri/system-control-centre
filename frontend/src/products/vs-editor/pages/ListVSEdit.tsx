@@ -108,19 +108,21 @@ const ListVSEdit: React.FC = () => {
     <div className="flex flex-col flex-1 w-full">
       {/* Toolbar + Table Card */}
       <div className="bg-white border border-zinc-200 rounded-xl">
-        <div className="p-4 flex items-center gap-3 border-b border-zinc-100">
+        <div className="p-3 sm:p-4 flex flex-col md:flex-row md:items-center gap-2 md:gap-3 border-b border-zinc-100">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
             <input type="text" placeholder="Search VS edits..." value={search} onChange={(e) => setSearch(e.target.value)}
-              className="pl-9 pr-4 h-9 w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
+              className="pl-9 pr-4 h-10 sm:h-9 w-full md:w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
           </div>
 
           {/* Date Range */}
           <div className="relative" ref={datePickerRef}>
-            <button onClick={() => setShowDatePicker(!showDatePicker)} className="flex items-center gap-2 border border-zinc-300 rounded-lg px-3 h-9 bg-white hover:bg-zinc-50 text-sm text-zinc-600 cursor-pointer transition-colors duration-150">
-              <Calendar className="h-4 w-4 text-zinc-400" />
-              <span className="max-w-[220px] truncate">{formatDateRange()}</span>
-              <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+            <button onClick={() => setShowDatePicker(!showDatePicker)} className="w-full md:w-auto flex items-center justify-between gap-2 border border-zinc-300 rounded-lg px-3 h-10 sm:h-9 bg-white hover:bg-zinc-50 text-sm text-zinc-600 cursor-pointer transition-colors duration-150">
+              <span className="flex items-center gap-2 truncate">
+                <Calendar className="h-4 w-4 text-zinc-400 shrink-0" />
+                <span className="max-w-[220px] truncate">{formatDateRange()}</span>
+              </span>
+              <ChevronDown className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
             </button>
             {showDatePicker && (
               <div className="absolute top-full mt-1 left-0 bg-white border border-zinc-200 rounded-lg shadow-lg z-50 min-w-[240px]">
@@ -152,21 +154,23 @@ const ListVSEdit: React.FC = () => {
             )}
           </div>
 
-          <div className="flex-1" />
+          <div className="hidden md:block flex-1" />
 
-          <button onClick={() => refetch()} className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150">
-            <RefreshCw className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => refetch()} className="h-10 w-10 sm:h-9 sm:w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150">
+              <RefreshCw className="h-4 w-4" />
+            </button>
 
-          <PermissionGate product="autopilot" permission="RELEASE_CREATE">
-            <Link to="/vs-editor/new">
-              <Button size="sm"><Plus className="w-4 h-4" /> New VS Edit</Button>
-            </Link>
-          </PermissionGate>
+            <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+              <Link to="/vs-editor/new" className="flex-1 md:flex-none">
+                <Button size="md" fullWidth><Plus className="w-4 h-4" /> New VS Edit</Button>
+              </Link>
+            </PermissionGate>
+          </div>
         </div>
 
-        {/* Table */}
-        <div className="overflow-x-auto">
+        {/* Desktop Table */}
+        <div className="hidden md:block overflow-x-auto">
           {isLoading ? (
             <TableSkeleton rows={8} cols={6} />
           ) : (
@@ -207,11 +211,44 @@ const ListVSEdit: React.FC = () => {
           )}
         </div>
 
+        {/* Mobile cards */}
+        <div className="md:hidden">
+          {isLoading ? (
+            <TableSkeleton rows={4} cols={4} />
+          ) : filteredEdits.length === 0 ? (
+            <div className="py-16 text-center text-zinc-400 text-sm">No VS edits found</div>
+          ) : (
+            <div className="divide-y divide-zinc-100">
+              {paginatedEdits.map((edit: VSEditTracker) => (
+                <div
+                  key={edit.id}
+                  onClick={() => navigate(`/vs-editor/${edit.id}`)}
+                  className="p-4 cursor-pointer hover:bg-zinc-50 active:bg-zinc-100 transition-colors"
+                >
+                  <div className="flex items-start justify-between gap-3 mb-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-zinc-900 truncate">{edit.service}</div>
+                      <div className="text-xs text-zinc-500 mt-0.5 truncate">{edit.appGroup}</div>
+                    </div>
+                    <StatusBadge status={edit.status} />
+                  </div>
+                  <div className="text-[11px] text-zinc-500 font-mono truncate">VS: {edit.vs_name}</div>
+                  <div className="flex items-center gap-2 text-[11px] text-zinc-500 mt-1 flex-wrap">
+                    <span>{edit.created_by}</span>
+                    <span>·</span>
+                    <span className="font-mono">{formatDate(edit.created_at)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         {/* Pagination */}
         {!isLoading && filteredEdits.length > 0 && (
-          <div className="px-4 py-3 flex items-center justify-between border-t border-zinc-100">
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-zinc-500">
+          <div className="px-3 sm:px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-zinc-100">
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-xs sm:text-sm text-zinc-500">
                 Showing {startIndex + 1}-{Math.min(startIndex + itemsPerPage, filteredEdits.length)} of {filteredEdits.length}
               </span>
               <select value={itemsPerPage} onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }} className="border border-zinc-300 rounded-lg px-2 py-1 text-xs text-zinc-600 cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400">
@@ -219,11 +256,11 @@ const ListVSEdit: React.FC = () => {
               </select>
             </div>
             <div className="flex items-center gap-1">
-              <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150">
+              <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150">
                 <ChevronLeft className="w-4 h-4" />
               </button>
               <span className="text-xs text-zinc-500 px-3 font-mono">{currentPage} / {totalPages}</span>
-              <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150">
+              <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150">
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>

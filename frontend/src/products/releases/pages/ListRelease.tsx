@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X } from 'lucide-react';
+import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X, SlidersHorizontal } from 'lucide-react';
 import { useReleases } from '../hooks';
 import { StatusBadge } from '../components/StatusBadge';
 import { Button } from '../../../shared/ui/button';
@@ -84,6 +84,7 @@ const ListRelease: React.FC = () => {
   const [customTo, setCustomTo] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [productFilter, setProductFilter] = useState<string>('');
+  const [showMobileFilters, setShowMobileFilters] = useState(false);
   const [sortField, setSortField] = useState<string>('date_created');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const datePickerRef = useRef<HTMLDivElement>(null);
@@ -177,16 +178,21 @@ const ListRelease: React.FC = () => {
     { label: 'Failed Today', value: kpis.failedToday, dotColor: 'bg-red-500' },
   ];
 
+  const activeFilterCount = (statusFilter ? 1 : 0) + (productFilter ? 1 : 0);
+
   return (
     <div className="flex flex-col flex-1 w-full">
       {/* KPI Cards */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-4 sm:mb-6">
         {kpiCards.map((kpi, i) => (
-          <div key={i} className="h-20 bg-white border border-zinc-200 rounded-xl px-5 py-4 flex flex-col justify-between">
-            <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">{kpi.label}</span>
-            <div className="flex items-center gap-2">
+          <div
+            key={i}
+            className="bg-white border border-zinc-200 rounded-xl px-4 py-3 sm:px-5 sm:py-4 flex flex-col justify-between min-h-[72px] sm:min-h-[80px]"
+          >
+            <span className="text-[10px] sm:text-[11px] font-medium text-zinc-500 uppercase tracking-wider">{kpi.label}</span>
+            <div className="flex items-center gap-2 mt-1">
               <span className={cn('w-1.5 h-1.5 rounded-full', kpi.dotColor)} />
-              <span className="text-2xl font-bold text-zinc-900">{kpi.value}</span>
+              <span className="text-xl sm:text-2xl font-bold text-zinc-900">{kpi.value}</span>
             </div>
           </div>
         ))}
@@ -194,7 +200,116 @@ const ListRelease: React.FC = () => {
 
       {/* Toolbar + Table Card */}
       <div className="bg-white border border-zinc-200 rounded-xl">
-        <div className="p-4 flex items-center gap-3 border-b border-zinc-100">
+        {/* Mobile toolbar */}
+        <div className="md:hidden p-3 border-b border-zinc-100 space-y-2">
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
+              <input
+                type="text"
+                placeholder="Search..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-9 pr-3 h-10 w-full border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent"
+              />
+            </div>
+            <button
+              onClick={() => setShowMobileFilters(!showMobileFilters)}
+              className={cn(
+                'h-10 px-3 flex items-center gap-1.5 border border-zinc-300 rounded-lg text-sm cursor-pointer transition-colors',
+                showMobileFilters ? 'bg-zinc-100 text-zinc-900' : 'bg-white text-zinc-600 hover:bg-zinc-50'
+              )}
+              aria-label="Toggle filters"
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+              {activeFilterCount > 0 && (
+                <span className="bg-zinc-900 text-white rounded-full text-[10px] w-4 h-4 flex items-center justify-center font-medium">
+                  {activeFilterCount}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => refetch()}
+              className="h-10 w-10 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors"
+              aria-label="Refresh"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </button>
+          </div>
+          {showMobileFilters && (
+            <div className="space-y-2 pt-1">
+              <div className="relative" ref={datePickerRef}>
+                <button
+                  onClick={() => setShowDatePicker(!showDatePicker)}
+                  className="w-full flex items-center justify-between gap-2 border border-zinc-300 rounded-lg px-3 h-10 bg-white text-sm text-zinc-600 cursor-pointer"
+                >
+                  <span className="flex items-center gap-2 truncate">
+                    <Calendar className="h-4 w-4 text-zinc-400 shrink-0" />
+                    <span className="truncate">{formatDateRange()}</span>
+                  </span>
+                  <ChevronDown className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                </button>
+                {showDatePicker && (
+                  <div className="absolute top-full mt-1 left-0 right-0 bg-white border border-zinc-200 rounded-lg shadow-sm z-50">
+                    <div className="p-1.5 max-h-60 overflow-y-auto">
+                      {TIME_RANGE_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.value}
+                          onClick={() => { if (opt.value !== 'custom') { setTimeRange(opt.value); setShowDatePicker(false); } else { setTimeRange('custom'); } }}
+                          className={cn(
+                            'w-full text-left px-3 py-2 text-sm rounded cursor-pointer transition-colors',
+                            timeRange === opt.value ? 'bg-zinc-100 text-zinc-900 font-medium' : 'text-zinc-600 hover:bg-zinc-50'
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                    {timeRange === 'custom' && (
+                      <div className="border-t border-zinc-100 p-3 space-y-2">
+                        <div>
+                          <label className="block text-xs font-medium text-zinc-600 mb-1">From</label>
+                          <input type="datetime-local" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-2 text-sm" />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-zinc-600 mb-1">To</label>
+                          <input type="datetime-local" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-2 text-sm" />
+                        </div>
+                        <Button size="md" onClick={handleCustomRangeApply} fullWidth>Apply</Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="w-full border border-zinc-300 rounded-lg px-3 h-10 text-sm text-zinc-600 bg-white"
+              >
+                <option value="">All Statuses</option>
+                {STATUS_FILTER_OPTIONS.map(s => <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
+              </select>
+              <select
+                value={productFilter}
+                onChange={(e) => setProductFilter(e.target.value)}
+                className="w-full border border-zinc-300 rounded-lg px-3 h-10 text-sm text-zinc-600 bg-white"
+              >
+                <option value="">All Groups</option>
+                {productOptions.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+          )}
+          <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+            <Link to="/releases/new" className="block">
+              <Button size="md" fullWidth>
+                <Plus className="w-4 h-4" /> Create Release
+              </Button>
+            </Link>
+          </PermissionGate>
+        </div>
+
+        {/* Desktop toolbar */}
+        <div className="hidden md:flex p-4 items-center gap-3 border-b border-zinc-100 flex-wrap">
           {/* Search */}
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
@@ -203,7 +318,7 @@ const ListRelease: React.FC = () => {
               placeholder="Search releases..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="pl-9 pr-4 h-9 w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+              className="pl-9 pr-4 h-9 w-56 lg:w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
             />
           </div>
 
@@ -211,11 +326,11 @@ const ListRelease: React.FC = () => {
           <div className="relative" ref={datePickerRef}>
             <button onClick={() => setShowDatePicker(!showDatePicker)} className="flex items-center gap-2 border border-zinc-300 rounded-lg px-3 h-9 bg-white hover:bg-zinc-50 text-sm text-zinc-600 cursor-pointer transition-colors duration-150">
               <Calendar className="h-4 w-4 text-zinc-400" />
-              <span className="max-w-[220px] truncate">{formatDateRange()}</span>
+              <span className="max-w-[180px] lg:max-w-[220px] truncate">{formatDateRange()}</span>
               <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
             </button>
             {showDatePicker && (
-              <div className="absolute top-full mt-1 left-0 bg-white border border-zinc-200 rounded-lg shadow-lg z-50 min-w-[260px]">
+              <div className="absolute top-full mt-1 left-0 bg-white border border-zinc-200 rounded-lg shadow-sm z-50 min-w-[260px]">
                 <div className="p-1.5">
                   {TIME_RANGE_OPTIONS.map((opt) => (
                     <button key={opt.value} onClick={() => { if (opt.value !== 'custom') { setTimeRange(opt.value); setShowDatePicker(false); } else { setTimeRange('custom'); } }}
@@ -245,21 +360,19 @@ const ListRelease: React.FC = () => {
             )}
           </div>
 
-          {/* Status Filter */}
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="border border-zinc-300 rounded-lg px-3 h-9 text-sm text-zinc-600 bg-white cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent">
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="border border-zinc-300 rounded-lg px-3 h-9 text-sm text-zinc-600 bg-white cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400">
             <option value="">All Statuses</option>
             {STATUS_FILTER_OPTIONS.map(s => <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
           </select>
 
-          {/* Product Filter */}
-          <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)} className="border border-zinc-300 rounded-lg px-3 h-9 text-sm text-zinc-600 bg-white cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent">
+          <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)} className="border border-zinc-300 rounded-lg px-3 h-9 text-sm text-zinc-600 bg-white cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400">
             <option value="">All Groups</option>
             {productOptions.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
 
           <div className="flex-1" />
 
-          <button onClick={() => refetch()} className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400">
+          <button onClick={() => refetch()} className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150">
             <RefreshCw className="h-4 w-4" />
           </button>
 
@@ -270,21 +383,21 @@ const ListRelease: React.FC = () => {
           </PermissionGate>
         </div>
 
-        {/* Table */}
-        <div className="overflow-x-auto">
+        {/* Desktop Table */}
+        <div className="hidden md:block overflow-x-auto">
           {isLoading ? (
             <TableSkeleton rows={8} cols={7} />
           ) : (
             <table className="w-full text-left whitespace-nowrap">
               <thead>
-                <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+                <tr className="bg-zinc-50 border-b border-zinc-200 text-[11px] text-zinc-500 font-medium uppercase tracking-wider">
                   <th className="py-3 px-4 w-12">#</th>
-                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('appGroup')}>App Group</th>
-                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('service')}>Service</th>
-                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('new_version')}>Version</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('appGroup')}>App Group</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('service')}>Service</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('new_version')}>Version</th>
                   <th className="py-3 px-4">Status</th>
-                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('release_manager')}>Release Manager</th>
-                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors duration-150" onClick={() => handleSort('date_created')}>Created At</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('release_manager')}>Release Manager</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('date_created')}>Created At</th>
                   <th className="py-3 px-4 w-24 text-center">Actions</th>
                 </tr>
               </thead>
@@ -308,20 +421,20 @@ const ListRelease: React.FC = () => {
                         <td className="py-3 px-4 font-medium text-zinc-800">{release.service}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">{release.new_version}</td>
                         <td className="py-3 px-4">
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <StatusBadge status={release.status} />
                             {release.env && (
-                              <span className="rounded px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide bg-sky-700 text-white">
+                              <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-sky-700 text-white">
                                 {release.env}
                               </span>
                             )}
                             {release.env_override_data && (
-                              <span className="rounded px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide bg-blue-700 text-white">
+                              <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-blue-700 text-white">
                                 ENV
                               </span>
                             )}
                             {isRevert && (
-                              <span className="rounded px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide bg-blue-700 text-white">
+                              <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-violet-700 text-white">
                                 REVERT
                               </span>
                             )}
@@ -335,6 +448,7 @@ const ListRelease: React.FC = () => {
                               <button
                                 onClick={(e) => { e.stopPropagation(); navigate(`/releases/${release.id}/clone`); }}
                                 className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
+                                aria-label="Clone release"
                               >
                                 <Copy className="w-3.5 h-3.5" />
                               </button>
@@ -343,6 +457,7 @@ const ListRelease: React.FC = () => {
                               <button
                                 onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(release.id); toast.success('Release ID copied'); }}
                                 className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
+                                aria-label="Copy release ID"
                               >
                                 <Clipboard className="w-3.5 h-3.5" />
                               </button>
@@ -358,23 +473,108 @@ const ListRelease: React.FC = () => {
           )}
         </div>
 
+        {/* Mobile card list */}
+        <div className="md:hidden">
+          {isLoading ? (
+            <TableSkeleton rows={4} cols={4} />
+          ) : filteredReleases.length === 0 ? (
+            <div className="py-16 text-center text-zinc-400 text-sm">No releases found</div>
+          ) : (
+            <div className="divide-y divide-zinc-100">
+              {paginatedReleases.map((release) => {
+                const isRevert = release.release_context?.revert === 1;
+                return (
+                  <div
+                    key={release.id}
+                    onClick={() => navigate(`/releases/${release.id}`)}
+                    className="p-4 cursor-pointer hover:bg-zinc-50 transition-colors active:bg-zinc-100"
+                  >
+                    <div className="flex items-start justify-between gap-3 mb-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-zinc-900 truncate">{release.service}</div>
+                        <div className="text-xs text-zinc-500 mt-0.5 truncate">{release.appGroup}</div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); navigate(`/releases/${release.id}/clone`); }}
+                          className="w-9 h-9 rounded-lg flex items-center justify-center text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100"
+                          aria-label="Clone release"
+                        >
+                          <Copy className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(release.id); toast.success('Release ID copied'); }}
+                          className="w-9 h-9 rounded-lg flex items-center justify-center text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100"
+                          aria-label="Copy release ID"
+                        >
+                          <Clipboard className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-wrap mb-2">
+                      <StatusBadge status={release.status} />
+                      {release.env && (
+                        <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-sky-700 text-white">
+                          {release.env}
+                        </span>
+                      )}
+                      {release.env_override_data && (
+                        <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-blue-700 text-white">
+                          ENV
+                        </span>
+                      )}
+                      {isRevert && (
+                        <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-violet-700 text-white">
+                          REVERT
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 text-[11px] text-zinc-500 font-mono flex-wrap">
+                      <span>{release.new_version}</span>
+                      <span>·</span>
+                      <span>{formatISODate(release.date_created)}</span>
+                    </div>
+                    {release.release_manager && (
+                      <div className="text-xs text-zinc-500 mt-1">By {release.release_manager}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
         {/* Pagination */}
         {!isLoading && filteredReleases.length > 0 && (
-          <div className="px-4 py-3 flex items-center justify-between border-t border-zinc-100">
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-zinc-500">
-                Showing {startIndex + 1}-{Math.min(startIndex + itemsPerPage, filteredReleases.length)} of {filteredReleases.length} releases
+          <div className="px-3 sm:px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-zinc-100">
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-xs sm:text-sm text-zinc-500">
+                Showing {startIndex + 1}-{Math.min(startIndex + itemsPerPage, filteredReleases.length)} of {filteredReleases.length}
               </span>
-              <select value={itemsPerPage} onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }} className="border border-zinc-300 rounded-lg px-2 py-1 text-xs text-zinc-600 cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400">
+              <select
+                value={itemsPerPage}
+                onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                className="border border-zinc-300 rounded-lg px-2 py-1 text-xs text-zinc-600 cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400"
+              >
                 {[10, 25, 50].map(n => <option key={n} value={n}>{n} / page</option>)}
               </select>
             </div>
             <div className="flex items-center gap-1">
-              <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150">
+              <button
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={currentPage === 1}
+                className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors"
+                aria-label="Previous page"
+              >
                 <ChevronLeft className="w-4 h-4" />
               </button>
               <span className="text-xs text-zinc-500 px-3 font-mono">{currentPage} / {totalPages}</span>
-              <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150">
+              <button
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                disabled={currentPage === totalPages}
+                className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors"
+                aria-label="Next page"
+              >
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>

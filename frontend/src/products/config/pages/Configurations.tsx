@@ -175,7 +175,7 @@ const Configurations: React.FC = () => {
             step={type === 'double' ? 'any' : '1'}
             value={modalValue}
             onChange={e => { setModalValue(e.target.value); setValidationError(''); }}
-            className="w-full h-9 rounded-lg border border-zinc-300 px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+            className="w-full h-10 sm:h-9 rounded-lg border border-zinc-300 px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
           />
           {validationError && <p className="text-xs text-red-500">{validationError}</p>}
         </div>
@@ -198,19 +198,19 @@ const Configurations: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col w-full">
+    <div className="flex flex-col w-full pb-12">
       {/* Header */}
-      <div className="flex items-center justify-between mb-5">
-        <h1 className="text-lg font-semibold text-zinc-900">Server Configurations</h1>
-        <div className="flex items-center gap-3">
-          <div className="relative">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 sm:mb-5">
+        <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Server Configurations</h1>
+        <div className="flex items-center gap-2 sm:gap-3">
+          <div className="relative flex-1 sm:flex-none">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
             <input
               type="text"
               placeholder="Search configs..."
               value={search}
               onChange={e => setSearch(e.target.value)}
-              className="pl-9 pr-4 h-9 border border-zinc-300 rounded-lg text-sm w-64 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+              className="pl-9 pr-4 h-10 sm:h-9 w-full sm:w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
             />
           </div>
           <Button size="icon" variant="ghost" onClick={() => refetch()}>
@@ -251,65 +251,94 @@ const Configurations: React.FC = () => {
 
                 {/* Config rows */}
                 {!isCollapsed && (
-                  <table className="w-full text-left">
-                    <thead>
-                      <tr className="border-b border-zinc-100 text-[11px] text-zinc-400 font-medium uppercase tracking-wider">
-                        <th className="px-4 py-2 w-64">Name</th>
-                        <th className="px-4 py-2 w-20">Type</th>
-                        <th className="px-4 py-2">Value</th>
-                        <th className="px-4 py-2 w-28">Product</th>
-                        <th className="px-4 py-2 w-20">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody className="text-sm">
-                      {group.configs.map((cfg, i) => (
-                        <tr
-                          key={cfg.key}
-                          className={cn(
-                            'border-b border-zinc-50 hover:bg-zinc-50 cursor-pointer transition-colors duration-150',
-                            i % 2 === 1 ? 'bg-zinc-25' : 'bg-white'
-                          )}
-                          onClick={() => openConfigModal(cfg)}
-                        >
-                          <td className="px-4 py-2.5">
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-medium text-zinc-800">{cfg.key}</span>
-                              {cfg.description && (
-                                <SimpleTooltip content={cfg.description}>
-                                  <Info className="w-3.5 h-3.5 text-zinc-300 hover:text-zinc-500 transition-colors" />
-                                </SimpleTooltip>
+                  <>
+                    {/* Desktop table */}
+                    <div className="hidden md:block overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead>
+                          <tr className="border-b border-zinc-100 text-[11px] text-zinc-400 font-medium uppercase tracking-wider">
+                            <th className="px-4 py-2 w-64">Name</th>
+                            <th className="px-4 py-2 w-20">Type</th>
+                            <th className="px-4 py-2">Value</th>
+                            <th className="px-4 py-2 w-28">Product</th>
+                            <th className="px-4 py-2 w-20">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody className="text-sm">
+                          {group.configs.map((cfg, i) => (
+                            <tr
+                              key={cfg.key}
+                              className={cn(
+                                'border-b border-zinc-50 hover:bg-zinc-50 cursor-pointer transition-colors duration-150',
+                                i % 2 === 1 ? 'bg-zinc-50/50' : 'bg-white'
                               )}
-                            </div>
-                          </td>
-                          <td className="px-4 py-2.5">
-                            <Badge variant={typeBadgeVariant(cfg.type)} size="sm">{cfg.type}</Badge>
-                          </td>
-                          <td className="px-4 py-2.5">
-                            {cfg.type === 'bool' ? (
-                              <span className={cn(
-                                'inline-flex items-center gap-1.5 text-xs font-medium',
-                                cfg.value === 'true' ? 'text-emerald-600' : 'text-zinc-400'
-                              )}>
+                              onClick={() => openConfigModal(cfg)}
+                            >
+                              <td className="px-4 py-2.5">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-medium text-zinc-800">{cfg.key}</span>
+                                  {cfg.description && (
+                                    <SimpleTooltip content={cfg.description}>
+                                      <Info className="w-3.5 h-3.5 text-zinc-300 hover:text-zinc-500 transition-colors" />
+                                    </SimpleTooltip>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-4 py-2.5">
+                                <Badge variant={typeBadgeVariant(cfg.type)} size="sm">{cfg.type}</Badge>
+                              </td>
+                              <td className="px-4 py-2.5">
+                                {cfg.type === 'bool' ? (
+                                  <span className={cn(
+                                    'inline-flex items-center gap-1.5 text-xs font-medium',
+                                    cfg.value === 'true' ? 'text-emerald-600' : 'text-zinc-400'
+                                  )}>
+                                    <span className={cn(
+                                      'w-1.5 h-1.5 rounded-full',
+                                      cfg.value === 'true' ? 'bg-emerald-500' : 'bg-zinc-300'
+                                    )} />
+                                    {cfg.value}
+                                  </span>
+                                ) : (
+                                  <span className="text-zinc-600 font-mono text-xs block truncate max-w-md">
+                                    {cfg.value || cfg.default || '-'}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-4 py-2.5">
+                                <Badge variant={productBadgeVariant(cfg.product)} size="sm">
+                                  {cfg.product || 'global'}
+                                </Badge>
+                              </td>
+                              <td className="px-4 py-2.5">
                                 <span className={cn(
-                                  'w-1.5 h-1.5 rounded-full',
-                                  cfg.value === 'true' ? 'bg-emerald-500' : 'bg-zinc-300'
-                                )} />
-                                {cfg.value}
-                              </span>
-                            ) : (
-                              <span className="text-zinc-600 font-mono text-xs block truncate max-w-md">
-                                {cfg.value || cfg.default || '-'}
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-4 py-2.5">
-                            <Badge variant={productBadgeVariant(cfg.product)} size="sm">
-                              {cfg.product || 'global'}
-                            </Badge>
-                          </td>
-                          <td className="px-4 py-2.5">
+                                  'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-medium uppercase border',
+                                  cfg.enabled
+                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                    : 'bg-red-50 text-red-700 border-red-200'
+                                )}>
+                                  <span className={cn('w-1.5 h-1.5 rounded-full', cfg.enabled ? 'bg-emerald-500' : 'bg-red-500')} />
+                                  {cfg.enabled ? 'On' : 'Off'}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Mobile cards */}
+                    <div className="md:hidden divide-y divide-zinc-100">
+                      {group.configs.map(cfg => (
+                        <div
+                          key={cfg.key}
+                          onClick={() => openConfigModal(cfg)}
+                          className="p-4 cursor-pointer hover:bg-zinc-50 active:bg-zinc-100 transition-colors"
+                        >
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <div className="text-sm font-medium text-zinc-800 break-all min-w-0 flex-1">{cfg.key}</div>
                             <span className={cn(
-                              'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-medium uppercase border',
+                              'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-medium uppercase border shrink-0',
                               cfg.enabled
                                 ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                                 : 'bg-red-50 text-red-700 border-red-200'
@@ -317,11 +346,21 @@ const Configurations: React.FC = () => {
                               <span className={cn('w-1.5 h-1.5 rounded-full', cfg.enabled ? 'bg-emerald-500' : 'bg-red-500')} />
                               {cfg.enabled ? 'On' : 'Off'}
                             </span>
-                          </td>
-                        </tr>
+                          </div>
+                          <div className="flex items-center gap-2 mb-2 flex-wrap">
+                            <Badge variant={typeBadgeVariant(cfg.type)} size="sm">{cfg.type}</Badge>
+                            <Badge variant={productBadgeVariant(cfg.product)} size="sm">{cfg.product || 'global'}</Badge>
+                          </div>
+                          <div className="text-xs text-zinc-600 font-mono break-all">
+                            {cfg.value || cfg.default || '-'}
+                          </div>
+                          {cfg.description && (
+                            <div className="text-xs text-zinc-400 mt-1">{cfg.description}</div>
+                          )}
+                        </div>
                       ))}
-                    </tbody>
-                  </table>
+                    </div>
+                  </>
                 )}
               </div>
             );
@@ -331,29 +370,36 @@ const Configurations: React.FC = () => {
 
       {/* Edit Modal */}
       {selectedConfig && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setSelectedConfig(null)}>
-          <div className="bg-white rounded-xl border border-zinc-200 shadow-xl w-full max-w-lg mx-4" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-6 pt-5 pb-2">
-              <div>
-                <h2 className="text-base font-semibold text-zinc-900">{selectedConfig.key}</h2>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50" onClick={() => setSelectedConfig(null)}>
+          <div
+            className="bg-white rounded-t-2xl sm:rounded-xl border-t sm:border border-zinc-200 w-full sm:max-w-lg sm:mx-4 max-h-[92vh] flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between px-4 sm:px-6 pt-4 sm:pt-5 pb-2 shrink-0">
+              <div className="min-w-0 flex-1 pr-3">
+                <h2 className="text-sm sm:text-base font-semibold text-zinc-900 break-all">{selectedConfig.key}</h2>
                 {selectedConfig.description && (
                   <p className="text-xs text-zinc-400 mt-0.5">{selectedConfig.description}</p>
                 )}
               </div>
-              <button onClick={() => setSelectedConfig(null)} className="p-1 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600 cursor-pointer transition-colors duration-150">
+              <button
+                onClick={() => setSelectedConfig(null)}
+                className="w-9 h-9 -mr-2 flex items-center justify-center rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600 cursor-pointer transition-colors duration-150 shrink-0"
+                aria-label="Close"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="px-6 py-4 space-y-4">
+            <div className="px-4 sm:px-6 py-4 space-y-4 overflow-y-auto flex-1">
               {/* Metadata row */}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <Badge variant={typeBadgeVariant(selectedConfig.type)} size="sm">{selectedConfig.type}</Badge>
                 <Badge variant={productBadgeVariant(selectedConfig.product)} size="sm">
                   {selectedConfig.product || 'global'}
                 </Badge>
                 {selectedConfig.default && (
-                  <span className="text-[10px] text-zinc-400">default: <span className="font-mono">{selectedConfig.default}</span></span>
+                  <span className="text-[10px] text-zinc-400">default: <span className="font-mono break-all">{selectedConfig.default}</span></span>
                 )}
               </div>
 
@@ -379,7 +425,7 @@ const Configurations: React.FC = () => {
               {renderValueInput()}
             </div>
 
-            <div className="flex items-center justify-end gap-3 px-6 pb-5 pt-2 border-t border-zinc-100">
+            <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2 sm:gap-3 px-4 sm:px-6 py-3 sm:py-4 border-t border-zinc-100 shrink-0 bg-zinc-50 rounded-b-2xl sm:rounded-b-xl">
               <Button variant="secondary" onClick={() => setSelectedConfig(null)}>Cancel</Button>
               <PermissionGate product="config-manager" permission="SERVICE_CONFIG_EDIT">
                 <Button onClick={handleModalUpdate} loading={saveMut.isPending}>Update</Button>

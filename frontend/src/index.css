@@ -81,15 +81,14 @@ tr.hoverable:hover td {
   animation: pageMount 200ms ease forwards;
 }
 
-/* ── Skeleton shimmer ── */
-@keyframes shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
-}
+/* ── Skeleton: flat pulse, no gradient ── */
 .skeleton-shimmer {
-  background: linear-gradient(90deg, #f4f4f5 25%, #e4e4e7 50%, #f4f4f5 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s ease-in-out infinite;
+  background-color: #f4f4f5;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
 }
 
 /* ── Status dot pulse for active items ── */

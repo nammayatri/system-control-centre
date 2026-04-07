@@ -114,33 +114,35 @@ const ListConfigMap: React.FC = () => {
     <div className="flex flex-col flex-1 w-full">
       <div className="bg-white border border-zinc-200 rounded-xl">
         {/* Toolbar */}
-        <div className="p-4 flex items-center gap-3 border-b border-zinc-100">
-          <div className="relative">
+        <div className="p-3 sm:p-4 flex flex-col md:flex-row md:items-center gap-2 md:gap-3 border-b border-zinc-100">
+          <div className="relative md:flex-none">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
             <input type="text" placeholder="Search config maps..." value={search} onChange={e => setSearch(e.target.value)}
-              className="pl-9 pr-4 h-9 w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
+              className="pl-9 pr-4 h-10 sm:h-9 w-full md:w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
           </div>
 
           <div className="relative" ref={datePickerRef}>
-            <button onClick={() => setShowDatePicker(!showDatePicker)} className="flex items-center gap-2 border border-zinc-300 rounded-lg px-3 h-9 bg-white hover:bg-zinc-50 text-sm text-zinc-600 cursor-pointer transition-colors duration-150">
-              <Calendar className="h-4 w-4 text-zinc-400" />
-              <span className="max-w-[200px] truncate">{dateRange.from.toLocaleDateString()} - {dateRange.to.toLocaleDateString()}</span>
-              <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+            <button onClick={() => setShowDatePicker(!showDatePicker)} className="w-full md:w-auto flex items-center justify-between gap-2 border border-zinc-300 rounded-lg px-3 h-10 sm:h-9 bg-white hover:bg-zinc-50 text-sm text-zinc-600 cursor-pointer transition-colors duration-150">
+              <span className="flex items-center gap-2 truncate">
+                <Calendar className="h-4 w-4 text-zinc-400 shrink-0" />
+                <span className="max-w-[200px] truncate">{dateRange.from.toLocaleDateString()} - {dateRange.to.toLocaleDateString()}</span>
+              </span>
+              <ChevronDown className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
             </button>
             {showDatePicker && (
-              <div className="absolute top-full mt-1 left-0 bg-white border border-zinc-200 rounded-lg shadow-lg z-50 min-w-[260px]">
-                <div className="p-1.5">
+              <div className="absolute top-full mt-1 left-0 right-0 md:right-auto bg-white border border-zinc-200 rounded-lg shadow-sm z-50 md:min-w-[260px]">
+                <div className="p-1.5 max-h-60 overflow-y-auto">
                   {TIME_RANGE_OPTIONS.map(opt => (
                     <button key={opt.value} onClick={() => { if (opt.value !== 'custom') { setTimeRange(opt.value); setShowDatePicker(false); } else setTimeRange('custom'); }}
-                      className={cn('w-full text-left px-3 py-1.5 text-sm rounded cursor-pointer transition-colors duration-150', timeRange === opt.value ? 'bg-zinc-100 text-zinc-900 font-medium' : 'text-zinc-600 hover:bg-zinc-50')}>
+                      className={cn('w-full text-left px-3 py-2 sm:py-1.5 text-sm rounded cursor-pointer transition-colors duration-150', timeRange === opt.value ? 'bg-zinc-100 text-zinc-900 font-medium' : 'text-zinc-600 hover:bg-zinc-50')}>
                       {opt.label}
                     </button>
                   ))}
                 </div>
                 {timeRange === 'custom' && (
                   <div className="border-t border-zinc-100 p-3 space-y-2">
-                    <div><label className="block text-xs font-medium text-zinc-600 mb-1">From</label><input type="datetime-local" value={customFrom} onChange={e => setCustomFrom(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent" /></div>
-                    <div><label className="block text-xs font-medium text-zinc-600 mb-1">To</label><input type="datetime-local" value={customTo} onChange={e => setCustomTo(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent" /></div>
+                    <div><label className="block text-xs font-medium text-zinc-600 mb-1">From</label><input type="datetime-local" value={customFrom} onChange={e => setCustomFrom(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent" /></div>
+                    <div><label className="block text-xs font-medium text-zinc-600 mb-1">To</label><input type="datetime-local" value={customTo} onChange={e => setCustomTo(e.target.value)} className="w-full border border-zinc-300 rounded-lg px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent" /></div>
                     <div className="text-xs text-zinc-400">Max range: 30 days</div>
                     <div className="flex gap-2">
                       <Button size="sm" onClick={handleCustomRangeApply} className="flex-1">Apply</Button>
@@ -152,15 +154,19 @@ const ListConfigMap: React.FC = () => {
             )}
           </div>
 
-          <div className="flex-1" />
-          <button onClick={() => refetch()} className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150"><RefreshCw className="h-4 w-4" /></button>
-          <PermissionGate product="autopilot" permission="CONFIG_CREATE">
-            <Link to="/configmap/new"><Button size="sm"><Plus className="w-4 h-4" /> Create ConfigMap</Button></Link>
-          </PermissionGate>
+          <div className="hidden md:block flex-1" />
+          <div className="flex items-center gap-2">
+            <button onClick={() => refetch()} className="h-10 w-10 sm:h-9 sm:w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150"><RefreshCw className="h-4 w-4" /></button>
+            <PermissionGate product="autopilot" permission="CONFIG_CREATE">
+              <Link to="/configmap/new" className="flex-1 md:flex-none">
+                <Button size="md" fullWidth><Plus className="w-4 h-4" /> Create ConfigMap</Button>
+              </Link>
+            </PermissionGate>
+          </div>
         </div>
 
-        {/* Table */}
-        <div className="overflow-x-auto">
+        {/* Desktop Table */}
+        <div className="hidden md:block overflow-x-auto">
           {isLoading ? (
             <TableSkeleton rows={6} cols={8} />
           ) : (
@@ -206,19 +212,57 @@ const ListConfigMap: React.FC = () => {
           )}
         </div>
 
+        {/* Mobile card list */}
+        <div className="md:hidden">
+          {isLoading ? (
+            <TableSkeleton rows={4} cols={4} />
+          ) : filtered.length === 0 ? (
+            <div className="py-16 text-center text-zinc-400 text-sm">No config maps found.</div>
+          ) : (
+            <div className="divide-y divide-zinc-100">
+              {paginatedItems.map((cm) => (
+                <div
+                  key={cm.id}
+                  className="p-4 cursor-pointer hover:bg-zinc-50 active:bg-zinc-100 transition-colors"
+                  onClick={() => navigate(`/configmap/${cm.cluster}&&${cm.id}`)}
+                >
+                  <div className="flex items-start justify-between gap-3 mb-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-zinc-900 truncate">{cm.name}</div>
+                      <div className="text-xs text-zinc-500 mt-0.5 truncate">{cm.appGroup}</div>
+                    </div>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); navigate(`/configmap/new?clone_id=${cm.id}`); }}
+                      className="w-9 h-9 shrink-0 rounded-lg flex items-center justify-center text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100"
+                      aria-label="Clone"
+                    >
+                      <Copy className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-wrap mb-2">
+                    <StatusBadge status={cm.status} />
+                  </div>
+                  <div className="text-[11px] text-zinc-500 font-mono truncate" title={cm.id}>{cm.id}</div>
+                  <div className="text-[11px] text-zinc-500 font-mono mt-1">{formatIST(cm.date_created)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         {/* Pagination */}
         {!isLoading && filtered.length > 0 && (
-          <div className="px-4 py-3 flex items-center justify-between border-t border-zinc-100">
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-zinc-500">Showing {startIndex + 1}-{Math.min(startIndex + itemsPerPage, filtered.length)} of {filtered.length}</span>
+          <div className="px-3 sm:px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-zinc-100">
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-xs sm:text-sm text-zinc-500">Showing {startIndex + 1}-{Math.min(startIndex + itemsPerPage, filtered.length)} of {filtered.length}</span>
               <select value={itemsPerPage} onChange={e => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }} className="border border-zinc-300 rounded-lg px-2 py-1 text-xs text-zinc-600 cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400">
                 {[10, 25, 50].map(n => <option key={n} value={n}>{n} / page</option>)}
               </select>
             </div>
             <div className="flex items-center gap-1">
-              <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150"><ChevronLeft className="w-4 h-4" /></button>
+              <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150"><ChevronLeft className="w-4 h-4" /></button>
               <span className="text-xs text-zinc-500 px-3 font-mono">{currentPage} / {totalPages}</span>
-              <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-1.5 border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150"><ChevronRight className="w-4 h-4" /></button>
+              <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors duration-150"><ChevronRight className="w-4 h-4" /></button>
             </div>
           </div>
         )}
