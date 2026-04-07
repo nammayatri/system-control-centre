@@ -1,2 +1,0 @@
-#!/usr/bin/env bash
-cd "$(dirname "$0")/.." && hpack && echo "Regenerated .cabal from package.yaml"

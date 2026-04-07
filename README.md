@@ -127,47 +127,40 @@ Configured in `Core/DB/Connection.hs` via `Data.Pool.createPool`:
 
 ### Prerequisites
 
-- Nix (with flakes enabled) or GHC 9.2.7 + Cabal
-- PostgreSQL running locally
-- Node.js 18+ and npm (for frontend)
-- `kubectl` configured for your target cluster (if deploying)
+- **Nix** with flakes enabled (recommended — manages everything including postgres + node + ghc)
+- **direnv** (optional but recommended — auto-activates the dev shell on `cd`)
+- `kubectl` configured for your target cluster (only needed for actual K8s deploys)
 
-### Backend Setup
+Without Nix you'd need: GHC 9.2.7, Cabal, PostgreSQL 14+, Node.js 20.19+, fourmolu — but `nix develop` provides all of these reproducibly.
+
+### One-command dev (recommended)
 
 ```bash
 cd backend
-
-# Option A: Nix (recommended, all-in-one)
-nix develop --accept-flake-config
-bash scripts/run.sh   # creates DB + builds + starts server on :8012
-
-# Option B: Step by step
-bash scripts/setup-db.sh           # create DB, schema, seed data
-cabal build                        # compile
-cabal run namma-ap-exe             # start server on :8012
+nix develop          # auto-activated by direnv if installed
+sc-dev               # starts everything
 ```
+
+`sc-dev` brings up via process-compose:
+- PostgreSQL on 127.0.0.1:5434 (data in `./.local/data/pg`, auto-init from `dev/sql-seed/`)
+- DB migrations from `dev/migrations/system-control/`
+- Backend on `:8012` with ghcid hot-reload
+- Frontend on `:5173` (vite dev server)
+
+Press Ctrl+C to stop everything.
 
 Available commands in the Nix shell:
 
 ```
-sc-setup-db    Setup local database (create + migrate + seed)
-sc-build       Compile the backend
-sc-run         Setup DB + build + start server (all-in-one)
-sc-server      Start server only (assumes already built)
-sc-hpack       Regenerate .cabal from package.yaml
-sc-format      Format all Haskell source files (fourmolu)
-sc-test        Run test suite
-sc-migrate     Apply SQL migrations from dev/migrations/
-sc-test-api    Test all APIs (server must be running)
+sc-dev         Start everything (postgres + db init + backend ghcid + frontend)
+sc-build       Compile the backend (cabal build)
+sc-test        Run test suite (cabal test)
+sc-test-api    API integration tests (server must be running)
+sc-format      Format all Haskell files via treefmt (fourmolu)
+sc-help        Show this list
 ```
 
-### Frontend Setup
-
-```bash
-cd frontend
-npm install
-npm run dev    # starts on :5173
-```
+To reset the DB: `rm -rf backend/.local/data/pg && sc-dev`
 
 ### Default Login
 
@@ -808,27 +801,31 @@ Audit trail for admin operations.
 ### Bootstrap Config (Environment Variables)
 
 Loaded once at startup from environment variables or a `.env` file in the backend directory.
+The canonical prefix is `SC_*` (System Control). The legacy `NammaAP_*` prefix is still
+accepted as a deprecated fallback for one release cycle.
+
+When using `sc-dev`, the dev shell auto-exports `SC_DATABASE_URL=postgres://$(whoami)@127.0.0.1:5434/system_control`
+so you don't need to set anything.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | APP_STATE | SERVER | Application mode (SERVER = server + runner, RUNNER = runner only) |
 | PORT | 8012 | HTTP server port |
-| NammaAP_ENV | production | Environment name |
-| NammaAP_KUBECTL_BIN | kubectl | Path to kubectl binary |
-| NammaAP_DEFAULT_NAMESPACE | default | Default K8s namespace |
-| NammaAP_MAX_K8S_RETRIES | 3 | Max retries for K8s commands |
-| NammaAP_DATABASE_URL | (none) | Full PostgreSQL connection URL (takes priority over individual fields) |
-| NammaAP_POSTGRES_HOST | 127.0.0.1 | PostgreSQL host |
-| NammaAP_POSTGRES_PORT | 5432 | PostgreSQL port |
-| NammaAP_POSTGRES_USER | postgres | PostgreSQL user |
-| NammaAP_POSTGRES_PASSWORD | postgres | PostgreSQL password |
-| NammaAP_POSTGRES_DB | namma_ap | PostgreSQL database name |
+| SC_ENV | production | Environment name |
+| SC_KUBECTL_BIN | kubectl | Path to kubectl binary |
+| SC_MAX_K8S_RETRIES | 3 | Max retries for K8s commands |
+| SC_DATABASE_URL | (none) | Full PostgreSQL connection URL (takes priority over individual fields) |
+| SC_POSTGRES_HOST | 127.0.0.1 | PostgreSQL host |
+| SC_POSTGRES_PORT | 5432 | PostgreSQL port (sc-dev uses 5434) |
+| SC_POSTGRES_USER | postgres | PostgreSQL user |
+| SC_POSTGRES_PASSWORD | postgres | PostgreSQL password |
+| SC_POSTGRES_DB | system_control | PostgreSQL database name |
 | SYNC_CLUSTER_URL | (empty) | Secondary cluster API URL for multi-cloud sync |
 | SYNC_CLUSTER_BASE_AUTH | (empty) | Basic auth credentials for secondary cluster |
 | SLACK_BOT_TOKEN | (empty) | Slack bot token for release notifications |
 | DASHBOARD_URL | http://localhost:5173 | Frontend URL for clickable links in Slack notifications |
 
-DB resolution order: `NammaAP_DATABASE_URL` is tried first. If unset, individual `NammaAP_POSTGRES_*` fields are used.
+DB resolution order: `SC_DATABASE_URL` is tried first. If unset, individual `SC_POSTGRES_*` fields are used.
 
 ### Runtime Config (server_config table)
 
@@ -981,7 +978,7 @@ Run with `cabal test` or `sc-test` in the Nix shell.
 
 ### Integration Tests (44 assertions)
 
-Run with `bash scripts/test-api.sh` or `sc-test-api` (requires server to be running).
+Run with `sc-test-api` (requires server to be running, e.g. via `sc-dev`).
 
 17 test sections:
 

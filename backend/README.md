@@ -8,34 +8,26 @@
 - **PostgreSQL** (local or remote)
 - **kubectl** (for Kubernetes operations)
 
-### Quick Start
+### Quick Start (one command)
 
 ```bash
-# 1. (Optional) Enter nix shell for reproducible deps
-nix develop
-
-# 2. Copy and configure environment
-cp .env.example .env
-# Edit .env — at minimum set your Postgres connection:
-#   NammaAP_DATABASE_URL=postgres://user:pass@localhost:5432/namma_ap
-# Or set individual vars: NammaAP_POSTGRES_HOST, _PORT, _USER, _PASSWORD, _DB
-
-# 3. Create + seed the database (idempotent — safe to re-run)
-bash scripts/setup-db.sh
-# This creates the DB, applies the canonical schema + seed under
-# dev/sql-seed/, and runs migrations from dev/migrations/system-control/.
-# At runtime, src/Core/DB/Connection.hs `ensureSchema` also creates any
-# missing core tables (deployment_config, release_tracker, release_events,
-# server_config) on server startup.
-
-# 4. Build
-cabal build
-
-# 5. Run (server + background worker)
-APP_STATE=SERVER cabal run namma-ap-exe
+nix develop          # enter the dev shell (auto via direnv if installed)
+sc-dev               # starts everything: postgres + db init + backend + frontend
 ```
 
-The server starts on `http://localhost:8012` (configurable via `PORT`).
+`sc-dev` brings up the full stack via process-compose:
+- **PostgreSQL** on `127.0.0.1:5434` — data in `./.local/data/pg`, auto-init from `dev/sql-seed/`
+- **DB migrations** from `dev/migrations/system-control/` (idempotent, re-applied each start)
+- **Backend** on `:8012` with `ghcid` hot-reload — saving any `.hs` file recompiles in seconds
+- **Frontend** on `:5173` (vite dev server)
+
+Press Ctrl+C to stop everything cleanly.
+
+To reset the DB completely:
+```bash
+rm -rf .local/data/pg
+sc-dev
+```
 
 ### Run Modes
 
@@ -47,27 +39,27 @@ The server starts on `http://localhost:8012` (configurable via `PORT`).
 
 ### Database Connection
 
-Resolved in order:
-1. `NammaAP_DATABASE_URL` (recommended for cloud Postgres)
-2. `DATABASE_URL`
-3. Individual vars: `NammaAP_POSTGRES_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_DB`
+`sc-dev` auto-exports `SC_DATABASE_URL=postgres://$(whoami)@127.0.0.1:5434/system_control`,
+so for normal local dev you don't need to set anything.
+
+For cloud / custom setups, the binary resolves DB connection in this order:
+1. `SC_DATABASE_URL` (recommended) — also accepts `NammaAP_DATABASE_URL` as deprecated fallback
+2. Individual vars: `SC_POSTGRES_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_DB`
 
 The `.env` file is read automatically — no need to `source` it.
 
 ### Environment Variables
 
-See [`.env.example`](.env.example) for the full list. Key ones:
+See [`.env.example`](.env.example) for the full list. Key ones (canonical `SC_*` names,
+`NammaAP_*` is the deprecated fallback):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `APP_STATE` | *(server only)* | Run mode: `SERVER`, `RUNNER`, or unset |
 | `PORT` | `8012` | HTTP server port |
-| `NammaAP_ENV` | `production` | Environment name |
-| `NammaAP_KUBECTL_BIN` | `kubectl` | Path to kubectl binary |
-| `NammaAP_RUNNER_POLL_SECONDS` | `20` | Worker poll interval |
-| `NammaAP_STAGGER_COOLOFF_SECONDS` | `120` | Cooloff between rollout steps |
-| `NammaAP_MAX_K8S_RETRIES` | `3` | kubectl retry attempts |
-| `NammaAP_MAINTENANCE_MODE` | `False` | Disable release execution |
+| `SC_ENV` | `production` | Environment name |
+| `SC_KUBECTL_BIN` | `kubectl` | Path to kubectl binary |
+| `SC_MAX_K8S_RETRIES` | `3` | kubectl retry attempts |
 
 ---
 
@@ -121,7 +113,7 @@ Namma AP is a release orchestration engine for [NammaYatri](https://nammayatri.i
 
 ```
 app/Main.hs                          # Entry point — selects SERVER vs RUNNER mode
-bin/                                 # Dev helper scripts (sc-build, sc-run, sc-server, sc-setup-db, ...)
+bin/                                 # Dev helper scripts (sc-dev, sc-build, sc-test, sc-format, ...)
 src/
   Core/                              # Shared framework (RBAC, server, DB, config)
     Auth/                            # Login, tokens, permission middleware
@@ -145,8 +137,8 @@ src/
       Runner.hs                      # Background worker loop
       Sync.hs, DecisionEngine.hs, Notifications.hs, Discovery.hs, RuntimeConfig.hs
   Shared/                            # Cross-product helpers (Error, JSON, Config, Queries, Types)
-scripts/                             # setup-db.sh, run.sh, format.sh, test-api.sh, SQL seeds
-dev/                                 # Canonical sql-seed/ + migrations/system-control/
+scripts/                             # test-api.sh (integration tests)
+dev/                                 # Canonical sql-seed/ + migrations/system-control/ (used by sc-dev)
 Dockerfile                           # Multi-stage Docker build
-flake.nix                            # Nix reproducible environment
+flake.nix                            # Nix reproducible environment + process-compose dev stack
 ```

@@ -1,27 +1,19 @@
 # Migrations
 
-Tables are created by `dev/sql-seed/system-control-seed.sql` (run via `setup-db.sh`). These migrations add **seed data** and **performance indexes**.
+Tables are created by `dev/sql-seed/system-control-seed.sql`. These migrations add **seed data** and **performance indexes**.
 
-## How to run
-
-```bash
-# Run all migrations
-for f in dev/migrations/system-control/0*.sql; do psql -d system_control -f "$f"; done
-
-# Or use nix command
-sc-migrate
-```
+`sc-dev` auto-applies them on every start (idempotent — safe to re-run).
 
 ## Migrations
 
-| File | What | When to run |
-|------|------|-------------|
-| `0001-seed-server-config.sql` | Insert default server_config entries | Once on fresh DB |
-| `0002-add-indexes.sql` | Performance indexes on all tables | Once on fresh DB |
-| `0009-decision-engine-configs.sql` | Decision engine server_config entries | Once on fresh DB |
+| File | What |
+|------|------|
+| `0001-seed-server-config.sql` | Insert default server_config entries |
+| `0002-add-indexes.sql` | Performance indexes on all tables |
+| `0009-decision-engine-configs.sql` | Decision engine server_config entries |
 
-## For local testing
+## Manual application
 
 ```bash
-sc-setup-db    # Creates DB + schema + seed + migrations (all-in-one)
+psql -h 127.0.0.1 -p 5434 -d system_control -f 0001-seed-server-config.sql
 ```

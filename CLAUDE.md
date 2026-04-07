@@ -11,34 +11,39 @@
 ### Quick Start (one command)
 ```bash
 cd backend
-nix develop --accept-flake-config
-# Inside nix shell:
-bash scripts/run.sh   # creates DB + builds + starts server on :8012
+nix develop          # enter nix shell (auto-via direnv if installed)
+sc-dev               # starts everything: pg + db init + backend ghcid + frontend
 ```
 
-### Step by Step
-```bash
-# Backend
-cd backend
-nix develop --accept-flake-config  # enter nix shell (GHC 9.2.7 + cabal + psql)
-bash scripts/setup-db.sh           # create DB + schema + seed data
-cabal build                        # compile
-cabal run namma-ap-exe             # start server on :8012
+`sc-dev` brings up the full stack via process-compose:
+- PostgreSQL on `127.0.0.1:5434` (data in `./.local/data/pg`, auto-init from `dev/sql-seed/`)
+- DB migrations from `dev/migrations/system-control/` (auto-applied)
+- Backend on port 8012 with ghcid hot-reload (changes in `src/` recompile in <5s)
+- Frontend on port 5173 (vite dev server)
 
-# Frontend (separate terminal)
-cd frontend
-npm install
-npm run dev                        # starts on :5173
+Press Ctrl+C to stop everything cleanly.
+
+### Other dev commands (run inside `nix develop`)
+| Command | What it does |
+|---------|--------------|
+| `sc-dev`     | Full stack via process-compose (recommended) |
+| `sc-build`   | `cabal build` |
+| `sc-test`    | `cabal test` |
+| `sc-test-api`| API integration tests (server must be running) |
+| `sc-format`  | `treefmt` (fourmolu) |
+| `sc-help`    | Show this list |
+
+### Reset DB
+```bash
+rm -rf backend/.local/data/pg
+sc-dev   # next start re-initialises everything
 ```
 
 ### Environment Variables
 | Variable | Default | Description |
 |----------|---------|-------------|
-| SC_DB_NAME | system_control | PostgreSQL database name |
-| SC_DB_USER | $(whoami) | PostgreSQL user |
-| SC_DB_HOST | localhost | PostgreSQL host |
-| SC_DB_PORT | 5432 | PostgreSQL port |
 | PORT | 8012 | Backend server port |
+| SC_DATABASE_URL | postgres://$(whoami)@127.0.0.1:5434/system_control | DB connection (set by `nix develop`) |
 | SC_CONFIG_PATH | ./dhall-configs/system-control.dhall | Dhall config file path |
 
 ## Default Login

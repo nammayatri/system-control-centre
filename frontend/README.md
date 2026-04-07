@@ -2,29 +2,39 @@
 
 A React + TypeScript frontend built with Vite, Tailwind CSS, and Monaco Editor.
 
-## Prerequisites
+## Local Setup (recommended)
 
+The frontend starts automatically as part of the backend's `sc-dev` stack:
+
+```bash
+cd ../backend
+nix develop          # auto via direnv
+sc-dev               # starts postgres + backend + frontend together
+```
+
+This brings up the frontend on `http://localhost:5173` (or 5174 if 5173 is in use)
+alongside the backend API on `http://localhost:8012`.
+
+## Standalone (without backend stack)
+
+If you want to run only the frontend (e.g. against a remote backend):
+
+### Prerequisites
 - **Node.js** >= 20.19 (22+ recommended)
 - **npm** (comes with Node.js)
 
-## Local Setup
-
+### Steps
 1. **Install dependencies**
-
    ```bash
    npm install
    ```
 
-2. **Create environment file**
-
-   Create a `.env` file in the project root:
-
+2. **Create environment file** (optional — defaults to localhost:8012)
    ```env
    VITE_API_BASE_URL=http://localhost:8012
    ```
 
 3. **Start the dev server**
-
    ```bash
    npm run dev
    ```
