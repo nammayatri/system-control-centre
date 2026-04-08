@@ -22,12 +22,12 @@ import Data.Time.Clock (getCurrentTime)
 import Products.Autopilot.EventLog (logStatusUpdated, logTrafficUpdatedWithMessage)
 import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getDeploymentReplicaStatus)
 import Products.Autopilot.K8s.Execute (runCmd)
-import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand)
+import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks)
 import Products.Autopilot.Queries.ReleaseTracker
-import Products.Autopilot.RuntimeConfig (getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
+import Products.Autopilot.RuntimeConfig (getHpaDefaultMinPods, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, dcAppGroup)
@@ -689,7 +689,30 @@ scaleDownOldDeployment cfg (rt, mts) = do
                                         -- delete the OLD HPA BEFORE scaling to 0, otherwise the HPA
                                         -- reconciler will scale the old deployment back up.
                                         let oldHpaName = oldDepName <> "-hpa"
-                                        _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns oldHpaName)
+                                        -- Julia parity (hpa.jl:39-44 updateOldHPAConfig):
+                                        -- before deleting, patch the OLD HPA's min DOWN to
+                                        -- min(currentMin, hpa_default_min_pods_config). Closes the
+                                        -- race window where the HPA reconciler runs between our
+                                        -- delete-HPA call and the kubectl scale call and re-scales
+                                        -- the old deployment back up. Best-effort: failures are
+                                        -- non-fatal because the delete that follows is the real
+                                        -- safety guarantee.
+                                        defaultMinPodsForOld <- getHpaDefaultMinPods
+                                        oldMinMaxRes <- liftIO $ getHpaMinMax cfg ns oldHpaName
+                                        let (curOldMin, curOldMax) = oldMinMaxRes
+                                            patchedMin = min curOldMin defaultMinPodsForOld
+                                        when (curOldMin > 0) $ do
+                                            _ <- liftIO $ runCmd (buildPatchHpaReplicasCommand cfg ns oldHpaName patchedMin curOldMax)
+                                            pure ()
+                                        deleteRes <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns oldHpaName)
+                                        case deleteRes of
+                                            Right _ ->
+                                                insertReleaseEvent
+                                                    (releaseId rt)
+                                                    "BUSINESS"
+                                                    "HPA_DELETED"
+                                                    (object ["hpa" .= oldHpaName, "phase" .= ("scale-down" :: T.Text)])
+                                            Left _ -> pure ()
                                         result <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName 0)
                                         case result of
                                             Left err -> do

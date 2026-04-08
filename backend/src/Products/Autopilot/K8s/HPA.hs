@@ -79,7 +79,31 @@ buildCreateHpaFromTemplateCommand cfg ns serviceHost version hpaTemplate minR ma
 
 buildCloneHpaCommand :: Config -> Text -> Text -> Text -> Text -> Text -> Int -> Int -> String
 buildCloneHpaCommand cfg ns serviceHost _oldVersion newVersion' oldHpaName minR maxR =
+    -- Julia parity (kubernetes.jl:1199-1247 createHpaFiles):
+    --   1. metadata.name → new HPA name
+    --   2. spec.scaleTargetRef.name → new deployment name
+    --   3. spec.minReplicas / spec.maxReplicas → computed values
+    --   4. Strip stale annotations: last-applied-configuration,
+    --      autoscaling.alpha.kubernetes.io/current-metrics,
+    --      autoscaling.alpha.kubernetes.io/conditions (kubernetes.jl:1211-1223)
+    --   5. For autoscaling/v2 with object metrics, also update
+    --      spec.metrics[*].object.describedObject.name → new deployment name
+    --      (kubernetes.jl:1238). Without this, an HPA targeting a queue/HTTP
+    --      object metric on the OLD deployment will keep scaling against the
+    --      old deployment's metric instead of the new one.
     let newDepName = T.unpack serviceHost <> "-" <> T.unpack newVersion'
         newHpaName = newDepName <> "-hpa"
-        jqFilter = ".metadata.name = $newHpaName | .spec.scaleTargetRef.name = $newDepName | .spec.minReplicas = " <> show minR <> " | .spec.maxReplicas = " <> show maxR <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.status)"
+        jqFilter =
+            ".metadata.name = $newHpaName"
+                <> " | .spec.scaleTargetRef.name = $newDepName"
+                <> " | .spec.minReplicas = "
+                <> show minR
+                <> " | .spec.maxReplicas = "
+                <> show maxR
+                <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.status)"
+                -- Strip stale annotations Julia removes (kubernetes.jl:1211-1223)
+                <> " | if .metadata.annotations then .metadata.annotations |= (del(.\"kubectl.kubernetes.io/last-applied-configuration\", .\"autoscaling.alpha.kubernetes.io/current-metrics\", .\"autoscaling.alpha.kubernetes.io/conditions\")) else . end"
+                -- v2 HPA: rewrite describedObject.name on each object-type metric
+                -- (kubernetes.jl:1238). No-op for CPU/memory metrics.
+                <> " | if .spec.metrics then .spec.metrics |= map(if .object then .object.describedObject.name = $newDepName else . end) else . end"
      in unwords [kubectlBin cfg, "-n", shellQuote ns, "get hpa", shellQuote oldHpaName, "-o json | jq", "--arg newHpaName", shellQuote (T.pack newHpaName), "--arg newDepName", shellQuote (T.pack newDepName), "'" <> jqFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote ns, "apply -f -"]

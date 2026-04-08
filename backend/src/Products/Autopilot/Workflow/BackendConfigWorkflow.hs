@@ -17,7 +17,7 @@ import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
 import Core.Environment (getConfig, logInfo, logWarning)
-import Data.Aeson (Value (..), eitherDecodeStrict', encode)
+import Data.Aeson (Value (..), eitherDecodeStrict', encode, object, (.=))
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.Maybe (fromMaybe)
@@ -108,6 +108,12 @@ validateConfig = do
     rt <- getRT
     logInfoS $ "Validating config for " <> appGroup rt
     updateConfigStatus BCInit
+    -- Julia parity (configMaprelease.jl): set INPROGRESS at workflow start so
+    -- a crash mid-step leaves an unambiguous "running" marker. Without this
+    -- the tracker stays CREATED until the very last step (notifyComplete),
+    -- which makes startup-rollback unable to distinguish "never picked"
+    -- from "picked but crashed mid-apply".
+    updateRT $ \r -> r{status = INPROGRESS}
 
     fileContent <- getFileContent
     case fileContent of
@@ -205,10 +211,17 @@ applyConfigMap = do
                             }
                     -- Capture AFTER snapshot of configmap
                     captureConfigMapSnapshot cfg (releaseId rt) (T.pack ns) (service rt) "CONFIGMAP_AFTER"
+                    -- Julia parity (events.jl:546): emit a success event so the
+                    -- audit trail records the apply, not just the failure path.
+                    insertReleaseEvent
+                        (releaseId rt)
+                        "BUSINESS"
+                        "CONFIGMAP_APPLIED"
+                        (object ["configmap" .= service rt, "namespace" .= T.pack ns])
                     logInfoS "ConfigMap applied successfully"
                 Left err -> do
                     insertReleaseEvent (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (String err)
-                    liftIO $ throwIO $ WorkflowError "apply" ("kubectl apply failed: " <> err)
+                    liftIO $ throwIO $ WorkflowError "apply" ("kubectl replace failed: " <> err)
         _ -> do
             insertReleaseEvent (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (String "Missing workflow metadata (resolveConfigContent did not run?)")
             liftIO $ throwIO $ WorkflowError "apply" "Missing workflow metadata"
@@ -251,14 +264,20 @@ notifyComplete = do
 -- ConfigMap Helpers (moved from Runner.hs)
 -- ============================================================================
 
--- | Pipe content into kubectl replace -f -
+{- | Pipe content into kubectl replace -f -
+Julia parity (kubernetes.jl:2630 kubeReplaceConfigMapCommand): uses
+`kubectl replace`, NOT `kubectl apply`. Replace overwrites the resource;
+apply does a 3-way merge with the last-applied-configuration annotation
+which can produce surprising results when the configmap is owned by
+GitOps tooling or has drifted annotations.
+-}
 replaceFromStdin :: Config -> String -> Text -> IO (Either Text ())
 replaceFromStdin cfg ns content = do
-    let args = ["-n", ns, "apply", "-f", "-"]
+    let args = ["-n", ns, "replace", "-f", "-"]
     (exitCode, _out, err) <- readProcessWithExitCode (kubectlBin cfg) args (T.unpack content)
     case exitCode of
         ExitSuccess -> pure (Right ())
-        ExitFailure _ -> pure (Left ("kubectl apply failed: " <> T.pack err))
+        ExitFailure _ -> pure (Left ("kubectl replace failed: " <> T.pack err))
 
 -- | Check if content looks like a raw K8s YAML manifest
 isK8sManifest :: Text -> Bool
@@ -268,7 +287,14 @@ isK8sManifest t =
             || T.isPrefixOf "kind:" stripped
             || T.isPrefixOf "---" stripped
 
--- | Patch an existing ConfigMap JSON: replace "data" with new content, strip extra metadata.
+{- | Patch an existing ConfigMap JSON: replace "data" with new content, strip
+only K8s-internal metadata fields (resourceVersion, uid, etc.).
+Julia parity (kubernetes.jl:2599-2601 getContentWithoutExtraMetadata):
+Julia preserves the entire metadata object except K8s-internal fields,
+then swaps the data section. Previously this stripped annotations and
+ownerReferences which broke GitOps reconciliation (Helm/Flux/ArgoCD
+ownership annotations were lost on every config-map release).
+-}
 patchConfigMapJson :: Text -> Text -> Either Text Text
 patchConfigMapJson existingJson newDataContent =
     case eitherDecodeStrict' (encodeUtf8 existingJson) of
@@ -277,16 +303,19 @@ patchConfigMapJson existingJson newDataContent =
             let newData = case eitherDecodeStrict' (encodeUtf8 newDataContent) of
                     Right val -> val
                     Left _ -> String newDataContent
+                -- K8s-internal metadata fields that must be stripped before
+                -- a kubectl replace (server rejects writes containing these).
+                internalMetaKeys =
+                    [ "resourceVersion"
+                    , "uid"
+                    , "generation"
+                    , "creationTimestamp"
+                    , "managedFields"
+                    , "selfLink"
+                    ]
                 cleanMeta = case KM.lookup "metadata" obj of
                     Just (Object meta) ->
-                        let kept =
-                                KM.fromList $
-                                    concat
-                                        [ maybe [] (\v -> [("name", v)]) (KM.lookup "name" meta)
-                                        , maybe [] (\v -> [("namespace", v)]) (KM.lookup "namespace" meta)
-                                        , maybe [] (\v -> [("labels", v)]) (KM.lookup "labels" meta)
-                                        ]
-                         in Object kept
+                        Object (foldr KM.delete meta internalMetaKeys)
                     other -> fromMaybe (Object KM.empty) other
                 cleaned =
                     Object $
