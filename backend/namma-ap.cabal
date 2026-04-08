@@ -42,6 +42,8 @@ library
       Shared.Config.Runtime
       Core.DB.Connection
       Core.Environment
+      Core.Workflow.Recorded
+      Core.Workflow.Types
       Core.Server
       Products.Autopilot.Config
       Products.Autopilot.DecisionEngine

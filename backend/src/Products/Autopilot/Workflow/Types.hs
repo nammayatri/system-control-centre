@@ -1,17 +1,23 @@
-module Products.Autopilot.Workflow.Types where
+module Products.Autopilot.Workflow.Types (
+    -- * Re-exported from Core.Workflow.Types
+    WorkFlowError (..),
+
+    -- * Autopilot-specific workflow types
+    ReleaseState (..),
+    StateFlow,
+    ReleaseWorkFlow,
+    StageOutcome (..),
+    MonitoringResult (..),
+) where
 
 import Control.Monad.Except (ExceptT)
 import Control.Monad.State.Strict (StateT)
 import Core.Environment (Flow)
+import Core.Workflow.Types (WorkFlowError (..))
 import Data.Aeson (Value)
 import Products.Autopilot.Types (Decision, ReleaseTracker)
 import Products.Autopilot.Types.Target (TargetState)
 import Products.Autopilot.Workflow.Recorded (Recorded)
-
-data WorkFlowError
-    = DomainError String
-    | RetriableError String
-    deriving (Eq, Show)
 
 {- | Universal workflow state
 
