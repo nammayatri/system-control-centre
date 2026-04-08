@@ -654,62 +654,87 @@ scaleDownOldDeployment cfg (rt, mts) = do
                             svcName = serviceName ctx
                             ns = namespace ctx
                             oldDepName = svcName <> "-" <> oldVer
+                        -- CRITICAL: before draining the old version, check whether
+                        -- it's currently the *new version* of an in-flight release on
+                        -- the same service (e.g. a revert that's rolling traffic back
+                        -- to it). If yes, skip the scale-down and clear the SCHEDULED
+                        -- flag so we don't keep retrying. Without this guard, a queued
+                        -- post-completion scale-down can fire mid-revert and wipe out
+                        -- the version we're rolling back to.
+                        inflightTrackers <- findActiveTrackersForService (NT.appGroup freshRT) (NT.service freshRT)
+                        let inflightTargetsOld = any (\(t, _) -> NT.releaseId t /= releaseId rt && NT.newVersion t == oldVer) inflightTrackers
                         if T.null oldVer || oldVer == "new" || oldVer == "unknown"
                             then pure ()
-                            else do
-                                logInfo $ "[scaleDownOldDeployment] Scaling down old deployment: " <> oldDepName <> " for release " <> releaseId rt
-                                -- Julia parity (kubernetes.jl:1718-1720 scaleDownPodsWithoutPolling):
-                                -- delete the OLD HPA BEFORE scaling to 0, otherwise the HPA
-                                -- reconciler will scale the old deployment back up.
-                                let oldHpaName = oldDepName <> "-hpa"
-                                _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns oldHpaName)
-                                result <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName 0)
-                                case result of
-                                    Left err -> do
-                                        -- Bug fix (round 6 / Julia parity): on kubectl failure
-                                        -- KEEP the tracker in ScaleDownScheduled state so the
-                                        -- next runner poll retries.
-                                        -- Round 8 audit H5: use FRESH tracker (freshRT/freshTS),
-                                        -- not the stale snapshot from poll-pick. Anything else
-                                        -- that updated releaseContext between pick and now
-                                        -- (e.g. immediate revert flipping revert=1) would be
-                                        -- clobbered if we wrote against `rt`+`mts`.
-                                        logWarning $ "[scaleDownOldDeployment] FAILED: " <> T.pack (show err) <> " — keeping ScaleDownScheduled for retry on next poll"
-                                        freshM' <- findReleaseTracker (releaseId rt)
-                                        case freshM' of
-                                            Just (freshRT', Just (K8sState freshK8s)) -> do
-                                                let retryCtx = (context freshK8s){podsScaleDownStatus = Just ScaleDownScheduled}
-                                                    retryK8s = freshK8s{context = retryCtx}
-                                                    retryMts = Just (K8sState retryK8s)
-                                                _ <- conditionalUpdateTracker freshRT' retryMts (releaseStatusToText (NT.status freshRT'))
-                                                pure ()
-                                            _ -> pure ()
+                            else
+                                if inflightTargetsOld
+                                    then do
+                                        logWarning $
+                                            "[scaleDownOldDeployment] Skipping scale-down of "
+                                                <> oldDepName
+                                                <> " — an in-flight release on this service is targeting it as its newVersion. Clearing SCHEDULED flag for "
+                                                <> releaseId rt
+                                        let clearedCtx = (context k8s){podsScaleDownStatus = Just ScaleDownDiscarded}
+                                            clearedMts = Just (K8sState k8s{context = clearedCtx})
+                                        _ <- conditionalUpdateTracker freshRT clearedMts (releaseStatusToText (NT.status freshRT))
                                         insertReleaseEvent
                                             (releaseId rt)
                                             "BUSINESS"
-                                            "SCALE_DOWN_FAILED"
-                                            (object ["oldDeployment" .= (oldDepName :: T.Text), "error" .= T.pack (show err)])
-                                    Right _ -> do
-                                        logInfo "[scaleDownOldDeployment] Old deployment scaled down successfully"
-                                        notifyPodsScaledDown rt oldVer
-                                        -- Same fix: use the fresh tracker we already
-                                        -- read at the top so the success-path CAS
-                                        -- doesn't overwrite a concurrent edit either.
-                                        let updatedCtx = (context k8s){podsScaleDownStatus = Just ScaleDownCompleted}
-                                            updatedK8s = k8s{context = updatedCtx}
-                                            updatedMts = Just (K8sState updatedK8s)
-                                        ok <- conditionalUpdateTracker freshRT updatedMts (releaseStatusToText (NT.status freshRT))
-                                        if not ok
-                                            then
-                                                logWarning $
-                                                    "[scaleDownOldDeployment] Status changed under us; not persisting scale-down flag for "
-                                                        <> releaseId rt
-                                            else
+                                            "SCALE_DOWN_SKIPPED_INFLIGHT"
+                                            (object ["oldDeployment" .= oldDepName, "reason" .= ("inflight release targets this version as newVersion" :: T.Text)])
+                                    else do
+                                        logInfo $ "[scaleDownOldDeployment] Scaling down old deployment: " <> oldDepName <> " for release " <> releaseId rt
+                                        -- Julia parity (kubernetes.jl:1718-1720 scaleDownPodsWithoutPolling):
+                                        -- delete the OLD HPA BEFORE scaling to 0, otherwise the HPA
+                                        -- reconciler will scale the old deployment back up.
+                                        let oldHpaName = oldDepName <> "-hpa"
+                                        _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns oldHpaName)
+                                        result <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName 0)
+                                        case result of
+                                            Left err -> do
+                                                -- Bug fix (round 6 / Julia parity): on kubectl failure
+                                                -- KEEP the tracker in ScaleDownScheduled state so the
+                                                -- next runner poll retries.
+                                                -- Round 8 audit H5: use FRESH tracker (freshRT/freshTS),
+                                                -- not the stale snapshot from poll-pick. Anything else
+                                                -- that updated releaseContext between pick and now
+                                                -- (e.g. immediate revert flipping revert=1) would be
+                                                -- clobbered if we wrote against `rt`+`mts`.
+                                                logWarning $ "[scaleDownOldDeployment] FAILED: " <> T.pack (show err) <> " — keeping ScaleDownScheduled for retry on next poll"
+                                                freshM' <- findReleaseTracker (releaseId rt)
+                                                case freshM' of
+                                                    Just (freshRT', Just (K8sState freshK8s)) -> do
+                                                        let retryCtx = (context freshK8s){podsScaleDownStatus = Just ScaleDownScheduled}
+                                                            retryK8s = freshK8s{context = retryCtx}
+                                                            retryMts = Just (K8sState retryK8s)
+                                                        _ <- conditionalUpdateTracker freshRT' retryMts (releaseStatusToText (NT.status freshRT'))
+                                                        pure ()
+                                                    _ -> pure ()
                                                 insertReleaseEvent
                                                     (releaseId rt)
                                                     "BUSINESS"
-                                                    "OLD_PODS_SCALED_DOWN"
-                                                    (object ["oldDeployment" .= (oldDepName :: T.Text), "namespace" .= (ns :: T.Text)])
+                                                    "SCALE_DOWN_FAILED"
+                                                    (object ["oldDeployment" .= (oldDepName :: T.Text), "error" .= T.pack (show err)])
+                                            Right _ -> do
+                                                logInfo "[scaleDownOldDeployment] Old deployment scaled down successfully"
+                                                notifyPodsScaledDown rt oldVer
+                                                -- Same fix: use the fresh tracker we already
+                                                -- read at the top so the success-path CAS
+                                                -- doesn't overwrite a concurrent edit either.
+                                                let updatedCtx = (context k8s){podsScaleDownStatus = Just ScaleDownCompleted}
+                                                    updatedK8s = k8s{context = updatedCtx}
+                                                    updatedMts = Just (K8sState updatedK8s)
+                                                ok <- conditionalUpdateTracker freshRT updatedMts (releaseStatusToText (NT.status freshRT))
+                                                if not ok
+                                                    then
+                                                        logWarning $
+                                                            "[scaleDownOldDeployment] Status changed under us; not persisting scale-down flag for "
+                                                                <> releaseId rt
+                                                    else
+                                                        insertReleaseEvent
+                                                            (releaseId rt)
+                                                            "BUSINESS"
+                                                            "OLD_PODS_SCALED_DOWN"
+                                                            (object ["oldDeployment" .= (oldDepName :: T.Text), "namespace" .= (ns :: T.Text)])
                 _ ->
                     logWarning $
                         "[scaleDownOldDeployment] Skipping "
