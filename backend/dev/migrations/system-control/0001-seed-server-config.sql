@@ -71,3 +71,58 @@ WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_enabled');
 INSERT INTO server_config (type, name, value, enabled, product)
 SELECT 'DECISION', 'ab_hs_post_monitoring_enabled', 'false', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_post_monitoring_enabled');
+
+-- HPA scaling: list of app groups with autoscaler enabled. Empty array = nothing
+-- enabled. Format MUST be a JSON array of strings (e.g. '["TEST_AUTOPILOT","NY"]').
+-- isHpaEnabledForProduct parses with eitherDecode first, falls back to comma-split.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'JSON', 'scaling_with_hpa_enabled', '[]', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'scaling_with_hpa_enabled');
+
+-- Old-version pods scale-down delay (HOURS, fractional allowed). Used by the
+-- runner's findCompletedTrackersForScaleDown gate (Julia parity:
+-- pods_scale_down_delay_config). Default 0 = drain immediately on completion.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'DOUBLE', 'pods_scale_down_delay_config', '0', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'pods_scale_down_delay_config');
+
+-- HPA template used by prepareK8sResources branch 3 when neither the new nor
+-- the old version has an existing HPA. Placeholders substituted by
+-- buildCreateHpaFromTemplateCommand:
+--   {{DEPLOYMENT-NAME}}  → <serviceHost>-<version>
+--   {{NAMESPACE}}        → product namespace
+--   "minReplicas": 1     → replaced with computed min
+--   "maxReplicas": 1     → replaced with computed max
+-- The literal "1" must be present in the template for the substitution to fire.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'JSON', 'hpa_template',
+'{
+  "apiVersion": "autoscaling/v2",
+  "kind": "HorizontalPodAutoscaler",
+  "metadata": {
+    "name": "{{DEPLOYMENT-NAME}}-hpa",
+    "namespace": "{{NAMESPACE}}"
+  },
+  "spec": {
+    "scaleTargetRef": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "name": "{{DEPLOYMENT-NAME}}"
+    },
+    "minReplicas": 1,
+    "maxReplicas": 1,
+    "metrics": [
+      {
+        "type": "Resource",
+        "resource": {
+          "name": "cpu",
+          "target": {
+            "type": "Utilization",
+            "averageUtilization": 70
+          }
+        }
+      }
+    ]
+  }
+}', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'hpa_template');
