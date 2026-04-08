@@ -197,16 +197,18 @@ rollbackInProgressOnStartup = do
 
 loop :: Flow ()
 loop = forever $ do
-    result <- MC.try @_ @E.SomeException iteration
+    result <- MC.try @_ @E.SomeException $ do
+        iteration
+        -- Poll delay inside the try so async exceptions during sleep don't
+        -- escape `forever`. Without this, AsyncCancelled raised in threadDelay
+        -- (e.g. from concurrently_ cancellation signals) would kill the loop.
+        pollDelay <- getReleaseWatchDelay
+        threadDelaySec pollDelay
     case result of
         Left e ->
             logError $
                 "[RUNNER] Poll iteration failed (continuing): " <> T.pack (show e)
         Right () -> pure ()
-    -- Always honour the poll delay, even after a failed iteration, so we
-    -- don't spin-loop on a persistent error.
-    pollDelay <- getReleaseWatchDelay
-    threadDelaySec pollDelay
   where
     iteration = do
         cfg <- getConfig

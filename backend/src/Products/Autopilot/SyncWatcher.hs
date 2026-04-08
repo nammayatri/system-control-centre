@@ -48,14 +48,15 @@ so a transient failure doesn't kill the watcher thread.
 -}
 syncWatcherPollLoop :: Flow ()
 syncWatcherPollLoop = forever $ do
-    result <- MC.try @_ @E.SomeException syncWatcherIteration
+    result <- MC.try @_ @E.SomeException $ do
+        syncWatcherIteration
+        pollDelay <- getReleaseWatchDelay
+        threadDelaySec pollDelay
     case result of
         Left e ->
             logError $
                 "[SYNC_WATCHER] Poll iteration failed (continuing): " <> T.pack (show e)
         Right () -> pure ()
-    pollDelay <- getReleaseWatchDelay
-    threadDelaySec pollDelay
 
 -- ──────────────────────────────────────────────────────────────────
 -- Iteration

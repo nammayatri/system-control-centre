@@ -234,8 +234,25 @@ createVsEditTrackerH _ap CreateVsEditTrackerReq{..} = do
             -- double-clicking. Revisit when the query layer grows a
             -- transaction-scoped variant.
             insertReleaseTrackerRow row
-            -- Capture old VS data as SNAPSHOT event
-            case oldVsData of
+            -- Capture old VS data as SNAPSHOT event. If the client did not
+            -- supply oldVsData, fetch the live VS from k8s now (Julia parity:
+            -- the OLD snapshot is mandatory at lock time so revert can later
+            -- restore the original VS — without this, /vs-edit-tracker/revert
+            -- fails with "No VS_OLD snapshot found").
+            cfg <- getConfig
+            mProdCfg <- findProductByNameAndCluster appGroup ""
+            let mNs = getProductNamespace <$> mProdCfg
+                vsToFetch = vsName
+            capturedOld <- case oldVsData of
+                Just d -> pure (Just d)
+                Nothing -> case mNs of
+                    Just ns | not (T.null vsToFetch) -> do
+                        result <- liftIO $ getVirtualServiceJson cfg ns vsToFetch
+                        case result of
+                            Right vsText -> pure (Just vsText)
+                            Left _ -> pure Nothing
+                    _ -> pure Nothing
+            case capturedOld of
                 Just d -> insertReleaseEvent tid "SNAPSHOT" "VS_OLD" (String d)
                 Nothing -> pure ()
             -- Close the TOCTOU window: if another caller raced us (same owner,

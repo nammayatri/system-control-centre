@@ -75,7 +75,7 @@ import Products.Autopilot.K8s.Deployment (
  )
 import Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
-import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildCreateHpaFromTemplateCommand, buildDeleteHpaCommand, buildPatchHpaReplicasCommand, hpaExists)
+import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildCreateHpaFromTemplateCommand, buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax, hpaExists)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRolloutWithRetries, getVirtualServiceJson)
 import Products.Autopilot.Notifications (
     notifyGenericThreadMessage,
@@ -409,9 +409,34 @@ scaleNewDeploymentForStage cfg ctx routePct podPct = do
             hpaPresent <- liftIO $ hpaExists cfg ns newHpa
             if hpaPresent
                 then do
-                    let hpaMin = safeTarget
-                        hpaMax = max hpaMin (round (fromIntegral safeTarget * wcHpaMinMaxFactor wfCfg :: Double))
-                    logInfoS $ "  [pods] Patching HPA " <> newHpa <> " min=" <> T.pack (show hpaMin) <> " max=" <> T.pack (show hpaMax) <> logCtx
+                    -- Julia parity (hpa.jl:37 updateMinPods!): ratchet upward only.
+                    -- Read the LIVE HPA's current min/max and take max(live, computed)
+                    -- so an operator bump-up or an earlier stage's higher floor is
+                    -- never shrunk by this patch. Previously we blindly overwrote
+                    -- with the computed values, which could under-provision a
+                    -- service after a manual HPA edit.
+                    (liveMin, liveMax) <- liftIO $ getHpaMinMax cfg ns newHpa
+                    let computedMin = safeTarget
+                        computedMax = max computedMin (round (fromIntegral safeTarget * wcHpaMinMaxFactor wfCfg :: Double))
+                        hpaMin = max liveMin computedMin
+                        hpaMax = max liveMax computedMax
+                    logInfoS $
+                        "  [pods] Patching HPA "
+                            <> newHpa
+                            <> " min="
+                            <> T.pack (show hpaMin)
+                            <> " max="
+                            <> T.pack (show hpaMax)
+                            <> " (live was min="
+                            <> T.pack (show liveMin)
+                            <> " max="
+                            <> T.pack (show liveMax)
+                            <> ", computed min="
+                            <> T.pack (show computedMin)
+                            <> " max="
+                            <> T.pack (show computedMax)
+                            <> ")"
+                            <> logCtx
                     _ <- liftIO $ runCmd (buildPatchHpaReplicasCommand cfg ns newHpa hpaMin hpaMax)
                     -- E2 fix: also issue a kubectl scale --replicas hint so the
                     -- HPA controller doesn't have to wait for its 15-90s
@@ -852,10 +877,19 @@ prepareK8sResources = do
                             Left (K8sError err) -> logErrorS $ "  [HPA] Clone failed (non-fatal): " <> err
                     else do
                         -- Branch 3: first release. Create from template.
+                        -- Julia parity (types/db/hpa.jl:14):
+                        --   defaultMinMax = tracker.rollout_strategy[1].pods, tracker.rollout_strategy[1].pods
+                        -- Use the operator's first-stage podPct as the floor for both
+                        -- min and max (Julia uses it for both — tight initial sizing,
+                        -- the per-stage ratchet bumps it up later). Falls back to
+                        -- defaultMinPods only if rolloutStrategy is empty (defensive).
+                        let firstStagePods = case rolloutStrategy rt of
+                                (s : _) -> max 1 (podPercent s)
+                                [] -> defaultMinPods
                         mTemplate <- getHpaTemplate
                         case mTemplate of
                             Just tmpl | not (T.null tmpl) -> do
-                                let (hpaMin, hpaMax) = computeMinMax defaultMinPods
+                                let (hpaMin, hpaMax) = computeMinMax firstStagePods
                                 logInfoS $ "  Creating HPA from template: " <> newHpaName
                                 createResult <- liftIO $ runCmd (buildCreateHpaFromTemplateCommand cfg (namespace ctx) (serviceName ctx) (newVersion ctx) tmpl hpaMin hpaMax)
                                 case createResult of

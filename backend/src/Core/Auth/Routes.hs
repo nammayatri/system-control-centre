@@ -49,6 +49,9 @@ loginH body = do
             mPerson <- findPersonByEmail email
             case mPerson of
                 Nothing -> throwM $ Unauthorized "Invalid credentials"
+                Just person
+                    | not (personIsActive person) ->
+                        throwM $ Unauthorized "Account deactivated"
                 Just person -> do
                     let valid = verifyPassword password (personPasswordHash person)
                     if not valid
@@ -112,6 +115,9 @@ meH mAuth = do
                             mPerson <- findPersonById (trPersonId tokenRow)
                             case mPerson of
                                 Nothing -> throwM $ NotFound "Person not found"
+                                Just person
+                                    | not (personIsActive person) ->
+                                        throwM $ Unauthorized "Account deactivated"
                                 Just person -> do
                                     products <- findAllProductsForPerson person
                                     pure $
