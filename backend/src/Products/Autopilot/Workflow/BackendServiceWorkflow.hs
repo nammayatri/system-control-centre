@@ -364,7 +364,30 @@ scaleNewDeploymentForStage cfg ctx routePct podPct = do
     -- minimum.
     -- Bug fix (round 7 / B7+E1): if currentOld<=0, fall through to operatorFloor
     -- (always ≥1) so we never silently leave the new deployment under-provisioned.
-    let safeTarget = if currentOld <= 0 then max 1 operatorFloor else target
+    -- Julia parity (service.jl:511-514 emergency HPA floor pre-check):
+    -- peek at the NEXT rollout stage's pods count and bump the safe target
+    -- if the next stage requires more pods than the current calculation.
+    -- Without this, a multi-stage strategy like [50%@5pods, 100%@10pods]
+    -- would scale to 5 at stage 1, then need to wait for the cooloff +
+    -- next-stage scale before pods reach 10, leaving a window where the
+    -- new deployment is under-provisioned for the upcoming traffic shift.
+    -- We pre-warm the floor to the max of current and next-stage operator
+    -- pods so the HPA's slow reconciler doesn't bottleneck the next flip.
+    let nextStageFloor =
+            let strat = rolloutStrategy rtNow
+                -- Find current stage by matching routePct, then peek at next.
+                -- Match by rolloutPercent equality; takes the FIRST match
+                -- if duplicates exist (rolloutStrategy validation already
+                -- enforces strictly-increasing percents at create time).
+                idxAndNext = case dropWhile (\(_, s) -> rolloutPercent s /= routePct) (zip [0 :: Int ..] strat) of
+                    ((i, _) : _) -> drop (i + 1) strat
+                    _ -> []
+             in case idxAndNext of
+                    (next : _) -> max 1 (podPercent next)
+                    _ -> 0
+        safeTarget =
+            let baseTarget = if currentOld <= 0 then max 1 operatorFloor else target
+             in max baseTarget nextStageFloor
     if currentNew >= safeTarget
         then
             logInfoS $

@@ -195,4 +195,39 @@ autopilotConfigs =
         ScalingGroup
         "HPA minReplicas default for first-release create-from-template branch"
         (Just "autopilot")
+    , -- Pod-count ratchet & HPA min/max ratio (Julia parity tunables; both
+      -- changed from historic 1.2 / 1.0 to safer 1.0 / 1.0 defaults to stop
+      -- the per-release HPA min inflation when CPU-driven scale-down is idle).
+      ConfigEntry
+        "pods_calculation_factor"
+        (DoubleConfig 1.0)
+        ScalingGroup
+        "Pod-count ratchet multiplier (Julia parity). 1.0 = match old version pods exactly. >1.0 adds headroom but inflates HPA min on every release in idle envs."
+        (Just "autopilot")
+    , ConfigEntry
+        "hpa_min_max_ratio"
+        (DoubleConfig 1.0)
+        ScalingGroup
+        "HPA max as ratio of computed safe target. 1.0 = fixed-replica HPA. Bump to 3.0+ for real autoscaling headroom."
+        (Just "autopilot")
+    , -- Stale-state sweep grace periods
+      ConfigEntry
+        "discarding_sweep_minutes"
+        (IntConfig 5)
+        DeploymentGroup
+        "Trackers stuck in DISCARDING longer than this are flipped to DISCARDED by the runner sweep (Julia filterUsingScheduleTime! parity)."
+        (Just "autopilot")
+    , ConfigEntry
+        "lock_expiry_delay_minutes"
+        (IntConfig 30)
+        DeploymentGroup
+        "VS-edit lock auto-expiry: locks older than this are eligible for re-acquisition by tryAcquireVsLock."
+        (Just "autopilot")
+    , -- Decision-engine notification dedup
+      ConfigEntry
+        "decision_notification_dedup_minutes"
+        (IntConfig 15)
+        ABTestingGroup
+        "Suppress repeat decision-engine Slack messages with the same (decisionType, decision, reason) tuple within this window. Julia ABHSSlackSpamFilter parity."
+        (Just "autopilot")
     ]

@@ -27,7 +27,7 @@ import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPri
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks)
 import Products.Autopilot.Queries.ReleaseTracker
-import Products.Autopilot.RuntimeConfig (getHpaDefaultMinPods, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
+import Products.Autopilot.RuntimeConfig (getDiscardingSweepMinutes, getHpaDefaultMinPods, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, dcAppGroup)
@@ -255,6 +255,19 @@ loop = forever $ do
         leakedTrackers <- findLeakedNewDeploymentTrackers now
         forM_ leakedTrackers $ \twt -> scaleDownLeakedNewDeployment cfg twt
 
+        -- Step 6 (Julia parity, release/watcher.jl filterUsingScheduleTime!):
+        -- Sweep stale-DISCARDING trackers. A discard request transitions a
+        -- tracker to DISCARDING and triggers cleanup; if the cleanup itself
+        -- crashes or stalls, the tracker stays DISCARDING forever and shows
+        -- up in operator dashboards as "still working". The sweep flips any
+        -- DISCARDING tracker older than @discarding_sweep_minutes@ to
+        -- DISCARDED so the audit trail closes cleanly.
+        sweepAge <- getDiscardingSweepMinutes
+        sweptCount <- sweepStaleDiscardingTrackers sweepAge
+        when (sweptCount > 0) $
+            logInfo $
+                "[RUNNER] Sweep flipped " <> T.pack (show sweptCount) <> " stale DISCARDING tracker(s) → DISCARDED"
+
 -- | Get the full AppState from the Flow monad (for passing to forkIO threads)
 getAppState :: Flow AppState
 getAppState = ask
@@ -322,8 +335,25 @@ sortByPriority = sortBy (comparing (Down . priority . fst))
 Atomically claims via conditionalUpdateTrackerRow (prevents double-pick).
 -}
 trigger :: DBEnv -> TrackerWithTarget -> Flow ()
-trigger _db (rt, mts) = do
+trigger _db (rtStale, mtsStale) = do
     cfg <- getConfig
+    -- Bug fix (Slack thread race): the (rt, mts) we got from
+    -- findRunnableReleaseTrackers is a snapshot taken BEFORE the
+    -- createReleaseH handler's notifyReleaseCreated saved slack_thread_ts
+    -- via a separate UPDATE statement. If we proceed with the stale
+    -- snapshot, the DELETE+INSERT inside conditionalUpdateTrackerRow
+    -- (insertReleaseTrackerRow at line 820 of Queries.ReleaseTracker.hs)
+    -- will overwrite the just-saved slack_thread_ts back to NULL,
+    -- causing every subsequent notification (Approved, INPROGRESS,
+    -- TRAFFIC_UPDATED, COMPLETED) to post as a fresh top-level Slack
+    -- message instead of replying in-thread.
+    -- Re-read the tracker once here so we pick up any column writes
+    -- (slack_thread_ts, env_override_data, etc.) that landed between
+    -- the runner poll and now.
+    fresh <- findReleaseTracker (releaseId rtStale)
+    let (rt, mts) = case fresh of
+            Just (freshRt, freshMts) -> (freshRt, freshMts)
+            Nothing -> (rtStale, mtsStale)
     -- Version validation
     versionOk <- liftIO $ validateRunningVersion cfg rt mts
     case versionOk of
@@ -384,7 +414,24 @@ trigger _db (rt, mts) = do
                                         then logWarning $ "[RUNNER] Workflow failed but tracker " <> releaseId rt <> " was concurrently modified — leaving as-is, the user state wins"
                                         else do
                                             insertReleaseEvent (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
-                                            restoreVsTrafficOnFailure cfg' rt mts
+                                            -- Julia parity (release/watcher.jl:342-521 per-type
+                                            -- failure handlers): VS traffic restore is meaningful
+                                            -- only for categories that actually flip a VS during
+                                            -- rollout. Schedulers, CronJobs, Jobs, and BackendConfig
+                                            -- have no VirtualService to restore — calling kubectl
+                                            -- on a non-existent VS would just emit a confusing
+                                            -- "VS not found" error and waste a kubectl roundtrip.
+                                            -- Dispatch by category to match Julia's per-type
+                                            -- failure handlers. The leaked-deployment cleanup
+                                            -- (scheduleNewDeploymentCleanup) and Slack abort
+                                            -- notification still run for every category.
+                                            case category rt of
+                                                BackendService -> restoreVsTrafficOnFailure cfg' rt mts
+                                                _ ->
+                                                    logInfo $
+                                                        "[RUNNER] Skipping VS restore for non-BackendService category "
+                                                            <> T.pack (show (category rt))
+                                                            <> " (no VS to restore)"
                                             -- Julia parity: mark for later poll-driven
                                             -- cleanup in case restoreVsTrafficOnFailure's
                                             -- kubectl scale-down itself failed.

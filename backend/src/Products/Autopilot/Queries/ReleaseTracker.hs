@@ -29,6 +29,7 @@ module Products.Autopilot.Queries.ReleaseTracker (
     resetStuckScaleDownInProgress,
     findActiveSyncTrackers,
     findEventByLabel,
+    sweepStaleDiscardingTrackers,
 
     -- * Events
     insertReleaseEvent,
@@ -75,7 +76,7 @@ import qualified Data.Text.Lazy as LT
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Database.Beam
 import Database.Beam.Postgres
-import Database.PostgreSQL.Simple (Only (..), execute, execute_, withTransaction)
+import Database.PostgreSQL.Simple (Only (..), execute, execute_, query, withTransaction)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
 import qualified Debug.Trace as DT
 import Products.Autopilot.Types
@@ -143,7 +144,7 @@ insertReleaseTracker rt mts = withDb $ \db -> do
                 \  , global_id         = EXCLUDED.global_id \
                 \  , sync_enabled      = EXCLUDED.sync_enabled \
                 \  , env_override_data = EXCLUDED.env_override_data \
-                \  , slack_thread_ts   = EXCLUDED.slack_thread_ts \
+                \  , slack_thread_ts   = COALESCE(EXCLUDED.slack_thread_ts, release_tracker.slack_thread_ts) \
                 \  , date_created      = EXCLUDED.date_created \
                 \  , last_updated      = EXCLUDED.last_updated"
                 ( (rtId row, rtOldVersion row, rtNewVersion row, rtAppGroup row, rtService row, rtPriority row, rtEnv row)
@@ -166,6 +167,21 @@ conditionalUpdateTracker rt mts expectedStatus = withDb $ \db -> do
         row = toRow created now rt mts
     withConn db $ \conn ->
         withTransaction conn $ do
+            -- Bug fix (Slack thread race): preserve slack_thread_ts written
+            -- by notifyReleaseCreated's updateReleaseTrackerSlackThreadTs.
+            -- The DELETE+INSERT pattern below would otherwise clobber the
+            -- column to NULL whenever the in-memory `rt` was snapshotted
+            -- before the side-effect UPDATE landed. Read the live value
+            -- inside the transaction so the INSERT carries it forward.
+            existingTs <-
+                query
+                    conn
+                    "SELECT slack_thread_ts FROM release_tracker WHERE id = ?"
+                    (Only (releaseId rt))
+            let preservedTs = case existingTs of
+                    [Only (Just ts)] -> Just ts
+                    _ -> rtSlackThreadTs row
+                mergedRow = row{rtSlackThreadTs = preservedTs}
             rowsDeleted <-
                 execute
                     conn
@@ -174,7 +190,7 @@ conditionalUpdateTracker rt mts expectedStatus = withDb $ \db -> do
             if rowsDeleted == 0
                 then pure False
                 else do
-                    runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
+                    runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
                     pure True
 
 {- | Atomic approve. Like conditionalUpdateTracker but the precondition is
@@ -190,6 +206,16 @@ conditionalUpdateApprove rt mts = withDb $ \db -> do
         row = toRow created now rt mts
     withConn db $ \conn ->
         withTransaction conn $ do
+            -- Bug fix (Slack thread race): see conditionalUpdateTracker.
+            existingTs <-
+                query
+                    conn
+                    "SELECT slack_thread_ts FROM release_tracker WHERE id = ?"
+                    (Only (releaseId rt))
+            let preservedTs = case existingTs of
+                    [Only (Just ts)] -> Just ts
+                    _ -> rtSlackThreadTs row
+                mergedRow = row{rtSlackThreadTs = preservedTs}
             rowsDeleted <-
                 execute
                     conn
@@ -198,7 +224,7 @@ conditionalUpdateApprove rt mts = withDb $ \db -> do
             if rowsDeleted == 0
                 then pure False
                 else do
-                    runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
+                    runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
                     pure True
 
 {- | Like 'conditionalUpdateTracker' but accepts a raw 'ReleaseTrackerRow'.
@@ -208,6 +234,16 @@ conditionalUpdateTrackerRow :: (MonadFlow m) => ReleaseTrackerRow -> Text -> m B
 conditionalUpdateTrackerRow row expectedStatus = withDb $ \db ->
     withConn db $ \conn ->
         withTransaction conn $ do
+            -- Bug fix (Slack thread race): see conditionalUpdateTracker.
+            existingTs <-
+                query
+                    conn
+                    "SELECT slack_thread_ts FROM release_tracker WHERE id = ?"
+                    (Only (rtId row))
+            let preservedTs = case existingTs of
+                    [Only (Just ts)] -> Just ts
+                    _ -> rtSlackThreadTs row
+                mergedRow = row{rtSlackThreadTs = preservedTs}
             rowsDeleted <-
                 execute
                     conn
@@ -216,7 +252,7 @@ conditionalUpdateTrackerRow row expectedStatus = withDb $ \db ->
             if rowsDeleted == 0
                 then pure False
                 else do
-                    runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
+                    runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
                     pure True
 
 findReleaseTracker :: (MonadFlow m) => Text -> m (Maybe TrackerWithTarget)
@@ -820,8 +856,23 @@ insertReleaseTrackerRow :: (MonadFlow m) => ReleaseTrackerRow -> m ()
 insertReleaseTrackerRow row = withDb $ \db ->
     withConn db $ \conn ->
         withTransaction conn $ do
+            -- Bug fix (Slack thread race): preserve slack_thread_ts when the
+            -- caller's row is a stale snapshot. Used by VS edit create flow
+            -- via createVsEditTrackerH → mkVsEditRow → insertReleaseTrackerRow.
+            -- Without this guard a re-insert (e.g. on retry / discard sweep
+            -- recreation) would clobber the thread_ts written by
+            -- notifyVsEditCreated's saveThreadTs call.
+            existingTs <-
+                query
+                    conn
+                    "SELECT slack_thread_ts FROM release_tracker WHERE id = ?"
+                    (Only (rtId row))
+            let preservedTs = case existingTs of
+                    [Only (Just ts)] -> Just ts
+                    _ -> rtSlackThreadTs row
+                mergedRow = row{rtSlackThreadTs = preservedTs}
             _ <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (rtId row))
-            runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
+            runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
 
 {- | Find all non-terminal trackers that have sync enabled and a global_id set.
 Used by 'Products.Autopilot.SyncWatcher' to poll secondary cluster status.
@@ -851,6 +902,53 @@ findActiveSyncTrackers = withDb $ \db -> do
                             )
                         pure rt
     pure (map (fst . fromRow) rows)
+
+{- | Sweep stale-DISCARDING trackers: any tracker that has been stuck in
+the DISCARDING status longer than @ageMinutes@ minutes is force-flipped to
+DISCARDED. Julia parity: @filterUsingScheduleTime!@ in
+@release/watcher.jl@ instantly discards DISCARDING-status trackers; we
+use a short grace period to absorb in-flight kubectl calls before
+declaring them dead. Returns the number of trackers flipped.
+
+Driven by the runner's poll loop with @discarding_sweep_minutes@
+server_config (default 5 minutes).
+-}
+sweepStaleDiscardingTrackers :: (MonadFlow m) => Int -> m Int
+sweepStaleDiscardingTrackers ageMinutes = withDb $ \db -> do
+    now <- liftIO getCurrentTime
+    let cutoff = addUTCTime (negate (fromIntegral (ageMinutes * 60) :: NominalDiffTime)) now
+    -- Two-step: SELECT matching IDs, then UPDATE. Beam's plain runUpdate
+    -- doesn't return a row count, so we count via the SELECT to keep the
+    -- caller's logging useful.
+    stuckIds <-
+        runDB db $
+            runSelectReturningList $
+                select $ do
+                    rt <- all_ (releaseTrackers autopilotDb)
+                    guard_ (rtStatus rt ==. val_ "DISCARDING")
+                    guard_ (rtUpdatedAt rt <=. val_ cutoff)
+                    pure (rtId rt)
+    if null stuckIds
+        then pure 0
+        else do
+            runDB db $
+                runUpdate $
+                    update
+                        (releaseTrackers autopilotDb)
+                        ( \rt ->
+                            mconcat
+                                [ rtStatus rt <-. val_ "DISCARDED"
+                                , rtEndTime rt <-. val_ (Just now)
+                                , rtUpdatedAt rt <-. val_ now
+                                ]
+                        )
+                        ( \rt ->
+                            rtStatus rt
+                                ==. val_ "DISCARDING"
+                                &&. rtUpdatedAt rt
+                                    <=. val_ cutoff
+                        )
+            pure (length stuckIds)
 
 {- | Find the most recent release event for a given release and label.
 Used by 'Products.Autopilot.SyncWatcher' to look up SYNC_SECONDARY_TRACKER_ID.

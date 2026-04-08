@@ -29,6 +29,7 @@ module Products.Autopilot.RuntimeConfig (
     getMaxJobCompletionHours,
     getRevertCooloff,
     getLockExpiryDelayMinutes,
+    getDiscardingSweepMinutes,
     getMaxK8sRetries,
     getCkhClusterName,
     getDEPostMonitoringTimeout,
@@ -64,21 +65,51 @@ import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct_io)
 
 -- ── Notifications ──────────────────────────────────────────────────
 
+{- | Master kill-switch for Slack notifications. When False, every notify*
+helper in Notifications.hs short-circuits with no HTTP call. Set False
+in dev/test envs that don't have a Slack workspace configured. Read by
+'whenSlackEnabled' wrapper at every notification entry point.
+-}
 isSlackEnabled :: (MonadFlow m) => m Bool
 isSlackEnabled = getConfigBoolForProduct "slack_enabled" (Just "autopilot") False
 
+{- | Master kill-switch for kubectl operations. When False, the workflow
+skips deployment cloning, HPA ops, VS edits, scale calls, and pod
+readiness polls (it walks the state machine but never touches k8s).
+Used for unit-test runs and DB-only smoke checks. Default True.
+-}
 isK8sEnabled :: (MonadFlow m) => m Bool
 isK8sEnabled = getConfigBoolForProduct "k8s_enabled" (Just "autopilot") True
 
+{- | Master kill-switch for the runner poll loop. When False, the runner
+still spawns but skips the iteration body, so no releases get picked.
+Lets operators freeze new dispatches without restarting the backend
+(e.g. while debugging a stuck workflow). Default True.
+-}
 isWatcherEnabled :: (MonadFlow m) => m Bool
 isWatcherEnabled = getConfigBoolForProduct "watcher_enabled" (Just "autopilot") True
 
+{- | When True, every newly-created release is auto-approved (is_approved
+forced to True at create time). Used for automation scenarios where
+releases come from CI/CD without a human approver. Default False
+(operators must explicitly approve via /releases/:id/approve).
+-}
 isApproveAllReleases :: (MonadFlow m) => m Bool
 isApproveAllReleases = getConfigBoolForProduct "approve_all_releases" (Just "autopilot") False
 
+{- | When True, the runner schedules a scale-down of the OLD deployment
+after a release reaches COMPLETED. False leaves the old deployment
+running indefinitely (useful for canary-style releases where old and
+new run side-by-side for an extended period). Default True.
+-}
 isScaleDownPodsOnCompletion :: (MonadFlow m) => m Bool
 isScaleDownPodsOnCompletion = getConfigBoolForProduct "scale_down_pods_on_completion" (Just "autopilot") True
 
+{- | When True, the workflow POSTs every release lifecycle event to the
+external GCLT (global changelog) service. Off by default — the GCLT
+HTTP client is not yet implemented in Haskell (CONTEXT.md "Conditional"
+list). Flipping this on without the client is a no-op.
+-}
 isGcltEnabled :: (MonadFlow m) => m Bool
 isGcltEnabled = getConfigBoolForProduct "global_changelog_tracker_enabled" (Just "autopilot") False
 
@@ -156,9 +187,21 @@ getABHSAllowedTimeDiffMins :: (MonadFlow m) => m Int
 getABHSAllowedTimeDiffMins =
     getConfigIntForProduct "ab_hs_allowed_time_diff_mins" (Just "autopilot") 60
 
+{- | Cross-cloud sync master gate. When True, completed releases POST a
+sync payload to the secondary cluster's @/releases/create@ endpoint
+via Sync.hs. The payload sets @isFromSync=true@ on the receiver to
+prevent infinite loops. Off by default — only enable in production
+multi-cloud setups. Read by 'triggerSyncIfEnabled' and SyncWatcher.
+-}
 isSyncClusterEnabled :: (MonadFlow m) => m Bool
 isSyncClusterEnabled = getConfigBoolForProduct "sync_cluster_enabled" (Just "autopilot") False
 
+{- | When True, the runner allows multiple in-flight releases per
+(app_group, env) provided they target DIFFERENT services. When False,
+only one release per app_group can run at a time (Julia historic
+single-release mode). Same-service concurrency is ALWAYS blocked
+regardless. Read by 'pickJobs' in Runner.hs.
+-}
 isMultiReleasePerProduct :: (MonadFlow m) => m Bool
 isMultiReleasePerProduct = getConfigBoolForProduct "multi_release_per_product" (Just "autopilot") False
 
@@ -197,7 +240,14 @@ getPodsScaleDownDelayFromConfig :: (MonadFlow m) => m Double
 getPodsScaleDownDelayFromConfig = getConfigDoubleForProduct "pods_scale_down_delay_config" (Just "autopilot") 0.0
 
 getPodsCalculationFactor :: (MonadFlow m) => m Double
-getPodsCalculationFactor = getConfigDoubleForProduct "pods_calculation_factor" (Just "autopilot") 1.2
+-- Default 1.0 = "match old version pods exactly". Was 1.2 (Julia historic
+-- default for traffic-shift headroom) but combined with the per-stage HPA
+-- ratchet (max(live, computed)) it caused per-release pod inflation in
+-- environments where the HPA never scaled down (idle test deployments).
+-- Operators who want headroom should set this to 1.2+ in server_config and
+-- accept the inflation, OR keep at 1.0 and rely on the HPA's CPU-driven
+-- scale-down between releases.
+getPodsCalculationFactor = getConfigDoubleForProduct "pods_calculation_factor" (Just "autopilot") 1.0
 
 getHpaMinMaxFactor :: (MonadFlow m) => m Double
 getHpaMinMaxFactor = getConfigDoubleForProduct "hpa_min_max_ratio" (Just "autopilot") 1.0
@@ -228,6 +278,16 @@ getDEPostMonitoringTimeout = getConfigIntForProduct "de_post_monitoring_timeout"
 
 getLockExpiryDelayMinutes :: (MonadFlow m) => m Int
 getLockExpiryDelayMinutes = getConfigIntForProduct "lock_expiry_delay_minutes" (Just "autopilot") 15
+
+{- | Stale-DISCARDING sweep grace period (minutes). Trackers that have been
+stuck in the DISCARDING status longer than this are force-flipped to
+DISCARDED by the runner's poll loop step 6. Julia parity: Julia discards
+DISCARDING-status trackers instantly via @filterUsingScheduleTime!@; we use
+a short grace period to absorb in-flight kubectl calls before declaring
+them dead. Default 5 minutes.
+-}
+getDiscardingSweepMinutes :: (MonadFlow m) => m Int
+getDiscardingSweepMinutes = getConfigIntForProduct "discarding_sweep_minutes" (Just "autopilot") 5
 
 getMaxK8sRetries :: (MonadFlow m) => m Int
 getMaxK8sRetries = getConfigIntForProduct "max_k8s_retries" (Just "autopilot") 3

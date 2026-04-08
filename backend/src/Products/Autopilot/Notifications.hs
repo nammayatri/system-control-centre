@@ -51,6 +51,7 @@ module Products.Autopilot.Notifications (
     notifyConfigMapDiscarded,
     notifyConfigMapFastForwarded,
     notifyGenericThreadMessage,
+    notifyDecisionThreadMessage,
 )
 where
 
@@ -63,6 +64,7 @@ import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value (..), decode, encode, object, (.=))
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
@@ -72,6 +74,7 @@ import qualified Products.Autopilot.Queries.ReleaseTracker as RTQ
 import Products.Autopilot.RuntimeConfig (isSlackEnabled)
 import Products.Autopilot.Sync (triggerSyncIfEnabled)
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
+import Products.Autopilot.Types.Storage.Schema (rePayload)
 import Products.Autopilot.Types.Target (TargetState)
 import System.Environment (lookupEnv)
 import Prelude
@@ -421,20 +424,30 @@ notifyPodsScaledDown tracker oldVer = whenSlackEnabled $
 
 -- ── VS Edit Notifications ────────────────────────────────────────
 
+{- | SYNCHRONOUS (not forked through whenSlackEnabled). The thread_ts MUST
+be saved to DB before this call returns, otherwise an immediately-following
+notifyVsEditApproved/Applied/Discarded reads slackThreadTs=NULL and posts
+a fresh top-level message instead of replying in-thread (the Slack
+"thread fan-out" bug). Same fix as notifyReleaseCreated / notifyVsEditLocked
+/ notifyConfigMapCreated.
+-}
 notifyVsEditCreated :: Text -> Text -> Text -> Maybe Text -> Flow ()
-notifyVsEditCreated trackerId prod svc mCreatedByUser = whenSlackEnabled $
-    withChannel prod svc $ \channel -> do
-        link <- liftIO getDashboardUrl
-        let vsLink = "<" <> link <> "/vs-editor/" <> trackerId <> "|" <> prod <> " | " <> svc <> " | VS Edit>"
-            createdByUser = maybe "admin" id mCreatedByUser
-            blocks =
-                [ sectionBlock vsLink
-                , contextBlock ["CREATED by *" <> createdByUser <> "*"]
-                ]
-        mTs <- sendSlackRich channel "VS CREATED" colorCreated blocks Nothing
-        case mTs of
-            Just ts -> saveThreadTs trackerId ts
-            Nothing -> pure ()
+notifyVsEditCreated trackerId prod svc mCreatedByUser = do
+    enabled <- isSlackEnabled
+    if not enabled
+        then logInfoG "[SLACK] Disabled, skipping vs-edit-create"
+        else withChannel prod svc $ \channel -> do
+            link <- liftIO getDashboardUrl
+            let vsLink = "<" <> link <> "/vs-editor/" <> trackerId <> "|" <> prod <> " | " <> svc <> " | VS Edit>"
+                createdByUser = maybe "admin" id mCreatedByUser
+                blocks =
+                    [ sectionBlock vsLink
+                    , contextBlock ["CREATED by *" <> createdByUser <> "*"]
+                    ]
+            mTs <- sendSlackRich channel "VS CREATED" colorCreated blocks Nothing
+            case mTs of
+                Just ts -> saveThreadTs trackerId ts
+                Nothing -> pure ()
 
 {- | SYNCHRONOUS (not forked). Same fix as notifyReleaseCreated: every
 follow-up notification (Approved/Applied/Discarded/etc.) needs the
@@ -612,3 +625,33 @@ notifyGenericThreadMessage tracker msg = whenSlackEnabled $
         let blocks = [sectionBlock msg]
         _ <- sendSlackRich channel msg colorDefault blocks threadTs
         pure ()
+
+{- | Decision-engine notification with dedup. Julia parity
+(release/workflow/service.jl:793-824 ABHSSlackSpamFilter): only sends a
+Slack message if the (decisionType, decision, reason) tuple differs from
+the last DECISION_RESULT event for this tracker. Without this, every
+decision-engine poll cycle (every cooloff iteration) would re-send the
+same message, flooding the channel during stuck Wait/Abort states.
+
+@decisionType@ is a stable tag (e.g. "PREMONITORING", "POSTMONITORING",
+"PROMETHEUS"). @decisionValue@ is the decision name ("Continue"/"Wait"/
+"Abort"). @reason@ is the engine's reason text.
+
+After sending, an audit event @DECISION_NOTIFIED@ is inserted so the
+next call can compare against it. Returns @True@ if the message was sent.
+-}
+notifyDecisionThreadMessage :: ReleaseTracker -> Text -> Text -> Maybe Text -> Text -> Flow Bool
+notifyDecisionThreadMessage tracker decisionType decisionValue reason msg = do
+    let dedupKey = decisionType <> "|" <> decisionValue <> "|" <> fromMaybe "" reason
+    mPrev <- RTQ.findEventByLabel (releaseId tracker) "DECISION_NOTIFIED"
+    let prevKey = case mPrev of
+            Just e -> case rePayload e of
+                String s -> s
+                _ -> ""
+            Nothing -> ""
+    if prevKey == dedupKey
+        then pure False
+        else do
+            RTQ.insertReleaseEvent (releaseId tracker) "BUSINESS" "DECISION_NOTIFIED" (String dedupKey)
+            notifyGenericThreadMessage tracker msg
+            pure True

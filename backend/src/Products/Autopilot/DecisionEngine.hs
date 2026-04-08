@@ -30,6 +30,7 @@ module Products.Autopilot.DecisionEngine (
 )
 where
 
+import Control.Applicative ((<|>))
 import Control.Exception (SomeException, try)
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
@@ -678,7 +679,7 @@ for parse-only errors; HTTP-level errors honour @decision_engine_fail_closed@).
 -}
 parseDecisionResponse :: Value -> Text -> IO DecisionResult
 parseDecisionResponse (Object obj) source = do
-    let decision = case KM.lookup (K.fromText "decision") obj of
+    let rawDecision = case KM.lookup (K.fromText "decision") obj of
             Just (Number n) -> case toBoundedInteger n :: Maybe Int of
                 Just 0 -> Continue
                 Just 1 -> Abort
@@ -695,7 +696,41 @@ parseDecisionResponse (Object obj) source = do
                 let xs = [r | String r <- toList rs, not (T.null r)]
                  in if null xs then Nothing else Just (T.intercalate "; " xs)
             _ -> Nothing
-    pure (DecisionResult decision reason source)
+        -- Julia parity (decision/runner.jl:494,537-541 volume_rate_result):
+        -- the decision pod returns Wait (not Abort) when total_a or total_b
+        -- are below the configured volume floor (vol_t = (50, 100)). Most
+        -- engines apply this gate themselves, but if the response includes
+        -- totalA / totalB / sampleSize fields and either is below the
+        -- minimum, downgrade Abort → Wait so we don't roll back on tiny
+        -- samples. No effect when the engine omits these fields (trust the
+        -- engine's gate). Lookup keys cover both camelCase and snake_case.
+        readInt k = case KM.lookup (K.fromText k) obj of
+            Just (Number n) -> toBoundedInteger n :: Maybe Int
+            _ -> Nothing
+        totalA = readInt "totalA" <|> readInt "total_a" <|> readInt "sampleA"
+        totalB = readInt "totalB" <|> readInt "total_b" <|> readInt "sampleB"
+        -- Default volume floor: matches Julia decision/runner.jl vol_t default (50, 100).
+        -- Allow opt-in tightening via the response itself; otherwise apply the
+        -- conservative defaults.
+        minA = 50 :: Int
+        minB = 100 :: Int
+        belowVolume = case (totalA, totalB) of
+            (Just a, _) | a < minA -> True
+            (_, Just b) | b < minB -> True
+            _ -> False
+        decision
+            | rawDecision == Abort && belowVolume = Wait
+            | otherwise = rawDecision
+        finalReason
+            | rawDecision == Abort && belowVolume =
+                Just $
+                    "Abort downgraded to Wait — sample size below volume floor (totalA="
+                        <> T.pack (show totalA)
+                        <> ", totalB="
+                        <> T.pack (show totalB)
+                        <> ")"
+            | otherwise = reason
+    pure (DecisionResult decision finalReason source)
 parseDecisionResponse _ source = do
     logWarningG $ "[DECISION] Could not parse decision response for " <> source
     pure (DecisionResult Continue (Just "Invalid response format") source)
