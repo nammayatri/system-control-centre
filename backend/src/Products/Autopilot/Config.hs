@@ -230,4 +230,26 @@ autopilotConfigs =
         ABTestingGroup
         "Suppress repeat decision-engine Slack messages with the same (decisionType, decision, reason) tuple within this window. Julia ABHSSlackSpamFilter parity."
         (Just "autopilot")
+    , -- Decision engine volume floors (Julia DecisionThreshold.volume_thresholds parity).
+      -- Used by parseDecisionResponseWithVolume to downgrade Abort → Wait when
+      -- the engine's reported sample sizes are below these floors.
+      ConfigEntry
+        "ab_hs_volume_min_a"
+        (IntConfig 50)
+        ABTestingGroup
+        "Minimum samples on the A side (control) before honoring an engine Abort. Below this, downgrade to Wait."
+        (Just "autopilot")
+    , ConfigEntry
+        "ab_hs_volume_min_b"
+        (IntConfig 100)
+        ABTestingGroup
+        "Minimum samples on the B side (variant) before honoring an engine Abort. Below this, downgrade to Wait."
+        (Just "autopilot")
+    , -- Auto-complete VS tracker sweep
+      ConfigEntry
+        "auto_complete_vs_tracker_minutes"
+        (IntConfig 60)
+        DeploymentGroup
+        "VS-edit trackers stuck in APPLIED longer than this are auto-flipped to COMPLETED by the runner sweep. Julia release/watcher.jl:158-160 parity."
+        (Just "autopilot")
     ]

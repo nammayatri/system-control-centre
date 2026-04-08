@@ -30,6 +30,8 @@ module Products.Autopilot.Queries.ReleaseTracker (
     findActiveSyncTrackers,
     findEventByLabel,
     sweepStaleDiscardingTrackers,
+    sweepAutoCompleteVsTrackers,
+    findLastGcltAbortedTracker,
 
     -- * Events
     insertReleaseEvent,
@@ -949,6 +951,73 @@ sweepStaleDiscardingTrackers ageMinutes = withDb $ \db -> do
                                     <=. val_ cutoff
                         )
             pure (length stuckIds)
+
+{- | Sweep VS-edit trackers stuck in APPLIED → auto-flip to COMPLETED
+after @ageMinutes@ minutes. Julia parity: @release/watcher.jl:158-160@
+auto-marks VS trackers COMPLETED after @getAutoCompleteVSTrackerDelay@.
+Without this, an APPLIED VS tracker hangs forever in the operator UI's
+"in-flight" view because nothing transitions APPLIED → COMPLETED.
+Returns the count of trackers flipped.
+-}
+sweepAutoCompleteVsTrackers :: (MonadFlow m) => Int -> m Int
+sweepAutoCompleteVsTrackers ageMinutes = withDb $ \db -> do
+    now <- liftIO getCurrentTime
+    let cutoff = addUTCTime (negate (fromIntegral (ageMinutes * 60) :: NominalDiffTime)) now
+    stuckIds <-
+        runDB db $
+            runSelectReturningList $
+                select $ do
+                    rt <- all_ (releaseTrackers autopilotDb)
+                    guard_ (rtCategory rt ==. val_ "VSEdit")
+                    guard_ (rtStatus rt ==. val_ "APPLIED")
+                    guard_ (rtUpdatedAt rt <=. val_ cutoff)
+                    pure (rtId rt)
+    if null stuckIds
+        then pure 0
+        else do
+            runDB db $
+                runUpdate $
+                    update
+                        (releaseTrackers autopilotDb)
+                        ( \rt ->
+                            mconcat
+                                [ rtStatus rt <-. val_ "COMPLETED"
+                                , rtEndTime rt <-. val_ (Just now)
+                                , rtUpdatedAt rt <-. val_ now
+                                ]
+                        )
+                        ( \rt ->
+                            rtCategory rt
+                                ==. val_ "VSEdit"
+                                &&. rtStatus rt
+                                    ==. val_ "APPLIED"
+                                &&. rtUpdatedAt rt
+                                    <=. val_ cutoff
+                        )
+            pure (length stuckIds)
+
+{- | Find the most recent release tracker for the given (app_group,
+service) that ended in @GCLT_ABORTED@ status. Julia parity:
+@validateGCLTAbortInPreviousTracker@ in @api/release/create.jl@. Used
+by createReleaseH to block a new release on a service whose previous
+release was killed by the global changelog tracker — operator must
+explicitly resolve before retrying.
+-}
+findLastGcltAbortedTracker :: (MonadFlow m) => Text -> Text -> Text -> m (Maybe ReleaseTracker)
+findLastGcltAbortedTracker ag svc envT = withDb $ \db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $
+                    limit_ 1 $
+                        orderBy_ (desc_ . rtUpdatedAt) $ do
+                            rt <- all_ (releaseTrackers autopilotDb)
+                            guard_ (rtAppGroup rt ==. val_ ag)
+                            guard_ (rtService rt ==. val_ svc)
+                            guard_ (rtEnv rt ==. val_ envT)
+                            guard_ (rtStatus rt ==. val_ "GCLT_ABORTED")
+                            pure rt
+    pure (fmap (fst . fromRow) (safeHead rows))
 
 {- | Find the most recent release event for a given release and label.
 Used by 'Products.Autopilot.SyncWatcher' to look up SYNC_SECONDARY_TRACKER_ID.

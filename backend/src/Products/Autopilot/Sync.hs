@@ -232,8 +232,12 @@ doCreate cfg tracker mts targetCluster = do
                 { reqMethod = POST
                 , reqHeaders = ("Content-Type", "application/json") : ("Connection", "close") : auth
                 , reqBody = Just (encode body)
-                , reqTimeout = Seconds 30
-                , reqRetries = 1
+                , -- Julia parity (service/sync.jl:67-91 createTrackerForSyncCluster):
+                  -- 60s per-attempt timeout + 2 retry attempts (3 total tries).
+                  -- Was 30s/1 retry which caused early failures on slow secondary
+                  -- clusters. Inter-retry sleep is handled inside Core.Http.Client.
+                  reqTimeout = Seconds 60
+                , reqRetries = 2
                 , reqLogTag = "sync"
                 }
         reqLog =
@@ -405,8 +409,12 @@ doRevert cfg tracker mts gid = do
             (defaultReq url)
                 { reqMethod = PUT
                 , reqHeaders = ("Content-Type", "application/json") : ("Connection", "close") : auth
-                , reqTimeout = Seconds 30
-                , reqRetries = 1
+                , -- Julia parity (service/sync.jl:67-91 createTrackerForSyncCluster):
+                  -- 60s per-attempt timeout + 2 retry attempts (3 total tries).
+                  -- Was 30s/1 retry which caused early failures on slow secondary
+                  -- clusters. Inter-retry sleep is handled inside Core.Http.Client.
+                  reqTimeout = Seconds 60
+                , reqRetries = 2
                 , reqLogTag = "revert-sync"
                 }
         reqLog = object ["url" .= url, "global_id" .= gid, "auth_mode" .= authMode]

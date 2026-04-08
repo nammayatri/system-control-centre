@@ -88,6 +88,12 @@ type CoreAPI =
         -- K8s ConfigMap lookup
         :<|> "configmap" :> Protected 'AP_CONFIG_EDIT :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] Value
         :<|> "configmap" :> Protected 'AP_CONFIG_EDIT :> "secondary" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] Value
+        -- Decision-engine post-monitoring webhook receiver (Julia parity:
+        -- release/workflow/webhook.jl). External AB engine POSTs the
+        -- post-100% verdict here. UNAUTHENTICATED — the webhook caller is
+        -- the engine, not a user. We trust the run_id (releaseId-post)
+        -- as the auth token.
+        :<|> "decision" :> "webhook" :> Capture "runId" Text :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
 
 coreServer :: ServerT CoreAPI Flow
 coreServer =
@@ -156,3 +162,5 @@ coreServer =
         -- K8s ConfigMap lookup
         :<|> ConfigMap.fetchConfigMapFromK8sH
         :<|> ConfigMap.fetchSecondaryConfigMapH
+        -- Post-monitoring webhook receiver
+        :<|> Release.decisionWebhookH

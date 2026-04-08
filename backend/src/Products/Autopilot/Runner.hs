@@ -27,7 +27,7 @@ import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPri
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks)
 import Products.Autopilot.Queries.ReleaseTracker
-import Products.Autopilot.RuntimeConfig (getDiscardingSweepMinutes, getHpaDefaultMinPods, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
+import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, dcAppGroup)
@@ -267,6 +267,17 @@ loop = forever $ do
         when (sweptCount > 0) $
             logInfo $
                 "[RUNNER] Sweep flipped " <> T.pack (show sweptCount) <> " stale DISCARDING tracker(s) → DISCARDED"
+
+        -- Step 7 (Julia parity, release/watcher.jl:158-160): Sweep VS-edit
+        -- trackers stuck in APPLIED → auto-flip to COMPLETED after the
+        -- @auto_complete_vs_tracker_minutes@ delay. Without this an APPLIED
+        -- VS tracker stays in operator's "in-flight" list forever because
+        -- nothing else transitions APPLIED → COMPLETED.
+        vsAutoCompleteAge <- getAutoCompleteVsTrackerMinutes
+        vsAutoCount <- sweepAutoCompleteVsTrackers vsAutoCompleteAge
+        when (vsAutoCount > 0) $
+            logInfo $
+                "[RUNNER] Auto-completed " <> T.pack (show vsAutoCount) <> " stale VS tracker(s) → COMPLETED"
 
 -- | Get the full AppState from the Flow monad (for passing to forkIO threads)
 getAppState :: Flow AppState

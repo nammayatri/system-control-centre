@@ -30,6 +30,9 @@ module Products.Autopilot.RuntimeConfig (
     getRevertCooloff,
     getLockExpiryDelayMinutes,
     getDiscardingSweepMinutes,
+    getABHSVolumeMinA,
+    getABHSVolumeMinB,
+    getAutoCompleteVsTrackerMinutes,
     getMaxK8sRetries,
     getCkhClusterName,
     getDEPostMonitoringTimeout,
@@ -288,6 +291,31 @@ them dead. Default 5 minutes.
 -}
 getDiscardingSweepMinutes :: (MonadFlow m) => m Int
 getDiscardingSweepMinutes = getConfigIntForProduct "discarding_sweep_minutes" (Just "autopilot") 5
+
+{- | AB/HS volume floor for the A side (control). Defensive sample-size
+gate: if the engine reports total_a < this value, downgrade an Abort
+verdict to Wait so we don't roll back on tiny samples. Julia parity:
+@DecisionThreshold.volume_thresholds[1]@ default 50.
+Read by 'getHSDecision' and passed to 'parseDecisionResponseWithVolume'.
+-}
+getABHSVolumeMinA :: (MonadFlow m) => m Int
+getABHSVolumeMinA = getConfigIntForProduct "ab_hs_volume_min_a" (Just "autopilot") 50
+
+{- | AB/HS volume floor for the B side (variant / new version). Same
+semantics as 'getABHSVolumeMinA' but for the new-version sample.
+Julia parity: @DecisionThreshold.volume_thresholds[2]@ default 100.
+-}
+getABHSVolumeMinB :: (MonadFlow m) => m Int
+getABHSVolumeMinB = getConfigIntForProduct "ab_hs_volume_min_b" (Just "autopilot") 100
+
+{- | Auto-complete delay for VS-edit trackers stuck in APPLIED. Used by
+the runner sweep step 7 to flip APPLIED → COMPLETED after this many
+minutes. Julia parity: @release/watcher.jl:158-160@
+@getAutoCompleteVSTrackerDelay@. Default 60 minutes.
+-}
+getAutoCompleteVsTrackerMinutes :: (MonadFlow m) => m Int
+getAutoCompleteVsTrackerMinutes =
+    getConfigIntForProduct "auto_complete_vs_tracker_minutes" (Just "autopilot") 60
 
 getMaxK8sRetries :: (MonadFlow m) => m Int
 getMaxK8sRetries = getConfigIntForProduct "max_k8s_retries" (Just "autopilot") 3

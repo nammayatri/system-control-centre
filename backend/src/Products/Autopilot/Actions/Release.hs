@@ -27,6 +27,7 @@ module Products.Autopilot.Actions.Release (
     rolloutHistoryH,
     listEventsH,
     logsLinkH,
+    decisionWebhookH,
 
     -- * Product/Service Handlers (used in Routes wiring)
     listProductsH,
@@ -47,6 +48,7 @@ import Core.Auth.Protected (AuthedPerson (..))
 import Core.Config (Config (..))
 import Core.DB.Connection (withConn)
 import Core.Environment (Flow, forkFlow, getConfig, getDBEnv, logInfo)
+import Core.Logging (logErrorG)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -56,6 +58,7 @@ import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Char (isAlphaNum)
 import Data.List (find)
 import Data.Maybe (fromMaybe, isJust)
+import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
@@ -256,7 +259,33 @@ createReleaseHBody mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
                         <> T.pack (show (NT.status existing))
                         <> "). Wait for it to complete, abort, or discard."
                     )
-        Nothing -> createReleaseHBodyAfterGuard mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..}
+        Nothing -> do
+            -- Julia parity (api/release/create.jl:103,195-221
+            -- validateGCLTAbortInPreviousTracker): block a new release if
+            -- the previous release on the same (appGroup, service, env)
+            -- ended in GCLT_ABORTED. The global changelog aborter has
+            -- vetoed this service — operator must explicitly resolve the
+            -- root cause and (manually or via tooling) clear the
+            -- GCLT_ABORTED tracker before retrying. Without this guard
+            -- a CI/CD loop can keep retrying a release that's been
+            -- killed by an unrelated upstream incident, masking the
+            -- GCLT signal.
+            mGcltBlock <- findLastGcltAbortedTracker appGroup service env
+            case mGcltBlock of
+                Just blocker ->
+                    pure $
+                        APIResponse
+                            "ERROR"
+                            ( "Previous release "
+                                <> NT.releaseId blocker
+                                <> " for "
+                                <> appGroup
+                                <> "/"
+                                <> service
+                                <> " was GCLT_ABORTED. Resolve the root cause and "
+                                <> "discard / restart the blocker tracker before creating a new release."
+                            )
+                Nothing -> createReleaseHBodyAfterGuard mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..}
 
 findInFlightSameService :: Text -> Text -> Flow (Maybe ReleaseTracker)
 findInFlightSameService ag svc = do
@@ -1022,6 +1051,77 @@ logsLinkH _ap rid = do
             -- wired up here. Surface explicitly instead of returning empty links
             -- so callers don't silently render broken UI.
             throwM $ InternalError "logsLinkH not yet implemented"
+
+{- | Post-monitoring webhook receiver. Julia parity
+(release/workflow/webhook.jl + api/decision/webhook.jl).
+
+The external AB engine POSTs the post-100% verdict here using the
+@runId@ as the auth token (no separate header — we trust whoever knows
+the run_id). Run id is @<releaseId>-post@ for post-monitoring runs.
+
+On Abort: emit a POST_MONITORING_RESULT event with action=alert_only,
+fire a Slack alert, but do NOT auto-rollback (intentional divergence
+from Julia, see notifyComplete in BackendServiceWorkflow.hs:1495-1521).
+
+UNAUTHENTICATED endpoint by design — the webhook caller is the AB
+engine, not a user. The run_id format is the auth token.
+-}
+decisionWebhookH :: Text -> Value -> Flow APIResponse
+decisionWebhookH runId body = do
+    -- Strip the "-post" suffix to recover the original release id.
+    let releaseRid =
+            if "-post" `T.isSuffixOf` runId
+                then T.dropEnd 5 runId
+                else runId
+    m <- findReleaseTracker releaseRid
+    case m of
+        Nothing -> do
+            logErrorG $ "[WEBHOOK] Unknown run_id: " <> runId
+            pure $ APIResponse "ERROR" ("Unknown run_id: " <> runId)
+        Just (tracker, _) -> do
+            let decisionStr = case body of
+                    Object o -> case KM.lookup (K.fromText "decision") o of
+                        Just (String s) -> T.toUpper s
+                        Just (Number n) -> case toBoundedInteger n :: Maybe Int of
+                            Just 0 -> "CONTINUE"
+                            Just 1 -> "ABORT"
+                            Just 2 -> "WAIT"
+                            _ -> "UNKNOWN"
+                        _ -> "UNKNOWN"
+                    _ -> "UNKNOWN"
+                reasonText = case body of
+                    Object o -> case KM.lookup (K.fromText "reason") o of
+                        Just (String r) -> r
+                        _ -> ""
+                    _ -> ""
+            insertReleaseEvent
+                releaseRid
+                "DECISION_ENGINE"
+                "POST_MONITORING_WEBHOOK"
+                ( object
+                    [ "runId" .= runId
+                    , "decision" .= decisionStr
+                    , "reason" .= reasonText
+                    , "action" .= ("alert_only_no_rollback" :: Text)
+                    ]
+                )
+            when (decisionStr == "ABORT") $ do
+                logErrorG $
+                    "[WEBHOOK] POST-MONITORING ABORT received for "
+                        <> releaseRid
+                        <> " — alerting (NOT auto-rolling back, traffic stays at 100%)"
+                _ <-
+                    notifyDecisionThreadMessage
+                        tracker
+                        "POSTMONITORING_WEBHOOK"
+                        decisionStr
+                        (if T.null reasonText then Nothing else Just reasonText)
+                        ( "🚨 POST-MONITORING ABORT (webhook, NOT auto-reverted — traffic at 100%): "
+                            <> (if T.null reasonText then "no reason" else reasonText)
+                            <> " — operator must decide whether to revert manually."
+                        )
+                pure ()
+            pure $ APIResponse "SUCCESS" ("Webhook received for " <> runId)
 
 -- ============================================================================
 -- Diff Endpoint (GET /releases/:id/diff)

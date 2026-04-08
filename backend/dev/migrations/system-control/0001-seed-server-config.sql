@@ -239,3 +239,26 @@ SELECT 'JSON', 'hpa_template',
   }
 }', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'hpa_template');
+
+-- AB/HS volume floor for the A side (control). Used by getHSDecision +
+-- parseDecisionResponseWithVolume in DecisionEngine.hs to downgrade an
+-- engine-reported Abort to Wait when total_a < this value (defensive
+-- against rolling back on tiny samples). Julia parity:
+-- DecisionThreshold.volume_thresholds[1] default 50.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'ab_hs_volume_min_a', '50', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_volume_min_a');
+
+-- AB/HS volume floor for the B side (variant). Same semantics as
+-- ab_hs_volume_min_a. Julia default 100.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'ab_hs_volume_min_b', '100', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_volume_min_b');
+
+-- Auto-complete delay for VS-edit trackers stuck in APPLIED. Used by the
+-- runner sweep step 7 (sweepAutoCompleteVsTrackers) to flip APPLIED →
+-- COMPLETED after this many minutes. Julia parity:
+-- release/watcher.jl:158-160 getAutoCompleteVSTrackerDelay. Default 60 min.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'auto_complete_vs_tracker_minutes', '60', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'auto_complete_vs_tracker_minutes');

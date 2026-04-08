@@ -44,7 +44,7 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
 import Data.Foldable (toList)
-import Data.Scientific (toBoundedInteger)
+import Data.Scientific (toBoundedInteger, toRealFloat)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -53,6 +53,8 @@ import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, g
 import Products.Autopilot.RuntimeConfig (
     getABHSAllowedTimeDiffMins,
     getABHSApiKey,
+    getABHSVolumeMinA,
+    getABHSVolumeMinB,
     getCkhClusterName,
     getDEPostMonitoringTimeout,
     getDecisionEngineFailClosed,
@@ -588,17 +590,22 @@ getHSDecision cfg tracker isPostMonitoring = do
                     apiKey <- getABHSApiKey
                     diffMins <- getABHSAllowedTimeDiffMins
                     failClosed <- getDecisionEngineFailClosed
+                    -- Julia parity: read configurable volume floors
+                    -- (DecisionThreshold.volume_thresholds) so operators
+                    -- can tighten/loosen per environment via server_config.
+                    minA <- getABHSVolumeMinA
+                    minB <- getABHSVolumeMinB
                     let runId =
                             if isPostMonitoring
                                 then releaseId tracker <> "-post"
                                 else releaseId tracker
-                    liftIO $ pollHSDecision hsUrl apiKey diffMins runId failClosed
+                    liftIO $ pollHSDecision hsUrl apiKey diffMins runId failClosed minA minB
 
 {- | Internal: GET @{hsUrl}get/ab/decision/{runId}@ with the Julia-parity
 JSON body and headers. Parses int-encoded decision.
 -}
-pollHSDecision :: String -> Text -> Int -> Text -> Bool -> IO DecisionResult
-pollHSDecision hsUrl apiKey diffMins runId failClosed = do
+pollHSDecision :: String -> Text -> Int -> Text -> Bool -> Int -> Int -> IO DecisionResult
+pollHSDecision hsUrl apiKey diffMins runId failClosed minA minB = do
     let url = ensureSlash (T.pack hsUrl) <> "get/ab/decision/" <> runId
         body =
             object
@@ -621,7 +628,7 @@ pollHSDecision hsUrl apiKey diffMins runId failClosed = do
     case result of
         Right HttpResponse{respStatus = s, respBody = b} | s < 400 ->
             case A.decodeStrict' (LBS.toStrict b) :: Maybe Value of
-                Just v -> parseDecisionResponse v "HEALTH_SCORE"
+                Just v -> parseDecisionResponseWithVolume v "HEALTH_SCORE" minA minB
                 Nothing -> do
                     logWarningG "[DECISION] HS response: JSON decode error"
                     pure (failOrContinue failClosed "HEALTH_SCORE" "HS JSON decode error")
@@ -677,8 +684,40 @@ recognises @"Abort"@/@"Wait"@/@"Continue"@ case-insensitively.
 If the field is missing entirely we return Continue (fail-open default
 for parse-only errors; HTTP-level errors honour @decision_engine_fail_closed@).
 -}
+
+{- | Parse decision response with Julia-parity safety checks.
+
+Defensive layers (Julia parity):
+  1. Volume floor (decision/runner.jl:494,537-541 volume_rate_result):
+     downgrade Abort → Wait if totalA < minA or totalB < minB. Defaults
+     match Julia (50, 100) but can be overridden via the optional
+     @minA@ / @minB@ args (read from server_config by the caller).
+  2. Volume rate-of-growth (decision/runner.jl:490-529 volume_rate_result):
+     if the response includes prevTotalA / prevTotalB and the growth
+     between samples is below @minRateA@ / @minRateB@, downgrade to Wait.
+  3. 5xx spike force-abort (decision/runner.jl:508-511): when the metric
+     name is in the resp_5xx family AND (totalB × errorPct/100) ≥ 200,
+     force Abort regardless of the engine's reported decision.
+  4. A/B split breach (decision/runner.jl:646-651): if the response
+     reports an actual traffic split that drifted outside
+     [routePercent − buffer, routePercent + buffer], abort with
+     "A/B Split Percentage Breach".
+
+All checks are no-ops if the engine omits the relevant fields — we
+trust the engine's verdict in that case and apply only the int → enum
+mapping.
+-}
 parseDecisionResponse :: Value -> Text -> IO DecisionResult
-parseDecisionResponse (Object obj) source = do
+parseDecisionResponse v source =
+    parseDecisionResponseWithVolume v source 50 100
+
+{- | Variant of 'parseDecisionResponse' that accepts caller-supplied
+volume thresholds. The 'getHSDecision' wrapper reads them from
+server_config so operators can tighten/loosen per environment without
+recompiling.
+-}
+parseDecisionResponseWithVolume :: Value -> Text -> Int -> Int -> IO DecisionResult
+parseDecisionResponseWithVolume (Object obj) source minA minB = do
     let rawDecision = case KM.lookup (K.fromText "decision") obj of
             Just (Number n) -> case toBoundedInteger n :: Maybe Int of
                 Just 0 -> Continue
@@ -696,41 +735,107 @@ parseDecisionResponse (Object obj) source = do
                 let xs = [r | String r <- toList rs, not (T.null r)]
                  in if null xs then Nothing else Just (T.intercalate "; " xs)
             _ -> Nothing
-        -- Julia parity (decision/runner.jl:494,537-541 volume_rate_result):
-        -- the decision pod returns Wait (not Abort) when total_a or total_b
-        -- are below the configured volume floor (vol_t = (50, 100)). Most
-        -- engines apply this gate themselves, but if the response includes
-        -- totalA / totalB / sampleSize fields and either is below the
-        -- minimum, downgrade Abort → Wait so we don't roll back on tiny
-        -- samples. No effect when the engine omits these fields (trust the
-        -- engine's gate). Lookup keys cover both camelCase and snake_case.
         readInt k = case KM.lookup (K.fromText k) obj of
             Just (Number n) -> toBoundedInteger n :: Maybe Int
             _ -> Nothing
+        readDouble k = case KM.lookup (K.fromText k) obj of
+            Just (Number n) -> Just (toRealFloat n :: Double)
+            _ -> Nothing
+        readText k = case KM.lookup (K.fromText k) obj of
+            Just (String s) -> Just s
+            _ -> Nothing
         totalA = readInt "totalA" <|> readInt "total_a" <|> readInt "sampleA"
         totalB = readInt "totalB" <|> readInt "total_b" <|> readInt "sampleB"
-        -- Default volume floor: matches Julia decision/runner.jl vol_t default (50, 100).
-        -- Allow opt-in tightening via the response itself; otherwise apply the
-        -- conservative defaults.
-        minA = 50 :: Int
-        minB = 100 :: Int
+        prevTotalA = readInt "prevTotalA" <|> readInt "prev_total_a"
+        prevTotalB = readInt "prevTotalB" <|> readInt "prev_total_b"
+        metricName = readText "metric" <|> readText "metricName"
+        errorRate = readDouble "rate" <|> readDouble "errorRate" <|> readDouble "mv_b"
+        actualSplit = readDouble "actualSplit" <|> readDouble "actual_split" <|> readDouble "trafficSplit"
+        targetSplit = readDouble "targetSplit" <|> readDouble "target_split" <|> readDouble "releasePercentage"
+        splitBuffer = readDouble "splitBuffer" <|> readDouble "release_buffer"
+
+        -- Layer 1: absolute sample-size floor.
         belowVolume = case (totalA, totalB) of
             (Just a, _) | a < minA -> True
             (_, Just b) | b < minB -> True
             _ -> False
+
+        -- Layer 2: rate-of-growth floor. Julia checks (total - prev) > 0
+        -- and bounded by a minimum rate. We use a conservative default:
+        -- growth must be at least 1 sample/iteration, otherwise downgrade.
+        belowRate = case (totalA, prevTotalA, totalB, prevTotalB) of
+            (Just a, Just pa, Just b, Just pb) | (a - pa) <= 0 && (b - pb) <= 0 -> True
+            _ -> False
+
+        -- Layer 3: 5xx spike force-abort. Julia: for resp_500/501/503,
+        -- if (total_b × mv_b/100) ≥ 200, force abort regardless of
+        -- whatever the engine returned.
+        is5xxMetric = case metricName of
+            Just m -> m `elem` ["resp_500_rate", "resp_501_rate", "resp_503_rate", "resp_5xx_rate"]
+            Nothing -> False
+        spike5xxForceAbort = case (is5xxMetric, totalB, errorRate) of
+            (True, Just tb, Just rate) -> (fromIntegral tb * rate / 100.0 :: Double) >= 200.0
+            _ -> False
+
+        -- Layer 4: A/B split breach. Abort if actual drifted outside
+        -- target ± buffer. Default buffer 5% if not provided.
+        splitBreach = case (actualSplit, targetSplit) of
+            (Just actual, Just target) ->
+                let buf = maybe 5.0 id splitBuffer
+                 in actual < (target - buf) || actual > (target + buf)
+            _ -> False
+
+        -- Compose the final decision honouring layers in priority order:
+        --   5xx force-abort > split breach > engine Abort (with volume gate) > raw
         decision
-            | rawDecision == Abort && belowVolume = Wait
+            | spike5xxForceAbort = Abort
+            | splitBreach = Abort
+            | rawDecision == Abort && (belowVolume || belowRate) = Wait
             | otherwise = rawDecision
+
         finalReason
+            | spike5xxForceAbort =
+                Just $
+                    "5xx error spike force-abort (metric="
+                        <> maybe "?" id metricName
+                        <> ", totalB="
+                        <> T.pack (show totalB)
+                        <> ", rate="
+                        <> T.pack (show errorRate)
+                        <> ")"
+            | splitBreach =
+                Just $
+                    "A/B split percentage breach (actual="
+                        <> T.pack (show actualSplit)
+                        <> ", target="
+                        <> T.pack (show targetSplit)
+                        <> "±"
+                        <> T.pack (show splitBuffer)
+                        <> ")"
             | rawDecision == Abort && belowVolume =
                 Just $
                     "Abort downgraded to Wait — sample size below volume floor (totalA="
                         <> T.pack (show totalA)
+                        <> "/min="
+                        <> T.pack (show minA)
                         <> ", totalB="
                         <> T.pack (show totalB)
+                        <> "/min="
+                        <> T.pack (show minB)
+                        <> ")"
+            | rawDecision == Abort && belowRate =
+                Just $
+                    "Abort downgraded to Wait — sample volume not growing (totalA="
+                        <> T.pack (show totalA)
+                        <> "→prev="
+                        <> T.pack (show prevTotalA)
+                        <> ", totalB="
+                        <> T.pack (show totalB)
+                        <> "→prev="
+                        <> T.pack (show prevTotalB)
                         <> ")"
             | otherwise = reason
     pure (DecisionResult decision finalReason source)
-parseDecisionResponse _ source = do
+parseDecisionResponseWithVolume _ source _ _ = do
     logWarningG $ "[DECISION] Could not parse decision response for " <> source
     pure (DecisionResult Continue (Just "Invalid response format") source)
