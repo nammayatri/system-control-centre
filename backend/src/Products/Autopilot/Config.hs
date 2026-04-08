@@ -252,4 +252,11 @@ autopilotConfigs =
         DeploymentGroup
         "VS-edit trackers stuck in APPLIED longer than this are auto-flipped to COMPLETED by the runner sweep. Julia release/watcher.jl:158-160 parity."
         (Just "autopilot")
+    , -- Job poll cap (Julia parity)
+      ConfigEntry
+        "max_job_completion_hours"
+        (IntConfig 3)
+        DeploymentGroup
+        "BackendJob category: max wall-clock hours to wait for a Kubernetes Job to complete before aborting the release. Read by monitorJobStatus → polls = hours × 360. Julia parity (default 3h)."
+        (Just "autopilot")
     ]

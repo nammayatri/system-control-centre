@@ -262,3 +262,166 @@ WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ab_hs_volume_min_b')
 INSERT INTO server_config (type, name, value, enabled, product)
 SELECT 'INT', 'auto_complete_vs_tracker_minutes', '60', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'auto_complete_vs_tracker_minutes');
+
+-- BackendJob category poll cap (hours). Read by monitorJobStatus in
+-- BackendJobWorkflow.hs to compute maxPolls = hours × 360 (10s poll interval).
+-- Was hardcoded to 60 polls (10 min). Julia parity: max_job_completion_hours
+-- in api/release/create.jl. Default 3 hours.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'max_job_completion_hours', '3', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'max_job_completion_hours');
+
+-- ────────────────────────────────────────────────────────────────────────
+-- Final batch: every config key that has a Haskell getter in
+-- RuntimeConfig.hs but was missing from the seed before. Adding all of
+-- them as idempotent inserts so a fresh DB init has the full surface
+-- area visible/editable from the UI.
+-- ────────────────────────────────────────────────────────────────────────
+
+-- Maintenance mode flag. JSON object @{"owner":"someone","ap_under_maintenance":bool}@.
+-- When true, /releases/create returns 400 "System is under maintenance" — used by
+-- the runner check before accepting new releases. Read by isUnderMaintenance.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'JSON', 'ap_under_maintenance', '{"ap_under_maintenance":false}', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ap_under_maintenance');
+
+-- When true, every newly-created release is auto-approved (is_approved set
+-- at create time). For CI/CD pipelines without a human approver step.
+-- Read by isApproveAllReleases. Default false.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'BOOL', 'approve_all_releases', 'false', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'approve_all_releases');
+
+-- Julia's `ckh_cluster_name` global. Sent in the AB initiate placeholders
+-- as the @cluster@ field — picks which ClickHouse cluster the engine
+-- queries. Opaque string forwarded as-is.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'STRING', 'ckh_cluster_name', '', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ckh_cluster_name');
+
+-- Post-monitoring AB initiate self-closing-time (seconds). Sent as
+-- @self_closing_time@ in the post-monitoring AB initiate body so the
+-- engine self-stops if SC crashes mid-monitoring. Julia parity. Default
+-- 1800s = 30 min.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'de_post_monitoring_timeout', '1800', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'de_post_monitoring_timeout');
+
+-- Master gate for posting events to the external GCLT (global changelog)
+-- service. Off by default — the GCLT HTTP client is not yet implemented
+-- in Haskell (CONTEXT.md "Conditional" list). Flipping this on without
+-- the client is a no-op.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'BOOL', 'global_changelog_tracker_enabled', 'false', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'global_changelog_tracker_enabled');
+
+-- Pods creation delay (seconds). Used between deployment apply and the
+-- first pod-readiness poll to give the API server a moment to schedule
+-- pods. Read by getPodsCreationDelay. Default 60.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'pods_creation_delay', '60', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'pods_creation_delay');
+
+-- Newer name for the Prometheus query check master gate. Read first by
+-- isPromQueryCheckEnabled with fallback to legacy `prom_checks_enabled`.
+-- Default false.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'BOOL', 'prom_query_check_enabled', 'false', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'prom_query_check_enabled');
+
+-- Delay (seconds) between runner picking a CREATED tracker and actually
+-- starting the workflow. Used to absorb a brief race window where two
+-- pollers might both pick the same tracker. Read by getReleaseStartDelay.
+-- Default 2.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'release_start_delay', '2', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'release_start_delay');
+
+-- Runner poll interval (seconds). Both runner.hs and SyncWatcher.hs poll
+-- on this cadence. Lower = faster pickup but more DB load. Default 20.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'release_watch_delay', '20', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'release_watch_delay');
+
+-- Revert cooloff (minutes). Minimum delay between an operator-initiated
+-- revert and the next allowed forward release on the same service.
+-- Prevents flapping. Read by getRevertCooloff. Default 1.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'revert_cooloff', '1', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'revert_cooloff');
+
+-- When true, the runner schedules a scale-down of the OLD deployment
+-- after a release reaches COMPLETED. False leaves the old deployment
+-- running indefinitely (canary-style side-by-side). Read by
+-- isScaleDownPodsOnCompletion. Default true.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'BOOL', 'scale_down_pods_on_completion', 'true', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'scale_down_pods_on_completion');
+
+-- Master kill-switch for Slack notifications. When false, every notify*
+-- helper short-circuits with no HTTP call. Set false in dev/test envs
+-- without a Slack workspace. Default false.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'BOOL', 'slack_enabled', 'false', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'slack_enabled');
+
+-- Cross-cloud sync master gate. When true, completed releases POST a sync
+-- payload to the secondary cluster's @/releases/create@ endpoint via
+-- Sync.hs. The receiver sets isFromSync=true to prevent loops. Off by
+-- default. Read by isSyncClusterEnabled. Enable only in production
+-- multi-cloud setups.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'BOOL', 'sync_cluster_enabled', 'false', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'sync_cluster_enabled');
+
+-- Master kill-switch for the runner poll loop. When false, the runner
+-- spawns but skips the iteration body so no new releases get picked.
+-- Lets operators freeze new dispatches without restarting the backend.
+-- Read by isWatcherEnabled. Default true.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'BOOL', 'watcher_enabled', 'true', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'watcher_enabled');
+
+
+-- ────────────────────────────────────────────────────────────────────────
+-- Production server_config seed (pulled from NammaAP cloud DB on 2026-04-08)
+-- Source: kubectl exec autopilot-0 → MySQL → server_config table
+-- 33 distinct keys, latest value per key (deduped on name)
+-- Type column normalized: production uses 'CONFIG' for everything; we
+-- map to typed values (BOOL/INT/JSON/STRING) so the Haskell
+-- get*ForProduct getters parse correctly.
+-- ────────────────────────────────────────────────────────────────────────
+
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'JSON', 'admin_list', '["sidharth@nammayatri.in","piyush@nammayatri.in","ritika@nammayatri.in","ashish.saini@nammayatri.in","khuzema.khomosi@nammayatri.in","ratnadeep.b@nammayatri.in","chakradhar.k@nammayatri.in","soumyajit.behera@nammayatri.in","saimanohar.veeravajhula@nammayatri.in","rupak.korde@nammayatri.in","saurabh.s@nammayatri.in","akhilesh.bhadauriya@nammayatri.in","vijay.gupta@nammayatri.in","anuragini.paunikar@nammayatri.in","aayush.agarwal@nammayatri.in","aman.dwivedi@nammayatri.in","prashant.singh@nammayatri.in","rohit.dhaker@nammayatri.in","jaypal.m@nammayatri.in","yashika.kaushik@nammayatri.in","piyush.kumar@nammayatri.in","vinit.j@nammayatri.in","nikith@nammayatri.in","braj.mohan@nammayatri.in","arun.s@nammayatri.in","vignesh.s@nammayatri.in","banala.siva.ext@nammayatri.in","jatin.arora.ext@nammayatri.in","yashwanth.s@nammayatri.in"]', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'admin_list');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'JSON', 'ap_dev_list', '["nikith@nammayatri.in","sidharth@nammayatri.in","piyush@nammayatri.in","hemant.mangla@nammayatri.in", "rupak.korde@nammayatri.in","piyush.kumar@nammayatri.in","vijay.gupta@nammayatri.in","ratnadeep.b@nammayatri.in","yashwanth.s@nammayatri.in"]', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ap_dev_list');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'JSON', 'ap_under_maintenance', '{"owner":"shabeeb.m.ext","ap_under_maintenance":false}', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'ap_under_maintenance');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'BOOL', 'approve_all_releases', 'true', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'approve_all_releases');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'BOOL', 'AUTOSCALER_CONFIG_ENABLED', 'false', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'AUTOSCALER_CONFIG_ENABLED');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'STRING', 'beckn_uat_release_branch', 'sbx-release-20231109', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'beckn_uat_release_branch');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'INT', 'collect_metrics_delay', '60', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'collect_metrics_delay');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'JSON', 'custom_counter_info', '{"CUSTOM":{"max":2,"counter":2}}', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'custom_counter_info');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'JSON', 'custom_deployment_enabled', '{"BECKN_UAT":true}', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'custom_deployment_enabled');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'BOOL', 'decision_engine_enabled', 'false', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'decision_engine_enabled');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'BOOL', 'global_changelog_tracker_enabled', 'false', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'global_changelog_tracker_enabled');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'JSON', 'infra_admin_list', '["sidharth@nammayatri.in","piyush@nammayatri.in","ritika@nammayatri.in","ashish.saini@nammayatri.in","khuzema.khomosi@nammayatri.in","ratnadeep.b@nammayatri.in","chakradhar.k@nammayatri.in","soumyajit.behera@nammayatri.in","saimanohar.veeravajhula@nammayatri.in","rupak.korde@nammayatri.in","saurabh.s@nammayatri.in","akhilesh.bhadauriya@nammayatri.in","vijay.gupta@nammayatri.in","anuragini.paunikar@nammayatri.in","aayush.agarwal@nammayatri.in","aman.dwivedi@nammayatri.in","prashant.singh@nammayatri.in","rohit.dhaker@nammayatri.in","jaypal.m@nammayatri.in","vijay.gupta@nammayatri.in","piyush.kumar@nammayatri.in","vinit.j@nammayatri.in"."pranav.sathya@nammayatri.in","vignesh.s@nammayatri.in","banala.siva.ext@nammayatri.in","jatin.arora.ext@nammayatri.in","yashwanth.s@nammayatri.in"]', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'infra_admin_list');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'STRING', 'integ_cluster_release_branch', 'integ-release-20210616', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'integ_cluster_release_branch');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'BOOL', 'is_pomerium_sso', 'true', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'is_pomerium_sso');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'BOOL', 'is_rbac_enabled', 'true', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'is_rbac_enabled');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'BOOL', 'is_workflow_watcher_enabled', 'true', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'is_workflow_watcher_enabled');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'BOOL', 'k8s_enabled', 'true', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'k8s_enabled');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'BOOL', 'mailing_enabled', 'false', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'mailing_enabled');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'INT', 'mandatory_vs_edit_monitoring_minutes', '5', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'mandatory_vs_edit_monitoring_minutes');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'INT', 'pods_scale_down_delay_config', '0', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'pods_scale_down_delay_config');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'STRING', 'release_branch', 'integ-release-20200907', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'release_branch');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'STRING', 'release_jira_id', 'EUL-2534', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'release_jira_id');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'INT', 'release_schedule_delay', '0', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'release_schedule_delay');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'INT', 'release_start_delay', '0', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'release_start_delay');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'INT', 'release_watch_delay', '60', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'release_watch_delay');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'BOOL', 'scale_down_pods_on_completion', 'true', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'scale_down_pods_on_completion');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'JSON', 'scaling_with_hpa_enabled', '["BECKN","BECKN_DASHBOARD","BECKN_ADMIN_DASHBOARD"]', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'scaling_with_hpa_enabled');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'JSON', 'subscribed_event_categories', '[BUSINESS,NOTIFICATION]', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'subscribed_event_categories');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'JSON', 'subscribed_event_labels', '[STATUS_UPDATED,TRAFFIC_UPDATED]', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'subscribed_event_labels');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'BOOL', 'sync_cluster_enabled', 'true', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'sync_cluster_enabled');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'BOOL', 'sync_cluster_enabled_2', 'true', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'sync_cluster_enabled_2');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'JSON', 'sync_rollout_strategy_config', '{"EKS":{"percentage":50,"strategy":"SAME"},"TRINITY":{"percentage":50,"strategy":"DEFAULT"}}', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'sync_rollout_strategy_config');
+-- INSERT INTO server_config (type, name, value, enabled, product) SELECT 'INT', 'worklfow_tracker_discard_interval_in_min', '60', 1, 'autopilot' WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'worklfow_tracker_discard_interval_in_min');
