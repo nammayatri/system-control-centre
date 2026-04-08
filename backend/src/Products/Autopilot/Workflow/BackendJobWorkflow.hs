@@ -35,6 +35,7 @@ import Products.Autopilot.Notifications (
     notifyReleaseAborted,
     notifyReleaseCompleted,
  )
+import Products.Autopilot.RuntimeConfig (getMaxJobCompletionHours)
 
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (appGroup, releaseId, status))
@@ -216,9 +217,17 @@ monitorJobStatus = do
 
     updateK8sStatus BSMonitoring
 
-    let jobName = T.unpack (serviceName ctx) <> "-" <> T.unpack (newVersion ctx)
+    -- Bug fix (Julia parity): the previous hardcoded `maxPolls = 60`
+    -- (10 minutes total) silently truncated long-running jobs that
+    -- legitimately need hours to complete (data backfills, batch
+    -- migrations, ML training prep, etc.). Julia uses
+    -- @max_job_completion_hours@ from server_config (default 3 hours).
+    -- Read the same config so operators can tune per environment.
+    -- Conversion: hours × 3600 / 10 (poll interval seconds) = polls.
+    maxJobHours <- lift getMaxJobCompletionHours
+    let maxPolls = maxJobHours * 360 -- hours × 3600s ÷ 10s poll interval
+        jobName = T.unpack (serviceName ctx) <> "-" <> T.unpack (newVersion ctx)
         ns = T.unpack (namespace ctx)
-        maxPolls = 60 :: Int -- 60 * 10s = 10 minutes max wait
         getJobCmd =
             unwords
                 [ kubectlBin cfg
@@ -228,6 +237,12 @@ monitorJobStatus = do
                 , ns
                 , "-o json"
                 ]
+    logInfoS $
+        "  Job poll cap: "
+            <> T.pack (show maxJobHours)
+            <> " hour(s) = "
+            <> T.pack (show maxPolls)
+            <> " polls × 10s"
 
     pollJobStatus cfg getJobCmd maxPolls 1
 

@@ -69,9 +69,11 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
+import Data.Time.Clock (diffUTCTime, getCurrentTime)
+import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import Products.Autopilot.Queries.ProductService (findProductByName, getSlackChannelDirect)
 import qualified Products.Autopilot.Queries.ReleaseTracker as RTQ
-import Products.Autopilot.RuntimeConfig (isSlackEnabled)
+import Products.Autopilot.RuntimeConfig (getDecisionNotificationDedupMinutes, isSlackEnabled)
 import Products.Autopilot.Sync (triggerSyncIfEnabled)
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
 import Products.Autopilot.Types.Storage.Schema (rePayload)
@@ -642,16 +644,62 @@ next call can compare against it. Returns @True@ if the message was sent.
 -}
 notifyDecisionThreadMessage :: ReleaseTracker -> Text -> Text -> Maybe Text -> Text -> Flow Bool
 notifyDecisionThreadMessage tracker decisionType decisionValue reason msg = do
+    -- Julia parity (release/workflow/service.jl:793-824 ABHSSlackSpamFilter):
+    -- two-layer dedup —
+    --   (a) tuple-key equality: (decisionType, decisionValue, reason). If
+    --       the new tuple is identical to the last one we sent, skip
+    --       regardless of how long ago.
+    --   (b) time window: even if the tuple changed, suppress if the LAST
+    --       notification (any tuple) was sent within
+    --       @decision_notification_dedup_minutes@ minutes. This is the
+    --       Julia repeat_interval_in_min check; without it a flapping
+    --       Continue→Wait→Continue cycle floods Slack.
     let dedupKey = decisionType <> "|" <> decisionValue <> "|" <> fromMaybe "" reason
     mPrev <- RTQ.findEventByLabel (releaseId tracker) "DECISION_NOTIFIED"
-    let prevKey = case mPrev of
+    windowMins <- getDecisionNotificationDedupMinutes
+    now <- liftIO getCurrentTime
+    let (prevKey, prevTs) = case mPrev of
             Just e -> case rePayload e of
-                String s -> s
-                _ -> ""
-            Nothing -> ""
+                Object o ->
+                    let k = case KM.lookup (K.fromText "key") o of
+                            Just (String s) -> s
+                            _ -> ""
+                        t = case KM.lookup (K.fromText "ts") o of
+                            Just (String s) -> Just s
+                            _ -> Nothing
+                     in (k, t)
+                String s -> (s, Nothing) -- legacy format
+                _ -> ("", Nothing)
+            Nothing -> ("", Nothing)
+        prevTime = prevTs >>= parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" . T.unpack
+        withinWindow = case prevTime of
+            Just t -> diffUTCTime now t < fromIntegral (windowMins * 60)
+            Nothing -> False
     if prevKey == dedupKey
-        then pure False
-        else do
-            RTQ.insertReleaseEvent (releaseId tracker) "BUSINESS" "DECISION_NOTIFIED" (String dedupKey)
-            notifyGenericThreadMessage tracker msg
-            pure True
+        then do
+            logInfoG $
+                "[NOTIFY] decision dedup (same tuple): "
+                    <> dedupKey
+                    <> " for "
+                    <> releaseId tracker
+            pure False
+        else
+            if withinWindow
+                then do
+                    logInfoG $
+                        "[NOTIFY] decision dedup (time window "
+                            <> T.pack (show windowMins)
+                            <> "min): suppressing "
+                            <> dedupKey
+                            <> " for "
+                            <> releaseId tracker
+                    pure False
+                else do
+                    let payload =
+                            object
+                                [ "key" .= dedupKey
+                                , "ts" .= T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" now)
+                                ]
+                    RTQ.insertReleaseEvent (releaseId tracker) "BUSINESS" "DECISION_NOTIFIED" payload
+                    notifyGenericThreadMessage tracker msg
+                    pure True

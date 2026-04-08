@@ -61,7 +61,7 @@ import Products.Autopilot.RuntimeConfig (
     isABHSDecisionEnabledForAppGroupService,
     isPromQueryCheckEnabled,
  )
-import Products.Autopilot.Types.Release (Decision (..), ReleaseTracker (..))
+import Products.Autopilot.Types.Release (Decision (..), ReleaseTracker (..), decisionPriority)
 import Shared.Config.Runtime (getConfigBoolForProduct)
 import Prelude
 
@@ -245,6 +245,35 @@ checkSingleQuery promUrl (Object qObj) abortTh warnTh = do
         mName = case KM.lookup (K.fromText "name") qObj of
             Just (String n) -> n
             _ -> "unknown"
+        -- Optional config fields read from the decision_config JSON for
+        -- per-query Julia parity safety rails:
+        readDouble k = case KM.lookup (K.fromText k) qObj of
+            Just (Number n) -> Just (toRealFloat n :: Double)
+            _ -> Nothing
+        -- Layer A: 5xx error-spike force-abort
+        -- (Julia decision/runner.jl:508-511). For metrics whose name flags
+        -- them as a 500/501/503/5xx error rate, force-abort when
+        -- (totalSamples × val/100) ≥ 200. The Prom path doesn't get a
+        -- raw "totalSamples" — we expect callers to put it in the query
+        -- config as @sample_count@ for these metric names.
+        is5xxMetric =
+            mName
+                `elem` [ "resp_500_rate"
+                       , "resp_501_rate"
+                       , "resp_503_rate"
+                       , "resp_5xx_rate"
+                       , "5xx_rate"
+                       ]
+        sampleCount = readDouble "sample_count" <|> readDouble "totalB"
+        -- Layer B: A/B split percentage breach
+        -- (Julia decision/runner.jl:646-651). If the query config carries
+        -- @target_split@ + @actual_split@ (the runner is expected to
+        -- populate actual_split from the live VS routes before calling
+        -- the decision engine), abort if actual drifted outside
+        -- target ± buffer (default 5%).
+        targetSplit = readDouble "target_split" <|> readDouble "release_percentage"
+        actualSplit = readDouble "actual_split" <|> readDouble "current_split"
+        splitBuffer = readDouble "split_buffer" <|> readDouble "release_buffer"
     case mQuery of
         Nothing -> pure PromOK
         Just query -> do
@@ -253,15 +282,49 @@ checkSingleQuery promUrl (Object qObj) abortTh warnTh = do
                 Nothing -> pure PromOK -- Query failed, fail open
                 Just val -> do
                     logDebugG $ "[DECISION] Prom query '" <> mName <> "' = " <> T.pack (show val)
-                    case abortTh of
-                        Just threshold
-                            | val > threshold ->
-                                pure $ PromAbort (mName <> " = " <> T.pack (show val) <> " exceeds abort threshold " <> T.pack (show threshold))
-                        _ -> case warnTh of
-                            Just threshold
-                                | val > threshold ->
-                                    pure $ PromWarn (mName <> " = " <> T.pack (show val) <> " exceeds warn threshold " <> T.pack (show threshold))
-                            _ -> pure PromOK
+                    -- Layer A: 5xx spike force-abort wins over generic threshold.
+                    let spike5xx = case (is5xxMetric, sampleCount) of
+                            (True, Just sc) -> (sc * val / 100.0 :: Double) >= 200.0
+                            _ -> False
+                        -- Layer B: A/B split breach.
+                        splitBreach = case (actualSplit, targetSplit) of
+                            (Just a, Just t) ->
+                                let buf = maybe 5.0 id splitBuffer
+                                 in a < (t - buf) || a > (t + buf)
+                            _ -> False
+                    if spike5xx
+                        then
+                            pure $
+                                PromAbort
+                                    ( "5xx spike force-abort: "
+                                        <> mName
+                                        <> " val="
+                                        <> T.pack (show val)
+                                        <> " sampleCount="
+                                        <> T.pack (show sampleCount)
+                                        <> " (Julia parity)"
+                                    )
+                        else
+                            if splitBreach
+                                then
+                                    pure $
+                                        PromAbort
+                                            ( "A/B split breach: actual="
+                                                <> T.pack (show actualSplit)
+                                                <> " target="
+                                                <> T.pack (show targetSplit)
+                                                <> "±"
+                                                <> T.pack (show splitBuffer)
+                                            )
+                                else case abortTh of
+                                    Just threshold
+                                        | val > threshold ->
+                                            pure $ PromAbort (mName <> " = " <> T.pack (show val) <> " exceeds abort threshold " <> T.pack (show threshold))
+                                    _ -> case warnTh of
+                                        Just threshold
+                                            | val > threshold ->
+                                                pure $ PromWarn (mName <> " = " <> T.pack (show val) <> " exceeds warn threshold " <> T.pack (show threshold))
+                                        _ -> pure PromOK
 checkSingleQuery _ _ _ _ = pure PromOK
 
 {- | Query Prometheus HTTP API and extract the scalar result value.
@@ -655,14 +718,15 @@ ensureSlash u
 -- Combined Decision
 -- ============================================================================
 
--- | Combine AB and HS decisions: Abort wins over Wait wins over Continue.
+{- | Combine AB and HS decisions by Julia priority ordering:
+  Abort > Wait > WaitForMoreIteration > Continue.
+Julia parity (decision/runner.jl decisionPriority field on ABDecision).
+-}
 getCombinedDecision :: DecisionResult -> DecisionResult -> Decision
-getCombinedDecision ab hs = case (drDecision ab, drDecision hs) of
-    (Abort, _) -> Abort
-    (_, Abort) -> Abort
-    (Wait, _) -> Wait
-    (_, Wait) -> Wait
-    _ -> Continue
+getCombinedDecision ab hs =
+    let a = drDecision ab
+        b = drDecision hs
+     in if decisionPriority a <= decisionPriority b then a else b
 
 -- ============================================================================
 -- Shared Helpers
@@ -723,10 +787,13 @@ parseDecisionResponseWithVolume (Object obj) source minA minB = do
                 Just 0 -> Continue
                 Just 1 -> Abort
                 Just 2 -> Wait
+                Just 3 -> WaitForMoreIteration
                 _ -> Continue
             Just (String s) -> case T.toLower (T.strip s) of
                 "abort" -> Abort
                 "wait" -> Wait
+                "wait_for_more_iteration" -> WaitForMoreIteration
+                "waitformoreiteration" -> WaitForMoreIteration
                 _ -> Continue
             _ -> Continue
         reason = case KM.lookup (K.fromText "reason") obj of

@@ -55,7 +55,7 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as LBS
-import Data.Char (isAlphaNum)
+import qualified Data.Foldable as F
 import Data.List (find)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Scientific (toBoundedInteger)
@@ -239,6 +239,30 @@ createReleaseH _ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = 
 
 createReleaseHBody :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseHBody mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
+    -- Julia parity (api/release/create.jl:95,237-255 validateUdf2):
+    -- when envOverrideData (legacy `udf2`) carries a YAML/JSON env list,
+    -- reject duplicate keys at create time so the workflow doesn't crash
+    -- mid-flight with a kubectl error. Empty / Nothing is fine.
+    case validateEnvOverrideData envOverrideData of
+        Left err -> pure $ APIResponse "ERROR" ("envOverrideData validation failed: " <> err)
+        Right () -> do
+            -- Julia parity (api/release/create.jl:77,285-298 validateInfo):
+            -- when info is provided AND the service has a custom service type
+            -- (CUSTOM/CUSTOM_SERVICE), require the YAML/JSON to contain a
+            -- `headers` block — otherwise the deployment template won't have
+            -- the routing data it needs and will fail at apply time. For
+            -- non-custom services, info is free-form.
+            mServiceCfg <- findServiceByProductAndName appGroup service
+            let svcType = mServiceCfg >>= S.dcServiceType
+            case validateCustomServiceInfo svcType info of
+                Left err -> pure $ APIResponse "ERROR" ("info validation failed: " <> err)
+                Right () -> createReleaseHBodyContinue mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..}
+
+{- | Refactored continuation so the validation guards above can short-circuit
+without forcing the entire body into nested case-blocks.
+-}
+createReleaseHBodyContinue :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
+createReleaseHBodyContinue mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
     -- Same-service concurrency guard. Different services in the same app
     -- group can run in parallel (serialised at kubectl-replace via VS lock
     -- retry — see runVsRolloutWithLock). Same (appGroup, service) with any
@@ -286,6 +310,76 @@ createReleaseHBody mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do
                                 <> "discard / restart the blocker tracker before creating a new release."
                             )
                 Nothing -> createReleaseHBodyAfterGuard mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..}
+
+{- | Julia parity (api/release/create.jl:237-255 validateUdf2). The
+@envOverrideData@ field (legacy name @udf2@) is a YAML/JSON list of
+@{name, value}@ env-var entries that get patched into the deployment.
+Reject duplicate env names at create time so the workflow doesn't crash
+mid-flight with a kubectl error like "duplicate env name".
+
+Accepts both YAML-list and JSON-array formats. Empty / Nothing is fine
+(many releases don't override envs at all). Permissive on parse failure
+— if the payload doesn't look like a structured env list, we let it
+through and trust the workflow to handle it (Julia is the same).
+-}
+validateEnvOverrideData :: Maybe Text -> Either Text ()
+validateEnvOverrideData Nothing = Right ()
+validateEnvOverrideData (Just t) | T.null (T.strip t) = Right ()
+validateEnvOverrideData (Just t) =
+    case A.eitherDecodeStrict (B.pack (T.unpack t)) :: Either String Value of
+        Right (Array arr) ->
+            let names = [n | Object o <- F.toList arr, Just (String n) <- [KM.lookup (K.fromText "name") o]]
+                dups = findDuplicates names
+             in if null dups
+                    then Right ()
+                    else Left ("Duplicate env name(s): " <> T.intercalate ", " dups)
+        Right _ -> Right () -- Not a JSON array — let workflow decide
+        Left _ -> Right () -- Not JSON at all — could be YAML; permissive
+  where
+    findDuplicates :: [Text] -> [Text]
+    findDuplicates xs = go [] [] xs
+      where
+        go _ dups [] = reverse dups
+        go seen dups (x : rest)
+            | x `elem` seen && x `notElem` dups = go seen (x : dups) rest
+            | otherwise = go (x : seen) dups rest
+
+{- | Julia parity (api/release/create.jl:285-298 validateInfo). When the
+service has a custom service type and the operator passed an @info@
+payload, require the YAML/JSON to declare a @headers@ block — otherwise
+the custom-service deployment template can't build the routing config
+and will fail at apply time. Non-custom service types skip this check.
+
+Accepts JSON-only for now (Haskell doesn't carry a YAML decoder in this
+module — production cutover doesn't use YAML for info per CONTEXT.md).
+-}
+validateCustomServiceInfo :: Maybe Text -> Maybe Text -> Either Text ()
+validateCustomServiceInfo svcType mInfo
+    | not (isCustomServiceType svcType) = Right ()
+    | otherwise = case mInfo of
+        Nothing -> Left "Custom service type requires `info` with a `headers` block"
+        Just t | T.null (T.strip t) -> Left "Custom service type requires `info` with a `headers` block"
+        Just t ->
+            case A.eitherDecodeStrict (B.pack (T.unpack t)) :: Either String Value of
+                Right (Object o) ->
+                    case KM.lookup (K.fromText "headers") o of
+                        Just (Object _) -> Right ()
+                        Just (Array _) -> Right ()
+                        _ -> Left "Custom service type `info` must declare a non-empty `headers` block"
+                Right (Array arr) ->
+                    -- Julia tolerates a list of dicts; succeed if any element has headers.
+                    let elemHasHeaders v = case v of
+                            Object o -> case KM.lookup (K.fromText "headers") o of
+                                Just _ -> True
+                                Nothing -> False
+                            _ -> False
+                        hasHeaders = any elemHasHeaders (F.toList arr)
+                     in if hasHeaders then Right () else Left "Custom service type `info` list must contain a `headers` block"
+                _ -> Left "Custom service type `info` must be valid JSON with a `headers` block"
+  where
+    isCustomServiceType :: Maybe Text -> Bool
+    isCustomServiceType (Just s) = T.toUpper s `elem` ["CUSTOM", "CUSTOM_SERVICE"]
+    isCustomServiceType Nothing = False
 
 findInFlightSameService :: Text -> Text -> Flow (Maybe ReleaseTracker)
 findInFlightSameService ag svc = do

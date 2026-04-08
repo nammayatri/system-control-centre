@@ -15,6 +15,7 @@ module Products.Autopilot.Types.Release (
 
     -- * Common Enums
     Decision (..),
+    decisionPriority,
     Mode (..),
 )
 where
@@ -32,12 +33,37 @@ import Products.Autopilot.Types.Workflow (ReleaseCategory, ReleaseWFStatus)
 -- Common Types (Used Across All Releases)
 -- ============================================================================
 
-data Decision = Continue | Wait | Abort
+{- | Decision-engine verdict. Julia parity (decision/runner.jl ABDecision):
+five variants with priority ordering used to merge multi-experiment results.
+
+Priority (lower = wins in merge):
+  WaitForMoreIteration = 0  -- engine wants more samples; takes precedence over a Continue
+  Continue             = 1  -- safe to advance
+  Wait                 = 2  -- engine still computing, hold cooloff
+  Abort                = 3  -- rollback, highest priority
+
+@WaitForMoreIteration@ is distinct from @Wait@: the former specifically
+signals that the engine has insufficient data to score (sample volume
+floor not yet hit), and the workflow should poll again on the next
+cooloff iteration WITHOUT advancing. Most engine responses don't
+distinguish — they collapse to plain @Wait@ — but Julia engines that
+report verdict code @2@ vs @3@ can be modeled distinctly.
+-}
+data Decision = WaitForMoreIteration | Continue | Wait | Abort
     deriving (Eq, Show, Read, Generic)
 
 instance ToJSON Decision
 
 instance FromJSON Decision
+
+{- | Lower number = higher priority in multi-experiment merge.
+Julia parity (decision/runner.jl ABDecision priority field).
+-}
+decisionPriority :: Decision -> Int
+decisionPriority Abort = 0
+decisionPriority Wait = 1
+decisionPriority WaitForMoreIteration = 2
+decisionPriority Continue = 3
 
 data Mode = AUTO | MANUAL
     deriving (Eq, Show, Read, Generic)

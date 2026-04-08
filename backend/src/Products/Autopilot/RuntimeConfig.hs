@@ -33,6 +33,7 @@ module Products.Autopilot.RuntimeConfig (
     getABHSVolumeMinA,
     getABHSVolumeMinB,
     getAutoCompleteVsTrackerMinutes,
+    getDecisionNotificationDedupMinutes,
     getMaxK8sRetries,
     getCkhClusterName,
     getDEPostMonitoringTimeout,
@@ -316,6 +317,17 @@ minutes. Julia parity: @release/watcher.jl:158-160@
 getAutoCompleteVsTrackerMinutes :: (MonadFlow m) => m Int
 getAutoCompleteVsTrackerMinutes =
     getConfigIntForProduct "auto_complete_vs_tracker_minutes" (Just "autopilot") 60
+
+{- | Decision-engine notification dedup time window (minutes). Used by
+'notifyDecisionThreadMessage' to suppress repeat Slack messages whose
+LAST notification was sent within this window — even if the
+(decisionType, decision, reason) tuple changed. Julia parity:
+@repeat_interval_in_min@ in @ABHSSlackSpamFilter@
+(release/workflow/service.jl:793-824). Default 15 minutes.
+-}
+getDecisionNotificationDedupMinutes :: (MonadFlow m) => m Int
+getDecisionNotificationDedupMinutes =
+    getConfigIntForProduct "decision_notification_dedup_minutes" (Just "autopilot") 15
 
 getMaxK8sRetries :: (MonadFlow m) => m Int
 getMaxK8sRetries = getConfigIntForProduct "max_k8s_retries" (Just "autopilot") 3
