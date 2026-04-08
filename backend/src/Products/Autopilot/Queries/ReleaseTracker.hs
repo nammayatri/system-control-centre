@@ -27,6 +27,8 @@ module Products.Autopilot.Queries.ReleaseTracker (
     findCompletedTrackersForScaleDown,
     findLeakedNewDeploymentTrackers,
     resetStuckScaleDownInProgress,
+    findActiveSyncTrackers,
+    findEventByLabel,
 
     -- * Events
     insertReleaseEvent,
@@ -759,6 +761,13 @@ findCompletedTrackersForScaleDown now delayHours = withDb $ \db -> do
                 select $
                     orderBy_ (asc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
+                        -- Julia parity (watcher.jl:84-102): query selects all
+                        -- terminal trackers; the SCALE_DOWN_SCHEDULED flag
+                        -- check below acts as the actual gate. The flag is
+                        -- only set by scheduleOldDeploymentScaleDown (called
+                        -- from cleanupOldVersion / revert paths), so aborted
+                        -- trackers — which never call that helper — are
+                        -- never picked up.
                         guard_ (rtStatus rt `in_` [val_ "COMPLETED", val_ "ABORTED", val_ "USER_ABORTED"])
                         guard_ (rtEndTime rt <=. just_ (val_ cutoff))
                         pure rt
@@ -766,16 +775,21 @@ findCompletedTrackersForScaleDown now delayHours = withDb $ \db -> do
         -- end_time + delay <= now is now enforced in SQL above. The remaining
         -- predicates (old-version sanity + JSON podsScaleDownStatus) stay in
         -- Haskell because they require parsing the target_state JSON blob.
+        -- Julia parity (watcher.jl filterUsingPodsStatus!): require an
+        -- explicit SCALE_DOWN_SCHEDULED flag on the tracker. Anything else
+        -- (Nothing, ScaleDownInProgress, ScaleDownCompleted, etc.) is
+        -- excluded. The flag is set ONLY by scheduleOldDeploymentScaleDown
+        -- which is called from cleanupOldVersion (terminal-success path)
+        -- and revert paths — never from abort paths. Without this gate, an
+        -- aborted release would have its OLD deployment scaled down ~3
+        -- minutes after the abort, wiping out the live serving version.
         isEligible (tracker, mts) =
             let oldVer = NT.oldVersion tracker
                 hasOldVersion = not (T.null oldVer) && T.toLower oldVer /= "unknown" && oldVer /= "new"
-                notAlreadyScaledDown = case mts of
-                    Just (K8sState k8s) ->
-                        case podsScaleDownStatus (context k8s) of
-                            Just ScaleDownCompleted -> False
-                            _ -> True
-                    _ -> False -- Non-K8s: not applicable
-             in hasOldVersion && notAlreadyScaledDown
+                isScheduled = case mts of
+                    Just (K8sState k8s) -> podsScaleDownStatus (context k8s) == Just ScaleDownScheduled
+                    _ -> False
+             in hasOldVersion && isScheduled
     pure (filter isEligible parsed)
 
 {- | Store the Slack thread_ts for the first message in a release's Slack
@@ -808,3 +822,49 @@ insertReleaseTrackerRow row = withDb $ \db ->
         withTransaction conn $ do
             _ <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (rtId row))
             runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [row]
+
+{- | Find all non-terminal trackers that have sync enabled and a global_id set.
+Used by 'Products.Autopilot.SyncWatcher' to poll secondary cluster status.
+Terminal statuses are excluded: COMPLETED, ABORTED, USER_ABORTED, DISCARDED,
+REVERTED, GCLT_ABORTED.
+-}
+findActiveSyncTrackers :: (MonadFlow m) => m [ReleaseTracker]
+findActiveSyncTrackers = withDb $ \db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $
+                    orderBy_ (asc_ . rtCreatedAt) $ do
+                        rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (rtSyncEnabled rt ==. val_ (Just "true"))
+                        guard_ (isJust_ (rtGlobalId rt))
+                        guard_
+                            ( not_ $
+                                rtStatus rt
+                                    `in_` [ val_ "COMPLETED"
+                                          , val_ "ABORTED"
+                                          , val_ "USER_ABORTED"
+                                          , val_ "DISCARDED"
+                                          , val_ "REVERTED"
+                                          , val_ "GCLT_ABORTED"
+                                          ]
+                            )
+                        pure rt
+    pure (map (fst . fromRow) rows)
+
+{- | Find the most recent release event for a given release and label.
+Used by 'Products.Autopilot.SyncWatcher' to look up SYNC_SECONDARY_TRACKER_ID.
+-}
+findEventByLabel :: (MonadFlow m) => Text -> Text -> m (Maybe ReleaseEvent)
+findEventByLabel rid lbl = withDb $ \db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $
+                    limit_ 1 $
+                        orderBy_ (desc_ . reCreatedAt) $ do
+                            ev <- all_ (releaseEvents autopilotDb)
+                            guard_ (reReleaseId ev ==. val_ rid)
+                            guard_ (reLabel ev ==. val_ lbl)
+                            pure ev
+    pure (safeHead rows)

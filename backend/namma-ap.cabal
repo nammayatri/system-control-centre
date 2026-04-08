@@ -66,6 +66,7 @@ library
       Products.Autopilot.Runner
       Products.Autopilot.RuntimeConfig
       Products.Autopilot.Sync
+      Products.Autopilot.SyncWatcher
       Products.Autopilot.Types
       Products.Autopilot.Types.API
       Products.Autopilot.Types.Permission

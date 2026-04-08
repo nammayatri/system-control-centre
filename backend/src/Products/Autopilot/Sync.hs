@@ -11,31 +11,36 @@ module Products.Autopilot.Sync (
     triggerSyncIfEnabled,
     triggerRevertSyncIfEnabled,
     triggerImmediateRevertSync,
+    buildAuthHeaders,
+    normaliseBase,
 )
 where
 
-import Control.Concurrent (forkIO)
+import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader (ask)
 import Core.Config (Config (..))
-import Core.Environment (Flow, MonadFlow, forkFlow, getConfig, runFlow)
+import Core.Environment (Flow, MonadFlow, forkFlow, getConfig)
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value (..), eitherDecode, encode, object, toJSON, (.=))
+import qualified Data.Aeson.Key as AK
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import GHC.Int (Int32)
-import Products.Autopilot.Queries.ProductService (findProductByName, getProductSyncCluster)
+import Products.Autopilot.Queries.ProductService (findProductByName, getProductSyncCluster, getSlackChannelDirect)
 import Products.Autopilot.Queries.ReleaseTracker (insertReleaseEvent)
-import Products.Autopilot.RuntimeConfig (isK8sEnabled, isSyncClusterEnabled)
+import Products.Autopilot.RuntimeConfig (isK8sEnabled, isSlackEnabled, isSyncClusterEnabled)
 import Products.Autopilot.Types
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (
     K8sDeploymentState (context),
     K8sReleaseContext (dockerImage, syncClusterEnvOverrideData, syncClusterRolloutStrategy, syncXForwardedEmail, syncXPomeriumJwt),
  )
+import Shared.Config.Runtime (getConfigTextForProduct)
+import System.Environment (lookupEnv)
 import Prelude
 
 -- ──────────────────────────────────────────────────────────────────
@@ -76,14 +81,31 @@ revertValue tracker = case status tracker of
     REVERTED -> 1
     _ -> 0
 
-getSyncRolloutStrategy :: ReleaseTracker -> Maybe K8sReleaseContext -> Value
-getSyncRolloutStrategy tracker mCtx =
+{- | Resolve rollout strategy for a sync request. Priority:
+1. Per-context override (syncClusterRolloutStrategy field on K8sReleaseContext)
+2. Per-cluster DB config (sync_rollout_strategy_config in server_config, keyed by cluster name)
+3. Tracker's own rolloutStrategy
+-}
+getSyncRolloutStrategy :: (MonadFlow m) => ReleaseTracker -> Maybe K8sReleaseContext -> Text -> m Value
+getSyncRolloutStrategy tracker mCtx targetCluster =
     case mCtx >>= syncClusterRolloutStrategy of
         Just s | not (T.null s) ->
-            case eitherDecode (LBS.pack (T.unpack s)) :: Either String Value of
-                Right v -> v
-                Left _ -> toJSON (rolloutStrategy tracker)
-        _ -> toJSON (rolloutStrategy tracker)
+            pure $
+                case eitherDecode (LBS.pack (T.unpack s)) :: Either String Value of
+                    Right v -> v
+                    Left _ -> toJSON (rolloutStrategy tracker)
+        _ -> do
+            cfgText <- getConfigTextForProduct "sync_rollout_strategy_config" (Just "autopilot") ""
+            if T.null cfgText
+                then pure (toJSON (rolloutStrategy tracker))
+                else pure $
+                    case eitherDecode (LBS.pack (T.unpack cfgText)) :: Either String Value of
+                        Right (Object obj) ->
+                            case KM.lookup (AK.fromText targetCluster) obj of
+                                Just v@(Array _) -> v
+                                Just v@(Object _) -> v
+                                _ -> toJSON (rolloutStrategy tracker)
+                        _ -> toJSON (rolloutStrategy tracker)
 
 -- ──────────────────────────────────────────────────────────────────
 -- Shared HTTP send
@@ -178,7 +200,8 @@ doCreate cfg tracker mts targetCluster = do
         syncEnvOverride = case mCtx >>= syncClusterEnvOverrideData of
             Just t | not (T.null t) -> Just t
             _ -> envOverrideData tracker
-        body =
+    rolloutStrat <- getSyncRolloutStrategy tracker mCtx targetCluster
+    let body =
             object
                 [ "release_tag" .= releaseTag tracker
                 , "product" .= appGroup tracker
@@ -189,7 +212,7 @@ doCreate cfg tracker mts targetCluster = do
                 , "release_manager" .= createdBy tracker
                 , "new_version" .= newVersion tracker
                 , "description" .= description tracker
-                , "rollout_strategy" .= getSyncRolloutStrategy tracker mCtx
+                , "rollout_strategy" .= rolloutStrat
                 , "cluster" .= targetCluster
                 , "docker_image" .= (mCtx >>= dockerImage)
                 , "change_log" .= changeLog tracker
@@ -222,7 +245,121 @@ doCreate cfg tracker mts targetCluster = do
                 , "has_pomerium_jwt" .= maybe False (not . T.null . T.strip) (mCtx >>= syncXPomeriumJwt)
                 , "body" .= body
                 ]
-    sendSyncRequest tracker "SYNC" req reqLog
+    -- Emit the request event, then do the HTTP call directly so we can
+    -- (a) extract the secondary tracker ID from the success response and
+    -- (b) fire a Slack alert on failure — two things sendSyncRequest can't do.
+    insertReleaseEvent (releaseId tracker) "BUSINESS" "SYNC_REQUEST" reqLog
+    result <- liftIO $ httpRaw req
+    case result of
+        Right HttpResponse{respStatus = s, respBody = b}
+            | s < 400 -> do
+                insertReleaseEvent
+                    (releaseId tracker)
+                    "BUSINESS"
+                    "SYNC_RESPONSE"
+                    (object ["status" .= ("SUCCESS" :: Text), "body" .= TE.decodeUtf8 (LBS.toStrict b), "url" .= url])
+                -- Extract the secondary release ID and store it so SyncWatcher can poll it.
+                case extractSecondaryId b of
+                    Just sid ->
+                        insertReleaseEvent
+                            (releaseId tracker)
+                            "BUSINESS"
+                            "SYNC_SECONDARY_TRACKER_ID"
+                            (object ["secondaryId" .= sid, "cluster" .= targetCluster])
+                    Nothing -> pure ()
+        Right HttpResponse{respStatus = s, respBody = b} -> do
+            let errText = TE.decodeUtf8 (LBS.toStrict b)
+            insertReleaseEvent
+                (releaseId tracker)
+                "BUSINESS"
+                "SYNC_FAILED_FINAL"
+                (object ["status" .= s, "body" .= errText, "url" .= url])
+            notifySyncFailedSlack tracker targetCluster errText
+        Left e -> do
+            let errText = T.pack (show e)
+            insertReleaseEvent
+                (releaseId tracker)
+                "BUSINESS"
+                "SYNC_FAILED_FINAL"
+                (object ["error" .= errText, "url" .= url])
+            notifySyncFailedSlack tracker targetCluster errText
+
+-- | Try to extract the "id" field from a successful sync response body.
+extractSecondaryId :: LBS.ByteString -> Maybe Text
+extractSecondaryId b =
+    case eitherDecode b :: Either String Value of
+        Right (Object obj) ->
+            case KM.lookup (AK.fromText "id") obj of
+                Just (String t) | not (T.null t) -> Just t
+                _ -> Nothing
+        _ -> Nothing
+
+-- | Send a Slack alert when a sync to the secondary cluster fails.
+notifySyncFailedSlack :: (MonadFlow m) => ReleaseTracker -> Text -> Text -> m ()
+notifySyncFailedSlack tracker cluster errMsg = do
+    mProduct <- findProductByName (appGroup tracker)
+    let mChannel = mProduct >>= getSlackChannelDirect
+    case mChannel of
+        Nothing -> pure ()
+        Just channel -> do
+            mToken <- liftIO (lookupEnv "SLACK_BOT_TOKEN")
+            case mToken of
+                Nothing -> pure ()
+                Just token -> do
+                    slackOn <- isSlackEnabled
+                    when slackOn $ do
+                        let msgBody =
+                                object
+                                    [ "channel" .= channel
+                                    , "text" .= ("Sync to secondary cluster failed" :: Text)
+                                    , "attachments"
+                                        .= [ object
+                                                [ "color" .= ("#dc2626" :: Text)
+                                                , "blocks"
+                                                    .= [ object
+                                                            [ "type" .= ("section" :: Text)
+                                                            , "text"
+                                                                .= object
+                                                                    [ "type" .= ("mrkdwn" :: Text)
+                                                                    , "text"
+                                                                        .= ( "*SYNC FAILED* to cluster `"
+                                                                                <> cluster
+                                                                                <> "`\n`"
+                                                                                <> appGroup tracker
+                                                                                <> "/"
+                                                                                <> service tracker
+                                                                                <> "` release `"
+                                                                                <> newVersion tracker
+                                                                                <> "`"
+                                                                           )
+                                                                    ]
+                                                            ]
+                                                       , object
+                                                            [ "type" .= ("context" :: Text)
+                                                            , "elements"
+                                                                .= [ object
+                                                                        [ "type" .= ("mrkdwn" :: Text)
+                                                                        , "text" .= ("Error: " <> T.take 300 errMsg)
+                                                                        ]
+                                                                   ]
+                                                            ]
+                                                       ]
+                                                ]
+                                           ]
+                                    ]
+                            slackReq =
+                                (defaultReq "https://slack.com/api/chat.postMessage")
+                                    { reqMethod = POST
+                                    , reqHeaders =
+                                        [ ("Authorization", "Bearer " <> T.pack token)
+                                        , ("Content-Type", "application/json; charset=utf-8")
+                                        ]
+                                    , reqBody = Just (encode msgBody)
+                                    , reqTimeout = Seconds 5
+                                    , reqLogTag = "sync-slack"
+                                    }
+                        _ <- liftIO $ httpRaw slackReq
+                        pure ()
 
 triggerRevertSyncIfEnabled :: ReleaseTracker -> Maybe TargetState -> Flow ()
 triggerRevertSyncIfEnabled tracker mts = do

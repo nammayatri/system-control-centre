@@ -22,6 +22,7 @@ import Data.Time.Clock (getCurrentTime)
 import Products.Autopilot.EventLog (logStatusUpdated, logTrafficUpdatedWithMessage)
 import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getDeploymentReplicaStatus)
 import Products.Autopilot.K8s.Execute (runCmd)
+import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks)
@@ -34,7 +35,7 @@ import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (..), K8sReleaseContext (..), PodsScaleDownStatus (..))
 import qualified Products.Autopilot.Types.Target.Kubernetes as K8s
 import Products.Autopilot.Workflow.Factory (executeReleaseWorkflow)
-import Products.Autopilot.Workflow.Types (ReleaseState (..), WorkFlowError)
+import Products.Autopilot.Workflow.Types (ReleaseState (..), WorkFlowError (..))
 import Prelude
 
 -- ============================================================================
@@ -343,7 +344,19 @@ trigger _db (rt, mts) = do
                 then logInfo $ "[RUNNER] Release " <> releaseId rt <> " already claimed, skipping"
                 else do
                     insertReleaseEvent (releaseId rt) "BUSINESS" "RUNNER_PICKED" (toJSON rt)
-                    result <- dispatchWorkflow rtNew mts
+                    -- Catch IO exceptions thrown via `liftIO $ throwIO $
+                    -- WorkflowError ...` from inside the workflow. The
+                    -- ExceptT inside `executeReleaseWorkflow` only catches
+                    -- typed `WorkFlowError` *returned* via Left — IO
+                    -- exceptions escape it entirely. Without this catch the
+                    -- exception bubbles up to forkFlow's `try @SomeException`
+                    -- safety net which silently swallows it, leaving the
+                    -- tracker dangling at INPROGRESS forever. Translating to
+                    -- Left funnels into the existing abort+cleanup branch.
+                    rawResult <- MC.try @_ @E.SomeException (dispatchWorkflow rtNew mts)
+                    let result = case rawResult of
+                            Right r -> r
+                            Left ex -> Left (DomainError (show ex))
                     case result of
                         Left err -> do
                             cfg' <- getConfig
@@ -529,6 +542,11 @@ restoreVsTrafficOnFailure cfg rt mts = do
                     if newDepName == oldDepName
                         then logInfo $ "[restoreVsTrafficOnFailure] Skipping scale-down: newDep == oldDep (" <> newDepName <> ") — immediate-revert path, only one deployment exists"
                         else do
+                            -- Julia parity (kubernetes.jl:1718-1720 scaleDownPodsWithoutPolling):
+                            -- delete the HPA BEFORE scaling to 0, otherwise the HPA reconciler
+                            -- will scale the deployment back up within 15-90s.
+                            let newHpaName = serviceName ctx <> "-" <> K8s.newVersion ctx <> "-hpa"
+                            _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns newHpaName)
                             scaleResult <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns newDepName 0)
                             case scaleResult of
                                 Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to scale down new deployment: " <> T.pack (show err)
@@ -640,6 +658,11 @@ scaleDownOldDeployment cfg (rt, mts) = do
                             then pure ()
                             else do
                                 logInfo $ "[scaleDownOldDeployment] Scaling down old deployment: " <> oldDepName <> " for release " <> releaseId rt
+                                -- Julia parity (kubernetes.jl:1718-1720 scaleDownPodsWithoutPolling):
+                                -- delete the OLD HPA BEFORE scaling to 0, otherwise the HPA
+                                -- reconciler will scale the old deployment back up.
+                                let oldHpaName = oldDepName <> "-hpa"
+                                _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns oldHpaName)
                                 result <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName 0)
                                 case result of
                                     Left err -> do
@@ -772,6 +795,12 @@ scaleDownLeakedNewDeployment cfg (rt, mts) = case mts of
                         <> " to 0 (release "
                         <> releaseId rt
                         <> ")"
+                -- Julia parity (kubernetes.jl:1718-1720 scaleDownPodsWithoutPolling):
+                -- delete the HPA BEFORE scaling to 0. The leaked deployment likely
+                -- still has its HPA from the failed rollout — without this delete
+                -- the HPA reconciler scales it back up within 15-90 seconds.
+                let leakedHpaName = depName <> "-hpa"
+                _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns leakedHpaName)
                 result <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns depName 0)
                 case result of
                     Left err -> do

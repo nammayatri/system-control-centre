@@ -4,11 +4,12 @@ import Control.Concurrent.Async (concurrently_)
 import Control.Exception (bracket)
 import Core.Config (Config (..), loadConfig)
 import Core.DB.Connection (mkDBEnv)
-import Core.Environment (AppState (..))
+import Core.Environment (AppState (..), runFlow)
 import Core.Logging (LoggerConfig (..), loadLoggerConfigFromDhall, logInfoIO, prepareLoggerEnv, releaseLoggerEnv, setGlobalLoggerEnv)
 import Core.Server (serverLoop)
 import qualified Data.Text as T
 import Products.Autopilot.Runner (runnerLoop, runnerPollLoop, runnerStartupRecovery)
+import Products.Autopilot.SyncWatcher (syncWatcherPollLoop)
 
 main :: IO ()
 main = do
@@ -37,7 +38,9 @@ main = do
             -- complete with the server still closed to new connections.
             "SERVER" -> do
                 runnerStartupRecovery st
-                concurrently_ (serverLoop st) (runnerPollLoop st)
+                concurrently_
+                    (concurrently_ (serverLoop st) (runnerPollLoop st))
+                    (runFlow st syncWatcherPollLoop)
             _ -> serverLoop st
   where
     show' :: (Show a) => a -> T.Text

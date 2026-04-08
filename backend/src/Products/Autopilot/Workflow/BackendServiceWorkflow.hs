@@ -47,7 +47,7 @@ import qualified Data.Text.Lazy.Encoding as TLE
 
 -- (Data.ByteString.Lazy removed - not used after refactor)
 import qualified Data.Text.Encoding as TE
-import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Products.Autopilot.DecisionEngine (
     DecisionResult (..),
     PromCheckResult (..),
@@ -94,6 +94,7 @@ import Products.Autopilot.RuntimeConfig (
     getPodReadinessPollSeconds,
     getPodRestartCountThreshold,
     getPodsCalculationFactor,
+    getPodsScaleDownDelayFromConfig,
     getReleaseStartDelay,
     isABHSDecisionEnabledForAppGroupService,
     isABHSPostMonitoringDecisionEnabledForAppGroupService,
@@ -118,7 +119,7 @@ import Products.Autopilot.Types.Target (
     TargetState (..),
     emptyK8sState,
  )
-import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..))
+import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..), PodsScaleDownStatus (..))
 import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers (
     captureDeploymentSnapshot,
@@ -251,6 +252,45 @@ scale UP above the floor under load, but cannot scale DOWN below it.
 
 Falls back to direct kubectl scale if no HPA on the new deployment.
 -}
+
+{- | Julia parity (kubernetes.jl:1641 scaleUpDeploymentUsingHPA →
+pollingStatusOfNewDeploymentForHpa): after scaling the new deployment
+for a rollout stage, BLOCK until the new deployment has at least its
+desired replica count Ready. Without this, runVsRolloutWithLock will
+immediately flip VS traffic to a deployment whose pods are still in
+ContainerCreating, causing a brief 5xx spike at every stage transition.
+
+Reuses 'waitForPodsReady' which polls every pod_readiness_poll_seconds
+and fast-fails on ImagePullBackOff/CrashLoopBackOff/restart-threshold
+via checkPodHealthDetailed inside the loop. On any failure (timeout or
+fast-fail) throws WorkflowError "rollout-stage" so the runner's abort
+path handles cleanup.
+-}
+waitForStagePodsReady :: Config -> K8sReleaseContext -> StateFlow ()
+waitForStagePodsReady cfg ctx = do
+    maxAttempts <- getPodReadinessMaxAttempts
+    pollSeconds <- getPodReadinessPollSeconds
+    restartThreshold <- getPodRestartCountThreshold
+    logEnv <- lift getLoggerEnv
+    logInfoS "    [stage] waiting for new deployment pods to be Ready before flipping VS"
+    waitResult <- liftIO $ waitForPodsReady logEnv cfg ctx maxAttempts pollSeconds restartThreshold
+    case waitResult of
+        Left errMsg -> do
+            logErrorS $ "    [stage] Pod readiness FAILED before VS flip: " <> errMsg
+            rt <- getRT
+            insertReleaseEvent
+                (releaseId rt)
+                "BUSINESS"
+                "STAGE_PODS_NOT_READY"
+                (toJSON errMsg)
+            lift $
+                notifyGenericThreadMessage
+                    rt
+                    ("Aborting at stage transition — new pods never became Ready: " <> errMsg)
+            liftIO $ throwIO $ WorkflowError "rollout-stage" ("Stage pod readiness: " <> errMsg)
+        Right () ->
+            logInfoS "    [stage] new deployment pods Ready, proceeding with VS flip"
+
 scaleNewDeploymentForStage ::
     Config ->
     K8sReleaseContext ->
@@ -441,6 +481,10 @@ data WorkflowConfig = WorkflowConfig
     -- ^ Multiplier on (oldDesiredPods × routePercent / 100) for the pod-count
     -- formula. Matches Julia's pods_calculation_factor (default 1.2). Lets
     -- operators add a global safety buffer above the strict ratio.
+    , wcPodsScaleDownDelay :: Double
+    -- ^ Minutes to wait after a successful rollout before the runner sweeps
+    -- the SCALE_DOWN_SCHEDULED flag and scales the old deployment to 0.
+    -- Matches Julia's @pods_scale_down_delay_config@.
     }
 
 -- | Build a 'WorkflowConfig' by reading every relevant runtime knob once.
@@ -454,6 +498,7 @@ loadWorkflowConfig product_ = do
     hpa <- isHpaEnabledForProduct product_
     scd <- isScaleDownPodsOnCompletion
     pcf <- getPodsCalculationFactor
+    psd <- getPodsScaleDownDelayFromConfig
     pure
         WorkflowConfig
             { wcCollectMetricsDelay = cmd
@@ -464,6 +509,7 @@ loadWorkflowConfig product_ = do
             , wcHpaEnabled = hpa
             , wcScaleDownOnCompletion = scd
             , wcPodsCalculationFactor = pcf
+            , wcPodsScaleDownDelay = psd
             }
 
 {- | Loop bail-out safety: max iterations and max wall-clock duration for
@@ -644,6 +690,20 @@ prepareK8sResources = do
     -- BEFORE snapshots are captured at release creation time (createReleaseH)
     -- so diffs are available before the workflow starts.
 
+    -- 0. Julia parity (service.jl:418-424): on a REVERT release, delete the
+    -- new-version HPA up front so the workflow can recreate it cleanly from
+    -- the old version's HPA YAML in the HPA branch below. Without this, a
+    -- stale HPA targeting an outdated/wrong deployment can survive and
+    -- fight the workflow's later scaling operations.
+    let isRevert = case revert ctx of
+            Just n -> n /= 0
+            Nothing -> False
+    when isRevert $ do
+        let revertHpaName = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
+        logInfoS $ "  [PREPARING] Revert release — deleting stale new HPA " <> revertHpaName <> " (Julia parity)"
+        _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg (namespace ctx) revertHpaName)
+        pure ()
+
     -- 1. Apply ConfigMap
     updateK8sStatus BSApplyConfigMap
     logInfoS "  Applying ConfigMap"
@@ -672,6 +732,64 @@ prepareK8sResources = do
                     _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg ctx)
                     pure ()
     updateK8sField (\k8s -> k8s{deploymentCreated = True})
+
+    -- Julia parity (kubernetes.jl:805 pollingStatusOfNewDeployment): block here
+    -- until the new deployment's pods are Ready (or fast-fail on
+    -- ImagePullBackOff / CrashLoopBackOff / restart-threshold breach). This
+    -- runs BEFORE any VS traffic flip and BEFORE HPA setup, so a broken image
+    -- aborts the release immediately instead of letting the rollout march
+    -- through every cooloff stage shifting traffic to a deployment with zero
+    -- ready pods. checkPodHealthDetailed (called inside waitForPodsReady)
+    -- recognises ImagePullBackOff/ErrImagePull/CrashLoopBackOff as fail-fast
+    -- conditions and returns Left immediately rather than waiting out the
+    -- full timeout.
+    do
+        -- Warmup: when the new deployment already existed (we skipped the
+        -- clone above), it may be at 0 replicas — e.g. it was the target of
+        -- a previously-aborted release whose leaked-deployment janitor
+        -- scaled it down. waitForPodsReady's `desired > 0` precondition
+        -- would otherwise loop until timeout. Julia's `createDeployment`
+        -- always re-runs `scaleUpOrScaleDown` after `kubectl apply`, so
+        -- it doesn't inherit stale replica counts either.
+        do
+            curStatus <- liftIO $ getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
+            let curDesired = case curStatus of
+                    Right (_, _, d) -> d
+                    Left _ -> 0
+            when (curDesired <= 0) $ do
+                oldStat <- liftIO $ getDeploymentReplicaStatus cfg (namespace ctx) (serviceName ctx <> "-" <> oldVersion ctx)
+                let warmupReplicas = case oldStat of
+                        Right (_, _, d) | d > 0 -> d
+                        _ -> 1
+                logInfoS $
+                    "  [PREPARING] New deployment "
+                        <> deploymentName ctx
+                        <> " at 0 replicas — scaling to "
+                        <> T.pack (show warmupReplicas)
+                        <> " before readiness wait"
+                _ <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) (deploymentName ctx) warmupReplicas)
+                pure ()
+        maxAttempts0 <- getPodReadinessMaxAttempts
+        pollSeconds0 <- getPodReadinessPollSeconds
+        restartThreshold0 <- getPodRestartCountThreshold
+        logEnv0 <- lift getLoggerEnv
+        logInfoS "  [PREPARING] Waiting for new deployment pods to become Ready (Julia parity)"
+        waitResult0 <- liftIO $ waitForPodsReady logEnv0 cfg ctx maxAttempts0 pollSeconds0 restartThreshold0
+        case waitResult0 of
+            Left errMsg -> do
+                logErrorS $ "  [PREPARING] Pod readiness FAILED before traffic shift: " <> errMsg
+                insertReleaseEvent
+                    (releaseId rt)
+                    "BUSINESS"
+                    "PREPARING_PODS_NOT_READY"
+                    (toJSON errMsg)
+                lift $
+                    notifyGenericThreadMessage
+                        rt
+                        ("Aborting before traffic shift — new deployment never became Ready: " <> errMsg)
+                liftIO $ throwIO $ WorkflowError "deploy" ("Pod readiness in PREPARING: " <> errMsg)
+            Right () ->
+                logInfoS "  [PREPARING] New deployment pods Ready"
 
     -- 3. Check Service exists
     updateK8sStatus BSUpdateService
@@ -854,6 +972,8 @@ progressiveRollout = do
                             logInfoS $ "  Initial rollout step: new=" <> T.pack (show firstNewW) <> "%, cooloff=" <> T.pack (show (cooloffMinutes firstStep)) <> "min"
                             -- Scale new deployment via the Julia max() formula BEFORE shifting traffic.
                             scaleNewDeploymentForStage cfg ctx firstNewW (podPercent firstStep)
+                            -- Julia parity: wait for new pods to be Ready before flipping VS.
+                            waitForStagePodsReady cfg ctx
                             runVsRolloutWithLock cfg ctx (wcMaxK8sRetries wfCfg) firstOldW firstNewW
                             updateK8sField (\k8s -> k8s{trafficPercentage = firstNewW})
 
@@ -960,6 +1080,33 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                     threadDelay (Seconds (wcCollectMetricsDelay wfCfg))
                     recurseSame
                 INPROGRESS -> do
+                    -- Better-than-Julia: fast-fail pod health check at the
+                    -- TOP of every rolloutLoop iteration. Julia only catches
+                    -- CrashLoopBackOff/ImagePullBackOff at deployment-create
+                    -- (pollingStatusOfNewDeployment); a pod that goes
+                    -- unhealthy mid-rollout (e.g. config map change, OOM,
+                    -- runtime crash) is missed until the final readiness
+                    -- check. checkPodHealthDetailed is a single
+                    -- `kubectl get pods -l app=...` so this is cheap to
+                    -- run on every poll tick.
+                    do
+                        restartThresholdRL <- getPodRestartCountThreshold
+                        healthRL <- liftIO $ checkPodHealthDetailed cfg ctx restartThresholdRL
+                        case healthRL of
+                            Left errMsg -> do
+                                logErrorS $ "  [rolloutLoop] Pod health FAILED mid-rollout: " <> errMsg
+                                insertReleaseEvent
+                                    (releaseId freshRT)
+                                    "BUSINESS"
+                                    "ROLLOUT_PODS_UNHEALTHY"
+                                    (toJSON errMsg)
+                                lift $
+                                    notifyGenericThreadMessage
+                                        freshRT
+                                        ("Aborting mid-rollout — pod health degraded: " <> errMsg)
+                                liftIO $ throwIO $ WorkflowError "rollout" ("Pod health: " <> errMsg)
+                            Right _ -> pure ()
+
                     -- Check AUTO vs MANUAL mode behavior
                     let currentMode = mode freshRT
                     -- Production line 197: MANUAL calls getNewRollout directly
@@ -1139,6 +1286,11 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
 
                                             -- Scale new deployment via the Julia max() formula BEFORE shifting traffic.
                                             scaleNewDeploymentForStage cfg ctx nextNewW (podPercent nextStep)
+                                            -- Julia parity: wait for the newly-scaled pods to reach
+                                            -- Ready before shifting more traffic to them. Otherwise
+                                            -- the VS flip below sends traffic to ContainerCreating
+                                            -- pods and we get a brief 5xx spike at every stage.
+                                            waitForStagePodsReady cfg ctx
                                             -- Round 7 audit B1/B2: removed the lookahead pre-warm. It
                                             -- patched the next-next stage's HPA min during the current
                                             -- stage's cooloff, over-provisioning capacity (and bill) for
@@ -1439,6 +1591,7 @@ checkSinglePod restartThreshold (Object podObj) =
             Just cs -> concatMap (checkContainer podName) cs
      in case phase of
             Just "Failed" -> Left (podName <> ": pod phase is Failed")
+            Just "Error" -> Left (podName <> ": pod phase is Error (application crashing)")
             _ ->
                 if null containerErrors
                     then Right (podName <> ": OK")
@@ -1449,6 +1602,16 @@ checkSinglePod restartThreshold (Object podObj) =
         _ -> Nothing
     getObj' _ _ = Nothing
 
+    -- Container waiting-reason fail-fast list. Mirrors Julia's
+    -- 'ErrorMessage' classifier (kubernetes.jl:1046-1067) but runs
+    -- INSIDE the polling loop instead of only at timeout, so we add
+    -- only states kubelet sets immediately on first sync (no
+    -- transient startup states like Pending / ContainerCreating).
+    -- 'InvalidImageName' is not in Julia's list — we add it because
+    -- kubelet sets it on the very first sync for malformed image
+    -- strings (e.g. 'nginx:nginx:alpine'), so it's safe to fast-fail
+    -- and a real production failure mode otherwise stuck waiting out
+    -- the full readiness timeout.
     checkContainer podName (Object cObj) =
         let restartCount = case KM.lookup (K.fromText "restartCount") cObj of
                 Just (Number n) -> round n :: Int
@@ -1460,11 +1623,33 @@ checkSinglePod restartThreshold (Object podObj) =
                         _ -> Nothing
                     _ -> Nothing
                 _ -> Nothing
+            terminatedReason = case KM.lookup (K.fromText "state") cObj of
+                Just (Object stateObj) -> case KM.lookup (K.fromText "terminated") stateObj of
+                    Just (Object termObj) -> case KM.lookup (K.fromText "reason") termObj of
+                        Just (String r) -> Just r
+                        _ -> Nothing
+                    _ -> Nothing
+                _ -> Nothing
             errs =
                 []
-                    <> [podName <> ": CrashLoopBackOff detected" | waitingReason == Just "CrashLoopBackOff"]
-                    <> [podName <> ": ImagePullBackOff detected" | waitingReason == Just "ImagePullBackOff"]
-                    <> [podName <> ": ErrImagePull detected" | waitingReason == Just "ErrImagePull"]
+                    -- Image-pull failures (Julia parity)
+                    <> [podName <> ": ImagePullBackOff (image pull failed)" | waitingReason == Just "ImagePullBackOff"]
+                    <> [podName <> ": ErrImagePull (image pull error)" | waitingReason == Just "ErrImagePull"]
+                    -- Malformed image string — kubelet sets this immediately on first
+                    -- sync, no recovery possible. Better than Julia which only catches
+                    -- this via the readiness timeout.
+                    <> [podName <> ": InvalidImageName (malformed image reference)" | waitingReason == Just "InvalidImageName"]
+                    <> [podName <> ": ImageInspectError" | waitingReason == Just "ImageInspectError"]
+                    -- Container config / secret / configmap reference broken (Julia parity).
+                    <> [podName <> ": CreateContainerConfigError (referenced secret/configmap missing or invalid)" | waitingReason == Just "CreateContainerConfigError"]
+                    <> [podName <> ": CreateContainerError" | waitingReason == Just "CreateContainerError"]
+                    <> [podName <> ": RunContainerError (referenced envs not in configmap/secrets)" | waitingReason == Just "RunContainerError"]
+                    -- App-level crash loop (Julia parity).
+                    <> [podName <> ": CrashLoopBackOff (env vars missing or app crashing)" | waitingReason == Just "CrashLoopBackOff"]
+                    -- Terminated states that indicate a non-recoverable failure.
+                    <> [podName <> ": container terminated with OOMKilled" | terminatedReason == Just "OOMKilled"]
+                    <> [podName <> ": container terminated with reason " <> r | Just r <- [terminatedReason], r `elem` ["ContainerCannotRun", "DeadlineExceeded", "Error"]]
+                    -- Restart-count threshold (catches app-level crashes that may not have escalated to CrashLoopBackOff yet).
                     <> [podName <> ": restartCount=" <> T.pack (show restartCount) <> " exceeds threshold (" <> T.pack (show restartThreshold) <> ")" | restartCount > restartThreshold]
          in errs
     checkContainer _ _ = []
@@ -1507,16 +1692,29 @@ cleanupOldVersion = do
             let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
 
             -- Production line 560: scheduleScaleDownOfPods(tracker, conn)
-            -- This schedules scale-down to happen later via the Runner's poll loop.
-            -- The Runner's findCompletedTrackersForScaleDown + scaleDownOldDeployment handles this.
-            -- We mark the intent so the Runner knows to scale down.
+            -- Julia parity: write the SCALE_DOWN_SCHEDULED flag + timestamp into
+            -- the K8sState so the Runner's findCompletedTrackersForScaleDown
+            -- worker picks it up. Without this flag the gate in
+            -- findCompletedTrackersForScaleDown will reject the tracker even
+            -- though the rollout completed successfully.
             logInfoS $ "  Scheduling scale-down for old deployment: " <> oldDepName
-            updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = False})
+            scheduleAt <- liftIO $ do
+                t <- getCurrentTime
+                let delaySec = realToFrac (wcPodsScaleDownDelay wfCfg * 60.0) :: Double
+                pure (addUTCTime (realToFrac delaySec :: NominalDiffTime) t)
+            updateK8sField $ \k8s ->
+                let oldCtx = context k8s
+                    newCtx = oldCtx{podsScaleDownStatus = Just ScaleDownScheduled, podsScaleDownTimestamp = Just scheduleAt}
+                 in k8s{oldDeploymentScaledDown = False, context = newCtx}
             insertReleaseEvent
                 (releaseId rt)
                 "BUSINESS"
                 "SCALE_DOWN_SCHEDULED"
-                (toJSON $ "Scale-down scheduled for " <> T.unpack oldDepName)
+                ( object
+                    [ "oldDeployment" .= oldDepName
+                    , "scheduledAt" .= scheduleAt
+                    ]
+                )
 
             -- Bug fix (round 7): NEVER scale down the old deployment from
             -- inside the workflow. We must only scale down AFTER the tracker

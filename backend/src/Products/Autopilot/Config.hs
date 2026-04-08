@@ -91,6 +91,12 @@ autopilotConfigs =
         "Buffer added to HPA max replicas calculation"
         (Just "autopilot")
     , ConfigEntry
+        "hpa_template"
+        (JsonConfig "{}")
+        ScalingGroup
+        "HPA template JSON for auto-creating HPAs on first release. Placeholders: {{DEPLOYMENT-NAME}}, {{NAMESPACE}}, literal \"minReplicas\": 1 / \"maxReplicas\": 1"
+        (Just "autopilot")
+    , ConfigEntry
         "max_k8s_retries"
         (IntConfig 3)
         DeploymentGroup

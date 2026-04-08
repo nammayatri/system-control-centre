@@ -1301,50 +1301,191 @@ immediateRevertH _ap rid req@ImmediateRevertReq{isRevertSync = mIsRevertSync} = 
 -- Restart Release (POST /releases/:id/restart)
 -- ============================================================================
 
+{- | Julia parity (api/revert/restart.jl + rollback.jl reCreateRelease):
+restart creates a brand-new tracker row that re-runs the same release.
+The original (terminal) tracker is left untouched as an audit record.
+
+Why a new tracker (and not in-place ABORTED → CREATED):
+  * Audit chain — every retry attempt is a separate row with its own
+    rollout_history, events, start_time. The release list shows the
+    full chain of (failed → restarted → completed).
+  * Clean state — the new tracker starts with empty release_context,
+    no leaked-cleanup markers, no stale rolloutHistory, no
+    podsScaleDownStatus carry-over from the previous attempt.
+  * Concurrency safety — the partial unique index
+    uq_release_tracker_service_inflight catches the case where another
+    in-flight tracker for the same (appGroup, service) already exists
+    via insertReleaseTrackerSafe, returning a friendly Conflict instead
+    of two competing workflows on the same service.
+  * Workflow simplicity — the runner has one mental model: "pick up
+    a CREATED tracker and run it from INIT to DONE". No "is this a
+    fresh start or a resume?" branching.
+
+Validation mirrors Julia's @validateRestartTracker@ (restart.jl:43-46):
+status must be in @{ABORTED, USER_ABORTED, DISCARDED, REVERTED}@ AND the
+new-version deployment must still exist in k8s (otherwise the workflow
+has nothing to scale up).
+-}
 restartReleaseH :: AuthedPerson -> Text -> RestartReleaseReq -> Flow APIResponse
 restartReleaseH _ap rid req = do
+    cfg <- getConfig
     m <- findReleaseTracker rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
             let currentStatus = NT.status tracker
-            if currentStatus /= ABORTED && currentStatus /= USER_ABORTED && currentStatus /= REVERTED
-                then pure $ APIResponse "ERROR" ("Cannot restart from status: " <> T.pack (show currentStatus) <> ". Valid: ABORTED, USER_ABORTED, REVERTED")
+            if currentStatus /= ABORTED && currentStatus /= USER_ABORTED && currentStatus /= REVERTED && currentStatus /= DISCARDED
+                then pure $ APIResponse "ERROR" ("Cannot restart from status: " <> T.pack (show currentStatus) <> ". Valid: ABORTED, USER_ABORTED, REVERTED, DISCARDED")
                 else do
-                    now <- liftIO getCurrentTime
-                    let updated =
-                            (tracker :: ReleaseTracker)
-                                { NT.status = CREATED
-                                , NT.releaseWFStatus = INIT
-                                , NT.startTime = Nothing
-                                , NT.endTime = Nothing
-                                , NT.scheduleTime = Just now
-                                , NT.rolloutHistory = []
-                                , -- Round 8 audit C3: clear globalId on restart so the
-                                  -- next sync to the secondary cluster lands as a fresh
-                                  -- tracker. Without this, the secondary's idempotent-
-                                  -- receive (findReleaseTrackerByGlobalId) sees the same
-                                  -- global_id and skips the insert — primary thinks the
-                                  -- restart replicated, secondary still has the old
-                                  -- aborted tracker.
-                                  NT.globalId = Nothing
-                                }
-                    ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText currentStatus)
-                    if not ok
-                        then pure staleTrackerError
+                    -- Validate the new-version deployment still exists in k8s.
+                    -- Julia: validateRestartTracker (restart.jl:45-46).
+                    let oldCtx = case mTargetState of
+                            Just (K8sState k8s) -> context k8s
+                            _ -> defaultK8sReleaseContext
+                        ns = oldCtx.namespace
+                        svcName = oldCtx.serviceName
+                        newDepName = svcName <> "-" <> NT.newVersion tracker
+                    newDepExists <- liftIO $ deploymentExists cfg ns newDepName
+                    if not (T.null newDepName) && not newDepExists
+                        then
+                            pure $
+                                APIResponse
+                                    "ERROR"
+                                    ( "Cannot restart: new-version deployment "
+                                        <> newDepName
+                                        <> " no longer exists in k8s. Please create a new release."
+                                    )
                         else do
-                            insertReleaseEvent
-                                rid
-                                "BUSINESS"
-                                "RELEASE_RESTARTED"
-                                ( object
-                                    [ "requestedBy" .= (req :: RestartReleaseReq).requestedBy
-                                    , "reason" .= (req :: RestartReleaseReq).reason
-                                    , "previousStatus" .= T.pack (show currentStatus)
-                                    ]
-                                )
-                            notifyReleaseRestarted updated
-                            pure $ APIResponse "SUCCESS" "Release restarted"
+                            -- Defensive in-flight check: don't spawn a restart if another
+                            -- tracker for this (appGroup, service) is already running.
+                            -- The DB partial unique index will also catch this via
+                            -- insertReleaseTrackerSafe → Conflict, but a friendly
+                            -- pre-check gives a better error message.
+                            inFlight <- findInFlightSameService (NT.appGroup tracker) (NT.service tracker)
+                            case inFlight of
+                                Just existingTracker
+                                    | NT.releaseId existingTracker /= rid ->
+                                        pure $
+                                            APIResponse
+                                                "ERROR"
+                                                ( "Cannot restart: another in-flight release "
+                                                    <> NT.releaseId existingTracker
+                                                    <> " already exists for this service. Wait for it to finish or abort it first."
+                                                )
+                                _ -> do
+                                    now <- liftIO getCurrentTime
+                                    newRid <- liftIO (UUID.toText <$> UUID.nextRandom)
+                                    -- Build a fresh K8s release context: keep the static
+                                    -- deployment-identity fields (cluster/ns/service host/
+                                    -- VS/DR/version pair/match-config), but reset all
+                                    -- per-attempt state — no leaked-cleanup markers, no
+                                    -- AB run id, no scale-down status, no rollout flags.
+                                    let restartedContext =
+                                            oldCtx
+                                                { abRunId = Nothing
+                                                , abStatus = Nothing
+                                                , cleanupAt = Nothing
+                                                , cleanupTargetDeployment = Nothing
+                                                , cleanupStatus = Nothing
+                                                , podsScaleDownDelay = Nothing
+                                                , podsScaleDownTimestamp = Nothing
+                                                , podsScaleDownStatus = Nothing
+                                                , prevAbHsDecision = Nothing
+                                                , postMonitoringDecisionMap = Nothing
+                                                , oldVersionPodCount = Nothing
+                                                }
+                                        wasNewService = case mTargetState of
+                                            Just (K8sState k8s) -> (newService :: K8sDeploymentState -> Bool) k8s
+                                            _ -> False
+                                        restartedTargetState =
+                                            K8sState $
+                                                emptyK8sState
+                                                    { context = restartedContext
+                                                    , newService = wasNewService
+                                                    }
+                                        restartedTracker =
+                                            (tracker :: ReleaseTracker)
+                                                { NT.releaseId = newRid
+                                                , NT.status = CREATED
+                                                , NT.releaseWFStatus = INIT
+                                                , NT.scheduleTime = Just now
+                                                , NT.startTime = Nothing
+                                                , NT.endTime = Nothing
+                                                , NT.dateCreated = Nothing -- DB sets via DEFAULT now()
+                                                , NT.lastUpdated = Nothing
+                                                , NT.rolloutHistory = []
+                                                , -- Julia parity (create.jl:312 getInitialApprovalStatus):
+                                                  -- restart-created trackers are NOT auto-approved.
+                                                  -- The user must hit Approve again on the new tracker
+                                                  -- to confirm intent. This matches Julia's reCreateRelease
+                                                  -- which doesn't pass isSystemTriggered, so the new row
+                                                  -- lands with is_approved=0.
+                                                  NT.isApproved = False
+                                                , NT.isInfraApproved = False
+                                                , -- Round 8 audit C3: clear globalId so cross-cloud sync
+                                                  -- on the secondary creates a fresh row, not idempotent-
+                                                  -- skips because the global_id matches the original.
+                                                  NT.globalId = Nothing
+                                                , -- Persist the restart's requestedBy as createdBy on the
+                                                  -- new tracker so audit shows who triggered the retry.
+                                                  NT.createdBy = fromMaybe (NT.createdBy tracker) ((req :: RestartReleaseReq).requestedBy)
+                                                , NT.releaseContext = Just (toJSON restartedContext)
+                                                }
+                                    mIdem <- insertReleaseTrackerSafe restartedTracker restartedTargetState
+                                    case mIdem of
+                                        Just existingId ->
+                                            -- Idempotent: another identical restart already created
+                                            -- a tracker for this (appGroup, service). Return that id.
+                                            pure $ APIResponse "SUCCESS" ("Restart already in flight: " <> existingId)
+                                        Nothing -> do
+                                            -- Audit event on the ORIGINAL tracker so the chain is
+                                            -- discoverable from either side.
+                                            insertReleaseEvent
+                                                rid
+                                                "BUSINESS"
+                                                "RELEASE_RESTARTED"
+                                                ( object
+                                                    [ "newTrackerId" .= newRid
+                                                    , "requestedBy" .= (req :: RestartReleaseReq).requestedBy
+                                                    , "reason" .= (req :: RestartReleaseReq).reason
+                                                    , "previousStatus" .= T.pack (show currentStatus)
+                                                    ]
+                                                )
+                                            -- TRACKER_CREATED event on the NEW tracker with a back-pointer.
+                                            insertReleaseEvent
+                                                newRid
+                                                "BUSINESS"
+                                                "TRACKER_CREATED"
+                                                ( object
+                                                    [ "restartedFrom" .= rid
+                                                    , "previousStatus" .= T.pack (show currentStatus)
+                                                    , "appGroup" .= NT.appGroup restartedTracker
+                                                    , "service" .= NT.service restartedTracker
+                                                    , "oldVersion" .= NT.oldVersion restartedTracker
+                                                    , "newVersion" .= NT.newVersion restartedTracker
+                                                    ]
+                                                )
+                                            -- Capture BEFORE/AFTER deployment snapshots so the
+                                            -- env-diff view on the new tracker has data to render.
+                                            -- createReleaseHBody and revertReleaseH do the same.
+                                            -- BEFORE = current state of the OLD deployment;
+                                            -- AFTER = preview of the NEW deployment built from the
+                                            -- OLD deployment YAML with image/version swapped in.
+                                            let restartNs = ns
+                                                restartOldDep = svcName <> "-" <> NT.oldVersion restartedTracker
+                                                restartNewVer = NT.newVersion restartedTracker
+                                                restartImage = fromMaybe "" (K8s.dockerImage oldCtx)
+                                            captureDeploymentSnapshot cfg newRid restartNs restartOldDep "DEPLOYMENT_BEFORE"
+                                            captureDeploymentPreview
+                                                cfg
+                                                newRid
+                                                restartNs
+                                                restartOldDep
+                                                restartNewVer
+                                                restartImage
+                                                "DEPLOYMENT_AFTER"
+                                            notifyReleaseRestarted restartedTracker
+                                            pure $ APIResponse "SUCCESS" ("Restart created: " <> newRid)
 
 -- ============================================================================
 -- Fast Forward (POST /releases/:id/fast-forward)
