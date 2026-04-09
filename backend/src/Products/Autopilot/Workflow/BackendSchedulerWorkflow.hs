@@ -25,6 +25,7 @@ import Core.Environment (getConfig, logError, logInfo, logWarning)
 import Core.Types.Time (threadDelaySec)
 import Core.Workflow.Spec (WorkflowSpec (..))
 import Core.Workflow.Stage (Stage)
+import Data.Aeson (object, toJSON, (.=))
 import qualified Data.Text as T
 import Products.Autopilot.K8s.Deployment (
     buildCloneDeploymentCommand,
@@ -36,12 +37,13 @@ import Products.Autopilot.K8s.Deployment (
     getDeploymentReplicaStatus,
  )
 import Products.Autopilot.K8s.Execute (K8sError (..), executeWithRetry, runCmd)
-import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, hpaExists)
+import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildDeleteHpaCommand, getHpaMinMax, hpaExists)
 import Products.Autopilot.Notifications (
     notifyPodsScaledDown,
     notifyReleaseCompleted,
     notifyReleaseProgress,
  )
+import Products.Autopilot.Queries.ReleaseTracker (insertReleaseEvent)
 import Products.Autopilot.RuntimeConfig (isScaleDownPodsOnCompletion)
 
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
@@ -227,6 +229,35 @@ prepareK8sResources = do
             pure ()
     updateK8sField (\k8s -> k8s{deploymentCreated = True})
 
+    -- 3. HPA: preserve existing / clone from old (no template branch).
+    --
+    -- Schedulers (queue workers, cron-driven workers) don't typically have an
+    -- HPA — autoscaling on CPU is meaningless for a queue consumer. But
+    -- some schedulers DO have one (e.g. KEDA-managed custom-metrics HPA on
+    -- queue depth). When that's the case we mirror BackendService's flow:
+    -- preserve the operator-configured min/max/metrics/behavior verbatim and
+    -- only mutate the HPA at this prepare stage. Progressive pod-count
+    -- rollout caps at the live HPA's maxReplicas but never patches it.
+    -- No Branch 3 (template create) — schedulers without an old HPA simply
+    -- run without one.
+    let newHpaName = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
+        oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
+    newHpaFound <- liftIO $ hpaExists cfg (namespace ctx) newHpaName
+    if newHpaFound
+        then do
+            logInfoS $ "  HPA " <> newHpaName <> " already exists, preserving (no patch)"
+            insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_PRESERVED" (toJSON newHpaName)
+        else do
+            oldHpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
+            when oldHpaFound $ do
+                logInfoS $ "  Cloning HPA from " <> oldHpaName <> " (preserving min/max/metrics/behavior)"
+                cloneResult <- liftIO $ runCmd (buildCloneHpaCommand cfg (namespace ctx) (serviceName ctx) (oldVersion ctx) (newVersion ctx) oldHpaName)
+                case cloneResult of
+                    Right _ -> do
+                        logInfoS "  HPA cloned successfully"
+                        insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_CLONED" (toJSON newHpaName)
+                    Left (K8sError err) -> logErrorS $ "  [HPA] Clone failed (non-fatal): " <> err
+
     -- Bug fix B10: replace the previous fixed `threadDelaySec 10` (which
     -- waited a fixed 10 seconds and then logged a warning if pods were not
     -- ready) with a real readiness poll. We poll up to 30 times at 10s
@@ -263,10 +294,9 @@ podCountRollout = do
     let steps = rolloutStrategy rt
     if null steps
         then do
-            -- No rollout strategy defined, scale to full desired count
-            -- Get the desired count from the old deployment's spec (use a reasonable default)
+            -- No rollout strategy defined, scale to full desired count.
             logInfoS "  No rollout strategy, scaling new deployment to desired count"
-            _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
+            scaleNewSchedulerCappedAtHpa cfg ctx 1
             updateK8sField (\k8s -> k8s{trafficPercentage = 100})
             lift $ notifyReleaseProgress currentRT 100
         else do
@@ -278,7 +308,7 @@ podCountRollout = do
                         <> " pods (rollout "
                         <> T.pack (show (rolloutPercent step))
                         <> "%)"
-                _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx targetPods)
+                scaleNewSchedulerCappedAtHpa cfg ctx targetPods
                 updateK8sField (\k8s -> k8s{trafficPercentage = rolloutPercent step})
 
                 -- Notify Slack of progress
@@ -296,6 +326,49 @@ podCountRollout = do
                     checkDeploymentHealth cfg ctx
 
     logInfoS "Pod-count rollout complete"
+
+{- | Scale the new scheduler deployment to @targetPods@ replicas, capped at
+the live HPA's @maxReplicas@ if an HPA exists for this version.
+
+If @safeTarget > liveMax@ (operator configured a tighter HPA than the rollout
+strategy demands), we scale to @liveMax@ and emit a 'ROLLOUT_CAPPED_BY_HPA'
+event so the operator can decide whether to bump the HPA or reduce
+'podCount'. The HPA itself is NOT mutated by the rollout — its bounds are
+sacred. See the prepare stage for the only place schedulers touch HPAs.
+-}
+scaleNewSchedulerCappedAtHpa :: Config -> K8sReleaseContext -> Int -> StateFlow ()
+scaleNewSchedulerCappedAtHpa cfg ctx targetPods = do
+    let newHpa = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
+        ns = namespace ctx
+    rt <- getRT
+    (_liveMin, liveMax) <- liftIO $ getHpaMinMax cfg ns newHpa
+    let cappedTarget
+            | liveMax > 0 = min targetPods liveMax
+            | otherwise = targetPods -- no HPA, or read failure
+        wasCapped = liveMax > 0 && targetPods > liveMax
+    when wasCapped $ do
+        logWarningS $
+            "  [pods] Scheduler target "
+                <> T.pack (show targetPods)
+                <> " exceeds HPA "
+                <> newHpa
+                <> " maxReplicas="
+                <> T.pack (show liveMax)
+                <> " — capping at "
+                <> T.pack (show liveMax)
+        insertReleaseEvent
+            (releaseId rt)
+            "BUSINESS"
+            "ROLLOUT_CAPPED_BY_HPA"
+            ( object
+                [ "hpa" .= newHpa
+                , "safeTarget" .= targetPods
+                , "hpaMaxReplicas" .= liveMax
+                , "cappedTo" .= liveMax
+                ]
+            )
+    _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx cappedTarget)
+    pure ()
 
 -- | Check deployment health via replica status
 checkDeploymentHealth :: Config -> K8sReleaseContext -> StateFlow ()

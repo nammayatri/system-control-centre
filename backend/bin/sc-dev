@@ -12,6 +12,42 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
+LOG_DIR=".local/logs"
+RUN_LOG_FILE="$LOG_DIR/sc-dev.log"
+APP_LOG_FILE="system-control.log"
+mkdir -p "$LOG_DIR"
+# Fresh logs per run.
+: > "$RUN_LOG_FILE"
+: > "$APP_LOG_FILE"
+
+kill_by_port() {
+  local port="$1"
+  local pids
+  pids="$(lsof -ti tcp:"$port" 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    echo "[sc-dev] killing existing process(es) on port $port: $pids"
+    kill -TERM $pids 2>/dev/null || true
+    sleep 1
+    local remaining
+    remaining="$(lsof -ti tcp:"$port" 2>/dev/null || true)"
+    if [ -n "$remaining" ]; then
+      echo "[sc-dev] force killing remaining process(es) on port $port: $remaining"
+      kill -KILL $remaining 2>/dev/null || true
+    fi
+  fi
+}
+
+echo "[sc-dev] cleaning stale dev services..."
+# Stop previous process-compose/ghcid/vite instances tied to this repo.
+pkill -f "process-compose.*system-control-centre/backend" 2>/dev/null || true
+pkill -f "ghcid.*namma-ap-exe" 2>/dev/null || true
+pkill -f "vite.*system-control-centre/frontend" 2>/dev/null || true
+
+# Ensure key dev ports are free before startup.
+kill_by_port 5434
+kill_by_port 8012
+kill_by_port 5173
+
 # Clean up any stale postgres lock from a previous crashed run
 if [ -f .local/data/pg/postmaster.pid ]; then
   PID=$(head -1 .local/data/pg/postmaster.pid 2>/dev/null || echo "")
@@ -21,4 +57,5 @@ if [ -f .local/data/pg/postmaster.pid ]; then
   fi
 fi
 
-exec nix run .#dev -- -t=false "$@"
+echo "[sc-dev] starting dev stack (run log: $RUN_LOG_FILE, app log reset: $APP_LOG_FILE)"
+nix run .#dev -- -t=false "$@" 2>&1 | tee -a "$RUN_LOG_FILE"
