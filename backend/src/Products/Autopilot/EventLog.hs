@@ -103,7 +103,7 @@ historyToProdJson h =
     object
         [ "rollout" .= historyRolloutPercent h
         , "cooloff" .= historyCooloffMinutes h
-        , "pods" .= historyPodsPercent h
+        , "pods" .= historyPodsCount h
         , "last_decision" .= fmap decisionToText (historyDecision h)
         , "decision_result" .= historyDecisionReason h
         , "started_at" .= formatProdTime (historyStartedAt h)
@@ -117,6 +117,7 @@ formatProdTime :: UTCTime -> Text
 formatProdTime = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%3Q"
 
 decisionToText :: Decision -> Text
+decisionToText WaitForMoreIteration = "WaitForMoreIteration"
 decisionToText Continue = "Continue"
 decisionToText Wait = "Wait"
 decisionToText Abort = "Abort"

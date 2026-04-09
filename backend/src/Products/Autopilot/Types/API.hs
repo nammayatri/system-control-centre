@@ -223,18 +223,21 @@ instance FromJSON K8sCreateReleaseReq where
         parseLegacyRollout (Array arr) = mapM parseLegacyStep (toList arr)
         parseLegacyRollout _ = fail "rollout_strategy must be an array"
         parseLegacyStep = withObject "RolloutStepLegacy" $ \s -> do
-            rolloutPercent <- s .:? "rolloutPercent" .!= 0
-            legacyRollout <- s .:? "rollout" .!= rolloutPercent
+            rolloutPctJson <- s .:? "rolloutPercent" .!= 0
+            legacyRollout <- s .:? "rollout" .!= rolloutPctJson
             -- Legacy parser: accept either modern "cooloffMinutes" or Julia-style "cooloff".
             cooloffFromJson <- s .:? "cooloffMinutes" .!= 0
             legacyCooloff <- s .:? "cooloff" .!= cooloffFromJson
-            podPercent <- s .:? "podPercent" .!= 0
-            legacyPods <- s .:? "pods" .!= podPercent
+            -- Field renamed in 0011: accept "podCount" (modern), "podPercent"
+            -- (deprecated misnomer), and "pods" (Julia-era) — first non-null wins.
+            podCountFromJson <- s .:? "podCount" .!= 0
+            podPercentDeprecated <- s .:? "podPercent" .!= podCountFromJson
+            legacyPods <- s .:? "pods" .!= podPercentDeprecated
             pure $
                 RolloutStep
                     { rolloutPercent = legacyRollout
                     , cooloffMinutes = legacyCooloff
-                    , podPercent = legacyPods
+                    , podCount = legacyPods
                     }
         parseMetadata obj = do
             direct <- obj .:? "metadata"

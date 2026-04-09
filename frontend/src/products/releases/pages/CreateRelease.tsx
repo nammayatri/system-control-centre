@@ -205,7 +205,7 @@ const CreateRelease: React.FC = () => {
                 setStages(rollouts.map((r: any) => ({
                   rollout: r.rollout ?? r.rolloutPercent ?? 0,
                   cooloff: r.cooloff ?? r.cooloffMinutes ?? 10,
-                  pods: r.pods ?? r.podPercent ?? 1,
+                  pods: r.pods ?? r.podCount ?? r.podPercent ?? 1,
                 })));
               }
             }
@@ -381,7 +381,7 @@ const CreateRelease: React.FC = () => {
             rolloutStrategy: stages.map(s => ({
               rolloutPercent: s.rollout,
               cooloffMinutes: s.cooloff,
-              podPercent: s.pods,
+              podCount: s.pods,
             })),
           },
         });
@@ -415,7 +415,7 @@ const CreateRelease: React.FC = () => {
       slack_thread_ts: null,
       isReleaseSync,
       syncClusterEnvOverrideData: isReleaseSync && isSecondaryEnvSwitch ? secondaryEnvData : null,
-      syncClusterRolloutStrategy: isReleaseSync ? secondaryStages.map(s => ({ rolloutPercent: s.rollout, cooloffMinutes: s.cooloff, podPercent: s.pods })) : null,
+      syncClusterRolloutStrategy: isReleaseSync ? secondaryStages.map(s => ({ rolloutPercent: s.rollout, cooloffMinutes: s.cooloff, podCount: s.pods })) : null,
       release_manager: "local_admin", release_tag: generateReleaseTag(svc), trackerType,
     });
 

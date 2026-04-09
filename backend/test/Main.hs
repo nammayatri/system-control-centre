@@ -506,9 +506,9 @@ testReleaseTag = do
 
 testRolloutStep :: IO ()
 testRolloutStep = do
-    let step1 = RolloutStep{rolloutPercent = 10, cooloffMinutes = 5, podPercent = 100}
-        step2 = RolloutStep{rolloutPercent = 50, cooloffMinutes = 10, podPercent = 100}
-        step3 = RolloutStep{rolloutPercent = 100, cooloffMinutes = 0, podPercent = 100}
+    let step1 = RolloutStep{rolloutPercent = 10, cooloffMinutes = 5, podCount = 100}
+        step2 = RolloutStep{rolloutPercent = 50, cooloffMinutes = 10, podCount = 100}
+        step3 = RolloutStep{rolloutPercent = 100, cooloffMinutes = 0, podCount = 100}
 
     -- Round-trip through Eq
     assertEqual "Step constructor round-trip" step1 step1

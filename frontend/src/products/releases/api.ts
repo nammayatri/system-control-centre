@@ -200,11 +200,11 @@ type NammaRelease = {
     envOverrideData?: string | null;
     slackThreadTs?: string | null;
     metadata?: any;
-    rolloutStrategy?: Array<{ rolloutPercent: number; cooloffMinutes: number; podPercent: number }>;
+    rolloutStrategy?: Array<{ rolloutPercent: number; cooloffMinutes: number; podCount: number }>;
     rolloutHistory?: Array<{
         historyRolloutPercent: number;
         historyCooloffMinutes: number;
-        historyPodsPercent: number;
+        historyPodsCount: number;
         historyDecision?: string | null;
         historyDecisionReason?: string | null;
         historyStartedAt: string;
@@ -331,13 +331,13 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     rollout_strategy: (r.rolloutStrategy || []).map(s => ({
         rollout: s.rolloutPercent,
         cooloff: s.cooloffMinutes,
-        pods: s.podPercent,
+        pods: s.podCount,
     })),
 
     rollout_history: (r.rolloutHistory || []).map(h => ({
         rollout: h.historyRolloutPercent,
         cooloff: h.historyCooloffMinutes,
-        pods: h.historyPodsPercent,
+        pods: h.historyPodsCount,
         last_decision: h.historyDecision || '',
         decision_result: h.historyDecisionReason || '',
         started_at: h.historyStartedAt || '',
@@ -505,7 +505,7 @@ export async function createRelease(isNewService: boolean, payload: any): Promis
         rolloutStrategy: (payload.rollout_strategy || []).map((s: any) => ({
             rolloutPercent: Number(s.rollout || 0),
             cooloffMinutes: Number(s.cooloff || 0),
-            podPercent: Number(s.pods || 0),
+            podCount: Number(s.pods || 0),
         })),
         info: payload.info || null,
         description: payload.description || null,

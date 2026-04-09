@@ -760,7 +760,7 @@ const DeploymentConfig: React.FC = () => {
               <div>
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Rollout Strategy</label>
                 {(() => {
-                  let stages: Array<{rolloutPercent: number; cooloffMinutes: number; podPercent: number}> = [];
+                  let stages: Array<{rolloutPercent: number; cooloffMinutes: number; podCount: number}> = [];
                   try { stages = JSON.parse(serviceForm.rollout_strategy || '[]'); } catch { stages = []; }
                   if (!Array.isArray(stages)) stages = [];
 
@@ -775,7 +775,7 @@ const DeploymentConfig: React.FC = () => {
                           <tr className="bg-zinc-50 text-zinc-500 uppercase tracking-wider">
                             <th className="px-2 py-1.5 text-left">Rollout %</th>
                             <th className="px-2 py-1.5 text-left">Cooloff (min)</th>
-                            <th className="px-2 py-1.5 text-left">Pods %</th>
+                            <th className="px-2 py-1.5 text-left">Pods</th>
                             <th className="px-2 py-1.5 w-8"></th>
                           </tr>
                         </thead>
@@ -793,8 +793,8 @@ const DeploymentConfig: React.FC = () => {
                                   className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
                               </td>
                               <td className="px-2 py-1">
-                                <input type="number" min={1} max={500} value={s.podPercent}
-                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, podPercent: parseInt(e.target.value) || 0 } : st))}
+                                <input type="number" min={1} max={500} value={s.podCount}
+                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, podCount: parseInt(e.target.value) || 0 } : st))}
                                   className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
                               </td>
                               <td className="px-2 py-1">
@@ -806,7 +806,7 @@ const DeploymentConfig: React.FC = () => {
                         </tbody>
                       </table>
                       <button type="button"
-                        onClick={() => updateStages([...stages, { rolloutPercent: 100, cooloffMinutes: 0, podPercent: 100 }])}
+                        onClick={() => updateStages([...stages, { rolloutPercent: 100, cooloffMinutes: 0, podCount: 100 }])}
                         className="w-full py-1.5 text-xs text-zinc-400 hover:text-zinc-600 border-t border-zinc-100 cursor-pointer">
                         + Add Stage
                       </button>
@@ -818,7 +818,7 @@ const DeploymentConfig: React.FC = () => {
               <div>
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Revert Strategy</label>
                 {(() => {
-                  let stages: Array<{rolloutPercent: number; cooloffMinutes: number; podPercent: number}> = [];
+                  let stages: Array<{rolloutPercent: number; cooloffMinutes: number; podCount: number}> = [];
                   try { stages = JSON.parse(serviceForm.revert_strategy || '[]'); } catch { stages = []; }
                   if (!Array.isArray(stages)) stages = [];
 
@@ -833,7 +833,7 @@ const DeploymentConfig: React.FC = () => {
                           <tr className="bg-zinc-50 text-zinc-500 uppercase tracking-wider">
                             <th className="px-2 py-1.5 text-left">Rollout %</th>
                             <th className="px-2 py-1.5 text-left">Cooloff (min)</th>
-                            <th className="px-2 py-1.5 text-left">Pods %</th>
+                            <th className="px-2 py-1.5 text-left">Pods</th>
                             <th className="px-2 py-1.5 w-8"></th>
                           </tr>
                         </thead>
@@ -851,8 +851,8 @@ const DeploymentConfig: React.FC = () => {
                                   className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
                               </td>
                               <td className="px-2 py-1">
-                                <input type="number" min={1} max={500} value={s.podPercent}
-                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, podPercent: parseInt(e.target.value) || 0 } : st))}
+                                <input type="number" min={1} max={500} value={s.podCount}
+                                  onChange={e => updateStages(stages.map((st, idx) => idx === i ? { ...st, podCount: parseInt(e.target.value) || 0 } : st))}
                                   className="w-full h-7 border border-zinc-200 rounded px-2 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-400" />
                               </td>
                               <td className="px-2 py-1">
@@ -864,7 +864,7 @@ const DeploymentConfig: React.FC = () => {
                         </tbody>
                       </table>
                       <button type="button"
-                        onClick={() => updateStages([...stages, { rolloutPercent: 100, cooloffMinutes: 0, podPercent: 100 }])}
+                        onClick={() => updateStages([...stages, { rolloutPercent: 100, cooloffMinutes: 0, podCount: 100 }])}
                         className="w-full py-1.5 text-xs text-zinc-400 hover:text-zinc-600 border-t border-zinc-100 cursor-pointer">
                         + Add Stage
                       </button>

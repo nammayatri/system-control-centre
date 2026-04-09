@@ -114,7 +114,7 @@ buildApplyFileCommand cfg filePath =
 
 buildRolloutCommands :: Config -> K8sReleaseContext -> RolloutStep -> [String]
 buildRolloutCommands cfg ctx step =
-    let targetReplicas = max 1 (podPercent step)
+    let targetReplicas = max 1 (podCount step)
      in [ buildSetImageCommand cfg ctx
         , buildCreateServiceCommand cfg ctx
         , buildConfigMapApplyCommand cfg ctx

@@ -271,7 +271,7 @@ podCountRollout = do
             lift $ notifyReleaseProgress currentRT 100
         else do
             forM_ steps $ \step -> do
-                let targetPods = max 1 (podPercent step)
+                let targetPods = max 1 (podCount step)
                 logInfoS $
                     "  Scaling new deployment to "
                         <> T.pack (show targetPods)

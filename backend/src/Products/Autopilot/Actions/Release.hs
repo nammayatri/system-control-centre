@@ -1039,11 +1039,16 @@ validateStrategyShape [] = Left "Rollout strategy must have at least one stage"
 validateStrategyShape steps = do
     let percents = map rolloutPercent steps
         cooloffs = map cooloffMinutes steps
-        pods = map podPercent steps
+        pods = map podCount steps
     when (any (\p -> p < 0 || p > 100) percents) $
         Left "Rollout percents must be in the range [0, 100]"
-    when (any (\p -> p < 0 || p > 100) pods) $
-        Left "Pod percents must be in the range [0, 100]"
+    -- podCount is a raw pod count (NOT a percentage). Bug fix from the
+    -- 0011 rename: previous code clamped to [0, 100] under the mistaken
+    -- belief it was a percentage, which silently rejected valid pod
+    -- counts > 100. The HPA cap (live max) protects against overscaling
+    -- at runtime, so we only enforce non-negative here.
+    when (any (< 0) pods) $
+        Left "Pod count must be non-negative"
     when (any (< 0) cooloffs) $
         Left "Cooloff minutes must be non-negative"
     when (percents /= sortedStrictlyIncreasing percents) $
@@ -1459,7 +1464,7 @@ immediateRevertH _ap rid req@ImmediateRevertReq{isRevertSync = mIsRevertSync} = 
                 else case mTargetState of
                     Just (K8sState k8s) -> do
                         let ctx = context k8s
-                            ns = (K8s.namespace :: K8sReleaseContext -> Text) ctx
+                            K8s.K8sReleaseContext{K8s.namespace = ns} = ctx
                             nsQ = shellQuote ns
                             newDepName = deploymentName ctx
                             depQ = shellQuote newDepName
@@ -1685,7 +1690,7 @@ restartReleaseH _ap rid req = do
                                                 , oldVersionPodCount = Nothing
                                                 }
                                         wasNewService = case mTargetState of
-                                            Just (K8sState k8s) -> (newService :: K8sDeploymentState -> Bool) k8s
+                                            Just (K8sState K8sDeploymentState{newService = isNewService}) -> isNewService
                                             _ -> False
                                         restartedTargetState =
                                             K8sState $

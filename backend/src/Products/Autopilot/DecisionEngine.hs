@@ -753,9 +753,7 @@ for parse-only errors; HTTP-level errors honour @decision_engine_fail_closed@).
 
 Defensive layers (Julia parity):
   1. Volume floor (decision/runner.jl:494,537-541 volume_rate_result):
-     downgrade Abort → Wait if totalA < minA or totalB < minB. Defaults
-     match Julia (50, 100) but can be overridden via the optional
-     @minA@ / @minB@ args (read from server_config by the caller).
+     downgrade Abort → Wait if totalA < minA or totalB < minB.
   2. Volume rate-of-growth (decision/runner.jl:490-529 volume_rate_result):
      if the response includes prevTotalA / prevTotalB and the growth
      between samples is below @minRateA@ / @minRateB@, downgrade to Wait.
@@ -769,16 +767,8 @@ Defensive layers (Julia parity):
 
 All checks are no-ops if the engine omits the relevant fields — we
 trust the engine's verdict in that case and apply only the int → enum
-mapping.
--}
-parseDecisionResponse :: Value -> Text -> IO DecisionResult
-parseDecisionResponse v source =
-    parseDecisionResponseWithVolume v source 50 100
-
-{- | Variant of 'parseDecisionResponse' that accepts caller-supplied
-volume thresholds. The 'getHSDecision' wrapper reads them from
-server_config so operators can tighten/loosen per environment without
-recompiling.
+mapping. The caller supplies @minA@ / @minB@ (typically from
+server_config) so operators can tune thresholds without recompiling.
 -}
 parseDecisionResponseWithVolume :: Value -> Text -> Int -> Int -> IO DecisionResult
 parseDecisionResponseWithVolume (Object obj) source minA minB = do

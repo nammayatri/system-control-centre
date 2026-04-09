@@ -234,10 +234,6 @@ getThreadTs rid = do
         Just (tracker, _) -> pure (slackThreadTs tracker)
         Nothing -> pure Nothing
 
--- | Cheap accessor when the caller already has the tracker — no DB hit.
-getThreadTsFromTracker :: ReleaseTracker -> Maybe Text
-getThreadTsFromTracker = slackThreadTs
-
 {- | Resolve the slack thread_ts for a tracker, with single DB fallback.
 
 Race we are guarding against: createReleaseH inserts the tracker with

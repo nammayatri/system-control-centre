@@ -211,10 +211,15 @@ validateGlobalStatusTransition from to = to `elem` allowed from
 
 data RolloutStep = RolloutStep
     { rolloutPercent :: Int
+    -- ^ Traffic percentage shifted to the new version at this step (0-100).
     , cooloffMinutes :: Int
     -- ^ Cooloff duration in MINUTES. Matches Julia production semantics:
     -- the workflow multiplies by 60 before use.
-    , podPercent :: Int
+    , podCount :: Int
+    -- ^ Absolute number of pods to run on the new deployment at this step
+    -- (NOT a percentage). Used as the operatorFloor input to the
+    -- scaleNewDeploymentForStage formula. Renamed from @podPercent@ in the
+    -- 0011 migration; the field was always a raw count, never a percentage.
     }
     deriving (Eq, Show, Generic)
 
@@ -226,7 +231,9 @@ data RolloutHistory = RolloutHistory
     { historyRolloutPercent :: Int
     , historyCooloffMinutes :: Int
     -- ^ Cooloff duration in minutes (same unit as 'cooloffMinutes').
-    , historyPodsPercent :: Int
+    , historyPodsCount :: Int
+    -- ^ Snapshot of 'RolloutStep.podCount' at the time the step ran.
+    -- Renamed from @historyPodsPercent@ in the 0011 migration.
     , historyDecision :: Maybe Decision
     , historyDecisionReason :: Maybe Text
     , historyStartedAt :: UTCTime

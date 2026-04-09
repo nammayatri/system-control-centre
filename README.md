@@ -538,16 +538,16 @@ Releases support progressive rollout defined as a list of `RolloutStep`:
 
 ```json
 [
-  { "rolloutPercent": 10, "cooloffMinutes": 5,  "podPercent": 20 },
-  { "rolloutPercent": 50, "cooloffMinutes": 10, "podPercent": 50 },
-  { "rolloutPercent": 100, "cooloffMinutes": 0, "podPercent": 100 }
+  { "rolloutPercent": 10, "cooloffMinutes": 5,  "podCount": 2 },
+  { "rolloutPercent": 50, "cooloffMinutes": 10, "podCount": 5 },
+  { "rolloutPercent": 100, "cooloffMinutes": 0, "podCount": 10 }
 ]
 ```
 
 Each step specifies:
 - `rolloutPercent` -- percentage of traffic routed to new version (VirtualService weight).
 - `cooloffMinutes` -- wait time **in minutes** at this stage (matches Julia production semantics; the legacy `cooloffSeconds` field name was renamed). The workflow multiplies by 60 internally.
-- `podPercent` -- percentage of pods to run the new version.
+- `podCount` -- absolute number of pods to run the new version (NOT a percentage). Renamed from the misnamed `podPercent` in migration 0011.
 
 The embedded `rollout_history` payload inside `TRAFFIC_UPDATED` / `DECISION_RESULT` event records still uses Julia's `cooloff` key for external consumer compatibility.
 

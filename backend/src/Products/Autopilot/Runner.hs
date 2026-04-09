@@ -880,7 +880,7 @@ scaleDownLeakedNewDeployment :: Config -> TrackerWithTarget -> Flow ()
 scaleDownLeakedNewDeployment cfg (rt, mts) = case mts of
     Just (K8sState k8s) -> do
         let ctx = context k8s
-            ns = (K8s.namespace :: K8s.K8sReleaseContext -> T.Text) ctx
+            K8s.K8sReleaseContext{K8s.namespace = ns} = ctx
         case cleanupTargetDeployment ctx of
             Nothing -> pure ()
             Just depName | T.null depName -> pure ()

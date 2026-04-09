@@ -56,8 +56,6 @@ import qualified Products.Autopilot.Queries.ReleaseTracker as DB
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
 import Products.Autopilot.Types.Target (K8sDeploymentState (..), TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext)
-import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
-import Products.Autopilot.Workflow.Recorded (recordedWithPersist)
 import Products.Autopilot.Workflow.Types (
     ReleaseState (..),
     ReleaseWorkFlow,

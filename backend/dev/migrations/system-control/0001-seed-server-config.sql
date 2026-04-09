@@ -147,26 +147,28 @@ INSERT INTO server_config (type, name, value, enabled, product)
 SELECT 'DOUBLE', 'pods_scale_down_delay_config', '0', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'pods_scale_down_delay_config');
 
--- Pod-count ratchet multiplier used by scaleNewDeploymentForStage. Julia parity:
+-- Pod-count multiplier used by scaleNewDeploymentForStage. Julia parity:
 -- pods_calculation_factor (service.jl:17). The strategy formula is
 --   strategyByFactor = ceil(factor × oldDesired / 100 × routePercent).
 -- Default 1.0 means "match old version pods exactly". Setting > 1.0 adds
--- headroom over the old pod count for traffic-shift safety, but BEWARE: with
--- the HPA ratchet (max(live, computed)), each release inflates pods by
--- (factor − 1.0). e.g. factor=1.2 + identical 100% rollouts will grow the HPA
--- min by ~20% per release. In production this self-heals because the HPA
--- scales replicas down between releases under real CPU load; in test envs
--- with idle pods, leave at 1.0 to avoid runaway growth.
+-- headroom over the old pod count for traffic-shift safety. Safe to bump
+-- (e.g. 1.2 for 20% headroom) because progressive rollout no longer
+-- ratchets HPA bounds — it only scales the deployment directly, capped at
+-- the live HPA's maxReplicas. Inflated values just size the transient
+-- rollout bigger and settle back when the HPA reconciles.
 INSERT INTO server_config (type, name, value, enabled, product)
 SELECT 'DOUBLE', 'pods_calculation_factor', '1.0', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'pods_calculation_factor');
 
--- HPA min/max ratio used by scaleNewDeploymentForStage. Julia parity:
--- hpa_min_max_factor (service.jl:17). Defines the HPA max as
---   hpaMax = max(hpaMin, ceil(safeTarget × ratio)).
--- Default 1.0 = fixed-replica HPA (max == min). Operators should bump to 3.0+
--- for real autoscaling headroom. Kept at 1.0 by default to match the
--- conservative ratchet semantics.
+-- HPA min/max ratio used ONLY when creating a new HPA from a template on a
+-- first-ever release for a service (no prior HPA to clone from). Defines
+--   hpaMax = max(hpaMin, ceil(hpaMin × ratio))
+-- where hpaMin is the last rollout stage's podPct (the steady-state target).
+-- Default 4.0 gives the template HPA real autoscaling headroom (max = 4× min).
+-- On all subsequent releases the HPA is cloned verbatim from the prior version
+-- — min/max/metrics/behavior are preserved from whatever the operator has
+-- configured. Progressive rollout NEVER mutates HPA bounds; it only scales
+-- the deployment and caps safeTarget at the live HPA's maxReplicas.
 INSERT INTO server_config (type, name, value, enabled, product)
 SELECT 'DOUBLE', 'hpa_min_max_ratio', '4.0', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'hpa_min_max_ratio');
@@ -223,7 +225,7 @@ SELECT 'JSON', 'hpa_template',
       "name": "{{DEPLOYMENT-NAME}}"
     },
     "minReplicas": 1,
-    "maxReplicas": 1,
+    "maxReplicas": 100,
     "metrics": [
       {
         "type": "Resource",

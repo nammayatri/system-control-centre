@@ -77,7 +77,7 @@ import Products.Autopilot.K8s.Deployment (
  )
 import Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd)
-import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildCreateHpaFromTemplateCommand, buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax, hpaExists)
+import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildCreateHpaFromTemplateCommand, buildDeleteHpaCommand, getHpaMinMax, hpaExists)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRolloutWithRetries, getVirtualServiceJson)
 import Products.Autopilot.Notifications (
     notifyGenericThreadMessage,
@@ -274,13 +274,13 @@ extractInternalVsPrimarySubset vsJson host =
                                 pickBest (Object dest) acc =
                                     case KM.lookup (K.fromText "destination") dest of
                                         Just (Object d) ->
-                                            let h = case KM.lookup (K.fromText "host") d of
-                                                    Just (String s) -> s
+                                            let hostVal = case KM.lookup (K.fromText "host") d of
+                                                    Just (String hostTxt) -> hostTxt
                                                     _ -> ""
-                                                s = case KM.lookup (K.fromText "subset") d of
-                                                    Just (String x) -> Just x
+                                                subsetVal = case KM.lookup (K.fromText "subset") d of
+                                                    Just (String subsetTxt) -> Just subsetTxt
                                                     _ -> Nothing
-                                             in if h == host then s <|> acc else acc
+                                             in if hostVal == host then subsetVal <|> acc else acc
                                         _ -> acc
                                 pickBest _ acc = acc
                                 tryRules [] = Nothing
@@ -356,10 +356,11 @@ scaleNewDeploymentForStage ::
     K8sReleaseContext ->
     -- | rolloutPercent (traffic %) for this stage — feeds the formula
     Int ->
-    -- | minPods from rollout strategy (operator's explicit minimum pod count)
+    -- | podCount from rollout strategy (operator's explicit minimum pod count;
+    -- raw count, not a percentage). Renamed from podPct in the 0011 migration.
     Int ->
     StateFlow ()
-scaleNewDeploymentForStage cfg ctx routePct podPct = do
+scaleNewDeploymentForStage cfg ctx routePct stagePodCount = do
     rtNow <- getRT
     wfCfg <- loadWorkflowConfig (appGroup rtNow)
     let oldDep = serviceName ctx <> "-" <> oldVersion ctx
@@ -403,9 +404,10 @@ scaleNewDeploymentForStage cfg ctx routePct podPct = do
                         / 100.0
                     )
         -- Operator's explicit floor: absolute minimum pod count, never below 1.
-        -- podPct is a raw pod count (not a percentage) — consistent with
-        -- BackendSchedulerWorkflow and K8s/Deployment which both use max 1 (podPercent step).
-        operatorFloor = max 1 podPct
+        -- stagePodCount is a raw pod count (not a percentage) — consistent
+        -- with BackendSchedulerWorkflow and K8s/Deployment which both use
+        -- max 1 (podCount step).
+        operatorFloor = max 1 stagePodCount
         -- Final = max of every input. Never shrink, never under-provision.
         target =
             maximum
@@ -443,7 +445,7 @@ scaleNewDeploymentForStage cfg ctx routePct podPct = do
                     ((i, _) : _) -> drop (i + 1) strat
                     _ -> []
              in case idxAndNext of
-                    (next : _) -> max 1 (podPercent next)
+                    (next : _) -> max 1 (podCount next)
                     _ -> 0
         safeTarget =
             let baseTarget = if currentOld <= 0 then max 1 operatorFloor else target
@@ -482,57 +484,61 @@ scaleNewDeploymentForStage cfg ctx routePct podPct = do
                         <> T.pack (show oldVersionPods)
                         <> ", route%="
                         <> T.pack (show routePct)
-                        <> ", minPods="
-                        <> T.pack (show podPct)
+                        <> ", podCount="
+                        <> T.pack (show stagePodCount)
                         <> ", factor="
                         <> T.pack (show factor)
                         <> ")"
-            -- Prefer HPA min-floor patching; HPA holds the floor against
-            -- its own scale-down reconciliation cycle.
-            hpaPresent <- liftIO $ hpaExists cfg ns newHpa
-            if hpaPresent
-                then do
-                    -- Julia parity (hpa.jl:37 updateMinPods!): ratchet upward only.
-                    -- Read the LIVE HPA's current min/max and take max(live, computed)
-                    -- so an operator bump-up or an earlier stage's higher floor is
-                    -- never shrunk by this patch. Previously we blindly overwrote
-                    -- with the computed values, which could under-provision a
-                    -- service after a manual HPA edit.
-                    (liveMin, liveMax) <- liftIO $ getHpaMinMax cfg ns newHpa
-                    let computedMin = safeTarget
-                        computedMax = max computedMin (round (fromIntegral safeTarget * wcHpaMinMaxFactor wfCfg :: Double))
-                        hpaMin = max liveMin computedMin
-                        hpaMax = max liveMax computedMax
-                    logInfoS $
-                        "  [pods] Patching HPA "
-                            <> newHpa
-                            <> " min="
-                            <> T.pack (show hpaMin)
-                            <> " max="
-                            <> T.pack (show hpaMax)
-                            <> " (live was min="
-                            <> T.pack (show liveMin)
-                            <> " max="
-                            <> T.pack (show liveMax)
-                            <> ", computed min="
-                            <> T.pack (show computedMin)
-                            <> " max="
-                            <> T.pack (show computedMax)
-                            <> ")"
-                            <> logCtx
-                    _ <- liftIO $ runCmd (buildPatchHpaReplicasCommand cfg ns newHpa hpaMin hpaMax)
-                    -- E2 fix: also issue a kubectl scale --replicas hint so the
-                    -- HPA controller doesn't have to wait for its 15-90s
-                    -- reconciliation cycle before honoring the new floor. The
-                    -- HPA still owns the long-term replica count; this is just
-                    -- a one-shot kick to bridge the under-replica window. If
-                    -- the HPA reconciles first, the scale is a no-op.
-                    _ <- liftIO $ runCmd (buildScaleDeploymentCommand cfg ctx safeTarget)
-                    pure ()
-                else do
-                    logInfoS $ "  [pods] No HPA, direct scaling " <> newDep <> " to " <> T.pack (show safeTarget) <> logCtx
-                    _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx safeTarget)
-                    pure ()
+            -- Cap the formula target at the operator's configured HPA max.
+            -- The HPA itself is NOT mutated here — progressive rollout only
+            -- scales the deployment. If the formula demands more pods than
+            -- the HPA allows, we scale to the cap and log a warning event so
+            -- the operator can bump the HPA or reduce podCount.
+            --
+            -- Deliberate divergence from Julia (hpa.jl:37 updateMinPods! +
+            -- kubernetes.jl ratchet): the old code ratcheted HPA min/max
+            -- upward every stage via max(liveMin, computed), which turned
+            -- one cascaded replica count into a permanently pinned HPA. We
+            -- trust the HPA's operator-configured bounds instead; the
+            -- prepare stage is the ONLY place the workflow touches HPA
+            -- spec.minReplicas/spec.maxReplicas.
+            (_liveMin, liveMax) <- liftIO $ getHpaMinMax cfg ns newHpa
+            let cappedTarget
+                    | liveMax > 0 = min safeTarget liveMax
+                    | otherwise = safeTarget -- no HPA, or read failure
+                wasCapped = liveMax > 0 && safeTarget > liveMax
+            when wasCapped $ do
+                logWarningS $
+                    "  [pods] Rollout target "
+                        <> T.pack (show safeTarget)
+                        <> " exceeds HPA "
+                        <> newHpa
+                        <> " maxReplicas="
+                        <> T.pack (show liveMax)
+                        <> " — capping at "
+                        <> T.pack (show liveMax)
+                        <> logCtx
+                insertReleaseEvent
+                    (releaseId rtNow)
+                    "BUSINESS"
+                    "ROLLOUT_CAPPED_BY_HPA"
+                    ( object
+                        [ "hpa" .= newHpa
+                        , "safeTarget" .= safeTarget
+                        , "hpaMaxReplicas" .= liveMax
+                        , "cappedTo" .= liveMax
+                        , "routePct" .= routePct
+                        ]
+                    )
+            logInfoS $
+                "  [pods] Scaling "
+                    <> newDep
+                    <> " to "
+                    <> T.pack (show cappedTarget)
+                    <> (if wasCapped then " (capped from " <> T.pack (show safeTarget) <> ")" else "")
+                    <> logCtx
+            _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx cappedTarget)
+            pure ()
 
 {- | Apply VS rollout with a pessimistic lock around the operation.
 Acquires vs_locked_by before the kubectl call, releases after (success or fail).
@@ -934,45 +940,49 @@ prepareK8sResources = do
     _ <- runK8sIO $ ensureDestinationRule cfg ctx
     updateK8sField (\k8s -> k8s{destinationRuleApplied = True})
 
-    -- 5. HPA: patch existing new / clone old / create from template (Julia parity, kubernetes.jl:1641-1698)
+    -- 5. HPA: preserve existing / clone from old / create from template.
+    --
+    -- Design (deliberate divergence from Julia kubernetes.jl:1641-1698):
+    -- The HPA is mutated by the workflow in EXACTLY ONE place — this prepare
+    -- stage. Once the HPA exists for the new version, the progressive rollout
+    -- path scales the deployment directly and never touches HPA bounds again.
+    -- This makes operator intent sacred: whatever min/max the operator has on
+    -- the HPA at prepare time is what stays on the HPA for the life of the
+    -- release. See scaleNewDeploymentForStage for the deployment-only scaling.
     let hpaEnabled = wcHpaEnabled wfCfg
     when hpaEnabled $ do
         let newHpaName = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
             oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
             hpaMinMaxFactor = wcHpaMinMaxFactor wfCfg
             defaultMinPods = wcHpaDefaultMinPods wfCfg
-            computeMinMax desired =
+            computeTemplateMinMax desired =
+                -- Only used for first-release template creation.
                 let hpaMin = max 1 desired
                     hpaMax = max hpaMin (round (fromIntegral desired * hpaMinMaxFactor))
                  in (hpaMin, hpaMax)
 
-        -- Read desired replicas from old deployment if it exists; otherwise fall back to default.
-        desiredFromOld <- liftIO $ getDeploymentReplicaStatus cfg (namespace ctx) (serviceName ctx <> "-" <> oldVersion ctx)
-        let desiredReplicas = case desiredFromOld of
-                Right (_, _, d) -> d
-                Left _ -> defaultMinPods
-
         newHpaFound <- liftIO $ hpaExists cfg (namespace ctx) newHpaName
         if newHpaFound
             then do
-                -- Branch 1: new HPA already exists (retry / partial previous run). Patch min/max.
-                let (hpaMin, hpaMax) = computeMinMax desiredReplicas
-                logInfoS $ "  Patching existing HPA " <> newHpaName <> " (min=" <> T.pack (show hpaMin) <> " max=" <> T.pack (show hpaMax) <> ")"
-                patchResult <- liftIO $ runCmd (buildPatchHpaReplicasCommand cfg (namespace ctx) newHpaName hpaMin hpaMax)
-                case patchResult of
-                    Right _ -> do
-                        logInfoS "  HPA patched successfully"
-                        updateK8sField (\k8s -> k8s{hpaCreated = True})
-                        insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_PATCHED" (toJSON newHpaName)
-                    Left (K8sError err) -> logErrorS $ "  [HPA] Patch failed (non-fatal): " <> err
+                -- Branch 1: new HPA already exists (retry / partial previous run
+                -- or an earlier iteration of THIS run). Leave it alone —
+                -- whatever values are on it are either from our previous clone
+                -- (preserved from old HPA) or from an operator manual patch.
+                -- Either way, there is nothing for us to compute or patch.
+                logInfoS $ "  HPA " <> newHpaName <> " already exists, preserving (no patch)"
+                updateK8sField (\k8s -> k8s{hpaCreated = True})
+                insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_PRESERVED" (toJSON newHpaName)
             else do
                 oldHpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
                 if oldHpaFound
                     then do
-                        -- Branch 2: clone the old HPA into new
-                        let (hpaMin, hpaMax) = computeMinMax desiredReplicas
-                        logInfoS $ "  Cloning HPA from " <> oldHpaName
-                        cloneResult <- liftIO $ runCmd (buildCloneHpaCommand cfg (namespace ctx) (serviceName ctx) (oldVersion ctx) (newVersion ctx) oldHpaName hpaMin hpaMax)
+                        -- Branch 2: clone old HPA into new — verbatim.
+                        -- min/max/metrics/behavior all carry over from the old
+                        -- HPA. Only metadata.name + scaleTargetRef + object
+                        -- metric describedObject.name are rewritten. The
+                        -- clone command no longer takes or overrides min/max.
+                        logInfoS $ "  Cloning HPA from " <> oldHpaName <> " (preserving min/max/metrics/behavior)"
+                        cloneResult <- liftIO $ runCmd (buildCloneHpaCommand cfg (namespace ctx) (serviceName ctx) (oldVersion ctx) (newVersion ctx) oldHpaName)
                         case cloneResult of
                             Right _ -> do
                                 logInfoS "  HPA cloned successfully"
@@ -980,21 +990,23 @@ prepareK8sResources = do
                                 insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_CLONED" (toJSON newHpaName)
                             Left (K8sError err) -> logErrorS $ "  [HPA] Clone failed (non-fatal): " <> err
                     else do
-                        -- Branch 3: first release. Create from template.
-                        -- Julia parity (types/db/hpa.jl:14):
-                        --   defaultMinMax = tracker.rollout_strategy[1].pods, tracker.rollout_strategy[1].pods
-                        -- Use the operator's first-stage podPct as the floor for both
-                        -- min and max (Julia uses it for both — tight initial sizing,
-                        -- the per-stage ratchet bumps it up later). Falls back to
-                        -- defaultMinPods only if rolloutStrategy is empty (defensive).
-                        let firstStagePods = case rolloutStrategy rt of
-                                (s : _) -> max 1 (podPercent s)
+                        -- Branch 3: first release. Create from template using
+                        -- the LAST rollout stage's podCount as the steady-state
+                        -- target (instead of Julia's first-stage value, which
+                        -- relied on a per-stage ratchet we no longer have).
+                        -- Falls back to defaultMinPods only if rolloutStrategy
+                        -- is empty (defensive). The template's own min/max are
+                        -- overwritten via jq — this is the ONE place where we
+                        -- compute HPA bounds, because there is no prior HPA to
+                        -- carry forward from.
+                        let targetPods = case rolloutStrategy rt of
                                 [] -> defaultMinPods
+                                steps -> max 1 (podCount (last steps))
                         mTemplate <- getHpaTemplate
                         case mTemplate of
                             Just tmpl | not (T.null tmpl) -> do
-                                let (hpaMin, hpaMax) = computeMinMax firstStagePods
-                                logInfoS $ "  Creating HPA from template: " <> newHpaName
+                                let (hpaMin, hpaMax) = computeTemplateMinMax targetPods
+                                logInfoS $ "  Creating HPA from template: " <> newHpaName <> " (min=" <> T.pack (show hpaMin) <> " max=" <> T.pack (show hpaMax) <> ")"
                                 createResult <- liftIO $ runCmd (buildCreateHpaFromTemplateCommand cfg (namespace ctx) (serviceName ctx) (newVersion ctx) tmpl hpaMin hpaMax)
                                 case createResult of
                                     Right _ -> do
@@ -1109,7 +1121,7 @@ progressiveRollout = do
                                 firstOldW = max 0 (100 - firstNewW)
                             logInfoS $ "  Initial rollout step: new=" <> T.pack (show firstNewW) <> "%, cooloff=" <> T.pack (show (cooloffMinutes firstStep)) <> "min"
                             -- Scale new deployment via the Julia max() formula BEFORE shifting traffic.
-                            scaleNewDeploymentForStage cfg ctx firstNewW (podPercent firstStep)
+                            scaleNewDeploymentForStage cfg ctx firstNewW (podCount firstStep)
                             -- Julia parity: wait for new pods to be Ready before flipping VS.
                             waitForStagePodsReady cfg ctx
                             runVsRolloutWithLock cfg ctx (wcMaxK8sRetries wfCfg) firstOldW firstNewW
@@ -1117,7 +1129,7 @@ progressiveRollout = do
 
                             -- Record rollout history for first step
                             stepStartTime <- liftIO getCurrentTime
-                            let firstHist = mkRolloutHistory firstNewW (cooloffMinutes firstStep) (podPercent firstStep) stepStartTime Nothing
+                            let firstHist = mkRolloutHistory firstNewW (cooloffMinutes firstStep) (podCount firstStep) stepStartTime Nothing
                             updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [firstHist]}
                             currentRT <- getRT
                             casUpdateOrBail
@@ -1376,6 +1388,7 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                             case combinedDecision of
                                                 Continue -> pure True -- advance
                                                 Wait -> pure False -- stay at current step, re-loop
+                                                WaitForMoreIteration -> pure False -- stay at current step, re-loop
                                                 Abort -> do
                                                     -- Production parity (service.jl:213): first STATUS_UPDATED
                                                     logStatusUpdated rtForEvent "ABORTING the release because of the Decision Engine"
@@ -1423,7 +1436,7 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                                     <> "min"
 
                                             -- Scale new deployment via the Julia max() formula BEFORE shifting traffic.
-                                            scaleNewDeploymentForStage cfg ctx nextNewW (podPercent nextStep)
+                                            scaleNewDeploymentForStage cfg ctx nextNewW (podCount nextStep)
                                             -- Julia parity: wait for the newly-scaled pods to reach
                                             -- Ready before shifting more traffic to them. Otherwise
                                             -- the VS flip below sends traffic to ContainerCreating
@@ -1443,7 +1456,7 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                             -- Record new rollout history entry
                                             -- Production line 489: setRolloutHistory!(tracker, push!(...))
                                             newStepStart <- liftIO getCurrentTime
-                                            let newHist = mkRolloutHistory nextNewW (cooloffMinutes nextStep) (podPercent nextStep) newStepStart Nothing
+                                            let newHist = mkRolloutHistory nextNewW (cooloffMinutes nextStep) (podCount nextStep) newStepStart Nothing
                                             updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [newHist]}
 
                                             -- Persist to DB via CAS — bail if a concurrent state
@@ -1478,7 +1491,7 @@ mkRolloutHistory rollout cooloff pods startedAt completedAt =
     RolloutHistory
         { historyRolloutPercent = rollout
         , historyCooloffMinutes = cooloff
-        , historyPodsPercent = pods
+        , historyPodsCount = pods
         , historyDecision = Nothing
         , historyDecisionReason = Nothing
         , historyStartedAt = startedAt
@@ -1625,6 +1638,9 @@ postMonitorLoop wfCfg cfg rt iteration loopStart = do
                                 <> " — operator must decide whether to revert manually."
                             )
                 Wait -> do
+                    threadDelay (Seconds (wcCollectMetricsDelay wfCfg))
+                    postMonitorLoop wfCfg cfg rt (iteration + 1) loopStart
+                WaitForMoreIteration -> do
                     threadDelay (Seconds (wcCollectMetricsDelay wfCfg))
                     postMonitorLoop wfCfg cfg rt (iteration + 1) loopStart
 
@@ -1838,7 +1854,7 @@ cleanupOldVersion = do
             logInfoS $ "  Scheduling scale-down for old deployment: " <> oldDepName
             scheduleAt <- liftIO $ do
                 t <- getCurrentTime
-                let delaySec = realToFrac (wcPodsScaleDownDelay wfCfg * 60.0) :: Double
+                let delaySec = wcPodsScaleDownDelay wfCfg * 60.0
                 pure (addUTCTime (realToFrac delaySec :: NominalDiffTime) t)
             updateK8sField $ \k8s ->
                 let oldCtx = context k8s

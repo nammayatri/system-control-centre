@@ -22,11 +22,15 @@ hpaExists cfg ns hpaName = do
     res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get hpa", shellQuote hpaName, "-o name"])
     pure $ case res of Right _ -> True; Left _ -> False
 
-{- | Julia parity (@getHpaMinMax@ in kubernetes.jl): read the live HPA's
-@spec.minReplicas@ and @spec.maxReplicas@. Used by the ratchet-upward
-logic in 'scaleNewDeploymentForStage' so we never shrink an operator's
-manual bump-up of the floor. Returns @(0, 0)@ on any failure so the
-caller falls through to "just use the computed values".
+{- | Read the live HPA's @spec.minReplicas@ and @spec.maxReplicas@.
+Used by:
+  * 'scaleNewDeploymentForStage' — to cap 'safeTarget' at 'maxReplicas'
+    so progressive rollout never tries to scale past the operator's
+    configured HPA ceiling.
+  * 'Runner.scaleDownOldDeployment' — to shrink the old HPA's floor
+    before deleting it, closing the reconciler race.
+Returns @(0, 0)@ on any failure (get-hpa error, parse error). Callers
+treat @maxReplicas == 0@ as "no live cap, use raw safeTarget".
 -}
 getHpaMinMax :: Config -> Text -> Text -> IO (Int, Int)
 getHpaMinMax cfg ns hpaName = do
@@ -77,33 +81,38 @@ buildCreateHpaFromTemplateCommand cfg ns serviceHost version hpaTemplate minR ma
         jqFilter = ".spec.minReplicas = " <> show minR <> " | .spec.maxReplicas = " <> show maxR
      in unwords ["echo", shellQuote withNs, "| jq", "'" <> jqFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote ns, "apply -f -"]
 
-buildCloneHpaCommand :: Config -> Text -> Text -> Text -> Text -> Text -> Int -> Int -> String
-buildCloneHpaCommand cfg ns serviceHost _oldVersion newVersion' oldHpaName minR maxR =
-    -- Julia parity (kubernetes.jl:1199-1247 createHpaFiles):
+buildCloneHpaCommand :: Config -> Text -> Text -> Text -> Text -> Text -> String
+buildCloneHpaCommand cfg ns serviceHost _oldVersion newVersion' oldHpaName =
+    -- Clone the old HPA onto the new deployment while preserving operator
+    -- intent verbatim: min/max/metrics/behavior all carry over from the old
+    -- HPA. Only identity + target pointers are rewritten:
+    --
     --   1. metadata.name → new HPA name
     --   2. spec.scaleTargetRef.name → new deployment name
-    --   3. spec.minReplicas / spec.maxReplicas → computed values
-    --   4. Strip stale annotations: last-applied-configuration,
+    --   3. Strip stale annotations: last-applied-configuration,
     --      autoscaling.alpha.kubernetes.io/current-metrics,
-    --      autoscaling.alpha.kubernetes.io/conditions (kubernetes.jl:1211-1223)
-    --   5. For autoscaling/v2 with object metrics, also update
+    --      autoscaling.alpha.kubernetes.io/conditions
+    --   4. For autoscaling/v2 with object metrics, rewrite
     --      spec.metrics[*].object.describedObject.name → new deployment name
-    --      (kubernetes.jl:1238). Without this, an HPA targeting a queue/HTTP
-    --      object metric on the OLD deployment will keep scaling against the
-    --      old deployment's metric instead of the new one.
+    --      (so object metrics scale against the NEW deployment, not the old).
+    --
+    -- Rationale (deliberate divergence from Julia's kubernetes.jl:1199-1247):
+    -- Julia recomputed spec.minReplicas/spec.maxReplicas here from a formula
+    -- based on the old deployment's replica count, then ratcheted upward every
+    -- rollout stage. That cascaded into min=max=N pinned HPAs whenever a prior
+    -- stage inflated the replica count (revert/restart). We stop the cascade
+    -- by letting the clone preserve whatever min/max the operator has on the
+    -- old HPA; the progressive-rollout path scales the deployment directly
+    -- and no longer touches HPA bounds. See scaleNewDeploymentForStage.
     let newDepName = T.unpack serviceHost <> "-" <> T.unpack newVersion'
         newHpaName = newDepName <> "-hpa"
         jqFilter =
             ".metadata.name = $newHpaName"
                 <> " | .spec.scaleTargetRef.name = $newDepName"
-                <> " | .spec.minReplicas = "
-                <> show minR
-                <> " | .spec.maxReplicas = "
-                <> show maxR
                 <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.status)"
-                -- Strip stale annotations Julia removes (kubernetes.jl:1211-1223)
+                -- Strip stale annotations that would otherwise collide with apply
                 <> " | if .metadata.annotations then .metadata.annotations |= (del(.\"kubectl.kubernetes.io/last-applied-configuration\", .\"autoscaling.alpha.kubernetes.io/current-metrics\", .\"autoscaling.alpha.kubernetes.io/conditions\")) else . end"
-                -- v2 HPA: rewrite describedObject.name on each object-type metric
-                -- (kubernetes.jl:1238). No-op for CPU/memory metrics.
+                -- v2 HPA: rewrite describedObject.name on each object-type metric.
+                -- No-op for CPU/memory metrics.
                 <> " | if .spec.metrics then .spec.metrics |= map(if .object then .object.describedObject.name = $newDepName else . end) else . end"
      in unwords [kubectlBin cfg, "-n", shellQuote ns, "get hpa", shellQuote oldHpaName, "-o json | jq", "--arg newHpaName", shellQuote (T.pack newHpaName), "--arg newDepName", shellQuote (T.pack newDepName), "'" <> jqFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote ns, "apply -f -"]

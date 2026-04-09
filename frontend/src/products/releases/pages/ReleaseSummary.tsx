@@ -473,7 +473,7 @@ const RolloutStrategyTab: React.FC<{
           rolloutStrategy: stages.map(s => ({
             rolloutPercent: s.rollout,
             cooloffMinutes: s.cooloff,
-            podPercent: s.pods,
+            podCount: s.pods,
           })),
         },
       });
