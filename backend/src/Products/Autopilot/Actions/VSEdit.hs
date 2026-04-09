@@ -106,22 +106,6 @@ forceUnlockAppGroupTransactional ag = do
                 (PG.Only ag)
         pure tid
 
-{- | Legacy single-table helper kept for the periodic expired-lock sweep
-which already updates deployment_config separately in its own txn.
--}
-unlockOrphanLockedTrackersForAppGroup :: Text -> Flow ()
-unlockOrphanLockedTrackersForAppGroup ag = do
-    db <- getDBEnv
-    liftIO $ withConn db $ \conn -> do
-        _ <-
-            PG.execute
-                conn
-                "UPDATE release_tracker \
-                \SET status = 'UNLOCKED', last_updated = NOW(), end_time = NOW() \
-                \WHERE category = 'VSEdit' AND status = 'LOCKED' AND app_group = ?"
-                (PG.Only ag)
-        pure ()
-
 {- | Convert a release_tracker row (category=VSEdit) to VsEditTrackerResponse
 VS-specific data: old_vs_data and new_vs_data are now stored as SNAPSHOT events.
 Lock info is in deployment_config.vs_locked_by.

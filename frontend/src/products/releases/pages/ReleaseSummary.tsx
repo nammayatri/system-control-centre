@@ -267,10 +267,10 @@ const PodHealthSection: React.FC<{ releaseId: string; release: any }> = ({ relea
           ))}
         </div>
         {pods.length > 0 && (
-          <div className="overflow-x-auto -mx-4 sm:mx-0">
+          <div className="border border-zinc-200 rounded-md -mx-4 sm:mx-0 max-h-96 overflow-y-auto overflow-x-auto">
             <table className="w-full text-sm text-left border-collapse">
-              <thead>
-                <tr className="bg-zinc-50 border-y border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+              <thead className="sticky top-0 z-10">
+                <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider shadow-[0_1px_0_rgb(228_228_231)]">
                   <th className="py-2 px-3">Name</th>
                   <th className="py-2 px-3">Status</th>
                   <th className="py-2 px-3">Ready</th>

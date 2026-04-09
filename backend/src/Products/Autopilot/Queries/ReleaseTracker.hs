@@ -589,16 +589,12 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
 fromRow :: ReleaseTrackerRow -> TrackerWithTarget
 fromRow ReleaseTrackerT{..} =
     let
-        -- Deserialize the target_state column once into a generic Aeson Value,
-        -- then try TargetState first and fall back to legacy K8sReleaseContext.
-        -- This avoids paying for two full JSON parses on every row.
+        -- Deserialize the target_state column into TargetState.
         mTargetState = case parseJsonTextMaybe rtTargetState :: Maybe Value of
             Nothing -> Nothing
             Just v -> case fromJSON v :: Aeson.Result TargetState of
                 Aeson.Success ts -> Just ts
-                Aeson.Error _ -> case fromJSON v :: Aeson.Result K8sReleaseContext of
-                    Aeson.Success ctx -> Just $ K8sState $ emptyK8sState{context = ctx}
-                    Aeson.Error _ -> Nothing
+                Aeson.Error _ -> Nothing
         -- Extract the K8s context as a JSON Value so the frontend can display
         -- cluster / namespace / pods scale-down status / etc.
         mReleaseContext = case mTargetState of
@@ -648,14 +644,12 @@ parseReleaseCategory t =
     case T.toUpper t of
         "BACKENDSERVICE" -> BackendService
         "BACKENDSCHEDULER" -> BackendScheduler
-        "BACKENDCRONJOB" -> BackendCronJob
-        "BACKENDJOB" -> BackendJob
         "BACKENDCONFIG" -> BackendConfig
-        "MOBILEAPPANDROID" -> MobileAppAndroid
-        "MOBILEAPPIOS" -> MobileAppIOS
-        "WEBAPPLICATION" -> WebApplication
-        "INFRASTRUCTURE" -> Infrastructure
         "VSEDIT" -> VSEdit
+        -- Any unknown string (including legacy retired categories like
+        -- 'BackendJob', 'BackendCronJob', 'MobileAppAndroid', etc.) hits the
+        -- generic fallback below, which logs a warning trace so the operator
+        -- sees the unexpected value instead of it being silently swallowed.
         _ ->
             DT.trace
                 ("[parseReleaseCategory] WARNING: unknown category " <> show t <> ", defaulting to BackendService")
@@ -676,7 +670,6 @@ parseReleaseWFStatus t =
         "FINALIZING" -> FINALIZING
         "DONE" -> DONE
         "ROLLING_BACK" -> ROLLING_BACK
-        "ROLLINGBACK" -> ROLLING_BACK -- legacy pascalCase-without-underscore
         _ ->
             DT.trace
                 ("[parseReleaseWFStatus] WARNING: unknown status " <> show t <> ", defaulting to INIT")

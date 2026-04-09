@@ -18,7 +18,7 @@ Production parity notes (service.jl):
 - Pod counts are calculated using podsCalculationFactor and old-version ratio.
 -}
 module Products.Autopilot.Workflow.BackendServiceWorkflow (
-    backendServiceWorkflow,
+    backendServiceSpec,
 )
 where
 
@@ -37,6 +37,8 @@ import Core.Types.Time (Seconds (..), threadDelay)
 
 import Core.Environment (getConfig, getLoggerEnv, logError, logInfo, logWarning)
 import Core.Logging (LoggerEnv, logErrorIO, logInfoIO)
+import Core.Workflow.Spec (WorkflowSpec (..))
+import Core.Workflow.Stage (Stage)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
@@ -124,30 +126,88 @@ import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers (
     captureDeploymentSnapshot,
     getRT,
+    persistWorkflowState,
     updateRT,
-    (|>>),
  )
+import Products.Autopilot.Workflow.StageHelpers (mkLegacyStateFlowStage)
 import Products.Autopilot.Workflow.Types (
     ReleaseState (..),
-    ReleaseWorkFlow,
     StateFlow,
  )
 import Shared.Config.Runtime (getConfigBoolForProduct)
 import Prelude
 
 -- ============================================================================
--- Workflow Definition
+-- Workflow Spec — the only entry point
 -- ============================================================================
 
--- | Backend service workflow using generic stages
-backendServiceWorkflow :: ReleaseWorkFlow ()
-backendServiceWorkflow = do
-    INIT |>> validatePreconditions
-    PREPARING |>> prepareK8sResources
-    DEPLOYING |>> progressiveRollout
-    MONITORING |>> monitorHealth
-    FINALIZING |>> cleanupOldVersion
-    DONE |>> notifyComplete
+{- | Backend service workflow expressed as a 'WorkflowSpec' value.
+
+Same shape as 'BackendSchedulerWorkflow.backendSchedulerSpec' — every
+workflow is a __value__ (a record of stages), not a function. The same
+six-step canonical lifecycle (skip-check → acquire-locks → pre-check → exec
+→ validate → advance-and-persist) runs every stage through the engine in
+'Core.Workflow.Engine'.
+
+Each stage uses the existing legacy 'StateFlow' function bodies via
+'mkLegacyStateFlowStage' — we are __preserving__ the existing semantics,
+not rewriting them. The bulk of this 1800+ LOC file (the helper functions
+@validatePreconditions@, @prepareK8sResources@, @progressiveRollout@,
+@rolloutLoop@, @monitorHealth@, @postMonitorLoop@, @cleanupOldVersion@,
+@notifyComplete@, @scaleNewDeploymentForStage@, @waitForPodsReady@,
+@checkPodHealthDetailed@, etc.) stays intact and is wrapped by the spec.
+Future PRs can incrementally split each @stageExec@ into more granular
+'Stage' values as desired.
+
+== Behavior preservation ==
+
+* Same six stages in the same order (init → prepare → deploy → monitor →
+  finalize → done)
+* Same skip-if-past semantics (@stageGuard@ mirrors @stateCheckFuncV2@)
+* Same advance semantics (@stageOnAdvance@ mirrors @cprV2@'s @modify@)
+* Same persistence (@wsPersist@ = @persistWorkflowState@)
+* Same legacy function bodies (run via @liftStateFlow@)
+* Workflow-level rollback still handled by Runner's
+  @restoreVsTrafficOnFailure@ at the dispatch site (Runner.hs:445); the
+  @wsRollback@ here is a no-op.
+
+This is the production hot path. Behavior is identical to the old @|>>@
+path that this replaced.
+-}
+backendServiceSpec :: WorkflowSpec ReleaseState
+backendServiceSpec =
+    WorkflowSpec
+        { wsName = "BackendService"
+        , wsStages =
+            [ serviceStageInit
+            , serviceStagePrepare
+            , serviceStageDeploy
+            , serviceStageMonitor
+            , serviceStageFinalize
+            , serviceStageDone
+            ]
+        , -- Workflow-level rollback is handled by the runner's
+          -- restoreVsTrafficOnFailure (called from Runner.hs:445), so the
+          -- spec-level rollback is a no-op. Future work: move the runner's
+          -- VS traffic restore into wsRollback so the engine handles it
+          -- uniformly.
+          wsRollback = \_err -> pure ()
+        , wsPersist = persistWorkflowState
+        }
+
+serviceStageInit
+    , serviceStagePrepare
+    , serviceStageDeploy
+    , serviceStageMonitor
+    , serviceStageFinalize
+    , serviceStageDone ::
+        Stage ReleaseState
+serviceStageInit = mkLegacyStateFlowStage "init" INIT validatePreconditions
+serviceStagePrepare = mkLegacyStateFlowStage "prepare" PREPARING prepareK8sResources
+serviceStageDeploy = mkLegacyStateFlowStage "deploy" DEPLOYING progressiveRollout
+serviceStageMonitor = mkLegacyStateFlowStage "monitor" MONITORING monitorHealth
+serviceStageFinalize = mkLegacyStateFlowStage "finalize" FINALIZING cleanupOldVersion
+serviceStageDone = mkLegacyStateFlowStage "done" DONE notifyComplete
 
 -- ============================================================================
 -- Helpers: Config / Context / K8s IO
@@ -709,10 +769,31 @@ validatePreconditions = do
                             let msg = "Internal VS subset (" <> subset <> ") does not match tracker oldVersion (" <> expectedOld <> ")"
                             logErrorS $ "  " <> msg
                             insertReleaseEvent (releaseId rt') "BUSINESS" "VERSION_MISMATCH_INTERNAL_VS" (toJSON msg)
+                            -- Bug fix B7: re-read the tracker from DB to get the current
+                            -- live status as the CAS baseline. The previous code used
+                            -- 'status rt'' from line 687, which is a stale snapshot from
+                            -- before this stage started — if a concurrent process modified
+                            -- the tracker during the kubectl call (a multi-second window),
+                            -- the CAS would silently fail (returning False) and orphan a
+                            -- tracker in a bad state with no exception.
+                            freshM <- findReleaseTracker (releaseId rt')
+                            let baselineStatus = case freshM of
+                                    Just (freshRT, _) -> releaseStatusText (status freshRT)
+                                    Nothing -> releaseStatusText (status rt')
                             updateRT $ \r -> r{status = DISCARDED}
                             currentRT <- getRT
                             currentTS <- gets targetState
-                            _ <- conditionalUpdateTracker currentRT currentTS (releaseStatusText (status rt'))
+                            casOk <- conditionalUpdateTracker currentRT currentTS baselineStatus
+                            unless casOk $ do
+                                logErrorS $
+                                    "  CAS failed when marking DISCARDED — tracker "
+                                        <> releaseId rt'
+                                        <> " was concurrently modified by another process; leaving DB status as-is"
+                                insertReleaseEvent
+                                    (releaseId rt')
+                                    "BUSINESS"
+                                    "CAS_FAILED_VS_VERSION_MISMATCH"
+                                    (toJSON ("CAS baseline=" <> baselineStatus :: T.Text))
                             liftIO $ throwIO $ WorkflowError "vs-internal" msg
 
     logInfoS "  Cluster reachable, namespace exists"

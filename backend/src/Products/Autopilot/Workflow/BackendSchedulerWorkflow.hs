@@ -10,7 +10,7 @@ Unlike BackendServiceWorkflow, schedulers use pod-count based rollout:
 - Pod count at each step: max(podsRolloutRatio * rollout%, totalPods)
 -}
 module Products.Autopilot.Workflow.BackendSchedulerWorkflow (
-    backendSchedulerWorkflow,
+    backendSchedulerSpec,
 )
 where
 
@@ -21,8 +21,10 @@ import Control.Monad.State.Strict (gets, modify)
 import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
-import Core.Environment (getConfig, logInfo, logWarning)
+import Core.Environment (getConfig, logError, logInfo, logWarning)
 import Core.Types.Time (threadDelaySec)
+import Core.Workflow.Spec (WorkflowSpec (..))
+import Core.Workflow.Stage (Stage)
 import qualified Data.Text as T
 import Products.Autopilot.K8s.Deployment (
     buildCloneDeploymentCommand,
@@ -55,30 +57,68 @@ import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers (
     captureDeploymentSnapshot,
     getRT,
+    persistWorkflowState,
     updateRT,
     withK8sContext,
-    (|>>),
  )
+import Products.Autopilot.Workflow.StageHelpers (mkLegacyStateFlowStage)
 import Products.Autopilot.Workflow.Types (
     ReleaseState (..),
-    ReleaseWorkFlow,
     StateFlow,
  )
 import Prelude
 
 -- ============================================================================
--- Workflow Definition
+-- Workflow Spec — the only entry point
 -- ============================================================================
 
--- | Backend scheduler workflow using pod-count based rollout (no traffic shifting)
-backendSchedulerWorkflow :: ReleaseWorkFlow ()
-backendSchedulerWorkflow = do
-    INIT |>> validatePreconditions
-    PREPARING |>> prepareK8sResources
-    DEPLOYING |>> podCountRollout
-    MONITORING |>> monitorHealth
-    FINALIZING |>> cleanupOldVersion
-    DONE |>> notifyComplete
+{- | Backend scheduler workflow expressed as a 'WorkflowSpec' value.
+
+Every workflow is a __value__ (a record holding a list of stages + lifecycle
+hooks), not a function. The same canonical six-step lifecycle (skip-check →
+acquire-locks → pre-check → exec → validate → advance-and-persist) runs
+every stage through the engine in 'Core.Workflow.Engine'. The shape is
+identical to what infra-switch's 'StageInterface' was designed for, just
+with @s@ as a type parameter so any future SCC product can plug in.
+
+Each stage uses the existing legacy 'StateFlow' function bodies via
+'mkLegacyStateFlowStage' — we are __preserving__ the existing semantics,
+not rewriting them. Future PRs can incrementally split each @stageExec@
+into @stagePreCheck@ + @stageExec@ + per-stage @stageOnError@ as desired.
+-}
+backendSchedulerSpec :: WorkflowSpec ReleaseState
+backendSchedulerSpec =
+    WorkflowSpec
+        { wsName = "BackendScheduler"
+        , wsStages =
+            [ schedulerStageInit
+            , schedulerStagePrepare
+            , schedulerStageDeploy
+            , schedulerStageMonitor
+            , schedulerStageFinalize
+            , schedulerStageDone
+            ]
+        , -- Workflow-level rollback is handled by the runner's
+          -- restoreVsTrafficOnFailure (called from Runner.hs:445), so the
+          -- spec-level rollback is a no-op. Future work: move the runner's
+          -- rollback into wsRollback so the engine handles it uniformly.
+          wsRollback = \_err -> pure ()
+        , wsPersist = persistWorkflowState
+        }
+
+schedulerStageInit
+    , schedulerStagePrepare
+    , schedulerStageDeploy
+    , schedulerStageMonitor
+    , schedulerStageFinalize
+    , schedulerStageDone ::
+        Stage ReleaseState
+schedulerStageInit = mkLegacyStateFlowStage "init" INIT validatePreconditions
+schedulerStagePrepare = mkLegacyStateFlowStage "prepare" PREPARING prepareK8sResources
+schedulerStageDeploy = mkLegacyStateFlowStage "deploy" DEPLOYING podCountRollout
+schedulerStageMonitor = mkLegacyStateFlowStage "monitor" MONITORING monitorHealth
+schedulerStageFinalize = mkLegacyStateFlowStage "finalize" FINALIZING cleanupOldVersion
+schedulerStageDone = mkLegacyStateFlowStage "done" DONE notifyComplete
 
 -- ============================================================================
 -- Helpers: Config / Context / K8s IO
@@ -94,6 +134,9 @@ logInfoS = lift . logInfo
 
 logWarningS :: T.Text -> StateFlow ()
 logWarningS = lift . logWarning
+
+logErrorS :: T.Text -> StateFlow ()
+logErrorS = lift . logError
 
 -- | Extract K8sReleaseContext from the current workflow state
 getK8sCtx :: StateFlow K8sReleaseContext
@@ -184,9 +227,14 @@ prepareK8sResources = do
             pure ()
     updateK8sField (\k8s -> k8s{deploymentCreated = True})
 
-    -- Wait for verification pod to be ready
-    logInfoS "  Waiting for verification pod"
-    liftIO $ threadDelaySec 10
+    -- Bug fix B10: replace the previous fixed `threadDelaySec 10` (which
+    -- waited a fixed 10 seconds and then logged a warning if pods were not
+    -- ready) with a real readiness poll. We poll up to 30 times at 10s
+    -- intervals (~5 min total, matching BackendServiceWorkflow's
+    -- `pod_readiness_max_attempts` / `pod_readiness_poll_seconds` defaults)
+    -- and bail loudly if the pod never reaches ready≥1.
+    logInfoS "  Waiting for verification pod readiness (max 30 polls × 10s)"
+    waitForSchedulerPodReady cfg ctx 30 10
     checkDeploymentHealth cfg ctx
 
     logInfoS "K8s resources prepared for scheduler"
@@ -264,6 +312,48 @@ checkDeploymentHealth cfg ctx = do
             <> T.pack (show desired)
     when (ready < desired) $
         logWarningS "    WARNING: Not all replicas ready yet"
+
+{- | Poll deployment replica status until ready≥desired or timeout.
+
+This is a minimal scheduler-local readiness check that replaces the previous
+fixed `threadDelaySec 10` (bug B10). It polls 'getDeploymentReplicaStatus' at
+fixed intervals and throws 'WorkflowError' if the deployment never reaches
+the ready state. The full pod-health checking (CrashLoopBackOff, ImagePull
+failure, restart count) lives in 'BackendServiceWorkflow.waitForPodsReady'
+and will be extracted to a shared module in the foundation phase.
+
+@maxAttempts@ × @pollSeconds@ = total wait budget. Defaults to 30 × 10 = 5min.
+-}
+waitForSchedulerPodReady :: Config -> K8sReleaseContext -> Int -> Int -> StateFlow ()
+waitForSchedulerPodReady cfg ctx maxAttempts pollSeconds = go 0
+  where
+    go attempt
+        | attempt >= maxAttempts = do
+            let msg =
+                    "Scheduler pod readiness timeout after "
+                        <> T.pack (show maxAttempts)
+                        <> " polls × "
+                        <> T.pack (show pollSeconds)
+                        <> "s"
+            logErrorS $ "    " <> msg
+            liftIO $ throwIO $ WorkflowError "scheduler-readiness" msg
+        | otherwise = do
+            liftIO $ threadDelaySec pollSeconds
+            (ready, _avail, desired) <-
+                runK8sIO $
+                    getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
+            logInfoS $
+                "    Poll "
+                    <> T.pack (show (attempt + 1))
+                    <> "/"
+                    <> T.pack (show maxAttempts)
+                    <> ": ready="
+                    <> T.pack (show ready)
+                    <> "/"
+                    <> T.pack (show desired)
+            if ready >= desired && desired > 0
+                then logInfoS "    Verification pod is Ready"
+                else go (attempt + 1)
 
 -- | Monitor health: poll replica status for stabilisation period
 monitorHealth :: StateFlow ()

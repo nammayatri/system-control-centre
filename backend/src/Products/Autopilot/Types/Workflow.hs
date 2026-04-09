@@ -1,20 +1,25 @@
 {- | Top-level workflow types
 
 This module contains the high-level types for release workflows:
-- ReleaseCategory: What type of release (BackendService, MobileAppAndroid, etc.)
+- ReleaseCategory: What type of release (BackendService, BackendScheduler, BackendConfig, VSEdit)
 - ReleaseWFStatus: Generic workflow stages (INIT, DEPLOYING, MONITORING, DONE, etc.)
 
 These types are deployment-target agnostic and apply to ALL releases.
+
+Note: BackendCronJob, BackendJob, MobileAppAndroid, MobileAppIOS, WebApplication,
+and Infrastructure constructors were removed because the corresponding workflows
+are not currently in use. They will be re-added when those products are needed.
+The four kept categories (BackendService, BackendScheduler, BackendConfig, VSEdit)
+each have a working workflow / action handler in 'Products.Autopilot.Workflow.*'
+or 'Products.Autopilot.Actions.*'.
 -}
 module Products.Autopilot.Types.Workflow (
     -- * Release Category
     ReleaseCategory (..),
     getDefaultDeploymentTarget,
-    migrateTrackerTypeToCategory,
 
     -- * Generic Workflow Stages
     ReleaseWFStatus (..),
-    migrateWorkflowStatusToReleaseWFStatus,
 )
 where
 
@@ -30,33 +35,24 @@ import GHC.Generics (Generic)
 
 This determines:
 - Which deployment workflow to use
-- What DeploymentState type to create (K8sState, PlayStoreState, etc.)
+- What DeploymentState type to create (K8sState or ConfigState)
 - Which deployment backend/API to interact with
 
 Terminology:
-- product (field) = Service/app name (e.g., "Beckn", "rider-android")
-- category (field) = ReleaseCategory (e.g., BackendService, MobileAppAndroid)
+- product (field) = Service/app name (e.g., "Beckn")
+- category (field) = ReleaseCategory (BackendService, BackendScheduler,
+  BackendConfig, VSEdit)
 -}
 data ReleaseCategory
     = -- | Backend microservices (REST APIs, gRPC services)
       BackendService
-    | -- | Backend scheduled jobs (run periodically)
+    | -- | Backend scheduled jobs (run periodically, no VS/DR)
       BackendScheduler
-    | -- | Backend cron jobs (cron-triggered)
-      BackendCronJob
-    | -- | Backend one-off jobs (batch processing)
-      BackendJob
-    | -- | Configuration updates (ConfigMaps, Secrets)
+    | -- | Configuration updates (ConfigMaps, Secrets) — managed via
+      --   'Products.Autopilot.Actions.ConfigMap' + 'BackendConfigWorkflow'
       BackendConfig
-    | -- | Android mobile apps (Play Store)
-      MobileAppAndroid
-    | -- | iOS mobile apps (App Store)
-      MobileAppIOS
-    | -- | Web frontends (S3/CDN deployment)
-      WebApplication
-    | -- | Infrastructure as code (Terraform, CloudFormation)
-      Infrastructure
-    | -- | VirtualService edits (VS lock/unlock/apply/revert)
+    | -- | VirtualService edits (VS lock/unlock/apply/revert) — managed via
+      --   'Products.Autopilot.Actions.VSEdit'
       VSEdit
     deriving (Eq, Show, Read, Generic, Ord)
 
@@ -68,24 +64,8 @@ instance FromJSON ReleaseCategory
 getDefaultDeploymentTarget :: ReleaseCategory -> Text
 getDefaultDeploymentTarget BackendService = "kubernetes"
 getDefaultDeploymentTarget BackendScheduler = "kubernetes"
-getDefaultDeploymentTarget BackendCronJob = "kubernetes"
-getDefaultDeploymentTarget BackendJob = "kubernetes"
 getDefaultDeploymentTarget BackendConfig = "kubernetes-config"
-getDefaultDeploymentTarget MobileAppAndroid = "play-store"
-getDefaultDeploymentTarget MobileAppIOS = "app-store"
-getDefaultDeploymentTarget WebApplication = "s3-cdn"
-getDefaultDeploymentTarget Infrastructure = "terraform"
 getDefaultDeploymentTarget VSEdit = "kubernetes"
-
--- | Migrate old TrackerType to new ReleaseCategory
-migrateTrackerTypeToCategory :: Text -> ReleaseCategory
-migrateTrackerTypeToCategory "Service" = BackendService
-migrateTrackerTypeToCategory "Scheduler" = BackendScheduler
-migrateTrackerTypeToCategory "CronJob" = BackendCronJob
-migrateTrackerTypeToCategory "Job" = BackendJob
-migrateTrackerTypeToCategory "ConfigMapRelease" = BackendConfig
-migrateTrackerTypeToCategory "AppBundle" = MobileAppAndroid
-migrateTrackerTypeToCategory _ = BackendService
 
 -- ============================================================================
 -- Generic Workflow Stages
@@ -145,17 +125,3 @@ data ReleaseWFStatus
 instance ToJSON ReleaseWFStatus
 
 instance FromJSON ReleaseWFStatus
-
--- | Migrate old WorkflowStatus strings to new generic ReleaseWFStatus ctors
-migrateWorkflowStatusToReleaseWFStatus :: String -> ReleaseWFStatus
-migrateWorkflowStatusToReleaseWFStatus "INIT" = INIT
-migrateWorkflowStatusToReleaseWFStatus "CreateDeployment" = PREPARING
-migrateWorkflowStatusToReleaseWFStatus "UpdateService" = DEPLOYING
-migrateWorkflowStatusToReleaseWFStatus "ApplyConfigMap" = PREPARING
-migrateWorkflowStatusToReleaseWFStatus "ApplyDestinationRule" = PREPARING
-migrateWorkflowStatusToReleaseWFStatus "FlipVirtualService" = DEPLOYING
-migrateWorkflowStatusToReleaseWFStatus "MONITORING" = MONITORING
-migrateWorkflowStatusToReleaseWFStatus "Stabilize" = FINALIZING
-migrateWorkflowStatusToReleaseWFStatus "DONE" = DONE
-migrateWorkflowStatusToReleaseWFStatus "Rollback" = ROLLING_BACK
-migrateWorkflowStatusToReleaseWFStatus _ = DEPLOYING

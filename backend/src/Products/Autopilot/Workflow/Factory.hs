@@ -15,19 +15,23 @@ where
 import Control.Monad.Except (runExceptT, throwError)
 import Control.Monad.Trans.Class (lift)
 import Core.Environment (Flow, logWarning)
+import Core.Workflow.Engine (runWorkflowSpec)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
 import Products.Autopilot.Types.Workflow (ReleaseCategory (..))
 
 -- Import category-specific workflows
+--
+-- BackendJob, BackendCronJob, MobileAppAndroid have been removed (their
+-- workflow files no longer exist). All three live categories — BackendService,
+-- BackendScheduler, BackendConfig — now dispatch to the product-agnostic
+-- engine via 'runWorkflowSpec'. VSEdit has its own handler in
+-- Actions/VSEdit.hs and is intentionally not wired here.
 
-import qualified Products.Autopilot.Workflow.BackendConfigWorkflow as Config
-import qualified Products.Autopilot.Workflow.BackendCronJobWorkflow as CronJob
-import qualified Products.Autopilot.Workflow.BackendJobWorkflow as Job
-import qualified Products.Autopilot.Workflow.BackendSchedulerWorkflow as Scheduler
-import qualified Products.Autopilot.Workflow.BackendServiceWorkflow as Backend
-import qualified Products.Autopilot.Workflow.MobileAppAndroidWorkflow as Android
+import Products.Autopilot.Workflow.BackendConfigWorkflow (backendConfigSpec)
+import Products.Autopilot.Workflow.BackendSchedulerWorkflow (backendSchedulerSpec)
+import Products.Autopilot.Workflow.BackendServiceWorkflow (backendServiceSpec)
 import Products.Autopilot.Workflow.Recorded (runRecorded)
 import Products.Autopilot.Workflow.Types (
     ReleaseState (..),
@@ -78,33 +82,25 @@ executeReleaseWorkflow initialState = do
 -- Workflow Selection
 -- ============================================================================
 
-{- | Get workflow executor for a release category
+{- | Get workflow executor for a release category.
 
-Dispatches to category-specific workflow implementations:
-- BackendService → Backend.backendServiceWorkflow
-- BackendScheduler → Scheduler.backendSchedulerWorkflow (pod-count based, no VS/DR)
-- BackendCronJob → CronJob.backendCronJobWorkflow (image update)
-- BackendJob → Job.backendJobWorkflow (one-time execution)
-- MobileAppAndroid → Android.mobileAppAndroidWorkflow
-- etc.
+Three categories are dispatched as runner workflows:
+
+* 'BackendService'   — full K8s rollout with VS traffic shifting
+* 'BackendScheduler' — pod-count based scheduler (no VS/DR)
+* 'BackendConfig'    — ConfigMap / Secret applies (managed via 'Actions.ConfigMap')
+
+'VSEdit' is intentionally not wired here — it is handled out-of-band via
+'Products.Autopilot.Actions.VSEdit'. Attempting to dispatch it falls through
+to 'notImplementedWorkflow' which short-circuits with a 'DomainError'. The
+runner is expected to never select 'VSEdit' for dispatch (its eligibility
+gate filters it out upstream).
 -}
 getWorkflowForCategory :: ReleaseCategory -> WorkflowExecutor
 getWorkflowForCategory = \case
-    -- Backend workflows (K8s-based)
-    BackendService -> Backend.backendServiceWorkflow
-    BackendScheduler -> Scheduler.backendSchedulerWorkflow
-    BackendCronJob -> CronJob.backendCronJobWorkflow
-    BackendJob -> Job.backendJobWorkflow
-    -- Backend config workflow
-    BackendConfig -> Config.backendConfigWorkflow
-    -- Mobile app workflows
-    MobileAppAndroid -> Android.mobileAppAndroidWorkflow
-    MobileAppIOS -> notImplementedWorkflow "MobileAppIOS"
-    -- Web application workflow
-    WebApplication -> notImplementedWorkflow "WebApplication"
-    -- Infrastructure workflow
-    Infrastructure -> notImplementedWorkflow "Infrastructure"
-    -- VS Edit (handled by Actions/VSEdit.hs, not the runner workflow)
+    BackendService -> runWorkflowSpec backendServiceSpec
+    BackendScheduler -> runWorkflowSpec backendSchedulerSpec
+    BackendConfig -> runWorkflowSpec backendConfigSpec
     VSEdit -> notImplementedWorkflow "VSEdit"
 
 -- | Placeholder for not-yet-implemented workflows

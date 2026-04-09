@@ -291,13 +291,7 @@ isEligibleToRun :: (MonadFlow m) => [DeploymentConfig] -> Bool -> [TrackerWithTa
 isEligibleToRun products multiRelease ongoing (rt, mts) = case category rt of
     BackendService -> k8sEligible
     BackendScheduler -> k8sEligible
-    BackendCronJob -> k8sEligible
-    BackendJob -> k8sEligible
     BackendConfig -> pure True
-    MobileAppAndroid -> pure True
-    MobileAppIOS -> pure True
-    WebApplication -> pure True
-    Infrastructure -> pure True
     VSEdit -> pure True
   where
     k8sEligible = do

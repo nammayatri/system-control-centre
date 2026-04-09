@@ -42,7 +42,10 @@ library
       Shared.Config.Runtime
       Core.DB.Connection
       Core.Environment
+      Core.Workflow.Engine
       Core.Workflow.Recorded
+      Core.Workflow.Spec
+      Core.Workflow.Stage
       Core.Workflow.Types
       Core.Server
       Products.Autopilot.Config
@@ -75,20 +78,16 @@ library
       Products.Autopilot.Types.Release
       Products.Autopilot.Types.Storage.Schema
       Products.Autopilot.Types.Target
-      Products.Autopilot.Types.Target.AppStore
       Products.Autopilot.Types.Target.Config
       Products.Autopilot.Types.Target.Kubernetes
-      Products.Autopilot.Types.Target.PlayStore
       Products.Autopilot.Types.Workflow
       Products.Autopilot.Workflow.BackendConfigWorkflow
-      Products.Autopilot.Workflow.BackendCronJobWorkflow
-      Products.Autopilot.Workflow.BackendJobWorkflow
       Products.Autopilot.Workflow.BackendSchedulerWorkflow
       Products.Autopilot.Workflow.BackendServiceWorkflow
       Products.Autopilot.Workflow.Factory
       Products.Autopilot.Workflow.Helpers
-      Products.Autopilot.Workflow.MobileAppAndroidWorkflow
       Products.Autopilot.Workflow.Recorded
+      Products.Autopilot.Workflow.StageHelpers
       Products.Autopilot.Workflow.Types
       Products.ConfigCatalog
       Products.Registry

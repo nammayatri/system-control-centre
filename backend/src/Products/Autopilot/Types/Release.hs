@@ -141,15 +141,11 @@ releaseStatusText = T.pack . show
 
 {- | Case-insensitive text → 'ReleaseStatus'. Derived from 'Enum'+'Bounded',
 so adding a new constructor to 'ReleaseStatus' is the ONLY edit needed.
-Legacy DB aliases (e.g. @USERABORTED@, @GCLTABORTED@ without the underscore)
-are handled explicitly before the generic lookup. Unknown values default
-to 'CREATED' to match prior behavior.
+Unknown values default to 'CREATED'.
 -}
 parseReleaseStatusText :: Text -> ReleaseStatus
-parseReleaseStatusText t = case T.toUpper t of
-    "USERABORTED" -> USER_ABORTED
-    "GCLTABORTED" -> GCLT_ABORTED
-    canon -> fromMaybe CREATED (lookup canon releaseStatusLookup)
+parseReleaseStatusText t =
+    fromMaybe CREATED (lookup (T.toUpper t) releaseStatusLookup)
   where
     releaseStatusLookup :: [(Text, ReleaseStatus)]
     releaseStatusLookup =

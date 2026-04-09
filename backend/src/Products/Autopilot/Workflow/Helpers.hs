@@ -7,13 +7,8 @@ Ported from Mobius.Utils.WorkFlow
 Provides high-level combinators for checkpoint-based workflow composition
 -}
 module Products.Autopilot.Workflow.Helpers (
-    -- * Workflow Combinators
-    (|>>),
-    stateCheckFuncV2,
-
     -- * State Persistence Functions
     persistWorkflowState,
-    persistFinalState,
 
     -- * Snapshot Capture Functions
     captureDeploymentSnapshot,
@@ -55,7 +50,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import qualified Data.Vector as V
 import qualified Data.Yaml as Yaml
-import Products.Autopilot.K8s.Execute (K8sResult (..), runCmd)
+import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import qualified Products.Autopilot.Queries.ReleaseTracker as DB
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
@@ -83,14 +78,6 @@ persistWorkflowState rs = do
     let rt = releaseTracker rs
         mts = targetState rs
     DB.insertReleaseTracker rt mts
-
-{- | Persist final state to database
-
-Used for the final workflow step. Updates all fields including
-those that might be set externally (like release_action).
--}
-persistFinalState :: ReleaseState -> Flow ()
-persistFinalState = persistWorkflowState
 
 -- ============================================================================
 -- Workflow Utilities
@@ -150,46 +137,80 @@ withK8sContext = do
 -- Snapshot Capture Functions
 -- ============================================================================
 
+{- | Result of a snapshot fetch attempt.
+
+Three outcomes, each handled differently by 'captureK8sYamlSnapshot':
+
+* 'SnapshotFailed' — the underlying kubectl / HTTP call failed. Surface
+  the error message in a 'SNAPSHOT_FAILED' release event so operators
+  can see what went wrong in the audit log. Do NOT abort the workflow.
+* 'SnapshotRaw' — the call succeeded but YAML/JSON parsing failed.
+  Persist the raw text as the snapshot payload (best-effort fallback).
+* 'SnapshotOk' — fully parsed; strip K8s noise and persist as YAML.
+-}
+data SnapshotFetch
+    = SnapshotFailed Text
+    | SnapshotRaw Text
+    | SnapshotOk Value
+
 {- | Internal: shared snapshot pipeline.
 
-Takes a fetch action that yields either a fallback raw text (Left) or
-a parsed JSON/YAML 'Value' (Right). The Value is stripped of K8s noise
-and re-encoded as YAML before being persisted as a release event.
+Takes a fetch action that yields a 'SnapshotFetch' and persists the result
+as a release event. Failures are NOT swallowed silently — they are recorded
+as 'SNAPSHOT_FAILED' events with the underlying error message, so the diff
+API and audit log surface kubectl problems instead of having mysteriously
+missing snapshots.
 -}
 captureK8sYamlSnapshot ::
     (MonadFlow m) =>
     Text -> -- releaseId
     Text -> -- label
-    IO (Maybe (Either Text Value)) ->
+    IO SnapshotFetch ->
     m ()
 captureK8sYamlSnapshot releaseId label fetch = do
-    mResult <- liftIO fetch
-    case mResult of
-        Nothing -> pure ()
-        Just (Left raw) -> DB.insertReleaseEvent releaseId "SNAPSHOT" label (String raw)
-        Just (Right val) ->
+    result <- liftIO fetch
+    case result of
+        SnapshotFailed err ->
+            -- Visibility fix (B6): record the failure as a release event so
+            -- operators can see kubectl problems in the audit trail. We use a
+            -- distinct label suffix so 'release_events' rows for failed
+            -- snapshots don't get mistaken for successful ones.
+            DB.insertReleaseEvent
+                releaseId
+                "SNAPSHOT"
+                (label <> "_FAILED")
+                (String ("snapshot fetch failed: " <> err))
+        SnapshotRaw raw ->
+            DB.insertReleaseEvent releaseId "SNAPSHOT" label (String raw)
+        SnapshotOk val ->
             let cleaned = stripK8sNoiseValue val
                 cleanYaml = TE.decodeUtf8 (Yaml.encode cleaned)
              in DB.insertReleaseEvent releaseId "SNAPSHOT" label (String cleanYaml)
 
--- | Decode YAML bytes into 'Either fallback Value' for the snapshot pipeline.
-decodeYamlForSnapshot :: ByteString -> Text -> Either Text Value
+{- | Decode YAML bytes into a 'SnapshotFetch'. On parse failure, fall back to
+  the raw text. The kubectl call itself must have already succeeded —
+  callers convert kubectl 'K8sError' to 'SnapshotFailed' before calling.
+-}
+decodeYamlForSnapshot :: ByteString -> Text -> SnapshotFetch
 decodeYamlForSnapshot bs fallback =
     case Yaml.decodeEither' bs :: Either Yaml.ParseException Value of
-        Right v -> Right v
-        Left _ -> Left fallback
+        Right v -> SnapshotOk v
+        Left _ -> SnapshotRaw fallback
 
 -- | Build a kubectl command line from a list of Text args.
 kubectlCmd :: Config -> [Text] -> String
 kubectlCmd cfg args = kubectlBin cfg <> " " <> T.unpack (T.intercalate " " args)
 
--- | Run a kubectl command and parse its YAML output, suitable for the snapshot pipeline.
-runKubectlYaml :: Config -> [Text] -> IO (Maybe (Either Text Value))
+{- | Run a kubectl command and parse its YAML output, surfacing failures as
+  'SnapshotFailed' so the snapshot pipeline can record them in the audit
+  log instead of swallowing them.
+-}
+runKubectlYaml :: Config -> [Text] -> IO SnapshotFetch
 runKubectlYaml cfg args = do
     res <- runCmd (kubectlCmd cfg args)
     case res of
-        Right (K8sResult yamlStr) -> pure (Just (decodeYamlForSnapshot (TE.encodeUtf8 yamlStr) yamlStr))
-        Left _ -> pure Nothing
+        Right (K8sResult yamlStr) -> pure (decodeYamlForSnapshot (TE.encodeUtf8 yamlStr) yamlStr)
+        Left (K8sError errMsg) -> pure (SnapshotFailed errMsg)
 
 -- | Capture deployment YAML snapshot and store as release event.
 captureDeploymentSnapshot :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> m ()
@@ -208,9 +229,9 @@ captureDeploymentPreview cfg releaseId ns oldDepName newVer newImage label =
                     Right val ->
                         let cleaned = stripK8sNoiseValue val
                             preview = modifyDeploymentForPreview cleaned oldDepName newVer newImage
-                         in pure (Just (Right preview))
-                    Left _ -> pure Nothing
-            Left _ -> pure Nothing
+                         in pure (SnapshotOk preview)
+                    Left parseErr -> pure (SnapshotFailed ("deployment YAML parse failed: " <> T.pack (show parseErr)))
+            Left (K8sError errMsg) -> pure (SnapshotFailed errMsg)
 
 -- | Capture VirtualService YAML snapshot and store as release event.
 captureVSSnapshot :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> m ()
@@ -220,9 +241,9 @@ captureVSSnapshot cfg releaseId ns vsName label =
         case res of
             Right vsJson ->
                 case eitherDecode (LBS.fromStrict (TE.encodeUtf8 vsJson)) :: Either String Value of
-                    Right v -> pure (Just (Right v))
-                    Left _ -> pure (Just (Left vsJson))
-            Left _ -> pure Nothing
+                    Right v -> pure (SnapshotOk v)
+                    Left _ -> pure (SnapshotRaw vsJson)
+            Left err -> pure (SnapshotFailed ("getVirtualServiceJson failed: " <> T.pack (show err)))
 
 -- | Capture ConfigMap YAML snapshot and store as release event.
 captureConfigMapSnapshot :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> m ()
@@ -263,7 +284,10 @@ updateContainerImage img obj =
         _ -> obj
 
 {- | Strip K8s noise from a parsed Value directly.
-Removes status, strips metadata to only name/namespace/labels.
+
+Removes the @status@ field entirely (runtime state, not spec) and filters
+@metadata@ down to just @name@, @namespace@, @labels@. All other top-level
+keys (@spec@, @apiVersion@, @kind@, @data@, etc.) are preserved unchanged.
 -}
 stripK8sNoiseValue :: Value -> Value
 stripK8sNoiseValue (Object obj) =
@@ -290,33 +314,9 @@ modifyDeploymentForPreview (Object obj) oldDepName newVer newImage =
      in Object obj5
 modifyDeploymentForPreview other _ _ _ = other
 
--- ============================================================================
--- ReleaseWFStatus-based Helpers
--- ============================================================================
-
--- | Check if workflow has reached a particular checkpoint
-stateCheckFuncV2 :: ReleaseWFStatus -> ReleaseState -> Maybe ()
-stateCheckFuncV2 targetStatus rs =
-    let rt = releaseTracker rs
-        currentStatus = releaseWFStatus rt
-     in if currentStatus >= targetStatus
-            then Just ()
-            else Nothing
-
--- | Checkpoint-resume operator
-cprV2 :: ReleaseWFStatus -> StateFlow () -> ReleaseWorkFlow ()
-cprV2 targetStatus func =
-    lift $ recordedWithPersist persistWorkflowState funcExec (stateCheckFuncV2 targetStatus)
-  where
-    funcExec = do
-        func
-        modify $ \rs ->
-            let rt = releaseTracker rs
-                rt' = rt{releaseWFStatus = targetStatus}
-             in rs{releaseTracker = rt'}
-
--- | Infix synonym for 'cprV2'
-(|>>) :: ReleaseWFStatus -> StateFlow () -> ReleaseWorkFlow ()
-(|>>) = cprV2
-
-infixl 1 |>>
+-- The legacy '|>>' / 'cprV2' / 'stateCheckFuncV2' operators were removed
+-- after all three active workflows (BackendService, BackendScheduler,
+-- BackendConfig) migrated to the 'WorkflowSpec' pattern in
+-- 'Core.Workflow.Engine'. The equivalent skip-if-past semantics are now
+-- encoded per-stage via 'stageGuard' and 'stageOnAdvance' in
+-- 'Products.Autopilot.Workflow.StageHelpers.mkLegacyStateFlowStage'.

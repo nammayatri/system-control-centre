@@ -9,8 +9,6 @@ module Products.Autopilot.Workflow.Recorded (
     Recorded (..),
     runRecorded,
     recordedWithPersist,
-    step,
-    stepWithRollback,
 )
 where
 

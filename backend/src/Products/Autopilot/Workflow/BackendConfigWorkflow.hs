@@ -6,7 +6,7 @@ Implements the ConfigMap apply workflow using the Recorded monad pattern.
 Migrated from Runner.hs's processConfigMapTracker.
 -}
 module Products.Autopilot.Workflow.BackendConfigWorkflow (
-    backendConfigWorkflow,
+    backendConfigSpec,
 )
 where
 
@@ -17,6 +17,8 @@ import Control.Monad.Trans.Class (lift)
 import Core.AppError (WorkflowError (..))
 import Core.Config (Config (..))
 import Core.Environment (getConfig, logInfo, logWarning)
+import Core.Workflow.Spec (WorkflowSpec (..))
+import Core.Workflow.Stage (Stage)
 import Data.Aeson (Value (..), eitherDecodeStrict', encode, object, (.=))
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -29,7 +31,7 @@ import qualified Data.Text.Lazy.Encoding as TLE
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.Notifications (notifyConfigMapCompleted)
 import Products.Autopilot.Queries.ProductService (findProductByName, getProductNamespace)
-import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTracker, findReleaseTracker, insertReleaseEvent, insertReleaseTracker)
+import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTracker, findReleaseTracker, insertReleaseEvent)
 import Products.Autopilot.Sync (triggerRevertSyncIfEnabled)
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
 import Products.Autopilot.Types.Target (BackendConfigWFStatus (..), ConfigDeploymentState (..), TargetState (..), emptyConfigState)
@@ -37,12 +39,12 @@ import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers (
     captureConfigMapSnapshot,
     getRT,
+    persistWorkflowState,
     updateRT,
-    (|>>),
  )
+import Products.Autopilot.Workflow.StageHelpers (mkLegacyStateFlowStage)
 import Products.Autopilot.Workflow.Types (
     ReleaseState (..),
-    ReleaseWorkFlow,
     StateFlow,
  )
 import System.Exit (ExitCode (..))
@@ -50,16 +52,47 @@ import System.Process (readProcessWithExitCode)
 import Prelude
 
 -- ============================================================================
--- Workflow Definition
+-- Workflow Spec — the only entry point
 -- ============================================================================
 
--- | Backend config workflow using generic stages
-backendConfigWorkflow :: ReleaseWorkFlow ()
-backendConfigWorkflow = do
-    INIT |>> validateConfig
-    PREPARING |>> resolveConfigContent
-    DEPLOYING |>> applyConfigMap
-    DONE |>> notifyComplete
+{- | Backend config (ConfigMap) workflow expressed as a 'WorkflowSpec' value.
+
+Same shape as 'BackendSchedulerWorkflow.backendSchedulerSpec' and
+'BackendServiceWorkflow.backendServiceSpec' — every workflow is a __value__
+walked through the product-agnostic engine in 'Core.Workflow.Engine'.
+
+The four stages (init → prepare → deploy → done) wrap the existing legacy
+@validateConfig@, @resolveConfigContent@, @applyConfigMap@, @notifyComplete@
+function bodies via 'mkLegacyStateFlowStage'. Behavior is identical to the
+old @|>>@ path.
+-}
+backendConfigSpec :: WorkflowSpec ReleaseState
+backendConfigSpec =
+    WorkflowSpec
+        { wsName = "BackendConfig"
+        , wsStages =
+            [ configStageInit
+            , configStagePrepare
+            , configStageDeploy
+            , configStageDone
+            ]
+        , -- ConfigMap workflow doesn't have rollback semantics — failures
+          -- leave the tracker in ABORTED but the ConfigMap itself is
+          -- either applied or not (best-effort). Future work could use
+          -- wsRollback to re-apply the previous ConfigMap revision.
+          wsRollback = \_err -> pure ()
+        , wsPersist = persistWorkflowState
+        }
+
+configStageInit
+    , configStagePrepare
+    , configStageDeploy
+    , configStageDone ::
+        Stage ReleaseState
+configStageInit = mkLegacyStateFlowStage "init" INIT validateConfig
+configStagePrepare = mkLegacyStateFlowStage "prepare" PREPARING resolveConfigContent
+configStageDeploy = mkLegacyStateFlowStage "deploy" DEPLOYING applyConfigMap
+configStageDone = mkLegacyStateFlowStage "done" DONE notifyComplete
 
 -- ============================================================================
 -- Helpers

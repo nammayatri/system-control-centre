@@ -168,7 +168,7 @@ WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'pods_calculation_fac
 -- for real autoscaling headroom. Kept at 1.0 by default to match the
 -- conservative ratchet semantics.
 INSERT INTO server_config (type, name, value, enabled, product)
-SELECT 'DOUBLE', 'hpa_min_max_ratio', '1.0', 1, 'autopilot'
+SELECT 'DOUBLE', 'hpa_min_max_ratio', '4.0', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'hpa_min_max_ratio');
 
 -- Workflow loop sleep between cooloff polls (seconds). Julia parity:

@@ -26,7 +26,15 @@ Owns backend releases, ConfigMap trackers, VS edit trackers, and runtime server 
 - `Actions/` — HTTP handlers (`Release.hs`, `Config.hs`, `ConfigMap.hs`, `K8sResource.hs`, `VSEdit.hs`)
 - `Queries/` — Database queries (`ReleaseTracker.hs`, `ProductService.hs`, `ServerConfig.hs`, `VsEditTracker.hs`)
 - `Types/` — Domain types (`API.hs`, `Release.hs`, `Workflow.hs`, `Target.hs`, `Permission.hs`, plus `Storage/` and `Target/`)
-- `Workflow/` — Release workflow state machines (`BackendServiceWorkflow.hs`, `BackendJobWorkflow.hs`, `BackendCronJobWorkflow.hs`, `BackendSchedulerWorkflow.hs`, `BackendConfigWorkflow.hs`, `MobileAppAndroidWorkflow.hs`, `Factory.hs`, `Helpers.hs`, `Recorded.hs`, `Types.hs`)
+- `Workflow/` — Workflow specs and helpers:
+  - `BackendServiceWorkflow.hs` — `backendServiceSpec :: WorkflowSpec ReleaseState` for K8s service rollouts (VS traffic shifting, decision engine, post-monitoring)
+  - `BackendSchedulerWorkflow.hs` — `backendSchedulerSpec :: WorkflowSpec ReleaseState` for pod-count based scheduler rollouts
+  - `BackendConfigWorkflow.hs` — `backendConfigWorkflow :: ReleaseWorkFlow ()` for ConfigMap / Secret applies (still on the legacy `|>>` pattern; spec-based migration is a future PR)
+  - `Factory.hs` — `getWorkflowForCategory` dispatch table
+  - `Helpers.hs` — shared helpers (`persistWorkflowState`, `captureDeploymentSnapshot`, `withK8sContext`, plus the legacy `|>>` / `cprV2` operator still used by `BackendConfigWorkflow.hs`)
+  - `StageHelpers.hs` — `mkLegacyStateFlowStage` adapter for wrapping existing `StateFlow` bodies as `Stage` values
+  - `Recorded.hs` — re-export shim for `Core.Workflow.Recorded`
+  - `Types.hs` — `ReleaseState`, `ReleaseWorkFlow`, `StateFlow`, `StageOutcome`
 - `K8s/` — kubectl execution wrappers (`Deployment.hs`, `VirtualService.hs`, `DestinationRule.hs`, `HPA.hs`, `Execute.hs`, `Kubectl.hs`)
 - `Runner.hs` — Background worker that polls and executes releases
 - `Sync.hs` — Cross-cluster sync for releases
@@ -35,30 +43,52 @@ Owns backend releases, ConfigMap trackers, VS edit trackers, and runtime server 
 - `Discovery.hs`, `Config.hs`, `RuntimeConfig.hs` — product configuration helpers
 - `Types/Permission.hs` — `AutopilotPermission` ADT (one constructor per permission)
 
-## Product: Config Manager — Future
+### Workflow engine: `Core.Workflow.*` (shared across all products)
 
-Planned as `src/Products/ConfigManager/` with the same shape (`Routes.hs`, `Actions/`, `Queries/`, `Types/`). Not yet present in the codebase.
+The workflow engine itself lives in `src/Core/Workflow/` and is **fully product-agnostic**. Any SCC product (Autopilot today, future products tomorrow) reuses the same engine by parameterizing it over its own state type:
 
-## Adding a New Product
+- `Core.Workflow.Recorded` — checkpointed state-transformer monad. Generic over `s` and `m`. The header comment says: *"Every SCC product that needs resumable, checkpointed workflows reuses this exact engine by choosing its own state type @s@ and base monad @m@."*
+- `Core.Workflow.Types` — `WorkFlowError = DomainError | RetriableError` (two-bucket error classification used by every workflow).
+- `Core.Workflow.Stage` — `Stage s` (a workflow stage as a __value__, with `stageGuard`/`stagePreCheck`/`stageExec`/`stageOnError`/`stageAcquireLocks`/`stageOnAdvance` fields), `StageM s m` constraint synonym, `StageOutcome` (`StageSuccess | StageWaiting | StageAbort`), `LockHandle`, `mkStage` smart constructor.
+- `Core.Workflow.Spec` — `WorkflowSpec s` (a workflow as a __value__, with `wsName`/`wsStages`/`wsRollback`/`wsPersist` fields).
+- `Core.Workflow.Engine` — `runWorkflowSpec` (entry point), `runStage`, `withLockBracket` (bracket-based lock release), `liftStateFlow` (adapter for legacy `StateFlow` bodies).
+
+Each stage runs through the canonical six-step lifecycle: __skip-check → acquire-locks → pre-check → exec → validate → advance-and-persist__. Same lifecycle for every stage in every product. Same monad stack — `ReleaseWorkFlow = ExceptT WorkFlowError (Recorded ReleaseState Flow)`. Same `Recorded`-based checkpoint resumption.
+
+### Adding a new release category to an existing product (Autopilot)
+
+For a new K8s release type (e.g. a new variant of BackendService for some specialized workload):
+
+1. Add a new constructor to `ReleaseCategory` in `src/Products/Autopilot/Types/Workflow.hs`.
+2. Add a new entry to `getDefaultDeploymentTarget` and `migrateTrackerTypeToCategory`.
+3. Add a new `WorkflowSpec ReleaseState` value in a new module under `src/Products/Autopilot/Workflow/`. The spec is just a list of stages — you can reuse existing stage definitions (e.g. the existing `serviceStageInit` from `BackendServiceWorkflow.hs`) or build new ones via `mkLegacyStateFlowStage` if you have existing `StateFlow` code, or via `mkStage` directly if writing fresh code.
+4. Wire the dispatch in `src/Products/Autopilot/Workflow/Factory.hs:getWorkflowForCategory` — add a new case mapping the category to `runWorkflowSpec yourSpec`.
+5. Update the parser in `src/Products/Autopilot/Queries/ReleaseTracker.hs:parseReleaseCategory` to recognize the new category from DB strings.
+6. Update the eligibility check in `src/Products/Autopilot/Runner.hs:isEligibleToRun` if the new category needs special gating.
+
+### Adding a new top-level product (e.g. FrontendRelease)
 
 The product system is type-driven — adding a product requires touching three places, after which the compiler enforces completeness.
 
 1. **Create the product folder** under `src/Products/MyProduct/` with at least:
    - `Routes.hs` — Servant API type and handler server
    - `Types/Permission.hs` — `MyProductPermission` ADT (`deriving Enum, Bounded`) and `myProductPermissionToText`
-   - `Actions/`, `Queries/`, `Types/` as needed
-2. **Register the product** in `src/Products/Types.hs`:
+   - `Types/State.hs` — your own `MyProductState` record type (analogous to Autopilot's `ReleaseState`)
+   - `Workflow/` — `WorkflowSpec MyProductState` values for each release type, plus per-product persist function
+   - `Actions/`, `Queries/` as needed
+2. **Reuse the workflow engine** from `Core.Workflow.*`:
+   - Each `WorkflowSpec MyProductState` is dispatched by `runWorkflowSpec :: WorkflowSpec MyProductState -> ExceptT WorkFlowError (Recorded MyProductState Flow) ()`
+   - The same canonical six-step lifecycle runs every stage, same as Autopilot
+   - The same `Recorded`-based checkpoint resumption applies
+3. **Register the product** in `src/Products/Types.hs`:
    - Add a constructor to the `ProductSlug` ADT (e.g. `| MyProduct`)
    - Extend `productSlugToText` / `textToProductSlug`
    - Extend the `Permission` union with a `MyProductPerm MyProductPermission` constructor and update `permissionToText`, `allPermissions`, `isViewPerm`, `isEditPerm`
-3. **Register routes and permissions** in `src/Products/Registry.hs`:
-   - Add a `myProductPermissions :: [ProductPermission]` list mapping `(method, path segments, permission, "myproduct")`
-   - Append it to `allProductPermissions`
 4. **Mount the API** in `src/Core/Server.hs`:
    - Import `MyProduct.Routes` and add it to the `FullAPI` type
    - Add the handler to `fullServer`
-5. **Add dynamic-path RBAC entries** (routes with path captures) in `src/Core/Auth/Middleware.hs` under `findRoutePermission`
-6. **Seed system roles** for the new product slug in the RBAC seed (`scripts/rbac_seed.sql` or the canonical seed under `dev/sql-seed/`)
+5. **Wire RBAC** by adding the `Protected '<perm>` Servant combinators to your routes in `MyProduct.Routes`
+6. **Seed system roles** for the new product slug in the RBAC seed under `dev/sql-seed/system-control-seed.sql`
 7. **Add the frontend product folder** under `frontend/src/products/myproduct/` and register it in `frontend/src/products/registry.ts`
 
 Build with `-Wall` after the change — non-exhaustive pattern matches in `permissionToText`, `allPermissions`, and the per-product `permissionDescription` will be flagged immediately if any case is missing.

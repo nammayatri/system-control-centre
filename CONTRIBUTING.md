@@ -40,21 +40,49 @@ The project follows a **two-layer architecture**:
 ### Adding a New Feature to Existing Product
 
 **Backend:**
-1. Add route to `Products/Autopilot/Routes.hs`
-2. Implement handler
-3. Add permission mapping to `Products/Registry.hs`
-4. If new permission needed: add to `Products/Autopilot/Types/Permission.hs` ADT
+1. Add route to `Products/Autopilot/Routes.hs` with the appropriate `Protected '<perm>` Servant combinator (compile-time RBAC — forgetting it is a type error)
+2. Implement the handler. Use the existing `Flow = ReaderT AppState IO` monad with `MonadFlow` for queries and `inDB` / `inConfig` helpers
+3. If a new permission is needed: add a constructor to `Products/Autopilot/Types/Permission.hs:AutopilotPermission`. The compiler will flag missing cases in `permissionDescription` etc. via `-Wall`
 
 **Frontend:**
-1. Add page component to `products/releases/pages/`
-2. Add API function to `products/releases/api.ts`
-3. Add React Query hook to `products/releases/hooks.ts`
-4. Add route to product definition in `products/registry.ts`
-5. Wrap edit actions in `<PermissionGate product="backend-releases" permission="PERM">`
+1. Add page component under `frontend/src/products/<product>/pages/`
+2. Add API function and React Query hook under the same product folder
+3. Add route to the `ProductDefinition` in `frontend/src/products/registry.ts`
+4. Wrap edit actions in `<PermissionGate product="..." permission="...">`
 
-### Adding a New Product
+### Adding a New Workflow / Release Type
 
-See README.md "Adding a New Product" section.
+Workflows are now defined as **values** (`WorkflowSpec s`) running through the product-agnostic engine in `Core.Workflow.*`. To add a new workflow:
+
+**Within Autopilot** (e.g. a new K8s release category):
+1. Add a constructor to `Products/Autopilot/Types/Workflow.hs:ReleaseCategory`
+2. Define a new `WorkflowSpec ReleaseState` value in a new module under `Products/Autopilot/Workflow/`. Example shape:
+   ```haskell
+   myNewSpec :: WorkflowSpec ReleaseState
+   myNewSpec = WorkflowSpec
+       { wsName     = "MyNew"
+       , wsStages   = [stage1, stage2, stage3]
+       , wsRollback = \_err -> pure ()
+       , wsPersist  = persistWorkflowState
+       }
+   ```
+3. Each stage is a `Stage ReleaseState` value. Build them via `mkStage` (clean) or `mkLegacyStateFlowStage` (wrapping existing `StateFlow` bodies)
+4. Wire dispatch in `Products/Autopilot/Workflow/Factory.hs:getWorkflowForCategory`
+5. Update the parser in `Products/Autopilot/Queries/ReleaseTracker.hs:parseReleaseCategory`
+
+**For a brand-new product** (e.g. `FrontendRelease` with its own state type):
+1. Define `data FrontendReleaseState = ...`
+2. Define `persistFrontendState :: FrontendReleaseState -> Flow ()`
+3. Build `Stage FrontendReleaseState` values for each stage
+4. Build `frontendBuildSpec :: WorkflowSpec FrontendReleaseState`
+5. Dispatch via `runWorkflowSpec frontendBuildSpec :: ExceptT WorkFlowError (Recorded FrontendReleaseState Flow) ()`
+6. The same engine, runner, RBAC, audit, sync, and notifications work without modification
+
+The canonical six-step lifecycle (`skip-check → acquire-locks → pre-check → exec → validate → advance-and-persist`) runs every stage in every product. Same monad. Same checkpoint resumption. The only thing that varies between products is the state type `s`.
+
+### Adding a New Top-Level Product
+
+See `backend/PRODUCTS.md` "Adding a new top-level product" section for the full checklist.
 
 ## Code Style
 
