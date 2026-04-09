@@ -590,12 +590,23 @@ restoreVsTrafficOnFailure cfg rt mts = do
                                 ]
                             )
 
-                    -- Step 3: now flip the VS
-                    logInfo $ "[restoreVsTrafficOnFailure] Restoring VS traffic to old version for " <> releaseId rt
-                    vsResult <- liftIO $ applyVirtualServiceRollout cfg ctx 100 0
-                    case vsResult of
-                        Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to restore VS: " <> T.pack (show err)
-                        Right _ -> logInfo "[restoreVsTrafficOnFailure] VS traffic restored to old version"
+                    -- Step 3: now flip the VS — but only if there IS one.
+                    -- Schedulers (and any future non-VS product) have an empty
+                    -- vsName; calling kubectl with that produces a noisy
+                    -- "resource name may not be empty" error. The deployment-
+                    -- side recovery (steps 1-2 + step 4 below) is still the
+                    -- correct rollback action for a scheduler — the scaling
+                    -- restores worker capacity, which is all schedulers care
+                    -- about.
+                    let vsName' = virtualServiceName ctx
+                    if T.null vsName'
+                        then logInfo $ "[restoreVsTrafficOnFailure] No VS configured for " <> releaseId rt <> " (scheduler / non-VS product); skipping VS flip"
+                        else do
+                            logInfo $ "[restoreVsTrafficOnFailure] Restoring VS traffic to old version for " <> releaseId rt
+                            vsResult <- liftIO $ applyVirtualServiceRollout cfg ctx 100 0
+                            case vsResult of
+                                Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to restore VS: " <> T.pack (show err)
+                                Right _ -> logInfo "[restoreVsTrafficOnFailure] VS traffic restored to old version"
 
                     -- Step 4: scale the new deployment to 0 (the failed one)
                     -- Round 8 audit H3: SKIP if newDep == oldDep (immediate-revert

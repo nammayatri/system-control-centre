@@ -779,6 +779,13 @@ revertReleaseH _ap rid req = do
                                 , NT.createdBy = fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)
                                 , NT.approvedBy = if isImmediate then Just (fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)) else Nothing
                                 , NT.isApproved = isImmediate
+                                , -- Bug fix: refresh dateCreated/lastUpdated. The revert
+                                  -- tracker is a record copy of the original, so without
+                                  -- this override every revert inherits the ORIGINAL
+                                  -- release's dateCreated, making the audit log lie
+                                  -- about when the revert was actually issued.
+                                  NT.dateCreated = Just now
+                                , NT.lastUpdated = Just now
                                 , NT.scheduleTime = Just now
                                 , NT.startTime = Nothing
                                 , NT.endTime = Nothing

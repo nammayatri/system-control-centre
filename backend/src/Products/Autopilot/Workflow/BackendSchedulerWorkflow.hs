@@ -270,7 +270,18 @@ prepareK8sResources = do
 
     logInfoS "K8s resources prepared for scheduler"
 
--- | Pod-count based rollout: scale old to 0, scale new up progressively
+{- | Pod-count based rollout for schedulers/queue workers.
+
+Order matters: ramp the NEW deployment FIRST, then scale the OLD to 0
+once the new is fully ramped. The previous order (scale old → 0 first,
+then ramp new) caused a window where there were ZERO active workers,
+which for queue/cron-driven schedulers means queue depth grows or
+cron runs are missed during the window.
+
+Two distinct workers (old + new) running in parallel during the ramp
+is NOT a problem for queue workers — they simply share the queue load.
+Once the rollout completes, the old goes to 0 and only the new pulls.
+-}
 podCountRollout :: StateFlow ()
 podCountRollout = do
     rt <- getRT
@@ -280,24 +291,17 @@ podCountRollout = do
 
     updateK8sStatus BSProgressiveRollout
 
-    -- Step 1: Scale old deployment to 0 replicas
-    let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
-    logInfoS $ "  Scaling down old deployment to 0: " <> oldDepName
-    _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
-    updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
-
-    -- Notify Slack of old pods scaled down
-    currentRT <- getRT
-    lift $ notifyPodsScaledDown currentRT (oldVersion ctx)
-
-    -- Step 2: Scale new deployment up progressively through rollout steps
+    -- Step 1: Scale NEW deployment up progressively through rollout steps.
+    -- The OLD deployment keeps running until the new is fully ramped, so
+    -- there is never a moment with zero workers.
     let steps = rolloutStrategy rt
     if null steps
         then do
-            -- No rollout strategy defined, scale to full desired count.
-            logInfoS "  No rollout strategy, scaling new deployment to desired count"
+            -- No rollout strategy defined, scale to 1 pod minimum.
+            logInfoS "  No rollout strategy, scaling new deployment to 1 pod"
             scaleNewSchedulerCappedAtHpa cfg ctx 1
             updateK8sField (\k8s -> k8s{trafficPercentage = 100})
+            currentRT <- getRT
             lift $ notifyReleaseProgress currentRT 100
         else do
             forM_ steps $ \step -> do
@@ -305,9 +309,9 @@ podCountRollout = do
                 logInfoS $
                     "  Scaling new deployment to "
                         <> T.pack (show targetPods)
-                        <> " pods (rollout "
+                        <> " pods (stage "
                         <> T.pack (show (rolloutPercent step))
-                        <> "%)"
+                        <> "% of rollout)"
                 scaleNewSchedulerCappedAtHpa cfg ctx targetPods
                 updateK8sField (\k8s -> k8s{trafficPercentage = rolloutPercent step})
 
@@ -315,7 +319,9 @@ podCountRollout = do
                 latestRT <- getRT
                 lift $ notifyReleaseProgress latestRT (rolloutPercent step)
 
-                -- Cooloff between steps
+                -- Cooloff between steps (cooloffMinutes is interpreted as seconds
+                -- by threadDelaySec — pre-existing semantic mismatch with the
+                -- field name, see scheduler workflow audit).
                 when (cooloffMinutes step > 0 && rolloutPercent step < 100) $ do
                     logInfoS $
                         "  Cooloff: " <> T.pack (show (cooloffMinutes step)) <> " seconds"
@@ -324,6 +330,18 @@ podCountRollout = do
                 -- Health check between steps
                 when (rolloutPercent step < 100) $
                     checkDeploymentHealth cfg ctx
+
+    -- Step 2: New is fully ramped — NOW scale OLD to 0.
+    -- Bug fix: previously this happened BEFORE step 1, leaving a window with
+    -- zero active workers. Schedulers/queue workers can't tolerate that gap.
+    let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
+    logInfoS $ "  New deployment fully ramped, scaling down old deployment: " <> oldDepName
+    _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
+    updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
+
+    -- Notify Slack of old pods scaled down (now correct: fires AFTER new is up)
+    finalRT <- getRT
+    lift $ notifyPodsScaledDown finalRT (oldVersion ctx)
 
     logInfoS "Pod-count rollout complete"
 

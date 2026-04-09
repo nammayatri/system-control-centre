@@ -354,9 +354,16 @@ notifyReleaseReverted :: ReleaseTracker -> Flow ()
 notifyReleaseReverted tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
         threadTs <- resolveThreadTs tracker
+        -- Bug fix: this notification fires on the REVERT tracker, whose
+        -- versions are SWAPPED relative to the original release
+        -- (Actions/Release.hs:794-795). The version we ended up at after
+        -- the rollback is the revert tracker's @newVersion@, NOT
+        -- @oldVersion@. Previously this read @oldVersion@ and reported
+        -- the wrong target ("Rolled back to v6" when we actually went
+        -- back to v5).
         let blocks =
                 [ sectionBlock "*REVERTED*"
-                , contextBlock ["Rolled back to `" <> oldVersion tracker <> "`"]
+                , contextBlock ["Rolled back to `" <> newVersion tracker <> "`"]
                 ]
         _ <- sendSlackRich channel "REVERTED" colorReverted blocks threadTs
         pure ()
