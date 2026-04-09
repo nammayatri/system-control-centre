@@ -4,35 +4,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
-{- | Pooled HTTP client used by every product for outbound calls.
-
-== Why this exists
-
-Before this module, every external call (Slack, Prometheus, AB engine,
-HS engine, sync cluster, ConfigMap proxy) was implemented as a separate
-copy of:
-
-@
-result <- try (readProcessWithExitCode \"curl\" curlArgs \"\")
-case result of
-  Right (ExitSuccess, out, _) -&gt; ...
-  Right (ExitFailure _, _, err) -&gt; ...
-  Left e -&gt; ...
--- + manual retry on the next 30 lines
-@
-
-…each spawning a new @curl@ subprocess, with no connection pooling and
-hand-rolled retry that drifted between modules.
-
-This module replaces all of that with a single 'httpJson' / 'httpRaw'
-call that:
-
-  * uses a process-wide pooled @http-client@ Manager (TLS reused across calls)
-  * supports retry with linear backoff
-  * has a configurable timeout
-  * logs every request via 'Core.Logging.logInfoG' (auto-includes 'withLogTag' context)
-
-Multiple products can use it without any product-specific glue.
+{- | Pooled HTTP client (single 'httpJson'/'httpRaw' over a process-wide
+TLS-enabled @http-client@ manager) with retry, timeout, and tagged
+request logging via 'Core.Logging.logInfoG'.
 -}
 module Core.Http.Client (
     -- * Request DSL
@@ -79,8 +53,6 @@ import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
 import System.IO.Unsafe (unsafePerformIO)
 
--- ── Request DSL ──────────────────────────────────────────────────
-
 data Method = GET | POST | PUT | DELETE | PATCH
     deriving (Show, Eq)
 
@@ -118,8 +90,6 @@ defaultReq url =
         , reqLogTag = "http"
         }
 
--- ── Response ─────────────────────────────────────────────────────
-
 data HttpResponse = HttpResponse
     { respStatus :: Int
     , respBody :: LBS.ByteString
@@ -132,15 +102,11 @@ data HttpError
     | HttpDecodeError String
     deriving (Show)
 
--- ── Manager (process-wide singleton) ─────────────────────────────
-
 {-# NOINLINE managerRef #-}
 managerRef :: IORef (Maybe Manager)
 managerRef = unsafePerformIO (newIORef Nothing)
 
-{- | Initialise the shared TLS-enabled HTTP manager. Call once from Main.
-If not called, 'getManager' will create one on first use (lazy fallback).
--}
+-- | Initialise the shared TLS manager. Lazy fallback in 'getManager' if not called.
 initHttpManager :: IO ()
 initHttpManager = do
     mgr <- newManager tlsManagerSettings
@@ -156,11 +122,7 @@ getManager = do
             writeIORef managerRef (Just mgr)
             pure mgr
 
--- ── Calls ────────────────────────────────────────────────────────
-
-{- | Make an HTTP call and return the raw response (status + body).
-Retries on network exceptions and 5xx responses with linear 0.5s backoff.
--}
+-- | Raw HTTP call; retries on exceptions + 5xx with 0.5s linear backoff.
 httpRaw :: HttpReq -> IO (Either HttpError HttpResponse)
 httpRaw req = go (reqRetries req)
   where
@@ -177,7 +139,7 @@ httpRaw req = go (reqRetries req)
                         <> T.pack (show (reqRetries req - attempts + 1))
                         <> "/"
                         <> T.pack (show (reqRetries req))
-                Conc.threadDelay 500_000 -- 0.5s linear backoff
+                Conc.threadDelay 500_000
                 go (attempts - 1)
 
 doOne :: HttpReq -> IO (Either HttpError HttpResponse)
@@ -209,17 +171,7 @@ doOne HttpReq{..} = do
                                 , respBody = responseBody r
                                 }
 
-{- | Make an HTTP call expecting a JSON response. Decodes the body to @a@.
-
-@
-result <- httpJson @SyncResp $ (defaultReq url)
-  { reqMethod  = POST
-  , reqHeaders = [(\"Authorization\", \"Bearer \" <> token)]
-  , reqBody    = Just (encode body)
-  , reqLogTag  = \"sync\"
-  }
-@
--}
+-- | HTTP call expecting a JSON response; decodes to @a@.
 httpJson :: (FromJSON a) => HttpReq -> IO (Either HttpError a)
 httpJson req = do
     raw <- httpRaw req

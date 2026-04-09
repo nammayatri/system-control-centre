@@ -1,11 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | VS Edit operations now use release_tracker with category='VSEdit'
-and deployment_config for VS lock state.
-
-Migrated to the 'MonadFlow' constraint pattern: callers no longer need to
-pass 'DBEnv' or wrap calls in 'liftIO'. Just call the query directly from
-any 'MonadFlow' computation.
+{- | VS edit operations live on release_tracker (category='VSEdit') +
+deployment_config (for VS lock state).
 -}
 module Products.Autopilot.Queries.VsEditTracker where
 
@@ -17,7 +13,6 @@ import Database.Beam
 import Database.PostgreSQL.Simple (execute)
 import Products.Autopilot.Types.Storage.Schema
 
--- | Find active VS lock by checking deployment_config.vs_locked_by IS NOT NULL
 findActiveLockFromConfig :: (MonadFlow m) => Text -> m (Maybe DeploymentConfig)
 findActiveLockFromConfig product' = withDb $ \db -> do
     rows <-
@@ -33,7 +28,6 @@ findActiveLockFromConfig product' = withDb $ \db -> do
         [] -> Nothing
         (x : _) -> Just x
 
--- | List VS edit trackers = release_tracker WHERE category='VSEdit'
 listVsEditTrackerRows :: (MonadFlow m) => Maybe UTCTime -> Maybe UTCTime -> m [ReleaseTrackerRow]
 listVsEditTrackerRows mFrom mTo = withDb $ \db ->
     runDB db $
@@ -50,7 +44,6 @@ listVsEditTrackerRows mFrom mTo = withDb $ \db ->
                         Nothing -> pure ()
                     pure t
 
--- | Find VS edit tracker by ID = release_tracker WHERE id=? AND category='VSEdit'
 findVsEditTrackerRowById :: (MonadFlow m) => Text -> m (Maybe ReleaseTrackerRow)
 findVsEditTrackerRowById tid = withDb $ \db -> do
     rows <-
@@ -65,15 +58,9 @@ findVsEditTrackerRowById tid = withDb $ \db -> do
         [] -> Nothing
         (x : _) -> Just x
 
-{- | Mark as DISCARDED any CREATED VSEdit tracker for the given app_group
-whose id is NOT the one just created. Mirrors Julia's
-'validateExistingVSTrackers' + 'discardIfDuplicate' post-insert cleanup
-(api/vsedit/create.jl:46-62). This closes the TOCTOU window between two
-concurrent createVsEditTrackerH calls that both manage to acquire the VS
-lock (e.g. if one caller observes a stale lock and installs a new one
-just as another call succeeds with the same owner).
-
-Returns the number of trackers discarded.
+{- | Mark as DISCARDED any CREATED VSEdit tracker for @appGroup'@ whose id
+is not @keepTrackerId@. Closes a TOCTOU window between two concurrent
+create calls that both acquire the VS lock. Returns count discarded.
 -}
 discardDuplicateCreatedVsTrackers :: (MonadFlow m) => Text -> Text -> m Int
 discardDuplicateCreatedVsTrackers appGroup' keepTrackerId = withDb $ \db ->

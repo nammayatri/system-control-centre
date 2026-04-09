@@ -1,9 +1,4 @@
-{- | Configuration target types
-
-This module contains all types related to configuration-only deployments:
-- ConfigDeploymentState: State tracking for ConfigMap/Secret updates
-- BackendConfigWFStatus: Detailed config-specific workflow stages
--}
+-- | Types for ConfigMap/Secret-only deployments (BackendConfig category).
 module Products.Autopilot.Types.Target.Config (
     -- * Target State
     ConfigDeploymentState (..),
@@ -18,57 +13,28 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
--- ============================================================================
--- Config Workflow Status
--- ============================================================================
-
-{- | Backend config workflow status (K8s ConfigMap/Secret-specific)
-
-Tracks ConfigMap/Secret updates and pod restarts.
-This provides detailed progress within the generic ReleaseWFStatus stages.
--}
+-- | Detailed sub-stages inside the generic @ReleaseWFStatus@ for BackendConfig.
 data BackendConfigWFStatus
-    = -- | Validate config changes
-      BCInit
-    | -- | Apply ConfigMap updates
-      BCApplyConfigMap
-    | -- | Apply Secret updates
-      BCApplySecret
-    | -- | Restart affected pods
-      BCRestartPods
-    | -- | Monitor config propagation
-      BCMonitorRollout
-    | -- | Verify config loaded correctly
-      BCVerifyConfig
-    | -- | Complete
-      BCDone
-    | -- | Revert config changes
-      BCRevertConfig
+    = BCInit
+    | BCApplyConfigMap
+    | BCApplySecret
+    | BCRestartPods
+    | BCMonitorRollout
+    | BCVerifyConfig
+    | BCDone
+    | BCRevertConfig
     deriving (Eq, Show, Read, Generic, Ord)
 
 instance ToJSON BackendConfigWFStatus
 
 instance FromJSON BackendConfigWFStatus
 
--- ============================================================================
--- Config Deployment State
--- ============================================================================
-
-{- | Configuration deployment state
-
-Tracks ConfigMap and Secret updates and rollout status
--}
 data ConfigDeploymentState = ConfigDeploymentState
     { categoryWorkflowStatus :: BackendConfigWFStatus
-    -- ^ Granular config-specific workflow progress
     , configMapsUpdated :: [Text]
-    -- ^ Names of updated ConfigMaps
     , secretsUpdated :: [Text]
-    -- ^ Names of updated Secrets
     , podsRestarted :: Bool
-    -- ^ Whether affected pods were restarted
     , rolloutComplete :: Bool
-    -- ^ Whether config rollout completed across all pods
     }
     deriving (Eq, Show, Generic)
 
@@ -76,7 +42,6 @@ instance ToJSON ConfigDeploymentState
 
 instance FromJSON ConfigDeploymentState
 
--- | Empty config deployment state (initial state)
 emptyConfigState :: ConfigDeploymentState
 emptyConfigState =
     ConfigDeploymentState

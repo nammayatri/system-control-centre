@@ -37,7 +37,6 @@ const getDateRange = (range: TimeRange, customFrom: string, customTo: string): {
   return { from, to };
 };
 
-// IST everywhere — NammaYatri ops convention. Backend stores UTC.
 const formatDate = (isoString?: string) => {
   if (!isoString) return '-';
   const date = new Date(isoString);
@@ -108,7 +107,6 @@ const ListVSEdit: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 w-full">
-      {/* Toolbar + Table Card */}
       <div className="bg-white border border-zinc-200 rounded-xl">
         <div className="p-3 sm:p-4 flex flex-col md:flex-row md:items-center gap-2 md:gap-3 border-b border-zinc-100">
           <div className="relative">
@@ -117,7 +115,6 @@ const ListVSEdit: React.FC = () => {
               className="pl-9 pr-4 h-10 sm:h-9 w-full md:w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
           </div>
 
-          {/* Date Range */}
           <div className="relative" ref={datePickerRef}>
             <button onClick={() => setShowDatePicker(!showDatePicker)} className="w-full md:w-auto flex items-center justify-between gap-2 border border-zinc-300 rounded-lg px-3 h-10 sm:h-9 bg-white hover:bg-zinc-50 text-sm text-zinc-600 cursor-pointer transition-colors duration-150">
               <span className="flex items-center gap-2 truncate">
@@ -171,7 +168,6 @@ const ListVSEdit: React.FC = () => {
           </div>
         </div>
 
-        {/* Desktop Table */}
         <div className="hidden md:block overflow-x-auto">
           {isLoading ? (
             <TableSkeleton rows={8} cols={6} />
@@ -213,7 +209,6 @@ const ListVSEdit: React.FC = () => {
           )}
         </div>
 
-        {/* Mobile cards */}
         <div className="md:hidden">
           {isLoading ? (
             <TableSkeleton rows={4} cols={4} />
@@ -246,7 +241,6 @@ const ListVSEdit: React.FC = () => {
           )}
         </div>
 
-        {/* Pagination */}
         {!isLoading && filteredEdits.length > 0 && (
           <div className="px-3 sm:px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-zinc-100">
             <div className="flex items-center gap-3 flex-wrap">

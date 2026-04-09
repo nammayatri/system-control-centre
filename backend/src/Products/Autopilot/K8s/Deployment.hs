@@ -54,22 +54,19 @@ buildCloneDeploymentCommand cfg ctx =
     let sourceDep = T.unpack (serviceName ctx) <> "-" <> T.unpack (oldVersion ctx)
         targetDep = T.unpack (deploymentName ctx)
         explicitDockerImage = maybe "" T.unpack (dockerImage ctx)
-        -- Strip env vars with unsupported fieldRef paths (e.g. metadata.labels[...])
+        -- Strip env vars whose fieldRef points at metadata.labels[...].
         stripUnsupportedEnvs = "(.spec.template.spec.containers[].env) |= [.[]? | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]"
         patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[] | select(.name == $container) | .image) |= (if ($dockerImage != \"\") then (if (($dockerImage | test(\"/\")) or ($dockerImage | test(\":\"))) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | " <> stripUnsupportedEnvs <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
      in unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "get deployment", shellQuote (T.pack sourceDep), "-o json | jq", "--arg targetDep", shellQuote (T.pack targetDep), "--arg container", shellQuote (containerName ctx), "--arg newTag", shellQuote (newVersion ctx), "--arg oldTag", shellQuote (oldVersion ctx), "--arg dockerImage", shellQuote (T.pack explicitDockerImage), "'" <> patchFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "apply -f -"]
 
-{- | Clone deployment with env vars injected from envOverrideData (env switch).
-Matches ny-autopilot's updateDeploymentWithNewEnvs: replaces the
-containers[0].env array in the cloned deployment with the user-provided envs.
--}
+-- | Clone deployment, replacing containers[0].env with the supplied envs.
 buildCloneDeploymentWithEnvsCommand :: Config -> K8sReleaseContext -> Text -> String
 buildCloneDeploymentWithEnvsCommand cfg ctx envsJson =
     let sourceDep = T.unpack (serviceName ctx) <> "-" <> T.unpack (oldVersion ctx)
         targetDep = T.unpack (deploymentName ctx)
         explicitDockerImage = maybe "" T.unpack (dockerImage ctx)
-        -- Same jq filter as buildCloneDeploymentCommand, plus env injection
-        -- Strip env vars with unsupported fieldRef paths (e.g. metadata.labels[...])
+        -- Strip env vars whose fieldRef points at metadata.labels[...] —
+        -- these require a downward API rule and break kubectl patch.
         stripUnsupportedEnvs = "(.spec.template.spec.containers[].env) |= [.[]? | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]"
         patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[] | select(.name == $container) | .image) |= (if ($dockerImage != \"\") then (if (($dockerImage | test(\"/\")) or ($dockerImage | test(\":\"))) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | (.spec.template.spec.containers[] | select(.name == $container) | .env) = ($envs | fromjson) | " <> stripUnsupportedEnvs <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
      in unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "get deployment", shellQuote (T.pack sourceDep), "-o json | jq", "--arg targetDep", shellQuote (T.pack targetDep), "--arg container", shellQuote (containerName ctx), "--arg newTag", shellQuote (newVersion ctx), "--arg oldTag", shellQuote (oldVersion ctx), "--arg dockerImage", shellQuote (T.pack explicitDockerImage), "--arg envs", shellQuote envsJson, "'" <> patchFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "apply -f -"]
@@ -90,28 +87,15 @@ buildRolloutStatusCommand :: Config -> K8sReleaseContext -> String
 buildRolloutStatusCommand cfg ctx =
     unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "rollout status deployment", shellQuote (deploymentName ctx), "--timeout=300s"]
 
-{- | REPLACE the env array of the first container on an existing deployment.
-
-Used in two places:
-  * Env switch when the target deployment already exists (skip-clone path)
-  * Immediate revert env restore (restore old deployment's envs)
-
-Bug fix: previously used @--type=strategic@ which merges @containers[].env@
-by the @name@ key — keeping pre-existing env vars and only adding new
-ones. That made env switches cumulative and broke immediate-revert's
-attempt to restore old envs (the new envs stayed). Switched to JSON
-Patch (@--type=json@) with an explicit @replace@ operation on
-@/spec/template/spec/containers/0/env@, which atomically replaces the
-entire array of container 0. Single-container assumption matches the
-rest of the deployment helpers in this file.
+{- | Replace the env array of the first container on an existing
+deployment. Uses JSON Patch (not strategic merge, which merges by @name@
+and caused env switches + immediate-revert env restore to be cumulative
+instead of replacing).
 -}
 buildPatchDeploymentEnvsCommand :: Config -> K8sReleaseContext -> Text -> String
 buildPatchDeploymentEnvsCommand cfg ctx envsJson =
-    -- Build the JSON Patch body via jq so envsJson (a serialized JSON array
-    -- of env objects) is parsed and embedded as a real JSON value, not a
-    -- string. We also strip env entries whose fieldRef points at
-    -- metadata.labels[...] — those require a downward API rule and break
-    -- kubectl patch when not configured.
+    -- jq parses envsJson into a real JSON array (not a string), and
+    -- strips metadata.labels[...] fieldRefs.
     let stripAndPatch =
             "($envs | fromjson | [.[] | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]) as $filtered | [{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/env\",\"value\":$filtered}]"
      in unwords
@@ -171,21 +155,16 @@ getDeploymentReplicaStatus cfg ns depName = do
   where
     parseInt s = case reads s of ((n, _) : _) -> n; _ -> 0
 
-{- | Get environment variables from a running deployment's first container.
-Matches ny-autopilot's getEnvsFromDeployment: first discovers the running
-version from the VirtualService, constructs the full deployment name
-(e.g. beckn-driver-offer-bpp-master-4fa110), then fetches envs from that deployment.
+{- | Fetch envs from the first container of the currently running
+deployment (resolved from the VirtualService's active subset).
 -}
 getDeploymentEnvs :: Config -> Text -> Text -> Text -> IO (Either K8sError Value)
 getDeploymentEnvs cfg ns vsName svcHost = do
-    -- Step 1: Get running version from VirtualService (like ny-autopilot's getRunningVersionOfService)
     versionRes <- getRunningVersionFromVS cfg ns vsName svcHost
     case versionRes of
         Left err -> pure (Left err)
         Right runningVersion -> do
-            -- Step 2: Construct full deployment name: <service_host>-<version>
             let fullDepName = T.unpack svcHost <> "-" <> T.unpack runningVersion
-            -- Step 3: kubectl get deployment <full-name> to fetch envs
             res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get deployment", shellQuote (T.pack fullDepName), "-o jsonpath='{.spec.template.spec.containers[0].env}'"])
             pure $ case res of
                 Left err -> Left err
@@ -197,10 +176,7 @@ getDeploymentEnvs cfg ns vsName svcHost = do
                 Just v -> Right v
                 Nothing -> Right (A.toJSON ([] :: [Value]))
 
-{- | Discover the currently running version/subset from a VirtualService.
-Parses the VS JSON, finds the route matching svcHost with the highest weight,
-and returns its subset (the version tag like "4fa110").
--}
+-- | Active subset (version tag) for @svcHost@ — the highest-weight route.
 getRunningVersionFromVS :: Config -> Text -> Text -> Text -> IO (Either K8sError Text)
 getRunningVersionFromVS cfg ns vsName svcHost = do
     res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get virtualservice", shellQuote vsName, "-o json"])

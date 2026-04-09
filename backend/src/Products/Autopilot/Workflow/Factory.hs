@@ -1,9 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 
-{- | Workflow factory - dispatches to category-specific workflows
-
-This module provides the main entry point for executing release workflows.
-It dispatches to the appropriate workflow implementation based on ReleaseCategory.
+{- | Dispatches release execution to the appropriate 'WorkflowSpec' by
+  'ReleaseCategory'.
 -}
 module Products.Autopilot.Workflow.Factory (
     executeReleaseWorkflow,
@@ -21,14 +19,6 @@ import qualified Data.Text as T
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
 import Products.Autopilot.Types.Workflow (ReleaseCategory (..))
 
--- Import category-specific workflows
---
--- BackendJob, BackendCronJob, MobileAppAndroid have been removed (their
--- workflow files no longer exist). All three live categories — BackendService,
--- BackendScheduler, BackendConfig — now dispatch to the product-agnostic
--- engine via 'runWorkflowSpec'. VSEdit has its own handler in
--- Actions/VSEdit.hs and is intentionally not wired here.
-
 import Products.Autopilot.Workflow.BackendConfigWorkflow (backendConfigSpec)
 import Products.Autopilot.Workflow.BackendSchedulerWorkflow (backendSchedulerSpec)
 import Products.Autopilot.Workflow.BackendServiceWorkflow (backendServiceSpec)
@@ -39,62 +29,23 @@ import Products.Autopilot.Workflow.Types (
     WorkFlowError (..),
  )
 
--- | Workflow executor function type
 type WorkflowExecutor = ReleaseWorkFlow ()
 
--- ============================================================================
--- Main Workflow Execution
--- ============================================================================
-
-{- | Execute a release workflow based on its category
-
-This is the main entry point for workflow execution. It:
-1. Determines the category from ReleaseTracker
-2. Selects the appropriate workflow implementation
-3. Executes the workflow with checkpoint/resume support
-4. Handles errors gracefully
-
-Usage:
-@
-result <- executeReleaseWorkflow releaseState
-case result of
-Right finalState -> -- success
-Left error -> -- handle error
-@
--}
+-- | Main entry: dispatch by category and run the spec with checkpoint/resume.
 executeReleaseWorkflow ::
     ReleaseState ->
     Flow (Either WorkFlowError ReleaseState)
 executeReleaseWorkflow initialState = do
     let rt = releaseTracker initialState
         category = getCategoryFromTracker rt
-
-    -- Get workflow executor for this category
     let workflow = getWorkflowForCategory category
-
-    -- Execute workflow with checkpoint/resume
     (result, finalState) <- runRecorded (runExceptT workflow) initialState
     pure $ case result of
         Left err -> Left err
         Right () -> Right finalState
 
--- ============================================================================
--- Workflow Selection
--- ============================================================================
-
-{- | Get workflow executor for a release category.
-
-Three categories are dispatched as runner workflows:
-
-* 'BackendService'   — full K8s rollout with VS traffic shifting
-* 'BackendScheduler' — pod-count based scheduler (no VS/DR)
-* 'BackendConfig'    — ConfigMap / Secret applies (managed via 'Actions.ConfigMap')
-
-'VSEdit' is intentionally not wired here — it is handled out-of-band via
-'Products.Autopilot.Actions.VSEdit'. Attempting to dispatch it falls through
-to 'notImplementedWorkflow' which short-circuits with a 'DomainError'. The
-runner is expected to never select 'VSEdit' for dispatch (its eligibility
-gate filters it out upstream).
+{- | 'VSEdit' is handled out-of-band via 'Products.Autopilot.Actions.VSEdit'
+  and the runner filters it before dispatch; reaching it here is a bug.
 -}
 getWorkflowForCategory :: ReleaseCategory -> WorkflowExecutor
 getWorkflowForCategory = \case
@@ -103,7 +54,6 @@ getWorkflowForCategory = \case
     BackendConfig -> runWorkflowSpec backendConfigSpec
     VSEdit -> notImplementedWorkflow "VSEdit"
 
--- | Placeholder for not-yet-implemented workflows
 notImplementedWorkflow :: Text -> WorkflowExecutor
 notImplementedWorkflow categoryName = do
     lift $
@@ -115,10 +65,5 @@ notImplementedWorkflow categoryName = do
             T.unpack $
                 "Workflow not implemented for category: " <> categoryName
 
--- ============================================================================
--- Helper Functions
--- ============================================================================
-
--- | Get ReleaseCategory from ReleaseTracker
 getCategoryFromTracker :: ReleaseTracker -> ReleaseCategory
 getCategoryFromTracker = category

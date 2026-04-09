@@ -170,10 +170,7 @@ isAppGroupServiceEnabledFromKey key appGroupName serviceName = withDb $ \db -> d
   where
     toListV = foldr (:) []
 
-{- | Whether decision-engine HTTP errors should be treated as ABORT
-(fail-closed, Julia parity) or CONTINUE (lenient, original Haskell).
-Default True (fail-closed) to match Julia's conservative behavior.
--}
+-- | Treat decision-engine HTTP errors as ABORT (fail-closed) or CONTINUE. Default fail-closed.
 getDecisionEngineFailClosed :: (MonadFlow m) => m Bool
 getDecisionEngineFailClosed =
     getConfigBoolForProduct "decision_engine_fail_closed" (Just "autopilot") True
@@ -191,29 +188,21 @@ getABHSAllowedTimeDiffMins :: (MonadFlow m) => m Int
 getABHSAllowedTimeDiffMins =
     getConfigIntForProduct "ab_hs_allowed_time_diff_mins" (Just "autopilot") 60
 
-{- | Cross-cloud sync master gate. When True, completed releases POST a
-sync payload to the secondary cluster's @/releases/create@ endpoint
-via Sync.hs. The payload sets @isFromSync=true@ on the receiver to
-prevent infinite loops. Off by default — only enable in production
-multi-cloud setups. Read by 'triggerSyncIfEnabled' and SyncWatcher.
+{- | Master gate for cross-cloud sync. When True, completed releases POST
+to the secondary cluster's @/releases/create@ with @isFromSync=true@ to
+prevent loops. Off unless running multi-cloud.
 -}
 isSyncClusterEnabled :: (MonadFlow m) => m Bool
 isSyncClusterEnabled = getConfigBoolForProduct "sync_cluster_enabled" (Just "autopilot") False
 
-{- | When True, the runner allows multiple in-flight releases per
-(app_group, env) provided they target DIFFERENT services. When False,
-only one release per app_group can run at a time (Julia historic
-single-release mode). Same-service concurrency is ALWAYS blocked
-regardless. Read by 'pickJobs' in Runner.hs.
+{- | When True, allow multiple in-flight releases per (app_group, env)
+provided they target DIFFERENT services. Same-service concurrency is
+always blocked regardless.
 -}
 isMultiReleasePerProduct :: (MonadFlow m) => m Bool
 isMultiReleasePerProduct = getConfigBoolForProduct "multi_release_per_product" (Just "autopilot") False
 
-{- | Check if autopilot is under maintenance.
-Reads "ap_under_maintenance" from server_config. The value is a JSON object
-like {"owner":"someone","ap_under_maintenance":false}. Returns True if the
-"ap_under_maintenance" field is true.
--}
+-- | Reads @ap_under_maintenance@ from server_config ({"ap_under_maintenance":bool}).
 isUnderMaintenance :: (MonadFlow m) => m Bool
 isUnderMaintenance = withDb $ \db -> do
     v <- getEnabledServerConfigValueForProduct_io db "ap_under_maintenance" (Just "autopilot")
@@ -243,14 +232,11 @@ getPodsCreationDelay = getConfigIntForProduct "pods_creation_delay" (Just "autop
 getPodsScaleDownDelayFromConfig :: (MonadFlow m) => m Double
 getPodsScaleDownDelayFromConfig = getConfigDoubleForProduct "pods_scale_down_delay_config" (Just "autopilot") 0.0
 
+{- | Default 1.0 = match old-version pod count exactly. Bumping above 1.0
+combined with the per-stage HPA ratchet (max(live, computed)) causes
+per-release pod inflation when the HPA never scales down (idle envs).
+-}
 getPodsCalculationFactor :: (MonadFlow m) => m Double
--- Default 1.0 = "match old version pods exactly". Was 1.2 (Julia historic
--- default for traffic-shift headroom) but combined with the per-stage HPA
--- ratchet (max(live, computed)) it caused per-release pod inflation in
--- environments where the HPA never scaled down (idle test deployments).
--- Operators who want headroom should set this to 1.2+ in server_config and
--- accept the inflation, OR keep at 1.0 and rely on the HPA's CPU-driven
--- scale-down between releases.
 getPodsCalculationFactor = getConfigDoubleForProduct "pods_calculation_factor" (Just "autopilot") 1.0
 
 getHpaMinMaxFactor :: (MonadFlow m) => m Double
@@ -265,17 +251,12 @@ getMaxJobCompletionHours = getConfigIntForProduct "max_job_completion_hours" (Ju
 getRevertCooloff :: (MonadFlow m) => m Int
 getRevertCooloff = getConfigIntForProduct "revert_cooloff" (Just "autopilot") 1
 
-{- | Julia's `ckh_cluster_name` global. Sent in the AB initiate
-placeholders.cluster field — picks which ClickHouse cluster the engine
-queries. Per CONTEXT.md the engine is external; this is just an opaque
-string we forward.
--}
+-- | Opaque ClickHouse cluster name forwarded to the AB engine initiate body.
 getCkhClusterName :: (MonadFlow m) => m T.Text
 getCkhClusterName = getConfigTextForProduct "ckh_cluster_name" (Just "autopilot") ""
 
-{- | Julia's `getDEPostMonitoringTimeout` — sent as `self_closing_time` in
-the post-monitoring AB initiate body so the engine self-stops if SC
-crashes mid-monitoring. Default 1800s = 30 min, matching Julia.
+{- | Sent as @self_closing_time@ in the post-monitoring AB initiate body
+so the engine self-stops if SC crashes mid-monitoring. Default 1800s.
 -}
 getDEPostMonitoringTimeout :: (MonadFlow m) => m Int
 getDEPostMonitoringTimeout = getConfigIntForProduct "de_post_monitoring_timeout" (Just "autopilot") 1800
@@ -283,47 +264,31 @@ getDEPostMonitoringTimeout = getConfigIntForProduct "de_post_monitoring_timeout"
 getLockExpiryDelayMinutes :: (MonadFlow m) => m Int
 getLockExpiryDelayMinutes = getConfigIntForProduct "lock_expiry_delay_minutes" (Just "autopilot") 15
 
-{- | Stale-DISCARDING sweep grace period (minutes). Trackers that have been
-stuck in the DISCARDING status longer than this are force-flipped to
-DISCARDED by the runner's poll loop step 6. Julia parity: Julia discards
-DISCARDING-status trackers instantly via @filterUsingScheduleTime!@; we use
-a short grace period to absorb in-flight kubectl calls before declaring
-them dead. Default 5 minutes.
+{- | Stale-DISCARDING sweep grace period (minutes). Short window absorbs
+in-flight kubectl calls before trackers are force-flipped to DISCARDED.
 -}
 getDiscardingSweepMinutes :: (MonadFlow m) => m Int
 getDiscardingSweepMinutes = getConfigIntForProduct "discarding_sweep_minutes" (Just "autopilot") 5
 
-{- | AB/HS volume floor for the A side (control). Defensive sample-size
-gate: if the engine reports total_a < this value, downgrade an Abort
-verdict to Wait so we don't roll back on tiny samples. Julia parity:
-@DecisionThreshold.volume_thresholds[1]@ default 50.
-Read by 'getHSDecision' and passed to 'parseDecisionResponseWithVolume'.
+{- | Sample-size floor for the A side. Abort verdicts are downgraded to
+Wait when @total_a < this@ so we don't roll back on tiny samples.
 -}
 getABHSVolumeMinA :: (MonadFlow m) => m Int
 getABHSVolumeMinA = getConfigIntForProduct "ab_hs_volume_min_a" (Just "autopilot") 50
 
-{- | AB/HS volume floor for the B side (variant / new version). Same
-semantics as 'getABHSVolumeMinA' but for the new-version sample.
-Julia parity: @DecisionThreshold.volume_thresholds[2]@ default 100.
--}
+-- | Same as 'getABHSVolumeMinA' but for the B (variant) side.
 getABHSVolumeMinB :: (MonadFlow m) => m Int
 getABHSVolumeMinB = getConfigIntForProduct "ab_hs_volume_min_b" (Just "autopilot") 100
 
-{- | Auto-complete delay for VS-edit trackers stuck in APPLIED. Used by
-the runner sweep step 7 to flip APPLIED → COMPLETED after this many
-minutes. Julia parity: @release/watcher.jl:158-160@
-@getAutoCompleteVSTrackerDelay@. Default 60 minutes.
+{- | Minutes after which VS-edit trackers stuck in APPLIED are auto-flipped
+to COMPLETED by the runner sweep.
 -}
 getAutoCompleteVsTrackerMinutes :: (MonadFlow m) => m Int
 getAutoCompleteVsTrackerMinutes =
     getConfigIntForProduct "auto_complete_vs_tracker_minutes" (Just "autopilot") 60
 
-{- | Decision-engine notification dedup time window (minutes). Used by
-'notifyDecisionThreadMessage' to suppress repeat Slack messages whose
-LAST notification was sent within this window — even if the
-(decisionType, decision, reason) tuple changed. Julia parity:
-@repeat_interval_in_min@ in @ABHSSlackSpamFilter@
-(release/workflow/service.jl:793-824). Default 15 minutes.
+{- | Dedup window (minutes) for decision-engine Slack notifications; a
+repeat within the window is suppressed even if the tuple differs.
 -}
 getDecisionNotificationDedupMinutes :: (MonadFlow m) => m Int
 getDecisionNotificationDedupMinutes =

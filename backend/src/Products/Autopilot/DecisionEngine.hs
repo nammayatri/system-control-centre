@@ -1,18 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-{- | Decision engine for autopilot releases.
+{- | Decision engine. Three gated decision sources:
 
-Provides three decision functions, all gated behind server_config flags:
+1. Prometheus query checks (decision_config in deployment_config).
+2. AB Decision Engine — external Continue/Wait/Abort service.
+3. Health Score — external service, pre- and post-monitoring variants.
 
-1. Prometheus query checks — reads decision_config from deployment_config,
- queries Prometheus HTTP API, checks thresholds.
-2. AB Decision Engine — calls external AB testing service for Continue/Wait/Abort.
-3. Health Score (HS) Decision — calls external health score service,
- supports pre-monitoring (during rollout) and post-monitoring (after 100%).
-
-All functions fail OPEN: on any error (HTTP failure, parse failure, missing config),
-they return Continue/PromOK so releases are never blocked by monitoring infrastructure failures.
+All sources fail OPEN on HTTP/parse/config errors so monitoring outages
+never block releases — except where @decision_engine_fail_closed@ is set.
 -}
 module Products.Autopilot.DecisionEngine (
     -- * Decision Functions
@@ -65,10 +61,6 @@ import Products.Autopilot.Types.Release (Decision (..), ReleaseTracker (..), dec
 import Shared.Config.Runtime (getConfigBoolForProduct)
 import Prelude
 
--- ============================================================================
--- Types
--- ============================================================================
-
 data DecisionResult = DecisionResult
     { drDecision :: Decision
     -- ^ Continue, Wait, or Abort
@@ -85,28 +77,12 @@ data PromCheckResult
     | PromAbort Text
     deriving (Show)
 
--- ============================================================================
--- Prometheus Query Checks
--- ============================================================================
-
-{- | Run Prometheus query checks against the service's decision_config.
-
-Reads the decision_config JSON from deployment_config, parses query configs,
-and for each query calls the Prometheus HTTP API to check thresholds.
-
-Returns PromOK if:
-- prom_checks_enabled is false (gate)
-- No decision_config provided
-- No PROMETHEUS_URL configured
-- Config is invalid JSON (fail open)
-- All queries pass thresholds
-
-Returns PromAbort if any metric exceeds abort_threshold.
-Returns PromWarn if any metric exceeds warn_threshold (but not abort).
+{- | Run Prometheus checks per the service's decision_config. Returns
+PromOK when gated off / no config / no URL / parse failure (fail open),
+PromAbort on any abort_threshold breach, PromWarn on warn_threshold.
 -}
 checkPromQueries :: (MonadFlow m) => Config -> ReleaseTracker -> Maybe Text -> m PromCheckResult
 checkPromQueries cfg tracker mDecisionConfig = do
-    -- Master gate: Julia's @prom_query_check_enabled@ (with @prom_checks_enabled@ fallback)
     enabled <- isPromQueryCheckEnabled
     if not enabled
         then pure PromOK
@@ -115,26 +91,18 @@ checkPromQueries cfg tracker mDecisionConfig = do
             Just configJson -> do
                 let promUrl = prometheusUrl cfg
                 if null promUrl
-                    then pure PromOK -- No Prometheus URL configured
+                    then pure PromOK
                     else liftIO $ executePromChecks promUrl configJson tracker
 
-{- | Internal: Execute Prometheus checks against all configs in the decision_config JSON.
-
-The decision_config is a JSON array of config objects, each containing queries
-and thresholds. We check each config entry and return the worst result
-(Abort > Warn > OK).
--}
 executePromChecks :: String -> Text -> ReleaseTracker -> IO PromCheckResult
 executePromChecks promUrl configJson tracker =
     case A.decodeStrict' (TE.encodeUtf8 configJson) of
         Nothing -> do
             logWarningG "[DECISION] Failed to parse decision_config JSON, skipping prom checks"
-            pure PromOK -- Invalid config, skip (fail open)
+            pure PromOK
         Just configs -> checkAllConfigs promUrl configs tracker
 
-{- | Check all config entries, returning the worst result.
-Abort > Warn > OK.
--}
+-- | Worst-result fold across configs: Abort > Warn > OK.
 checkAllConfigs :: String -> [Value] -> ReleaseTracker -> IO PromCheckResult
 checkAllConfigs _ [] _ = pure PromOK
 checkAllConfigs url (c : rest) rt = do
@@ -148,20 +116,9 @@ checkAllConfigs url (c : rest) rt = do
                 _ -> pure (PromWarn reason)
         PromOK -> checkAllConfigs url rest rt
 
-{- | Check a single config entry against Prometheus.
-
-Expected config structure:
-{
-"cluster": "...",
-"config": {
-  "experiments": [{
-    "queries": [{"query": "...", "name": "..."}],
-    "thresholds": {"abort": 100, "warn": 50}
-  }]
-}
-}
-
-Uses try/catch for HTTP failures — returns PromOK on failure (fail open).
+{- | Check a single config entry against Prometheus. Expected shape:
+@{cluster, config: {experiments: [{queries: [{query, name}], thresholds: {abort, warn}}]}}@.
+HTTP errors return PromOK (fail open).
 -}
 checkSingleConfig :: String -> Value -> ReleaseTracker -> IO PromCheckResult
 checkSingleConfig url config _rt = do
@@ -170,12 +127,8 @@ checkSingleConfig url config _rt = do
         Right r -> pure r
         Left e -> do
             logErrorG $ "[DECISION] Prometheus check failed: " <> T.pack (show e)
-            pure PromOK -- Fail open
+            pure PromOK
 
-{- | Extract queries from a config entry and check each one.
-
-Navigates: config.config.experiments[].queries[] and config.config.experiments[].thresholds
--}
 checkConfigQueries :: String -> Value -> IO PromCheckResult
 checkConfigQueries promUrl (Object configObj) = do
     case KM.lookup (K.fromText "config") configObj of
@@ -187,7 +140,6 @@ checkConfigQueries promUrl (Object configObj) = do
         _ -> pure PromOK
 checkConfigQueries _ _ = pure PromOK
 
--- | Check all experiments in a config entry.
 checkExperiments :: String -> [Value] -> IO PromCheckResult
 checkExperiments _ [] = pure PromOK
 checkExperiments promUrl (exp' : rest) = do
@@ -201,7 +153,6 @@ checkExperiments promUrl (exp' : rest) = do
                 _ -> pure (PromWarn reason)
         PromOK -> checkExperiments promUrl rest
 
--- | Check a single experiment: extract queries and thresholds, query Prometheus.
 checkExperiment :: String -> Value -> IO PromCheckResult
 checkExperiment promUrl (Object expObj) = do
     let queries = case KM.lookup (K.fromText "queries") expObj of
@@ -212,7 +163,6 @@ checkExperiment promUrl (Object expObj) = do
     checkQueryList promUrl queries abortThreshold warnThreshold
 checkExperiment _ _ = pure PromOK
 
--- | Extract a numeric threshold from the thresholds object.
 extractThreshold :: Text -> KM.KeyMap Value -> Maybe Double
 extractThreshold key expObj =
     case KM.lookup (K.fromText "thresholds") expObj of
@@ -222,7 +172,6 @@ extractThreshold key expObj =
                 _ -> Nothing
         _ -> Nothing
 
--- | Check a list of queries against Prometheus, comparing results to thresholds.
 checkQueryList :: String -> [Value] -> Maybe Double -> Maybe Double -> IO PromCheckResult
 checkQueryList _ [] _ _ = pure PromOK
 checkQueryList promUrl (q : rest) abortTh warnTh = do
@@ -236,7 +185,7 @@ checkQueryList promUrl (q : rest) abortTh warnTh = do
                 _ -> pure (PromWarn reason)
         PromOK -> checkQueryList promUrl rest abortTh warnTh
 
--- | Query Prometheus for a single metric and compare against thresholds.
+-- | Query Prometheus for a single metric and apply threshold + safety rails.
 checkSingleQuery :: String -> Value -> Maybe Double -> Maybe Double -> IO PromCheckResult
 checkSingleQuery promUrl (Object qObj) abortTh warnTh = do
     let mQuery = case KM.lookup (K.fromText "query") qObj of
@@ -245,17 +194,11 @@ checkSingleQuery promUrl (Object qObj) abortTh warnTh = do
         mName = case KM.lookup (K.fromText "name") qObj of
             Just (String n) -> n
             _ -> "unknown"
-        -- Optional config fields read from the decision_config JSON for
-        -- per-query Julia parity safety rails:
         readDouble k = case KM.lookup (K.fromText k) qObj of
             Just (Number n) -> Just (toRealFloat n :: Double)
             _ -> Nothing
-        -- Layer A: 5xx error-spike force-abort
-        -- (Julia decision/runner.jl:508-511). For metrics whose name flags
-        -- them as a 500/501/503/5xx error rate, force-abort when
-        -- (totalSamples × val/100) ≥ 200. The Prom path doesn't get a
-        -- raw "totalSamples" — we expect callers to put it in the query
-        -- config as @sample_count@ for these metric names.
+        -- Layer A: 5xx error-spike force-abort when (sampleCount × val/100) ≥ 200.
+        -- sampleCount must be supplied via the query config (sample_count/totalB).
         is5xxMetric =
             mName
                 `elem` [ "resp_500_rate"
@@ -265,12 +208,7 @@ checkSingleQuery promUrl (Object qObj) abortTh warnTh = do
                        , "5xx_rate"
                        ]
         sampleCount = readDouble "sample_count" <|> readDouble "totalB"
-        -- Layer B: A/B split percentage breach
-        -- (Julia decision/runner.jl:646-651). If the query config carries
-        -- @target_split@ + @actual_split@ (the runner is expected to
-        -- populate actual_split from the live VS routes before calling
-        -- the decision engine), abort if actual drifted outside
-        -- target ± buffer (default 5%).
+        -- Layer B: abort on A/B split drift outside target ± buffer (default 5%).
         targetSplit = readDouble "target_split" <|> readDouble "release_percentage"
         actualSplit = readDouble "actual_split" <|> readDouble "current_split"
         splitBuffer = readDouble "split_buffer" <|> readDouble "release_buffer"
@@ -279,14 +217,13 @@ checkSingleQuery promUrl (Object qObj) abortTh warnTh = do
         Just query -> do
             mValue <- queryPrometheus promUrl query
             case mValue of
-                Nothing -> pure PromOK -- Query failed, fail open
+                Nothing -> pure PromOK
                 Just val -> do
                     logDebugG $ "[DECISION] Prom query '" <> mName <> "' = " <> T.pack (show val)
-                    -- Layer A: 5xx spike force-abort wins over generic threshold.
+                    -- Layer A wins over generic thresholds; layer B wins over A engine verdict.
                     let spike5xx = case (is5xxMetric, sampleCount) of
                             (True, Just sc) -> (sc * val / 100.0 :: Double) >= 200.0
                             _ -> False
-                        -- Layer B: A/B split breach.
                         splitBreach = case (actualSplit, targetSplit) of
                             (Just a, Just t) ->
                                 let buf = maybe 5.0 id splitBuffer
@@ -302,7 +239,6 @@ checkSingleQuery promUrl (Object qObj) abortTh warnTh = do
                                         <> T.pack (show val)
                                         <> " sampleCount="
                                         <> T.pack (show sampleCount)
-                                        <> " (Julia parity)"
                                     )
                         else
                             if splitBreach
@@ -327,12 +263,7 @@ checkSingleQuery promUrl (Object qObj) abortTh warnTh = do
                                         _ -> pure PromOK
 checkSingleQuery _ _ _ _ = pure PromOK
 
-{- | Query Prometheus HTTP API and extract the scalar result value.
-
-Calls: GET {promUrl}/api/v1/query?query={query}
-Parses the response JSON to extract the numeric value from the result.
-Returns Nothing on any failure (fail open).
--}
+-- | GET {promUrl}/api/v1/query — extracts scalar value. Nothing on any failure.
 queryPrometheus :: String -> Text -> IO (Maybe Double)
 queryPrometheus promUrl query = do
     let url = T.pack promUrl <> "/api/v1/query?query=" <> query
@@ -349,11 +280,7 @@ queryPrometheus promUrl query = do
             logErrorG $ "[DECISION] Prometheus query failed: " <> T.pack (show e)
             pure Nothing
 
-{- | Parse Prometheus query response JSON.
-
-Expected format:
-{ "status": "success", "data": { "result": [{ "value": [timestamp, "value_string"] }] } }
--}
+-- | Parse @{data: {result: [{value: [ts, "n"]}]}}@ into a scalar.
 parsePromResponse :: String -> Maybe Double
 parsePromResponse raw =
     case A.decodeStrict' (TE.encodeUtf8 (T.pack raw)) :: Maybe Value of
@@ -379,33 +306,13 @@ parsePromResponse raw =
                 _ -> Nothing
         _ -> Nothing
 
--- ============================================================================
--- AB Decision Engine
--- ============================================================================
-
-{- | Initiate the AB decision pod ONCE per release (Julia parity).
-
-Mirrors Julia's @intiateDecisionEngine@ in @global_changelog.jl@: a single
-POST to @{AB_ENGINE_URL}initiate/ab@ at release start spawns the ephemeral
-decision pod. The actual decision verdict is read later via 'getHSDecision'
-polling the same @run_id@ during the rollout loop.
-
-This function should be called from the workflow's preparing phase (e.g.
-'prepareK8sResources'), not from the rollout step loop. Calling it once
-matches Julia's contract; per-step calls (the previous behavior) would
-re-spawn the pod on every iteration.
-
-Gates: master @ab_decision_enabled@ AND per-service
-@ab_hs_decision_enabled_app_groups@ JSON. If either is false, returns
-Continue without contacting the engine.
-
-On HTTP error returns Abort (fail-closed) if @decision_engine_fail_closed@
-is true (default — Julia parity), Continue otherwise.
-
-NOTE: Julia's full flow includes a webhook callback path on the AB engine
-side; we implement only the synchronous initiate path. The decision result
-is read via 'getHSDecision', which polls the same run_id. See CONTEXT.md
-"AB engine: synchronous polling only" note.
+{- | Spawn the AB decision pod ONCE per release via POST
+@{AB_ENGINE_URL}initiate/ab@. Called from the workflow prepare phase, not
+the rollout loop (per-step calls would re-spawn every iteration).
+Gated by @ab_decision_enabled@ AND per-service
+@ab_hs_decision_enabled_app_groups@. HTTP errors return Abort if
+@decision_engine_fail_closed@ is set (default), else Continue. The
+verdict is read later via 'getHSDecision' polling the same run_id.
 -}
 initiateABDecisionForRelease :: (MonadFlow m) => Config -> ReleaseTracker -> m DecisionResult
 initiateABDecisionForRelease cfg tracker = do
@@ -428,15 +335,11 @@ initiateABDecisionForRelease cfg tracker = do
                     let body = mkInitiateAbBody tracker cluster svcHost now
                     liftIO $ initiateABDecision abUrl apiKey (appGroup tracker) body failClosed
 
--- | Helper: Maybe Text -> Text with "" default.
 fromMaybeT :: Maybe Text -> Text
 fromMaybeT = maybe "" id
 
-{- | Julia-parity: POST a second initiate to spawn the POST-monitoring AB run.
-Mirrors Julia's @intiateDecisionEnginePostMonitoring@. Called once AFTER
-the new version reaches 100% traffic and pods are ready, BEFORE the
-post-monitor HS poll loop starts. The @run_id@ is @<release-id>-post@
-so the HS GET during post-monitoring reads a distinct verdict stream.
+{- | Spawn the post-monitoring AB run (run_id suffix @-post@) once the new
+version hits 100% and pods are ready, before the post-monitor HS loop.
 -}
 initiatePostMonitoringABDecisionForRelease :: (MonadFlow m) => Config -> ReleaseTracker -> m DecisionResult
 initiatePostMonitoringABDecisionForRelease cfg tracker = do
@@ -455,9 +358,8 @@ initiatePostMonitoringABDecisionForRelease cfg tracker = do
             let body = mkInitiateAbBodyPostMonitoring tracker cluster svcHost selfClosingSec now
             liftIO $ initiateABDecision abUrl apiKey (appGroup tracker) body failClosed
 
-{- | Julia parity: POST @{abUrl}stop/ab/{run_id}@ to terminate the decision
-pod when we abort or complete a release. Best-effort: logs on failure and
-never throws, so cleanup paths remain robust.
+{- | Best-effort POST @{abUrl}stop/ab/{run_id}@ to terminate the decision
+pod on abort/complete. Logs failures; never throws.
 -}
 stopDecisionEngineHS :: (MonadFlow m) => Config -> Text -> m ()
 stopDecisionEngineHS cfg runId = do
@@ -491,26 +393,14 @@ stopDecisionEngineHS cfg runId = do
                     Left e ->
                         logWarningG $ "[DECISION] Stop AB engine threw: " <> T.pack (show e)
 
-{- | Per-rollout-step AB decision read.
-
-In Julia's flow, the AB engine never returns a verdict directly during the
-rollout — the decision pod runs in the background and emits its verdict via
-the HS GET poll using the shared @run_id@. So this function is structurally
-a no-op: it always returns Continue. The actual decision-making happens in
-'getHSDecision'.
-
-Kept as a separate function (rather than inlining) for symmetry with Julia's
-two-call shape (@getABDecision@ + @getHSDecision@) and to make the workflow
-call site read identically to Julia's @service.jl@.
+{- | Per-rollout-step AB read — structurally a no-op (always Continue). The
+AB pod's verdict arrives via 'getHSDecision'. Kept as a separate function
+so the workflow's two-call shape stays readable.
 -}
 getABDecision :: (MonadFlow m) => Config -> ReleaseTracker -> m DecisionResult
 getABDecision _cfg _tracker = pure (DecisionResult Continue Nothing "AB_ENGINE")
 
-{- | Internal: POST @{abUrl}initiate/ab@ to spawn the decision pod.
-Mirrors @intiateDecisionEngine@ in Julia's @global_changelog.jl@.
-On success returns @DecisionResult Continue@ — the actual decision
-comes back via the HS poll (which reads the same @run_id@).
--}
+-- | POST @{abUrl}initiate/ab@; success returns Continue (verdict via HS poll).
 initiateABDecision :: String -> Text -> Text -> Value -> Bool -> IO DecisionResult
 initiateABDecision abUrl apiKey productName body failClosed = do
     let url = ensureSlash (T.pack abUrl) <> "initiate/ab"
@@ -539,10 +429,7 @@ initiateABDecision abUrl apiKey productName body failClosed = do
             logErrorG $ "[DECISION] AB initiate failed: " <> T.pack (show e)
             pure (failOrContinue failClosed "AB_ENGINE" "AB Engine unreachable")
 
-{- | Build the JSON body Julia POSTs to @initiate/ab@ — full Julia parity.
-Julia source: @global_changelog.jl:111-124@. Includes start_time, end_time
-(start+24h), cluster (ckh_cluster_name), and the deployment_config service host.
--}
+-- | JSON body for @initiate/ab@. end_time is start+24h.
 mkInitiateAbBody :: ReleaseTracker -> Text -> Text -> UTCTime -> Value
 mkInitiateAbBody tracker cluster svcHost now =
     let st = case startTime tracker of
@@ -566,14 +453,9 @@ mkInitiateAbBody tracker cluster svcHost now =
             , "run_id" .= releaseId tracker
             ]
 
-{- | Julia parity: post-monitoring AB initiate body. Source:
-@global_changelog.jl:144-188@. Differences from primary body:
-  * service suffixed with "_POST"
-  * interval = 5
-  * placeholders.start_time = now (not tracker.start_time)
-  * placeholders.global_time = now - 24h
-  * run_id suffixed with "-post"
-  * top-level self_closing_time field
+{- | Post-monitoring variant of 'mkInitiateAbBody'. Differences: service
+suffixed @_POST@, interval 5, start_time=now, global_time=now-24h,
+run_id suffixed @-post@, plus top-level @self_closing_time@.
 -}
 mkInitiateAbBodyPostMonitoring :: ReleaseTracker -> Text -> Text -> Int -> UTCTime -> Value
 mkInitiateAbBodyPostMonitoring tracker cluster svcHost selfClosingSec now =
@@ -596,13 +478,10 @@ mkInitiateAbBodyPostMonitoring tracker cluster svcHost selfClosingSec now =
             , "self_closing_time" .= selfClosingSec
             ]
 
-{- | Format a UTCTime the way Julia's @convertTimeToStandardFormat@ does:
-ISO-ish "YYYY-mm-ddTHH:MM:SS".
--}
+-- | "YYYY-mm-ddTHH:MM:SS" for the AB engine.
 formatStdTime :: UTCTime -> Text
 formatStdTime = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S"
 
--- | Pull "cluster" out of the tracker's releaseContext JSON blob.
 extractCluster :: ReleaseTracker -> Text
 extractCluster tracker = case releaseContext tracker of
     Just (Object o) -> case KM.lookup (K.fromText "cluster") o of
@@ -610,35 +489,10 @@ extractCluster tracker = case releaseContext tracker of
         _ -> ""
     _ -> ""
 
--- ============================================================================
--- Health Score (HS) Decision Engine
--- ============================================================================
-
-{- | Get decision from Health Score / AB engine.
-
-Wire format (Julia parity, @global_changelog.jl:191-216@):
-
-@
-  GET  {AB_HS_URL}get/ab/decision/{run_id}
-  Headers: Content-Type: application/json
-           x-api-key: <ab_hs_api_key>
-  Body:    {"allowedTimeDiffInMins": <ab_hs_allowed_time_diff_mins>,
-            "ignoreMetricsForDecision": []}
-@
-
-Note: Julia's HTTP client allows a body on GET. We do the same via
-'Core.Http.Client'. Response is integer-encoded:
-
-  * @{"decision": 0}@ → Continue
-  * @{"decision": 1}@ → Abort
-  * @{"decision": 2}@ → Wait
-
-For post-monitoring, the run_id is suffixed with @"-post"@ (Julia
-@intiateDecisionEnginePostMonitoring@ uses @tracker.id * "-post"@).
-
-Returns Continue if @ab_hs_enabled@ is false or @AB_HS_URL@ unset.
-On HTTP error: Abort if @decision_engine_fail_closed@ is true (default,
-Julia parity), Continue otherwise.
+{- | GET @{AB_HS_URL}get/ab/decision/{runId}@ (body allowed on GET) with
+int-encoded response (0 Continue, 1 Abort, 2 Wait). Post-monitoring uses
+@{runId}-post@. Gated by @ab_hs_enabled@; HTTP errors honour
+@decision_engine_fail_closed@.
 -}
 getHSDecision :: (MonadFlow m) => Config -> ReleaseTracker -> Bool -> m DecisionResult
 getHSDecision cfg tracker isPostMonitoring = do
@@ -653,9 +507,7 @@ getHSDecision cfg tracker isPostMonitoring = do
                     apiKey <- getABHSApiKey
                     diffMins <- getABHSAllowedTimeDiffMins
                     failClosed <- getDecisionEngineFailClosed
-                    -- Julia parity: read configurable volume floors
-                    -- (DecisionThreshold.volume_thresholds) so operators
-                    -- can tighten/loosen per environment via server_config.
+                    -- Per-env volume floors via server_config.
                     minA <- getABHSVolumeMinA
                     minB <- getABHSVolumeMinB
                     let runId =
@@ -664,9 +516,6 @@ getHSDecision cfg tracker isPostMonitoring = do
                                 else releaseId tracker
                     liftIO $ pollHSDecision hsUrl apiKey diffMins runId failClosed minA minB
 
-{- | Internal: GET @{hsUrl}get/ab/decision/{runId}@ with the Julia-parity
-JSON body and headers. Parses int-encoded decision.
--}
 pollHSDecision :: String -> Text -> Int -> Text -> Bool -> Int -> Int -> IO DecisionResult
 pollHSDecision hsUrl apiKey diffMins runId failClosed minA minB = do
     let url = ensureSlash (T.pack hsUrl) <> "get/ab/decision/" <> runId
@@ -702,73 +551,36 @@ pollHSDecision hsUrl apiKey diffMins runId failClosed minA minB = do
             logErrorG $ "[DECISION] HS Engine call failed: " <> T.pack (show e)
             pure (failOrContinue failClosed "HEALTH_SCORE" "HS Engine unreachable")
 
--- | Choose Abort (fail-closed, Julia parity) or Continue (lenient) on error.
 failOrContinue :: Bool -> Text -> Text -> DecisionResult
 failOrContinue True src reason = DecisionResult Abort (Just reason) src
 failOrContinue False src reason = DecisionResult Continue (Just reason) src
 
--- | Ensure a URL string ends with @/@ so we can append @initiate/ab@ etc.
 ensureSlash :: Text -> Text
 ensureSlash u
     | T.null u = u
     | T.last u == '/' = u
     | otherwise = u <> "/"
 
--- ============================================================================
--- Combined Decision
--- ============================================================================
-
-{- | Combine AB and HS decisions by Julia priority ordering:
-  Abort > Wait > WaitForMoreIteration > Continue.
-Julia parity (decision/runner.jl decisionPriority field on ABDecision).
--}
+-- | Combine AB + HS by priority: Abort > Wait > WaitForMoreIteration > Continue.
 getCombinedDecision :: DecisionResult -> DecisionResult -> Decision
 getCombinedDecision ab hs =
     let a = drDecision ab
         b = drDecision hs
      in if decisionPriority a <= decisionPriority b then a else b
 
--- ============================================================================
--- Shared Helpers
--- ============================================================================
+{- | Parse an engine response with four defensive layers (any omitted field
+= no-op):
 
-{- | Parse a decision response JSON.
+  1. Volume floor — downgrade Abort→Wait if totalA\<minA or totalB\<minB.
+  2. Rate-of-growth — downgrade Abort→Wait if totals aren't growing.
+  3. 5xx spike — force Abort if (totalB × rate/100) ≥ 200 for a
+     @resp_5xx@-family metric regardless of engine verdict.
+  4. A/B split breach — force Abort if actual drifted outside
+     target ± buffer (default 5%).
 
-Primary path (Julia parity, @decisionengine.jl:87-95@): the @"decision"@
-field is an integer:
-
-  * @0@ → Continue
-  * @1@ → Abort
-  * @2@ → Wait
-  * any other int → Continue (lenient)
-
-Fallback path (forward-compat with any string-emitting endpoint):
-recognises @"Abort"@/@"Wait"@/@"Continue"@ case-insensitively.
-
-If the field is missing entirely we return Continue (fail-open default
-for parse-only errors; HTTP-level errors honour @decision_engine_fail_closed@).
--}
-
-{- | Parse decision response with Julia-parity safety checks.
-
-Defensive layers (Julia parity):
-  1. Volume floor (decision/runner.jl:494,537-541 volume_rate_result):
-     downgrade Abort → Wait if totalA < minA or totalB < minB.
-  2. Volume rate-of-growth (decision/runner.jl:490-529 volume_rate_result):
-     if the response includes prevTotalA / prevTotalB and the growth
-     between samples is below @minRateA@ / @minRateB@, downgrade to Wait.
-  3. 5xx spike force-abort (decision/runner.jl:508-511): when the metric
-     name is in the resp_5xx family AND (totalB × errorPct/100) ≥ 200,
-     force Abort regardless of the engine's reported decision.
-  4. A/B split breach (decision/runner.jl:646-651): if the response
-     reports an actual traffic split that drifted outside
-     [routePercent − buffer, routePercent + buffer], abort with
-     "A/B Split Percentage Breach".
-
-All checks are no-ops if the engine omits the relevant fields — we
-trust the engine's verdict in that case and apply only the int → enum
-mapping. The caller supplies @minA@ / @minB@ (typically from
-server_config) so operators can tune thresholds without recompiling.
+The primary @decision@ field is int-encoded (0 Continue, 1 Abort, 2 Wait,
+3 WaitForMoreIteration); a string fallback recognises the same names.
+Missing field is treated as Continue (fail-open parse error).
 -}
 parseDecisionResponseWithVolume :: Value -> Text -> Int -> Int -> IO DecisionResult
 parseDecisionResponseWithVolume (Object obj) source minA minB = do
@@ -811,22 +623,15 @@ parseDecisionResponseWithVolume (Object obj) source minA minB = do
         targetSplit = readDouble "targetSplit" <|> readDouble "target_split" <|> readDouble "releasePercentage"
         splitBuffer = readDouble "splitBuffer" <|> readDouble "release_buffer"
 
-        -- Layer 1: absolute sample-size floor.
         belowVolume = case (totalA, totalB) of
             (Just a, _) | a < minA -> True
             (_, Just b) | b < minB -> True
             _ -> False
 
-        -- Layer 2: rate-of-growth floor. Julia checks (total - prev) > 0
-        -- and bounded by a minimum rate. We use a conservative default:
-        -- growth must be at least 1 sample/iteration, otherwise downgrade.
         belowRate = case (totalA, prevTotalA, totalB, prevTotalB) of
             (Just a, Just pa, Just b, Just pb) | (a - pa) <= 0 && (b - pb) <= 0 -> True
             _ -> False
 
-        -- Layer 3: 5xx spike force-abort. Julia: for resp_500/501/503,
-        -- if (total_b × mv_b/100) ≥ 200, force abort regardless of
-        -- whatever the engine returned.
         is5xxMetric = case metricName of
             Just m -> m `elem` ["resp_500_rate", "resp_501_rate", "resp_503_rate", "resp_5xx_rate"]
             Nothing -> False
@@ -834,16 +639,13 @@ parseDecisionResponseWithVolume (Object obj) source minA minB = do
             (True, Just tb, Just rate) -> (fromIntegral tb * rate / 100.0 :: Double) >= 200.0
             _ -> False
 
-        -- Layer 4: A/B split breach. Abort if actual drifted outside
-        -- target ± buffer. Default buffer 5% if not provided.
         splitBreach = case (actualSplit, targetSplit) of
             (Just actual, Just target) ->
                 let buf = maybe 5.0 id splitBuffer
                  in actual < (target - buf) || actual > (target + buf)
             _ -> False
 
-        -- Compose the final decision honouring layers in priority order:
-        --   5xx force-abort > split breach > engine Abort (with volume gate) > raw
+        -- Priority: 5xx force-abort > split breach > engine Abort (volume-gated) > raw.
         decision
             | spike5xxForceAbort = Abort
             | splitBreach = Abort

@@ -3,18 +3,10 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Autopilot product permissions
-
-All permissions for the Autopilot product as a type-safe ADT.
-Adding a new permission here without handling in permissionDescription
-will cause a compiler warning with -Wall.
-
-The data kind promotion ('DataKinds') makes each constructor also a type,
-which is consumed by the 'Protected' Servant combinator in
-"Core.Auth.Protected" for compile-time RBAC. The 'KnownPermission'
-instances below bridge each promoted constructor back to its runtime
-@(product, action)@ pair so the middleware-less Phase 3 auth check can do
-its lookup against @sc_person_product_access@.
+{- | Autopilot permissions as a promoted ADT. Each constructor is also a
+type (DataKinds) consumed by the 'Protected' Servant combinator; the
+'KnownPermission' instances bridge each type back to its runtime
+@(product, action)@ pair used by the RBAC check.
 -}
 module Products.Autopilot.Types.Permission (
     AutopilotPermission (..),
@@ -92,9 +84,7 @@ textToAutopilotPermission "CONFIG_REVERT" = Just AP_CONFIG_REVERT
 textToAutopilotPermission "FORCE_UNLOCK" = Just AP_FORCE_UNLOCK
 textToAutopilotPermission _ = Nothing
 
-{- | Human-readable description of each permission.
-Exhaustive pattern match ensures compiler warns if a new permission is added.
--}
+-- | Human-readable description (exhaustive, -Wall catches missing variants).
 permissionDescription :: AutopilotPermission -> Text
 permissionDescription AP_RELEASE_VIEW = "View releases and events"
 permissionDescription AP_RELEASE_CREATE = "Create new releases"
@@ -116,18 +106,8 @@ permissionDescription AP_CONFIG_DISCARD = "Discard ConfigMap and VS edit release
 permissionDescription AP_CONFIG_REVERT = "Revert ConfigMap releases"
 permissionDescription AP_FORCE_UNLOCK = "Force-release a VS edit lock held by another user (operator recovery; superadmin only)"
 
--- ============================================================================
--- KnownPermission instances — one per promoted constructor
---
--- These bridge the type-level permission tag used by 'Protected' at the API
--- type-site back to a runtime @(product, action)@ pair that the auth check
--- can match against @sc_person_product_access@.
---
--- 'permissionName' MUST match the Text value returned by
--- 'autopilotPermissionToText' for the corresponding constructor — the RBAC
--- check in 'Core.Auth.Protected.checkPermission' compares this string
--- against the effective-permission list pulled from the DB.
--- ============================================================================
+-- 'permissionName' MUST match 'autopilotPermissionToText' for the same
+-- constructor; the RBAC check compares this string against the DB.
 
 instance KnownPermission 'AP_RELEASE_VIEW where
     permissionProduct _ = "autopilot"

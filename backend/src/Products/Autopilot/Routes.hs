@@ -21,11 +21,9 @@ import Products.Autopilot.Types.Permission (AutopilotPermission (..))
 import Servant
 import Shared.API.Response (APIResponse (..))
 
-{- | Convention: 'Protected' is placed immediately after the first path literal
-and before any 'QueryParam' / 'ReqBody' / 'Capture' / 'Header'. That keeps
-the URL literal readable and makes 'AuthedPerson' the FIRST argument to
-every handler (because 'Protected :> api' prepends an 'AuthedPerson ->'
-to the handler's 'ServerT').
+{- | 'Protected' sits immediately after the first path literal (before
+QueryParam/ReqBody/Capture/Header) so 'AuthedPerson' is the first
+argument to every handler.
 -}
 type CoreAPI =
     "products" :> Protected 'AP_PRODUCT_CONFIG_VIEW :> Get '[JSON] [ProductResponse]
@@ -88,11 +86,8 @@ type CoreAPI =
         -- K8s ConfigMap lookup
         :<|> "configmap" :> Protected 'AP_CONFIG_EDIT :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] Value
         :<|> "configmap" :> Protected 'AP_CONFIG_EDIT :> "secondary" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] Value
-        -- Decision-engine post-monitoring webhook receiver (Julia parity:
-        -- release/workflow/webhook.jl). External AB engine POSTs the
-        -- post-100% verdict here. UNAUTHENTICATED — the webhook caller is
-        -- the engine, not a user. We trust the run_id (releaseId-post)
-        -- as the auth token.
+        -- Decision-engine post-monitoring webhook. UNAUTHENTICATED — trusts
+        -- the run_id (releaseId-post) as the auth token; caller is the AB engine.
         :<|> "decision" :> "webhook" :> Capture "runId" Text :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
 
 coreServer :: ServerT CoreAPI Flow

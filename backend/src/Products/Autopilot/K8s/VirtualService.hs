@@ -54,10 +54,8 @@ applyVirtualServiceRolloutWithRetries maxRetries cfg ctx oldW newW = do
                 Nothing -> pure (Right (K8sResult "external-vs-updated"))
                 Just internalVs -> applyVirtualServiceRolloutSingle cfg ctx maxRetries internalVs oldW newW
 
-{- | Apply VS rollout with optimistic concurrency.
-Reads the full VS (with resourceVersion), surgically modifies only the target
-service's routes, then kubectl replace. On 409 Conflict (another release
-modified the VS between our read and write), re-reads and retries up to 3 times.
+{- | Apply VS rollout with optimistic concurrency: read full VS, patch the
+target service's routes, kubectl replace; re-reads and retries on 409.
 -}
 applyVirtualServiceRolloutSingle :: Config -> K8sReleaseContext -> Int -> Text -> Int -> Int -> IO (Either K8sError K8sResult)
 applyVirtualServiceRolloutSingle cfg ctx maxRetries vsName oldW newW = go 1
@@ -73,7 +71,6 @@ applyVirtualServiceRolloutSingle cfg ctx maxRetries vsName oldW newW = go 1
                         case buildUpdatedVS v of
                             Nothing -> pure (Left (K8sError "VirtualService missing spec.http"))
                             Just updatedJson -> do
-                                -- kubectl replace with stdin piping (no echo — safe for all content)
                                 (exitCode, _out, errStr) <- readProcessWithExitCode (kubectlBin cfg) ["-n", T.unpack (namespace ctx), "replace", "-f", "-"] (T.unpack updatedJson)
                                 case exitCode of
                                     ExitSuccess -> pure (Right (K8sResult "vs-updated"))

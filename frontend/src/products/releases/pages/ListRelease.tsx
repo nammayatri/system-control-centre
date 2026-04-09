@@ -60,9 +60,7 @@ const getDateRange = (range: TimeRange, customFrom: string, customTo: string): {
   return { from, to };
 };
 
-// NammaYatri ops run on IST — all timestamps render in Asia/Kolkata so
-// dashboard users outside India still see the same values as on-call India.
-// Backend stores UTC; this is a display-only transform.
+// Display-only IST formatting so worldwide dashboard users see on-call India's timestamps.
 const formatISODate = (isoString?: string) => {
   if (!isoString) return '-';
   const date = new Date(isoString);
@@ -88,16 +86,12 @@ const ListRelease: React.FC = () => {
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   const [sortField, setSortField] = useState<string>('date_created');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  // Bug fix: dynamic time ranges ("last 30 mins") were frozen at the moment
-  // timeRange changed, so refresh re-fetched with stale from/to and returned
-  // identical results — the user saw a no-op refresh. Bumping this counter
-  // on manual refresh invalidates the memo, recomputes NOW-relative dates,
-  // and forces a real fresh query.
+  // Bumped on manual refresh so NOW-relative ranges ("last 30 mins") recompute instead of
+  // staying frozen at the time the range was first selected.
   const [refreshTick, setRefreshTick] = useState(0);
   const datePickerRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
 
-  // Debounce search
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 300);
     return () => clearTimeout(t);
@@ -108,14 +102,11 @@ const ListRelease: React.FC = () => {
 
   const doRefresh = useCallback(() => {
     setRefreshTick((n) => n + 1);
-    // refetch() runs after the state update flushes the new dateRange through
-    // the useReleases query key. queueMicrotask ensures we fire refetch after
-    // React commits the re-render.
+    // queueMicrotask so refetch runs after React commits the new dateRange into the query key.
     queueMicrotask(() => { void refetch(); });
   }, [refetch]);
   const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, doRefresh);
 
-  // Outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (datePickerRef.current && !datePickerRef.current.contains(e.target as Node)) setShowDatePicker(false);
@@ -124,7 +115,6 @@ const ListRelease: React.FC = () => {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // Reset page on filter change
   useEffect(() => { setCurrentPage(1); }, [debouncedSearch, statusFilter, productFilter]);
 
   const handleCustomRangeApply = () => {
@@ -140,7 +130,6 @@ const ListRelease: React.FC = () => {
     }
   };
 
-  // KPI calculations
   const kpis = useMemo(() => {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     return {
@@ -153,7 +142,6 @@ const ListRelease: React.FC = () => {
 
   const productOptions = useMemo(() => [...new Set(releases.map(r => r.appGroup).filter(Boolean))], [releases]);
 
-  // Filter + sort
   const filteredReleases = useMemo(() => {
     let list = releases.filter(r => {
       const q = debouncedSearch.toLowerCase();
@@ -198,7 +186,6 @@ const ListRelease: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 w-full">
-      {/* KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-4 sm:mb-6">
         {kpiCards.map((kpi, i) => (
           <div
@@ -214,9 +201,7 @@ const ListRelease: React.FC = () => {
         ))}
       </div>
 
-      {/* Toolbar + Table Card */}
       <div className="bg-white border border-zinc-200 rounded-xl">
-        {/* Mobile toolbar */}
         <div className="md:hidden p-3 border-b border-zinc-100 space-y-2">
           <div className="flex gap-2">
             <div className="relative flex-1">
@@ -324,9 +309,7 @@ const ListRelease: React.FC = () => {
           </PermissionGate>
         </div>
 
-        {/* Desktop toolbar */}
         <div className="hidden md:flex p-4 items-center gap-3 border-b border-zinc-100 flex-wrap">
-          {/* Search */}
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
             <input
@@ -338,7 +321,6 @@ const ListRelease: React.FC = () => {
             />
           </div>
 
-          {/* Date Range */}
           <div className="relative" ref={datePickerRef}>
             <button onClick={() => setShowDatePicker(!showDatePicker)} className="flex items-center gap-2 border border-zinc-300 rounded-lg px-3 h-9 bg-white hover:bg-zinc-50 text-sm text-zinc-600 cursor-pointer transition-colors duration-150">
               <Calendar className="h-4 w-4 text-zinc-400" />
@@ -399,7 +381,6 @@ const ListRelease: React.FC = () => {
           </PermissionGate>
         </div>
 
-        {/* Desktop Table */}
         <div className="hidden md:block overflow-x-auto">
           {isLoading ? (
             <TableSkeleton rows={8} cols={7} />
@@ -489,7 +470,6 @@ const ListRelease: React.FC = () => {
           )}
         </div>
 
-        {/* Mobile card list */}
         <div className="md:hidden">
           {isLoading ? (
             <TableSkeleton rows={4} cols={4} />
@@ -560,7 +540,6 @@ const ListRelease: React.FC = () => {
           )}
         </div>
 
-        {/* Pagination */}
         {!isLoading && filteredReleases.length > 0 && (
           <div className="px-3 sm:px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-zinc-100">
             <div className="flex items-center gap-3 flex-wrap">

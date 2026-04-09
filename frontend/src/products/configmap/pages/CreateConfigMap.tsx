@@ -87,7 +87,6 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
     },
   });
 
-  // Derive sync_cluster from product config
   useEffect(() => {
     if (form.appGroup && productConfigs.length > 0) {
       const config = productConfigs.find((c: ProductConfig) => c.appGroup === form.appGroup);
@@ -95,7 +94,6 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
     }
   }, [form.appGroup, productConfigs]);
 
-  // Fetch secondary configmap when name is selected and sync_cluster exists
   useEffect(() => {
     if (form.appGroup && form.name && syncCluster) {
       setSecondaryLoading(true);
@@ -113,7 +111,6 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
     }
   }, [form.appGroup, form.name, syncCluster]);
 
-  // Load configmap names when product changes
   useEffect(() => {
     if (!form.appGroup) return;
     fetchConfigMapNames(form.appGroup)
@@ -125,7 +122,6 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
       });
   }, [form.appGroup]);
 
-  // Load file content when name is selected
   useEffect(() => {
     if (!form.appGroup || !form.name) return;
     fetchConfigMapData(form.appGroup, form.name)
@@ -140,7 +136,6 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
       });
   }, [form.appGroup, form.name]);
 
-  // For update/clone: pre-populate form
   useEffect(() => {
     const fetchId = id || cloneId;
     if (!fetchId) return;
@@ -198,26 +193,22 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
             <h2 className="text-base sm:text-lg font-semibold text-zinc-900">{isUpdate ? 'Update ConfigMap' : cloneId ? 'Clone ConfigMap' : 'Create ConfigMap'}</h2>
           </div>
           <div className="p-4 sm:p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-6 lg:gap-x-8 gap-y-4 sm:gap-y-5">
-            {/* LEFT column */}
             <div className="space-y-4">
               <div><FieldLabel required>App Group</FieldLabel><select name="appGroup" value={form.appGroup} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select App Group</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
               <div><FieldLabel>Description</FieldLabel><input name="description" value={form.description} onChange={handleChange} placeholder="Deploying Hotfix" className={inputClass} /></div>
               <div><FieldLabel>Priority</FieldLabel><select name="priority" value={form.priority} onChange={handleChange} className={cn(inputClass, 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(n => <option key={n} value={n}>{n}</option>)}</select></div>
             </div>
-            {/* CENTER column */}
             <div className="space-y-4">
               <div><FieldLabel required>Name</FieldLabel><select name="name" value={form.name} onChange={handleChange} required disabled={!form.appGroup || namesOptions.length === 0} className={cn(inputClass, (!form.appGroup || namesOptions.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}><option value="">Select Name</option>{namesOptions.map(n => <option key={n} value={n}>{n}</option>)}</select></div>
               <div><FieldLabel required>Change Log</FieldLabel><input name="change_log" value={form.change_log} onChange={handleChange} required placeholder="EUL-1.0.0" className={inputClass} /></div>
               <div><FieldLabel required>Env</FieldLabel><select name="env" value={form.env} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}>{AVAILABLE_ENVS.map(e => <option key={e} value={e}>{e}</option>)}</select></div>
             </div>
-            {/* RIGHT column */}
             <div className="space-y-4">
               <div><FieldLabel>Schedule Time</FieldLabel><input name="schedule_time" value={form.schedule_time} onChange={handleChange} placeholder="2022-11-01T19:39:35" className={inputClass} /></div>
               <div><FieldLabel required>Cluster</FieldLabel><input name="cluster" value={form.cluster} disabled className={cn(inputClass, 'bg-zinc-50 text-zinc-400 cursor-not-allowed')} /></div>
             </div>
           </div>
 
-          {/* Editors */}
           {(!!fileContent || syncCluster) && (
             <div className="px-4 pb-4 sm:px-6 sm:pb-6">
               {syncCluster ? (

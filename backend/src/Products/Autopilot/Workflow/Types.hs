@@ -17,34 +17,18 @@ import Products.Autopilot.Types (ReleaseTracker)
 import Products.Autopilot.Types.Target (TargetState)
 import Products.Autopilot.Workflow.Recorded (Recorded)
 
-{- | Universal workflow state
-
-Used by ALL product workflows. Currently the supported targets are:
-
-* BackendService / BackendScheduler → 'K8sState' (Kubernetes)
-* BackendConfig                     → 'ConfigState' (ConfigMap / Secret)
-* VSEdit                            → 'K8sState' (handled out-of-band)
-
-The Play Store / App Store variants were removed when the corresponding
-release categories were retired — they will be re-added when those products
-are needed.
+{- | Workflow state shared by all Autopilot release categories.
+  'targetState' carries the platform-specific view (K8s, Config, ...).
 -}
 data ReleaseState = ReleaseState
     { releaseTracker :: ReleaseTracker
-    -- ^ The release being executed (universal fields)
     , targetState :: Maybe TargetState
-    -- ^ Target platform-specific state
     , workflowMetadata :: Maybe Value
-    -- ^ Workflow-specific temporary data (not persisted to DB)
-    -- Used for passing data between workflow steps
+    -- ^ Transient per-tick scratch space for passing data between stages;
+    --   not persisted to DB.
     }
     deriving (Show)
 
 type StateFlow = StateT ReleaseState Flow
 
 type ReleaseWorkFlow = ExceptT WorkFlowError (Recorded ReleaseState Flow)
-
--- Note: 'StageOutcome' used to be defined here but was never used by any
--- production code (it was a stalled relic of an earlier stage refactor).
--- The canonical 'StageOutcome' now lives in 'Core.Workflow.Stage' and is
--- used by every 'Stage s' in every 'WorkflowSpec s'.

@@ -1,19 +1,4 @@
-{- | File + console logging via fast-logger, inspired by NammaYatri's IOLogging.
-
-Usage in IO code:
-
-@
-logInfoIO  logEnv "Server started on port 8012"
-logErrorIO logEnv ("Failed to connect: " <> errMsg)
-@
-
-Usage in Flow (reads LoggerEnv from AppState):
-
-@
-logInfo  "Processing release"
-logError ("K8s call failed: " <> err)
-@
--}
+-- | File + console logging via fast-logger.
 module Core.Logging (
     LogLevel (..),
     LoggerConfig (..),
@@ -22,18 +7,15 @@ module Core.Logging (
     releaseLoggerEnv,
     loadLoggerConfigFromDhall,
     logOutput,
-    -- IO-level helpers (require LoggerEnv)
     logInfoIO,
     logErrorIO,
     logWarningIO,
     logDebugIO,
-    -- Global helpers (use the process-wide LoggerEnv set by Main)
     setGlobalLoggerEnv,
     logInfoG,
     logErrorG,
     logWarningG,
     logDebugG,
-    -- Tag stack — context auto-prepended to every log line
     withLogTag,
 )
 where
@@ -56,8 +38,6 @@ import System.Environment (lookupEnv)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Log.FastLogger
 import System.Process (readProcess)
-
--- ── Types ─────────────────────────────────────────────────────────
 
 data LogLevel = DEBUG | INFO | WARNING | ERROR
     deriving (Show, Read, Eq, Ord)
@@ -91,15 +71,8 @@ data LoggerEnv = LoggerEnv
     , consoleLogger :: Maybe Logger
     }
 
--- ── Dhall loader ──────────────────────────────────────────────────
-
-{- | Load LoggerConfig from the dhall config file.
-Uses @dhall-to-json@ CLI (available in the nix shell) to convert dhall
-to JSON, then extracts the @loggerCfg@ block with aeson.
-
-Config path resolution (mirrors NammaYatri convention):
-  1. @SC_CONFIG_PATH@ env var
-  2. Default: @./dhall-configs/system-control.dhall@
+{- | Load LoggerConfig from dhall (via @dhall-to-json@). Path from
+@SC_CONFIG_PATH@ env var or @./dhall-configs/system-control.dhall@.
 -}
 loadLoggerConfigFromDhall :: IO LoggerConfig
 loadLoggerConfigFromDhall = do
@@ -112,14 +85,11 @@ loadLoggerConfigFromDhall = do
   where
     defaultPath = "./dhall-configs/system-control.dhall"
 
--- | Minimal wrapper to extract just the loggerCfg block from the full dhall JSON.
 newtype DhallWrapper = DhallWrapper {loggerCfg :: LoggerConfig}
 
 instance FromJSON DhallWrapper where
     parseJSON = withObject "DhallConfig" $ \o ->
         DhallWrapper <$> o .: "loggerCfg"
-
--- ── Lifecycle ─────────────────────────────────────────────────────
 
 prepareLoggerEnv :: LoggerConfig -> IO LoggerEnv
 prepareLoggerEnv cfg = do
@@ -147,8 +117,6 @@ releaseLoggerEnv env = do
     maybe (pure ()) cleanUpFunc (fileLogger env)
     maybe (pure ()) cleanUpFunc (consoleLogger env)
 
--- ── Log output ────────────────────────────────────────────────────
-
 logOutput :: (MonadIO m) => LoggerEnv -> LogLevel -> Text -> m ()
 logOutput env lvl msg = when (lvl >= level env) $
     liftIO $ do
@@ -165,8 +133,6 @@ formatLogLine now lvl msg =
   where
     timestamp = T.pack $ formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" now
 
--- ── IO-level convenience ──────────────────────────────────────────
-
 logInfoIO :: LoggerEnv -> Text -> IO ()
 logInfoIO env = logOutput env INFO
 
@@ -179,44 +145,25 @@ logWarningIO env = logOutput env WARNING
 logDebugIO :: LoggerEnv -> Text -> IO ()
 logDebugIO env = logOutput env DEBUG
 
--- ── Global logger ─────────────────────────────────────────────────
---
--- A process-wide LoggerEnv set once at startup by Main. Used by call
--- sites that don't have a LoggerEnv in scope (e.g. plain IO helpers
--- buried inside K8s/Notifications/DecisionEngine modules) so their
--- output still lands in the structured log file rather than only on
--- stdout via 'putStrLn'.
---
--- Until 'setGlobalLoggerEnv' is called, the helpers fall back to
--- 'putStrLn' so logs from very early startup are not silently dropped.
+-- Process-wide LoggerEnv set once at startup for call sites without a
+-- LoggerEnv in scope. Falls back to 'putStrLn' until installed so
+-- early-startup logs are not silently dropped.
 
 {-# NOINLINE globalLoggerRef #-}
 globalLoggerRef :: IORef (Maybe LoggerEnv)
 globalLoggerRef = unsafePerformIO (newIORef Nothing)
 
-{- | Per-thread tag stack. Tags pushed by 'withLogTag' get prepended to
-every log line emitted by the current thread (and only the current
-thread). On thread exit, the stack is cleaned up by the 'bracket_' in
-'withLogTag', so this map cannot leak across requests.
--}
+-- | Per-thread tag stack, cleaned up on exit by 'withLogTag''s 'bracket_'.
 {-# NOINLINE tagStackRef #-}
 tagStackRef :: IORef (Map.Map Conc.ThreadId [Text])
 tagStackRef = unsafePerformIO (newIORef Map.empty)
 
-{- | Install the process-wide LoggerEnv. Call once from Main after
-'prepareLoggerEnv'.
--}
+-- | Install the process-wide LoggerEnv. Call once from Main.
 setGlobalLoggerEnv :: LoggerEnv -> IO ()
 setGlobalLoggerEnv env = writeIORef globalLoggerRef (Just env)
 
-{- | Run an action with an extra tag pushed onto the current thread's
-log stack. The tag is automatically popped on exit (even on
-exceptions) so contexts can never leak.
-
-> withLogTag ("release-" <> releaseId rt) $ do
->   logInfoG "starting"          -- → "[release-r-789] starting"
->   withLogTag "stage-MONITORING" $
->     logInfoG "checking metrics" -- → "[release-r-789][stage-MONITORING] checking metrics"
+{- | Run an action with a tag pushed onto the current thread's log
+stack. Automatically popped on exit (even on exceptions).
 -}
 withLogTag :: (MonadIO m) => Text -> IO a -> m a
 withLogTag tag action = liftIO $ do
@@ -230,9 +177,7 @@ withLogTag tag action = liftIO $ do
             Just (_ : rest) | not (null rest) -> (Map.insert tid rest m, ())
             _ -> (Map.delete tid m, ())
 
-{- | Look up the current thread's tag stack and format it as
-@\"[tag1][tag2] \"@ for log line prefixes.
--}
+-- | Format the current thread's tag stack as @"[tag1][tag2] "@.
 currentTagPrefix :: IO Text
 currentTagPrefix = do
     tid <- Conc.myThreadId

@@ -97,9 +97,7 @@ const Configurations: React.FC = () => {
       setValidationError(err);
       return;
     }
-    // Round 8 audit H13: server config flags drive live system behaviour
-    // (decision engine, autopilot toggles, sync). Confirm before writing,
-    // especially for the "decision" / boolean kill-switch entries.
+    // Server config flags drive live runtime behaviour (decision engine, kill switches) — confirm writes.
     const ok = await confirmAction({
       title: `Update ${selectedConfig.key}`,
       description: `Set "${selectedConfig.key}" to "${modalValue}"? This affects production behaviour immediately.`,
@@ -196,7 +194,6 @@ const Configurations: React.FC = () => {
       );
     }
 
-    // text or json
     return (
       <div className="space-y-1.5">
         <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider">Value</label>
@@ -213,7 +210,6 @@ const Configurations: React.FC = () => {
 
   return (
     <div className="flex flex-col w-full pb-12">
-      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 sm:mb-5">
         <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Server Configurations</h1>
         <div className="flex items-center gap-2 sm:gap-3">
@@ -233,7 +229,6 @@ const Configurations: React.FC = () => {
         </div>
       </div>
 
-      {/* Grouped configs */}
       {isLoading ? (
         <div className="bg-white rounded-xl border border-zinc-200 overflow-hidden">
           <TableSkeleton rows={8} cols={4} />
@@ -248,7 +243,6 @@ const Configurations: React.FC = () => {
             const isCollapsed = collapsedGroups.has(group.name);
             return (
               <div key={group.name} className="bg-white rounded-xl border border-zinc-200 overflow-hidden">
-                {/* Group header */}
                 <button
                   type="button"
                   onClick={() => toggleGroup(group.name)}
@@ -263,10 +257,8 @@ const Configurations: React.FC = () => {
                   </div>
                 </button>
 
-                {/* Config rows */}
                 {!isCollapsed && (
                   <>
-                    {/* Desktop table */}
                     <div className="hidden md:block overflow-x-auto">
                       <table className="w-full text-left">
                         <thead>
@@ -341,7 +333,6 @@ const Configurations: React.FC = () => {
                       </table>
                     </div>
 
-                    {/* Mobile cards */}
                     <div className="md:hidden divide-y divide-zinc-100">
                       {group.configs.map(cfg => (
                         <div
@@ -382,7 +373,6 @@ const Configurations: React.FC = () => {
         </div>
       )}
 
-      {/* Edit Modal */}
       {selectedConfig && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50" onClick={() => setSelectedConfig(null)}>
           <div
@@ -406,7 +396,6 @@ const Configurations: React.FC = () => {
             </div>
 
             <div className="px-4 sm:px-6 py-4 space-y-4 overflow-y-auto flex-1">
-              {/* Metadata row */}
               <div className="flex items-center gap-2 flex-wrap">
                 <Badge variant={typeBadgeVariant(selectedConfig.type)} size="sm">{selectedConfig.type}</Badge>
                 <Badge variant={productBadgeVariant(selectedConfig.product)} size="sm">
@@ -417,7 +406,6 @@ const Configurations: React.FC = () => {
                 )}
               </div>
 
-              {/* Enable toggle */}
               <div className="space-y-1.5">
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider">Enabled</label>
                 <button
@@ -435,7 +423,6 @@ const Configurations: React.FC = () => {
                 </button>
               </div>
 
-              {/* Value input (type-aware) */}
               {renderValueInput()}
             </div>
 

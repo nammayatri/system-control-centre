@@ -28,9 +28,7 @@ import { toast } from 'sonner';
 import ReactDiffViewer from 'react-diff-viewer-continued';
 import YAML from 'yaml';
 
-// NammaYatri ops run on IST — format all timestamps in Asia/Kolkata so
-// dashboard users outside India still see the same values as on-call India.
-// Backend stores UTC; this is a display-only transform.
+// Format in Asia/Kolkata so dashboard users worldwide see the same timestamps as on-call India.
 const formatDate = (d?: string) => {
   if (!d) return '-';
   const date = new Date(d);
@@ -51,7 +49,6 @@ const tryFormatJson = (data: string): string => {
   catch { return data; }
 };
 
-/** Events Tab */
 const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [eventSearch, setEventSearch] = useState('');
@@ -121,27 +118,22 @@ const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
   );
 };
 
-/** ENV Diff Tab */
-// Backend now returns YAML directly (matching production autopilot behavior).
-// No JSON-to-YAML conversion needed -- just pass through, with fallback for legacy JSON data.
+// Backend returns YAML; legacy records may still be (double-encoded) JSON — convert those to YAML.
 const formatDiff = (raw: string): string => {
   if (!raw) return '';
-  // If it looks like JSON (legacy data before YAML migration), convert it
   const trimmed = raw.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
       let data = raw;
-      // Handle double-encoded JSON
       try {
         const firstParse = JSON.parse(data);
         if (typeof firstParse === 'string') data = firstParse;
         else return YAML.stringify(firstParse, { indent: 2 });
-      } catch { /* not JSON wrapper */ }
+      } catch { /* not a JSON string wrapper */ }
       const parsed = JSON.parse(data);
       return YAML.stringify(parsed, { indent: 2 });
-    } catch { /* not JSON, fall through */ }
+    } catch { /* fall through — treat as YAML */ }
   }
-  // Already YAML from backend, return as-is
   return raw;
 };
 
@@ -182,7 +174,6 @@ const EnvDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
   );
 };
 
-/** Deployment Status Card — old vs new version pod counts */
 const DeploymentStatusCard: React.FC<{ release: any; pods: PodInfo[] }> = ({ release, pods }) => {
   const oldVersion = release.old_version;
   const newVersion = release.new_version;
@@ -225,7 +216,6 @@ const DeploymentStatusCard: React.FC<{ release: any; pods: PodInfo[] }> = ({ rel
   );
 };
 
-/** Pod Health Section (in Summary tab) */
 const PodHealthSection: React.FC<{ releaseId: string; release: any }> = ({ releaseId, release }) => {
   const { data: podData, isLoading } = usePodHealth(releaseId);
 
@@ -251,7 +241,6 @@ const PodHealthSection: React.FC<{ releaseId: string; release: any }> = ({ relea
 
   return (
     <>
-      {/* Deployment Status — old vs new version pod counts */}
       <DeploymentStatusCard release={release} pods={pods} />
 
       <div className="border border-zinc-200 rounded-lg p-4 mb-6">
@@ -300,7 +289,6 @@ const PodHealthSection: React.FC<{ releaseId: string; release: any }> = ({ relea
   );
 };
 
-/** Resources Section (in Summary tab) */
 const ResourcesSection: React.FC<{ product: string; service: string }> = ({ product, service }) => {
   const { data: resources, isLoading } = useResources(product, service);
 
@@ -329,7 +317,6 @@ const ResourcesSection: React.FC<{ product: string; service: string }> = ({ prod
   );
 };
 
-/** Rollout History (inline in Summary tab) */
 const RolloutHistoryInline: React.FC<{ history: RolloutHistoryEvent[] }> = ({ history }) => {
   if (!history?.length) return null;
 
@@ -389,7 +376,6 @@ const RolloutHistoryInline: React.FC<{ history: RolloutHistoryEvent[] }> = ({ hi
   );
 };
 
-/** K8s Context Card */
 const K8sContextCard: React.FC<{ releaseContext: any }> = ({ releaseContext }) => {
   if (!releaseContext) return null;
 
@@ -423,7 +409,6 @@ const K8sContextCard: React.FC<{ releaseContext: any }> = ({ releaseContext }) =
   );
 };
 
-/** Editable Rollout Strategy (inline in Summary) */
 const RolloutStrategyTab: React.FC<{
   releaseId: string;
   strategy: RolloutStrategyEvent[];
@@ -614,17 +599,13 @@ const ReleaseSummary: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'env-diff' | 'json'>('summary');
-  // Edit dialog removed — now uses full /releases/:id/edit page
 
   const { data: release, isLoading, isFetching, error, refetch } = useRelease(id);
   const { data: events = [] } = useReleaseEvents(id);
   const qc = useQueryClient();
-  // Round 8 audit M9: use the authenticated user's email instead of the
-  // hardcoded "admin" string for approve/revert/restart audit attribution.
   const { user: authUser } = useAuth();
   const actor = authUser?.email || 'admin';
   const doRefresh = useCallback(async () => {
-    // Refresh both the release and its event log so the UI shows fully fresh state.
     await Promise.all([
       refetch(),
       qc.invalidateQueries({ queryKey: ['release-events', id] }),
@@ -634,7 +615,6 @@ const ReleaseSummary: React.FC = () => {
   }, [refetch, qc, id]);
   const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, doRefresh);
 
-  // Revert sync checkbox defaults based on release.sync_enabled
   const [revertSyncChecked, setRevertSyncChecked] = useState(false);
   useEffect(() => {
     if (release) {
@@ -661,14 +641,10 @@ const ReleaseSummary: React.FC = () => {
   const KIALI_URL = import.meta.env.VITE_KIALI_URL || '';
   const GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || '';
 
-  // Capitalise the first letter of a string for titles/buttons.
   const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-  /** doAction takes a SHORT verb (e.g. "fast forward", "approve") for the
-   *  modal title + confirm-button label, and an OPTIONAL longer description
-   *  shown in the body. Previously the verb and description were the same
-   *  long string, which produced an unreadable modal title and a giant
-   *  button label for fast-forward. */
+  // `label` is a short verb ("approve", "fast forward") used as title/confirm label;
+  // `description` overrides the generic confirmation body for action-specific wording.
   const doAction = async (
     label: string,
     fn: () => Promise<any>,
@@ -685,8 +661,7 @@ const ReleaseSummary: React.FC = () => {
     });
     if (!ok) return;
     try { await fn(); } catch (err: any) {
-      // individual mutation onError handlers fire their own toasts;
-      // this is a safety net for any future mutation added without onError
+      // Safety net — individual mutations fire their own error toasts.
       console.error('[doAction]', err);
     }
   };
@@ -731,7 +706,6 @@ const ReleaseSummary: React.FC = () => {
     { key: 'json' as const, label: 'JSON Data' },
   ];
 
-  // Build extra info fields conditionally
   const dockerImage = release.docker_image || release.release_context?.docker_image || '';
   const category = release.tracker_type || '';
   const releaseTag = release.release_tag || '';
@@ -741,7 +715,6 @@ const ReleaseSummary: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
-      {/* Breadcrumb */}
       <div className="flex items-center text-sm text-zinc-500 font-medium mb-3 sm:mb-4 flex-wrap gap-y-1">
         <Link to="/releases" className="hover:text-zinc-700 transition-colors duration-150">Releases</Link>
         <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300 shrink-0" />
@@ -761,7 +734,6 @@ const ReleaseSummary: React.FC = () => {
         )}
       </div>
 
-      {/* Header */}
       <div className="flex flex-col gap-3 mb-4 sm:mb-5">
         <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
           <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Release Summary</h1>
@@ -843,7 +815,6 @@ const ReleaseSummary: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Card with Tabs */}
       <div className="bg-white rounded-xl border border-zinc-200">
         <div className="flex border-b border-zinc-200 px-2 sm:px-5 overflow-x-auto">
           {tabs.map(tab => (
@@ -854,10 +825,8 @@ const ReleaseSummary: React.FC = () => {
           ))}
         </div>
 
-        {/* Summary */}
         {activeTab === 'summary' && (
           <div className="p-4 sm:p-6">
-            {/* Info Cards */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 mb-6">
               {[
                 {
@@ -907,13 +876,10 @@ const ReleaseSummary: React.FC = () => {
               ))}
             </div>
 
-            {/* Pod Health + Deployment Status */}
             <PodHealthSection releaseId={id!} release={release} />
 
-            {/* Rollout History (inline) */}
             <RolloutHistoryInline history={release.rollout_history} />
 
-            {/* Rollout Strategy (inline editable) */}
             <RolloutStrategyTab
               releaseId={id!}
               strategy={release.rollout_strategy}
@@ -921,7 +887,6 @@ const ReleaseSummary: React.FC = () => {
               status={s}
             />
 
-            {/* Release Details — consolidated (no duplicate data) */}
             <div className="border border-zinc-200 rounded-lg p-4 mb-6">
               <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Release Details</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 sm:gap-x-6 gap-y-3">
@@ -940,13 +905,10 @@ const ReleaseSummary: React.FC = () => {
           </div>
         )}
 
-        {/* Events */}
         {activeTab === 'events' && <ReleaseEventsTab events={events} />}
 
-        {/* ENV Diff */}
         {activeTab === 'env-diff' && <EnvDiffTab releaseId={id!} />}
 
-        {/* JSON Data */}
         {activeTab === 'json' && (
           <div className="p-4 sm:p-6">
             <pre className="bg-zinc-50 border border-zinc-200 rounded-lg p-3 sm:p-4 text-[11px] sm:text-xs font-mono text-zinc-700 overflow-auto max-h-[600px] whitespace-pre-wrap break-all">

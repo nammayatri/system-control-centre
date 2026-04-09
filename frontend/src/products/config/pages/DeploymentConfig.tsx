@@ -19,14 +19,10 @@ import { Search, Plus, RefreshCw, Pencil, Trash2, ChevronRight, ChevronDown } fr
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
 
-// ── Types ────────────────────────────────────────────────────────────
-
 interface GroupWithServices {
   group: ProductConfig;
   services: ReleaseConfig[];
 }
-
-// ── Empty forms ──────────────────────────────────────────────────────
 
 const EMPTY_GROUP_FORM: Partial<ProductConfig> = {
   appGroup: '', cluster: '', namespace: '', vs_name: '',
@@ -38,8 +34,6 @@ const EMPTY_SERVICE_FORM: Partial<ReleaseConfig> = {
   serviceType: 'SERVICE',
   revert_strategy: '', decision_config: '',
 };
-
-// ── Helpers ──────────────────────────────────────────────────────────
 
 const truncateJson = (json: string, maxLen = 50): string => {
   if (!json) return '-';
@@ -55,27 +49,20 @@ function typeBadgeVariant(type: string): 'blue' | 'warning' | 'purple' | 'defaul
   }
 }
 
-// ── Component ────────────────────────────────────────────────────────
-
 const DeploymentConfig: React.FC = () => {
   const queryClient = useQueryClient();
   const confirmAction = useConfirm();
 
-  // State
   const [search, setSearch] = useState('');
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
-  // Group modal state
   const [groupModalOpen, setGroupModalOpen] = useState(false);
   const [editingGroup, setEditingGroup] = useState<ProductConfig | null>(null);
   const [groupForm, setGroupForm] = useState<Partial<ProductConfig>>(EMPTY_GROUP_FORM);
 
-  // Service modal state
   const [serviceModalOpen, setServiceModalOpen] = useState(false);
   const [editingService, setEditingService] = useState<ReleaseConfig | null>(null);
   const [serviceForm, setServiceForm] = useState<Partial<ReleaseConfig>>(EMPTY_SERVICE_FORM);
-
-  // ── Queries ──────────────────────────────────────────────────────
 
   const { data: groupConfigs = [], isLoading: groupsLoading, isFetching: groupsFetching, refetch: refetchGroups } = useQuery({
     queryKey: ['product-configs'],
@@ -97,8 +84,6 @@ const DeploymentConfig: React.FC = () => {
   };
   const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, refetchAll);
 
-  // ── Group mutations ──────────────────────────────────────────────
-
   const createGroupMut = useMutation({
     mutationFn: (payload: Partial<ProductConfig>) => createProductConfig(payload),
     onSuccess: () => { toast.success('Deployment group created'); queryClient.invalidateQueries({ queryKey: ['product-configs'] }); setGroupModalOpen(false); },
@@ -117,8 +102,6 @@ const DeploymentConfig: React.FC = () => {
     onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to delete group'),
   });
 
-  // ── Service mutations ────────────────────────────────────────────
-
   const createServiceMut = useMutation({
     mutationFn: (payload: Partial<ReleaseConfig>) => createReleaseConfig(payload),
     onSuccess: () => { toast.success('Service config created'); queryClient.invalidateQueries({ queryKey: ['release-configs'] }); setServiceModalOpen(false); },
@@ -136,8 +119,6 @@ const DeploymentConfig: React.FC = () => {
     onSuccess: () => { toast.success('Service config deleted'); queryClient.invalidateQueries({ queryKey: ['release-configs'] }); },
     onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to delete service'),
   });
-
-  // ── Build grouped data ───────────────────────────────────────────
 
   const groupedData: GroupWithServices[] = useMemo(() => {
     const q = search.toLowerCase();
@@ -162,8 +143,6 @@ const DeploymentConfig: React.FC = () => {
       });
   }, [groupConfigs, serviceConfigs, search]);
 
-  // ── Expand / collapse ────────────────────────────────────────────
-
   const toggleGroup = (appGroupVal: string) => {
     setExpandedGroups(prev => {
       const next = new Set(prev);
@@ -172,8 +151,6 @@ const DeploymentConfig: React.FC = () => {
       return next;
     });
   };
-
-  // ── Group CRUD handlers ──────────────────────────────────────────
 
   const openCreateGroup = () => {
     setEditingGroup(null);
@@ -206,8 +183,6 @@ const DeploymentConfig: React.FC = () => {
     }
   };
 
-  // ── Service CRUD handlers ────────────────────────────────────────
-
   const openCreateService = (parentProduct: string) => {
     setEditingService(null);
     setServiceForm({ ...EMPTY_SERVICE_FORM, appGroup: parentProduct });
@@ -239,19 +214,14 @@ const DeploymentConfig: React.FC = () => {
     }
   };
 
-  // ── Shared styles ────────────────────────────────────────────────
-
   const inputClass = "w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150";
   const productOptions = useMemo(() =>
     [...new Set(groupConfigs.map((c: ProductConfig) => c.appGroup).filter(Boolean))],
     [groupConfigs]
   );
 
-  // ── Render ───────────────────────────────────────────────────────
-
   return (
     <div className="flex flex-col w-full pb-12">
-      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 sm:mb-5">
         <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Deployment Config</h1>
         <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
@@ -276,7 +246,6 @@ const DeploymentConfig: React.FC = () => {
         </div>
       </div>
 
-      {/* Table — desktop */}
       <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
         {isLoading ? (
           <TableSkeleton rows={8} cols={7} />
@@ -308,7 +277,6 @@ const DeploymentConfig: React.FC = () => {
                   const isExpanded = expandedGroups.has(group.appGroup);
                   return (
                     <React.Fragment key={group.id || group.appGroup}>
-                      {/* Group row */}
                       <tr
                         className={cn(
                           'border-b border-zinc-200 hover:bg-zinc-50/80 transition-colors duration-150 cursor-pointer',
@@ -380,7 +348,6 @@ const DeploymentConfig: React.FC = () => {
                         </td>
                       </tr>
 
-                      {/* Service sub-header (expanded) */}
                       {isExpanded && services.length > 0 && (
                         <tr className="bg-zinc-100/60 border-b border-zinc-200">
                           <td className="py-2 px-4"></td>
@@ -394,7 +361,6 @@ const DeploymentConfig: React.FC = () => {
                         </tr>
                       )}
 
-                      {/* Service rows (expanded) */}
                       {isExpanded && services.map((svc, sIdx) => (
                         <tr
                           key={svc.id || svc.service}
@@ -446,7 +412,6 @@ const DeploymentConfig: React.FC = () => {
                         </tr>
                       ))}
 
-                      {/* Add Service button row */}
                       {isExpanded && (
                         <tr className="border-b border-zinc-100 bg-zinc-50/10">
                           <td className="py-2 px-4"></td>
@@ -474,7 +439,6 @@ const DeploymentConfig: React.FC = () => {
           </div>
         )}
 
-        {/* Mobile/tablet card list */}
         {!isLoading && groupedData.length > 0 && (
           <div className="lg:hidden divide-y divide-zinc-200">
             {groupedData.map(({ group, services }) => {
@@ -579,7 +543,6 @@ const DeploymentConfig: React.FC = () => {
         )}
       </div>
 
-      {/* ── Group Modal ──────────────────────────────────────────── */}
       <Dialog open={groupModalOpen} onOpenChange={setGroupModalOpen}>
         <DialogContent size="lg">
           <DialogHeader>
@@ -697,7 +660,6 @@ const DeploymentConfig: React.FC = () => {
         </DialogContent>
       </Dialog>
 
-      {/* ── Service Modal ────────────────────────────────────────── */}
       <Dialog open={serviceModalOpen} onOpenChange={setServiceModalOpen}>
         <DialogContent size="xl">
           <DialogHeader>
@@ -758,7 +720,6 @@ const DeploymentConfig: React.FC = () => {
                   <option value="CUSTOM">CUSTOM</option>
                 </select>
               </div>
-              {/* Rollout Strategy Editor */}
               <div>
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Rollout Strategy</label>
                 {(() => {
@@ -816,7 +777,6 @@ const DeploymentConfig: React.FC = () => {
                   );
                 })()}
               </div>
-              {/* Revert Strategy Editor */}
               <div>
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Revert Strategy</label>
                 {(() => {

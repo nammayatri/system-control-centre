@@ -123,17 +123,9 @@ import Products.Autopilot.Workflow.Types (
 import Shared.Config.Runtime (getConfigBoolForProduct)
 import Prelude
 
--- ============================================================================
--- Workflow Spec — the only entry point
--- ============================================================================
-
-{- | Backend service workflow as a 'WorkflowSpec' value.
-
-Six canonical stages (init → prepare → deploy → monitor → finalize → done),
-each wrapping the existing 'StateFlow' function bodies via
-'mkLegacyStateFlowStage'. Workflow-level rollback is a no-op here; the
-runner's 'restoreVsTrafficOnFailure' handles VS traffic restore at the
-dispatch site.
+{- | Six-stage backend service workflow (init → prepare → deploy → monitor →
+finalize → done). Rollback is a no-op here; VS traffic restore on failure
+is handled by the runner's 'restoreVsTrafficOnFailure'.
 -}
 backendServiceSpec :: WorkflowSpec ReleaseState
 backendServiceSpec =
@@ -147,8 +139,7 @@ backendServiceSpec =
             , serviceStageFinalize
             , serviceStageDone
             ]
-        , -- Rollback handled by runner's restoreVsTrafficOnFailure; no-op here.
-          wsRollback = \_err -> pure ()
+        , wsRollback = \_err -> pure ()
         , wsPersist = persistWorkflowState
         }
 
@@ -166,15 +157,9 @@ serviceStageMonitor = mkLegacyStateFlowStage "monitor" MONITORING monitorHealth
 serviceStageFinalize = mkLegacyStateFlowStage "finalize" FINALIZING cleanupOldVersion
 serviceStageDone = mkLegacyStateFlowStage "done" DONE notifyComplete
 
--- ============================================================================
--- Helpers: Config / Context / K8s IO
--- ============================================================================
-
--- | Get bootstrap config from the Flow (ReaderT) environment
 getCfg :: StateFlow Config
 getCfg = lift getConfig
 
--- | StateFlow-level logging (lifts from Flow)
 logInfoS :: T.Text -> StateFlow ()
 logInfoS = lift . logInfo
 
@@ -184,7 +169,6 @@ logWarningS = lift . logWarning
 logErrorS :: T.Text -> StateFlow ()
 logErrorS = lift . logError
 
--- | Extract K8sReleaseContext from the current workflow state
 getK8sCtx :: StateFlow K8sReleaseContext
 getK8sCtx = do
     rs <- gets id
@@ -192,7 +176,6 @@ getK8sCtx = do
         Just (K8sState k8s) -> pure (context k8s)
         _ -> liftIO $ throwIO $ WorkflowError "init" "Missing K8sState in targetState"
 
--- | Check if this is a new service release (no existing deployment)
 isNewServiceRelease :: StateFlow Bool
 isNewServiceRelease = do
     rs <- gets id
@@ -200,7 +183,6 @@ isNewServiceRelease = do
         Just (K8sState k8s) -> pure (newService k8s)
         _ -> pure False
 
--- | Run an IO action that returns Either K8sError, lifting into StateFlow
 runK8sIO :: IO (Either K8sError a) -> StateFlow a
 runK8sIO action = do
     result <- liftIO action
@@ -208,9 +190,8 @@ runK8sIO action = do
         Right a -> pure a
         Left (K8sError err) -> liftIO $ throwIO $ WorkflowError "k8s" err
 
-{- | Return the subset of the highest-weighted route targeting @host@ in the
-first matching http rule of an istio VirtualService JSON doc. Used by the
-internal-VS cross-validation in 'validatePreconditions'.
+{- | Subset of the first matching-host route in an istio VirtualService JSON doc.
+Used by the internal-VS cross-validation in 'validatePreconditions'.
 -}
 extractInternalVsPrimarySubset :: Value -> T.Text -> Maybe T.Text
 extractInternalVsPrimarySubset vsJson host =
@@ -248,13 +229,9 @@ extractInternalVsPrimarySubset vsJson host =
                 _ -> Nothing
         _ -> Nothing
 
-{- | After scaling the new deployment for a rollout stage, BLOCK until the
-new deployment has at least its desired replica count Ready. Otherwise
-'runVsRolloutWithLock' would flip VS traffic to pods still in
-ContainerCreating and cause a brief 5xx spike at every stage transition.
-
-'waitForPodsReady' fast-fails on ImagePullBackOff/CrashLoopBackOff/
-restart-threshold; any failure throws @WorkflowError "rollout-stage"@.
+{- | Block until the new deployment has desired replicas Ready before flipping
+VS traffic — otherwise we 5xx spike routing to ContainerCreating pods.
+Fast-fails on ImagePullBackOff/CrashLoopBackOff/restart-threshold.
 -}
 waitForStagePodsReady :: Config -> K8sReleaseContext -> StateFlow ()
 waitForStagePodsReady cfg ctx = do
@@ -284,9 +261,9 @@ waitForStagePodsReady cfg ctx = do
 scaleNewDeploymentForStage ::
     Config ->
     K8sReleaseContext ->
-    -- | rolloutPercent (traffic %) for this stage — feeds the formula
+    -- | rolloutPercent (traffic %) for this stage
     Int ->
-    -- | podCount from rollout strategy: operator's explicit minimum pod count (raw, not %)
+    -- | operator's explicit minimum pod count (raw, not %)
     Int ->
     StateFlow ()
 scaleNewDeploymentForStage cfg ctx routePct stagePodCount = do
@@ -311,7 +288,7 @@ scaleNewDeploymentForStage cfg ctx routePct stagePodCount = do
         oldVersionPods = max 0 oldReady
         availableNew = max 0 newReady
         factor = wcPodsCalculationFactor wfCfg
-        -- Strategy target: pods_calculation_factor × oldDesired/100 × routePct
+        -- factor × oldDesired × routePct/100
         strategyByFactor =
             ceiling
                 ( factor
@@ -319,8 +296,7 @@ scaleNewDeploymentForStage cfg ctx routePct stagePodCount = do
                     / 100.0
                     * fromIntegral routePct
                 )
-        -- Share of old pods proportional to (routePct + 10), capped at 100.
-        -- +10 gives ~10% headroom so we don't under-provision mid-shift.
+        -- Share of old pods at (routePct + 10%), capped at 100 — headroom for mid-shift.
         predictedFromOld =
             let pct = min (routePct + 10) 100
              in ceiling
@@ -328,9 +304,8 @@ scaleNewDeploymentForStage cfg ctx routePct stagePodCount = do
                         * fromIntegral pct
                         / 100.0
                     )
-        -- Operator's explicit floor: raw minimum pod count, never below 1.
         operatorFloor = max 1 stagePodCount
-        -- Final = max of every input. Never shrink, never under-provision.
+        -- max-of-all-inputs: never shrink, never under-provision.
         target =
             maximum
                 [ currentNew
@@ -339,11 +314,8 @@ scaleNewDeploymentForStage cfg ctx routePct stagePodCount = do
                 , predictedFromOld
                 , operatorFloor
                 ]
-    -- If currentOld<=0, fall through to operatorFloor (always ≥1) so we never
-    -- silently leave the new deployment under-provisioned.
-    -- Pre-warm to the next stage's operator pods too: a [50%@5, 100%@10] strategy
-    -- would otherwise wait out cooloff before getting to 10 pods, under-provisioned
-    -- for the upcoming flip (HPA reconciler is too slow to close the gap).
+    -- Pre-warm to the next stage's operator pods so [50%@5, 100%@10] doesn't
+    -- wait out cooloff under-provisioned; HPA is too slow to close the gap.
     let nextStageFloor =
             let strat = rolloutStrategy rtNow
                 idxAndNext = case dropWhile (\(_, s) -> rolloutPercent s /= routePct) (zip [0 :: Int ..] strat) of
@@ -394,9 +366,7 @@ scaleNewDeploymentForStage cfg ctx routePct stagePodCount = do
                         <> ", factor="
                         <> T.pack (show factor)
                         <> ")"
-            -- Cap formula target at operator's HPA max; never mutate HPA bounds
-            -- here (only prepare stage does that). Log a warning event if capped
-            -- so the operator can bump HPA or reduce podCount.
+            -- Cap at HPA max; never mutate HPA here (only prepare stage does).
             (_liveMin, liveMax) <- liftIO $ getHpaMinMax cfg ns newHpa
             let cappedTarget
                     | liveMax > 0 = min safeTarget liveMax
@@ -435,9 +405,8 @@ scaleNewDeploymentForStage cfg ctx routePct stagePodCount = do
             _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx cappedTarget)
             pure ()
 
-{- | Apply VS rollout under a pessimistic lock. Retries with exp backoff
-(500ms → 8s, ~15s total) so parallel releases on the same app group serialize
-cleanly instead of one aborting immediately.
+{- | Apply VS rollout under a pessimistic lock. Exp backoff (500ms → 8s, ~15s)
+so parallel releases on the same app group serialize instead of aborting.
 -}
 runVsRolloutWithLock :: Config -> K8sReleaseContext -> Int -> Int -> Int -> StateFlow ()
 runVsRolloutWithLock cfg ctx maxRetries oldW newW = do
@@ -466,12 +435,8 @@ runVsRolloutWithLock cfg ctx maxRetries oldW newW = do
             liftIO $ throwIO $ WorkflowError "k8s" k8sErr
         Right (Right _) -> pure ()
 
--- ============================================================================
--- Workflow-local config snapshot + safe helpers
--- ============================================================================
-
-{- | Snapshot of RuntimeConfig values, loaded once per workflow phase so a
-config change mid-rollout cannot cause inconsistent decisions in one loop body.
+{- | Snapshot of RuntimeConfig values loaded once per workflow phase, so a
+config change mid-rollout can't produce inconsistent decisions.
 -}
 data WorkflowConfig = WorkflowConfig
     { wcCollectMetricsDelay :: Int
@@ -482,11 +447,9 @@ data WorkflowConfig = WorkflowConfig
     , wcHpaEnabled :: Bool
     , wcScaleDownOnCompletion :: Bool
     , wcPodsCalculationFactor :: Double
-    -- ^ Multiplier on (oldDesiredPods × routePercent / 100) in the pod-count
-    -- formula; global safety buffer above the strict ratio (default 1.2).
+    -- ^ Safety multiplier on (oldDesired × routePct/100) (default 1.2).
     , wcPodsScaleDownDelay :: Double
-    -- ^ Minutes to wait after a successful rollout before the runner scales
-    -- the old deployment to 0.
+    -- ^ Minutes after rollout success before scaling old deployment to 0.
     }
 
 loadWorkflowConfig :: T.Text -> StateFlow WorkflowConfig
@@ -513,7 +476,7 @@ loadWorkflowConfig product_ = do
             , wcPodsScaleDownDelay = psd
             }
 
--- | Loop bail-outs: a paused-and-forgotten release must not spin forever.
+-- | Loop bail-outs: paused-and-forgotten releases must not spin forever.
 maxLoopIterations :: Int
 maxLoopIterations = 10000
 
@@ -521,17 +484,13 @@ maxLoopDurationSec :: Double
 maxLoopDurationSec = 24 * 60 * 60
 
 {- | CAS-protected persistence: write only if on-disk status matches the
-snapshot baseline, else BAIL with 'WorkflowError'. Prevents silent
-overwrite of concurrent state changes inside loops.
+snapshot baseline, else bail with 'WorkflowError'.
 -}
 casUpdateOrBail ::
-    -- | caller tag for log messages
     T.Text ->
-    -- | updated tracker to write
     ReleaseTracker ->
-    -- | updated target state
     Maybe TargetState ->
-    -- | status of the snapshot we computed against
+    -- | snapshot baseline status
     ReleaseStatus ->
     StateFlow ()
 casUpdateOrBail tag updated mts oldStatus = do
@@ -540,12 +499,10 @@ casUpdateOrBail tag updated mts oldStatus = do
         logWarningS $ "[" <> tag <> "] CAS failed - concurrent state change, exiting loop"
         liftIO $ throwIO $ WorkflowError "cas" "concurrent state change"
 
--- | Split a list into (init, last); 'Nothing' if empty.
 unsnocList :: [a] -> Maybe ([a], a)
 unsnocList [] = Nothing
 unsnocList xs = Just (Prelude.init xs, Prelude.last xs)
 
--- | Bounds-checked list indexing. Returns 'Nothing' for out-of-range indices.
 safeIndex :: [a] -> Int -> Maybe a
 safeIndex xs i
     | i < 0 = Nothing
@@ -553,9 +510,7 @@ safeIndex xs i
         (x : _) -> Just x
         [] -> Nothing
 
-{- | Transform the LAST rolloutHistory entry in-memory. No-op on empty.
-Caller is responsible for persistence (typically 'casUpdateOrBail').
--}
+-- | Transform the last rolloutHistory entry in-memory. Caller must persist.
 updateLastHistoryEntry :: (RolloutHistory -> RolloutHistory) -> StateFlow ()
 updateLastHistoryEntry f = do
     rt <- getRT
@@ -564,9 +519,7 @@ updateLastHistoryEntry f = do
         Just (initH, lastH) ->
             updateRT $ \r -> r{rolloutHistory = initH <> [f lastH]}
 
-{- | Mark tracker ABORTED and persist unconditionally. For unrecoverable
-input errors (e.g. empty rollout strategy).
--}
+-- | Mark ABORTED and persist unconditionally. For unrecoverable input errors.
 abortWithReason :: T.Text -> StateFlow a
 abortWithReason reason = do
     logErrorS $ "[workflow] Aborting: " <> reason
@@ -578,11 +531,7 @@ abortWithReason reason = do
     insertReleaseTracker currentRT currentTS
     liftIO $ throwIO $ WorkflowError "workflow" reason
 
--- ============================================================================
--- Workflow Step Implementations
--- ============================================================================
-
--- | Validate preconditions: cluster reachable, namespace exists
+-- | Validate preconditions: cluster reachable, namespace exists.
 validatePreconditions :: StateFlow ()
 validatePreconditions = do
     rt <- getRT
@@ -616,13 +565,13 @@ validatePreconditions = do
     when isNew $
         logInfoS "  New service release: skipping old version validation"
 
-    -- Cross-validate internal VS subset against tracker oldVersion; DISCARD on mismatch.
+    -- Cross-check internal VS subset against tracker oldVersion; DISCARD on mismatch.
     let internalVsName = case internalVirtualServiceName ctx of
             Just t | not (T.null t) -> t
             _ -> serviceName ctx <> "-internal-vs"
     internalResult <- liftIO $ getVirtualServiceJson cfg (namespace ctx) internalVsName
     case internalResult of
-        Left _ -> pure () -- No internal VS is fine.
+        Left _ -> pure ()
         Right internalText -> do
             rt' <- getRT
             logInfoS $ "  Internal VS found: " <> internalVsName
@@ -633,7 +582,7 @@ validatePreconditions = do
                 (toJSON internalVsName)
             unless isNew $ do
                 let host = serviceName ctx
-                    expectedOld = oldVersion ctx -- from K8sReleaseContext
+                    expectedOld = oldVersion ctx
                     parsed = A.eitherDecode (TLE.encodeUtf8 (TL.fromStrict internalText)) :: Either String Value
                     internalSubset = case parsed of
                         Right v -> extractInternalVsPrimarySubset v host
@@ -646,9 +595,8 @@ validatePreconditions = do
                             let msg = "Internal VS subset (" <> subset <> ") does not match tracker oldVersion (" <> expectedOld <> ")"
                             logErrorS $ "  " <> msg
                             insertReleaseEvent (releaseId rt') "BUSINESS" "VERSION_MISMATCH_INTERNAL_VS" (toJSON msg)
-                            -- Re-read tracker for a live CAS baseline; the stale 'rt'' snapshot
-                            -- predates the kubectl call, so a concurrent write would silently
-                            -- fail CAS and orphan the tracker.
+                            -- Re-read baseline: stale 'rt'' predates kubectl,
+                            -- a concurrent write would orphan the tracker on CAS fail.
                             freshM <- findReleaseTracker (releaseId rt')
                             let baselineStatus = case freshM of
                                     Just (freshRT, _) -> releaseStatusText (status freshRT)
@@ -687,8 +635,7 @@ prepareK8sResources = do
     wfCfg <- loadWorkflowConfig (appGroup rt)
     logInfoS $ "PREPARING K8s resources for " <> appGroup rt <> if isNew then " (NEW SERVICE)" else ""
 
-    -- On REVERT, delete the new-version HPA up front so the HPA branch below
-    -- recreates it cleanly; a stale HPA would fight later scaling ops.
+    -- On revert, delete stale new-version HPA so the clone branch recreates it clean.
     let isRevert = case revert ctx of
             Just n -> n /= 0
             Nothing -> False
@@ -698,14 +645,12 @@ prepareK8sResources = do
         _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg (namespace ctx) revertHpaName)
         pure ()
 
-    -- 1. Apply ConfigMap
     updateK8sStatus BSApplyConfigMap
     logInfoS "  Applying ConfigMap"
     _ <- runK8sIO $ executeWithRetry cfg (buildConfigMapApplyCommand cfg ctx)
     updateK8sField (\k8s -> k8s{configMapApplied = True})
 
-    -- 2. Create/clone deployment (skip if already exists, e.g. checkpoint resume).
-    -- envOverrideData: non-empty → inject envs on clone, or patch in place on resume.
+    -- envOverrideData: inject envs on clone, or patch in place on resume.
     updateK8sStatus BSCreateDeployment
     let envOverride = case envOverrideData rt of
             Just t | not (T.null t) -> Just t
@@ -740,13 +685,12 @@ prepareK8sResources = do
                         pure ()
     updateK8sField (\k8s -> k8s{deploymentCreated = True})
 
-    -- Block until new deployment pods are Ready BEFORE any VS flip/HPA setup, so
-    -- a broken image aborts immediately rather than shifting traffic to zero-ready pods.
-    -- Fast-fails on ImagePullBackOff/CrashLoopBackOff/restart-threshold.
+    -- Block until new pods Ready BEFORE VS flip / HPA setup so broken images
+    -- abort immediately instead of routing to zero-ready pods.
     do
-        -- Warmup: if we skipped clone, the deployment may be at 0 replicas
-        -- (e.g. janitor scaled down a previously-aborted release). Scale it up
-        -- or waitForPodsReady's `desired > 0` precondition loops to timeout.
+        -- Warmup: a skipped clone may leave deployment at 0 replicas (e.g.
+        -- janitor scaled down a prior aborted release); waitForPodsReady's
+        -- `desired > 0` precondition would otherwise loop to timeout.
         do
             curStatus <- liftIO $ getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
             let curDesired = case curStatus of
@@ -800,16 +744,16 @@ prepareK8sResources = do
     updateK8sField (\k8s -> k8s{destinationRuleApplied = True})
 
     -- HPA: preserve existing / clone from old / create from template.
-    -- The HPA is mutated ONLY in this prepare stage; rollout only scales the
-    -- deployment. This keeps the operator's min/max sacred for the release lifetime.
+    -- Mutated ONLY in prepare stage; rollout never touches HPA. Keeps operator's
+    -- min/max sacred for the release lifetime.
     let hpaEnabled = wcHpaEnabled wfCfg
     when hpaEnabled $ do
         let newHpaName = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
             oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
             hpaMinMaxFactor = wcHpaMinMaxFactor wfCfg
             defaultMinPods = wcHpaDefaultMinPods wfCfg
+            -- Only used for first-release template creation.
             computeTemplateMinMax desired =
-                -- Only used for first-release template creation.
                 let hpaMin = max 1 desired
                     hpaMax = max hpaMin (round (fromIntegral desired * hpaMinMaxFactor))
                  in (hpaMin, hpaMax)
@@ -817,11 +761,7 @@ prepareK8sResources = do
         newHpaFound <- liftIO $ hpaExists cfg (namespace ctx) newHpaName
         if newHpaFound
             then do
-                -- Branch 1: new HPA already exists (retry / partial previous run
-                -- or an earlier iteration of THIS run). Leave it alone —
-                -- whatever values are on it are either from our previous clone
-                -- (preserved from old HPA) or from an operator manual patch.
-                -- Either way, there is nothing for us to compute or patch.
+                -- New HPA already exists (retry or operator patch): leave it alone.
                 logInfoS $ "  HPA " <> newHpaName <> " already exists, preserving (no patch)"
                 updateK8sField (\k8s -> k8s{hpaCreated = True})
                 insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_PRESERVED" (toJSON newHpaName)
@@ -829,11 +769,7 @@ prepareK8sResources = do
                 oldHpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
                 if oldHpaFound
                     then do
-                        -- Branch 2: clone old HPA into new — verbatim.
-                        -- min/max/metrics/behavior all carry over from the old
-                        -- HPA. Only metadata.name + scaleTargetRef + object
-                        -- metric describedObject.name are rewritten. The
-                        -- clone command no longer takes or overrides min/max.
+                        -- Clone old HPA verbatim; only name/scaleTargetRef rewritten.
                         logInfoS $ "  Cloning HPA from " <> oldHpaName <> " (preserving min/max/metrics/behavior)"
                         cloneResult <- liftIO $ runCmd (buildCloneHpaCommand cfg (namespace ctx) (serviceName ctx) (oldVersion ctx) (newVersion ctx) oldHpaName)
                         case cloneResult of
@@ -843,15 +779,9 @@ prepareK8sResources = do
                                 insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_CLONED" (toJSON newHpaName)
                             Left (K8sError err) -> logErrorS $ "  [HPA] Clone failed (non-fatal): " <> err
                     else do
-                        -- Branch 3: first release. Create from template using
-                        -- the LAST rollout stage's podCount as the steady-state
-                        -- target (instead of Julia's first-stage value, which
-                        -- relied on a per-stage ratchet we no longer have).
-                        -- Falls back to defaultMinPods only if rolloutStrategy
-                        -- is empty (defensive). The template's own min/max are
-                        -- overwritten via jq — this is the ONE place where we
-                        -- compute HPA bounds, because there is no prior HPA to
-                        -- carry forward from.
+                        -- First release: create from template using last stage's
+                        -- podCount as steady-state target. This is the only place
+                        -- we compute HPA bounds (no prior HPA to inherit from).
                         let targetPods = case rolloutStrategy rt of
                                 [] -> defaultMinPods
                                 steps -> max 1 (podCount (last steps))
@@ -869,10 +799,8 @@ prepareK8sResources = do
                                     Left (K8sError err) -> logErrorS $ "  [HPA] Create from template failed (non-fatal): " <> err
                             _ -> logInfoS "  No hpa_template configured; skipping HPA create"
 
-    -- Initiate AB decision pod ONCE per release (Julia parity, global_changelog.jl).
-    -- The verdict is read later by getHSDecision in the rollout loop using the
-    -- same run_id. Gated by master ab_decision_enabled AND per-service flag.
-    -- On fail-closed initiate failure, abort the release before rollout begins.
+    -- Initiate AB decision pod ONCE per release; verdict read later by getHSDecision.
+    -- Fail-closed: abort the release if initiate fails.
     abInit <- lift $ initiateABDecisionForRelease cfg rt
     case drDecision abInit of
         Abort -> do
@@ -888,15 +816,10 @@ prepareK8sResources = do
 
     logInfoS "K8s resources prepared"
 
-{- | Progressive rollout: shift traffic old -> new following the tracker's rollout_strategy.
-
-Production parity (service.jl while-loop at line 459):
-- Each iteration of the loop handles ONE rollout step.
-- Re-reads the tracker from DB to catch user pause/abort/strategy changes.
-- Records rollout history after each completed step.
-- In MANUAL mode: only advances if cooloff exceeded (no decision engine).
-- In AUTO mode: advances if cooloff exceeded AND decision engine says Continue.
-- The loop blocks on collectMetricsDelay between iterations (not the full cooloff).
+{- | Progressive rollout: shift traffic old -> new per tracker rollout_strategy.
+One step per loop iteration; re-reads tracker each iteration to catch
+pause/abort/strategy changes. MANUAL advances on cooloff only; AUTO also
+requires decision engine Continue. Sleeps collectMetricsDelay per iteration.
 -}
 progressiveRollout :: StateFlow ()
 progressiveRollout = do
@@ -904,8 +827,6 @@ progressiveRollout = do
     cfg <- getCfg
     ctx <- getK8sCtx
     isNew <- isNewServiceRelease
-    -- Snapshot config once for the rollout phase; a mid-rollout config change
-    -- must not produce inconsistent decisions across iterations.
     wfCfg <- loadWorkflowConfig (appGroup rt)
     logInfoS $ "Starting progressive rollout for " <> appGroup rt
 
@@ -918,8 +839,7 @@ progressiveRollout = do
     when (releaseStartDelay > 0) $ do
         logInfoS $ "  Release start delay: " <> T.pack (show releaseStartDelay) <> " seconds"
         threadDelay (Seconds releaseStartDelay)
-    -- Re-fetch tracker after start delay so any RM edit (strategy/mode)
-    -- lands before the rollout actually begins.
+    -- Re-fetch after start delay so any RM edit (strategy/mode) lands before rollout.
     when (releaseStartDelay > 0) $ do
         mFresh <- findReleaseTracker (releaseId rt)
         case mFresh of
@@ -951,7 +871,6 @@ progressiveRollout = do
                         existingHistory = rolloutHistory rt
                         alreadyStarted = not (null existingHistory)
 
-                    -- Resume if workflow was restarted (e.g. after VS lock failure).
                     if alreadyStarted
                         then do
                             let currentIndex = length existingHistory
@@ -959,18 +878,15 @@ progressiveRollout = do
                             loopStart <- liftIO getCurrentTime
                             rolloutLoop wfCfg cfg ctx currentIndex totalSteps loopStart 0 loopStart
                         else do
-                            -- strategy is non-empty by the case match above.
                             let (firstStep : _) = strategy
                                 firstNewW = rolloutPercent firstStep
                                 firstOldW = max 0 (100 - firstNewW)
                             logInfoS $ "  Initial rollout step: new=" <> T.pack (show firstNewW) <> "%, cooloff=" <> T.pack (show (cooloffMinutes firstStep)) <> "min"
-                            -- Scale new deployment and wait for Ready BEFORE flipping VS.
                             scaleNewDeploymentForStage cfg ctx firstNewW (podCount firstStep)
                             waitForStagePodsReady cfg ctx
                             runVsRolloutWithLock cfg ctx (wcMaxK8sRetries wfCfg) firstOldW firstNewW
                             updateK8sField (\k8s -> k8s{trafficPercentage = firstNewW})
 
-                            -- Record rollout history for first step
                             stepStartTime <- liftIO getCurrentTime
                             let firstHist = mkRolloutHistory firstNewW (cooloffMinutes firstStep) (podCount firstStep) stepStartTime Nothing
                             updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [firstHist]}
@@ -983,14 +899,12 @@ progressiveRollout = do
                             lift $ notifyReleaseProgress currentRT firstNewW
                             logTrafficUpdated currentRT 0
 
-                            -- index=1: first step already applied
                             rolloutLoop wfCfg cfg ctx 1 totalSteps stepStartTime 0 stepStartTime
 
     logInfoS "Progressive rollout complete"
 
-{- | Re-entrant rollout loop. Each iteration re-reads the tracker (catching
-user pause/abort/strategy change), handles terminal states, advances on
-cooloff, and sleeps collectMetricsDelay between polls.
+{- | Re-entrant rollout loop: each iter re-reads the tracker, handles terminal
+states, advances on cooloff, sleeps collectMetricsDelay between polls.
 -}
 rolloutLoop ::
     WorkflowConfig ->
@@ -999,9 +913,9 @@ rolloutLoop ::
     Int ->
     Int ->
     UTCTime ->
-    -- | iteration counter (bail-out safety)
+    -- | iteration counter (bail-out)
     Int ->
-    -- | loop wall-clock start (bail-out safety)
+    -- | loop start (bail-out)
     UTCTime ->
     StateFlow ()
 rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopStart = do
@@ -1018,7 +932,6 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
         updateRT $ \r -> r{status = ABORTED}
         currentRT <- getRT
         currentTS <- gets targetState
-        -- Best-effort CAS; exception still flies either way.
         _ <- conditionalUpdateTracker currentRT currentTS (releaseStatusText (status rtStuck))
         liftIO $ throwIO $ WorkflowError "rollout" "Stuck rollout: max loop bail-out"
 
@@ -1034,7 +947,7 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                 Just ts -> modify $ \s -> s{targetState = Just ts}
                 Nothing -> pure ()
 
-            -- Re-read strategy on every iteration so mid-flight updates take effect.
+            -- Re-read strategy each iteration so mid-flight edits take effect.
             let strategy = rolloutStrategy freshRT
                 freshTotalSteps = length strategy
                 freshStatus = status freshRT
@@ -1061,8 +974,8 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                     threadDelay (Seconds (wcCollectMetricsDelay wfCfg))
                     recurseSame
                 INPROGRESS -> do
-                    -- Fast-fail pod health at the top of every iteration so a mid-rollout
-                    -- crash/OOM/CrashLoop is caught immediately, not at final readiness.
+                    -- Fast-fail pod health each iteration so mid-rollout crashes
+                    -- are caught immediately, not at final readiness.
                     do
                         restartThresholdRL <- getPodRestartCountThreshold
                         healthRL <- liftIO $ checkPodHealthDetailed cfg ctx restartThresholdRL
@@ -1086,9 +999,8 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                     if currentIndex >= totalSteps
                         then do
                             logInfoS "  [rolloutLoop] All rollout steps completed"
-                            -- Close a race window: single-stage 100% rollouts don't loop again,
-                            -- so a user abort/pause between the fresh read and the final CAS
-                            -- would otherwise be silently discarded and the tracker goes COMPLETED.
+                            -- Race guard: single-stage 100% rollouts don't loop, so an
+                            -- abort/pause between fresh read and final CAS would be lost.
                             finalFresh <- findReleaseTracker (releaseId freshRT)
                             case finalFresh of
                                 Just (finalRT, _)
@@ -1108,9 +1020,9 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                     currentRT <- getRT
                                     casUpdateOrBail "rolloutLoop/finalHist" currentRT freshMts freshStatus
                         else do
-                            -- Cooloff check; fast-forward sets strategy cooloff to 0.
+                            -- Fast-forward sets cooloff to 0.
                             now <- liftIO getCurrentTime
-                            -- Strategy may have shrunk under us since the snapshot.
+                            -- Strategy may have shrunk under us since snapshot.
                             currentStep <- case safeIndex strategy (currentIndex - 1) of
                                 Just s -> pure s
                                 Nothing -> abortWithReason "rolloutStrategy index out of range (current step)"
@@ -1132,7 +1044,6 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                             logInfoS "  [rolloutLoop] AUTO mode: checking health before advancing"
                                             checkDeploymentHealth cfg ctx
 
-                                            -- 1. Prometheus query checks
                                             mSvcConfig <- findServiceByProductAndName (appGroup freshRT) (service freshRT)
                                             let mDecisionConfig = mSvcConfig >>= S.dcDecisionConfig
                                             promResult <- checkPromQueries cfg freshRT mDecisionConfig
@@ -1148,11 +1059,10 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                                     liftIO $ throwIO $ WorkflowError "decision" ("Prometheus ABORT: " <> reason)
                                                 PromWarn reason -> do
                                                     logWarningS $ "[DECISION] Prometheus WARN: " <> reason
-                                                    -- Slack only, no DB event; continue despite warning.
                                                     lift $ notifyGenericThreadMessage freshRT ("Prometheus warning: " <> reason)
                                                 PromOK -> pure ()
 
-                                            -- 2/3. AB + HS decisions, per-(product,service) gated.
+                                            -- AB + HS decisions, per-(product,service) gated.
                                             perServiceEnabled <-
                                                 isABHSDecisionEnabledForAppGroupService
                                                     (appGroup freshRT)
@@ -1179,9 +1089,8 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                                         <> " HS="
                                                         <> T.pack (show (drDecision hsDecision))
 
-                                            -- Write decision into last history entry BEFORE emitting
-                                            -- DECISION_RESULT so the embedded rollout_history shows it.
-                                            -- Applies to Continue, Wait AND Abort paths.
+                                            -- Write decision into last history entry BEFORE the
+                                            -- DECISION_RESULT event so its embedded history includes it.
                                             case unsnocList (rolloutHistory freshRT) of
                                                 Nothing -> pure ()
                                                 Just _ -> do
@@ -1196,7 +1105,6 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                                     currentTSDR <- gets targetState
                                                     casUpdateOrBail "rolloutLoop/decisionHist" currentRTDR currentTSDR freshStatus
 
-                                            -- Read back so the event payload sees the updated history.
                                             rtForEvent <- getRT
                                             logDecisionResult rtForEvent combinedDecision combinedResultText combinedReasons
 
@@ -1226,7 +1134,6 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                                 Nothing -> abortWithReason "rolloutStrategy index out of range (next step)"
                                             let nextNewW = rolloutPercent nextStep
                                                 nextOldW = max 0 (100 - nextNewW)
-                                                -- Previous % before appending the new history entry.
                                                 previousRolloutW =
                                                     case unsnocList (rolloutHistory freshRT) of
                                                         Nothing -> 0
@@ -1242,8 +1149,7 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                                     <> T.pack (show (cooloffMinutes nextStep))
                                                     <> "min"
 
-                                            -- Scale new deployment and wait for pods Ready BEFORE the VS flip,
-                                            -- else traffic hits ContainerCreating pods and we 5xx at every stage.
+                                            -- Scale + wait Ready BEFORE VS flip (see waitForStagePodsReady).
                                             scaleNewDeploymentForStage cfg ctx nextNewW (podCount nextStep)
                                             waitForStagePodsReady cfg ctx
                                             runVsRolloutWithLock cfg ctx (wcMaxK8sRetries wfCfg) nextOldW nextNewW
@@ -1301,7 +1207,7 @@ checkDeploymentHealth cfg ctx = do
     when (ready < desired) $
         logWarningS "    WARNING: Not all replicas ready yet"
 
--- | Poll pods until all Running+Ready, max 5 minutes.
+-- | Poll pods until Running+Ready, max ~5 min. Runs post-monitoring if enabled.
 monitorHealth :: StateFlow ()
 monitorHealth = do
     rt <- getRT
@@ -1326,8 +1232,7 @@ monitorHealth = do
         Right () ->
             logInfoS "  All pods ready"
 
-    -- Post-monitoring: after all pods are healthy at 100%, check HS decision
-    -- Master gate (legacy flat boolean, kept as a kill switch) AND per-service gate.
+    -- Post-monitoring HS check once at 100%: master kill switch AND per-service gate.
     masterPostEnabled <- getConfigBoolForProduct "ab_hs_post_monitoring_enabled" (Just (appGroup rt)) False
     perServicePostEnabled <-
         if masterPostEnabled
@@ -1340,21 +1245,15 @@ monitorHealth = do
             "BUSINESS"
             "POST_MONITORING_STARTED"
             (toJSON ("Post-monitoring phase" :: T.Text))
-        -- Julia parity: spawn the post-monitoring AB decision pod ONCE before
-        -- polling. The HS GET loop reads its verdict via run_id "<id>-post".
+        -- Spawn post-monitoring AB pod ONCE; HS GET loop reads run_id "<id>-post".
         _ <- lift $ initiatePostMonitoringABDecisionForRelease cfg rt
         loopStart <- liftIO getCurrentTime
         postMonitorLoop wfCfg cfg rt 0 loopStart
-        -- Best-effort cleanup: stop the post-monitoring decision pod once
-        -- the loop has exited (Continue, Abort-alert, or timeout). Mirrors
-        -- Julia's stopDecisionEngineHS call after post-monitoring concludes.
         lift $ stopDecisionEngineHS cfg (releaseId rt <> "-post")
 
     logInfoS "Health monitoring complete"
 
-{- | Post-monitoring loop: poll HS decision engine after 100% traffic.
-Max 30 iterations with collectMetricsDelay between polls.
--}
+-- | Poll HS decision after 100% traffic. Max 30 iterations, delay between polls.
 postMonitorLoop :: WorkflowConfig -> Config -> ReleaseTracker -> Int -> UTCTime -> StateFlow ()
 postMonitorLoop wfCfg cfg rt iteration loopStart = do
     nowGuard <- liftIO getCurrentTime
@@ -1371,7 +1270,7 @@ postMonitorLoop wfCfg cfg rt iteration loopStart = do
                 "POST_MONITORING_TIMEOUT"
                 (object ["iterations" .= (iteration :: Int)])
         else do
-            hsResult <- getHSDecision cfg rt True -- isPostMonitoring=True
+            hsResult <- getHSDecision cfg rt True
             insertReleaseEvent
                 (releaseId rt)
                 "DECISION_ENGINE"
@@ -1391,9 +1290,8 @@ postMonitorLoop wfCfg cfg rt iteration loopStart = do
                         "POST_MONITORING_RESULT"
                         (object ["decision" .= ("Continue" :: T.Text)])
                 Abort -> do
-                    -- Post-monitoring runs AFTER traffic shifted to 100%. Auto-rollback
-                    -- here would kill live traffic on a deployment that already passed
-                    -- every stage — operator must decide. Alert loudly, stay at 100%.
+                    -- Post-monitoring is AFTER 100% traffic; auto-rollback would kill
+                    -- live traffic on a deployment that passed every gate. Alert only.
                     logErrorS "[WORKFLOW] Post-monitoring ABORT — alerting (NOT auto-rolling back, traffic stays at 100%)"
                     insertReleaseEvent
                         (releaseId rt)
@@ -1419,7 +1317,7 @@ postMonitorLoop wfCfg cfg rt iteration loopStart = do
                     threadDelay (Seconds (wcCollectMetricsDelay wfCfg))
                     postMonitorLoop wfCfg cfg rt (iteration + 1) loopStart
 
--- | Poll pods until all are Running+Ready or timeout/failure
+-- | Poll pods until Running+Ready, or fast-fail on bad container states.
 waitForPodsReady :: LoggerEnv -> Config -> K8sReleaseContext -> Int -> Int -> Int -> IO (Either T.Text ())
 waitForPodsReady logEnv cfg ctx maxAttempts pollSeconds restartThreshold = go 0
   where
@@ -1442,22 +1340,18 @@ waitForPodsReady logEnv cfg ctx maxAttempts pollSeconds restartThreshold = go 0
                     <> "/"
                     <> T.pack (show desired)
 
-            -- Check for pod-level failures (CrashLoopBackOff, ImagePullBackOff, etc.)
             podHealth <- checkPodHealthDetailed cfg ctx restartThreshold
             case podHealth of
                 Left errMsg -> do
                     logErrorIO logEnv $ "    Pod health check FAILED: " <> errMsg
                     pure (Left errMsg)
                 Right msg -> do
-                    -- TODO: migrate to structured logging
                     logInfoIO logEnv $ "    Pod health: " <> msg
                     if readyCount >= desired && desired > 0
                         then pure (Right ())
                         else go (attempt + 1)
 
-{- | Detailed pod health check: restart count, CrashLoopBackOff, ImagePullBackOff
-Returns Left errorMessage if pods are unhealthy, Right statusMessage if OK.
--}
+-- | Detailed pod health check. Left = unhealthy reason; Right = status msg.
 checkPodHealthDetailed :: Config -> K8sReleaseContext -> Int -> IO (Either T.Text T.Text)
 checkPodHealthDetailed cfg ctx restartThreshold = do
     let svcHost = serviceName ctx
@@ -1482,7 +1376,6 @@ checkPodHealthDetailed cfg ctx restartThreshold = do
                 Nothing -> pure (Right "Could not parse pod JSON (non-fatal)")
                 Just podJson -> pure (analyzePodHealth restartThreshold podJson)
 
--- | Analyze pod health from kubectl JSON output
 analyzePodHealth :: Int -> Value -> Either T.Text T.Text
 analyzePodHealth restartThreshold (Object root) =
     case KM.lookup (K.fromText "items") root of
@@ -1495,7 +1388,6 @@ analyzePodHealth restartThreshold (Object root) =
         _ -> Right "No pods found (non-fatal)"
 analyzePodHealth _ _ = Right "Unexpected JSON format (non-fatal)"
 
--- | Check a single pod for unhealthy conditions
 checkSinglePod :: Int -> Value -> Either T.Text T.Text
 checkSinglePod restartThreshold (Object podObj) =
     let podName = case KM.lookup (K.fromText "metadata") podObj >>= getObj' "name" of
@@ -1514,7 +1406,6 @@ checkSinglePod restartThreshold (Object podObj) =
                     Just (Array cs) -> Just (foldr (:) [] cs)
                     _ -> Nothing
                 _ -> Nothing
-        -- Check for bad container states
         containerErrors = case containerStatuses of
             Nothing -> []
             Just cs -> concatMap (checkContainer podName) cs
@@ -1531,16 +1422,8 @@ checkSinglePod restartThreshold (Object podObj) =
         _ -> Nothing
     getObj' _ _ = Nothing
 
-    -- Container waiting-reason fail-fast list. Mirrors Julia's
-    -- 'ErrorMessage' classifier (kubernetes.jl:1046-1067) but runs
-    -- INSIDE the polling loop instead of only at timeout, so we add
-    -- only states kubelet sets immediately on first sync (no
-    -- transient startup states like Pending / ContainerCreating).
-    -- 'InvalidImageName' is not in Julia's list — we add it because
-    -- kubelet sets it on the very first sync for malformed image
-    -- strings (e.g. 'nginx:nginx:alpine'), so it's safe to fast-fail
-    -- and a real production failure mode otherwise stuck waiting out
-    -- the full readiness timeout.
+    -- Fail-fast waiting-reason list: only states kubelet sets on first sync
+    -- (no transient Pending/ContainerCreating). Runs inside the poll loop.
     checkContainer podName (Object cObj) =
         let restartCount = case KM.lookup (K.fromText "restartCount") cObj of
                 Just (Number n) -> round n :: Int
@@ -1561,37 +1444,24 @@ checkSinglePod restartThreshold (Object podObj) =
                 _ -> Nothing
             errs =
                 []
-                    -- Image-pull failures (Julia parity)
                     <> [podName <> ": ImagePullBackOff (image pull failed)" | waitingReason == Just "ImagePullBackOff"]
                     <> [podName <> ": ErrImagePull (image pull error)" | waitingReason == Just "ErrImagePull"]
-                    -- Malformed image string — kubelet sets this immediately on first
-                    -- sync, no recovery possible. Better than Julia which only catches
-                    -- this via the readiness timeout.
                     <> [podName <> ": InvalidImageName (malformed image reference)" | waitingReason == Just "InvalidImageName"]
                     <> [podName <> ": ImageInspectError" | waitingReason == Just "ImageInspectError"]
-                    -- Container config / secret / configmap reference broken (Julia parity).
                     <> [podName <> ": CreateContainerConfigError (referenced secret/configmap missing or invalid)" | waitingReason == Just "CreateContainerConfigError"]
                     <> [podName <> ": CreateContainerError" | waitingReason == Just "CreateContainerError"]
                     <> [podName <> ": RunContainerError (referenced envs not in configmap/secrets)" | waitingReason == Just "RunContainerError"]
-                    -- App-level crash loop (Julia parity).
                     <> [podName <> ": CrashLoopBackOff (env vars missing or app crashing)" | waitingReason == Just "CrashLoopBackOff"]
-                    -- Terminated states that indicate a non-recoverable failure.
                     <> [podName <> ": container terminated with OOMKilled" | terminatedReason == Just "OOMKilled"]
                     <> [podName <> ": container terminated with reason " <> r | Just r <- [terminatedReason], r `elem` ["ContainerCannotRun", "DeadlineExceeded", "Error"]]
-                    -- Restart-count threshold (catches app-level crashes that may not have escalated to CrashLoopBackOff yet).
+                    -- Catches app crashes that haven't escalated to CrashLoopBackOff yet.
                     <> [podName <> ": restartCount=" <> T.pack (show restartCount) <> " exceeds threshold (" <> T.pack (show restartThreshold) <> ")" | restartCount > restartThreshold]
          in errs
     checkContainer _ _ = []
 checkSinglePod _ _ = Right "unknown"
 
-{- | Cleanup old version.
-
-Production parity (releaseCompletionActions, line 558-596):
-- Records end time on the tracker
-- Schedules scale-down of old pods (done by Runner's scaleDownOldDeployment on next poll)
-rather than scaling down immediately
-- Only scales down immediately if scale_down_pods_on_completion is enabled
-- Captures AFTER snapshots for diff
+{- | Finalize: record end time, schedule old-deployment scale-down, delete old HPA.
+Actual scale-down happens in Runner after tracker reaches COMPLETED.
 -}
 cleanupOldVersion :: StateFlow ()
 cleanupOldVersion = do
@@ -1602,30 +1472,23 @@ cleanupOldVersion = do
     wfCfg <- loadWorkflowConfig (appGroup rt)
     logInfoS $ "Cleaning up old version for " <> appGroup rt
 
-    -- Julia parity: best-effort stop of the primary AB decision pod once
-    -- we have reached the finalize stage (release success path).
+    -- Best-effort stop of the primary AB decision pod on the success path.
     lift $ stopDecisionEngineHS cfg (releaseId rt)
 
     updateK8sStatus BSScaleDownOld
 
-    -- Production line 559: update_release_end_time!(conn, tracker)
     now <- liftIO getCurrentTime
     updateRT $ \r -> r{endTime = Just now}
 
     if isNew
         then do
-            -- New service: no old deployment to clean up
             logInfoS "  New service: no old deployment to clean up"
             updateK8sField (\k8s -> k8s{oldDeploymentScaledDown = True})
         else do
             let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
 
-            -- Production line 560: scheduleScaleDownOfPods(tracker, conn)
-            -- Julia parity: write the SCALE_DOWN_SCHEDULED flag + timestamp into
-            -- the K8sState so the Runner's findCompletedTrackersForScaleDown
-            -- worker picks it up. Without this flag the gate in
-            -- findCompletedTrackersForScaleDown will reject the tracker even
-            -- though the rollout completed successfully.
+            -- Write SCALE_DOWN_SCHEDULED + timestamp so the Runner's
+            -- findCompletedTrackersForScaleDown picks the tracker up.
             logInfoS $ "  Scheduling scale-down for old deployment: " <> oldDepName
             scheduleAt <- liftIO $ do
                 t <- getCurrentTime
@@ -1645,23 +1508,13 @@ cleanupOldVersion = do
                     ]
                 )
 
-            -- Bug fix (round 7): NEVER scale down the old deployment from
-            -- inside the workflow. We must only scale down AFTER the tracker
-            -- has transitioned to COMPLETED, otherwise a backend restart
-            -- between this scale-down and the COMPLETED transition would
-            -- find an orphan INPROGRESS tracker whose old deployment is at
-            -- 0 pods, and `restoreVsTrafficOnFailure` would point traffic
-            -- at a deployment with no pods (= 5xx outage).
-            -- The Runner's separate scale-down sweep (findCompletedTrackers
-            -- ForScaleDown) handles this safely AFTER status=COMPLETED.
-            let _ = wcScaleDownOnCompletion wfCfg -- read but no longer drives in-workflow scale
+            -- NEVER scale down the old deployment from inside the workflow: a
+            -- backend restart before the COMPLETED transition would leave an
+            -- orphan INPROGRESS tracker and restoreVsTrafficOnFailure would
+            -- route to zero pods (5xx outage). Runner handles it post-COMPLETED.
+            let _ = wcScaleDownOnCompletion wfCfg
 
-            -- Delete old version's HPA so a revert can re-create it cleanly and
-            -- we don't leak HPAs across releases. Mirrors prepareK8sResources
-            -- which clones the HPA when isHpaEnabledForProduct; only attempt the
-            -- delete if one actually exists (no-op when HPA was never created).
-            -- Julia parity (service.jl:138-154 — cleanup of old-version HPA post
-            -- rollout).
+            -- Delete old-version HPA so a revert can re-create it cleanly.
             let oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
             oldHpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
             when oldHpaFound $ do
@@ -1678,7 +1531,6 @@ cleanupOldVersion = do
                     Left err ->
                         logErrorS $ "  WARNING: Failed to delete old HPA: " <> T.pack (show err)
 
-    -- Capture AFTER snapshots
     cfgAfter <- getCfg
     rtAfter <- getRT
     ctxAfter <- getK8sCtx
@@ -1686,14 +1538,7 @@ cleanupOldVersion = do
 
     logInfoS "Cleanup complete"
 
-{- | Notify complete.
-
-Production parity (service.jl line 176 + releaseCompletionActions):
-- Sets tracker status to COMPLETED
-- Records completion event
-- Persists final state to DB
-- Notifies Slack
--}
+-- | Mark COMPLETED, persist, emit STATUS_UPDATED, notify Slack.
 notifyComplete :: StateFlow ()
 notifyComplete = do
     rt <- getRT
@@ -1704,32 +1549,22 @@ notifyComplete = do
     logInfoS $ "   Category: BackendService"
     logInfoS $ "   Status: COMPLETED"
 
-    -- Production line 176: update_tracker_status!(conn, COMPLETED, tracker)
     now <- liftIO getCurrentTime
     updateRT $ \r -> r{status = COMPLETED, endTime = Just now}
 
-    -- Persist final state to DB immediately (production does this in update_tracker_status!)
     currentRT <- getRT
     currentTS <- gets targetState
     insertReleaseTracker currentRT currentTS
 
-    -- Log completion event
-    -- Production parity: NOTIFICATION / STATUS_UPDATED
     let completionMsg = "Tracker marked as COMPLETED with " <> T.pack (show (getTrafficPct currentTS)) <> "% traffic"
     logStatusUpdated currentRT completionMsg
 
-    -- Notify Slack
     lift $ notifyReleaseCompleted currentRT currentTS
   where
     getTrafficPct Nothing = 100 :: Int
     getTrafficPct (Just (K8sState k8s)) = trafficPercentage k8s
     getTrafficPct _ = 100
 
--- ============================================================================
--- K8s State Helpers
--- ============================================================================
-
--- | Update K8s workflow status
 updateK8sStatus :: BackendServiceWFStatus -> StateFlow ()
 updateK8sStatus newStatus = do
     rs <- gets id
@@ -1739,7 +1574,6 @@ updateK8sStatus newStatus = do
             modify $ \s -> s{targetState = Just (K8sState k8s')}
         _ -> return ()
 
--- | Update K8s deployment state field
 updateK8sField :: (K8sDeploymentState -> K8sDeploymentState) -> StateFlow ()
 updateK8sField f = do
     rs <- gets id

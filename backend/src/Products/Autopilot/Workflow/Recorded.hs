@@ -1,9 +1,5 @@
-{- | Re-export shim for the shared 'Core.Workflow.Recorded' module.
-
-The Recorded monad lives in 'Core.Workflow.Recorded' so every product
-(Autopilot, future products) can reuse the same checkpointed workflow
-engine. This module exists only to keep existing Autopilot imports
-working without a codebase-wide rename.
+{- | Re-export shim so existing Autopilot imports keep working; the real
+  definitions live in 'Core.Workflow.Recorded'.
 -}
 module Products.Autopilot.Workflow.Recorded (
     Recorded (..),

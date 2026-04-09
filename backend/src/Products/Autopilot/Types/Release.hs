@@ -29,25 +29,10 @@ import GHC.Generics (Generic)
 import GHC.Int (Int32)
 import Products.Autopilot.Types.Workflow (ReleaseCategory, ReleaseWFStatus)
 
--- ============================================================================
--- Common Types (Used Across All Releases)
--- ============================================================================
-
-{- | Decision-engine verdict. Julia parity (decision/runner.jl ABDecision):
-five variants with priority ordering used to merge multi-experiment results.
-
-Priority (lower = wins in merge):
-  WaitForMoreIteration = 0  -- engine wants more samples; takes precedence over a Continue
-  Continue             = 1  -- safe to advance
-  Wait                 = 2  -- engine still computing, hold cooloff
-  Abort                = 3  -- rollback, highest priority
-
-@WaitForMoreIteration@ is distinct from @Wait@: the former specifically
-signals that the engine has insufficient data to score (sample volume
-floor not yet hit), and the workflow should poll again on the next
-cooloff iteration WITHOUT advancing. Most engine responses don't
-distinguish — they collapse to plain @Wait@ — but Julia engines that
-report verdict code @2@ vs @3@ can be modeled distinctly.
+{- | Decision-engine verdict, merged across experiments via 'decisionPriority'
+(lower = wins). @WaitForMoreIteration@ is distinct from @Wait@: the former
+means the engine lacks enough samples to score yet, the latter means it's
+still computing. Most responses collapse to @Wait@.
 -}
 data Decision = WaitForMoreIteration | Continue | Wait | Abort
     deriving (Eq, Show, Read, Generic)
@@ -56,9 +41,7 @@ instance ToJSON Decision
 
 instance FromJSON Decision
 
-{- | Lower number = higher priority in multi-experiment merge.
-Julia parity (decision/runner.jl ABDecision priority field).
--}
+-- | Lower number = higher priority in multi-experiment merge.
 decisionPriority :: Decision -> Int
 decisionPriority Abort = 0
 decisionPriority Wait = 1
@@ -72,77 +55,45 @@ instance ToJSON Mode
 
 instance FromJSON Mode
 
--- ============================================================================
--- Release Status (user-facing lifecycle states)
--- ============================================================================
+{- | User-facing release lifecycle status (applies to all categories).
+Platform-specific workflow progress lives in 'targetState'.
 
-{- | Release lifecycle status
+Backend/config:
+@CREATED → INPROGRESS → COMPLETED | PAUSED | ABORTING → (USER_)ABORTED | REVERTING → REVERTED@
+@CREATED → DISCARDING → DISCARDED@
 
-These are the user-facing states that apply to ALL release types.
-Platform-specific workflow progress is tracked separately in targetState.
-
-Lifecycle (backend/config releases):
-CREATED → INPROGRESS → COMPLETED
-                    → PAUSED → INPROGRESS (resume)
-                    → ABORTING → ABORTED / USER_ABORTED / GCLT_ABORTED
-                    → REVERTING → REVERTED
-CREATED → DISCARDING → DISCARDED
-
-VSEdit states (same table, category='VSEdit'):
-CREATED → LOCKED → APPLIED → COMPLETED
-                → UNLOCKED (abort / expiry / discard)
+VSEdit (same table, category='VSEdit'):
+@CREATED → LOCKED → APPLIED → COMPLETED | UNLOCKED@
 -}
 data ReleaseStatus
-    = -- | Initial state, awaiting approval or scheduling
-      CREATED
-    | -- | Actively executing
-      INPROGRESS
-    | -- | Successfully finished
-      COMPLETED
-    | -- | System-initiated abort (errors, health check failures, etc.)
-      ABORTED
-    | -- | User-initiated abort
-      USER_ABORTED
-    | -- | DISCARDED before execution
-      DISCARDED
-    | -- | Transitioning to DISCARDED (async cleanup)
-      DISCARDING
-    | -- | PAUSED by user, can be resumed
-      PAUSED
-    | -- | Abort in progress (transitioning to ABORTED/USER_ABORTED)
-      ABORTING
-    | -- | REVERTING a completed release back to previous version
-      REVERTING
-    | -- | Revert completed successfully
-      REVERTED
-    | -- | Resuming after pause or transient failure
-      RESTARTING
-    | -- | ABORTED by decision engine (HS/AB) — distinct from user-initiated abort
+    = CREATED
+    | INPROGRESS
+    | COMPLETED
+    | ABORTED
+    | USER_ABORTED
+    | DISCARDED
+    | DISCARDING
+    | PAUSED
+    | ABORTING
+    | REVERTING
+    | REVERTED
+    | RESTARTING
+    | -- | Aborted by decision engine (HS/AB), distinct from user abort.
       GCLT_ABORTED
-    | -- | VSEdit: lock held on target virtual service
-      LOCKED
-    | -- | VSEdit: lock released (abort/expiry/discard)
-      UNLOCKED
-    | -- | VSEdit: edit applied to virtual service
-      APPLIED
+    | LOCKED
+    | UNLOCKED
+    | APPLIED
     deriving (Eq, Show, Read, Generic, Enum, Bounded)
 
 instance ToJSON ReleaseStatus
 
 instance FromJSON ReleaseStatus
 
-{- | Canonical text form of a 'ReleaseStatus' — identical to the constructor
-name and to the JSON wire format (Aeson default @allNullaryToStringTag@).
-Single source of truth: both the DB layer and the JSON layer agree by
-construction, no lookup tables to drift.
--}
+-- | Canonical text form — identical to constructor and JSON wire format.
 releaseStatusText :: ReleaseStatus -> Text
 releaseStatusText = T.pack . show
 
-{- | Case-insensitive text → 'ReleaseStatus'. Derived from 'Enum'+'Bounded',
-so adding a new constructor to 'ReleaseStatus' is the ONLY edit needed.
-Unknown values default to 'CREATED'.
--}
+-- | Case-insensitive text → 'ReleaseStatus'. Unknown values default to 'CREATED'.
 parseReleaseStatusText :: Text -> ReleaseStatus
 parseReleaseStatusText t =
     fromMaybe CREATED (lookup (T.toUpper t) releaseStatusLookup)
@@ -152,10 +103,6 @@ parseReleaseStatusText t =
         [ (T.toUpper (releaseStatusText s), s)
         | s <- [minBound .. maxBound :: ReleaseStatus]
         ]
-
--- ============================================================================
--- Status Helpers
--- ============================================================================
 
 isTerminalStatus :: ReleaseStatus -> Bool
 isTerminalStatus s = s `elem` [ABORTED, USER_ABORTED, GCLT_ABORTED, COMPLETED, DISCARDED, REVERTED, UNLOCKED]
@@ -179,7 +126,6 @@ validateStatusTransition from to = to `elem` allowed from
     allowed REVERTED = []
     allowed RESTARTING = [INPROGRESS, ABORTED, USER_ABORTED, GCLT_ABORTED]
     allowed DISCARDING = [DISCARDED]
-    -- VSEdit transitions
     allowed LOCKED = [APPLIED, UNLOCKED, DISCARDED]
     allowed APPLIED = [COMPLETED, UNLOCKED]
     allowed UNLOCKED = []
@@ -199,27 +145,19 @@ validateGlobalStatusTransition from to = to `elem` allowed from
     allowed ABORTING = [ABORTING, DISCARDED, ABORTED, USER_ABORTED, GCLT_ABORTED, REVERTING, RESTARTING, COMPLETED]
     allowed REVERTING = [REVERTED, USER_ABORTED, PAUSED, RESTARTING]
     allowed DISCARDING = [DISCARDED]
-    -- VSEdit transitions
     allowed LOCKED = [APPLIED, UNLOCKED, DISCARDED]
     allowed APPLIED = [COMPLETED, UNLOCKED]
     allowed UNLOCKED = []
     allowed REVERTED = []
 
--- ============================================================================
--- Release Data Types
--- ============================================================================
-
 data RolloutStep = RolloutStep
     { rolloutPercent :: Int
     -- ^ Traffic percentage shifted to the new version at this step (0-100).
     , cooloffMinutes :: Int
-    -- ^ Cooloff duration in MINUTES. Matches Julia production semantics:
-    -- the workflow multiplies by 60 before use.
+    -- ^ Cooloff duration in minutes (workflow multiplies by 60 before use).
     , podCount :: Int
-    -- ^ Absolute number of pods to run on the new deployment at this step
-    -- (NOT a percentage). Used as the operatorFloor input to the
-    -- scaleNewDeploymentForStage formula. Renamed from @podPercent@ in the
-    -- 0011 migration; the field was always a raw count, never a percentage.
+    -- ^ Absolute pod count (not a percentage) for the new deployment at
+    -- this step; used as operatorFloor input to scaleNewDeploymentForStage.
     }
     deriving (Eq, Show, Generic)
 
@@ -230,10 +168,8 @@ instance FromJSON RolloutStep
 data RolloutHistory = RolloutHistory
     { historyRolloutPercent :: Int
     , historyCooloffMinutes :: Int
-    -- ^ Cooloff duration in minutes (same unit as 'cooloffMinutes').
     , historyPodsCount :: Int
     -- ^ Snapshot of 'RolloutStep.podCount' at the time the step ran.
-    -- Renamed from @historyPodsPercent@ in the 0011 migration.
     , historyDecision :: Maybe Decision
     , historyDecisionReason :: Maybe Text
     , historyStartedAt :: UTCTime
@@ -251,19 +187,13 @@ instance FromJSON RolloutHistory
 data ReleaseTracker = ReleaseTracker
     { releaseId :: Text
     , appGroup :: Text
-    -- ^ App group name (e.g., "Beckn", "rider-app", "BecknSchedulers")
-    -- This is the WHAT - which group/product is being released
+    -- ^ App group being released (e.g. "Beckn", "rider-app").
     , service :: Text
-    -- ^ Alias for product (for backward compatibility)
     , env :: Text
     , category :: ReleaseCategory
-    -- ^ Release category: BackendService, MobileAppAndroid, BackendConfig, etc.
-    -- This is the HOW/WHERE - how/where to deploy it
     , status :: ReleaseStatus
-    -- ^ Current release status: CREATED, INPROGRESS, COMPLETED, ABORTED, etc.
     , releaseWFStatus :: ReleaseWFStatus
-    -- ^ Generic workflow stage: INIT, PREPARING, DEPLOYING, MONITORING, FINALIZING, DONE
-    -- Applies to ALL release categories (K8s, Play Store, App Store, etc.)
+    -- ^ Generic workflow stage (applies across K8s, mobile, etc.).
     , mode :: Mode
     , createdBy :: Text
     , approvedBy :: Maybe Text
@@ -278,9 +208,7 @@ data ReleaseTracker = ReleaseTracker
     , rolloutStrategy :: [RolloutStep]
     , rolloutHistory :: [RolloutHistory]
     , oldVersion :: Text
-    -- ^ Previous version (generic, applies to all release types)
     , newVersion :: Text
-    -- ^ New version being released (generic, applies to all release types)
     , info :: Maybe Text
     , description :: Maybe Text
     , changeLog :: Maybe Text

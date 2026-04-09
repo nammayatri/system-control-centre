@@ -19,14 +19,11 @@ const EditVS: React.FC = () => {
 
   const [appGroup, setAppGroup] = useState('');
   const [service, setService] = useState('');
-  // Round 8 audit H19: env was hardcoded to 'UAT', mis-attributing PROD VS
-  // edits in the audit trail. Make it user-selectable with sensible default.
   const [env, setEnv] = useState('UAT');
   const [vsData, setVsData] = useState('');
   const [trackerId, setTrackerId] = useState<string | null>(null);
   const [isLocked, setIsLocked] = useState(false);
 
-  // Round 8 audit M10: use authenticated user's email for lockedBy.
   const { user: authUser } = useAuth();
   const lockerIdentity = authUser?.email || 'admin';
 
@@ -127,7 +124,6 @@ const EditVS: React.FC = () => {
         <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">VS Editor</h1>
       </div>
 
-      {/* Selection */}
       <div className="bg-white rounded-xl border border-zinc-200 p-4 sm:p-6 mb-4 sm:mb-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
           <div>
@@ -148,7 +144,6 @@ const EditVS: React.FC = () => {
         </div>
       </div>
 
-      {/* Editor */}
       {appGroup && service && (
         <div className="bg-white rounded-xl border border-zinc-200">
           <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">

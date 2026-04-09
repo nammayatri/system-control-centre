@@ -1,10 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Backend config workflow (K8s ConfigMap apply)
-
-Implements the ConfigMap apply workflow using the Recorded monad pattern.
-Migrated from Runner.hs's processConfigMapTracker.
--}
+-- | Backend config (K8s ConfigMap apply) workflow spec.
 module Products.Autopilot.Workflow.BackendConfigWorkflow (
     backendConfigSpec,
 )
@@ -51,20 +47,8 @@ import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 import Prelude
 
--- ============================================================================
--- Workflow Spec — the only entry point
--- ============================================================================
-
-{- | Backend config (ConfigMap) workflow expressed as a 'WorkflowSpec' value.
-
-Same shape as 'BackendSchedulerWorkflow.backendSchedulerSpec' and
-'BackendServiceWorkflow.backendServiceSpec' — every workflow is a __value__
-walked through the product-agnostic engine in 'Core.Workflow.Engine'.
-
-The four stages (init → prepare → deploy → done) wrap the existing legacy
-@validateConfig@, @resolveConfigContent@, @applyConfigMap@, @notifyComplete@
-function bodies via 'mkLegacyStateFlowStage'. Behavior is identical to the
-old @|>>@ path.
+{- | Four-stage spec: init → prepare → deploy → done. No rollback — a
+  failed ConfigMap is either applied or not (best-effort).
 -}
 backendConfigSpec :: WorkflowSpec ReleaseState
 backendConfigSpec =
@@ -76,11 +60,7 @@ backendConfigSpec =
             , configStageDeploy
             , configStageDone
             ]
-        , -- ConfigMap workflow doesn't have rollback semantics — failures
-          -- leave the tracker in ABORTED but the ConfigMap itself is
-          -- either applied or not (best-effort). Future work could use
-          -- wsRollback to re-apply the previous ConfigMap revision.
-          wsRollback = \_err -> pure ()
+        , wsRollback = \_err -> pure ()
         , wsPersist = persistWorkflowState
         }
 
@@ -94,21 +74,16 @@ configStagePrepare = mkLegacyStateFlowStage "prepare" PREPARING resolveConfigCon
 configStageDeploy = mkLegacyStateFlowStage "deploy" DEPLOYING applyConfigMap
 configStageDone = mkLegacyStateFlowStage "done" DONE notifyComplete
 
--- ============================================================================
--- Helpers
--- ============================================================================
-
 getCfg :: StateFlow Config
 getCfg = lift getConfig
 
--- | StateFlow-level logging (lifts from Flow)
 logInfoS :: T.Text -> StateFlow ()
 logInfoS = lift . logInfo
 
 logWarningS :: T.Text -> StateFlow ()
 logWarningS = lift . logWarning
 
--- | Get file content from metadata
+-- | Tracker metadata carries the file content under either "file" or "config".
 getFileContent :: StateFlow (Maybe Text)
 getFileContent = do
     rt <- getRT
@@ -121,7 +96,6 @@ getFileContent = do
                     _ -> Nothing
         _ -> Nothing
 
--- | Update config workflow status in target state
 updateConfigStatus :: BackendConfigWFStatus -> StateFlow ()
 updateConfigStatus newStatus = do
     rs <- gets id
@@ -131,21 +105,14 @@ updateConfigStatus newStatus = do
         _ ->
             modify $ \s -> s{targetState = Just (ConfigState (emptyConfigState{categoryWorkflowStatus = newStatus}))}
 
--- ============================================================================
--- Workflow Step Implementations
--- ============================================================================
-
--- | Validate that the tracker has config/file content
 validateConfig :: StateFlow ()
 validateConfig = do
     rt <- getRT
     logInfoS $ "Validating config for " <> appGroup rt
     updateConfigStatus BCInit
-    -- Julia parity (configMaprelease.jl): set INPROGRESS at workflow start so
-    -- a crash mid-step leaves an unambiguous "running" marker. Without this
-    -- the tracker stays CREATED until the very last step (notifyComplete),
-    -- which makes startup-rollback unable to distinguish "never picked"
-    -- from "picked but crashed mid-apply".
+    -- Set INPROGRESS up front so a crash mid-step leaves an unambiguous
+    -- "running" marker; otherwise startup-rollback can't distinguish
+    -- "never picked" from "picked but crashed mid-apply".
     updateRT $ \r -> r{status = INPROGRESS}
 
     fileContent <- getFileContent
@@ -156,7 +123,9 @@ validateConfig = do
 
     logInfoS "Config validation passed"
 
--- | Resolve the config content: if raw K8s manifest use directly, otherwise patch existing ConfigMap
+{- | If the content is a raw K8s manifest, use it directly; otherwise fetch
+  the existing ConfigMap and patch its @data@ section.
+-}
 resolveConfigContent :: StateFlow ()
 resolveConfigContent = do
     rt <- getRT
@@ -168,7 +137,6 @@ resolveConfigContent = do
     case fileContent of
         Nothing -> liftIO $ throwIO $ WorkflowError "resolve" "No file content"
         Just fc -> do
-            -- Resolve namespace from product config
             p <- findProductByName (appGroup rt)
             let ns = case p of
                     Just pCfg -> T.unpack (getProductNamespace pCfg)
@@ -178,12 +146,10 @@ resolveConfigContent = do
                             _ -> T.unpack (env rt)
                         _ -> T.unpack (env rt)
 
-            -- Capture BEFORE snapshot of configmap
             captureConfigMapSnapshot cfg (releaseId rt) (T.pack ns) (service rt) "CONFIGMAP_BEFORE"
 
             if isK8sManifest fc
                 then do
-                    -- Store resolved content + namespace in workflowMetadata for DEPLOYING stage
                     let resolved =
                             Object $
                                 KM.fromList
@@ -193,7 +159,6 @@ resolveConfigContent = do
                     modify $ \s -> s{workflowMetadata = Just resolved}
                     logInfoS "  Content is raw K8s manifest, will apply directly"
                 else do
-                    -- Fetch existing ConfigMap and patch it
                     let cmName' = T.unpack (service rt)
                         getCmd = unwords [kubectlBin cfg, "get configmap", cmName', "-n", ns, "-o json"]
                     logInfoS $ "  Fetching existing ConfigMap: " <> T.pack cmName'
@@ -215,7 +180,6 @@ resolveConfigContent = do
 
     logInfoS "Config content resolved"
 
--- | Apply the resolved ConfigMap content via kubectl replace
 applyConfigMap :: StateFlow ()
 applyConfigMap = do
     rt <- getRT
@@ -242,10 +206,9 @@ applyConfigMap = do
                                     Just (ConfigState cs) -> Just (ConfigState (cs{configMapsUpdated = [service rt], rolloutComplete = True}))
                                     _ -> Just (ConfigState (emptyConfigState{configMapsUpdated = [service rt], rolloutComplete = True}))
                             }
-                    -- Capture AFTER snapshot of configmap
                     captureConfigMapSnapshot cfg (releaseId rt) (T.pack ns) (service rt) "CONFIGMAP_AFTER"
-                    -- Julia parity (events.jl:546): emit a success event so the
-                    -- audit trail records the apply, not just the failure path.
+                    -- Emit a success event so the audit trail records
+                    -- successful applies, not just failures.
                     insertReleaseEvent
                         (releaseId rt)
                         "BUSINESS"
@@ -259,13 +222,14 @@ applyConfigMap = do
             insertReleaseEvent (releaseId rt) "BUSINESS" "KUBECTL_FAILED" (String "Missing workflow metadata (resolveConfigContent did not run?)")
             liftIO $ throwIO $ WorkflowError "apply" "Missing workflow metadata"
 
--- | Mark workflow as complete
 notifyComplete :: StateFlow ()
 notifyComplete = do
     rt <- getRT
     logInfoS $ "ConfigMap release " <> releaseId rt <> " completed!"
     lift $ notifyConfigMapCompleted rt
-    -- If this is a revert tracker, mark the original as REVERTED
+    -- If this tracker is a revert of another, CAS-transition the original
+    -- REVERTING → REVERTED so a concurrent abort/discard can't be silently
+    -- overwritten.
     case (info rt, description rt) of
         (Just "REVERT", Just desc) ->
             case T.stripPrefix "Revert of " desc of
@@ -273,10 +237,6 @@ notifyComplete = do
                     mOrig <- findReleaseTracker origId
                     case mOrig of
                         Just (origRt, origTs) | status origRt == REVERTING -> do
-                            -- CAS: only transition REVERTING → REVERTED if nobody
-                            -- else has touched the original tracker since we read it.
-                            -- Prevents a concurrent abort/discard of the original
-                            -- being silently overwritten by this revert-completion.
                             let reverted = origRt{status = REVERTED}
                             ok <- conditionalUpdateTracker reverted origTs "REVERTING"
                             if ok
@@ -293,16 +253,9 @@ notifyComplete = do
         _ -> pure ()
     updateRT $ \r -> r{status = COMPLETED}
 
--- ============================================================================
--- ConfigMap Helpers (moved from Runner.hs)
--- ============================================================================
-
-{- | Pipe content into kubectl replace -f -
-Julia parity (kubernetes.jl:2630 kubeReplaceConfigMapCommand): uses
-`kubectl replace`, NOT `kubectl apply`. Replace overwrites the resource;
-apply does a 3-way merge with the last-applied-configuration annotation
-which can produce surprising results when the configmap is owned by
-GitOps tooling or has drifted annotations.
+{- | Pipe content into @kubectl replace -f -@. We use @replace@ (overwrite)
+instead of @apply@ (3-way merge) because @apply@ produces surprising results
+when the ConfigMap is owned by GitOps tooling or has drifted annotations.
 -}
 replaceFromStdin :: Config -> String -> Text -> IO (Either Text ())
 replaceFromStdin cfg ns content = do
@@ -312,7 +265,6 @@ replaceFromStdin cfg ns content = do
         ExitSuccess -> pure (Right ())
         ExitFailure _ -> pure (Left ("kubectl replace failed: " <> T.pack err))
 
--- | Check if content looks like a raw K8s YAML manifest
 isK8sManifest :: Text -> Bool
 isK8sManifest t =
     let stripped = T.strip t
@@ -320,13 +272,10 @@ isK8sManifest t =
             || T.isPrefixOf "kind:" stripped
             || T.isPrefixOf "---" stripped
 
-{- | Patch an existing ConfigMap JSON: replace "data" with new content, strip
-only K8s-internal metadata fields (resourceVersion, uid, etc.).
-Julia parity (kubernetes.jl:2599-2601 getContentWithoutExtraMetadata):
-Julia preserves the entire metadata object except K8s-internal fields,
-then swaps the data section. Previously this stripped annotations and
-ownerReferences which broke GitOps reconciliation (Helm/Flux/ArgoCD
-ownership annotations were lost on every config-map release).
+{- | Replace the ConfigMap's @data@ section, preserving metadata except for
+K8s-internal fields. Do NOT strip annotations or ownerReferences — doing so
+broke GitOps reconciliation (Helm/Flux/ArgoCD ownership was lost on every
+config-map release).
 -}
 patchConfigMapJson :: Text -> Text -> Either Text Text
 patchConfigMapJson existingJson newDataContent =
@@ -336,8 +285,7 @@ patchConfigMapJson existingJson newDataContent =
             let newData = case eitherDecodeStrict' (encodeUtf8 newDataContent) of
                     Right val -> val
                     Left _ -> String newDataContent
-                -- K8s-internal metadata fields that must be stripped before
-                -- a kubectl replace (server rejects writes containing these).
+                -- K8s server rejects writes containing these fields.
                 internalMetaKeys =
                     [ "resourceVersion"
                     , "uid"

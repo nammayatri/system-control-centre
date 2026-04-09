@@ -195,14 +195,13 @@ autopilotConfigs =
         ScalingGroup
         "HPA minReplicas default for first-release create-from-template branch"
         (Just "autopilot")
-    , -- Pod-count ratchet & HPA min/max ratio (Julia parity tunables; both
-      -- changed from historic 1.2 / 1.0 to safer 1.0 / 1.0 defaults to stop
-      -- the per-release HPA min inflation when CPU-driven scale-down is idle).
+    , -- Pod-count ratchet & HPA ratio: 1.0/1.0 defaults avoid per-release
+      -- HPA min inflation when CPU-driven scale-down is idle.
       ConfigEntry
         "pods_calculation_factor"
         (DoubleConfig 1.0)
         ScalingGroup
-        "Pod-count ratchet multiplier (Julia parity). 1.0 = match old version pods exactly. >1.0 adds headroom but inflates HPA min on every release in idle envs."
+        "Pod-count ratchet multiplier. 1.0 = match old version pods exactly. >1.0 adds headroom but inflates HPA min on every release in idle envs."
         (Just "autopilot")
     , ConfigEntry
         "hpa_min_max_ratio"
@@ -215,7 +214,7 @@ autopilotConfigs =
         "discarding_sweep_minutes"
         (IntConfig 5)
         DeploymentGroup
-        "Trackers stuck in DISCARDING longer than this are flipped to DISCARDED by the runner sweep (Julia filterUsingScheduleTime! parity)."
+        "Trackers stuck in DISCARDING longer than this are flipped to DISCARDED by the runner sweep."
         (Just "autopilot")
     , ConfigEntry
         "lock_expiry_delay_minutes"
@@ -228,11 +227,10 @@ autopilotConfigs =
         "decision_notification_dedup_minutes"
         (IntConfig 15)
         ABTestingGroup
-        "Suppress repeat decision-engine Slack messages with the same (decisionType, decision, reason) tuple within this window. Julia ABHSSlackSpamFilter parity."
+        "Suppress repeat decision-engine Slack messages with the same (decisionType, decision, reason) tuple within this window."
         (Just "autopilot")
-    , -- Decision engine volume floors (Julia DecisionThreshold.volume_thresholds parity).
-      -- Used by parseDecisionResponseWithVolume to downgrade Abort → Wait when
-      -- the engine's reported sample sizes are below these floors.
+    , -- Decision engine sample-volume floors: parseDecisionResponseWithVolume
+      -- downgrades Abort → Wait when the engine's sample sizes are below these.
       ConfigEntry
         "ab_hs_volume_min_a"
         (IntConfig 50)
@@ -250,13 +248,12 @@ autopilotConfigs =
         "auto_complete_vs_tracker_minutes"
         (IntConfig 60)
         DeploymentGroup
-        "VS-edit trackers stuck in APPLIED longer than this are auto-flipped to COMPLETED by the runner sweep. Julia release/watcher.jl:158-160 parity."
+        "VS-edit trackers stuck in APPLIED longer than this are auto-flipped to COMPLETED by the runner sweep."
         (Just "autopilot")
-    , -- Job poll cap (Julia parity)
-      ConfigEntry
+    , ConfigEntry
         "max_job_completion_hours"
         (IntConfig 3)
         DeploymentGroup
-        "BackendJob category: max wall-clock hours to wait for a Kubernetes Job to complete before aborting the release. Read by monitorJobStatus → polls = hours × 360. Julia parity (default 3h)."
+        "BackendJob category: max wall-clock hours to wait for a Kubernetes Job to complete before aborting the release. Read by monitorJobStatus (polls = hours × 360)."
         (Just "autopilot")
     ]

@@ -12,7 +12,6 @@ import { DEFAULT_ENV, AVAILABLE_ENVS } from '../../../lib/constants';
 import { Trash2, Lock, ChevronDown, Info } from 'lucide-react';
 import { toast } from 'sonner';
 
-// Valid status transitions for update mode (UPPERCASE canonical)
 const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
   'CREATED': ['CREATED', 'INPROGRESS', 'DISCARDED'],
   'INPROGRESS': ['INPROGRESS', 'PAUSED', 'ABORTING', 'COMPLETED'],
@@ -41,9 +40,8 @@ const CreateRelease: React.FC = () => {
     status: 'CREATED', mode: 'AUTO', priority: '0', info: '',
     cluster: 'MOVING_TECH',
     cronjob_suspend: false, description: '', schedule_time: '',
-    // deploy_file_path, vs_file_path, dr_file_path removed (backend still accepts via API)
   });
-  const isNewService = false; // new_service toggle removed from UI; still accepted by backend API
+  const isNewService = false;
   const [error, setError] = useState('');
   const [isEnvSwitch, setIsEnvSwitch] = useState(false);
   const [envData, setEnvData] = useState('');
@@ -77,17 +75,16 @@ const CreateRelease: React.FC = () => {
   const createMutation = useCreateRelease();
   const updateMutation = useUpdateTracker();
 
-  // Sync first selected service into formData.service for dependent effects (envs, resources, rollout)
+  // Sync first selected service into formData.service for dependent effects (envs, resources, rollout).
+  // Env/resources switches only work with a single service.
   useEffect(() => {
     setFormData(prev => ({ ...prev, service: selectedServices[0] || '' }));
-    // Disable env/resources switches when multiple services selected (can't fetch for multiple)
     if (selectedServices.length !== 1) {
       setIsEnvSwitch(false);
       setIsResourcesSwitch(false);
     }
   }, [selectedServices]);
 
-  // Close service dropdown on outside click
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (showServiceDropdown && !(e.target as HTMLElement).closest('.service-dropdown')) {
@@ -98,11 +95,7 @@ const CreateRelease: React.FC = () => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showServiceDropdown]);
 
-  // Fetch existing release for update mode.
-  // Round 8 audit H16: disable the polling refetch on the edit page so the
-  // form state isn't overwritten mid-edit. Without staleTime/refetchInterval
-  // overrides this would inherit useRelease's 10s poll and reset every typed
-  // field every 10 seconds.
+  // Disable polling on edit: useRelease's 10s poll would overwrite typed form fields otherwise.
   const { data: existingRelease } = useQuery({
     queryKey: ['release', id],
     queryFn: () => fetchReleaseDetails(id!),
@@ -111,11 +104,9 @@ const CreateRelease: React.FC = () => {
     refetchOnWindowFocus: false,
     staleTime: Infinity,
   });
-  // Round 8 audit H16: only run the pre-fill effect ONCE per release id, not
-  // on every refetch — otherwise polling overwrites every keystroke.
+  // Pre-fill once per release id — re-running on refetch would clobber keystrokes.
   const [prefilledOnce, setPrefilledOnce] = useState(false);
 
-  // Pre-fill form when editing
   useEffect(() => {
     if (existingRelease && isUpdate && !prefilledOnce) {
       setPrefilledOnce(true);
@@ -135,7 +126,6 @@ const CreateRelease: React.FC = () => {
         cronjob_suspend: existingRelease.cronjob_suspend || false,
         description: existingRelease.description || '',
         schedule_time: existingRelease.schedule_time || '',
-        // deploy/vs/dr file paths removed from UI
       });
       setSelectedServices([existingRelease.service || ''].filter(Boolean));
       setRolloutHistoryLength(existingRelease.rollout_history?.length || 0);
@@ -150,7 +140,6 @@ const CreateRelease: React.FC = () => {
     }
   }, [existingRelease, isUpdate]);
 
-  // Clone fetch
   useEffect(() => {
     if (isClone && id) {
       fetchReleaseDetails(id).then(data => {
@@ -178,7 +167,6 @@ const CreateRelease: React.FC = () => {
     }
   }, [isClone, id]);
 
-  // Sync cluster
   useEffect(() => {
     if (formData.appGroup) {
       const config = productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup);
@@ -186,19 +174,19 @@ const CreateRelease: React.FC = () => {
     } else setSyncCluster('');
   }, [formData.appGroup, productConfigs]);
 
-  // Load rollout stages from service config when service is selected (skip if cloning or updating)
+  // Load rollout stages from service config on service select (skip clone/update — those use existing stages).
   useEffect(() => {
     if (!isClone && !isUpdate && formData.appGroup && formData.service) {
       fetchReleaseConfigs(formData.appGroup).then(configs => {
         const svcConfig = configs.find(c => c.service === formData.service);
         if (svcConfig?.rollout_strategy) {
           try {
-            // DB stores double-escaped JSON — parse until we get an array
+            // DB stores double-escaped JSON — parse until we get an array.
             let parsed: any = svcConfig.rollout_strategy;
             for (let i = 0; i < 3 && typeof parsed === 'string'; i++) {
               parsed = JSON.parse(parsed);
             }
-            // Handle [{cluster, rollouts: [...]}] format
+            // Accept both [{cluster, rollouts: [...]}] and plain array shapes.
             if (Array.isArray(parsed) && parsed.length > 0) {
               const rollouts = parsed[0]?.rollouts || parsed;
               if (Array.isArray(rollouts) && rollouts.length > 0) {
@@ -210,8 +198,7 @@ const CreateRelease: React.FC = () => {
               }
             }
           } catch (e) {
-            // Round 8 audit H6: surface parse errors so users know why their
-            // service config didn't load (instead of silently showing defaults).
+            // Surface parse errors — silent fallback to defaults hides misconfigured service configs.
             console.error('[CreateRelease] failed to parse service rollout_strategy:', e);
             toast.error('Could not load saved rollout stages for this service — using defaults');
           }
@@ -226,7 +213,6 @@ const CreateRelease: React.FC = () => {
   useEffect(() => { if (!isEnvSwitch) setEnvData(''); }, [isEnvSwitch]);
   useEffect(() => { if (!isResourcesSwitch) setResourcesData(''); }, [isResourcesSwitch]);
 
-  // Fetch envs
   useEffect(() => {
     if (isEnvSwitch && formData.appGroup && formData.service && formData.env) {
       fetchEnvs(formData.appGroup, formData.env, formData.service)
@@ -239,7 +225,6 @@ const CreateRelease: React.FC = () => {
     }
   }, [isEnvSwitch, formData.appGroup, formData.service, formData.env]);
 
-  // Fetch resources
   useEffect(() => {
     if (isResourcesSwitch && formData.appGroup && formData.service) {
       fetchResources(formData.appGroup, formData.service)
@@ -249,7 +234,6 @@ const CreateRelease: React.FC = () => {
   }, [isResourcesSwitch, formData.appGroup, formData.service]);
 
 
-  // Secondary envs
   useEffect(() => {
     if (isReleaseSync && isSecondaryEnvSwitch && formData.appGroup && formData.service && formData.env) {
       setSecondaryEnvLoading(true);
@@ -264,7 +248,6 @@ const CreateRelease: React.FC = () => {
     if (!isReleaseSync) { setIsSecondaryEnvSwitch(false); setSecondaryEnvData(''); }
   }, [isReleaseSync]);
 
-  // Auto-fill cluster & clear services on product change
   useEffect(() => {
     if (formData.appGroup && !isUpdate) {
       const config = productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup);
@@ -295,13 +278,11 @@ const CreateRelease: React.FC = () => {
     const mode = formData.mode || 'AUTO';
     const env = formData.env || 'UAT';
     const pri = formData.priority || '0';
-    // Only include non-empty parts to avoid double underscores
     const parts = [acronym, dateStr, versionTag, svcTag, mode, env, pri].filter(Boolean);
     return parts.join('_');
   };
   const generatedReleaseTag = generateReleaseTag();
 
-  // Valid status options for update mode
   const statusOptions = isUpdate && formData.status
     ? (VALID_STATUS_TRANSITIONS[formData.status] || [formData.status])
     : ['CREATED'];
@@ -324,7 +305,6 @@ const CreateRelease: React.FC = () => {
     e.preventDefault();
     setError('');
 
-    // Validate new_version (Fix #13)
     if (!isUpdate && formData.new_version) {
       if (/[A-Z]/.test(formData.new_version)) {
         toast.error('New version cannot contain uppercase letters');
@@ -336,7 +316,6 @@ const CreateRelease: React.FC = () => {
       }
     }
 
-    // Validate rollout strategy (Fix #12)
     if (stages.length === 0) {
       toast.error('Rollout strategy must have at least one stage');
       return;
@@ -364,7 +343,7 @@ const CreateRelease: React.FC = () => {
     }
 
     if (isUpdate && id) {
-      // Update mode: only send editable fields + future stages
+      // Only editable fields + stages past the already-executed history are sent.
       const futureStages = stages.slice(rolloutHistoryLength);
       try {
         await updateMutation.mutateAsync({
@@ -392,7 +371,6 @@ const CreateRelease: React.FC = () => {
       return;
     }
 
-    // Create mode
     if (selectedServices.length === 0) {
       toast.error('Select at least one service');
       return;
@@ -473,8 +451,7 @@ const CreateRelease: React.FC = () => {
     <div className="flex flex-col flex-1 w-full pb-12">
       <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-6">
         {error && (() => {
-          // Parse an in-flight release ID from messages like:
-          // "Service X in app group Y already has an in-flight release <uuid> (status=...)"
+          // Extract in-flight release UUID from backend error message to render a deep link.
           const uuidMatch = error.match(/in-flight release ([0-9a-f-]{36})/i);
           const inFlightId = uuidMatch?.[1];
           return (
@@ -492,14 +469,13 @@ const CreateRelease: React.FC = () => {
           );
         })()}
 
-        {/* Main Form Card */}
         <div className="bg-white rounded-xl border border-zinc-200">
           <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex justify-between items-center">
             <h2 className="text-base sm:text-lg font-semibold text-zinc-900">{pageTitle}</h2>
           </div>
 
           <div className="p-4 sm:p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-6 lg:gap-x-8 gap-y-4 sm:gap-y-5">
-            {/* Col 1 */}
+
             <div className="space-y-4">
               <div>
                 <FieldLabel>Release Tag</FieldLabel>
@@ -533,7 +509,6 @@ const CreateRelease: React.FC = () => {
               <div><FieldLabel>Info</FieldLabel><input type="text" name="info" value={formData.info} onChange={handleInputChange} placeholder="Any Valid JSON" className={inputClass} /></div>
             </div>
 
-            {/* Col 2 */}
             <div className="space-y-4">
               <div>
                 <FieldLabel required={!isUpdate}>App Group</FieldLabel>
@@ -574,7 +549,6 @@ const CreateRelease: React.FC = () => {
               )}
             </div>
 
-            {/* Col 3 */}
             <div className="space-y-4">
               <div>
                 <FieldLabel required={!isUpdate}>Service</FieldLabel>
@@ -636,10 +610,8 @@ const CreateRelease: React.FC = () => {
             </div>
           </div>
 
-          {/* New Service YAML Paths removed from UI — backend still accepts via API */}
         </div>
 
-        {/* Stages Card */}
         <div className="bg-white rounded-xl border border-zinc-200">
           <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
             <h2 className="text-base sm:text-lg font-semibold text-zinc-900">Stages</h2>
@@ -714,7 +686,6 @@ const CreateRelease: React.FC = () => {
           </div>
         </div>
 
-        {/* Env Switch */}
         {!isNewService && (
           <div className="bg-white rounded-xl border border-zinc-200">
             <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex items-center gap-3 flex-wrap">
@@ -734,7 +705,6 @@ const CreateRelease: React.FC = () => {
           </div>
         )}
 
-        {/* Get Resources */}
         {!isNewService && (
           <div className="bg-white rounded-xl border border-zinc-200">
             <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex items-center gap-3 flex-wrap">
@@ -754,7 +724,6 @@ const CreateRelease: React.FC = () => {
           </div>
         )}
 
-        {/* Sync Release */}
         {syncCluster && !isUpdate && (
           <div className="bg-white rounded-xl border border-zinc-200">
             <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex items-center gap-3 flex-wrap">
@@ -822,7 +791,6 @@ const CreateRelease: React.FC = () => {
           </div>
         )}
 
-        {/* Action Buttons */}
         <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3 pt-2">
           <Button type="button" variant="secondary" onClick={() => isUpdate ? navigate(`/releases/${id}`) : navigate('/releases')}>Cancel</Button>
           <Button type="submit" loading={isSubmitting}>{submitLabel}</Button>

@@ -113,7 +113,6 @@ export interface APRelease {
     slack_thread_ts: string;
     global_id: string;
     new_service: string;
-    // is_art_recorder removed (column dropped)
     cronjob_suspend: boolean;
     ab_hs_status: string;
     tracker_type: string;
@@ -246,8 +245,7 @@ type NammaRelease = {
     };
 };
 
-/** Backend returns UPPERCASE statuses. Pass through directly.
- *  Safety: normalize any unexpected casing to UPPERCASE. */
+/** Backend returns UPPERCASE statuses; normalize any unexpected casing just in case. */
 const normalizeStatus = (status?: string): ReleaseStatus => {
     const upper = (status || 'CREATED').toUpperCase().replace(/\s+/g, '_');
     switch (upper) {
@@ -291,7 +289,6 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     priority: r.priority ?? 0,
     global_id: r.globalId || '',
     new_service: r.newService ? 'Yes' : 'No',
-    // is_art_recorder removed
     cronjob_suspend: r.cronjobSuspend ?? false,
     ab_hs_status: r.abHsStatus || 'Uninitiated',
     sync_enabled: r.syncEnabled || (r as any).sync_enabled || (r as any).udf1 || '',
@@ -349,8 +346,6 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
 
     events: [],
 });
-
-// ── Status color helpers (matching rescript dashboard) ──────────────
 
 export function statusColor(status: ReleaseStatus | string): string {
     const upper = (status || '').toUpperCase().replace(/\s+/g, '_');
@@ -462,9 +457,7 @@ export async function fetchSecondaryEnvs(appGroup: string, env: string, service:
 
 export async function fetchAPConfigMaps(from: string, to: string): Promise<APConfigMap[]> {
     const { data } = await apiClient.get('/tracker/configmap/list', { params: { from, to } });
-    // Round 8 audit H1: defensive — backend returns either {list: [...]} or
-    // a plain array depending on handler. Handle both shapes so a contract
-    // change doesn't silently produce an empty list.
+    // Backend returns either {list: [...]} or a plain array depending on the handler.
     if (Array.isArray(data)) return data;
     if (data && Array.isArray(data.list)) return data.list;
     return [];
@@ -519,7 +512,6 @@ export async function createRelease(isNewService: boolean, payload: any): Promis
         priority: payload.priority ?? 0,
         global_id: payload.global_id || null,
         new_service: payload.new_service || false,
-        // is_art_recorder removed
         cronjob_suspend: payload.cronjob_suspend || false,
         change_log: payload.change_log || null,
         syncEnabled: payload.sync_enabled || null,
@@ -558,7 +550,6 @@ export async function updateTracker(releaseId: string, updates: Record<string, a
     return data;
 }
 
-// Convenience wrappers matching rescript dashboard actions
 export const pauseRelease = (id: string) => updateTracker(id, { status: 'PAUSED' });
 export const resumeRelease = (id: string) => updateTracker(id, { status: 'INPROGRESS' });
 export const abortRelease = (id: string) => updateTracker(id, { status: 'ABORTING' });
@@ -705,7 +696,6 @@ export async function fetchReleaseConfigs(appGroup?: string): Promise<ReleaseCon
     const params = appGroup ? { product: appGroup } : {};
     const { data } = await apiClient.get('/services/config', { params });
     if (!Array.isArray(data)) return [];
-    // Map backend field names to frontend interface
     return data.map((d: any) => ({
         id: d.id,
         appGroup: d.serviceProduct || d.appGroup || d.product || '',

@@ -4,22 +4,9 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
 
-{- | Autopilot storage schema.
-
-Canonical location for all autopilot-owned Beam table definitions:
-
-  * 'DeploymentConfigT'  — unified product+service deployment config
-  * 'ReleaseTrackerT'    — release tracker rows
-  * 'ReleaseEventT'      — release event log rows
-  * 'AutopilotDb'        — Beam Database binding the three autopilot tables
-
-Cross-product tables (e.g. @server_config@) do NOT live here — they belong
-under "Shared.Types.Storage.*" so that other products can use them without
-reaching into Autopilot. See "Shared.Types.Storage.ServerConfig".
-
-History: this module used to live at @Shared.Types.Storage.Schema@ and was
-moved inside the Autopilot product in task #22. Task #30 then extracted
-'ServerConfigT' into Shared and renamed @NammaAPDb@ → 'AutopilotDb'.
+{- | Autopilot-owned Beam tables: 'DeploymentConfigT', 'ReleaseTrackerT',
+'ReleaseEventT', bound together by 'AutopilotDb'. Cross-product tables
+(e.g. @server_config@) belong under @Shared.Types.Storage.*@.
 -}
 module Products.Autopilot.Types.Storage.Schema where
 
@@ -29,7 +16,7 @@ import Data.Time.Clock (UTCTime)
 import Database.Beam
 import GHC.Int (Int32)
 
--- | Unified deployment config: product-level (service IS NULL) or service-level (service IS NOT NULL)
+-- | Product-level row when @dcService@ IS NULL; service-level otherwise.
 data DeploymentConfigT f = DeploymentConfigT
     { dcId :: Columnar f Int32
     , dcAppGroup :: Columnar f Text

@@ -28,10 +28,6 @@ import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Types.API (ResourcesResponse (..))
 
--- ============================================================================
--- Resources Endpoint (GET /resources?PRODUCT=&SERVICE=)
--- ============================================================================
-
 fetchResourcesH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow ResourcesResponse
 fetchResourcesH _ap mProduct mService = do
     cfg <- getConfig
@@ -48,7 +44,6 @@ fetchResourcesH _ap mProduct mService = do
                             Nothing -> serviceName'
                         ns = getProductNamespace pCfg
                         vsName' = getProductVsName pCfg
-                    -- Get the running version from VS
                     versionResult <- liftIO $ getPrimarySubsetFromVirtualService cfg ns vsName' svcHost
                     case versionResult of
                         Left _ -> pure emptyResources
@@ -64,10 +59,6 @@ fetchResourcesH _ap mProduct mService = do
                                             Just v -> pure v
                                             Nothing -> pure emptyResources
         _ -> pure emptyResources
-
--- ============================================================================
--- Envs Endpoints
--- ============================================================================
 
 fetchEnvsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
 fetchEnvsH _ap mProduct _mEnv mService = do
@@ -88,9 +79,8 @@ fetchEnvsH _ap mProduct _mEnv mService = do
                         Right envJson -> pure envJson
         _ -> pure $ A.toJSON ([] :: [Value])
 
-{- | Proxy env fetch to sync cluster URL for secondary cloud.
-Tries the namma-ap endpoint format (GET /envs) first, then falls back to
-ny-autopilot format (POST /release/getenvs/).
+{- | Proxy env fetch to secondary cluster. Tries namma-ap format (GET /envs)
+first, falls back to ny-autopilot (POST /release/getenvs/).
 -}
 fetchSecondaryEnvsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
 fetchSecondaryEnvsH _ap mProduct mEnv mService = do
@@ -151,5 +141,3 @@ fetchSecondaryEnvsH _ap mProduct mEnv mService = do
                     Just v -> pure v
                     Nothing -> pure $ A.toJSON ([] :: [Value])
             _ -> pure $ A.toJSON ([] :: [Value])
-
--- ============================================================================

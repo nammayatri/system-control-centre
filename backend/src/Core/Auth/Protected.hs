@@ -11,33 +11,14 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-{- | Compile-time RBAC enforcement via a Servant combinator.
+{- | Compile-time RBAC Servant combinator.
 
-Usage in the API type:
-
-> type CoreAPI =
->        "releases" :> Protected 'AP_RELEASE_VIEW :> Get '[JSON] [ReleaseTracker]
->   :<|> "releases" :> Protected 'AP_RELEASE_CREATE :> "create"
->          :> ReqBody '[JSON] K8sCreateReleaseReq :> Post '[JSON] APIResponse
-
-At request time, the 'HasServer' instance below:
-
-  1. Reads the @Authorization: Bearer <token>@ header.
-  2. Looks up the token in @sc_registration_token@ and the person in @sc_person@.
-  3. Checks the person has @perm@ on the product specified by the
-     'KnownPermission' instance — or is a superadmin.
-  4. Passes an 'AuthedPerson' record to the handler as a fresh first argument.
-
-On any failure (missing header, expired token, deactivated account, no
-product access, permission denied) it fails the route with a 401/403 JSON
-response matching the format previously emitted by 'Core.Auth.Middleware'.
-
-== Layer policy
-
-This module is deliberately product-agnostic. 'Protected' is indexed by a
-poly-kinded @perm@, and 'KnownPermission' instances live in the owning
-product module (e.g. "Products.Autopilot.Types.Permission") so that Core
-never imports from Products.
+@Protected \'AP_RELEASE_VIEW :> ...@ attaches a permission tag to a
+route; the 'HasServer' instance validates the bearer token, checks the
+permission (or superadmin), and passes an 'AuthedPerson' to the handler
+on success. Failures become typed 401/403 JSON. Product-agnostic: @perm@
+is poly-kinded and 'KnownPermission' instances live in the owning
+product so Core never imports Products.
 -}
 module Core.Auth.Protected (
     Protected,
@@ -86,19 +67,10 @@ import Servant (
 import Servant.Server.Internal.Delayed (addAuthCheck)
 import Servant.Server.Internal.DelayedIO (DelayedIO, delayedFailFatal, withRequest)
 
--- ============================================================================
--- Public types
--- ============================================================================
-
-{- | Combinator carrying a compile-time permission tag. The @perm@ kind is
-intentionally polymorphic so each product can use its own permission
-data kind (e.g. @AutopilotPermission@) without Core knowing about it.
--}
+-- | Combinator carrying a compile-time permission tag (poly-kinded @perm@).
 data Protected (perm :: k)
 
-{- | The authenticated principal, handed to every 'Protected' handler as a
-fresh first argument — a type-level proof that the check ran.
--}
+-- | Authenticated principal handed to every 'Protected' handler.
 data AuthedPerson = AuthedPerson
     { apPersonId :: UUID
     , apEmail :: Text
@@ -106,10 +78,6 @@ data AuthedPerson = AuthedPerson
     , apProductAccesses :: [ProductAccess]
     }
     deriving (Show, Generic)
-
--- ============================================================================
--- HasServer instance — the actual check
--- ============================================================================
 
 instance
     ( KnownPermission perm
@@ -140,13 +108,8 @@ instance
                 Right ap -> pure ap
                 Left (status, msg) -> delayedFailFatal (jsonError status msg)
 
--- ============================================================================
--- The permission check itself
--- ============================================================================
-
-{- | Validate the token and check the required permission for the request.
-Returns the authenticated person on success; a @(ServerError-template, msg)@
-pair on failure that is turned into a 401/403 JSON response.
+{- | Validate the bearer token and check @permText@ for @prodSlug@.
+Returns Right on success, Left @(status, msg)@ for 401/403 JSON.
 -}
 checkPermission ::
     (MonadFlow m) =>
@@ -201,10 +164,7 @@ checkPermission prodSlug permText req = do
                                                                     }
                                                     else pure $ Left (err403, "Permission denied: " <> permText)
 
-{- | Pull the bearer token out of an @Authorization@ header value. Accepts
-both @"Bearer xyz"@ and a bare @"xyz"@ for compatibility with the previous
-middleware implementation.
--}
+-- | Extract the bearer token; accepts @"Bearer xyz"@ or bare @"xyz"@.
 extractBearer :: Maybe B.ByteString -> Maybe Text
 extractBearer Nothing = Nothing
 extractBearer (Just bs) =
@@ -213,10 +173,7 @@ extractBearer (Just bs) =
             Just t -> Just (T.strip t)
             Nothing -> Just raw
 
-{- | Build a 'ServerError' with a JSON @{"error": "..."}@ body matching the
-format that 'Core.Auth.Middleware' used pre-Phase 3, so wire compatibility
-with the frontend is preserved.
--}
+-- | 'ServerError' with JSON @{"error": msg}@ body.
 jsonError :: ServerError -> Text -> ServerError
 jsonError template msg =
     template

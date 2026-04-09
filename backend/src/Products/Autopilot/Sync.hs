@@ -2,10 +2,7 @@
 {-# LANGUAGE RecordWildCards #-}
 
 {- | Cross-cluster sync — pushes a completed release to a secondary
-cluster's @namma-ap@ instance via HTTP.
-
-All entry points run in 'MonadFlow'; background fan-out uses
-'forkFlow' so the spawned thread inherits 'AppState'.
+namma-ap instance. Background fan-out uses 'forkFlow'.
 -}
 module Products.Autopilot.Sync (
     triggerSyncIfEnabled,
@@ -43,10 +40,6 @@ import Shared.Config.Runtime (getConfigTextForProduct)
 import System.Environment (lookupEnv)
 import Prelude
 
--- ──────────────────────────────────────────────────────────────────
--- Shared helpers
--- ──────────────────────────────────────────────────────────────────
-
 getK8sContext :: Maybe TargetState -> Maybe K8sReleaseContext
 getK8sContext (Just (K8sState k8s)) = Just (context k8s)
 getK8sContext _ = Nothing
@@ -81,10 +74,8 @@ revertValue tracker = case status tracker of
     REVERTED -> 1
     _ -> 0
 
-{- | Resolve rollout strategy for a sync request. Priority:
-1. Per-context override (syncClusterRolloutStrategy field on K8sReleaseContext)
-2. Per-cluster DB config (sync_rollout_strategy_config in server_config, keyed by cluster name)
-3. Tracker's own rolloutStrategy
+{- | Rollout strategy precedence: context override >
+@sync_rollout_strategy_config@ keyed by cluster > tracker's own strategy.
 -}
 getSyncRolloutStrategy :: (MonadFlow m) => ReleaseTracker -> Maybe K8sReleaseContext -> Text -> m Value
 getSyncRolloutStrategy tracker mCtx targetCluster =
@@ -107,10 +98,6 @@ getSyncRolloutStrategy tracker mCtx targetCluster =
                                 _ -> toJSON (rolloutStrategy tracker)
                         _ -> toJSON (rolloutStrategy tracker)
 
--- ──────────────────────────────────────────────────────────────────
--- Shared HTTP send
--- ──────────────────────────────────────────────────────────────────
-
 sendSyncRequest ::
     (MonadFlow m) =>
     ReleaseTracker ->
@@ -122,7 +109,7 @@ sendSyncRequest tracker labelPrefix req reqLogPayload = do
     insertReleaseEvent (releaseId tracker) "BUSINESS" (labelPrefix <> "_REQUEST") reqLogPayload
     sendSyncRequestNoReqLog tracker labelPrefix req
 
--- | Variant that skips emitting the _REQUEST event (caller already did).
+-- | Variant that skips emitting _REQUEST (caller already did).
 sendSyncRequestNoReqLog ::
     (MonadFlow m) =>
     ReleaseTracker ->
@@ -152,10 +139,6 @@ sendSyncRequestNoReqLog tracker labelPrefix req = do
                 (labelPrefix <> "_FAILED_FINAL")
                 (object ["error" .= T.pack (show e), "url" .= reqUrl req])
 
--- ──────────────────────────────────────────────────────────────────
--- Public entry points
--- ──────────────────────────────────────────────────────────────────
-
 triggerSyncIfEnabled :: ReleaseTracker -> Maybe TargetState -> Flow ()
 triggerSyncIfEnabled tracker mts = do
     cfg <- getConfig
@@ -178,11 +161,7 @@ triggerSyncIfEnabled tracker mts = do
                 then do
                     let target = maybe "" id mSyncCluster
                     insertReleaseEvent (releaseId tracker) "BUSINESS" "SYNC_TRIGGERED" (String ("Syncing to cluster: " <> target))
-                    -- Round 8 audit C6: use forkFlow (not raw forkIO) so any
-                    -- exception inside doCreate is caught + logged via the
-                    -- forkFlow safety net. Raw forkIO swallowed exceptions
-                    -- silently — operator saw COMPLETED on primary, zero
-                    -- rows on secondary, no audit trail explaining why.
+                    -- forkFlow (not raw forkIO) so exceptions are logged.
                     _ <- forkFlow (doCreate cfg tracker mts target)
                     pure ()
                 else
@@ -232,10 +211,7 @@ doCreate cfg tracker mts targetCluster = do
                 { reqMethod = POST
                 , reqHeaders = ("Content-Type", "application/json") : ("Connection", "close") : auth
                 , reqBody = Just (encode body)
-                , -- Julia parity (service/sync.jl:67-91 createTrackerForSyncCluster):
-                  -- 60s per-attempt timeout + 2 retry attempts (3 total tries).
-                  -- Was 30s/1 retry which caused early failures on slow secondary
-                  -- clusters. Inter-retry sleep is handled inside Core.Http.Client.
+                , -- 60s / 3 tries — slow secondary clusters were failing early at 30s/1.
                   reqTimeout = Seconds 60
                 , reqRetries = 2
                 , reqLogTag = "sync"
@@ -249,9 +225,8 @@ doCreate cfg tracker mts targetCluster = do
                 , "has_pomerium_jwt" .= maybe False (not . T.null . T.strip) (mCtx >>= syncXPomeriumJwt)
                 , "body" .= body
                 ]
-    -- Emit the request event, then do the HTTP call directly so we can
-    -- (a) extract the secondary tracker ID from the success response and
-    -- (b) fire a Slack alert on failure — two things sendSyncRequest can't do.
+    -- Inline HTTP (not sendSyncRequest) so we can extract the secondary tracker
+    -- id on success and fire a Slack alert on failure.
     insertReleaseEvent (releaseId tracker) "BUSINESS" "SYNC_REQUEST" reqLog
     result <- liftIO $ httpRaw req
     case result of
@@ -262,7 +237,7 @@ doCreate cfg tracker mts targetCluster = do
                     "BUSINESS"
                     "SYNC_RESPONSE"
                     (object ["status" .= ("SUCCESS" :: Text), "body" .= TE.decodeUtf8 (LBS.toStrict b), "url" .= url])
-                -- Extract the secondary release ID and store it so SyncWatcher can poll it.
+                -- Store the secondary release id for SyncWatcher to poll.
                 case extractSecondaryId b of
                     Just sid ->
                         insertReleaseEvent
@@ -288,7 +263,6 @@ doCreate cfg tracker mts targetCluster = do
                 (object ["error" .= errText, "url" .= url])
             notifySyncFailedSlack tracker targetCluster errText
 
--- | Try to extract the "id" field from a successful sync response body.
 extractSecondaryId :: LBS.ByteString -> Maybe Text
 extractSecondaryId b =
     case eitherDecode b :: Either String Value of
@@ -298,7 +272,6 @@ extractSecondaryId b =
                 _ -> Nothing
         _ -> Nothing
 
--- | Send a Slack alert when a sync to the secondary cluster fails.
 notifySyncFailedSlack :: (MonadFlow m) => ReleaseTracker -> Text -> Text -> m ()
 notifySyncFailedSlack tracker cluster errMsg = do
     mProduct <- findProductByName (appGroup tracker)
@@ -389,7 +362,6 @@ triggerRevertSyncIfEnabled tracker mts = do
                 then do
                     let gid = maybe "" id mGlobalId
                     insertReleaseEvent (releaseId tracker) "BUSINESS" "REVERT_SYNC_TRIGGERED" (String ("Triggering revert sync for global_id=" <> gid))
-                    -- Round 8 audit C6: forkFlow not raw forkIO (see C1 sister fix above).
                     _ <- forkFlow (doRevert cfg tracker mts gid)
                     pure ()
                 else
@@ -409,10 +381,7 @@ doRevert cfg tracker mts gid = do
             (defaultReq url)
                 { reqMethod = PUT
                 , reqHeaders = ("Content-Type", "application/json") : ("Connection", "close") : auth
-                , -- Julia parity (service/sync.jl:67-91 createTrackerForSyncCluster):
-                  -- 60s per-attempt timeout + 2 retry attempts (3 total tries).
-                  -- Was 30s/1 retry which caused early failures on slow secondary
-                  -- clusters. Inter-retry sleep is handled inside Core.Http.Client.
+                , -- 60s / 3 tries — see doCreate.
                   reqTimeout = Seconds 60
                 , reqRetries = 2
                 , reqLogTag = "revert-sync"
@@ -449,7 +418,7 @@ triggerImmediateRevertSync tracker mts = do
                                 , reqLogTag = "immediate-revert-sync"
                                 }
                         reqLog = object ["url" .= url, "global_id" .= gid, "auth_mode" .= authMode]
-                    -- Emit the REQUEST event on the caller thread (matches pre-refactor ordering)
+                    -- Emit REQUEST on caller thread so ordering is stable.
                     insertReleaseEvent (releaseId tracker) "BUSINESS" "IMMEDIATE_REVERT_SYNC_REQUEST" reqLog
                     _ <- forkFlow $ sendSyncRequestNoReqLog tracker "IMMEDIATE_REVERT_SYNC" req
                     pure ()

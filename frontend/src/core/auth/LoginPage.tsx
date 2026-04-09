@@ -55,7 +55,6 @@ const LoginPage: React.FC = () => {
         transition={{ duration: 0.25, ease: 'easeOut' }}
       >
         <div className="bg-white rounded-xl shadow-sm border border-zinc-200">
-          {/* Logo + Title */}
           <div className="px-6 sm:px-8 pt-7 sm:pt-8 pb-2 text-center">
             <div className="flex items-center justify-center mb-3">
               <img src={nyLogo} alt="Logo" className="h-8 w-auto" />
@@ -64,7 +63,6 @@ const LoginPage: React.FC = () => {
             <p className="text-sm text-zinc-500 mt-1">Sign in to your account</p>
           </div>
 
-          {/* Form */}
           <form onSubmit={handleSubmit} className="px-6 sm:px-8 pb-7 sm:pb-8 pt-4 space-y-4">
             <div className="space-y-1.5">
               <label

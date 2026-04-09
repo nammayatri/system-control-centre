@@ -33,7 +33,6 @@ function formatConfigMapContent(raw: string): string {
 
 interface ConfigMapEvent { category: string; label: string; data: string; timestamp: string; }
 
-// IST everywhere — NammaYatri ops convention. Backend stores UTC.
 const formatTs = (ts: string) => {
   if (!ts) return '-';
   const d = new Date(ts);
@@ -82,8 +81,7 @@ const ConfigMapSummary: React.FC = () => {
   const [activeTab, setActiveTab] = useState('Summary');
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
 
-  // Round 8 audit C4: param is `<cluster>&&<id>` (URL-encoded as %26%26 since &
-  // is reserved in URLs). Decode + split + URL-decode the parts.
+  // Route param is `<cluster>&&<id>` (&& is URL-encoded); take the id half after decoding.
   const id = (() => {
     if (!rawId) return '';
     const decoded = decodeURIComponent(rawId);
@@ -165,7 +163,6 @@ const ConfigMapSummary: React.FC = () => {
 
   return (
     <div className="flex flex-col w-full pb-12">
-      {/* Header */}
       <div className="flex flex-col gap-3 mb-4 sm:mb-5">
         <div>
           <div className="flex items-center gap-2 sm:gap-3 mb-1 flex-wrap">
@@ -212,7 +209,6 @@ const ConfigMapSummary: React.FC = () => {
         </div>
       </div>
 
-      {/* Tabs */}
       <div className="bg-white rounded-xl border border-zinc-200">
         <div className="flex border-b border-zinc-200 px-2 sm:px-5 overflow-x-auto">
           {tabs.map(t => (

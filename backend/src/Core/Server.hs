@@ -62,18 +62,8 @@ mkApp st =
 fullServer :: ServerT FullAPI Flow
 fullServer = authServer :<|> adminServer :<|> coreServer
 
-{- | Global error handler — catches ALL exceptions from every handler
-and converts them to structured JSON with proper error codes, tags,
-and HTTP status codes.
-
-Exception dispatch:
-  1. AppException (our hierarchy) → typed error with code/tag/message
-  2. Any other SomeException → generic 500 with INTERNAL_ERROR code
-
-Every error response has this format:
-@
-{ "status": "ERROR", "code": "NOT_FOUND", "message": "...", "tag": "APIError" }
-@
+{- | Global handler: catches all exceptions. 'AppException' dispatches
+via 'toServantError'; anything else becomes a generic 500.
 -}
 toHandler :: AppState -> Flow a -> Handler a
 toHandler st flow = Handler . ExceptT $ do
@@ -81,18 +71,13 @@ toHandler st flow = Handler . ExceptT $ do
     case result of
         Right a -> pure (Right a)
         Left (ex :: SomeException) -> do
-            -- Log every error with tag + code for observability
             logErrorIO (loggerEnv st) $ "[ERROR] " <> formatExceptionLog ex
-            -- Convert to structured Servant error
             pure . Left $ exceptionToServantError ex
 
--- | Dispatch exception to structured HTTP error.
 exceptionToServantError :: SomeException -> ServerError
 exceptionToServantError ex
-    -- Our typed hierarchy: AppException carries ToAppError constraint
     | Just (AppException inner) <- fromException ex =
         toServantError inner
-    -- Anything else: generic 500
     | otherwise =
         ServerError
             500
@@ -100,7 +85,6 @@ exceptionToServantError ex
             (errorResponseJSON "ERROR" "INTERNAL_ERROR" (T.pack (show ex)) "UnhandledException")
             [("Content-Type", "application/json")]
 
--- | Format exception for log line: [Tag:CODE] message
 formatExceptionLog :: SomeException -> Text
 formatExceptionLog ex
     | Just (AppException inner) <- fromException ex =

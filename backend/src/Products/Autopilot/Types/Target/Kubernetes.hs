@@ -1,11 +1,4 @@
-{- | Kubernetes target types
-
-This module contains all types related to Kubernetes deployments:
-- K8sDeploymentState: State tracking for K8s resources
-- K8sReleaseContext: K8s-specific release context (cluster, namespace, etc.)
-- BackendServiceWFStatus: Detailed K8s-specific workflow stages
-- K8s-specific helper types
--}
+-- | K8s-specific types: deployment state, release context, workflow sub-stages.
 module Products.Autopilot.Types.Target.Kubernetes (
     -- * Target State
     K8sDeploymentState (..),
@@ -34,10 +27,6 @@ import Data.Aeson (FromJSON, ToJSON, Value)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import GHC.Generics (Generic)
-
--- ============================================================================
--- K8s Enums (moved from Release.hs)
--- ============================================================================
 
 data DecisionEngineHSStatus
     = Uninitiated
@@ -75,17 +64,7 @@ instance ToJSON MatchDetails
 
 instance FromJSON MatchDetails
 
--- ============================================================================
--- K8s Release Context (moved from Release.hs, renamed from ReleaseContext)
--- ============================================================================
-
-{- | Kubernetes release context
-
-Contains all K8s-specific deployment configuration:
-cluster, namespace, Istio routing, pod scaling, etc.
-oldVersion/newVersion are kept here for K8s operations that need them
-(they are also on ReleaseTracker for generic access).
--}
+-- | K8s-specific deployment context: cluster, namespace, Istio routing, scaling.
 data K8sReleaseContext = K8sReleaseContext
     { cluster :: Text
     , namespace :: Text
@@ -126,7 +105,6 @@ instance ToJSON K8sReleaseContext
 
 instance FromJSON K8sReleaseContext
 
--- | Default empty K8s release context
 defaultK8sReleaseContext :: K8sReleaseContext
 defaultK8sReleaseContext =
     K8sReleaseContext
@@ -164,11 +142,7 @@ defaultK8sReleaseContext =
         , syncXPomeriumJwt = Nothing
         }
 
--- ============================================================================
--- K8s Product / Service Config (stored as JSON in target_config columns)
--- ============================================================================
-
--- | K8s-specific product configuration (stored as JSON in product_config.target_config)
+-- | K8s-specific product config, stored as JSON in @product_config.target_config@.
 data K8sProductConfig = K8sProductConfig
     { cluster :: Text
     , namespace :: Text
@@ -187,7 +161,7 @@ instance FromJSON K8sProductConfig
 defaultK8sProductConfig :: K8sProductConfig
 defaultK8sProductConfig = K8sProductConfig "" "" "" Nothing Nothing Nothing Nothing
 
--- | K8s-specific service configuration (stored as JSON in release_config.target_config)
+-- | K8s-specific service config, stored as JSON in @release_config.target_config@.
 data K8sServiceConfig = K8sServiceConfig
     { serviceHost :: Maybe Text
     }
@@ -197,84 +171,42 @@ instance ToJSON K8sServiceConfig
 
 instance FromJSON K8sServiceConfig
 
--- ============================================================================
--- Kubernetes Workflow Status
--- ============================================================================
-
-{- | Backend service workflow status (K8s-specific)
-
-Tracks granular K8s resource creation and traffic shifting steps.
-This provides detailed progress within the generic ReleaseWFStatus stages.
--}
+-- | Granular K8s sub-stages inside the generic 'ReleaseWFStatus'.
 data BackendServiceWFStatus
-    = -- | Initial validation
-      BSInit
-    | -- | Create K8s Deployment
-      BSCreateDeployment
-    | -- | Update K8s Service
-      BSUpdateService
-    | -- | Apply ConfigMaps
-      BSApplyConfigMap
-    | -- | Apply Istio DestinationRule
-      BSApplyDestinationRule
-    | -- | Update Istio VirtualService for traffic
-      BSFlipVirtualService
-    | -- | Progressive traffic shift (0->25->50->100)
-      BSProgressiveRollout
-    | -- | Monitor pod health and metrics
-      BSMonitoring
-    | -- | Stabilization period
-      BSStabilize
-    | -- | Scale down old deployment
-      BSScaleDownOld
-    | -- | Complete
-      BSDone
-    | -- | Rollback in progress
-      BSRollback
+    = BSInit
+    | BSCreateDeployment
+    | BSUpdateService
+    | BSApplyConfigMap
+    | BSApplyDestinationRule
+    | BSFlipVirtualService
+    | BSProgressiveRollout
+    | BSMonitoring
+    | BSStabilize
+    | BSScaleDownOld
+    | BSDone
+    | BSRollback
     deriving (Eq, Show, Read, Generic, Ord)
 
 instance ToJSON BackendServiceWFStatus
 
 instance FromJSON BackendServiceWFStatus
 
--- ============================================================================
--- Kubernetes Deployment State
--- ============================================================================
-
-{- | Kubernetes deployment state
-
-Tracks which K8s resources have been created/updated and the current
-state of the deployment (traffic percentage, pod health, etc.)
-Also includes K8s-specific operational fields that were previously
-on ReleaseTracker (cronjobSuspend, abHsStatus, newService, isArtRecorder).
--}
 data K8sDeploymentState = K8sDeploymentState
     { context :: K8sReleaseContext
-    -- ^ K8s-specific release context (cluster, namespace, Istio config, etc.)
     , cronjobSuspend :: Bool
-    -- ^ Whether to suspend CronJobs during release
     , abHsStatus :: DecisionEngineHSStatus
-    -- ^ Decision engine health status
     , newService :: Bool
-    -- ^ Whether this is a new service (no existing deployment)
+    -- ^ True when no existing deployment is running for this service.
     , categoryWorkflowStatus :: BackendServiceWFStatus
-    -- ^ Granular K8s-specific workflow progress
     , deploymentCreated :: Bool
-    -- ^ Whether Deployment resource was created
     , serviceCreated :: Bool
-    -- ^ Whether Service resource was created
     , virtualServiceApplied :: Bool
-    -- ^ Whether Istio VirtualService was applied
     , destinationRuleApplied :: Bool
-    -- ^ Whether Istio DestinationRule was applied
     , trafficPercentage :: Int
-    -- ^ Current traffic percentage to new version (0-100)
+    -- ^ Current traffic percent to the new version (0-100).
     , hpaCreated :: Bool
-    -- ^ Whether HorizontalPodAutoscaler was created
     , configMapApplied :: Bool
-    -- ^ Whether ConfigMap was applied
     , oldDeploymentScaledDown :: Bool
-    -- ^ Whether old deployment was scaled down
     }
     deriving (Eq, Show, Generic)
 
@@ -282,7 +214,6 @@ instance ToJSON K8sDeploymentState
 
 instance FromJSON K8sDeploymentState
 
--- | Empty K8s deployment state (initial state)
 emptyK8sState :: K8sDeploymentState
 emptyK8sState =
     K8sDeploymentState

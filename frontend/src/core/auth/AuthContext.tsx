@@ -23,7 +23,7 @@ const AuthContext = createContext<AuthContextType>({
   loading: true,
 });
 
-// Load cached data from localStorage for instant UI
+// Hydrate from localStorage so the app paints an authed UI before the profile request returns.
 function loadCached(): { user: AuthUser | null; products: ProductAccess[] } {
   try {
     const user = JSON.parse(localStorage.getItem('auth_user') || 'null');
@@ -63,17 +63,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(data.person);
         setProducts(data.products || []);
         setToken(storedToken);
-        // Update cache
         localStorage.setItem('auth_user', JSON.stringify(data.person));
         localStorage.setItem('auth_products', JSON.stringify(data.products || []));
       })
       .catch((err) => {
-        // Only clear auth on 401 (invalid/expired token)
-        // Network errors → keep cached data, user stays logged in
+        // Only 401 clears auth — network errors keep the cached user so a transient
+        // backend outage doesn't sign everyone out.
         if (err?.response?.status === 401) {
           clearAuth();
         }
-        // Otherwise silently keep cached user — backend might be temporarily down
       })
       .finally(() => setLoading(false));
   }, [clearAuth]);

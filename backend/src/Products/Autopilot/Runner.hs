@@ -38,45 +38,29 @@ import Products.Autopilot.Workflow.Factory (executeReleaseWorkflow)
 import Products.Autopilot.Workflow.Types (ReleaseState (..), WorkFlowError (..))
 import Prelude
 
--- ============================================================================
--- Runner Entry Point
--- ============================================================================
-
-{- | Full runner lifecycle: synchronous startup recovery then the polling
-loop. Used by the standalone @RUNNER@ mode. The @SERVER@ mode in
-"Main" calls 'runnerStartupRecovery' and 'runnerPollLoop' separately so
-that startup recovery finishes before the HTTP port is bound — this
-closes the CRITICAL race (task #35 FIX 1) where concurrent HTTP writes
-could be silently clobbered by a stale rollback sweep (race-hunter #29).
+{- | Runner lifecycle: synchronous startup recovery, then poll loop.
+SERVER mode calls the two phases separately so recovery finishes before
+the HTTP port binds — otherwise concurrent HTTP writes can be clobbered
+by the stale rollback sweep.
 -}
 runnerLoop :: AppState -> IO ()
 runnerLoop st = do
     runnerStartupRecovery st
     runnerPollLoop st
 
-{- | Synchronous startup recovery. Must run BEFORE the HTTP server binds
-its port, otherwise user-initiated state changes (abort, revert) can
-land in parallel with these sweeps and get overwritten by their stale
-snapshots. See #35 FIX 1 for the full race description.
+{- | Startup recovery. Must run BEFORE the HTTP port binds, or concurrent
+HTTP writes race with the sweeps. Performs:
 
-This function performs two recovery actions:
-
-  1. 'rollbackInProgressOnStartup' — drives any INPROGRESS/PAUSED/
-     REVERTING releases to a terminal state (ABORTED/REVERTED) because
-     their workflow threads were lost when the server died.
-  2. 'releaseExpiredVsLocksOnStartup' — clears any orphaned VS locks
-     whose timestamp is older than @lock_expiry_delay_minutes@. Covers
-     the case where a lock is held but no one tries to acquire it (so
-     the inline expiry check inside 'tryAcquireVsLock' never runs),
-     leaving an orphaned lock visible to 'isEligibleToRun' and blocking
-     release dispatch.
+  1. 'rollbackInProgressOnStartup' — drives orphaned INPROGRESS/REVERTING
+     releases to a terminal state (their workflow threads died with the server).
+  2. 'releaseExpiredVsLocksOnStartup' — clears orphaned VS locks older than
+     @lock_expiry_delay_minutes@; covers locks nobody else tries to acquire.
 -}
 runnerStartupRecovery :: AppState -> IO ()
 runnerStartupRecovery st = do
     runFlow st rollbackInProgressOnStartup
-    -- Julia parity: reset any leaked-deployment scale-downs that were
-    -- stuck in SCALE_DOWN_INPROGRESS (worker crashed mid-scale-down) so
-    -- the next poll picks them back up.
+    -- Reset leaked-deployment scale-downs stuck SCALE_DOWN_INPROGRESS (worker
+    -- crashed mid-scale-down) so the next poll retries.
     runFlow st $ do
         n <- resetStuckScaleDownInProgress
         when (n > 0) $
@@ -86,15 +70,12 @@ runnerStartupRecovery st = do
                     <> " tracker(s) stuck in SCALE_DOWN_INPROGRESS → SCALE_DOWN_SCHEDULED"
     runFlow st releaseExpiredVsLocksOnStartup
 
-{- | Forever poll loop. Picks CREATED trackers, handles aborting releases,
-schedules scale-downs. Safe to run concurrently with the HTTP server.
--}
+-- | Forever poll loop. Safe to run concurrently with the HTTP server.
 runnerPollLoop :: AppState -> IO ()
 runnerPollLoop st = runFlow st loop
 
-{- | Release any VS lock older than the configured expiry. Runs once at
-startup; tryAcquireVsLock also treats stale locks as released so new
-edit attempts unblock themselves without needing this sweep to run first.
+{- | Release VS locks older than the configured expiry. tryAcquireVsLock also
+treats stale locks as released, so this sweep is belt-and-braces at startup.
 -}
 releaseExpiredVsLocksOnStartup :: Flow ()
 releaseExpiredVsLocksOnStartup = do
@@ -103,16 +84,9 @@ releaseExpiredVsLocksOnStartup = do
         then logInfo "[STARTUP] No expired VS locks to release"
         else logInfo $ "[STARTUP] Released " <> T.pack (show n) <> " expired VS lock(s)"
 
--- ============================================================================
--- Startup Rollback (Julia parity: rollbackReleaseInProgress)
--- ============================================================================
-
-{- | Roll back all orphaned INPROGRESS/REVERTING releases on server startup.
-Restores VS traffic to old version and marks as ABORTED.
-PAUSED releases are intentionally NOT included — pause is a user state with
-no in-flight kubectl work to recover, so a backend restart must not silently
-abort them.
-Julia reference: api/rollback/rollback.jl lines 10-75
+{- | Roll back orphaned INPROGRESS/REVERTING releases on startup: restore VS
+traffic and mark ABORTED. PAUSED is NOT included — pause is a user state
+with no in-flight kubectl work to recover.
 -}
 rollbackInProgressOnStartup :: Flow ()
 rollbackInProgressOnStartup = do

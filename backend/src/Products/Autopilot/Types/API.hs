@@ -32,9 +32,7 @@ import GHC.Int (Int32)
 import Products.Autopilot.Types (ReleaseCategory (..), RolloutStep (..))
 import Servant (FromHttpApiData)
 
--- ============================================================================
 -- Newtypes for type-safe IDs
--- ============================================================================
 
 newtype ReleaseId = ReleaseId {unReleaseId :: Text}
     deriving stock (Show, Eq)
@@ -48,9 +46,7 @@ newtype ServiceSlug = ServiceSlug {unServiceSlug :: Text}
     deriving stock (Show, Eq)
     deriving newtype (FromJSON, ToJSON, FromHttpApiData)
 
--- ============================================================================
 -- Request Types
--- ============================================================================
 
 data UpsertProductReq = UpsertProductReq
     { id :: Maybe Int32
@@ -423,9 +419,7 @@ instance FromJSON FastForwardReq where
 instance ToJSON FastForwardReq where
     toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
--- ============================================================================
 -- VS Edit Tracker Request Types
--- ============================================================================
 
 data CreateVsEditTrackerReq = CreateVsEditTrackerReq
     { appGroup :: Text
@@ -504,9 +498,7 @@ instance FromJSON VsUnlockReq where
 instance ToJSON VsUnlockReq where
     toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
--- ============================================================================
 -- Product & Service Response Types
--- ============================================================================
 
 data ProductResponse = ProductResponse
     { appGroup :: Text
@@ -534,9 +526,7 @@ data ServiceResponse = ServiceResponse
 instance ToJSON ServiceResponse where
     toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
--- ============================================================================
 -- Product Config CRUD Response
--- ============================================================================
 
 data ProductConfigResponse = ProductConfigResponse
     { id :: Int32
@@ -556,9 +546,7 @@ data ProductConfigResponse = ProductConfigResponse
 instance ToJSON ProductConfigResponse where
     toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
--- ============================================================================
 -- Release Config CRUD Response
--- ============================================================================
 
 data ReleaseConfigResponse = ReleaseConfigResponse
     { id :: Int32
@@ -579,9 +567,7 @@ data ReleaseConfigResponse = ReleaseConfigResponse
 instance ToJSON ReleaseConfigResponse where
     toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
--- ============================================================================
 -- Pod Health Response Types
--- ============================================================================
 
 data PodInfo = PodInfo
     { piName :: Text
@@ -637,9 +623,7 @@ instance ToJSON PodHealthResponse where
             , "summary" .= summary
             ]
 
--- ============================================================================
 -- Diff Response Type
--- ============================================================================
 
 data DiffResponse = DiffResponse
     { drOldfile :: Text
@@ -656,9 +640,7 @@ instance ToJSON DiffResponse where
             , "message" .= m
             ]
 
--- ============================================================================
 -- Resources Response Type
--- ============================================================================
 
 data ResourceSpec = ResourceSpec
     { rsCpu :: Maybe Text
@@ -698,9 +680,7 @@ instance FromJSON ResourcesResponse where
             <$> v .:? "requests"
             <*> v .:? "limits"
 
--- ============================================================================
 -- VS Edit Tracker Response Type
--- ============================================================================
 
 data VsEditTrackerResponse = VsEditTrackerResponse
     { vetRespId :: Text
@@ -749,9 +729,7 @@ instance ToJSON VsEditTrackerResponse where
             , "updated_at" .= vetRespUpdatedAt v
             ]
 
--- ============================================================================
 -- Server Config Response Types
--- ============================================================================
 
 data ServerConfigEntry = ServerConfigEntry
     { sceKey :: Text
@@ -825,9 +803,7 @@ instance ToJSON ServerConfigResponse where
             , "configs" .= scrConfigs r
             ]
 
--- ============================================================================
 -- ConfigMap Tracker Response Type
--- ============================================================================
 
 data ConfigMapResponse = ConfigMapResponse
     { cmrId :: Text
@@ -895,9 +871,7 @@ data ConfigMapListResponse = ConfigMapListResponse
 instance ToJSON ConfigMapListResponse where
     toJSON r = object ["list" .= cmlList r]
 
--- ============================================================================
 -- ConfigMap K8s Lookup Response
--- ============================================================================
 
 data ConfigMapK8sResponse = ConfigMapK8sResponse
     { cmkConfigMap :: Value
@@ -911,9 +885,7 @@ instance FromJSON ConfigMapK8sResponse where
     parseJSON = withObject "ConfigMapK8sResponse" $ \v ->
         ConfigMapK8sResponse <$> v .: "configMap"
 
--- ============================================================================
 -- Release Event Response Type
--- ============================================================================
 
 data ReleaseEventResponse = ReleaseEventResponse
     { reCategory :: Text
@@ -932,9 +904,7 @@ instance ToJSON ReleaseEventResponse where
             , "timestamp" .= reTimestamp e
             ]
 
--- ============================================================================
 -- Error Response Type (for typed 404s etc.)
--- ============================================================================
 
 data ErrorResponse = ErrorResponse
     { errError :: Text
@@ -946,9 +916,7 @@ instance ToJSON ErrorResponse where
     toJSON (ErrorResponse e m) =
         object $ ["error" .= e] <> maybe [] (\msg -> ["message" .= msg]) m
 
--- ============================================================================
 -- VS Lock Error Response
--- ============================================================================
 
 data VsLockErrorResponse = VsLockErrorResponse
     { vleError :: Text
@@ -965,9 +933,7 @@ instance ToJSON VsLockErrorResponse where
             , "lock_expiry" .= vleLockExpiry v
             ]
 
--- ============================================================================
 -- Upsert Server Config Request Type
--- ============================================================================
 
 data UpsertServerConfigReq = UpsertServerConfigReq
     { uscName :: Text

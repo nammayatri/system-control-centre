@@ -2,55 +2,15 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeApplications #-}
 
-{- | Application environment, the canonical 'Flow' monad, and the
-'MonadFlow' constraint that every product reuses.
+{- | 'AppState', the 'Flow' monad, and the 'MonadFlow' constraint
+reused across the codebase.
 
-== The pattern (NammaYatri-style, simplified for one resource)
-
-The whole codebase shares one constraint:
-
-@
-type MonadFlow m = (MonadIO m, MonadThrow m, MonadCatch m, MonadMask m, MonadReader AppState m)
-@
-
-Every query, every handler, every workflow step lives at type
-@MonadFlow m => ... -> m a@ — never at concrete @Flow@. This means:
-
-* Code is monomorphic at the call site (Servant resolves @m = Flow@)
-  but polymorphic in source (tests can run the same code with a
-  test runtime / mock 'AppState' / etc.)
-* You write @throwM (NotFound \"...\")@ anywhere — the global handler
-  in 'Core.Server' catches it and renders a typed JSON 4xx/5xx response.
-* You write @bracket@, @finally@, @onException@ from
-  "Control.Monad.Catch" anywhere — exception safety just works.
-* You don't write @liftIO@ or @getDBEnv@ in handlers — call the
-  query directly: @rows <- findReleaseTrackerById rid@.
-
-== Why a constraint synonym instead of a typeclass?
-
-A typeclass would force a method dictionary at every call site
-(slower compile, no inlining), and we don't actually need
-multi-instance dispatch — the only instance is 'Flow'. A constraint
-synonym (@type MonadFlow m = (MonadIO m, ...)@) is the same shape
-NammaYatri uses internally and gives us all the testability benefits
-of polymorphism without any runtime cost.
-
-== Crash safety
-
-'Flow' inherits 'MonadThrow' / 'MonadCatch' / 'MonadMask' from
-'ReaderT' so the full @Control.Monad.Catch@ vocabulary works:
-
-@
-withVsLock product owner action = do
-    acquired <- tryAcquireVsLock product owner
-    if not acquired
-        then throwM (Conflict "VS is locked")
-        else action \`finally\` releaseVsLockIfOwner product owner
-@
-
-The @finally@ runs even if @action@ throws an exception, an async
-exception kills the thread, or the user aborts the request — same
-guarantees you get from "Control.Exception.bracket".
+@MonadFlow@ is a constraint synonym (not a typeclass) aggregating
+MonadIO / MonadThrow / MonadCatch / MonadMask / MonadReader AppState.
+Queries, handlers, and workflow steps declare @MonadFlow m@; Servant
+resolves @m = Flow@ at the API boundary, tests can resolve to a
+different stack. Inheriting MonadMask means @bracket@/@finally@ from
+"Control.Monad.Catch" work everywhere, including through 'forkFlow'.
 -}
 module Core.Environment (
     -- * The monad
@@ -92,8 +52,6 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Database.PostgreSQL.Simple (Connection)
 
--- ── Environment carriers ──────────────────────────────────────────
-
 data DBEnv = DBEnv
     { dbPool :: Pool Connection
     }
@@ -104,26 +62,10 @@ data AppState = AppState
     , loggerEnv :: LoggerEnv
     }
 
--- ── The monad ─────────────────────────────────────────────────────
-
-{- | The canonical concrete monad. Inherits 'MonadIO', 'MonadThrow',
-'MonadCatch', 'MonadMask', and 'MonadReader' 'AppState' from
-'ReaderT', so you can throw\/catch typed errors and use 'bracket'\/'finally'
-without any extra plumbing.
--}
+-- | The canonical concrete monad.
 type Flow = ReaderT AppState IO
 
-{- | The capability constraint every query, handler, and workflow step
-should declare instead of pinning to concrete 'Flow'.
-
-@
-findReleaseTrackerById :: MonadFlow m => Id ReleaseTracker -> m (Maybe ReleaseTracker)
-findReleaseTrackerById rid = withDb $ \\db -> ...
-@
-
-Servant resolves @m = Flow@ at the API boundary. Tests can resolve
-@m@ to a different stack with mock 'AppState'.
--}
+-- | Declared instead of concrete 'Flow' for testability.
 type MonadFlow m =
     ( MonadIO m
     , MonadThrow m
@@ -135,8 +77,6 @@ type MonadFlow m =
 runFlow :: AppState -> Flow a -> IO a
 runFlow = flip runReaderT
 
--- ── Reader accessors ──────────────────────────────────────────────
-
 getConfig :: (MonadFlow m) => m Config
 getConfig = asks config
 
@@ -146,15 +86,7 @@ getDBEnv = asks dbEnv
 getLoggerEnv :: (MonadFlow m) => m LoggerEnv
 getLoggerEnv = asks loggerEnv
 
--- ── Convenience: lift IO actions that need env ────────────────────
-
-{- | Run an IO action that needs the 'DBEnv', without the
-@db <- getDBEnv; liftIO $ action db@ boilerplate.
-
-@
-findReleaseTrackerById rid = withDb $ \\db -> runDB db $ ...
-@
--}
+-- | Run an IO action that needs the 'DBEnv'.
 withDb :: (MonadFlow m) => (DBEnv -> IO a) -> m a
 withDb action = do
     db <- getDBEnv
@@ -166,14 +98,9 @@ withConfig action = do
     cfg <- getConfig
     liftIO (action cfg)
 
--- ── Concurrency ───────────────────────────────────────────────────
-
-{- | Fork a 'Flow' action in a fresh OS thread, propagating the current
-'AppState' (DB pool, config, logger) into the new thread.
-
-Use this instead of @forkIO@ inside any 'Flow' computation — it lets
-the forked action call queries, log, throw typed errors, etc. without
-needing to thread @AppState@ around manually.
+{- | Fork a 'Flow' action, propagating the current 'AppState' to the
+child. Child crashes are caught and logged (see 'forkIO' wrapping) so
+they don't take the parent thread down silently.
 -}
 forkFlow :: Flow () -> Flow ThreadId
 forkFlow action = do
@@ -186,8 +113,6 @@ forkFlow action = do
                     "[forkFlow] Worker thread died with exception: "
                         <> T.pack (show e)
             Right _ -> pure ()
-
--- ── Logging (polymorphic in MonadFlow) ────────────────────────────
 
 logInfo :: (MonadFlow m) => Text -> m ()
 logInfo msg = getLoggerEnv >>= \env -> liftIO (logOutput env INFO msg)

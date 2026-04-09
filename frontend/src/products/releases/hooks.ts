@@ -48,8 +48,8 @@ export function useRelease(id: string | undefined) {
 }
 
 export function useReleaseEvents(id: string | undefined) {
-  // Round 8 audit H17: cross-reference the release status from the cached
-  // ['release', id] query so terminal releases stop polling events forever.
+  // Poll while the release is active; peek at the ['release', id] cache so terminal
+  // releases stop refetching events.
   const qc = useQueryClient();
   return useQuery({
     queryKey: ['release-events', id],

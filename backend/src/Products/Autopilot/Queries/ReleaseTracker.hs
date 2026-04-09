@@ -87,7 +87,6 @@ import Products.Autopilot.Types.Storage.Schema
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes
 
--- | Type alias for tracker + target state pair
 type TrackerWithTarget = (ReleaseTracker, Maybe TargetState)
 
 insertReleaseTracker :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m ()
@@ -95,10 +94,9 @@ insertReleaseTracker rt mts = withDb $ \db -> do
     now <- getCurrentTime
     let created = fromMaybe now (dateCreated rt)
         row = toRow created now rt mts
-    -- Real UPSERT — single statement, no transaction needed.
-    -- Every non-PK column must be listed in BOTH the INSERT column list AND
-    -- the DO UPDATE SET clause, otherwise that column would silently retain
-    -- its old value on conflict (which would corrupt the rollout state).
+    -- Every non-PK column must appear in BOTH the INSERT list AND the DO
+    -- UPDATE SET clause, otherwise it silently retains its old value on
+    -- conflict and corrupts rollout state.
     withConn db $ \conn -> do
         _ <-
             execute
@@ -169,12 +167,9 @@ conditionalUpdateTracker rt mts expectedStatus = withDb $ \db -> do
         row = toRow created now rt mts
     withConn db $ \conn ->
         withTransaction conn $ do
-            -- Bug fix (Slack thread race): preserve slack_thread_ts written
-            -- by notifyReleaseCreated's updateReleaseTrackerSlackThreadTs.
-            -- The DELETE+INSERT pattern below would otherwise clobber the
-            -- column to NULL whenever the in-memory `rt` was snapshotted
-            -- before the side-effect UPDATE landed. Read the live value
-            -- inside the transaction so the INSERT carries it forward.
+            -- Preserve slack_thread_ts: the in-memory `rt` may have been
+            -- snapshotted before notifyReleaseCreated's side-effect UPDATE,
+            -- so read the live value inside the txn before DELETE+INSERT.
             existingTs <-
                 query
                     conn
@@ -195,11 +190,8 @@ conditionalUpdateTracker rt mts expectedStatus = withDb $ \db -> do
                     runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
                     pure True
 
-{- | Atomic approve. Like conditionalUpdateTracker but the precondition is
-    is_approved=false AND status='CREATED'. Two concurrent approve handlers
-    both pass the in-memory pre-check; only the one that wins this DELETE
-    gets to insert the updated row. The loser sees rowsDeleted=0 and returns
-    False so the handler can throw a friendly error.
+{- | Atomic approve. Precondition is @is_approved=false AND status='CREATED'@,
+enforced in SQL so concurrent approve handlers can't both win.
 -}
 conditionalUpdateApprove :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m Bool
 conditionalUpdateApprove rt mts = withDb $ \db -> do
@@ -208,7 +200,7 @@ conditionalUpdateApprove rt mts = withDb $ \db -> do
         row = toRow created now rt mts
     withConn db $ \conn ->
         withTransaction conn $ do
-            -- Bug fix (Slack thread race): see conditionalUpdateTracker.
+            -- Preserve slack_thread_ts; see conditionalUpdateTracker.
             existingTs <-
                 query
                     conn
@@ -236,7 +228,7 @@ conditionalUpdateTrackerRow :: (MonadFlow m) => ReleaseTrackerRow -> Text -> m B
 conditionalUpdateTrackerRow row expectedStatus = withDb $ \db ->
     withConn db $ \conn ->
         withTransaction conn $ do
-            -- Bug fix (Slack thread race): see conditionalUpdateTracker.
+            -- Preserve slack_thread_ts; see conditionalUpdateTracker.
             existingTs <-
                 query
                     conn
@@ -278,11 +270,7 @@ listReleaseEvents rid = withDb $ \db ->
                 guard_ (reReleaseId ev ==. val_ rid)
                 pure ev
 
-{- | Like 'listReleaseEvents' but filters by event category in SQL. Used by
-release-diff handlers that only care about a single category (e.g.
-"SNAPSHOT") and don't want to pull every event for the release just to
-discard most of them in Haskell.
--}
+-- | Like 'listReleaseEvents' but filters by event category in SQL.
 listReleaseEventsByCategory :: (MonadFlow m) => Text -> Text -> m [ReleaseEvent]
 listReleaseEventsByCategory rid cat = withDb $ \db ->
     runDB db $
@@ -314,15 +302,14 @@ listReleaseTrackersByDateRange fromTime toTime = withDb $ \db -> do
                         rt <- all_ (releaseTrackers autopilotDb)
                         guard_ (rtCreatedAt rt >=. val_ fromTime)
                         guard_ (rtCreatedAt rt <=. val_ toTime)
-                        -- Exclude VS edits and ConfigMap changes (shown in their own sections)
+                        -- VS edits and ConfigMap changes have their own sections in the UI.
                         guard_ (rtCategory rt /=. val_ "VSEdit")
                         guard_ (rtCategory rt /=. val_ "BackendConfig")
                         pure rt
     pure (map fromRow rows)
 
-{- | Find releases ready to be dispatched. Only picks CREATED status.
-INPROGRESS releases are NOT re-dispatched — on server restart, they are
-rolled back (matching Julia production behavior: rollbackReleaseInProgress).
+{- | Find approved CREATED releases ready to be dispatched. INPROGRESS
+releases are recovered via a separate rollback path, not re-dispatched here.
 -}
 findRunnableReleaseTrackers :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
 findRunnableReleaseTrackers now = withDb $ \db -> do
@@ -338,12 +325,9 @@ findRunnableReleaseTrackers now = withDb $ \db -> do
                         pure rt
     pure (map fromRow rows)
 
-{- | Find any non-terminal tracker for the given (app_group, service). Used by
-the same-service concurrency guard at create time. Catches CREATED (whether
-approved or not), INPROGRESS, PAUSED, ABORTING, REVERTING, RESTARTING — i.e.
-anything that's still alive in the workflow state machine. Excludes terminal
-states (COMPLETED, ABORTED, USER_ABORTED, DISCARDED, REVERTED, RECORDED,
-GcltAborted) and VS-edit lock rows (LOCKED, UNLOCKED).
+{- | Find any non-terminal tracker for (app_group, service). Used by the
+same-service concurrency guard at create time. Excludes terminal states
+and VS-edit lock rows (LOCKED, UNLOCKED).
 -}
 findActiveTrackersForService :: (MonadFlow m) => Text -> Text -> m [TrackerWithTarget]
 findActiveTrackersForService ag svc = withDb $ \db -> do
@@ -376,12 +360,10 @@ findInProgressReleaseTrackers = withDb $ \db -> do
                 select $
                     orderBy_ (asc_ . rtCreatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
-                        -- Bug fix: PAUSED is an intentional user state. Restarting the
-                        -- backend should NOT silently ABORT user-paused releases. Only
-                        -- INPROGRESS/REVERTING releases need recovery (their workflow
-                        -- thread was lost on restart). PAUSED releases hold no in-flight
-                        -- kubectl state — the runner will pick them back up via the
-                        -- normal poll once they transition back to INPROGRESS.
+                        -- PAUSED is intentional user state — do NOT include it here, or
+                        -- a backend restart would silently ABORT user-paused releases.
+                        -- Only INPROGRESS/REVERTING need restart recovery (workflow
+                        -- thread was lost).
                         guard_ (rtStatus rt `in_` [val_ "INPROGRESS", val_ "REVERTING"])
                         pure rt
     pure (map fromRow rows)
@@ -410,21 +392,13 @@ findCleanupScheduledTrackers now = withDb $ \db -> do
                 _ -> False
     pure (filter isDue parsed)
 
-{- | Julia parity (watcher.jl scaleDownPodsInProgress / rollback.jl):
-find terminal-state trackers whose NEW deployment leaked because the
-abort/cleanup path never reached @restoreVsTrafficOnFailure@'s scale-down
-(process kill, OOM, kubectl failure, etc).
+{- | Find terminal-state trackers whose NEW deployment leaked because the
+abort/cleanup path never reached the scale-down step (process kill, OOM,
+kubectl failure, etc).
 
-Eligibility:
-  * status IN (ABORTED, USER_ABORTED, DISCARDED)
-  * release_context has @cleanupTargetDeployment@ set (the new dep name)
-  * @cleanupStatus == "SCALE_DOWN_SCHEDULED"@
-  * @cleanupAt <= now@ (or unset, in which case we treat it as overdue)
-
-The poll worker 'scaleDownLeakedNewDeployment' issues @kubectl scale
---replicas=0@ on the target deployment and flips @cleanupStatus@ to
-@SCALE_DOWN_COMPLETED@. The kubectl call is idempotent so re-runs on
-already-scaled deployments are harmless.
+Eligibility: status IN (ABORTED, USER_ABORTED, DISCARDED), release_context
+has @cleanupTargetDeployment@ set, @cleanupStatus == "SCALE_DOWN_SCHEDULED"@,
+@cleanupAt <= now@ (unset = overdue).
 -}
 findLeakedNewDeploymentTrackers :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
 findLeakedNewDeploymentTrackers now = withDb $ \db -> do
@@ -449,12 +423,9 @@ findLeakedNewDeploymentTrackers now = withDb $ \db -> do
             _ -> False
     pure (filter isDue parsed)
 
-{- | Julia parity (rollback.jl scaleDownPodsInProgress): walks
-terminal-state trackers stuck in @SCALE_DOWN_INPROGRESS@ (worker crashed
-mid-flight) and resets them to @SCALE_DOWN_SCHEDULED@ so the next runner
-poll picks them up. Run once at startup before the poll loop.
-
-Returns the number of trackers reset (for log visibility).
+{- | Reset terminal-state trackers stuck in @SCALE_DOWN_INPROGRESS@
+(worker crashed mid-flight) back to @SCALE_DOWN_SCHEDULED@. Call at
+startup before the poll loop. Returns the number of trackers reset.
 -}
 resetStuckScaleDownInProgress :: (MonadFlow m) => m Int
 resetStuckScaleDownInProgress = withDb $ \db ->
@@ -589,14 +560,13 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
 fromRow :: ReleaseTrackerRow -> TrackerWithTarget
 fromRow ReleaseTrackerT{..} =
     let
-        -- Deserialize the target_state column into TargetState.
         mTargetState = case parseJsonTextMaybe rtTargetState :: Maybe Value of
             Nothing -> Nothing
             Just v -> case fromJSON v :: Aeson.Result TargetState of
                 Aeson.Success ts -> Just ts
                 Aeson.Error _ -> Nothing
-        -- Extract the K8s context as a JSON Value so the frontend can display
-        -- cluster / namespace / pods scale-down status / etc.
+        -- K8s context surfaced as JSON so the frontend can render cluster /
+        -- namespace / scale-down status without reparsing the whole state.
         mReleaseContext = case mTargetState of
             Just (K8sState k8s) -> Just (toJSON (context k8s))
             _ -> Nothing
@@ -638,7 +608,6 @@ fromRow ReleaseTrackerT{..} =
      in
         (tracker, mTargetState)
 
--- New parsers (recommended)
 parseReleaseCategory :: Text -> ReleaseCategory
 parseReleaseCategory t =
     case T.toUpper t of
@@ -646,20 +615,14 @@ parseReleaseCategory t =
         "BACKENDSCHEDULER" -> BackendScheduler
         "BACKENDCONFIG" -> BackendConfig
         "VSEDIT" -> VSEdit
-        -- Any unknown string (including legacy retired categories like
-        -- 'BackendJob', 'BackendCronJob', 'MobileAppAndroid', etc.) hits the
-        -- generic fallback below, which logs a warning trace so the operator
-        -- sees the unexpected value instead of it being silently swallowed.
+        -- Unknown values (including legacy categories) log a warning instead
+        -- of being silently swallowed.
         _ ->
             DT.trace
                 ("[parseReleaseCategory] WARNING: unknown category " <> show t <> ", defaulting to BackendService")
                 BackendService
 
-{- | Parse ReleaseWFStatus from DB text. Explicit case at the DB boundary
-(haskell-reviewer Trap 7 — avoid 'read' which is strict about whitespace and
-gives terrible error messages). Constructors are UPPER_SNAKE, so they match
-the DB wire format 1:1.
--}
+-- | Parse ReleaseWFStatus from DB text. Explicit case so unknown values warn.
 parseReleaseWFStatus :: Text -> ReleaseWFStatus
 parseReleaseWFStatus t =
     case T.toUpper t of
@@ -675,11 +638,7 @@ parseReleaseWFStatus t =
                 ("[parseReleaseWFStatus] WARNING: unknown status " <> show t <> ", defaulting to INIT")
                 INIT
 
-{- | Parse ReleaseStatus from DB text. Delegates to 'parseReleaseStatusText'
-in "Products.Autopilot.Types.Release", which derives the lookup from the
-'ReleaseStatus' 'Enum'\/'Bounded' instance — one source of truth for both
-the DB layer and the Aeson JSON layer.
--}
+-- | Re-export of 'parseReleaseStatusText' so DB + JSON share one lookup.
 parseReleaseStatus :: Text -> ReleaseStatus
 parseReleaseStatus = parseReleaseStatusText
 
@@ -694,14 +653,9 @@ parseMode (Just t) =
                 ("[parseMode] WARNING: unknown mode " <> show t <> ", defaulting to AUTO")
                 AUTO
 
-{- | Convert ReleaseStatus to UPPERCASE Text for DB storage.
-Re-export of 'releaseStatusText' from "Products.Autopilot.Types.Release"
-so callers in this module don't need to import the types module directly.
--}
 releaseStatusToText :: ReleaseStatus -> Text
 releaseStatusToText = releaseStatusText
 
--- | Convert Mode to UPPERCASE Text for DB storage (same as show).
 modeToText :: Mode -> Text
 modeToText = T.pack . show
 
@@ -722,14 +676,8 @@ parseDecisionEngineHSStatus (Just t) =
                 ("[parseDecisionEngineHSStatus] WARNING: unknown status " <> show t <> ", defaulting to Uninitiated")
                 Uninitiated
 
--- NOTE: target_state is currently a 'text' column. Migrating it to 'jsonb'
--- would let us drop the encode/decode round-trip entirely, but that
--- migration is out of scope for this file (no migrations live under
--- backend/dev/migrations/system-control/ for this change).
---
--- For now, encode goes Value -> Text via aeson's text builder (skips the
--- ByteString step), and decode goes Text -> ByteString via TE.encodeUtf8
--- straight into eitherDecodeStrict (skips the lazy ByteString step).
+-- target_state is a 'text' column (not jsonb) so we encode/decode JSON
+-- manually; a jsonb migration would let this go away.
 encodeJsonText :: (ToJSON a) => a -> Text
 encodeJsonText = LT.toStrict . AesonText.encodeToLazyText
 
@@ -773,18 +721,13 @@ safeHead :: [a] -> Maybe a
 safeHead [] = Nothing
 safeHead (x : _) = Just x
 
-{- | Find completed/aborted trackers whose old deployment is due for scale-down.
-A tracker is eligible if:
-- status IN (COMPLETED, ABORTED, USER_ABORTED)
-- end_time + delay hours < now
-- old_version is not empty/unknown/new
-- podsScaleDownStatus is NOT already ScaleDownCompleted
-When delay is 0, all completed trackers with end_time set are immediately eligible.
+{- | Find completed/aborted trackers whose old deployment is due for
+scale-down. Eligibility: terminal status, @end_time + delayHours < now@,
+old_version looks real, and @podsScaleDownStatus == ScaleDownScheduled@.
 -}
 findCompletedTrackersForScaleDown :: (MonadFlow m) => UTCTime -> Double -> m [TrackerWithTarget]
 findCompletedTrackersForScaleDown now delayHours = withDb $ \db -> do
-    -- Push end_time + delay <= now into SQL so we don't pull every completed
-    -- row across the wire only to discard most of them in Haskell.
+    -- Push end_time cutoff into SQL; target_state JSON filtering stays in Haskell.
     let cutoff = addUTCTime (realToFrac (negate (delayHours * 3600)) :: NominalDiffTime) now
     rows <-
         runDB db $
@@ -792,28 +735,18 @@ findCompletedTrackersForScaleDown now delayHours = withDb $ \db -> do
                 select $
                     orderBy_ (asc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
-                        -- Julia parity (watcher.jl:84-102): query selects all
-                        -- terminal trackers; the SCALE_DOWN_SCHEDULED flag
-                        -- check below acts as the actual gate. The flag is
-                        -- only set by scheduleOldDeploymentScaleDown (called
-                        -- from cleanupOldVersion / revert paths), so aborted
-                        -- trackers — which never call that helper — are
-                        -- never picked up.
+                        -- Status filter is broad; the SCALE_DOWN_SCHEDULED
+                        -- predicate below is the real gate. Flag is only set
+                        -- on success/revert paths, so aborts stay excluded.
                         guard_ (rtStatus rt `in_` [val_ "COMPLETED", val_ "ABORTED", val_ "USER_ABORTED"])
                         guard_ (rtEndTime rt <=. just_ (val_ cutoff))
                         pure rt
     let parsed = map fromRow rows
-        -- end_time + delay <= now is now enforced in SQL above. The remaining
-        -- predicates (old-version sanity + JSON podsScaleDownStatus) stay in
-        -- Haskell because they require parsing the target_state JSON blob.
-        -- Julia parity (watcher.jl filterUsingPodsStatus!): require an
-        -- explicit SCALE_DOWN_SCHEDULED flag on the tracker. Anything else
-        -- (Nothing, ScaleDownInProgress, ScaleDownCompleted, etc.) is
-        -- excluded. The flag is set ONLY by scheduleOldDeploymentScaleDown
-        -- which is called from cleanupOldVersion (terminal-success path)
-        -- and revert paths — never from abort paths. Without this gate, an
-        -- aborted release would have its OLD deployment scaled down ~3
-        -- minutes after the abort, wiping out the live serving version.
+        -- Require an explicit SCALE_DOWN_SCHEDULED flag. Anything else
+        -- (including ScaleDownInProgress/Completed) is excluded. Without
+        -- this gate, an aborted release would have its OLD deployment
+        -- scaled down ~3 minutes after the abort, wiping out the live
+        -- serving version.
         isEligible (tracker, mts) =
             let oldVer = NT.oldVersion tracker
                 hasOldVersion = not (T.null oldVer) && T.toLower oldVer /= "unknown" && oldVer /= "new"
@@ -823,18 +756,10 @@ findCompletedTrackersForScaleDown now delayHours = withDb $ \db -> do
              in hasOldVersion && isScheduled
     pure (filter isEligible parsed)
 
-{- | Store the Slack thread_ts for the first message in a release's Slack
-thread. Write-once: only the FIRST writer succeeds, subsequent writers
-become no-ops. This closes a race (task #31) where two concurrent
-notifications each discovered @slack_thread_ts IS NULL@, each created a
-fresh Slack thread, and then raced to overwrite the stored thread_ts —
-losing one thread to orphaning.
-
-The @AND slack_thread_ts IS NULL@ guard in the WHERE clause means the
-UPDATE is atomic: PostgreSQL's MVCC serializes the two concurrent writers
-and the loser's row-match count is zero, so its write silently no-ops.
-Callers do not need to check the row count — the contract is "best
-effort, if someone else already set it the value is preserved".
+{- | Store the Slack thread_ts write-once: the @slack_thread_ts IS NULL@
+guard makes the UPDATE atomic under MVCC, so concurrent notifications
+can't race-overwrite each other's thread ids. Best-effort; callers don't
+need to check the row count.
 -}
 updateReleaseTrackerSlackThreadTs :: (MonadFlow m) => Text -> Text -> m ()
 updateReleaseTrackerSlackThreadTs rid value = withDb $ \db ->
@@ -851,12 +776,8 @@ insertReleaseTrackerRow :: (MonadFlow m) => ReleaseTrackerRow -> m ()
 insertReleaseTrackerRow row = withDb $ \db ->
     withConn db $ \conn ->
         withTransaction conn $ do
-            -- Bug fix (Slack thread race): preserve slack_thread_ts when the
-            -- caller's row is a stale snapshot. Used by VS edit create flow
-            -- via createVsEditTrackerH → mkVsEditRow → insertReleaseTrackerRow.
-            -- Without this guard a re-insert (e.g. on retry / discard sweep
-            -- recreation) would clobber the thread_ts written by
-            -- notifyVsEditCreated's saveThreadTs call.
+            -- Preserve slack_thread_ts when the caller's row is a stale
+            -- snapshot (e.g. VS-edit retry / discard-sweep recreation).
             existingTs <-
                 query
                     conn
@@ -869,11 +790,7 @@ insertReleaseTrackerRow row = withDb $ \db ->
             _ <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (rtId row))
             runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
 
-{- | Find all non-terminal trackers that have sync enabled and a global_id set.
-Used by 'Products.Autopilot.SyncWatcher' to poll secondary cluster status.
-Terminal statuses are excluded: COMPLETED, ABORTED, USER_ABORTED, DISCARDED,
-REVERTED, GCLT_ABORTED.
--}
+-- | Non-terminal trackers with sync enabled + global_id; used by SyncWatcher.
 findActiveSyncTrackers :: (MonadFlow m) => m [ReleaseTracker]
 findActiveSyncTrackers = withDb $ \db -> do
     rows <-
@@ -898,23 +815,15 @@ findActiveSyncTrackers = withDb $ \db -> do
                         pure rt
     pure (map (fst . fromRow) rows)
 
-{- | Sweep stale-DISCARDING trackers: any tracker that has been stuck in
-the DISCARDING status longer than @ageMinutes@ minutes is force-flipped to
-DISCARDED. Julia parity: @filterUsingScheduleTime!@ in
-@release/watcher.jl@ instantly discards DISCARDING-status trackers; we
-use a short grace period to absorb in-flight kubectl calls before
-declaring them dead. Returns the number of trackers flipped.
-
-Driven by the runner's poll loop with @discarding_sweep_minutes@
-server_config (default 5 minutes).
+{- | Force-flip trackers stuck in DISCARDING longer than @ageMinutes@ to
+DISCARDED. Grace period absorbs in-flight kubectl calls before declaring
+them dead. Returns the number of trackers flipped.
 -}
 sweepStaleDiscardingTrackers :: (MonadFlow m) => Int -> m Int
 sweepStaleDiscardingTrackers ageMinutes = withDb $ \db -> do
     now <- liftIO getCurrentTime
     let cutoff = addUTCTime (negate (fromIntegral (ageMinutes * 60) :: NominalDiffTime)) now
-    -- Two-step: SELECT matching IDs, then UPDATE. Beam's plain runUpdate
-    -- doesn't return a row count, so we count via the SELECT to keep the
-    -- caller's logging useful.
+    -- Two-step SELECT-then-UPDATE because Beam's runUpdate has no row count.
     stuckIds <-
         runDB db $
             runSelectReturningList $
@@ -945,12 +854,9 @@ sweepStaleDiscardingTrackers ageMinutes = withDb $ \db -> do
                         )
             pure (length stuckIds)
 
-{- | Sweep VS-edit trackers stuck in APPLIED → auto-flip to COMPLETED
-after @ageMinutes@ minutes. Julia parity: @release/watcher.jl:158-160@
-auto-marks VS trackers COMPLETED after @getAutoCompleteVSTrackerDelay@.
-Without this, an APPLIED VS tracker hangs forever in the operator UI's
-"in-flight" view because nothing transitions APPLIED → COMPLETED.
-Returns the count of trackers flipped.
+{- | Auto-flip VS-edit trackers stuck in APPLIED to COMPLETED after
+@ageMinutes@. Without this they hang forever in the operator UI's
+in-flight view. Returns the count flipped.
 -}
 sweepAutoCompleteVsTrackers :: (MonadFlow m) => Int -> m Int
 sweepAutoCompleteVsTrackers ageMinutes = withDb $ \db -> do
@@ -989,12 +895,10 @@ sweepAutoCompleteVsTrackers ageMinutes = withDb $ \db -> do
                         )
             pure (length stuckIds)
 
-{- | Find the most recent release tracker for the given (app_group,
-service) that ended in @GCLT_ABORTED@ status. Julia parity:
-@validateGCLTAbortInPreviousTracker@ in @api/release/create.jl@. Used
-by createReleaseH to block a new release on a service whose previous
-release was killed by the global changelog tracker — operator must
-explicitly resolve before retrying.
+{- | Most recent GCLT_ABORTED tracker for (app_group, service, env).
+Used by createReleaseH to block new releases on services whose previous
+release was killed by the global changelog tracker until an operator
+explicitly resolves it.
 -}
 findLastGcltAbortedTracker :: (MonadFlow m) => Text -> Text -> Text -> m (Maybe ReleaseTracker)
 findLastGcltAbortedTracker ag svc envT = withDb $ \db -> do
@@ -1012,9 +916,7 @@ findLastGcltAbortedTracker ag svc envT = withDb $ \db -> do
                             pure rt
     pure (fmap (fst . fromRow) (safeHead rows))
 
-{- | Find the most recent release event for a given release and label.
-Used by 'Products.Autopilot.SyncWatcher' to look up SYNC_SECONDARY_TRACKER_ID.
--}
+-- | Most recent release event for (release, label); used by SyncWatcher.
 findEventByLabel :: (MonadFlow m) => Text -> Text -> m (Maybe ReleaseEvent)
 findEventByLabel rid lbl = withDb $ \db -> do
     rows <-

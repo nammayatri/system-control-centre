@@ -1,19 +1,6 @@
-{- | Target platform state types
-
-This module provides the top-level TargetState discriminated union
-that contains target-platform-specific state.
-
-"Target" refers to WHERE/HOW the release is deployed (the execution platform).
-Currently two targets are supported:
-
-- K8sState     — Kubernetes deployments (BackendService, BackendScheduler)
-- ConfigState  — Kubernetes ConfigMap / Secret applies (BackendConfig)
-
-The Play Store / App Store variants were removed when the corresponding
-release categories (MobileAppAndroid / MobileAppIOS) were retired — they will
-be re-added when those products are needed.
-
-This module re-exports all target-specific types from submodules.
+{- | 'TargetState' is a discriminated union over deployment platforms
+('K8sState' for K8s deployments, 'ConfigState' for ConfigMap/Secret
+applies). Re-exports the target-specific submodules.
 -}
 module Products.Autopilot.Types.Target (
     -- * Top-level Target State
@@ -30,30 +17,15 @@ where
 import Data.Aeson (FromJSON, ToJSON)
 import GHC.Generics (Generic)
 
--- Import and re-export target-specific modules
-
 import Products.Autopilot.Types.Target.Config
 import Products.Autopilot.Types.Target.Kubernetes
 
--- ============================================================================
--- Top-level Target State
--- ============================================================================
-
-{- | Target state (discriminated by target platform)
-
-This is a discriminated union containing state specific to each deployment target.
-The TargetState variant determines which platform-specific fields are available.
-
-Mapping (ReleaseCategory → TargetState):
-- BackendService / BackendScheduler → K8sState
-- BackendConfig                     → ConfigState
-- VSEdit                            → K8sState (handled out-of-band, but uses K8s context)
+{- | Category → variant:
+BackendService/Scheduler/VSEdit → 'K8sState'; BackendConfig → 'ConfigState'.
 -}
 data TargetState
-    = -- | Kubernetes deployment state (for backend services + schedulers)
-      K8sState K8sDeploymentState
-    | -- | Configuration deployment state (for ConfigMap / Secret releases)
-      ConfigState ConfigDeploymentState
+    = K8sState K8sDeploymentState
+    | ConfigState ConfigDeploymentState
     deriving (Eq, Show, Generic)
 
 instance ToJSON TargetState

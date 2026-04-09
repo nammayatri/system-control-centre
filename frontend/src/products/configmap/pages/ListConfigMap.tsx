@@ -116,7 +116,6 @@ const ListConfigMap: React.FC = () => {
   return (
     <div className="flex flex-col flex-1 w-full">
       <div className="bg-white border border-zinc-200 rounded-xl">
-        {/* Toolbar */}
         <div className="p-3 sm:p-4 flex flex-col md:flex-row md:items-center gap-2 md:gap-3 border-b border-zinc-100">
           <div className="relative md:flex-none">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
@@ -168,7 +167,6 @@ const ListConfigMap: React.FC = () => {
           </div>
         </div>
 
-        {/* Desktop Table */}
         <div className="hidden md:block overflow-x-auto">
           {isLoading ? (
             <TableSkeleton rows={6} cols={8} />
@@ -215,7 +213,6 @@ const ListConfigMap: React.FC = () => {
           )}
         </div>
 
-        {/* Mobile card list */}
         <div className="md:hidden">
           {isLoading ? (
             <TableSkeleton rows={4} cols={4} />
@@ -253,7 +250,6 @@ const ListConfigMap: React.FC = () => {
           )}
         </div>
 
-        {/* Pagination */}
         {!isLoading && filtered.length > 0 && (
           <div className="px-3 sm:px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-zinc-100">
             <div className="flex items-center gap-3 flex-wrap">

@@ -1,18 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Production-format event logging (matches Julia autopilot exactly).
+{- | Release-event emitters with production payload format.
 
-Emits release events with the same category/label/payload structure as
-the production Julia autopilot (/release/events.jl).
+  * 'logTrafficUpdated'  — BUSINESS / TRAFFIC_UPDATED
+  * 'logDecisionResult'  — DECISION_ENGINE / DECISION_RESULT
+  * 'logStatusUpdated'   — NOTIFICATION / STATUS_UPDATED
 
-Three event types are supported:
-
-* 'logTrafficUpdated'  — BUSINESS / TRAFFIC_UPDATED
-* 'logDecisionResult'  — DECISION_ENGINE / DECISION_RESULT
-* 'logStatusUpdated'   — NOTIFICATION / STATUS_UPDATED
-
-The @rollout_history@ field in each payload is serialized as a JSON
-STRING (not a nested object) to match Julia's @JSON2.write@ output.
+@rollout_history@ is serialised as a JSON *string* (not a nested object)
+for wire compatibility with the existing consumers.
 -}
 module Products.Autopilot.EventLog (
     logTrafficUpdated,
@@ -91,10 +86,6 @@ import Products.Autopilot.Types.Release (
     RolloutHistory (..),
  )
 
--- ============================================================================
--- Production-format rollout_history serialization
--- ============================================================================
-
 encodeProdRolloutHistory :: [RolloutHistory] -> Text
 encodeProdRolloutHistory hs =
     let jsonArray = toJSON (map historyToProdJson hs)
@@ -123,10 +114,6 @@ decisionToText WaitForMoreIteration = "WaitForMoreIteration"
 decisionToText Continue = "Continue"
 decisionToText Wait = "Wait"
 decisionToText Abort = "Abort"
-
--- ============================================================================
--- Event emitters (MonadFlow only — no _io versions)
--- ============================================================================
 
 logTrafficUpdated :: (MonadFlow m) => ReleaseTracker -> Int -> m ()
 logTrafficUpdated rt previousRollout = do
@@ -178,30 +165,11 @@ logStatusUpdated rt message = do
                 ]
     insertReleaseEvent (releaseId rt) "NOTIFICATION" "STATUS_UPDATED" payload
 
--- ============================================================================
--- Helpers
--- ============================================================================
-
 statusText :: ReleaseTracker -> Text
 statusText = releaseStatusToText . status
 
--- ============================================================================
-
--- * Event categories & labels — central registry
-
--- ============================================================================
-
-{- | Typed constants for every release-event @(category, label)@ pair currently
-emitted across @Products.Autopilot.*@.
-
-This section is intentionally *additive only*. Existing call sites still pass
-string literals directly to 'insertReleaseEvent'; they are **not** migrated in
-this pass. Future work should gradually replace magic strings with these
-constants to eliminate typo risk and provide a single source of truth.
-
-Naming convention: category constants are prefixed @evCategory@; label
-constants are prefixed @ev@ followed by the camelCase form of the underlying
-@SNAKE_CASE@ label (e.g. @SYNC_REQUEST@ becomes 'evSyncRequest').
+{- | Typed constants for every release-event @(category, label)@ pair.
+Additive: existing call sites still use string literals; migrate over time.
 -}
 evCategoryBusiness, evCategoryDecisionEngine, evCategoryNotification, evCategorySnapshot :: Text
 evCategoryBusiness = "BUSINESS"
@@ -209,7 +177,6 @@ evCategoryDecisionEngine = "DECISION_ENGINE"
 evCategoryNotification = "NOTIFICATION"
 evCategorySnapshot = "SNAPSHOT"
 
--- | BUSINESS category labels.
 evTrafficUpdated
     , evSyncRequest
     , evSyncResponse
@@ -280,25 +247,16 @@ evImmediateRevert = "IMMEDIATE_REVERT"
 evRunnerPicked = "RUNNER_PICKED"
 evCompleted = "COMPLETED"
 
--- | DECISION_ENGINE category labels.
 evDecisionResult :: Text
 evDecisionResult = "DECISION_RESULT"
 
--- | NOTIFICATION category labels.
 evStatusUpdated :: Text
 evStatusUpdated = "STATUS_UPDATED"
 
-{- | SNAPSHOT category labels.
-
-  * @DEPLOYMENT_BEFORE@ / @DEPLOYMENT_AFTER@ — GROUND-TRUTH snapshots
-    captured at workflow execution time (prepare + finalize stages).
-    These reflect what the cluster actually looked like.
-  * @DEPLOYMENT_BEFORE_PREVIEW@ / @DEPLOYMENT_AFTER_PREVIEW@ — PREVIEW
-    snapshots captured at release-creation time by the API handlers
-    (createReleaseH / revertReleaseH / restartReleaseH). These exist so
-    the diff endpoint can show a preview immediately after the release is
-    created, before the workflow has actually run. The diff endpoint
-    prefers the workflow labels if present and falls back to preview.
+{- | @DEPLOYMENT_BEFORE@/@_AFTER@ are ground-truth workflow snapshots.
+@*_PREVIEW@ are captured at release-creation time by the API handlers so
+the diff endpoint has something to show before the workflow runs; the
+diff endpoint prefers the workflow labels and falls back to preview.
 -}
 evDeploymentBefore, evDeploymentAfter, evDeploymentBeforePreview, evDeploymentAfterPreview :: Text
 evDeploymentBefore = "DEPLOYMENT_BEFORE"

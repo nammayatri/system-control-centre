@@ -22,15 +22,8 @@ hpaExists cfg ns hpaName = do
     res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get hpa", shellQuote hpaName, "-o name"])
     pure $ case res of Right _ -> True; Left _ -> False
 
-{- | Read the live HPA's @spec.minReplicas@ and @spec.maxReplicas@.
-Used by:
-  * 'scaleNewDeploymentForStage' — to cap 'safeTarget' at 'maxReplicas'
-    so progressive rollout never tries to scale past the operator's
-    configured HPA ceiling.
-  * 'Runner.scaleDownOldDeployment' — to shrink the old HPA's floor
-    before deleting it, closing the reconciler race.
-Returns @(0, 0)@ on any failure (get-hpa error, parse error). Callers
-treat @maxReplicas == 0@ as "no live cap, use raw safeTarget".
+{- | Read live HPA @spec.minReplicas/maxReplicas@. Returns @(0, 0)@ on any
+failure; callers treat @maxReplicas == 0@ as "no live cap".
 -}
 getHpaMinMax :: Config -> Text -> Text -> IO (Int, Int)
 getHpaMinMax cfg ns hpaName = do
@@ -69,12 +62,10 @@ buildDeleteHpaCommand cfg ns hpaName =
 
 buildCreateHpaFromTemplateCommand :: Config -> Text -> Text -> Text -> Text -> Int -> Int -> String
 buildCreateHpaFromTemplateCommand cfg ns serviceHost version hpaTemplate minR maxR =
-    -- Julia parity (kubernetes.jl:3125 createHPAFromTemplate): substitute
-    -- placeholders, then JSON-set spec.minReplicas / spec.maxReplicas via jq
-    -- so ANY initial value (not just the literal `1`) in the template gets
-    -- overwritten. The previous string-replace approach silently no-oped if
-    -- the template shipped with minReplicas/maxReplicas != 1, producing
-    -- wrong-sized HPAs on first release.
+    -- Substitute template placeholders, then JSON-set
+    -- spec.minReplicas/maxReplicas via jq so ANY initial value gets
+    -- overwritten (string-replace silently no-oped if the template's
+    -- values differed from the literal `1`, producing wrong-sized HPAs).
     let depName = T.unpack serviceHost <> "-" <> T.unpack version
         withDep = T.replace "{{DEPLOYMENT-NAME}}" (T.pack depName) hpaTemplate
         withNs = T.replace "{{NAMESPACE}}" ns withDep
@@ -83,36 +74,24 @@ buildCreateHpaFromTemplateCommand cfg ns serviceHost version hpaTemplate minR ma
 
 buildCloneHpaCommand :: Config -> Text -> Text -> Text -> Text -> Text -> String
 buildCloneHpaCommand cfg ns serviceHost _oldVersion newVersion' oldHpaName =
-    -- Clone the old HPA onto the new deployment while preserving operator
-    -- intent verbatim: min/max/metrics/behavior all carry over from the old
-    -- HPA. Only identity + target pointers are rewritten:
-    --
+    -- Clone the old HPA: preserve min/max/metrics/behavior verbatim,
+    -- rewrite identity + target pointers only:
     --   1. metadata.name → new HPA name
     --   2. spec.scaleTargetRef.name → new deployment name
-    --   3. Strip stale annotations: last-applied-configuration,
-    --      autoscaling.alpha.kubernetes.io/current-metrics,
-    --      autoscaling.alpha.kubernetes.io/conditions
-    --   4. For autoscaling/v2 with object metrics, rewrite
-    --      spec.metrics[*].object.describedObject.name → new deployment name
-    --      (so object metrics scale against the NEW deployment, not the old).
+    --   3. strip stale annotations (last-applied-configuration and the
+    --      autoscaling.alpha.kubernetes.io/current-metrics | conditions)
+    --   4. rewrite spec.metrics[*].object.describedObject.name for v2
+    --      object metrics so they track the NEW deployment.
     --
-    -- Rationale (deliberate divergence from Julia's kubernetes.jl:1199-1247):
-    -- Julia recomputed spec.minReplicas/spec.maxReplicas here from a formula
-    -- based on the old deployment's replica count, then ratcheted upward every
-    -- rollout stage. That cascaded into min=max=N pinned HPAs whenever a prior
-    -- stage inflated the replica count (revert/restart). We stop the cascade
-    -- by letting the clone preserve whatever min/max the operator has on the
-    -- old HPA; the progressive-rollout path scales the deployment directly
-    -- and no longer touches HPA bounds. See scaleNewDeploymentForStage.
+    -- Deliberately does NOT recompute min/max from replica count: that
+    -- caused min=max=N pinned HPAs after revert/restart. The progressive
+    -- rollout path scales the deployment directly instead.
     let newDepName = T.unpack serviceHost <> "-" <> T.unpack newVersion'
         newHpaName = newDepName <> "-hpa"
         jqFilter =
             ".metadata.name = $newHpaName"
                 <> " | .spec.scaleTargetRef.name = $newDepName"
                 <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.status)"
-                -- Strip stale annotations that would otherwise collide with apply
                 <> " | if .metadata.annotations then .metadata.annotations |= (del(.\"kubectl.kubernetes.io/last-applied-configuration\", .\"autoscaling.alpha.kubernetes.io/current-metrics\", .\"autoscaling.alpha.kubernetes.io/conditions\")) else . end"
-                -- v2 HPA: rewrite describedObject.name on each object-type metric.
-                -- No-op for CPU/memory metrics.
                 <> " | if .spec.metrics then .spec.metrics |= map(if .object then .object.describedObject.name = $newDepName else . end) else . end"
      in unwords [kubectlBin cfg, "-n", shellQuote ns, "get hpa", shellQuote oldHpaName, "-o json | jq", "--arg newHpaName", shellQuote (T.pack newHpaName), "--arg newDepName", shellQuote (T.pack newDepName), "'" <> jqFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote ns, "apply -f -"]

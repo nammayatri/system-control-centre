@@ -43,9 +43,7 @@ import Shared.Config.Registry (validateConfigValue)
 import Shared.Config.Types (ConfigEntry (..), configGroupToText, configTypeDefault, configTypeTag)
 import Shared.Queries.ServerConfig (deleteServerConfig, listServerConfigsByProduct, upsertServerConfig)
 
--- ============================================================================
--- Product Config CRUD (GET/POST/GET/:id/PUT/:id/DELETE/:id /products/config)
--- ============================================================================
+-- Product Config CRUD (/products/config)
 
 listProductConfigsH :: AuthedPerson -> Flow [ProductConfigResponse]
 listProductConfigsH _ap = map toProductConfigResponse <$> listProducts
@@ -98,9 +96,7 @@ deleteProductConfigH _ap pid = do
     deleteProductConfig pid
     pure $ APIResponse "SUCCESS" "Product config deleted"
 
--- ============================================================================
--- Release Config CRUD (GET/POST/GET/:id/PUT/:id/DELETE/:id /services/config)
--- ============================================================================
+-- Release Config CRUD (/services/config)
 
 listReleaseConfigsH :: AuthedPerson -> Maybe Text -> Flow [ReleaseConfigResponse]
 listReleaseConfigsH _ap mProduct =
@@ -143,26 +139,18 @@ deleteReleaseConfigH _ap rid = do
     deleteReleaseConfig rid
     pure $ APIResponse "SUCCESS" "Release config deleted"
 
--- ============================================================================
--- Server Config
--- ============================================================================
-
 listServerConfigH :: AuthedPerson -> Maybe Text -> Flow ServerConfigResponse
 listServerConfigH _ap mProduct = do
     rows <- listServerConfigsByProduct mProduct
-    -- Build a map of DB rows by name
     let dbMap :: Map.Map Text (Int, Text, Text, Text, Int, Maybe Text)
         dbMap = Map.fromList [(n, row) | row@(_, _, n, _, _, _) <- rows]
-        -- Merge registry entries with DB state
         mergedConfigs = map (mergeEntry dbMap) allConfigEntries
-        -- Also include DB rows that are NOT in registry (unknown/legacy configs)
+        -- Include legacy DB rows not in the registry.
         registryKeys = map ceKey allConfigEntries
         extraDbConfigs = [mkUnknownEntry row | row@(_, _, n, _, _, _) <- rows, n `notElem` registryKeys]
         allConfigs = mergedConfigs ++ extraDbConfigs
-        -- Group by group name
         grouped = Map.toAscList $ Map.fromListWith (++) [(g, [c]) | (g, c) <- allConfigs]
         groupObjs = map (\(gName, cs) -> ServerConfigGroup gName cs) grouped
-    -- Also return flat configs list for backward compat
     let flatConfigs = map toFlatItem rows
     pure $ ServerConfigResponse groupObjs flatConfigs
   where

@@ -1,30 +1,12 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-{- | Typed exception hierarchy — NammaYatri-style error codes, messages,
-and tags, but with a cleaner single-module design.
+{- | Typed exception hierarchy. 'AppException' wraps any type with a
+'ToAppError' instance; the global handler in "Core.Server" renders the
+resulting 'ServerError' as @{status, code, message, tag}@ JSON.
 
-== Hierarchy
-
-@
-SomeException
-  └── AppException (our root — carries ToAppError constraint)
-        ├── APIError       — client-facing (400/403/404/409/422/500)
-        ├── AuthError      — authentication/authorization failures (401/403)
-        ├── DBError        — database failures (500)
-        └── WorkflowError  — release workflow failures (500)
-@
-
-== JSON response format (all errors)
-
-@
-{
-  "status": "ERROR",
-  "code": "NOT_FOUND",
-  "message": "Release r-123 not found",
-  "tag": "APIError"
-}
-@
+Branches: 'APIError' (client-facing 4xx/5xx), 'AuthError' (401/403),
+'DBError' (500), 'WorkflowError' (500).
 -}
 module Core.AppError (
     -- * Root exception
@@ -63,9 +45,7 @@ import Data.Typeable (Typeable, cast)
 import Network.HTTP.Types (Header)
 import Servant (ServerError (..), err400, err401, err403, err404, err409, err500)
 
--- ── Structured error response ─────────────────────────────────────
-
--- | Build a structured JSON error body (used by all error types).
+-- | Build a structured JSON error body.
 errorResponseJSON :: Text -> Text -> Text -> Text -> LBS.ByteString
 errorResponseJSON status code message tag =
     encode $
@@ -79,10 +59,8 @@ errorResponseJSON status code message tag =
 jsonHeaders :: [Header]
 jsonHeaders = [("Content-Type", "application/json")]
 
--- ── Root exception ────────────────────────────────────────────────
-
-{- | Root of our exception hierarchy. The global error handler in
-'Core.Server.toHandler' catches this and calls 'toServantError'.
+{- | Root exception; the global handler in 'Core.Server.toHandler'
+catches this and dispatches via 'toServantError'.
 -}
 data AppException = forall e. (Exception e, ToAppError e) => AppException e
 
@@ -91,16 +69,12 @@ instance Show AppException where
 
 instance Exception AppException
 
-{- | Convert a domain exception to an HTTP error response.
-Every error type in the hierarchy implements this.
--}
+-- | Convert a domain exception to an HTTP error response.
 class (Show e, Typeable e) => ToAppError e where
     toServantError :: e -> ServerError
     toErrorCode :: e -> Text
     toErrorTag :: e -> Text
     toErrorMessage :: e -> Text
-
--- ── APIError ──────────────────────────────────────────────────────
 
 data APIError
     = NotFound Text
@@ -157,8 +131,6 @@ instance ToJSON APIError where
             , "tag" .= toErrorTag err
             ]
 
--- ── AuthError ─────────────────────────────────────────────────────
-
 data AuthError
     = Unauthorized Text
     | InvalidToken Text
@@ -205,8 +177,6 @@ instance ToAppError AuthError where
             AccountDisabled _ -> err403
             PermissionDenied _ -> err403
 
--- ── DBError ───────────────────────────────────────────────────────
-
 data DBError = DBError
     { dbErrorContext :: Text
     , dbErrorDetail :: Text
@@ -228,8 +198,6 @@ instance ToAppError DBError where
             { errBody = errorResponseJSON "ERROR" (toErrorCode err) (toErrorMessage err) (toErrorTag err)
             , errHeaders = jsonHeaders
             }
-
--- ── WorkflowError ─────────────────────────────────────────────────
 
 data WorkflowError = WorkflowError
     { wfErrorStep :: Text
@@ -253,22 +221,10 @@ instance ToAppError WorkflowError where
             , errHeaders = jsonHeaders
             }
 
--- ── Error helpers ─────────────────────────────────────────────────
-
-{- | Extract from Maybe or throw typed error.
-
-@
-release <- fromMaybeM (NotFound "Release not found") mRelease
-@
--}
+-- | Extract from 'Maybe' or throw a typed error.
 fromMaybeM :: (MonadThrow m, Exception e) => e -> Maybe a -> m a
 fromMaybeM err = maybe (throwM err) pure
 
-{- | Extract from Either or throw, mapping the Left value.
-
-@
-value <- fromEitherM (BadRequest . T.pack) parseResult
-@
--}
+-- | Extract from 'Either', mapping the Left to an exception.
 fromEitherM :: (MonadThrow m, Exception e) => (left -> e) -> Either left a -> m a
 fromEitherM toErr = either (throwM . toErr) pure

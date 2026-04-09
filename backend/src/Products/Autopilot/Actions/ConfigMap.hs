@@ -54,10 +54,6 @@ import Shared.API.Response (APIResponse (..))
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
--- ============================================================================
--- ConfigMap Tracker Handlers
--- ============================================================================
-
 listConfigMapsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow ConfigMapListResponse
 listConfigMapsH _ap mFrom mTo = do
     now <- liftIO getCurrentTime
@@ -123,23 +119,20 @@ createConfigMapH _ap body = do
                         , syncEnabled = Nothing
                         , envOverrideData = Nothing
                         , slackThreadTs = Nothing
-                        , -- ConfigMap releases don't carry a K8s release context (no
-                          -- rolling deployment), but the record field MUST be initialised
-                          -- or accessing it crashes at runtime with "Missing field in
-                          -- record construction" (caught by -Wmissing-fields).
+                        , -- ConfigMap releases carry no K8s context, but the record
+                          -- field must be initialised or access crashes at runtime.
                           releaseContext = Nothing
                         }
                 targetState = ConfigState emptyConfigState
             insertReleaseTracker tracker (Just targetState)
             insertReleaseEvent rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
-            -- Capture CONFIGMAP_BEFORE snapshot at creation time so diff is available immediately
+            -- Snapshot at creation so diff is immediately available.
             cfg <- getConfig
             let cmName = fromMaybe service' name'
             p <- findProductByName product'
             let ns = maybe product' getProductNamespace p
             captureConfigMapSnapshot cfg rid ns cmName "CONFIGMAP_BEFORE"
             notifyConfigMapCreated tracker
-            -- Handle sync to secondary cluster
             let isSync = case body of
                     Object o -> isTruthy "isSync" o
                     _ -> False
@@ -201,7 +194,6 @@ updateConfigMapH _ap cmId' body = do
     case m of
         Nothing -> pure $ APIResponse "ERROR" "ConfigMap tracker not found"
         Just (rt, mts) -> do
-            -- Check if this is a revert request — handle specially
             let isRevert = case body of
                     Object obj -> getStrM "status" obj == Just "revert"
                     _ -> False
@@ -209,16 +201,11 @@ updateConfigMapH _ap cmId' body = do
                 then handleConfigMapRevert rt mts cmId'
                 else do
                     let updated = applyCmUpdates rt body
-                    -- CAS (task #34): replace blind insertReleaseTracker with a
-                    -- conditional update keyed on the snapshot status. If the
-                    -- ConfigMap row was mutated by a concurrent request between
-                    -- our findReleaseTracker and now, fail loudly so the UI
-                    -- refreshes rather than silently overwriting that change.
+                    -- CAS on snapshot status so concurrent writers can't be clobbered.
                     casOk <- conditionalUpdateTracker updated mts (releaseStatusToText (NT.status rt))
                     if not casOk
                         then pure $ APIResponse "ERROR" "ConfigMap was modified by another request. Please refresh and try again."
                         else do
-                            -- Status-specific notifications
                             case body of
                                 Object obj -> do
                                     case getStrM "status" obj of
@@ -249,7 +236,6 @@ restoreOriginalOnRevertCancel :: ReleaseTracker -> Flow ()
 restoreOriginalOnRevertCancel rt = do
     case NT.info rt of
         Just "REVERT" -> do
-            -- Extract original tracker ID from description "Revert of <id>"
             let origId = T.stripPrefix "Revert of " =<< NT.description rt
             case origId of
                 Just oid -> do
@@ -257,9 +243,7 @@ restoreOriginalOnRevertCancel rt = do
                     case mOrig of
                         Just (origRt, origTs) | NT.status origRt == REVERTING -> do
                             let restored = origRt{NT.status = COMPLETED}
-                            -- CAS (task #34): only restore if the original tracker is
-                            -- still REVERTING. If something else moved it (e.g. a
-                            -- second revert flow), do NOT clobber.
+                            -- CAS: only restore if original is still REVERTING.
                             casOk <- conditionalUpdateTracker restored origTs (releaseStatusToText (NT.status origRt))
                             if casOk
                                 then logInfo $ "[CONFIGMAP] Restored original tracker " <> oid <> " from REVERTING to COMPLETED"
@@ -268,7 +252,6 @@ restoreOriginalOnRevertCancel rt = do
                 Nothing -> pure ()
         _ -> pure ()
 
--- | Handle revert by creating a new tracker with old config data
 handleConfigMapRevert :: ReleaseTracker -> Maybe TargetState -> Text -> Flow APIResponse
 handleConfigMapRevert rt mts cmId' = do
     events <- listReleaseEvents cmId'
@@ -277,13 +260,11 @@ handleConfigMapRevert rt mts cmId' = do
         Nothing -> pure $ APIResponse "ERROR" "No CONFIGMAP_BEFORE snapshot found to revert to"
         Just beforeEvt -> do
             newRid <- liftIO (UUID.toText <$> UUID.nextRandom)
-            -- Extract just the data section as JSON (not full K8s YAML) so the
-            -- workflow patches it into the current configmap like Julia does,
-            -- rather than trying kubectl replace with a stale resourceVersion.
+            -- Extract just the data section so the workflow can patch the
+            -- live configmap instead of replacing with a stale resourceVersion.
             let oldConfig = case S.rePayload beforeEvt of
                     String s -> Just (extractDataAsJson s)
                     _ -> Nothing
-                -- Create a new tracker as a revert copy
                 revertTracker =
                     rt
                         { NT.releaseId = newRid
@@ -296,7 +277,6 @@ handleConfigMapRevert rt mts cmId' = do
                         , NT.dateCreated = Nothing
                         , NT.lastUpdated = Nothing
                         }
-                -- Update metadata with old config
                 oldMeta = case NT.metadata revertTracker of
                     Just (Object o) -> o
                     _ -> KM.empty
@@ -309,15 +289,12 @@ handleConfigMapRevert rt mts cmId' = do
                 targetState = ConfigState emptyConfigState
             insertReleaseTracker finalTracker (Just targetState)
             insertReleaseEvent newRid "BUSINESS" "REVERT_TRACKER_CREATED" (toJSON ("Revert of " <> cmId'))
-            -- Capture CONFIGMAP_BEFORE snapshot for the revert tracker (current K8s state)
             cfg <- getConfig
             let cmName = NT.service finalTracker
             p <- findProductByName (NT.appGroup finalTracker)
             let ns = maybe (NT.appGroup finalTracker) getProductNamespace p
             captureConfigMapSnapshot cfg newRid ns cmName "CONFIGMAP_BEFORE"
-            -- Mark original as REVERTING via CAS (task #34): another request
-            -- (status update, abort) may have raced us between findReleaseTracker
-            -- and now; we must not overwrite their change.
+            -- CAS: don't overwrite a concurrent status change on the original.
             casOk <- conditionalUpdateTracker (rt{NT.status = REVERTING}) mts (releaseStatusToText (NT.status rt))
             if not casOk
                 then pure $ APIResponse "ERROR" "ConfigMap was modified by another request. Please refresh and try again."
@@ -325,11 +302,7 @@ handleConfigMapRevert rt mts cmId' = do
                     notifyConfigMapReverted (rt{NT.status = REVERTING})
                     pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
 
--- ============================================================================
--- K8s ConfigMap Lookup (kubectl)
--- ============================================================================
-
--- | Fetch configmap names (no NAME param) or data (with NAME param) from K8s
+-- | Fetch configmap names (no NAME) or data (with NAME) from K8s.
 fetchConfigMapFromK8sH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow Value
 fetchConfigMapFromK8sH _ap mProduct mName = do
     cfg <- getConfig
@@ -358,7 +331,7 @@ fetchConfigMapFromK8sH _ap mProduct mName = do
                                      in pure $ object ["configMap" .= cleaned]
                                 _ -> pure $ object ["configMap" .= ("" :: Text)]
 
--- | Fetch configmap from secondary cluster via sync URL
+-- | Fetch configmap from secondary cluster via sync URL.
 fetchSecondaryConfigMapH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow Value
 fetchSecondaryConfigMapH _ap mProduct mName = do
     cfg <- getConfig
@@ -377,7 +350,6 @@ fetchSecondaryConfigMapH _ap mProduct mName = do
                     _ -> ""
                 getUrl = normalised <> "configmap" <> queryParams
                 getCurlArgs = ["-s", "-X", "GET", getUrl, "--max-time", "15"] <> authArgs
-            -- TODO: migrate to structured logging
             logInfo $ "[SYNC-CONFIGMAP] Fetching secondary configmap from: " <> T.pack getUrl
             getResult <- liftIO (try (readProcessWithExitCode "curl" getCurlArgs "") :: IO (Either SomeException (ExitCode, String, String)))
             case getResult of
@@ -387,11 +359,6 @@ fetchSecondaryConfigMapH _ap mProduct mName = do
                         Nothing -> pure $ object ["configMap" .= toJSON ([] :: [Text])]
                 _ -> pure $ object ["configMap" .= toJSON ([] :: [Text])]
 
--- ============================================================================
--- Internal Helpers
--- ============================================================================
-
--- | Convert a ReleaseTracker (category=BackendConfig) to typed ConfigMapResponse
 toConfigMapResponse :: ReleaseTracker -> ConfigMapResponse
 toConfigMapResponse rt =
     let meta = case NT.metadata rt of

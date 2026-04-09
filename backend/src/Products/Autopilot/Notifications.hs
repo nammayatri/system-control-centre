@@ -1,20 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-{- | Slack notification helpers for autopilot release lifecycle.
+{- | Slack notifications for autopilot release lifecycle.
 
-Thread-aware: the first message (CREATED) starts a thread,
-all subsequent messages (Approved, Progress, COMPLETED, etc.)
-reply in that thread using the thread_ts stored in release_tracker.slack_thread_ts.
-
-Uses Slack Block Kit with colored attachments for rich formatting.
-
-== Monad / perf
-
-Notifications run in 'Flow'. The actual Slack HTTP call goes through
-'Core.Http.Client.httpRaw' which uses the process-wide pooled TLS
-manager (no per-call 'newManager'). Notifications are dispatched
-asynchronously via 'forkFlow' so HTTP handlers do not block on Slack.
+Thread-aware: CREATED starts a thread; later messages reply in it using the
+thread_ts stored in release_tracker.slack_thread_ts. Sent via 'forkFlow' so
+HTTP handlers don't block on Slack, except the create messages which must
+save thread_ts before a follow-up notification can race them.
 -}
 module Products.Autopilot.Notifications (
     notifyReleaseCreated,
@@ -81,20 +73,16 @@ import Products.Autopilot.Types.Target (TargetState)
 import System.Environment (lookupEnv)
 import Prelude
 
--- ── Colors ───────────────────────────────────────────────────────
-
 colorCreated, colorApproved, colorInProgress, colorCompleted :: Text
 colorAborted, colorPaused, colorReverted, colorDefault :: Text
-colorCreated = "#2563eb" -- blue
-colorApproved = "#0891b2" -- cyan
-colorInProgress = "#d97706" -- amber
-colorCompleted = "#16a34a" -- green
-colorAborted = "#dc2626" -- red
-colorPaused = "#6366f1" -- indigo
-colorReverted = "#7c3aed" -- violet
-colorDefault = "#71717a" -- zinc
-
--- ── Internal helpers ──────────────────────────────────────────────
+colorCreated = "#2563eb"
+colorApproved = "#0891b2"
+colorInProgress = "#d97706"
+colorCompleted = "#16a34a"
+colorAborted = "#dc2626"
+colorPaused = "#6366f1"
+colorReverted = "#7c3aed"
+colorDefault = "#71717a"
 
 getSlackToken :: IO (Maybe String)
 getSlackToken = lookupEnv "SLACK_BOT_TOKEN"
@@ -104,25 +92,18 @@ getDashboardUrl = do
     mUrl <- lookupEnv "DASHBOARD_URL"
     pure $ T.pack $ maybe "http://localhost:5173" id mUrl
 
-{- | Slack channel is owned by the app group. One channel per app group
-covers all releases, configmaps, and VS edits.
--}
+-- | One Slack channel per app group covers releases, configmaps and VS edits.
 getSlackChannel :: Text -> Flow (Maybe Text)
 getSlackChannel prod = do
     mProd <- findProductByName prod
     pure (mProd >>= getSlackChannelDirect)
 
--- | Truncate to N chars, appending an ellipsis marker if cut.
 truncateT :: Int -> Text -> Text
 truncateT n t
     | T.length t <= n = t
     | otherwise = T.take n t <> "..."
 
-{- | Post a rich message to Slack using Block Kit attachments.
-Returns the message ts (thread ID) if successful. Uses the pooled
-HTTP manager from 'Core.Http.Client'. Logs HTTP/exception failures
-inline (channel name + truncated error).
--}
+-- | Post a Block Kit message; returns the message ts (thread ID) on success.
 sendSlackRich :: Text -> Text -> Text -> [Value] -> Maybe Text -> Flow (Maybe Text)
 sendSlackRich channel fallbackText color blocks mThreadTs = do
     mToken <- liftIO getSlackToken
@@ -149,11 +130,8 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
                             ]
                         , reqBody = Just (encode bodyObj)
                         , reqLogTag = "slack"
-                        , -- Bug fix (round 7 / E10): cap Slack POST at 5s so the
-                          -- synchronous notifyReleaseCreated/notifyConfigMapCreated
-                          -- /notifyVsEditLocked paths can never wedge an HTTP
-                          -- handler waiting for Slack. On timeout, we return
-                          -- Nothing — the caller logs and proceeds.
+                        , -- 5s cap so the synchronous create paths can never
+                          -- wedge an HTTP handler waiting on Slack.
                           reqTimeout = Seconds 5
                         }
             result <- liftIO (httpRaw req)
@@ -188,7 +166,6 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
                         logInfoG $ "[SLACK] Sent to #" <> channel <> maybe "" (\ts -> " (ts=" <> ts <> ")") mTs
                         pure mTs
 
--- | Build a section block with markdown text
 sectionBlock :: Text -> Value
 sectionBlock txt =
     object
@@ -196,7 +173,6 @@ sectionBlock txt =
         , "text" .= object ["type" .= ("mrkdwn" :: Text), "text" .= txt]
         ]
 
--- | Build a context block (small grey text)
 contextBlock :: [Text] -> Value
 contextBlock items =
     object
@@ -204,11 +180,7 @@ contextBlock items =
         , "elements" .= map (\t -> object ["type" .= ("mrkdwn" :: Text), "text" .= t]) items
         ]
 
-{- | Run the notification body asynchronously iff Slack is enabled.
-The DB hit for 'isSlackEnabled' happens on the caller thread (cheap)
-so we can short-circuit before forking, but the actual Slack HTTP
-work runs on a background thread and never blocks the HTTP handler.
--}
+-- | Run the notification body async iff Slack is enabled.
 whenSlackEnabled :: Flow () -> Flow ()
 whenSlackEnabled action = do
     enabled <- isSlackEnabled
@@ -223,10 +195,7 @@ withChannel prod svc f = do
         Nothing -> logWarningG $ "[SLACK] No channel for " <> prod <> "/" <> svc
         Just ch -> f ch
 
-{- | Read thread_ts fresh from DB. Use this only when the caller does
-not already have a 'ReleaseTracker' in hand (e.g. VS-edit paths that
-only carry a trackerId).
--}
+-- | Read thread_ts fresh from DB (for callers without a ReleaseTracker in hand).
 getThreadTs :: Text -> Flow (Maybe Text)
 getThreadTs rid = do
     m <- RTQ.findReleaseTracker rid
@@ -234,18 +203,9 @@ getThreadTs rid = do
         Just (tracker, _) -> pure (slackThreadTs tracker)
         Nothing -> pure Nothing
 
-{- | Resolve the slack thread_ts for a tracker, with single DB fallback.
-
-Race we are guarding against: createReleaseH inserts the tracker with
-slack_thread_ts=NULL and forks the create-Slack POST asynchronously. A user
-who clicks Approve immediately may hit approveReleaseH before the POST
-completes and saves the thread_ts. The in-memory tracker is stale (Nothing)
-so the approve notification would post a NEW top-level Slack message
-instead of replying in-thread.
-
-Strategy: if in-memory is Just, use it (zero cost). Otherwise hit the DB
-once. No retry loop — if the create POST hasn't landed yet, accept the
-fallback to a top-level message rather than blocking the request.
+{- | Resolve thread_ts with a single DB fallback. Guards the race where an
+Approve hits before the async create-Slack POST has saved thread_ts; an
+in-memory-stale Nothing would otherwise post a new top-level message.
 -}
 resolveThreadTs :: ReleaseTracker -> Flow (Maybe Text)
 resolveThreadTs tracker = case slackThreadTs tracker of
@@ -255,27 +215,20 @@ resolveThreadTs tracker = case slackThreadTs tracker of
 saveThreadTs :: Text -> Text -> Flow ()
 saveThreadTs = RTQ.updateReleaseTrackerSlackThreadTs
 
--- | Clickable header link only (no redundant product/service text)
 releaseLink :: ReleaseTracker -> IO Text
 releaseLink t = do
     base <- getDashboardUrl
     let url = base <> "/releases/" <> releaseId t
     pure $ "<" <> url <> "|" <> appGroup t <> " | " <> service t <> " | " <> env t <> " Release>"
 
--- | Version line with arrow
 versionLine :: ReleaseTracker -> Text
 versionLine t = oldVersion t <> " → " <> newVersion t <> " | " <> createdBy t
 
--- ── Public notification functions ─────────────────────────────────
-
-{- | Send the "release created" Slack message SYNCHRONOUSLY (not via forkFlow).
-This is critical: every subsequent notification (Approved, Progress, Completed,
-etc.) needs to thread under the create message via thread_ts. If create is
-fired-and-forgotten, an immediate Approve hits DB before the create POST has
-saved thread_ts, so the Approved message lands as a new top-level message.
-By blocking the create handler on this one Slack POST (~200-500ms), we
-guarantee the DB has thread_ts before the user can possibly call approve.
-All other notify* functions remain async via whenSlackEnabled.
+{- | Send the CREATED Slack message SYNCHRONOUSLY. Every subsequent
+notification threads under this message via thread_ts, so we must block
+the create handler on this ~200-500ms POST to guarantee thread_ts is in
+the DB before an immediate Approve can race it. All other notify*
+functions remain async via whenSlackEnabled.
 -}
 notifyReleaseCreated :: ReleaseTracker -> Flow ()
 notifyReleaseCreated tracker = do
@@ -354,13 +307,9 @@ notifyReleaseReverted :: ReleaseTracker -> Flow ()
 notifyReleaseReverted tracker = whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
         threadTs <- resolveThreadTs tracker
-        -- Bug fix: this notification fires on the REVERT tracker, whose
-        -- versions are SWAPPED relative to the original release
-        -- (Actions/Release.hs:794-795). The version we ended up at after
-        -- the rollback is the revert tracker's @newVersion@, NOT
-        -- @oldVersion@. Previously this read @oldVersion@ and reported
-        -- the wrong target ("Rolled back to v6" when we actually went
-        -- back to v5).
+        -- Fires on the REVERT tracker, whose versions are swapped vs the
+        -- original (Actions/Release.hs). The rollback target is newVersion,
+        -- not oldVersion — reading oldVersion here misreports the target.
         let blocks =
                 [ sectionBlock "*REVERTED*"
                 , contextBlock ["Rolled back to `" <> newVersion tracker <> "`"]
@@ -427,15 +376,7 @@ notifyPodsScaledDown tracker oldVer = whenSlackEnabled $
         _ <- sendSlackRich channel ("Pods scaled down: " <> oldVer) colorDefault blocks threadTs
         pure ()
 
--- ── VS Edit Notifications ────────────────────────────────────────
-
-{- | SYNCHRONOUS (not forked through whenSlackEnabled). The thread_ts MUST
-be saved to DB before this call returns, otherwise an immediately-following
-notifyVsEditApproved/Applied/Discarded reads slackThreadTs=NULL and posts
-a fresh top-level message instead of replying in-thread (the Slack
-"thread fan-out" bug). Same fix as notifyReleaseCreated / notifyVsEditLocked
-/ notifyConfigMapCreated.
--}
+-- | Synchronous — see notifyReleaseCreated for the thread_ts rationale.
 notifyVsEditCreated :: Text -> Text -> Text -> Maybe Text -> Flow ()
 notifyVsEditCreated trackerId prod svc mCreatedByUser = do
     enabled <- isSlackEnabled
@@ -454,11 +395,7 @@ notifyVsEditCreated trackerId prod svc mCreatedByUser = do
                 Just ts -> saveThreadTs trackerId ts
                 Nothing -> pure ()
 
-{- | SYNCHRONOUS (not forked). Same fix as notifyReleaseCreated: every
-follow-up notification (Approved/Applied/Discarded/etc.) needs the
-thread_ts saved to DB before it runs. Forking this would race the
-immediately-following save/approve/apply that the user does.
--}
+-- | Synchronous — see notifyReleaseCreated for the thread_ts rationale.
 notifyVsEditLocked :: Text -> Text -> Text -> Text -> Flow ()
 notifyVsEditLocked trackerId prod svc lockedByUser = do
     enabled <- isSlackEnabled
@@ -519,12 +456,7 @@ notifyVsEditUnlocked trackerId prod svc = whenSlackEnabled $
         _ <- sendSlackRich channel "VS UNLOCKED" colorDefault blocks threadTs
         pure ()
 
--- ── ConfigMap Notifications ──────────────────────────────────────
-
-{- | SYNCHRONOUS (not forked) — same reason as notifyReleaseCreated.
-Approve / discard / apply will fire immediately after create on the user's
-next click; thread_ts must be in DB before they run.
--}
+-- | Synchronous — see notifyReleaseCreated for the thread_ts rationale.
 notifyConfigMapCreated :: ReleaseTracker -> Flow ()
 notifyConfigMapCreated tracker = do
     enabled <- isSlackEnabled
@@ -631,32 +563,15 @@ notifyGenericThreadMessage tracker msg = whenSlackEnabled $
         _ <- sendSlackRich channel msg colorDefault blocks threadTs
         pure ()
 
-{- | Decision-engine notification with dedup. Julia parity
-(release/workflow/service.jl:793-824 ABHSSlackSpamFilter): only sends a
-Slack message if the (decisionType, decision, reason) tuple differs from
-the last DECISION_RESULT event for this tracker. Without this, every
-decision-engine poll cycle (every cooloff iteration) would re-send the
-same message, flooding the channel during stuck Wait/Abort states.
-
-@decisionType@ is a stable tag (e.g. "PREMONITORING", "POSTMONITORING",
-"PROMETHEUS"). @decisionValue@ is the decision name ("Continue"/"Wait"/
-"Abort"). @reason@ is the engine's reason text.
-
-After sending, an audit event @DECISION_NOTIFIED@ is inserted so the
-next call can compare against it. Returns @True@ if the message was sent.
+{- | Decision-engine notification with two-layer dedup:
+  (a) exact-tuple (decisionType, decisionValue, reason) match against the
+      last DECISION_NOTIFIED event — suppresses stuck-state spam.
+  (b) time window (@decision_notification_dedup_minutes@) — suppresses
+      flapping Continue→Wait→Continue floods even when the tuple changes.
+Returns True if the message was sent.
 -}
 notifyDecisionThreadMessage :: ReleaseTracker -> Text -> Text -> Maybe Text -> Text -> Flow Bool
 notifyDecisionThreadMessage tracker decisionType decisionValue reason msg = do
-    -- Julia parity (release/workflow/service.jl:793-824 ABHSSlackSpamFilter):
-    -- two-layer dedup —
-    --   (a) tuple-key equality: (decisionType, decisionValue, reason). If
-    --       the new tuple is identical to the last one we sent, skip
-    --       regardless of how long ago.
-    --   (b) time window: even if the tuple changed, suppress if the LAST
-    --       notification (any tuple) was sent within
-    --       @decision_notification_dedup_minutes@ minutes. This is the
-    --       Julia repeat_interval_in_min check; without it a flapping
-    --       Continue→Wait→Continue cycle floods Slack.
     let dedupKey = decisionType <> "|" <> decisionValue <> "|" <> fromMaybe "" reason
     mPrev <- RTQ.findEventByLabel (releaseId tracker) "DECISION_NOTIFIED"
     windowMins <- getDecisionNotificationDedupMinutes
@@ -671,7 +586,7 @@ notifyDecisionThreadMessage tracker decisionType decisionValue reason msg = do
                             Just (String s) -> Just s
                             _ -> Nothing
                      in (k, t)
-                String s -> (s, Nothing) -- legacy format
+                String s -> (s, Nothing)
                 _ -> ("", Nothing)
             Nothing -> ("", Nothing)
         prevTime = prevTs >>= parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" . T.unpack
