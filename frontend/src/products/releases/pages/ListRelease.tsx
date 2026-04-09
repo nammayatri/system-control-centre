@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X, SlidersHorizontal } from 'lucide-react';
 import { useReleases } from '../hooks';
+import { useRefreshAnimation } from '../../../shared/hooks';
 import { StatusBadge } from '../components/StatusBadge';
 import { Button } from '../../../shared/ui/button';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
@@ -87,6 +88,12 @@ const ListRelease: React.FC = () => {
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   const [sortField, setSortField] = useState<string>('date_created');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  // Bug fix: dynamic time ranges ("last 30 mins") were frozen at the moment
+  // timeRange changed, so refresh re-fetched with stale from/to and returned
+  // identical results — the user saw a no-op refresh. Bumping this counter
+  // on manual refresh invalidates the memo, recomputes NOW-relative dates,
+  // and forces a real fresh query.
+  const [refreshTick, setRefreshTick] = useState(0);
   const datePickerRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
 
@@ -96,8 +103,17 @@ const ListRelease: React.FC = () => {
     return () => clearTimeout(t);
   }, [search]);
 
-  const dateRange = useMemo(() => getDateRange(timeRange, customFrom, customTo), [timeRange, customFrom, customTo]);
+  const dateRange = useMemo(() => getDateRange(timeRange, customFrom, customTo), [timeRange, customFrom, customTo, refreshTick]);
   const { data: releases = [], isLoading, isFetching, refetch } = useReleases(dateRange.from.toISOString(), dateRange.to.toISOString());
+
+  const doRefresh = useCallback(() => {
+    setRefreshTick((n) => n + 1);
+    // refetch() runs after the state update flushes the new dateRange through
+    // the useReleases query key. queueMicrotask ensures we fire refetch after
+    // React commits the re-render.
+    queueMicrotask(() => { void refetch(); });
+  }, [refetch]);
+  const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, doRefresh);
 
   // Outside click
   useEffect(() => {
@@ -229,11 +245,11 @@ const ListRelease: React.FC = () => {
               )}
             </button>
             <button
-              onClick={() => refetch()}
+              onClick={handleRefresh}
               className="h-10 w-10 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors"
               aria-label="Refresh"
             >
-              <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`h-4 w-4 ${refreshSpinning ? 'animate-spin' : ''}`} />
             </button>
           </div>
           {showMobileFilters && (
@@ -372,8 +388,8 @@ const ListRelease: React.FC = () => {
 
           <div className="flex-1" />
 
-          <button onClick={() => refetch()} aria-label="Refresh" className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150">
-            <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+          <button onClick={handleRefresh} aria-label="Refresh" className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150">
+            <RefreshCw className={`h-4 w-4 ${refreshSpinning ? 'animate-spin' : ''}`} />
           </button>
 
           <PermissionGate product="autopilot" permission="RELEASE_CREATE">

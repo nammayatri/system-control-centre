@@ -57,7 +57,7 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Data.Foldable as F
 import Data.List (find)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -71,7 +71,7 @@ import qualified Data.Yaml as Yaml
 import Database.PostgreSQL.Simple (Only (..), SqlError (..), execute, withTransaction)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
 import Products.Autopilot.EventLog (logStatusUpdated)
-import Products.Autopilot.K8s.Deployment (deploymentExists)
+import Products.Autopilot.K8s.Deployment (buildPatchDeploymentEnvsCommand, deploymentExists)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Notifications
@@ -636,12 +636,19 @@ createReleaseHBodyAfterStrategyCheck mXForwardedEmail mXPomeriumJwt K8sCreateRel
                                                             pure $ APIResponse "SUCCESS" ("Tracker already exists: " <> existingRid)
                                                         Nothing -> do
                                                             insertReleaseEvent rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
-                                                            -- Capture BEFORE snapshots at creation time (so diff is available immediately)
-                                                            -- Also generate a preview AFTER by modifying version/image in the old deployment YAML
+                                                            -- Capture PREVIEW snapshots at creation time so the diff
+                                                            -- is available immediately (before the workflow runs).
+                                                            -- Labels use the @_PREVIEW@ suffix to distinguish them
+                                                            -- from the workflow-time ground-truth snapshots, which
+                                                            -- use the plain @DEPLOYMENT_BEFORE/AFTER@ labels. Without
+                                                            -- this split, the event log showed TWO pairs of
+                                                            -- identically-labeled snapshots per release (create-time
+                                                            -- preview + workflow ground-truth). The diff endpoint
+                                                            -- prefers the workflow labels and falls back to
+                                                            -- @_PREVIEW@ if they haven't been written yet.
                                                             let ns = getProductNamespace pCfg
                                                                 oldDepName = targetSvcHost <> "-" <> resolvedOldVersion
-                                                            captureDeploymentSnapshot cfg rid ns oldDepName "DEPLOYMENT_BEFORE"
-                                                            -- Generate preview AFTER: take old deployment, replace version + image
+                                                            captureDeploymentSnapshot cfg rid ns oldDepName "DEPLOYMENT_BEFORE_PREVIEW"
                                                             captureDeploymentPreview
                                                                 cfg
                                                                 rid
@@ -649,7 +656,8 @@ createReleaseHBodyAfterStrategyCheck mXForwardedEmail mXPomeriumJwt K8sCreateRel
                                                                 oldDepName
                                                                 newVersion
                                                                 (fromMaybe "" metadataDockerImage)
-                                                                "DEPLOYMENT_AFTER"
+                                                                envOverrideData
+                                                                "DEPLOYMENT_AFTER_PREVIEW"
                                                             notifyReleaseCreated tracker
                                                             pure $ APIResponse "SUCCESS" ("Tracker created: " <> rid)
 
@@ -786,6 +794,14 @@ revertReleaseH _ap rid req = do
                                   -- about when the revert was actually issued.
                                   NT.dateCreated = Just now
                                 , NT.lastUpdated = Just now
+                                , -- Bug fix: clear envOverrideData on revert. A revert
+                                  -- semantically means "undo the change", and the env
+                                  -- switch is part of the change. If we kept the
+                                  -- original's envOverrideData here, the revert workflow
+                                  -- would re-apply those overridden envs to the clone,
+                                  -- defeating the point of reverting. Clearing it lets
+                                  -- the clone preserve the source deployment's envs.
+                                  NT.envOverrideData = Nothing
                                 , NT.scheduleTime = Just now
                                 , NT.startTime = Nothing
                                 , NT.endTime = Nothing
@@ -825,18 +841,31 @@ revertReleaseH _ap rid req = do
                             , "origSyncEnabled" .= (origSyncEnabled :: Bool)
                             ]
                         )
-                    -- Capture BEFORE snapshots for the revert release
+                    -- Capture BEFORE/AFTER snapshots for the revert release.
+                    -- BEFORE = the CURRENT live state (the new deployment from
+                    -- the original release, which we're reverting away from).
+                    -- AFTER  = the TARGET deployment the revert will restore
+                    -- (the original's oldVersion, which typically still exists
+                    -- on the cluster at 0 replicas). Sourcing the preview from
+                    -- the target gives the user a correct diff showing what
+                    -- will happen — including any env removal, because the
+                    -- target deployment's env spec is what the user is
+                    -- reverting TO.
                     let revertNs = (\(K8sReleaseContext{namespace = n}) -> n) oldCtx
                         revertNewDep = ctxServiceName <> "-" <> NT.newVersion tracker
-                    captureDeploymentSnapshot cfg newRid revertNs revertNewDep "DEPLOYMENT_BEFORE"
+                        revertTargetDep = ctxServiceName <> "-" <> NT.oldVersion tracker
+                    -- Create-time preview snapshots (see createReleaseH for
+                    -- the rationale behind the @_PREVIEW@ suffix).
+                    captureDeploymentSnapshot cfg newRid revertNs revertNewDep "DEPLOYMENT_BEFORE_PREVIEW"
                     captureDeploymentPreview
                         cfg
                         newRid
                         revertNs
-                        revertNewDep
+                        revertTargetDep
                         (NT.oldVersion tracker)
                         (fromMaybe "" (K8s.dockerImage oldCtx))
-                        "DEPLOYMENT_AFTER"
+                        Nothing -- revert tracker clears envOverrideData (see buildRevertedTracker)
+                        "DEPLOYMENT_AFTER_PREVIEW"
                     notifyReleaseReverted revertedTracker
                     when (isImmediate && shouldSyncRevert) $
                         triggerImmediateRevertSync tracker mTargetState
@@ -1240,16 +1269,29 @@ releaseDiffH _ap rid _mType = do
     case m of
         Nothing -> pure $ DiffResponse "" "" "Release not found"
         Just (tracker, mTargetState) -> do
-            -- Check for stored SNAPSHOT events first
+            -- Check for stored SNAPSHOT events first. For K8s deployments we
+            -- look for workflow-time labels first (DEPLOYMENT_BEFORE / AFTER,
+            -- written during prepare + finalize stages) and fall back to
+            -- create-time preview labels (DEPLOYMENT_BEFORE_PREVIEW /
+            -- AFTER_PREVIEW, written by createReleaseH/revertReleaseH/
+            -- restartReleaseH). This gives the user an immediate diff when
+            -- the release is first created, and automatically upgrades to
+            -- the ground-truth workflow diff once the workflow runs.
             snapshotEvents <- listReleaseEventsByCategory rid "SNAPSHOT"
             let trackerCat = NT.category tracker
-                (beforeLabel, afterLabel, diffLabel) = case trackerCat of
-                    BackendConfig -> ("CONFIGMAP_BEFORE", "CONFIGMAP_AFTER", "ConfigMap diff")
-                    VSEdit -> ("VS_OLD", "VS_NEW", "VS diff")
-                    _ -> ("DEPLOYMENT_BEFORE", "DEPLOYMENT_AFTER", "Deployment diff")
-                findSnapshot label = find (\e -> S.reLabel e == label) snapshotEvents
-                mBefore = findSnapshot beforeLabel
-                mAfter = findSnapshot afterLabel
+                diffLabel = case trackerCat of
+                    BackendConfig -> "ConfigMap diff"
+                    VSEdit -> "VS diff"
+                    _ -> "Deployment diff"
+                -- Ordered candidate labels: first = preferred (ground-truth
+                -- workflow snapshot), fall-through = preview (create-time).
+                (beforeLabels, afterLabels) = case trackerCat of
+                    BackendConfig -> (["CONFIGMAP_BEFORE"], ["CONFIGMAP_AFTER"])
+                    VSEdit -> (["VS_OLD"], ["VS_NEW"])
+                    _ -> (["DEPLOYMENT_BEFORE", "DEPLOYMENT_BEFORE_PREVIEW"], ["DEPLOYMENT_AFTER", "DEPLOYMENT_AFTER_PREVIEW"])
+                findSnapshot labels = listToMaybe [e | lbl <- labels, e <- snapshotEvents, S.reLabel e == lbl]
+                mBefore = findSnapshot beforeLabels
+                mAfter = findSnapshot afterLabels
             let payloadToText :: Value -> Text
                 payloadToText (String s) = s -- Already YAML text from snapshot capture, return as-is
                 payloadToText other = TE.decodeUtf8 (LBS.toStrict (A.encode other))
@@ -1535,6 +1577,51 @@ immediateRevertH _ap rid req@ImmediateRevertReq{isRevertSync = mIsRevertSync} = 
                                             Left (K8sError err) ->
                                                 pure $ APIResponse "ERROR" ("Failed to set image: " <> err)
                                             Right _ -> do
+                                                -- Step 2b (bug fix): if the release had an env-switch
+                                                -- override (envOverrideData), also restore the envs
+                                                -- from the OLD deployment. Without this, immediate
+                                                -- revert would leave the new deployment with the
+                                                -- overridden envs, which contradicts "undo the
+                                                -- release". Read the old deployment's env array
+                                                -- live and patch it onto the new deployment.
+                                                let hadEnvOverride = case NT.envOverrideData tracker of
+                                                        Just t -> not (T.null t)
+                                                        Nothing -> False
+                                                when hadEnvOverride $ do
+                                                    let getEnvCmd =
+                                                            unwords
+                                                                [ kubectlBin cfg
+                                                                , "-n"
+                                                                , nsQ
+                                                                , "get deployment"
+                                                                , oldDepQ
+                                                                , "-o"
+                                                                , "jsonpath='{.spec.template.spec.containers[?(@.name==\"" <> T.unpack cName <> "\")].env}'"
+                                                                ]
+                                                    envResult <- liftIO $ runCmd getEnvCmd
+                                                    case envResult of
+                                                        Left (K8sError e) ->
+                                                            logInfo $ "[immediateRevertH] env restore: could not read old envs: " <> e
+                                                        Right (K8sResult rawEnv) -> do
+                                                            let oldEnv = T.strip (T.dropAround (== '\'') (T.strip rawEnv))
+                                                                oldEnvNonEmpty = not (T.null oldEnv) && oldEnv /= "[]"
+                                                            if oldEnvNonEmpty
+                                                                then do
+                                                                    patchEnvRes <- liftIO $ executeWithRetry cfg (buildPatchDeploymentEnvsCommand cfg ctx oldEnv)
+                                                                    case patchEnvRes of
+                                                                        Left (K8sError pe) ->
+                                                                            logInfo $ "[immediateRevertH] env restore: patch failed: " <> pe
+                                                                        Right _ ->
+                                                                            logInfo "[immediateRevertH] env restore: patched envs from old deployment"
+                                                                else -- Old had no envs — clear the override by patching empty env
+                                                                do
+                                                                    patchEnvRes <- liftIO $ executeWithRetry cfg (buildPatchDeploymentEnvsCommand cfg ctx "[]")
+                                                                    case patchEnvRes of
+                                                                        Left (K8sError pe) ->
+                                                                            logInfo $ "[immediateRevertH] env clear: failed: " <> pe
+                                                                        Right _ ->
+                                                                            logInfo "[immediateRevertH] env restore: cleared envs (old had none)"
+
                                                 -- Step 3: rollout restart to bounce pods onto the old image
                                                 let restartCmd =
                                                         unwords
@@ -1777,7 +1864,9 @@ restartReleaseH _ap rid req = do
                                                 restartOldDep = svcName <> "-" <> NT.oldVersion restartedTracker
                                                 restartNewVer = NT.newVersion restartedTracker
                                                 restartImage = fromMaybe "" (K8s.dockerImage oldCtx)
-                                            captureDeploymentSnapshot cfg newRid restartNs restartOldDep "DEPLOYMENT_BEFORE"
+                                            -- Create-time preview snapshots (see createReleaseH for
+                                            -- the rationale behind the @_PREVIEW@ suffix).
+                                            captureDeploymentSnapshot cfg newRid restartNs restartOldDep "DEPLOYMENT_BEFORE_PREVIEW"
                                             captureDeploymentPreview
                                                 cfg
                                                 newRid
@@ -1785,7 +1874,8 @@ restartReleaseH _ap rid req = do
                                                 restartOldDep
                                                 restartNewVer
                                                 restartImage
-                                                "DEPLOYMENT_AFTER"
+                                                (NT.envOverrideData restartedTracker)
+                                                "DEPLOYMENT_AFTER_PREVIEW"
                                             notifyReleaseRestarted restartedTracker
                                             pure $ APIResponse "SUCCESS" ("Restart created: " <> newRid)
 

@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { useRefreshAnimation } from '../../../shared/hooks';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   fetchProductConfigs, createProductConfig, updateProductConfig, deleteProductConfig,
@@ -94,6 +95,7 @@ const DeploymentConfig: React.FC = () => {
   const refetchAll = async () => {
     await Promise.all([refetchGroups(), refetchServices()]);
   };
+  const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, refetchAll);
 
   // ── Group mutations ──────────────────────────────────────────────
 
@@ -263,8 +265,8 @@ const DeploymentConfig: React.FC = () => {
               className="pl-9 pr-4 h-10 sm:h-9 w-full sm:w-72 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
             />
           </div>
-          <Button size="icon" variant="ghost" onClick={refetchAll} aria-label="Refresh">
-            <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} />
+          <Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh">
+            <RefreshCw className={`w-4 h-4 ${refreshSpinning ? 'animate-spin' : ''}`} />
           </Button>
           <PermissionGate product="autopilot" permission="RELEASE_CREATE">
             <Button size="md" onClick={openCreateGroup}>

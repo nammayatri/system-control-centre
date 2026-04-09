@@ -90,15 +90,42 @@ buildRolloutStatusCommand :: Config -> K8sReleaseContext -> String
 buildRolloutStatusCommand cfg ctx =
     unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "rollout status deployment", shellQuote (deploymentName ctx), "--timeout=300s"]
 
-{- | Patch envs on an existing deployment using kubectl patch.
-Used when env switch (envOverrideData) is set but deployment already exists (not cloned).
+{- | REPLACE the env array of the first container on an existing deployment.
+
+Used in two places:
+  * Env switch when the target deployment already exists (skip-clone path)
+  * Immediate revert env restore (restore old deployment's envs)
+
+Bug fix: previously used @--type=strategic@ which merges @containers[].env@
+by the @name@ key — keeping pre-existing env vars and only adding new
+ones. That made env switches cumulative and broke immediate-revert's
+attempt to restore old envs (the new envs stayed). Switched to JSON
+Patch (@--type=json@) with an explicit @replace@ operation on
+@/spec/template/spec/containers/0/env@, which atomically replaces the
+entire array of container 0. Single-container assumption matches the
+rest of the deployment helpers in this file.
 -}
 buildPatchDeploymentEnvsCommand :: Config -> K8sReleaseContext -> Text -> String
 buildPatchDeploymentEnvsCommand cfg ctx envsJson =
-    let container = T.unpack (containerName ctx)
-        -- Use jq to build a strategic merge patch, filtering out unsupported fieldRef paths
-        stripAndPatch = "($envs | fromjson | [.[] | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]) as $filtered | {\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"" <> container <> "\",\"env\":$filtered}]}}}}"
-     in unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "patch deployment", shellQuote (deploymentName ctx), "--type=strategic", "-p", "\"$(echo null | jq --arg envs", shellQuote envsJson, "'" <> stripAndPatch <> "'" <> ")\""]
+    -- Build the JSON Patch body via jq so envsJson (a serialized JSON array
+    -- of env objects) is parsed and embedded as a real JSON value, not a
+    -- string. We also strip env entries whose fieldRef points at
+    -- metadata.labels[...] — those require a downward API rule and break
+    -- kubectl patch when not configured.
+    let stripAndPatch =
+            "($envs | fromjson | [.[] | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]) as $filtered | [{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/env\",\"value\":$filtered}]"
+     in unwords
+            [ kubectlBin cfg
+            , "-n"
+            , shellQuote (namespace ctx)
+            , "patch deployment"
+            , shellQuote (deploymentName ctx)
+            , "--type=json"
+            , "-p"
+            , "\"$(echo null | jq --arg envs"
+            , shellQuote envsJson
+            , "'" <> stripAndPatch <> "'" <> ")\""
+            ]
 
 buildCreateServiceCommand :: Config -> K8sReleaseContext -> String
 buildCreateServiceCommand cfg ctx =

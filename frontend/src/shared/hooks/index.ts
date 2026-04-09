@@ -3,7 +3,7 @@
  * Products import these instead of reimplementing common patterns.
  */
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import type { DateRange, PaginationState } from '../types';
 
 /** Search + debounce hook for list views */
@@ -88,6 +88,77 @@ function yesterdayRange(): DateRange {
   const end = new Date(start);
   end.setHours(23, 59, 59, 999);
   return { from: start.toISOString(), to: end.toISOString() };
+}
+
+/**
+ * Refresh button helper with a minimum visible spin duration.
+ *
+ * Problem: react-query's @isFetching@ flips true→false within ~50ms for cached
+ * or fast API calls. The refresh icon @animate-spin@ class then flickers on
+ * and off so quickly the user doesn't perceive any feedback — making the
+ * button feel broken even when it works.
+ *
+ * Solution: this hook returns a @spinning@ boolean that stays true for AT
+ * LEAST @minMs@ after @trigger()@ is called, OR until @isFetching@ goes
+ * false, whichever is LONGER. Users always see a visible spin animation.
+ *
+ * Usage:
+ * ```
+ * const { spinning, onRefresh } = useRefreshAnimation(isFetching, refetch);
+ * <RefreshCw className={`w-4 h-4 ${spinning ? 'animate-spin' : ''}`} onClick={onRefresh} />
+ * ```
+ */
+export function useRefreshAnimation(
+  isFetching: boolean,
+  onRefresh: () => void | Promise<unknown>,
+  minMs = 400
+) {
+  const [manualSpin, setManualSpin] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Stop manual spin when both (a) minMs elapsed AND (b) isFetching done.
+  // The minMs timer sets a flag; we only CLEAR manualSpin once both are true.
+  const minTimeDoneRef = useRef(false);
+
+  useEffect(() => {
+    if (!manualSpin) return;
+    // If fetch finishes AND minimum time has elapsed, stop spinning.
+    if (!isFetching && minTimeDoneRef.current) {
+      setManualSpin(false);
+    }
+  }, [isFetching, manualSpin]);
+
+  const trigger = useCallback(() => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    minTimeDoneRef.current = false;
+    setManualSpin(true);
+    void onRefresh();
+    timerRef.current = setTimeout(() => {
+      minTimeDoneRef.current = true;
+      // If fetch already finished by this point, stop spinning now.
+      setManualSpin((cur) => {
+        // read latest isFetching via effect; if still fetching, stay true
+        // (effect will flip it off when fetch finishes)
+        return cur && isFetchingRef.current;
+      });
+    }, minMs);
+  }, [onRefresh, minMs]);
+
+  // Mirror isFetching in a ref so trigger's setTimeout callback reads latest.
+  const isFetchingRef = useRef(isFetching);
+  useEffect(() => {
+    isFetchingRef.current = isFetching;
+  }, [isFetching]);
+
+  // Cleanup on unmount
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
+
+  // Spin whenever the library is fetching OR we're in the forced-minimum window.
+  const spinning = isFetching || manualSpin;
+
+  return { spinning, onRefresh: trigger };
 }
 
 /** Filter list by search string across multiple fields */

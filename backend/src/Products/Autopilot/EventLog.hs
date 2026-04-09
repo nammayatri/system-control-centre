@@ -66,6 +66,8 @@ module Products.Autopilot.EventLog (
     evStatusUpdated,
     evDeploymentBefore,
     evDeploymentAfter,
+    evDeploymentBeforePreview,
+    evDeploymentAfterPreview,
     evConfigmapBefore,
     evConfigmapAfter,
     evVsBefore,
@@ -286,10 +288,25 @@ evDecisionResult = "DECISION_RESULT"
 evStatusUpdated :: Text
 evStatusUpdated = "STATUS_UPDATED"
 
--- | SNAPSHOT category labels.
-evDeploymentBefore, evDeploymentAfter, evConfigmapBefore, evConfigmapAfter, evVsBefore, evVsAfter :: Text
+{- | SNAPSHOT category labels.
+
+  * @DEPLOYMENT_BEFORE@ / @DEPLOYMENT_AFTER@ — GROUND-TRUTH snapshots
+    captured at workflow execution time (prepare + finalize stages).
+    These reflect what the cluster actually looked like.
+  * @DEPLOYMENT_BEFORE_PREVIEW@ / @DEPLOYMENT_AFTER_PREVIEW@ — PREVIEW
+    snapshots captured at release-creation time by the API handlers
+    (createReleaseH / revertReleaseH / restartReleaseH). These exist so
+    the diff endpoint can show a preview immediately after the release is
+    created, before the workflow has actually run. The diff endpoint
+    prefers the workflow labels if present and falls back to preview.
+-}
+evDeploymentBefore, evDeploymentAfter, evDeploymentBeforePreview, evDeploymentAfterPreview :: Text
 evDeploymentBefore = "DEPLOYMENT_BEFORE"
 evDeploymentAfter = "DEPLOYMENT_AFTER"
+evDeploymentBeforePreview = "DEPLOYMENT_BEFORE_PREVIEW"
+evDeploymentAfterPreview = "DEPLOYMENT_AFTER_PREVIEW"
+
+evConfigmapBefore, evConfigmapAfter, evVsBefore, evVsAfter :: Text
 evConfigmapBefore = "CONFIGMAP_BEFORE"
 evConfigmapAfter = "CONFIGMAP_AFTER"
 evVsBefore = "VS_BEFORE"

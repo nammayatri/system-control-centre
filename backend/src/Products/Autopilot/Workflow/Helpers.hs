@@ -39,7 +39,7 @@ import Control.Monad.Trans.Class (lift)
 import qualified Core.AppError as AppErr
 import Core.Config (Config (..))
 import Core.Environment (Flow, MonadFlow)
-import Data.Aeson (Value (..), eitherDecode)
+import Data.Aeson (Value (..), decode, eitherDecode)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.ByteString (ByteString)
@@ -50,6 +50,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import qualified Data.Vector as V
 import qualified Data.Yaml as Yaml
+import qualified Data.Yaml.Pretty as YamlP
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import qualified Products.Autopilot.Queries.ReleaseTracker as DB
@@ -181,8 +182,19 @@ captureK8sYamlSnapshot releaseId label fetch = do
         SnapshotRaw raw ->
             DB.insertReleaseEvent releaseId "SNAPSHOT" label (String raw)
         SnapshotOk val ->
+            -- Bug fix: use encodePretty with alphabetical key sorting so
+            -- BEFORE/AFTER snapshots encode to a DETERMINISTIC layout. The
+            -- default @Yaml.encode@ preserves the in-memory KeyMap order,
+            -- and because 'modifyDeploymentForPreview' uses KM.insert (which
+            -- promotes inserted keys to the front of the map), the AFTER
+            -- snapshot ends up with keys in a different order from the
+            -- BEFORE — producing spurious diff noise (incorrect indentation
+            -- offsets + reshuffled fields). Sorting alphabetically makes
+            -- both sides layout-identical except for the intentional
+            -- changes.
             let cleaned = stripK8sNoiseValue val
-                cleanYaml = TE.decodeUtf8 (Yaml.encode cleaned)
+                prettyCfg = YamlP.setConfCompare compare YamlP.defConfig
+                cleanYaml = TE.decodeUtf8 (YamlP.encodePretty prettyCfg cleaned)
              in DB.insertReleaseEvent releaseId "SNAPSHOT" label (String cleanYaml)
 
 {- | Decode YAML bytes into a 'SnapshotFetch'. On parse failure, fall back to
@@ -216,9 +228,19 @@ captureDeploymentSnapshot cfg releaseId ns depName label =
     captureK8sYamlSnapshot releaseId label $
         runKubectlYaml cfg ["-n", ns, "get deployment", depName, "-o", "yaml"]
 
--- | Generate a preview of the deployment after applying name/version/image changes.
-captureDeploymentPreview :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> Text -> Text -> m ()
-captureDeploymentPreview cfg releaseId ns oldDepName newVer newImage label =
+{- | Generate a preview of the deployment after applying name/version/image
+changes, and optionally apply an envOverrideData env-switch to
+containers[0].env.
+
+The @envOverride@ argument is the raw JSON array string from the release's
+@envOverrideData@ field (e.g. @[{"name":"FOO","value":"bar"}]@). When
+supplied, it replaces the first container's env in the preview so the
+DEPLOYMENT_AFTER snapshot reflects what the workflow will actually apply
+(via 'buildCloneDeploymentWithEnvsCommand'), and the diff endpoint shows
+the real env changes instead of identical before/after copies.
+-}
+captureDeploymentPreview :: (MonadFlow m) => Config -> Text -> Text -> Text -> Text -> Text -> Maybe Text -> Text -> m ()
+captureDeploymentPreview cfg releaseId ns oldDepName newVer newImage envOverride label =
     captureK8sYamlSnapshot releaseId label $ do
         res <- runCmd (kubectlCmd cfg ["-n", ns, "get deployment", oldDepName, "-o", "yaml"])
         case res of
@@ -226,7 +248,7 @@ captureDeploymentPreview cfg releaseId ns oldDepName newVer newImage label =
                 case Yaml.decodeEither' (TE.encodeUtf8 yamlStr) :: Either Yaml.ParseException Value of
                     Right val ->
                         let cleaned = stripK8sNoiseValue val
-                            preview = modifyDeploymentForPreview cleaned oldDepName newVer newImage
+                            preview = modifyDeploymentForPreview cleaned oldDepName newVer newImage envOverride
                          in pure (SnapshotOk preview)
                     Left parseErr -> pure (SnapshotFailed ("deployment YAML parse failed: " <> T.pack (show parseErr)))
             Left (K8sError errMsg) -> pure (SnapshotFailed errMsg)
@@ -298,9 +320,13 @@ stripK8sNoiseValue (Object obj) =
      in Object cleanMeta
 stripK8sNoiseValue other = other
 
--- | Modify a deployment Value for preview: update name, version labels, image.
-modifyDeploymentForPreview :: Value -> Text -> Text -> Text -> Value
-modifyDeploymentForPreview (Object obj) oldDepName newVer newImage =
+{- | Modify a deployment Value for preview: update name, version labels,
+image, and (when @envOverride@ is set) replace containers[0].env with the
+user-provided env-switch data. The env parameter is the raw JSON array
+string from @envOverrideData@; parse failures leave env untouched.
+-}
+modifyDeploymentForPreview :: Value -> Text -> Text -> Text -> Maybe Text -> Value
+modifyDeploymentForPreview (Object obj) oldDepName newVer newImage envOverride =
     let parts = T.splitOn "-" oldDepName
         svcHost = if length parts > 1 then T.intercalate "-" (init parts) else oldDepName
         newDepName = svcHost <> "-" <> newVer
@@ -309,8 +335,38 @@ modifyDeploymentForPreview (Object obj) oldDepName newVer newImage =
         obj3 = updateNestedText ["spec", "selector", "matchLabels", "version"] newVer obj2
         obj4 = updateNestedText ["spec", "template", "metadata", "labels", "version"] newVer obj3
         obj5 = if T.null newImage then obj4 else updateContainerImage newImage obj4
-     in Object obj5
-modifyDeploymentForPreview other _ _ _ = other
+        obj6 = case envOverride of
+            Just envJson
+                | not (T.null envJson)
+                , Just parsed <- decode (LBS.fromStrict (TE.encodeUtf8 envJson))
+                , Array _ <- parsed ->
+                    updateContainerEnv parsed obj5
+            _ -> obj5
+     in Object obj6
+modifyDeploymentForPreview other _ _ _ _ = other
+
+-- | Replace the first container's @env@ array with the given Value.
+updateContainerEnv :: Value -> KM.KeyMap Value -> KM.KeyMap Value
+updateContainerEnv envVal obj =
+    case KM.lookup (K.fromText "spec") obj of
+        Just (Object spec) -> case KM.lookup (K.fromText "template") spec of
+            Just (Object tmpl) -> case KM.lookup (K.fromText "spec") tmpl of
+                Just (Object podSpec) -> case KM.lookup (K.fromText "containers") podSpec of
+                    Just (Array containers) ->
+                        let cList = V.toList containers
+                         in case cList of
+                                (Object c : rest) ->
+                                    let c' = KM.insert (K.fromText "env") envVal c
+                                        containers' = Array (V.fromList (Object c' : rest))
+                                        podSpec' = KM.insert (K.fromText "containers") containers' podSpec
+                                        tmpl' = KM.insert (K.fromText "spec") (Object podSpec') tmpl
+                                        spec' = KM.insert (K.fromText "template") (Object tmpl') spec
+                                     in KM.insert (K.fromText "spec") (Object spec') obj
+                                _ -> obj
+                    _ -> obj
+                _ -> obj
+            _ -> obj
+        _ -> obj
 
 -- The legacy '|>>' / 'cprV2' / 'stateCheckFuncV2' operators were removed
 -- after all three active workflows (BackendService, BackendScheduler,

@@ -1,4 +1,5 @@
-import React, { useState, Fragment, useMemo } from 'react';
+import React, { useState, Fragment, useMemo, useCallback } from 'react';
+import { useRefreshAnimation } from '../../../shared/hooks';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
@@ -98,12 +99,13 @@ const ConfigMapSummary: React.FC = () => {
     refetchInterval: 10000,
   });
   const qcCM = useQueryClient();
-  const handleRefresh = async () => {
+  const doRefresh = useCallback(async () => {
     await Promise.all([
       refetch(),
       qcCM.invalidateQueries({ queryKey: ['configmap-events', id] }),
     ]);
-  };
+  }, [refetch, qcCM, id]);
+  const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, doRefresh);
 
   const { data: releaseEvents = [] } = useQuery({
     queryKey: ['configmap-events', id],
@@ -202,7 +204,7 @@ const ConfigMapSummary: React.FC = () => {
             </PermissionGate>
           )}
           <SimpleTooltip content="Refresh">
-            <Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh"><RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /></Button>
+            <Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh"><RefreshCw className={`w-4 h-4 ${refreshSpinning ? 'animate-spin' : ''}`} /></Button>
           </SimpleTooltip>
           <SimpleTooltip content="Clone">
             <Button size="icon" variant="ghost" onClick={() => navigate(`/configmap/new?clone_id=${data.id}`)}><Copy className="w-4 h-4" /></Button>

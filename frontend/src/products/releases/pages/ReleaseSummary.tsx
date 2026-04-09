@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { useRefreshAnimation } from '../../../shared/hooks';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../../core/auth/AuthContext';
@@ -622,7 +623,7 @@ const ReleaseSummary: React.FC = () => {
   // hardcoded "admin" string for approve/revert/restart audit attribution.
   const { user: authUser } = useAuth();
   const actor = authUser?.email || 'admin';
-  const handleRefresh = async () => {
+  const doRefresh = useCallback(async () => {
     // Refresh both the release and its event log so the UI shows fully fresh state.
     await Promise.all([
       refetch(),
@@ -630,7 +631,8 @@ const ReleaseSummary: React.FC = () => {
       qc.invalidateQueries({ queryKey: ['release-pods', id] }),
       qc.invalidateQueries({ queryKey: ['release-resources', id] }),
     ]);
-  };
+  }, [refetch, qc, id]);
+  const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, doRefresh);
 
   // Revert sync checkbox defaults based on release.sync_enabled
   const [revertSyncChecked, setRevertSyncChecked] = useState(false);
@@ -837,7 +839,7 @@ const ReleaseSummary: React.FC = () => {
             <SimpleTooltip content="Delete"><Button size="icon" variant="ghost" className="text-red-500 hover:bg-red-50" loading={deleteMut.isPending} onClick={() => doAction('delete', async () => { await deleteMut.mutateAsync(id!); navigate('/releases'); }, true, 'Delete this release tracker permanently. This removes the audit trail and cannot be undone.')}><Trash2 className="w-4 h-4" /></Button></SimpleTooltip>
           </PermissionGate>
           <SimpleTooltip content="Clone"><Button size="icon" variant="ghost" onClick={() => navigate(`/releases/${id}/clone`)}><Copy className="w-4 h-4" /></Button></SimpleTooltip>
-          <SimpleTooltip content="Refresh"><Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh"><RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /></Button></SimpleTooltip>
+          <SimpleTooltip content="Refresh"><Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh"><RefreshCw className={`w-4 h-4 ${refreshSpinning ? 'animate-spin' : ''}`} /></Button></SimpleTooltip>
         </div>
       </div>
 

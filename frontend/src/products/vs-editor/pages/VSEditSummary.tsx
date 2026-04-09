@@ -1,4 +1,5 @@
-import React, { useState, Fragment } from 'react';
+import React, { useState, Fragment, useCallback } from 'react';
+import { useRefreshAnimation } from '../../../shared/hooks';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
@@ -53,12 +54,13 @@ const VSEditSummary: React.FC = () => {
     enabled: !!id,
     refetchInterval: 10000,
   });
-  const handleRefresh = async () => {
+  const doRefresh = useCallback(async () => {
     await Promise.all([
       refetch(),
       queryClient.invalidateQueries({ queryKey: ['vs-events', id] }),
     ]);
-  };
+  }, [refetch, queryClient, id]);
+  const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, doRefresh);
 
   const { data: vsEvents = [] } = useQuery({
     queryKey: ['vs-events', id],
@@ -178,7 +180,7 @@ const VSEditSummary: React.FC = () => {
             </PermissionGate>
           )}
 
-          <Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh"><RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /></Button>
+          <Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh"><RefreshCw className={`w-4 h-4 ${refreshSpinning ? 'animate-spin' : ''}`} /></Button>
         </div>
       </div>
 

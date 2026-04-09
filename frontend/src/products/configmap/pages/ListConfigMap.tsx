@@ -8,6 +8,7 @@ import { StatusBadge } from '../../releases/components/StatusBadge';
 import { Button } from '../../../shared/ui/button';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
+import { useRefreshAnimation } from '../../../shared/hooks';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { cn } from '../../../lib/utils';
 
@@ -79,6 +80,7 @@ const ListConfigMap: React.FC = () => {
     queryFn: () => fetchAPConfigMaps(dateRange.from.toISOString(), dateRange.to.toISOString()),
     refetchInterval: 60000,
   });
+  const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, refetch);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => { if (datePickerRef.current && !datePickerRef.current.contains(e.target as Node)) setShowDatePicker(false); };
@@ -157,7 +159,7 @@ const ListConfigMap: React.FC = () => {
 
           <div className="hidden md:block flex-1" />
           <div className="flex items-center gap-2">
-            <button onClick={() => refetch()} aria-label="Refresh" className="h-10 w-10 sm:h-9 sm:w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150"><RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} /></button>
+            <button onClick={handleRefresh} aria-label="Refresh" className="h-10 w-10 sm:h-9 sm:w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150"><RefreshCw className={`h-4 w-4 ${refreshSpinning ? 'animate-spin' : ''}`} /></button>
             <PermissionGate product="autopilot" permission="CONFIG_CREATE">
               <Link to="/configmap/new" className="flex-1 md:flex-none">
                 <Button size="md" fullWidth><Plus className="w-4 h-4" /> Create ConfigMap</Button>

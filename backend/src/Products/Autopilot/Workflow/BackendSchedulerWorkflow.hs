@@ -27,6 +27,7 @@ import Core.Workflow.Spec (WorkflowSpec (..))
 import Core.Workflow.Stage (Stage)
 import Data.Aeson (object, toJSON, (.=))
 import qualified Data.Text as T
+import Data.Time.Clock (UTCTime, getCurrentTime)
 import Products.Autopilot.K8s.Deployment (
     buildCloneDeploymentCommand,
     buildConfigMapApplyCommand,
@@ -43,11 +44,16 @@ import Products.Autopilot.Notifications (
     notifyReleaseCompleted,
     notifyReleaseProgress,
  )
-import Products.Autopilot.Queries.ReleaseTracker (insertReleaseEvent)
+import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker, insertReleaseEvent)
 import Products.Autopilot.RuntimeConfig (isScaleDownPodsOnCompletion)
 
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
-import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (appGroup, releaseId, rolloutStrategy, status), RolloutStep (..))
+import Products.Autopilot.Types.Release (
+    ReleaseStatus (..),
+    ReleaseTracker (appGroup, releaseId, rolloutHistory, rolloutStrategy, status),
+    RolloutHistory (..),
+    RolloutStep (..),
+ )
 import Products.Autopilot.Types.Target (
     BackendServiceWFStatus (..),
     K8sDeploymentState (..),
@@ -216,15 +222,27 @@ prepareK8sResources = do
     _ <- runK8sIO $ executeWithRetry cfg (buildConfigMapApplyCommand cfg ctx)
     updateK8sField (\k8s -> k8s{configMapApplied = True})
 
-    -- 2. Clone deployment with 1 pod for verification (skip if already exists)
+    -- 2. Clone deployment (or reuse existing) + ensure at least 1 replica
+    --    for the readiness verification below.
+    --
+    -- Bug fix: previously, when the target deployment already existed
+    -- (resume, revert, restart paths), this branch skipped BOTH the clone
+    -- AND the scale-to-1 call. The next step 'waitForSchedulerPodReady'
+    -- then looped while @desired > 0@ was false and timed out after 5 min
+    -- on a deployment that was left at replicas=0 by a prior release's
+    -- scale-down. Now we always ensure @replicas >= 1@ before the
+    -- readiness check — the scale call is idempotent, so it's cheap even
+    -- when the deployment is already running.
     updateK8sStatus BSCreateDeployment
     newDepExists <- liftIO $ deploymentExists cfg (namespace ctx) (deploymentName ctx)
     if newDepExists
-        then logInfoS "  Deployment already exists, skipping clone"
+        then do
+            logInfoS "  Deployment already exists, ensuring at least 1 replica for readiness check"
+            _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
+            pure ()
         else do
             logInfoS $ "  Cloning deployment to " <> deploymentName ctx <> " with 1 pod for verification"
             _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg ctx)
-            -- Scale to 1 pod for initial verification
             _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
             pure ()
     updateK8sField (\k8s -> k8s{deploymentCreated = True})
@@ -299,12 +317,28 @@ podCountRollout = do
         then do
             -- No rollout strategy defined, scale to 1 pod minimum.
             logInfoS "  No rollout strategy, scaling new deployment to 1 pod"
+            stepStartTime <- liftIO getCurrentTime
             scaleNewSchedulerCappedAtHpa cfg ctx 1
+            stepEndTime <- liftIO getCurrentTime
             updateK8sField (\k8s -> k8s{trafficPercentage = 100})
+            -- Append rollout history entry — schedulers previously did
+            -- NOT write history, leaving the UI history panel empty and
+            -- breaking restart-from-checkpoint detection.
+            let entry = mkSchedHistory 100 0 1 stepStartTime stepEndTime
+            updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [entry]}
             currentRT <- getRT
             lift $ notifyReleaseProgress currentRT 100
         else do
             forM_ steps $ \step -> do
+                -- Bug fix: re-read the tracker from DB at the top of each
+                -- stage so PAUSED / ABORTING / USER_ABORTED signals issued
+                -- by the user via /update are picked up between stages.
+                -- Previously the forM_ loop ran to completion regardless of
+                -- mid-rollout status changes — an operator's PAUSE during
+                -- cooloff would be silently ignored and the release would
+                -- finish anyway.
+                bailIfNotInProgress (releaseId rt) (rolloutPercent step)
+
                 let targetPods = max 1 (podCount step)
                 logInfoS $
                     "  Scaling new deployment to "
@@ -312,24 +346,41 @@ podCountRollout = do
                         <> " pods (stage "
                         <> T.pack (show (rolloutPercent step))
                         <> "% of rollout)"
+                stepStartTime <- liftIO getCurrentTime
                 scaleNewSchedulerCappedAtHpa cfg ctx targetPods
                 updateK8sField (\k8s -> k8s{trafficPercentage = rolloutPercent step})
 
-                -- Notify Slack of progress
+                -- Notify Slack of progress (fires before cooloff so the
+                -- channel sees the ramp immediately).
                 latestRT <- getRT
                 lift $ notifyReleaseProgress latestRT (rolloutPercent step)
 
-                -- Cooloff between steps (cooloffMinutes is interpreted as seconds
-                -- by threadDelaySec — pre-existing semantic mismatch with the
-                -- field name, see scheduler workflow audit).
+                -- Cooloff between steps. @cooloffMinutes@ is minutes;
+                -- multiply by 60 before passing to the seconds-based delay.
+                -- Bug fix: previously called @threadDelaySec (cooloffMinutes step)@
+                -- which treated a 90-minute cooloff as 90 seconds, silently
+                -- collapsing multi-stage rollouts to finish in well under a
+                -- minute. BackendServiceWorkflow already does the @* 60@.
                 when (cooloffMinutes step > 0 && rolloutPercent step < 100) $ do
                     logInfoS $
-                        "  Cooloff: " <> T.pack (show (cooloffMinutes step)) <> " seconds"
-                    liftIO $ threadDelaySec (cooloffMinutes step)
+                        "  Cooloff: "
+                            <> T.pack (show (cooloffMinutes step))
+                            <> " minutes ("
+                            <> T.pack (show (cooloffMinutes step * 60))
+                            <> " seconds)"
+                    liftIO $ threadDelaySec (cooloffMinutes step * 60)
 
                 -- Health check between steps
                 when (rolloutPercent step < 100) $
                     checkDeploymentHealth cfg ctx
+
+                -- Append rollout history entry AFTER cooloff + health check
+                -- so the @completedAt@ timestamp reflects the stage's real
+                -- wall-clock duration (scale + cooloff + health), not just
+                -- the ~0.3s scale call.
+                stepEndTime <- liftIO getCurrentTime
+                let entry = mkSchedHistory (rolloutPercent step) (cooloffMinutes step) targetPods stepStartTime stepEndTime
+                updateRT $ \r -> r{rolloutHistory = rolloutHistory r <> [entry]}
 
     -- Step 2: New is fully ramped — NOW scale OLD to 0.
     -- Bug fix: previously this happened BEFORE step 1, leaving a window with
@@ -344,6 +395,71 @@ podCountRollout = do
     lift $ notifyPodsScaledDown finalRT (oldVersion ctx)
 
     logInfoS "Pod-count rollout complete"
+
+{- | Re-read the tracker from DB and bail out of the rollout loop if the
+user issued a PAUSE, ABORT, or DISCARD between stages. Throws a
+'WorkflowError' that the engine maps to 'DomainError', letting the
+workflow stop cleanly without completing the remaining stages.
+
+This is the scheduler equivalent of BackendService's per-iteration fresh
+tracker re-read. Without it, the 'forM_ steps' loop ignores mid-rollout
+status changes and the release runs to completion even after the
+operator hit PAUSE.
+-}
+bailIfNotInProgress :: T.Text -> Int -> StateFlow ()
+bailIfNotInProgress rid stageRolloutPct = do
+    fresh <- lift $ findReleaseTracker rid
+    case fresh of
+        Just (freshRT, _) -> case status freshRT of
+            INPROGRESS -> pure ()
+            PAUSED -> do
+                logInfoS $
+                    "  [stage "
+                        <> T.pack (show stageRolloutPct)
+                        <> "%] Release is PAUSED — bailing out, runner will resume on next tick"
+                liftIO $ throwIO $ WorkflowError "scheduler-rollout" "paused by user"
+            ABORTING -> do
+                logInfoS $
+                    "  [stage "
+                        <> T.pack (show stageRolloutPct)
+                        <> "%] Release is ABORTING — bailing out"
+                liftIO $ throwIO $ WorkflowError "scheduler-rollout" "aborting by user"
+            USER_ABORTED -> do
+                logInfoS $
+                    "  [stage "
+                        <> T.pack (show stageRolloutPct)
+                        <> "%] Release already USER_ABORTED — bailing out"
+                liftIO $ throwIO $ WorkflowError "scheduler-rollout" "user aborted"
+            ABORTED -> liftIO $ throwIO $ WorkflowError "scheduler-rollout" "aborted"
+            DISCARDED -> liftIO $ throwIO $ WorkflowError "scheduler-rollout" "discarded"
+            other ->
+                logWarningS $
+                    "  [stage "
+                        <> T.pack (show stageRolloutPct)
+                        <> "%] Unexpected tracker status "
+                        <> T.pack (show other)
+                        <> " — continuing"
+        Nothing -> pure () -- tracker gone from DB, let the next op surface it
+
+{- | Build a 'RolloutHistory' entry for a single scheduler stage.
+Schedulers don't have a decision engine, so the @historyDecision@ /
+@historyDecisionReason@ / @historyDecisionHs@ / @historyDecisionHsReason@
+fields are 'Nothing'. Manual override is also unused for schedulers.
+-}
+mkSchedHistory :: Int -> Int -> Int -> UTCTime -> UTCTime -> RolloutHistory
+mkSchedHistory rollPct cooloff pods startedAt completedAt =
+    RolloutHistory
+        { historyRolloutPercent = rollPct
+        , historyCooloffMinutes = cooloff
+        , historyPodsCount = pods
+        , historyDecision = Nothing
+        , historyDecisionReason = Nothing
+        , historyStartedAt = startedAt
+        , historyCompletedAt = Just completedAt
+        , historyManualOverride = False
+        , historyDecisionHs = Nothing
+        , historyDecisionHsReason = Nothing
+        }
 
 {- | Scale the new scheduler deployment to @targetPods@ replicas, capped at
 the live HPA's @maxReplicas@ if an HPA exists for this version.

@@ -10,6 +10,7 @@ import { Save, X, RefreshCw, Search, ChevronDown, ChevronRight, Info } from 'luc
 import { toast } from 'sonner';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { cn } from '../../../lib/utils';
+import { useRefreshAnimation } from '../../../shared/hooks';
 
 interface ConfigItem {
   key: string;
@@ -47,6 +48,7 @@ const Configurations: React.FC = () => {
       return res.data as GroupedResponse;
     },
   });
+  const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, refetch);
 
   const groups = data?.groups ?? [];
 
@@ -225,8 +227,8 @@ const Configurations: React.FC = () => {
               className="pl-9 pr-4 h-10 sm:h-9 w-full sm:w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
             />
           </div>
-          <Button size="icon" variant="ghost" onClick={() => refetch()} aria-label="Refresh">
-            <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} />
+          <Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh">
+            <RefreshCw className={`w-4 h-4 ${refreshSpinning ? 'animate-spin' : ''}`} />
           </Button>
         </div>
       </div>

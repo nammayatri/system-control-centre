@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useRefreshAnimation } from '../../../shared/hooks';
 import { Link, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { fetchVSEdits } from '../../releases/api';
@@ -72,6 +73,7 @@ const ListVSEdit: React.FC = () => {
     queryFn: () => fetchVSEdits({ from: dateRange.from.toISOString(), to: dateRange.to.toISOString() }),
     refetchInterval: 30000,
   });
+  const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, refetch);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -157,8 +159,8 @@ const ListVSEdit: React.FC = () => {
           <div className="hidden md:block flex-1" />
 
           <div className="flex items-center gap-2">
-            <button onClick={() => refetch()} aria-label="Refresh" className="h-10 w-10 sm:h-9 sm:w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150">
-              <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+            <button onClick={handleRefresh} aria-label="Refresh" className="h-10 w-10 sm:h-9 sm:w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150">
+              <RefreshCw className={`h-4 w-4 ${refreshSpinning ? 'animate-spin' : ''}`} />
             </button>
 
             <PermissionGate product="autopilot" permission="RELEASE_CREATE">
