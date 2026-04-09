@@ -482,7 +482,16 @@ validateRunningVersion cfg rt mts = do
                 svcHost = serviceName ctx
                 trackerOldVer = NT.oldVersion rt
                 isNewSvc = newService k8s
-            if isNewSvc || T.null trackerOldVer || T.toLower trackerOldVer == "unknown" || trackerOldVer == "new"
+            -- Skip VS-based version validation for products without a
+            -- VirtualService (BackendScheduler, future non-VS products).
+            -- The gate is `vsName' is empty` rather than a category check
+            -- so any product type with no VS configured falls through
+            -- cleanly without re-touching this code.
+            if isNewSvc
+                || T.null vsName'
+                || T.null trackerOldVer
+                || T.toLower trackerOldVer == "unknown"
+                || trackerOldVer == "new"
                 then pure Nothing
                 else do
                     result <- getPrimarySubsetFromVirtualService cfg ns vsName' svcHost
