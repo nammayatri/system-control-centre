@@ -88,6 +88,7 @@ data K8sReleaseContext = K8sReleaseContext
     , cleanupAt :: Maybe UTCTime
     , cleanupTargetDeployment :: Maybe Text
     , cleanupStatus :: Maybe Text
+    , cleanupAttempts :: Int
     , deployFilePath :: Maybe Text
     , serviceFilePath :: Maybe Text
     , drFilePath :: Maybe Text
@@ -130,6 +131,7 @@ defaultK8sReleaseContext =
         , cleanupAt = Nothing
         , cleanupTargetDeployment = Nothing
         , cleanupStatus = Nothing
+        , cleanupAttempts = 0
         , deployFilePath = Nothing
         , serviceFilePath = Nothing
         , drFilePath = Nothing

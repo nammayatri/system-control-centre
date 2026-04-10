@@ -35,6 +35,7 @@ module Products.Autopilot.RuntimeConfig (
     getAutoCompleteVsTrackerMinutes,
     getDecisionNotificationDedupMinutes,
     getMaxK8sRetries,
+    getMaxCleanupRetries,
     getCkhClusterName,
     getDEPostMonitoringTimeout,
     getPodReadinessMaxAttempts,
@@ -231,6 +232,13 @@ getPodsCreationDelay = getConfigIntForProduct "pods_creation_delay" (Just "autop
 
 getPodsScaleDownDelayFromConfig :: (MonadFlow m) => m Double
 getPodsScaleDownDelayFromConfig = getConfigDoubleForProduct "pods_scale_down_delay_config" (Just "autopilot") 0.0
+
+{- | Max retry attempts for scaling down leaked NEW deployments. When a scale-down
+fails (e.g., deployment not found in k8s), the runner retries up to this limit
+before marking the cleanup as permanently FAILED. Default 5.
+-}
+getMaxCleanupRetries :: (MonadFlow m) => m Int
+getMaxCleanupRetries = getConfigIntForProduct "max_cleanup_retries" (Just "autopilot") 5
 
 {- | Default 1.0 = match old-version pod count exactly. Bumping above 1.0
 combined with the per-stage HPA ratchet (max(live, computed)) causes

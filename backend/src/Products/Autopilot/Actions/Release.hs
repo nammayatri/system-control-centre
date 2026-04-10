@@ -543,6 +543,7 @@ createReleaseHBodyAfterStrategyCheck mXForwardedEmail mXPomeriumJwt K8sCreateRel
                                                                 , cleanupAt = Nothing
                                                                 , cleanupTargetDeployment = Nothing
                                                                 , cleanupStatus = Nothing
+                                                                , cleanupAttempts = 0
                                                                 , deployFilePath = deployFilePath
                                                                 , serviceFilePath = serviceFilePath
                                                                 , drFilePath = drFilePath

@@ -147,6 +147,14 @@ INSERT INTO server_config (type, name, value, enabled, product)
 SELECT 'DOUBLE', 'pods_scale_down_delay_config', '0', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'pods_scale_down_delay_config');
 
+-- Max retry attempts for scaling down leaked NEW deployments. When a scale-down
+-- fails (e.g., deployment not found in k8s), the runner retries up to this
+-- limit before marking the cleanup as permanently FAILED. Each retry waits
+-- for the next poll cycle (release_watch_delay). Default 5.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'max_cleanup_retries', '5', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'max_cleanup_retries');
+
 -- Pod-count multiplier used by scaleNewDeploymentForStage. Julia parity:
 -- pods_calculation_factor (service.jl:17). The strategy formula is
 --   strategyByFactor = ceil(factor × oldDesired / 100 × routePercent).

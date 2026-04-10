@@ -79,6 +79,12 @@ autopilotConfigs =
         "Delay before scaling down old pods (hours)"
         (Just "autopilot")
     , ConfigEntry
+        "max_cleanup_retries"
+        (IntConfig 5)
+        ScalingGroup
+        "Max retry attempts for scaling down leaked NEW deployments before marking as SCALE_DOWN_FAILED"
+        (Just "autopilot")
+    , ConfigEntry
         "scaling_with_hpa_enabled"
         (JsonConfig "[]")
         ScalingGroup

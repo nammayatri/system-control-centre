@@ -27,7 +27,7 @@ import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPri
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks)
 import Products.Autopilot.Queries.ReleaseTracker
-import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
+import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getMaxCleanupRetries, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, dcAppGroup)
@@ -847,6 +847,7 @@ scheduleNewDeploymentCleanup rt mts = case mts of
                             { cleanupTargetDeployment = Just newDepName
                             , cleanupStatus = Just "SCALE_DOWN_SCHEDULED"
                             , cleanupAt = Just now
+                            , cleanupAttempts = 0
                             }
                     updatedMts = Just (K8sState k8s{context = updatedCtx})
                 ok <- conditionalUpdateTracker rt updatedMts (releaseStatusToText (NT.status rt))
@@ -900,25 +901,50 @@ scaleDownLeakedNewDeployment cfg (rt, mts) = case mts of
                 result <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns depName 0)
                 case result of
                     Left err -> do
+                        maxRetries <- getMaxCleanupRetries
                         logWarning $
                             "[scaleDownLeakedNewDeployment] FAILED for "
                                 <> depName
                                 <> ": "
                                 <> T.pack (show err)
-                                <> " — resetting to SCHEDULED for retry"
+                                <> " — attempt "
+                                <> T.pack (show (cleanupAttempts ctx + 1))
+                                <> "/"
+                                <> T.pack (show maxRetries)
                         freshM <- findReleaseTracker (releaseId rt)
                         case freshM of
                             Just (freshRT, Just (K8sState freshK8s)) -> do
-                                let retryCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_SCHEDULED"}
-                                    retryMts = Just (K8sState freshK8s{context = retryCtx})
-                                _ <- conditionalUpdateTracker freshRT retryMts (releaseStatusToText (NT.status freshRT))
-                                pure ()
+                                let currentAttempts = cleanupAttempts (context freshK8s) + 1
+                                if currentAttempts >= maxRetries
+                                    then do
+                                        -- Max retries exceeded, mark as FAILED and stop retrying
+                                        logWarning $
+                                            "[scaleDownLeakedNewDeployment] Max retries ("
+                                                <> T.pack (show maxRetries)
+                                                <> ") exceeded for "
+                                                <> depName
+                                                <> " in release "
+                                                <> releaseId rt
+                                                <> " — marking SCALE_DOWN_FAILED"
+                                        let failedCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_FAILED", cleanupAttempts = currentAttempts}
+                                            failedMts = Just (K8sState freshK8s{context = failedCtx})
+                                        _ <- conditionalUpdateTracker freshRT failedMts (releaseStatusToText (NT.status freshRT))
+                                        insertReleaseEvent
+                                            (releaseId rt)
+                                            "BUSINESS"
+                                            "LEAKED_DEPLOYMENT_SCALE_DOWN_ABANDONED"
+                                            (object ["deployment" .= depName, "error" .= T.pack (show err), "attempts" .= currentAttempts])
+                                    else do
+                                        -- Retry: reset to SCHEDULED and increment counter
+                                        let retryCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_SCHEDULED", cleanupAttempts = currentAttempts}
+                                            retryMts = Just (K8sState freshK8s{context = retryCtx})
+                                        _ <- conditionalUpdateTracker freshRT retryMts (releaseStatusToText (NT.status freshRT))
+                                        insertReleaseEvent
+                                            (releaseId rt)
+                                            "BUSINESS"
+                                            "LEAKED_DEPLOYMENT_SCALE_DOWN_FAILED"
+                                            (object ["deployment" .= depName, "error" .= T.pack (show err), "attempts" .= currentAttempts])
                             _ -> pure ()
-                        insertReleaseEvent
-                            (releaseId rt)
-                            "BUSINESS"
-                            "LEAKED_DEPLOYMENT_SCALE_DOWN_FAILED"
-                            (object ["deployment" .= depName, "error" .= T.pack (show err)])
                     Right _ -> do
                         logInfo $ "[scaleDownLeakedNewDeployment] Scaled " <> depName <> " to 0 successfully"
                         freshM <- findReleaseTracker (releaseId rt)
