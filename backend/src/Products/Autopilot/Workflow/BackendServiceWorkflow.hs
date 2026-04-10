@@ -458,6 +458,15 @@ runVsRolloutWithLock cfg ctx maxRetries oldW newW = do
                             liftIO $ CC.threadDelay (waitDelaySecs * 1000000)
                             waitForEditorUnlock (attempt + 1)
     waitForEditorUnlock 1
+    -- Abort check: re-read tracker to catch user-initiated abort before flipping VS.
+    -- Without this, single-stage releases go PREPARING → DEPLOYING → COMPLETED
+    -- in one tick, never checking for abort between pod-ready and VS flip.
+    freshAbortCheck <- findReleaseTracker (releaseId rt)
+    case freshAbortCheck of
+        Just (freshRT, _) | status freshRT == ABORTING || status freshRT == USER_ABORTED -> do
+            logInfo $ "[runVsRolloutWithLock] Abort detected before VS flip for " <> releaseId rt
+            liftIO $ throwIO $ WorkflowError "rollout" "Release aborted by user (caught before VS flip)"
+        _ -> pure ()
     let delaysMs = [500, 1000, 2000, 4000, 8000] :: [Int]
         attempt remainingDelays = do
             r <-

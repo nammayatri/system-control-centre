@@ -360,7 +360,17 @@ lockVsEditTrackerH _ap VsLockReq{..} = do
                 row = mkVsEditRow tid appGroup resolvedService resolvedEnv resolvedVsName (Just resolvedLockedBy) "LOCKED" now
                 rowWithExpiry = row{S.rtEndTime = Just lockExpiry}
             insertReleaseTrackerRow rowWithExpiry
-            case oldVsData of
+            capturedOld <- case oldVsData of
+                Just d -> pure (Just d)
+                Nothing -> case mProdCfg of
+                    Just pCfg | not (T.null resolvedVsName) -> do
+                        let ns = getProductNamespace pCfg
+                        result <- liftIO $ getVirtualServiceJson cfg ns resolvedVsName
+                        case result of
+                            Right vsText -> pure (Just vsText)
+                            Left _ -> pure Nothing
+                    _ -> pure Nothing
+            case capturedOld of
                 Just d -> insertReleaseEvent tid "SNAPSHOT" "VS_OLD" (String d)
                 Nothing -> pure ()
             notifyVsEditLocked tid appGroup (fromMaybe "" service) (fromMaybe "admin" lockedBy)
