@@ -85,6 +85,18 @@ autopilotConfigs =
         "Max retry attempts for scaling down leaked NEW deployments before marking as SCALE_DOWN_FAILED"
         (Just "autopilot")
     , ConfigEntry
+        "max_vs_lock_wait_retries"
+        (IntConfig 30)
+        DeploymentGroup
+        "Max retries waiting for VS editor lock to release before aborting a release workflow"
+        (Just "autopilot")
+    , ConfigEntry
+        "vs_lock_wait_delay_seconds"
+        (IntConfig 10)
+        DeploymentGroup
+        "Delay in seconds between VS editor lock wait retries"
+        (Just "autopilot")
+    , ConfigEntry
         "scaling_with_hpa_enabled"
         (JsonConfig "[]")
         ScalingGroup

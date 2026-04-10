@@ -71,7 +71,7 @@ import Products.Autopilot.Notifications (
     notifyReleaseCompleted,
     notifyReleaseProgress,
  )
-import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, withVsLock)
+import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, isVsLockedByEditor, withVsLock)
 import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTracker, findReleaseTracker, insertReleaseEvent, insertReleaseTracker)
 import Products.Autopilot.RuntimeConfig (
     getCollectMetricsDelay,
@@ -79,12 +79,14 @@ import Products.Autopilot.RuntimeConfig (
     getHpaMinMaxFactor,
     getHpaTemplate,
     getMaxK8sRetries,
+    getMaxVsLockWaitRetries,
     getPodReadinessMaxAttempts,
     getPodReadinessPollSeconds,
     getPodRestartCountThreshold,
     getPodsCalculationFactor,
     getPodsScaleDownDelayFromConfig,
     getReleaseStartDelay,
+    getVsLockWaitDelaySeconds,
     isABHSDecisionEnabledForAppGroupService,
     isABHSPostMonitoringDecisionEnabledForAppGroupService,
     isHpaEnabledForProduct,
@@ -412,7 +414,51 @@ runVsRolloutWithLock :: Config -> K8sReleaseContext -> Int -> Int -> Int -> Stat
 runVsRolloutWithLock cfg ctx maxRetries oldW newW = do
     rt <- getRT
     let lockOwner = "release:" <> releaseId rt
-        delaysMs = [500, 1000, 2000, 4000, 8000] :: [Int]
+    maxWaitRetries <- getMaxVsLockWaitRetries
+    waitDelaySecs <- getVsLockWaitDelaySeconds
+    let waitForEditorUnlock attempt = do
+            editorLocked <- isVsLockedByEditor (appGroup rt) lockOwner
+            if not editorLocked
+                then pure ()
+                else
+                    if attempt >= maxWaitRetries
+                        then do
+                            let reason =
+                                    "VS is locked by an editor for "
+                                        <> appGroup rt
+                                        <> ". Waited "
+                                        <> T.pack (show attempt)
+                                        <> " attempts, aborting release."
+                            insertReleaseEvent
+                                (releaseId rt)
+                                "BUSINESS"
+                                "VS_EDITOR_LOCK_TIMEOUT"
+                                (object ["attempts" .= attempt, "lockOwner" .= lockOwner, "reason" .= reason])
+                            logWarning $ "[runVsRolloutWithLock] " <> reason
+                            updateRT $ \r -> r{status = ABORTING}
+                            currentRT <- getRT
+                            currentTS <- gets targetState
+                            casUpdateOrBail "vsEditorLockTimeout" currentRT currentTS (status rt)
+                            liftIO $ throwIO $ WorkflowError "vs-editor-lock" reason
+                        else do
+                            when (attempt == 1) $
+                                insertReleaseEvent
+                                    (releaseId rt)
+                                    "BUSINESS"
+                                    "VS_EDITOR_LOCK_WAIT"
+                                    (object ["message" .= ("VS locked by editor, waiting for unlock" :: T.Text)])
+                            logInfo $
+                                "[runVsRolloutWithLock] VS locked by editor for "
+                                    <> appGroup rt
+                                    <> ", waiting... (attempt "
+                                    <> T.pack (show attempt)
+                                    <> "/"
+                                    <> T.pack (show maxWaitRetries)
+                                    <> ")"
+                            liftIO $ CC.threadDelay (waitDelaySecs * 1000000)
+                            waitForEditorUnlock (attempt + 1)
+    waitForEditorUnlock 1
+    let delaysMs = [500, 1000, 2000, 4000, 8000] :: [Int]
         attempt remainingDelays = do
             r <-
                 withVsLock (appGroup rt) lockOwner $

@@ -36,6 +36,8 @@ module Products.Autopilot.RuntimeConfig (
     getDecisionNotificationDedupMinutes,
     getMaxK8sRetries,
     getMaxCleanupRetries,
+    getMaxVsLockWaitRetries,
+    getVsLockWaitDelaySeconds,
     getCkhClusterName,
     getDEPostMonitoringTimeout,
     getPodReadinessMaxAttempts,
@@ -239,6 +241,12 @@ before marking the cleanup as permanently FAILED. Default 5.
 -}
 getMaxCleanupRetries :: (MonadFlow m) => m Int
 getMaxCleanupRetries = getConfigIntForProduct "max_cleanup_retries" (Just "autopilot") 5
+
+getMaxVsLockWaitRetries :: (MonadFlow m) => m Int
+getMaxVsLockWaitRetries = getConfigIntForProduct "max_vs_lock_wait_retries" (Just "autopilot") 30
+
+getVsLockWaitDelaySeconds :: (MonadFlow m) => m Int
+getVsLockWaitDelaySeconds = getConfigIntForProduct "vs_lock_wait_delay_seconds" (Just "autopilot") 10
 
 {- | Default 1.0 = match old-version pod count exactly. Bumping above 1.0
 combined with the per-stage HPA ratchet (max(live, computed)) causes

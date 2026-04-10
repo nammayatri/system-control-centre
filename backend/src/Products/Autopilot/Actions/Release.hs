@@ -1894,86 +1894,77 @@ fastForwardH ap rid req = do
             if currentStatus /= INPROGRESS
                 then pure $ APIResponse "ERROR" ("Cannot fast-forward from status: " <> T.pack (show currentStatus) <> ". Must be INPROGRESS")
                 else do
-                    -- Debounce: if the current stage is ALREADY marked manualOverride=true,
-                    -- a previous fast-forward already fired and the workflow just hasn't
-                    -- advanced yet (it polls every release_watch_delay seconds). Return a
-                    -- friendly no-op so we don't pollute the event log with duplicate
-                    -- FAST_FORWARD entries when the user clicks twice quickly.
-                    -- BUT (round 7 audit B5): if the previous fast-forward never landed
-                    -- (workflow stuck for >5 minutes since the manualOverride was set),
-                    -- ALLOW a fresh fast-forward attempt so the user can recover from a
-                    -- wedged workflow without aborting + restarting the whole release.
-                    nowFF <- liftIO getCurrentTime
-                    let history = NT.rolloutHistory tracker
-                        (currentStepAlreadyForwarded, stuckTooLong) = case history of
-                            [] -> (False, False)
-                            xs ->
-                                let lastH = last xs
-                                    forwarded = historyManualOverride lastH
-                                    elapsedMin =
-                                        round
-                                            ( realToFrac (diffUTCTime nowFF (historyStartedAt lastH)) / 60.0 ::
-                                                Double
-                                            ) ::
-                                            Int
-                                 in (forwarded, elapsedMin >= 5)
-                    if currentStepAlreadyForwarded && not stuckTooLong
-                        then pure $ APIResponse "SUCCESS" "Fast forward already in progress for current stage; runner will advance on next poll."
+                    let ag = NT.appGroup tracker
+                    mProduct <- findProductByName ag
+                    let editorLocked = case mProduct of
+                            Nothing -> False
+                            Just p -> case getProductVsLockedBy p of
+                                Nothing -> False
+                                Just _ -> True
+                    if editorLocked
+                        then pure $ APIResponse "ERROR" ("Cannot fast-forward: VS is locked for " <> ag <> ". Unlock the VS first.")
                         else do
-                            -- Fast-forward: match production Julia logic exactly.
-                            -- Sets rollout strategy cooloff to elapsed minutes (time since step started),
-                            -- so isCoolOffExceeded(cooloff, startedAt) returns true immediately:
-                            --   coolOffLimit = startedAt + Minute(elapsedMinutes) <= now  →  true
-                            -- Also marks historyManualOverride = True.
-                            now <- liftIO getCurrentTime
-                            let currentStepIdx = length history - 1
-                                -- Calculate elapsed minutes from step start
-                                elapsedMins = case history of
-                                    [] -> 0
-                                    steps ->
-                                        let lastStep = last steps
-                                         in round (realToFrac (diffUTCTime now (historyStartedAt lastStep)) / 60 :: Double) :: Int
-                                strategy = NT.rolloutStrategy tracker
-                                updatedStrategy = case strategy of
-                                    [] -> []
-                                    steps ->
-                                        zipWith (\i s -> if i == currentStepIdx then s{cooloffMinutes = elapsedMins} else s) [0 ..] steps
-                                -- History keeps original cooloff for display; manualOverride=True shows it was fast-forwarded
-                                -- Strategy gets elapsedMins so workflow's isCoolOffExceeded passes immediately
-                                updatedHistory = case history of
-                                    [] -> []
-                                    steps ->
-                                        let lastIdx = length steps - 1
-                                            updateStep i step =
-                                                if i == lastIdx
-                                                    then step{historyManualOverride = True}
-                                                    else step
-                                         in zipWith updateStep [0 ..] steps
-                                updated = (tracker :: ReleaseTracker){NT.rolloutHistory = updatedHistory, NT.rolloutStrategy = updatedStrategy}
-                            ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText currentStatus)
-                            if not ok
-                                then pure staleTrackerError
+                            nowFF <- liftIO getCurrentTime
+                            let history = NT.rolloutHistory tracker
+                                (currentStepAlreadyForwarded, stuckTooLong) = case history of
+                                    [] -> (False, False)
+                                    xs ->
+                                        let lastH = last xs
+                                            forwarded = historyManualOverride lastH
+                                            elapsedMin =
+                                                round
+                                                    ( realToFrac (diffUTCTime nowFF (historyStartedAt lastH)) / 60.0 ::
+                                                        Double
+                                                    ) ::
+                                                    Int
+                                         in (forwarded, elapsedMin >= 5)
+                            if currentStepAlreadyForwarded && not stuckTooLong
+                                then pure $ APIResponse "SUCCESS" "Fast forward already in progress for current stage; runner will advance on next poll."
                                 else do
-                                    -- Default requestedBy to the authenticated person if frontend
-                                    -- omitted the field, so the audit log isn't full of nulls.
-                                    let actor = case (req :: FastForwardReq).requestedBy of
-                                            Just t | not (T.null t) -> t
-                                            _ -> apEmail ap
-                                        reasonText = case (req :: FastForwardReq).reason of
-                                            Just t | not (T.null t) -> Just t
-                                            _ -> Just "User-initiated fast-forward"
-                                    insertReleaseEvent
-                                        rid
-                                        "BUSINESS"
-                                        "FAST_FORWARD"
-                                        ( object
-                                            [ "requestedBy" .= actor
-                                            , "reason" .= reasonText
-                                            , "stage" .= (currentStepIdx + 1)
-                                            ]
-                                        )
-                                    notifyReleaseFastForwarded updated
-                                    pure $ APIResponse "SUCCESS" "Fast forward: cooloff period skipped, runner will advance on next poll"
+                                    now <- liftIO getCurrentTime
+                                    let currentStepIdx = length history - 1
+                                        elapsedMins = case history of
+                                            [] -> 0
+                                            steps ->
+                                                let lastStep = last steps
+                                                 in round (realToFrac (diffUTCTime now (historyStartedAt lastStep)) / 60 :: Double) :: Int
+                                        strategy = NT.rolloutStrategy tracker
+                                        updatedStrategy = case strategy of
+                                            [] -> []
+                                            steps ->
+                                                zipWith (\i s -> if i == currentStepIdx then s{cooloffMinutes = elapsedMins} else s) [0 ..] steps
+                                        updatedHistory = case history of
+                                            [] -> []
+                                            steps ->
+                                                let lastIdx = length steps - 1
+                                                    updateStep i step =
+                                                        if i == lastIdx
+                                                            then step{historyManualOverride = True}
+                                                            else step
+                                                 in zipWith updateStep [0 ..] steps
+                                        updated = (tracker :: ReleaseTracker){NT.rolloutHistory = updatedHistory, NT.rolloutStrategy = updatedStrategy}
+                                    ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText currentStatus)
+                                    if not ok
+                                        then pure staleTrackerError
+                                        else do
+                                            let actor = case (req :: FastForwardReq).requestedBy of
+                                                    Just t | not (T.null t) -> t
+                                                    _ -> apEmail ap
+                                                reasonText = case (req :: FastForwardReq).reason of
+                                                    Just t | not (T.null t) -> Just t
+                                                    _ -> Just "User-initiated fast-forward"
+                                            insertReleaseEvent
+                                                rid
+                                                "BUSINESS"
+                                                "FAST_FORWARD"
+                                                ( object
+                                                    [ "requestedBy" .= actor
+                                                    , "reason" .= reasonText
+                                                    , "stage" .= (currentStepIdx + 1)
+                                                    ]
+                                                )
+                                            notifyReleaseFastForwarded updated
+                                            pure $ APIResponse "SUCCESS" "Fast forward: cooloff period skipped, runner will advance on next poll"
 
 -- ============================================================================
 -- Validation Helpers

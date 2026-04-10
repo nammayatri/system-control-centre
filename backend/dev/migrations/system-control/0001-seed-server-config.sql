@@ -155,6 +155,19 @@ INSERT INTO server_config (type, name, value, enabled, product)
 SELECT 'INT', 'max_cleanup_retries', '5', 1, 'autopilot'
 WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'max_cleanup_retries');
 
+-- Max retries waiting for a VS editor lock to release before aborting a
+-- release workflow. Each retry waits vs_lock_wait_delay_seconds. Default
+-- 30 retries × 10s = 5 minutes max wait.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'max_vs_lock_wait_retries', '30', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'max_vs_lock_wait_retries');
+
+-- Delay (seconds) between VS editor lock wait retries. Used by
+-- runVsRolloutWithLock to poll for editor unlock. Default 10.
+INSERT INTO server_config (type, name, value, enabled, product)
+SELECT 'INT', 'vs_lock_wait_delay_seconds', '10', 1, 'autopilot'
+WHERE NOT EXISTS (SELECT 1 FROM server_config WHERE name = 'vs_lock_wait_delay_seconds');
+
 -- Pod-count multiplier used by scaleNewDeploymentForStage. Julia parity:
 -- pods_calculation_factor (service.jl:17). The strategy formula is
 --   strategyByFactor = ceil(factor × oldDesired / 100 × routePercent).

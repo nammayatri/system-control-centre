@@ -19,6 +19,17 @@ import GHC.Int (Int32)
 import Products.Autopilot.Types.Storage.Schema
 import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct_io)
 
+isVsLockedByEditor :: (MonadFlow m) => Text -> Text -> m Bool
+isVsLockedByEditor productName' releaseOwner = do
+    mProduct <- findProductByName productName'
+    case mProduct of
+        Nothing -> pure False
+        Just p -> case getProductVsLockedBy p of
+            Nothing -> pure False
+            Just lockedBy
+                | lockedBy == releaseOwner -> pure False
+                | otherwise -> pure True
+
 -- Product-level queries (service IS NULL)
 
 getProductCluster :: DeploymentConfig -> Text

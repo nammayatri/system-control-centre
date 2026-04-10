@@ -485,41 +485,71 @@ revertVsEditTrackerH _ap tid = do
                                 Nothing -> pure $ APIResponse "ERROR" "No product config found"
                                 Just pCfg -> do
                                     let ns = getProductNamespace pCfg
+                                        vsN = getProductVsName pCfg
                                         oldVsContent = case S.rePayload oldVsEvt of
                                             String s' -> s'
                                             _ -> ""
                                     if T.null oldVsContent
                                         then pure $ APIResponse "ERROR" "Empty VS_OLD snapshot"
                                         else do
-                                            acquired <- tryAcquireVsLock (S.rtAppGroup orig) (S.rtCreatedBy orig <> "-revert")
-                                            if not acquired
-                                                then throwM (Conflict ("VS is already locked for app group " <> S.rtAppGroup orig))
-                                                else do
-                                                    now <- liftIO getCurrentTime
-                                                    newTid <- liftIO (UUID.toText <$> UUID.nextRandom)
-                                                    let revertRow =
-                                                            (mkVsEditRow newTid (S.rtAppGroup orig) (S.rtService orig) (S.rtEnv orig) (fromMaybe "" (S.rtMetadata orig)) (Just (S.rtCreatedBy orig <> "-revert")) "CREATED" now)
-                                                                { S.rtInfo = Just ("Revert of " <> tid)
-                                                                , S.rtDescription = Just ("Revert of " <> tid)
-                                                                }
-                                                    insertReleaseTrackerRow revertRow
-                                                    insertReleaseEvent newTid "BUSINESS" "REVERT_TRACKER_CREATED" (String ("Revert of " <> tid))
-                                                    insertReleaseEvent newTid "SNAPSHOT" "VS_NEW" (String oldVsContent)
-                                                    applyResult <- liftIO $ applyVsToK8s cfg (T.unpack ns) oldVsContent
-                                                    case applyResult of
-                                                        Left err -> do
-                                                            _ <- releaseVsLockIfOwner (S.rtAppGroup orig) (S.rtCreatedBy orig <> "-revert")
-                                                            pure $ APIResponse "ERROR" ("K8s apply failed during revert: " <> err)
-                                                        Right () -> do
-                                                            -- VS already applied; surface CAS misses so
-                                                            -- operators see the audit-row drift.
-                                                            let appliedRow = revertRow{S.rtStatus = "APPLIED", S.rtUpdatedAt = now}
-                                                            casOk <- conditionalUpdateTrackerRow appliedRow "CREATED"
-                                                            _ <- releaseVsLockIfOwner (S.rtAppGroup orig) (S.rtCreatedBy orig <> "-revert")
-                                                            notifyVsEditApplied newTid (S.rtAppGroup orig) (S.rtService orig) (S.rtCreatedBy orig <> "-revert")
-                                                            if casOk
-                                                                then pure $ APIResponse "SUCCESS" ("VS edit reverted. New tracker: " <> newTid)
-                                                                else pure $ APIResponse "WARNING" ("VS edit applied to K8s but tracker row was modified concurrently. New tracker: " <> newTid)
+                                            -- Safety check: compare VS_NEW snapshot with live VS.
+                                            -- If they differ, a release or another edit changed the
+                                            -- VS after this edit was applied — revert would clobber
+                                            -- those changes.
+                                            let mNewVs = find (\e -> S.reCategory e == "SNAPSHOT" && S.reLabel e == "VS_NEW") events
+                                                newVsContent = case mNewVs of
+                                                    Just evt -> case S.rePayload evt of
+                                                        String s' -> s'
+                                                        _ -> ""
+                                                    Nothing -> ""
+                                            liveVsResult <- liftIO $ getVirtualServiceJson cfg ns vsN
+                                            case liveVsResult of
+                                                Left _ -> pure $ APIResponse "ERROR" "Failed to fetch live VS from k8s — cannot verify safety of revert."
+                                                Right liveVsText -> do
+                                                    let cleanSpec t = case eitherDecode (LBS.pack (T.unpack t)) of
+                                                            Right v -> Just (stripK8sNoiseValue v)
+                                                            Left _ -> Nothing
+                                                        liveClean = cleanSpec liveVsText
+                                                        snapshotClean = cleanSpec newVsContent
+                                                        vsModified = case (liveClean, snapshotClean) of
+                                                            (Just l, Just s) -> l /= s
+                                                            _ -> not (T.null newVsContent)
+                                                    if vsModified
+                                                        then do
+                                                            insertReleaseEvent
+                                                                tid
+                                                                "BUSINESS"
+                                                                "REVERT_BLOCKED"
+                                                                (object ["reason" .= ("VS has been modified since this edit was applied (by a release or another edit). Cannot safely revert." :: Text)])
+                                                            pure $ APIResponse "ERROR" "VS has been modified since this edit was applied (by a release or another edit). Cannot safely revert — manual intervention required."
+                                                        else do
+                                                            acquired <- tryAcquireVsLock (S.rtAppGroup orig) (S.rtCreatedBy orig <> "-revert")
+                                                            if not acquired
+                                                                then throwM (Conflict ("VS is already locked for app group " <> S.rtAppGroup orig))
+                                                                else do
+                                                                    now <- liftIO getCurrentTime
+                                                                    newTid <- liftIO (UUID.toText <$> UUID.nextRandom)
+                                                                    let revertRow =
+                                                                            (mkVsEditRow newTid (S.rtAppGroup orig) (S.rtService orig) (S.rtEnv orig) (fromMaybe "" (S.rtMetadata orig)) (Just (S.rtCreatedBy orig <> "-revert")) "CREATED" now)
+                                                                                { S.rtInfo = Just ("Revert of " <> tid)
+                                                                                , S.rtDescription = Just ("Revert of " <> tid)
+                                                                                }
+                                                                    insertReleaseTrackerRow revertRow
+                                                                    insertReleaseEvent newTid "BUSINESS" "REVERT_TRACKER_CREATED" (String ("Revert of " <> tid))
+                                                                    insertReleaseEvent newTid "SNAPSHOT" "VS_NEW" (String oldVsContent)
+                                                                    applyResult <- liftIO $ applyVsToK8s cfg (T.unpack ns) oldVsContent
+                                                                    case applyResult of
+                                                                        Left err -> do
+                                                                            _ <- releaseVsLockIfOwner (S.rtAppGroup orig) (S.rtCreatedBy orig <> "-revert")
+                                                                            pure $ APIResponse "ERROR" ("K8s apply failed during revert: " <> err)
+                                                                        Right () -> do
+                                                                            let appliedRow = revertRow{S.rtStatus = "APPLIED", S.rtUpdatedAt = now}
+                                                                            casOk <- conditionalUpdateTrackerRow appliedRow "CREATED"
+                                                                            _ <- releaseVsLockIfOwner (S.rtAppGroup orig) (S.rtCreatedBy orig <> "-revert")
+                                                                            notifyVsEditApplied newTid (S.rtAppGroup orig) (S.rtService orig) (S.rtCreatedBy orig <> "-revert")
+                                                                            if casOk
+                                                                                then pure $ APIResponse "SUCCESS" ("VS edit reverted. New tracker: " <> newTid)
+                                                                                else pure $ APIResponse "WARNING" ("VS edit applied to K8s but tracker row was modified concurrently. New tracker: " <> newTid)
 
 -- | Fetch live VS JSON from K8s; uses deployment_config.vs_name, not service.
 fetchCurrentVsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow Value
