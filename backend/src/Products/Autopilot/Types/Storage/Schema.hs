@@ -38,6 +38,7 @@ data DeploymentConfigT f = DeploymentConfigT
     , dcRevertStrategy :: Columnar f (Maybe Text)
     , dcDecisionConfig :: Columnar f (Maybe Text)
     , dcSlackChannel :: Columnar f (Maybe Text)
+    , dcServiceState :: Columnar f (Maybe Text)
     }
     deriving (Generic, Beamable)
 
@@ -144,6 +145,7 @@ autopilotDb =
                             , dcRevertStrategy = fieldNamed "revert_strategy"
                             , dcDecisionConfig = fieldNamed "decision_config"
                             , dcSlackChannel = fieldNamed "slack_channel"
+                            , dcServiceState = fieldNamed "service_state"
                             }
             , releaseTrackers =
                 setEntityName "release_tracker"

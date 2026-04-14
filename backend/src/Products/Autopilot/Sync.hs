@@ -2,7 +2,7 @@
 {-# LANGUAGE RecordWildCards #-}
 
 {- | Cross-cluster sync — pushes a completed release to a secondary
-namma-ap instance. Background fan-out uses 'forkFlow'.
+scc instance. Background fan-out uses 'forkFlow'.
 -}
 module Products.Autopilot.Sync (
     triggerSyncIfEnabled,

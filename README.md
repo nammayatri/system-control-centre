@@ -255,7 +255,7 @@ The first run on a fresh DB needs schema bootstrap. Either:
 1. Mount the host's `dev/sql-seed/` and `dev/migrations/system-control/` into the postgres init dir, OR
 2. Exec into the container and run the bundled SQL files manually:
    ```bash
-   docker exec -it scc-backend sh -c 'psql "$SC_DATABASE_URL" -f /srv/namma-ap/dev/sql-seed/system-control-seed.sql'
+   docker exec -it scc-backend sh -c 'psql "$SC_DATABASE_URL" -f /srv/scc/dev/sql-seed/system-control-seed.sql'
    ```
 
 Final image ~280 MB.
@@ -334,7 +334,7 @@ scc-entrypoint.sh:
   if DHALL_CONFIGS is set:
     echo "$DHALL_CONFIGS" | base64 -d > /tmp/scc/system-control.dhall
     export SC_CONFIG_PATH=/tmp/scc/system-control.dhall
-  exec namma-ap
+  exec scc
 ```
 
 If `DHALL_CONFIGS` is unset, the entrypoint is a no-op and the binary uses its built-in default path — perfect for local dev / testing.

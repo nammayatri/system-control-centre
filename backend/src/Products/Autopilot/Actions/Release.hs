@@ -483,184 +483,198 @@ createReleaseHBodyAfterStrategyCheck mXForwardedEmail mXPomeriumJwt K8sCreateRel
                                             if depAlreadyExists && not (fromMaybe False newService)
                                                 then pure $ APIResponse "ERROR" ("Deployment with version " <> newVersion <> " already exists: " <> newDepNameCheck)
                                                 else do
-                                                    rid <- liftIO (UUID.toText <$> UUID.nextRandom)
-                                                    let targetSvcHost = fromMaybe service (getServiceHost sCfg)
-                                                        metadataDockerImage =
-                                                            case metadata of
-                                                                Just (Object obj) ->
-                                                                    case KM.lookup (K.fromText "docker-image") obj of
-                                                                        Just (String t) | not (T.null t) -> Just t
-                                                                        _ ->
-                                                                            case KM.lookup (K.fromText "dockerImage") obj of
-                                                                                Just (String t) | not (T.null t) -> Just t
-                                                                                _ -> Nothing
-                                                                _ -> Nothing
-                                                        metadataInternalVsName =
-                                                            case metadata of
-                                                                Just (Object obj) ->
-                                                                    case KM.lookup (K.fromText "internal-vs-name") obj of
-                                                                        Just (String t) | not (T.null t) -> Just t
-                                                                        _ ->
-                                                                            case KM.lookup (K.fromText "internalVsName") obj of
-                                                                                Just (String t) | not (T.null t) -> Just t
-                                                                                _ -> Nothing
-                                                                _ -> Nothing
-                                                    resolvedOldVersion <-
-                                                        if fromMaybe False newService
-                                                            then do
-                                                                -- New service: no old version to discover, set to "new"
-                                                                logInfo "[createReleaseH] New service flag set, skipping old version discovery"
-                                                                pure (if T.null oldVersion then "new" else oldVersion)
-                                                            else
-                                                                if T.toLower oldVersion == "unknown" || T.null oldVersion
-                                                                    then do
-                                                                        discovered <- liftIO $ getPrimarySubsetFromVirtualService cfg (getProductNamespace pCfg) (getProductVsName pCfg) targetSvcHost
-                                                                        pure $ case discovered of
-                                                                            Right (Just subset) -> subset
-                                                                            _ -> oldVersion
-                                                                    else pure oldVersion
-                                                    let derivedContext =
-                                                            K8sReleaseContext
-                                                                { cluster = getProductCluster pCfg
-                                                                , namespace = getProductNamespace pCfg
-                                                                , deploymentName = targetSvcHost <> "-" <> newVersion
-                                                                , serviceName = targetSvcHost
-                                                                , destinationRuleName = targetSvcHost <> "-destinations"
-                                                                , virtualServiceName = getProductVsName pCfg
-                                                                , internalVirtualServiceName = metadataInternalVsName
-                                                                , containerName = targetSvcHost
-                                                                , oldVersion = resolvedOldVersion
-                                                                , newVersion = newVersion
-                                                                , dockerImage = metadataDockerImage
-                                                                , matches = []
-                                                                , podsScaleDownDelay = Nothing
-                                                                , podsScaleDownTimestamp = Nothing
-                                                                , podsScaleDownStatus = Nothing
-                                                                , oldVersionPodCount = Nothing
-                                                                , revert = Nothing
-                                                                , abRunId = Nothing
-                                                                , abStatus = Nothing
-                                                                , cleanupAt = Nothing
-                                                                , cleanupTargetDeployment = Nothing
-                                                                , cleanupStatus = Nothing
-                                                                , cleanupAttempts = 0
-                                                                , deployFilePath = deployFilePath
-                                                                , serviceFilePath = serviceFilePath
-                                                                , drFilePath = drFilePath
-                                                                , vsFilePath = vsFilePath
-                                                                , prevAbHsDecision = Nothing
-                                                                , postMonitoringDecisionMap = Nothing
-                                                                , syncClusterEnvOverrideData = syncClusterEnvOverrideData
-                                                                , syncClusterRolloutStrategy = fmap (\v -> T.pack (LBS.unpack (A.encode v))) syncClusterRolloutStrategy
-                                                                , syncXForwardedEmail = mXForwardedEmail
-                                                                , syncXPomeriumJwt = mXPomeriumJwt
-                                                                }
-                                                        reqMode = case mode of
-                                                            Just "MANUAL" -> MANUAL
-                                                            Just "manual" -> MANUAL
-                                                            _ -> AUTO
-                                                    approveAll <- isApproveAllReleases
-                                                    now <- liftIO getCurrentTime
-                                                    let isFromSync = fromMaybe False isSystemTriggered
-                                                        initialApproval = case isApproved of
-                                                            Just True -> True
-                                                            _ -> approveAll && isFromSync
-                                                        -- Auto-generate release tag if not provided
-                                                        autoTag = case releaseTag of
-                                                            Just t | not (T.null t) -> Just t
-                                                            _ ->
-                                                                let datePart = T.pack (formatTime defaultTimeLocale "%Y%m%d" now)
-                                                                    modeText = T.pack (show reqMode)
-                                                                    priText = T.pack (show (fromMaybe 0 priority))
-                                                                 in Just (T.intercalate "_" [appGroup, datePart, newVersion, service, modeText, env, priText])
-                                                        tracker =
-                                                            ReleaseTracker
-                                                                { releaseId = rid
-                                                                , appGroup = appGroup
-                                                                , service = service
-                                                                , env = env
-                                                                , category = trackerType
-                                                                , status = CREATED
-                                                                , releaseWFStatus = INIT
-                                                                , mode = reqMode
-                                                                , createdBy = createdBy
-                                                                , approvedBy = approvedBy
-                                                                , isApproved = initialApproval
-                                                                , isInfraApproved = fromMaybe (fromMaybe False (S.dcNeedInfraApproval pCfg >>= \need -> if need then Just False else Just True)) isInfraApproved
-                                                                , releaseTag = autoTag
-                                                                , dateCreated = Nothing -- DB sets via DEFAULT now()
-                                                                , lastUpdated = Nothing -- DB sets via DEFAULT now()
-                                                                , scheduleTime = scheduleTime
-                                                                , startTime = Nothing
-                                                                , endTime = Nothing
-                                                                , rolloutStrategy = rolloutStrategy
-                                                                , rolloutHistory = []
-                                                                , oldVersion = resolvedOldVersion
-                                                                , newVersion = newVersion
-                                                                , info = info
-                                                                , description = description
-                                                                , changeLog = changeLog
-                                                                , metadata = metadata
-                                                                , priority = fromMaybe 0 priority
-                                                                , globalId = globalId
-                                                                , syncEnabled =
-                                                                    if isFromSync
-                                                                        then Nothing
-                                                                        else case isReleaseSync of
-                                                                            Just True -> Just "true"
-                                                                            _ -> syncEnabled
-                                                                , envOverrideData = envOverrideData
-                                                                , slackThreadTs = slackThreadTs
-                                                                , -- Seed from 'derivedContext' below so the tracker's public view
-                                                                  -- matches the 'K8sState' target state we're about to persist.
-                                                                  -- Without this field the record is partial and any access to
-                                                                  -- 'releaseContext' crashes at runtime with "Missing field in
-                                                                  -- record construction" (caught by -Wmissing-fields).
-                                                                  releaseContext = Just (toJSON derivedContext)
-                                                                }
-                                                        targetState =
-                                                            K8sState $
-                                                                emptyK8sState
-                                                                    { context = derivedContext
-                                                                    , newService = fromMaybe False newService
-                                                                    , cronjobSuspend = fromMaybe False cronjobSuspend
-                                                                    }
-                                                    -- insertReleaseTrackerSafe returns Just <existing-id>
-                                                    -- when the parallel global_id idempotency path fired
-                                                    -- (another thread already inserted this global_id);
-                                                    -- in that case, short-circuit with the same SUCCESS
-                                                    -- shape the createReleaseH idempotent fast-path uses.
-                                                    mIdem <- insertReleaseTrackerSafe tracker targetState
-                                                    case mIdem of
-                                                        Just existingRid -> do
-                                                            logInfo $ "Idempotent receive (DB-level): tracker already exists for global_id, returning existing id=" <> existingRid
-                                                            pure $ APIResponse "SUCCESS" ("Tracker already exists: " <> existingRid)
-                                                        Nothing -> do
-                                                            insertReleaseEvent rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
-                                                            -- Capture PREVIEW snapshots at creation time so the diff
-                                                            -- is available immediately (before the workflow runs).
-                                                            -- Labels use the @_PREVIEW@ suffix to distinguish them
-                                                            -- from the workflow-time ground-truth snapshots, which
-                                                            -- use the plain @DEPLOYMENT_BEFORE/AFTER@ labels. Without
-                                                            -- this split, the event log showed TWO pairs of
-                                                            -- identically-labeled snapshots per release (create-time
-                                                            -- preview + workflow ground-truth). The diff endpoint
-                                                            -- prefers the workflow labels and falls back to
-                                                            -- @_PREVIEW@ if they haven't been written yet.
-                                                            let ns = getProductNamespace pCfg
-                                                                oldDepName = targetSvcHost <> "-" <> resolvedOldVersion
-                                                            captureDeploymentSnapshot cfg rid ns oldDepName "DEPLOYMENT_BEFORE_PREVIEW"
-                                                            captureDeploymentPreview
-                                                                cfg
-                                                                rid
-                                                                ns
-                                                                oldDepName
-                                                                newVersion
-                                                                (fromMaybe "" metadataDockerImage)
-                                                                envOverrideData
-                                                                "DEPLOYMENT_AFTER_PREVIEW"
-                                                            notifyReleaseCreated tracker
-                                                            pure $ APIResponse "SUCCESS" ("Tracker created: " <> rid)
+                                                    claimed <- claimServiceForModification appGroup service
+                                                    if not claimed
+                                                        then pure $ APIResponse "ERROR" ("Service " <> service <> " in app group " <> appGroup <> " is already being modified (service_state guard). Try again shortly.")
+                                                        else createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} pCfg sCfg
+
+createReleaseHBodyAfterClaim ::
+    Maybe Text ->
+    Maybe Text ->
+    K8sCreateReleaseReq ->
+    S.DeploymentConfig ->
+    S.DeploymentConfig ->
+    Flow APIResponse
+createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} pCfg sCfg = do
+    cfg <- getConfig
+    rid <- liftIO (UUID.toText <$> UUID.nextRandom)
+    let targetSvcHost = fromMaybe service (getServiceHost sCfg)
+        metadataDockerImage =
+            case metadata of
+                Just (Object obj) ->
+                    case KM.lookup (K.fromText "docker-image") obj of
+                        Just (String t) | not (T.null t) -> Just t
+                        _ ->
+                            case KM.lookup (K.fromText "dockerImage") obj of
+                                Just (String t) | not (T.null t) -> Just t
+                                _ -> Nothing
+                _ -> Nothing
+        metadataInternalVsName =
+            case metadata of
+                Just (Object obj) ->
+                    case KM.lookup (K.fromText "internal-vs-name") obj of
+                        Just (String t) | not (T.null t) -> Just t
+                        _ ->
+                            case KM.lookup (K.fromText "internalVsName") obj of
+                                Just (String t) | not (T.null t) -> Just t
+                                _ -> Nothing
+                _ -> Nothing
+    resolvedOldVersion <-
+        if fromMaybe False newService
+            then do
+                -- New service: no old version to discover, set to "new"
+                logInfo "[createReleaseH] New service flag set, skipping old version discovery"
+                pure (if T.null oldVersion then "new" else oldVersion)
+            else
+                if T.toLower oldVersion == "unknown" || T.null oldVersion
+                    then do
+                        discovered <- liftIO $ getPrimarySubsetFromVirtualService cfg (getProductNamespace pCfg) (getProductVsName pCfg) targetSvcHost
+                        pure $ case discovered of
+                            Right (Just subset) -> subset
+                            _ -> oldVersion
+                    else pure oldVersion
+    let derivedContext =
+            K8sReleaseContext
+                { cluster = getProductCluster pCfg
+                , namespace = getProductNamespace pCfg
+                , deploymentName = targetSvcHost <> "-" <> newVersion
+                , serviceName = targetSvcHost
+                , destinationRuleName = targetSvcHost <> "-destinations"
+                , virtualServiceName = getProductVsName pCfg
+                , internalVirtualServiceName = metadataInternalVsName
+                , containerName = targetSvcHost
+                , oldVersion = resolvedOldVersion
+                , newVersion = newVersion
+                , dockerImage = metadataDockerImage
+                , matches = []
+                , podsScaleDownDelay = Nothing
+                , podsScaleDownTimestamp = Nothing
+                , podsScaleDownStatus = Nothing
+                , oldVersionPodCount = Nothing
+                , revert = Nothing
+                , abRunId = Nothing
+                , abStatus = Nothing
+                , cleanupAt = Nothing
+                , cleanupTargetDeployment = Nothing
+                , cleanupStatus = Nothing
+                , cleanupAttempts = 0
+                , deployFilePath = deployFilePath
+                , serviceFilePath = serviceFilePath
+                , drFilePath = drFilePath
+                , vsFilePath = vsFilePath
+                , prevAbHsDecision = Nothing
+                , postMonitoringDecisionMap = Nothing
+                , syncClusterEnvOverrideData = syncClusterEnvOverrideData
+                , syncClusterRolloutStrategy = fmap (\v -> T.pack (LBS.unpack (A.encode v))) syncClusterRolloutStrategy
+                , syncXForwardedEmail = mXForwardedEmail
+                , syncXPomeriumJwt = mXPomeriumJwt
+                }
+        reqMode = case mode of
+            Just "MANUAL" -> MANUAL
+            Just "manual" -> MANUAL
+            _ -> AUTO
+    approveAll <- isApproveAllReleases
+    now <- liftIO getCurrentTime
+    let isFromSync = fromMaybe False isSystemTriggered
+        initialApproval = case isApproved of
+            Just True -> True
+            _ -> approveAll && isFromSync
+        -- Auto-generate release tag if not provided
+        autoTag = case releaseTag of
+            Just t | not (T.null t) -> Just t
+            _ ->
+                let datePart = T.pack (formatTime defaultTimeLocale "%Y%m%d" now)
+                    modeText = T.pack (show reqMode)
+                    priText = T.pack (show (fromMaybe 0 priority))
+                 in Just (T.intercalate "_" [appGroup, datePart, newVersion, service, modeText, env, priText])
+        tracker =
+            ReleaseTracker
+                { releaseId = rid
+                , appGroup = appGroup
+                , service = service
+                , env = env
+                , category = trackerType
+                , status = CREATED
+                , releaseWFStatus = INIT
+                , mode = reqMode
+                , createdBy = createdBy
+                , approvedBy = approvedBy
+                , isApproved = initialApproval
+                , isInfraApproved = fromMaybe (fromMaybe False (S.dcNeedInfraApproval pCfg >>= \need -> if need then Just False else Just True)) isInfraApproved
+                , releaseTag = autoTag
+                , dateCreated = Nothing -- DB sets via DEFAULT now()
+                , lastUpdated = Nothing -- DB sets via DEFAULT now()
+                , scheduleTime = scheduleTime
+                , startTime = Nothing
+                , endTime = Nothing
+                , rolloutStrategy = rolloutStrategy
+                , rolloutHistory = []
+                , oldVersion = resolvedOldVersion
+                , newVersion = newVersion
+                , info = info
+                , description = description
+                , changeLog = changeLog
+                , metadata = metadata
+                , priority = fromMaybe 0 priority
+                , globalId = globalId
+                , syncEnabled =
+                    if isFromSync
+                        then Nothing
+                        else case isReleaseSync of
+                            Just True -> Just "true"
+                            _ -> syncEnabled
+                , envOverrideData = envOverrideData
+                , slackThreadTs = slackThreadTs
+                , -- Seed from 'derivedContext' below so the tracker's public view
+                  -- matches the 'K8sState' target state we're about to persist.
+                  -- Without this field the record is partial and any access to
+                  -- 'releaseContext' crashes at runtime with "Missing field in
+                  -- record construction" (caught by -Wmissing-fields).
+                  releaseContext = Just (toJSON derivedContext)
+                }
+        targetState =
+            K8sState $
+                emptyK8sState
+                    { context = derivedContext
+                    , newService = fromMaybe False newService
+                    , cronjobSuspend = fromMaybe False cronjobSuspend
+                    }
+    -- insertReleaseTrackerSafe returns Just <existing-id>
+    -- when the parallel global_id idempotency path fired
+    -- (another thread already inserted this global_id);
+    -- in that case, short-circuit with the same SUCCESS
+    -- shape the createReleaseH idempotent fast-path uses.
+    mIdem <- insertReleaseTrackerSafe tracker targetState
+    case mIdem of
+        Just existingRid -> do
+            logInfo $ "Idempotent receive (DB-level): tracker already exists for global_id, returning existing id=" <> existingRid
+            pure $ APIResponse "SUCCESS" ("Tracker already exists: " <> existingRid)
+        Nothing -> do
+            insertReleaseEvent rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
+            -- Capture PREVIEW snapshots at creation time so the diff
+            -- is available immediately (before the workflow runs).
+            -- Labels use the @_PREVIEW@ suffix to distinguish them
+            -- from the workflow-time ground-truth snapshots, which
+            -- use the plain @DEPLOYMENT_BEFORE/AFTER@ labels. Without
+            -- this split, the event log showed TWO pairs of
+            -- identically-labeled snapshots per release (create-time
+            -- preview + workflow ground-truth). The diff endpoint
+            -- prefers the workflow labels and falls back to
+            -- @_PREVIEW@ if they haven't been written yet.
+            let ns = getProductNamespace pCfg
+                oldDepName = targetSvcHost <> "-" <> resolvedOldVersion
+            captureDeploymentSnapshot cfg rid ns oldDepName "DEPLOYMENT_BEFORE_PREVIEW"
+            captureDeploymentPreview
+                cfg
+                rid
+                ns
+                oldDepName
+                newVersion
+                (fromMaybe "" metadataDockerImage)
+                envOverrideData
+                "DEPLOYMENT_AFTER_PREVIEW"
+            notifyReleaseCreated tracker
+            pure $ APIResponse "SUCCESS" ("Tracker created: " <> rid)
 
 getReleaseH :: AuthedPerson -> Text -> Flow (Maybe ReleaseTracker)
 getReleaseH _ap rid = do
@@ -903,6 +917,7 @@ discardReleaseH _ap rid DiscardReleaseReq{..} = do
                             -- Production parity: NOTIFICATION / STATUS_UPDATED
                             logStatusUpdated updated ("Tracker marked as DISCARDED" <> maybe "" (": " <>) reason)
                             notifyReleaseDiscarded updated
+                            releaseService (NT.appGroup updated) (NT.service updated)
                             pure $ APIResponse "SUCCESS" "Release discarded"
                         else pure staleTrackerError
 
@@ -1763,122 +1778,135 @@ restartReleaseH _ap rid req = do
                                                     <> " already exists for this service. Wait for it to finish or abort it first."
                                                 )
                                 _ -> do
-                                    now <- liftIO getCurrentTime
-                                    newRid <- liftIO (UUID.toText <$> UUID.nextRandom)
-                                    -- Build a fresh K8s release context: keep the static
-                                    -- deployment-identity fields (cluster/ns/service host/
-                                    -- VS/DR/version pair/match-config), but reset all
-                                    -- per-attempt state — no leaked-cleanup markers, no
-                                    -- AB run id, no scale-down status, no rollout flags.
-                                    let restartedContext =
-                                            oldCtx
-                                                { abRunId = Nothing
-                                                , abStatus = Nothing
-                                                , cleanupAt = Nothing
-                                                , cleanupTargetDeployment = Nothing
-                                                , cleanupStatus = Nothing
-                                                , podsScaleDownDelay = Nothing
-                                                , podsScaleDownTimestamp = Nothing
-                                                , podsScaleDownStatus = Nothing
-                                                , prevAbHsDecision = Nothing
-                                                , postMonitoringDecisionMap = Nothing
-                                                , oldVersionPodCount = Nothing
-                                                }
-                                        wasNewService = case mTargetState of
-                                            Just (K8sState K8sDeploymentState{newService = isNewService}) -> isNewService
-                                            _ -> False
-                                        restartedTargetState =
-                                            K8sState $
-                                                emptyK8sState
-                                                    { context = restartedContext
-                                                    , newService = wasNewService
-                                                    }
-                                        restartedTracker =
-                                            (tracker :: ReleaseTracker)
-                                                { NT.releaseId = newRid
-                                                , NT.status = CREATED
-                                                , NT.releaseWFStatus = INIT
-                                                , NT.scheduleTime = Just now
-                                                , NT.startTime = Nothing
-                                                , NT.endTime = Nothing
-                                                , NT.dateCreated = Nothing -- DB sets via DEFAULT now()
-                                                , NT.lastUpdated = Nothing
-                                                , NT.rolloutHistory = []
-                                                , -- Julia parity (create.jl:312 getInitialApprovalStatus):
-                                                  -- restart-created trackers are NOT auto-approved.
-                                                  -- The user must hit Approve again on the new tracker
-                                                  -- to confirm intent. This matches Julia's reCreateRelease
-                                                  -- which doesn't pass isSystemTriggered, so the new row
-                                                  -- lands with is_approved=0.
-                                                  NT.isApproved = False
-                                                , NT.isInfraApproved = False
-                                                , -- Round 8 audit C3: clear globalId so cross-cloud sync
-                                                  -- on the secondary creates a fresh row, not idempotent-
-                                                  -- skips because the global_id matches the original.
-                                                  NT.globalId = Nothing
-                                                , -- Persist the restart's requestedBy as createdBy on the
-                                                  -- new tracker so audit shows who triggered the retry.
-                                                  NT.createdBy = fromMaybe (NT.createdBy tracker) ((req :: RestartReleaseReq).requestedBy)
-                                                , NT.releaseContext = Just (toJSON restartedContext)
-                                                }
-                                    mIdem <- insertReleaseTrackerSafe restartedTracker restartedTargetState
-                                    case mIdem of
-                                        Just existingId ->
-                                            -- Idempotent: another identical restart already created
-                                            -- a tracker for this (appGroup, service). Return that id.
-                                            pure $ APIResponse "SUCCESS" ("Restart already in flight: " <> existingId)
-                                        Nothing -> do
-                                            -- Audit event on the ORIGINAL tracker so the chain is
-                                            -- discoverable from either side.
-                                            insertReleaseEvent
-                                                rid
-                                                "BUSINESS"
-                                                "RELEASE_RESTARTED"
-                                                ( object
-                                                    [ "newTrackerId" .= newRid
-                                                    , "requestedBy" .= (req :: RestartReleaseReq).requestedBy
-                                                    , "reason" .= (req :: RestartReleaseReq).reason
-                                                    , "previousStatus" .= T.pack (show currentStatus)
-                                                    ]
-                                                )
-                                            -- TRACKER_CREATED event on the NEW tracker with a back-pointer.
-                                            insertReleaseEvent
-                                                newRid
-                                                "BUSINESS"
-                                                "TRACKER_CREATED"
-                                                ( object
-                                                    [ "restartedFrom" .= rid
-                                                    , "previousStatus" .= T.pack (show currentStatus)
-                                                    , "appGroup" .= NT.appGroup restartedTracker
-                                                    , "service" .= NT.service restartedTracker
-                                                    , "oldVersion" .= NT.oldVersion restartedTracker
-                                                    , "newVersion" .= NT.newVersion restartedTracker
-                                                    ]
-                                                )
-                                            -- Capture BEFORE/AFTER deployment snapshots so the
-                                            -- env-diff view on the new tracker has data to render.
-                                            -- createReleaseHBody and revertReleaseH do the same.
-                                            -- BEFORE = current state of the OLD deployment;
-                                            -- AFTER = preview of the NEW deployment built from the
-                                            -- OLD deployment YAML with image/version swapped in.
-                                            let restartNs = ns
-                                                restartOldDep = svcName <> "-" <> NT.oldVersion restartedTracker
-                                                restartNewVer = NT.newVersion restartedTracker
-                                                restartImage = fromMaybe "" (K8s.dockerImage oldCtx)
-                                            -- Create-time preview snapshots (see createReleaseH for
-                                            -- the rationale behind the @_PREVIEW@ suffix).
-                                            captureDeploymentSnapshot cfg newRid restartNs restartOldDep "DEPLOYMENT_BEFORE_PREVIEW"
-                                            captureDeploymentPreview
-                                                cfg
-                                                newRid
-                                                restartNs
-                                                restartOldDep
-                                                restartNewVer
-                                                restartImage
-                                                (NT.envOverrideData restartedTracker)
-                                                "DEPLOYMENT_AFTER_PREVIEW"
-                                            notifyReleaseRestarted restartedTracker
-                                            pure $ APIResponse "SUCCESS" ("Restart created: " <> newRid)
+                                    claimed <- claimServiceForModification (NT.appGroup tracker) (NT.service tracker)
+                                    if not claimed
+                                        then
+                                            pure $
+                                                APIResponse
+                                                    "ERROR"
+                                                    ( "Service "
+                                                        <> NT.service tracker
+                                                        <> " in app group "
+                                                        <> NT.appGroup tracker
+                                                        <> " is already being modified (service_state guard). Try again shortly."
+                                                    )
+                                        else do
+                                            now <- liftIO getCurrentTime
+                                            newRid <- liftIO (UUID.toText <$> UUID.nextRandom)
+                                            -- Build a fresh K8s release context: keep the static
+                                            -- deployment-identity fields (cluster/ns/service host/
+                                            -- VS/DR/version pair/match-config), but reset all
+                                            -- per-attempt state — no leaked-cleanup markers, no
+                                            -- AB run id, no scale-down status, no rollout flags.
+                                            let restartedContext =
+                                                    oldCtx
+                                                        { abRunId = Nothing
+                                                        , abStatus = Nothing
+                                                        , cleanupAt = Nothing
+                                                        , cleanupTargetDeployment = Nothing
+                                                        , cleanupStatus = Nothing
+                                                        , podsScaleDownDelay = Nothing
+                                                        , podsScaleDownTimestamp = Nothing
+                                                        , podsScaleDownStatus = Nothing
+                                                        , prevAbHsDecision = Nothing
+                                                        , postMonitoringDecisionMap = Nothing
+                                                        , oldVersionPodCount = Nothing
+                                                        }
+                                                wasNewService = case mTargetState of
+                                                    Just (K8sState K8sDeploymentState{newService = isNewService}) -> isNewService
+                                                    _ -> False
+                                                restartedTargetState =
+                                                    K8sState $
+                                                        emptyK8sState
+                                                            { context = restartedContext
+                                                            , newService = wasNewService
+                                                            }
+                                                restartedTracker =
+                                                    (tracker :: ReleaseTracker)
+                                                        { NT.releaseId = newRid
+                                                        , NT.status = CREATED
+                                                        , NT.releaseWFStatus = INIT
+                                                        , NT.scheduleTime = Just now
+                                                        , NT.startTime = Nothing
+                                                        , NT.endTime = Nothing
+                                                        , NT.dateCreated = Nothing -- DB sets via DEFAULT now()
+                                                        , NT.lastUpdated = Nothing
+                                                        , NT.rolloutHistory = []
+                                                        , -- Julia parity (create.jl:312 getInitialApprovalStatus):
+                                                          -- restart-created trackers are NOT auto-approved.
+                                                          -- The user must hit Approve again on the new tracker
+                                                          -- to confirm intent. This matches Julia's reCreateRelease
+                                                          -- which doesn't pass isSystemTriggered, so the new row
+                                                          -- lands with is_approved=0.
+                                                          NT.isApproved = False
+                                                        , NT.isInfraApproved = False
+                                                        , -- Round 8 audit C3: clear globalId so cross-cloud sync
+                                                          -- on the secondary creates a fresh row, not idempotent-
+                                                          -- skips because the global_id matches the original.
+                                                          NT.globalId = Nothing
+                                                        , -- Persist the restart's requestedBy as createdBy on the
+                                                          -- new tracker so audit shows who triggered the retry.
+                                                          NT.createdBy = fromMaybe (NT.createdBy tracker) ((req :: RestartReleaseReq).requestedBy)
+                                                        , NT.releaseContext = Just (toJSON restartedContext)
+                                                        }
+                                            mIdem <- insertReleaseTrackerSafe restartedTracker restartedTargetState
+                                            case mIdem of
+                                                Just existingId ->
+                                                    -- Idempotent: another identical restart already created
+                                                    -- a tracker for this (appGroup, service). Return that id.
+                                                    pure $ APIResponse "SUCCESS" ("Restart already in flight: " <> existingId)
+                                                Nothing -> do
+                                                    -- Audit event on the ORIGINAL tracker so the chain is
+                                                    -- discoverable from either side.
+                                                    insertReleaseEvent
+                                                        rid
+                                                        "BUSINESS"
+                                                        "RELEASE_RESTARTED"
+                                                        ( object
+                                                            [ "newTrackerId" .= newRid
+                                                            , "requestedBy" .= (req :: RestartReleaseReq).requestedBy
+                                                            , "reason" .= (req :: RestartReleaseReq).reason
+                                                            , "previousStatus" .= T.pack (show currentStatus)
+                                                            ]
+                                                        )
+                                                    -- TRACKER_CREATED event on the NEW tracker with a back-pointer.
+                                                    insertReleaseEvent
+                                                        newRid
+                                                        "BUSINESS"
+                                                        "TRACKER_CREATED"
+                                                        ( object
+                                                            [ "restartedFrom" .= rid
+                                                            , "previousStatus" .= T.pack (show currentStatus)
+                                                            , "appGroup" .= NT.appGroup restartedTracker
+                                                            , "service" .= NT.service restartedTracker
+                                                            , "oldVersion" .= NT.oldVersion restartedTracker
+                                                            , "newVersion" .= NT.newVersion restartedTracker
+                                                            ]
+                                                        )
+                                                    -- Capture BEFORE/AFTER deployment snapshots so the
+                                                    -- env-diff view on the new tracker has data to render.
+                                                    -- createReleaseHBody and revertReleaseH do the same.
+                                                    -- BEFORE = current state of the OLD deployment;
+                                                    -- AFTER = preview of the NEW deployment built from the
+                                                    -- OLD deployment YAML with image/version swapped in.
+                                                    let restartNs = ns
+                                                        restartOldDep = svcName <> "-" <> NT.oldVersion restartedTracker
+                                                        restartNewVer = NT.newVersion restartedTracker
+                                                        restartImage = fromMaybe "" (K8s.dockerImage oldCtx)
+                                                    -- Create-time preview snapshots (see createReleaseH for
+                                                    -- the rationale behind the @_PREVIEW@ suffix).
+                                                    captureDeploymentSnapshot cfg newRid restartNs restartOldDep "DEPLOYMENT_BEFORE_PREVIEW"
+                                                    captureDeploymentPreview
+                                                        cfg
+                                                        newRid
+                                                        restartNs
+                                                        restartOldDep
+                                                        restartNewVer
+                                                        restartImage
+                                                        (NT.envOverrideData restartedTracker)
+                                                        "DEPLOYMENT_AFTER_PREVIEW"
+                                                    notifyReleaseRestarted restartedTracker
+                                                    pure $ APIResponse "SUCCESS" ("Restart created: " <> newRid)
 
 -- ============================================================================
 -- Fast Forward (POST /releases/:id/fast-forward)

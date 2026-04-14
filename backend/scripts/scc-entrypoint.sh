@@ -9,10 +9,10 @@
 #      or whatever SC_CONFIG_PATH was already set to by the caller.
 #
 # This lets the same image run:
-#   • Locally with `docker run -v /path/to/dhall-configs:/srv/namma-ap/dhall-configs scc-backend`
+#   • Locally with `docker run -v /path/to/dhall-configs:/srv/scc/dhall-configs scc-backend`
 #   • In k8s with `env: [{ name: DHALL_CONFIGS, valueFrom: { secretKeyRef: ... } }]`
 #
-# Falls through to `exec namma-ap "$@"` so signals + tini work correctly.
+# Falls through to `exec scc "$@"` so signals + tini work correctly.
 
 set -eu
 
@@ -23,4 +23,4 @@ if [ -n "${DHALL_CONFIGS:-}" ]; then
     echo "[entrypoint] decoded DHALL_CONFIGS → $SC_CONFIG_PATH"
 fi
 
-exec /usr/local/bin/namma-ap "$@"
+exec /usr/local/bin/scc "$@"

@@ -111,7 +111,7 @@
                   export SC_DATABASE_URL="postgres://$user@127.0.0.1:5434/system_control"
                   export PORT=8012
                   exec ghcid \
-                    --command "cabal repl exe:namma-ap-exe" \
+                    --command "cabal repl exe:scc" \
                     --test "Main.main" \
                     --restart=package.yaml \
                     --restart=dhall-configs/system-control.dhall \
@@ -142,7 +142,7 @@
             programs.ormolu.package = lib.mkForce pkgs.haskellPackages.fourmolu;
           };
 
-          packages.default = self'.packages.namma-ap;
+          packages.default = self'.packages.scc;
 
           # nix run .#dev → starts the full process-compose stack
           apps.dev = {

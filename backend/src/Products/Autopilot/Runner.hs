@@ -25,7 +25,7 @@ import Products.Autopilot.K8s.Execute (runCmd)
 import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
-import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks)
+import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks, releaseService)
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getMaxCleanupRetries, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
 import Products.Autopilot.Types
@@ -136,6 +136,7 @@ rollbackInProgressOnStartup = do
                                     "BUSINESS"
                                     "STARTUP_REVERT_COMPLETED"
                                     (toJSON ("Revert completed on startup recovery — VS traffic restored to old version" :: T.Text))
+                                releaseService (NT.appGroup reverted) (NT.service reverted)
                     _ -> do
                         let aborted = rt{status = ABORTED, endTime = Just now}
                         -- Julia parity: persist cleanup marker before flipping
@@ -163,6 +164,7 @@ rollbackInProgressOnStartup = do
                                     "STARTUP_ROLLBACK"
                                     (toJSON ("ABORTED due to server restart — VS traffic restored to old version" :: T.Text))
                                 notifyReleaseAborted aborted
+                                releaseService (NT.appGroup aborted) (NT.service aborted)
             logInfo "[STARTUP] Rollback complete"
 
 -- ============================================================================
@@ -416,6 +418,7 @@ trigger _db (rtStale, mtsStale) = do
                                             -- kubectl scale-down itself failed.
                                             scheduleNewDeploymentCleanup abortedTracker mts
                                             notifyReleaseAborted abortedTracker
+                                            releaseService (NT.appGroup abortedTracker) (NT.service abortedTracker)
                         Right _ -> do
                             -- The workflow persists state via persistWorkflowState in each cprV2
                             -- stage, but the Recorded monad's bind may short-circuit the final
@@ -436,6 +439,7 @@ trigger _db (rtStale, mtsStale) = do
                                         pure ()
                                 _ -> pure ()
                             insertReleaseEvent (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
+                            releaseService (NT.appGroup rt) (NT.service rt)
 
 dispatchWorkflow :: ReleaseTracker -> Maybe TargetState -> Flow (Either WorkFlowError ReleaseState)
 dispatchWorkflow rt mts = do
@@ -662,6 +666,7 @@ handleAbortingRelease cfg rt mts = do
             logTrafficUpdatedWithMessage aborted previousRollout ("Rolling back traffic to old version: " <> oldVer)
             insertReleaseEvent (releaseId rt) "BUSINESS" "ABORT_HANDLED" (toJSON ("User abort processed" :: String))
             notifyReleaseAborted aborted
+            releaseService (NT.appGroup aborted) (NT.service aborted)
 
 -- ============================================================================
 -- Scale-Down of Old Deployments After Delay

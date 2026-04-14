@@ -4,12 +4,12 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 
-name:           namma-ap
+name:           scc
 version:        0.1.0.0
-synopsis:       Namma AP release orchestration engine
-description:    Mobius-style workflow engine with kubectl backend release orchestration.
-homepage:       https://github.com/nammayatri/namma-ap#readme
-bug-reports:    https://github.com/nammayatri/namma-ap/issues
+synopsis:       System Control Centre — release orchestration with RBAC
+description:    Monolith backend for system control dashboard with typed RBAC, product modules, and release orchestration.
+homepage:       https://github.com/nammayatri/system-control-centre#readme
+bug-reports:    https://github.com/nammayatri/system-control-centre/issues
 author:         NammaYatri
 maintainer:     platform@nammayatri.in
 license:        OtherLicense
@@ -17,7 +17,7 @@ build-type:     Simple
 
 source-repository head
   type: git
-  location: https://github.com/nammayatri/namma-ap
+  location: https://github.com/nammayatri/system-control-centre
 
 library
   exposed-modules:
@@ -46,6 +46,7 @@ library
       Core.Workflow.Recorded
       Core.Workflow.Spec
       Core.Workflow.Stage
+      Core.Workflow.StageInterface
       Core.Workflow.Types
       Core.Server
       Products.Autopilot.Config
@@ -100,7 +101,7 @@ library
       Shared.Queries.ServerConfig
       Shared.Types.Storage.ServerConfig
   other-modules:
-      Paths_namma_ap
+      Paths_scc
   hs-source-dirs:
       src
   default-extensions:
@@ -149,10 +150,10 @@ library
     , yaml
   default-language: Haskell2010
 
-executable namma-ap-exe
+executable scc
   main-is: Main.hs
   other-modules:
-      Paths_namma_ap
+      Paths_scc
   hs-source-dirs:
       app
   default-extensions:
@@ -177,7 +178,7 @@ executable namma-ap-exe
     , exceptions
     , filepath
     , mtl
-    , namma-ap
+    , scc
     , postgresql-simple
     , process
     , resource-pool
@@ -195,11 +196,11 @@ executable namma-ap-exe
     , warp
   default-language: Haskell2010
 
-test-suite namma-ap-test
+test-suite scc-test
   type: exitcode-stdio-1.0
   main-is: Main.hs
   other-modules:
-      Paths_namma_ap
+      Paths_scc
   hs-source-dirs:
       test
   default-extensions:
@@ -224,7 +225,7 @@ test-suite namma-ap-test
     , exceptions
     , filepath
     , mtl
-    , namma-ap
+    , scc
     , postgresql-simple
     , process
     , resource-pool

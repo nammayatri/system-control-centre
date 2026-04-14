@@ -62,6 +62,7 @@ runWorkflowSpec spec = do
     renderError = \case
         DomainError msg -> "DomainError: " <> T.pack msg
         RetriableError msg -> "RetriableError: " <> T.pack msg
+        MultipleErrors errs -> "MultipleErrors: " <> T.intercalate "; " (map T.pack errs)
 
 -- | Run one 'Stage' through skip/lock/pre-check/exec/validate/advance+persist.
 runStage ::

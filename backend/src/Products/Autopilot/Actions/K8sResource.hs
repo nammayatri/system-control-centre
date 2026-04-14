@@ -79,7 +79,7 @@ fetchEnvsH _ap mProduct _mEnv mService = do
                         Right envJson -> pure envJson
         _ -> pure $ A.toJSON ([] :: [Value])
 
-{- | Proxy env fetch to secondary cluster. Tries namma-ap format (GET /envs)
+{- | Proxy env fetch to secondary cluster. Tries scc format (GET /envs)
 first, falls back to ny-autopilot (POST /release/getenvs/).
 -}
 fetchSecondaryEnvsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value

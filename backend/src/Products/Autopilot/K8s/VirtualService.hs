@@ -8,6 +8,8 @@ module Products.Autopilot.K8s.VirtualService (
     applyVirtualServiceRolloutWithRetries,
     isSubsetReceivingTraffic,
     getPrimarySubsetFromVirtualService,
+    isVsSyncedWithExpectedState,
+    VsSyncResult (..),
 )
 where
 
@@ -185,3 +187,102 @@ getInt key obj = case KM.lookup (K.fromText key) obj of Just (Number n) -> round
 
 toList :: (Foldable t) => t a -> [a]
 toList = foldr (:) []
+
+-- | Result of VS sync validation check
+data VsSyncResult
+    = VsInSync
+    | VsOutOfSync Text
+    | VsSyncError Text
+    deriving (Eq, Show)
+
+{- | Verify that the live VirtualService matches the expected state from our DB.
+
+This prevents silent overwrites when the VS has been modified outside SCC
+(e.g., by manual kubectl edits, another tool, or a failed concurrent operation).
+
+Returns:
+- VsInSync: Live VS matches expected state (safe to proceed)
+- VsOutOfSync reason: Live VS differs from expectation (risk of overwrite)
+- VsSyncError msg: Could not perform the check (transient error)
+-}
+isVsSyncedWithExpectedState ::
+    Config ->
+    -- | namespace
+    Text ->
+    -- | vsName
+    Text ->
+    -- | expected state (from DB/previous snapshot)
+    Value ->
+    IO VsSyncResult
+isVsSyncedWithExpectedState cfg ns vsName expectedState = do
+    vsResult <- getVirtualServiceJson cfg ns vsName
+    case vsResult of
+        Left (K8sError err) ->
+            pure $ VsSyncError $ "Failed to fetch VS: " <> err
+        Right liveJson ->
+            case A.decodeStrict' (encodeUtf8 liveJson) :: Maybe Value of
+                Nothing ->
+                    pure $ VsSyncError "Failed to parse live VS JSON"
+                Just liveState ->
+                    let normalizedExpected = normalizeVsForComparison expectedState
+                        normalizedLive = normalizeVsForComparison liveState
+                     in if normalizedExpected == normalizedLive
+                            then pure VsInSync
+                            else pure $ VsOutOfSync $ computeVsDiff normalizedExpected normalizedLive
+
+-- | Normalize VS for comparison by stripping volatile/runtime fields
+normalizeVsForComparison :: Value -> Value
+normalizeVsForComparison (Object root) =
+    let
+        -- Strip status (runtime state)
+        withoutStatus = KM.delete (K.fromText "status") root
+        -- Strip metadata.runtime fields
+        withoutRuntimeMeta = case KM.lookup (K.fromText "metadata") withoutStatus of
+            Just (Object meta) ->
+                let cleanMeta =
+                        KM.filterWithKey
+                            ( \k _ ->
+                                K.toText k
+                                    `notElem` [ "uid"
+                                              , "resourceVersion"
+                                              , "generation"
+                                              , "creationTimestamp"
+                                              , "managedFields"
+                                              , "annotations"
+                                              ]
+                            )
+                            meta
+                 in KM.insert (K.fromText "metadata") (Object cleanMeta) withoutStatus
+            _ -> withoutStatus
+     in
+        Object withoutRuntimeMeta
+normalizeVsForComparison other = other
+
+-- | Compute a human-readable diff between expected and live VS
+computeVsDiff :: Value -> Value -> Text
+computeVsDiff expected live =
+    "VirtualService state mismatch detected. "
+        <> "The live VS has been modified outside SCC. "
+        <> "Expected routes: "
+        <> summarizeRoutes expected
+        <> ", Live routes: "
+        <> summarizeRoutes live
+
+-- | Extract a summary of routes for error messages
+summarizeRoutes :: Value -> Text
+summarizeRoutes (Object root) =
+    case getObj "spec" root >>= getArr "http" of
+        Nothing -> "(no routes)"
+        Just routes -> T.intercalate ", " $ map summarizeRoute routes
+  where
+    summarizeRoute (Object httpRule) =
+        case getArr "route" httpRule of
+            Just rts -> T.intercalate "|" $ map summarizeDestination rts
+            Nothing -> "(empty)"
+    summarizeRoute _ = "(invalid)"
+    summarizeDestination (Object routeObj) =
+        case getObj "destination" routeObj >>= getTxt "subset" of
+            Just subset -> subset
+            Nothing -> "(no subset)"
+    summarizeDestination _ = "(invalid)"
+summarizeRoutes _ = "(invalid VS)"

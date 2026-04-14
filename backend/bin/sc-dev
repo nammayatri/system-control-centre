@@ -40,7 +40,7 @@ kill_by_port() {
 echo "[sc-dev] cleaning stale dev services..."
 # Stop previous process-compose/ghcid/vite instances tied to this repo.
 pkill -f "process-compose.*system-control-centre/backend" 2>/dev/null || true
-pkill -f "ghcid.*namma-ap-exe" 2>/dev/null || true
+pkill -f "ghcid.*exe:scc" 2>/dev/null || true
 pkill -f "vite.*system-control-centre/frontend" 2>/dev/null || true
 
 # Ensure key dev ports are free before startup.

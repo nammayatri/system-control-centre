@@ -13,6 +13,12 @@ module Products.Autopilot.Types.Release (
     releaseStatusText,
     parseReleaseStatusText,
 
+    -- * Service State (per-service lifecycle, not per-release)
+    ServiceState (..),
+    isServiceModifiable,
+    serviceStateText,
+    parseServiceStateText,
+
     -- * Common Enums
     Decision (..),
     decisionPriority,
@@ -225,3 +231,48 @@ data ReleaseTracker = ReleaseTracker
 instance ToJSON ReleaseTracker
 
 instance FromJSON ReleaseTracker
+
+{- | Per-service lifecycle state (distinct from per-release ReleaseStatus).
+Used to track whether a service is currently being modified,
+preventing concurrent modifications via a DB-level guard.
+
+CREATING   → Service being deployed for first time (new deployment)
+MODIFYING  → Service currently being rolled out/updated
+AVAILABLE  → Service stable, ready for new operations
+TERMINATING→ Service being decommissioned
+TERMINATED → Service has been removed from infrastructure
+-}
+data ServiceState
+    = CREATING
+    | MODIFYING
+    | AVAILABLE
+    | TERMINATING
+    | TERMINATED
+    deriving (Eq, Show, Read, Generic, Enum, Bounded)
+
+instance ToJSON ServiceState
+
+instance FromJSON ServiceState
+
+-- | Text representation for DB storage.
+serviceStateText :: ServiceState -> Text
+serviceStateText = T.pack . show
+
+-- | Parse text from DB with case-insensitive matching.
+parseServiceStateText :: Text -> Maybe ServiceState
+parseServiceStateText t =
+    lookup (T.toUpper t) serviceStateLookup
+  where
+    serviceStateLookup :: [(Text, ServiceState)]
+    serviceStateLookup =
+        [ (T.toUpper (serviceStateText s), s)
+        | s <- [minBound .. maxBound :: ServiceState]
+        ]
+
+{- | Can this service state accept a new modification?
+Returns False if service is already in a mutable state.
+-}
+isServiceModifiable :: ServiceState -> Bool
+isServiceModifiable AVAILABLE = True
+isServiceModifiable TERMINATED = True
+isServiceModifiable _ = False

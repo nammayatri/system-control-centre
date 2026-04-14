@@ -32,7 +32,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
 ENV PATH="/root/.ghcup/bin:${PATH}"
 
 # Cache deps separately so source changes don't bust the dependency layer
-COPY cabal.project namma-ap.cabal ./
+COPY cabal.project scc.cabal ./
 RUN --mount=type=cache,target=/root/.cabal \
     --mount=type=cache,target=/root/.ghc \
     cabal update && cabal build --only-dependencies -j4
@@ -41,9 +41,9 @@ RUN --mount=type=cache,target=/root/.cabal \
 COPY . .
 RUN --mount=type=cache,target=/root/.cabal \
     --mount=type=cache,target=/root/.ghc \
-    cabal build exe:namma-ap-exe -j4 && \
-    cp "$(cabal list-bin exe:namma-ap-exe)" /usr/local/bin/namma-ap && \
-    strip /usr/local/bin/namma-ap || true
+    cabal build exe:scc -j4 && \
+    cp "$(cabal list-bin exe:scc)" /usr/local/bin/scc && \
+    strip /usr/local/bin/scc || true
 
 # ── Runtime stage ──────────────────────────────────────────────────
 FROM --platform=linux/amd64 debian:bookworm-slim AS runtime
@@ -66,18 +66,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user
-RUN groupadd --system --gid 1001 namma && \
-    useradd --system --uid 1001 --gid namma --home /srv/namma-ap --shell /bin/sh namma
+RUN groupadd --system --gid 1001 scc && \
+    useradd --system --uid 1001 --gid scc --home /srv/scc --shell /bin/sh scc
 
-WORKDIR /srv/namma-ap
+WORKDIR /srv/scc
 
 # Binary
-COPY --from=build /usr/local/bin/namma-ap /usr/local/bin/namma-ap
+COPY --from=build /usr/local/bin/scc /usr/local/bin/scc
 
 # Schema + migrations bundled in image so a fresh DB can be initialised
 # from inside the container (e.g. an init container or a one-shot job).
-COPY --from=build /app/dev/sql-seed     /srv/namma-ap/dev/sql-seed
-COPY --from=build /app/dev/migrations   /srv/namma-ap/dev/migrations
+COPY --from=build /app/dev/sql-seed     /srv/scc/dev/sql-seed
+COPY --from=build /app/dev/migrations   /srv/scc/dev/migrations
 
 # NOTE: dhall-configs/ is intentionally NOT baked into the image (matches
 # NammaYatri's pattern). The container is environment-agnostic — production
@@ -103,9 +103,9 @@ COPY --from=build /app/dev/migrations   /srv/namma-ap/dev/migrations
 COPY --from=build /app/scripts/scc-entrypoint.sh /usr/local/bin/scc-entrypoint.sh
 RUN chmod +x /usr/local/bin/scc-entrypoint.sh
 
-RUN chown -R namma:namma /srv/namma-ap
+RUN chown -R scc:scc /srv/scc
 
-USER namma
+USER scc
 
 ENV APP_STATE=SERVER \
     PORT=8012 \
@@ -119,5 +119,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl --max-time 3 --silent --output /dev/null "http://localhost:${PORT}/" || exit 1
 
 # tini as PID 1 so signals + zombie reaping work correctly.
-# scc-entrypoint.sh decodes DHALL_CONFIGS if set, then execs namma-ap.
+# scc-entrypoint.sh decodes DHALL_CONFIGS if set, then execs scc.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/scc-entrypoint.sh"]

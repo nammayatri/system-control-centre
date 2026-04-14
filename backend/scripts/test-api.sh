@@ -92,7 +92,7 @@ echo ""
 HEALTH=$(curl -sf "$BASE/health" 2>/dev/null || echo "UNREACHABLE")
 if [ "$HEALTH" = "UNREACHABLE" ]; then
   echo -e "${RED}ERROR: Server not reachable at $BASE${NC}"
-  echo "Start the server first: cabal run namma-ap-exe"
+  echo "Start the server first: cabal run scc"
   exit 1
 fi
 echo "Server is healthy."

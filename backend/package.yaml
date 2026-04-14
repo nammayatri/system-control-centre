@@ -3,7 +3,7 @@
 
 # Workaround for segfault on macOS
 # https://github.com/NixOS/nixpkgs/issues/149692#issuecomment-1587564664
-name: namma-ap
+name: scc
 version: 0.1.0.0
 github: "nammayatri/system-control-centre"
 license: OtherLicense
@@ -90,7 +90,7 @@ library:
   source-dirs: src
 
 executables:
-  namma-ap-exe:
+  scc:
     main: Main.hs
     source-dirs: app
     ghc-options:
@@ -98,11 +98,11 @@ executables:
       - -rtsopts
       - "-with-rtsopts=-N -T"
     dependencies:
-      - namma-ap
+      - scc
 
 tests:
-  namma-ap-test:
+  scc-test:
     main: Main.hs
     source-dirs: test
     dependencies:
-      - namma-ap
+      - scc

@@ -32,11 +32,15 @@ CREATE TABLE IF NOT EXISTS deployment_config (
   rollout_strategy TEXT,
   revert_strategy TEXT,
   decision_config TEXT,
-  slack_channel TEXT
+  slack_channel TEXT,
+  service_state TEXT DEFAULT 'AVAILABLE'
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_deployment_config
   ON deployment_config (app_group, COALESCE(service, ''));
+
+CREATE INDEX IF NOT EXISTS idx_dc_service_state
+  ON deployment_config (service_state);
 
 CREATE TABLE IF NOT EXISTS release_tracker (
   id TEXT NOT NULL PRIMARY KEY,

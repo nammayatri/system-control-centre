@@ -4,6 +4,7 @@
 module Products.Autopilot.Queries.ProductService where
 
 import qualified Control.Exception
+import Control.Monad (void)
 import qualified Control.Monad.Catch
 import Core.DB.Connection (runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
@@ -16,6 +17,7 @@ import Database.Beam
 import Database.Beam.Postgres (runBeamPostgres)
 import Database.PostgreSQL.Simple (In (..), Only (..), execute, query, withTransaction)
 import GHC.Int (Int32)
+import Products.Autopilot.Types.Release (ServiceState (..), parseServiceStateText, serviceStateText)
 import Products.Autopilot.Types.Storage.Schema
 import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct_io)
 
@@ -201,6 +203,7 @@ upsertProduct productName' cluster' namespace' vsName' productType' productAcron
                                 , dcRevertStrategy = val_ Nothing
                                 , dcDecisionConfig = val_ Nothing
                                 , dcSlackChannel = val_ slackChannel'
+                                , dcServiceState = val_ Nothing
                                 }
                             ]
 
@@ -243,6 +246,7 @@ upsertService rolloutStrategy decisionConfig serviceName' product' sType service
                                 , dcRevertStrategy = val_ revertStrategy
                                 , dcDecisionConfig = val_ decisionConfig
                                 , dcSlackChannel = val_ Nothing
+                                , dcServiceState = val_ (Just (serviceStateText AVAILABLE))
                                 }
                             ]
 
@@ -462,3 +466,131 @@ withVsLock productName' lockOwner action = do
                         Left ex -> pure (Left (Data.Text.pack (show ex)))
                 )
                 (releaseVsLockIfOwner productName' lockOwner >> pure ())
+
+-- ============================================================================
+-- Service State Guards (per-service lifecycle state management)
+-- ============================================================================
+
+{- | Get the current service state for a (product, service) pair.
+Returns AVAILABLE if no row exists or service_state column is NULL.
+-}
+getServiceState :: (MonadFlow m) => Text -> Text -> m ServiceState
+getServiceState appGroup serviceName = withDb $ \db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $ do
+                    s <- all_ (deploymentConfig autopilotDb)
+                    guard_ (dcAppGroup s ==. val_ appGroup)
+                    guard_ (dcService s ==. val_ (Just serviceName))
+                    pure s
+    pure $ case rows of
+        [] -> AVAILABLE
+        (s : _) -> fromMaybe AVAILABLE (parseServiceStateText =<< dcServiceState s)
+
+{- | Atomically check service state and transition to MODIFYING.
+Returns True if transition succeeded (state was AVAILABLE or TERMINATED).
+Returns False if transition blocked (state is CREATING, MODIFYING, or TERMINATING).
+
+This is the core guard preventing concurrent modifications.
+-}
+tryTransitionServiceState ::
+    (MonadFlow m) =>
+    -- | appGroup
+    Text ->
+    -- | serviceName
+    Text ->
+    -- | expected current state(s) that allow transition
+    [ServiceState] ->
+    -- | new state to transition to
+    ServiceState ->
+    m Bool
+tryTransitionServiceState appGroup serviceName fromStates toState = withDb $ \db -> withConn db $ \conn -> do
+    let stateTexts = map serviceStateText fromStates
+    rows <-
+        execute
+            conn
+            "UPDATE deployment_config \
+            \SET service_state = ?, last_updated = NOW() \
+            \WHERE app_group = ? \
+            \  AND service = ? \
+            \  AND ( service_state IS NULL \
+            \     OR service_state = ANY(?) )"
+            (serviceStateText toState, appGroup, serviceName, In stateTexts)
+    pure (rows > 0)
+
+{- | Convenience: attempt to claim service for modification.
+Sets state to MODIFYING if current state is AVAILABLE or TERMINATED.
+Returns True on success.
+-}
+claimServiceForModification :: (MonadFlow m) => Text -> Text -> m Bool
+claimServiceForModification appGroup serviceName =
+    tryTransitionServiceState
+        appGroup
+        serviceName
+        [AVAILABLE, TERMINATED]
+        MODIFYING
+
+{- | Release service after modification (transition to AVAILABLE).
+Always succeeds regardless of current state.
+-}
+releaseService :: (MonadFlow m) => Text -> Text -> m ()
+releaseService appGroup serviceName = withDb $ \db -> withConn db $ \conn ->
+    void $
+        execute
+            conn
+            "UPDATE deployment_config \
+            \SET service_state = 'AVAILABLE', last_updated = NOW() \
+            \WHERE app_group = ? \
+            \  AND service = ?"
+            (appGroup, serviceName)
+
+{- | Mark service as terminating (prevents new modifications during cleanup).
+Only succeeds if current state is AVAILABLE or MODIFYING.
+-}
+markServiceTerminating :: (MonadFlow m) => Text -> Text -> m Bool
+markServiceTerminating appGroup serviceName =
+    tryTransitionServiceState
+        appGroup
+        serviceName
+        [AVAILABLE, MODIFYING]
+        TERMINATING
+
+{- | Mark service as terminated (final state).
+Called after successful cleanup.
+-}
+markServiceTerminated :: (MonadFlow m) => Text -> Text -> m ()
+markServiceTerminated appGroup serviceName = withDb $ \db -> withConn db $ \conn ->
+    void $
+        execute
+            conn
+            "UPDATE deployment_config \
+            \SET service_state = 'TERMINATED', last_updated = NOW() \
+            \WHERE app_group = ? \
+            \  AND service = ?"
+            (appGroup, serviceName)
+
+{- | Mark service as creating (initial deployment).
+Usually only succeeds if no state exists or state is TERMINATED.
+-}
+markServiceCreating :: (MonadFlow m) => Text -> Text -> m Bool
+markServiceCreating appGroup serviceName =
+    tryTransitionServiceState
+        appGroup
+        serviceName
+        [TERMINATED]
+        CREATING
+
+{- | Initialize service state for a new service configuration.
+Ensures service_state is set to AVAILABLE when upserting a service.
+-}
+initializeServiceState :: (MonadFlow m) => Text -> Text -> m ()
+initializeServiceState appGroup serviceName = withDb $ \db -> withConn db $ \conn ->
+    void $
+        execute
+            conn
+            "UPDATE deployment_config \
+            \SET service_state = COALESCE(service_state, 'AVAILABLE') \
+            \WHERE app_group = ? \
+            \  AND service = ?"
+            (appGroup, serviceName)
