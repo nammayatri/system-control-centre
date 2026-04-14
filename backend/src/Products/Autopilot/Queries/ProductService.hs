@@ -16,6 +16,7 @@ import qualified Data.Text.Read as TR
 import Database.Beam
 import Database.Beam.Postgres (runBeamPostgres)
 import Database.PostgreSQL.Simple (In (..), Only (..), execute, query, withTransaction)
+import Database.PostgreSQL.Simple.Types (PGArray (..))
 import GHC.Int (Int32)
 import Products.Autopilot.Types.Release (ServiceState (..), parseServiceStateText, serviceStateText)
 import Products.Autopilot.Types.Storage.Schema
@@ -511,12 +512,12 @@ tryTransitionServiceState appGroup serviceName fromStates toState = withDb $ \db
         execute
             conn
             "UPDATE deployment_config \
-            \SET service_state = ?, last_updated = NOW() \
+            \SET service_state = ? \
             \WHERE app_group = ? \
             \  AND service = ? \
             \  AND ( service_state IS NULL \
             \     OR service_state = ANY(?) )"
-            (serviceStateText toState, appGroup, serviceName, In stateTexts)
+            (serviceStateText toState, appGroup, serviceName, PGArray stateTexts)
     pure (rows > 0)
 
 {- | Convenience: attempt to claim service for modification.
@@ -540,7 +541,7 @@ releaseService appGroup serviceName = withDb $ \db -> withConn db $ \conn ->
         execute
             conn
             "UPDATE deployment_config \
-            \SET service_state = 'AVAILABLE', last_updated = NOW() \
+            \SET service_state = 'AVAILABLE' \
             \WHERE app_group = ? \
             \  AND service = ?"
             (appGroup, serviceName)
@@ -565,7 +566,7 @@ markServiceTerminated appGroup serviceName = withDb $ \db -> withConn db $ \conn
         execute
             conn
             "UPDATE deployment_config \
-            \SET service_state = 'TERMINATED', last_updated = NOW() \
+            \SET service_state = 'TERMINATED' \
             \WHERE app_group = ? \
             \  AND service = ?"
             (appGroup, serviceName)
