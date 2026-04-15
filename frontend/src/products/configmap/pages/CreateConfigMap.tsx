@@ -10,7 +10,7 @@ import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { toast } from 'sonner';
 import { cn } from '../../../lib/utils';
 import ReactDiffViewer from 'react-diff-viewer-continued';
-import { DEFAULT_ENV, AVAILABLE_ENVS } from '../../../lib/constants';
+import { useAuth } from '../../../core/auth/AuthContext';
 import type { ProductConfig } from '../../releases/api';
 
 function jsonConfigToYaml(raw: string): string {
@@ -52,6 +52,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const cloneId = searchParams.get('clone_id') || '';
+  const { env: deploymentEnv } = useAuth();
 
   const { data: products = [] } = useQuery({ queryKey: ['products'], queryFn: fetchProducts, staleTime: 300000 });
   const { data: productConfigs = [] } = useQuery({ queryKey: ['product-configs'], queryFn: fetchProductConfigs, staleTime: 300000 });
@@ -65,7 +66,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
   const [error, setError] = useState('');
 
   const [form, setForm] = useState({
-    appGroup: '', name: '', description: '', change_log: '', priority: '0', env: DEFAULT_ENV, schedule_time: '', cluster: 'BECKN_UAT', file: '', mode: 'AUTO',
+    appGroup: '', name: '', description: '', change_log: '', priority: '0', env: deploymentEnv, schedule_time: '', cluster: 'BECKN_UAT', file: '', mode: 'AUTO',
   });
 
   const createMut = useMutation({
@@ -201,7 +202,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
             <div className="space-y-4">
               <div><FieldLabel required>Name</FieldLabel><select name="name" value={form.name} onChange={handleChange} required disabled={!form.appGroup || namesOptions.length === 0} className={cn(inputClass, (!form.appGroup || namesOptions.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}><option value="">Select Name</option>{namesOptions.map(n => <option key={n} value={n}>{n}</option>)}</select></div>
               <div><FieldLabel required>Change Log</FieldLabel><input name="change_log" value={form.change_log} onChange={handleChange} required placeholder="EUL-1.0.0" className={inputClass} /></div>
-              <div><FieldLabel required>Env</FieldLabel><select name="env" value={form.env} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}>{AVAILABLE_ENVS.map(e => <option key={e} value={e}>{e}</option>)}</select></div>
+              <div><FieldLabel>Env</FieldLabel><input name="env" value={form.env} disabled className={cn(inputClass, 'bg-zinc-50 text-zinc-400 cursor-not-allowed')} /></div>
             </div>
             <div className="space-y-4">
               <div><FieldLabel>Schedule Time</FieldLabel><input name="schedule_time" value={form.schedule_time} onChange={handleChange} placeholder="2022-11-01T19:39:35" className={inputClass} /></div>

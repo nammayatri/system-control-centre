@@ -17,10 +17,15 @@ export interface ProductAccess {
   permissions: string[];
 }
 
+export interface AppConfig {
+  env: string;
+}
+
 export interface LoginResponse {
   token: string;
   person: AuthUser;
   products: ProductAccess[];
+  config?: AppConfig;
 }
 
 export async function login(email: string, password: string): Promise<LoginResponse> {

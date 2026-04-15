@@ -8,7 +8,8 @@ import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs
 import type { ProductConfig } from '../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
-import { DEFAULT_ENV, AVAILABLE_ENVS, normalizeProductType } from '../../../lib/constants';
+import { normalizeProductType } from '../../../lib/constants';
+import { useAuth } from '../../../core/auth/AuthContext';
 import { Trash2, Lock, ChevronDown, Info } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -30,13 +31,14 @@ const CreateRelease: React.FC = () => {
   const location = useLocation();
   const { id } = useParams<{ id?: string }>();
   const isClone = location.pathname.endsWith('/clone') && !!id;
+  const { env: deploymentEnv } = useAuth();
   const isUpdate = !!id && location.pathname.endsWith('/edit');
 
   const { data: productConfigs = [] } = useProductConfigs();
   const products = [...new Set(productConfigs.map((c: ProductConfig) => c.appGroup).filter(Boolean))];
 
   const [formData, setFormData] = useState({
-    appGroup: '', service: '', env: DEFAULT_ENV, old_version: '', new_version: '', docker_image: '', change_log: '',
+    appGroup: '', service: '', env: deploymentEnv, old_version: '', new_version: '', docker_image: '', change_log: '',
     status: 'CREATED', mode: 'AUTO', priority: '0', info: '',
     cluster: 'MOVING_TECH',
     cronjob_suspend: false, description: '', schedule_time: '',
@@ -113,7 +115,7 @@ const CreateRelease: React.FC = () => {
       setFormData({
         appGroup: existingRelease.appGroup || '',
         service: existingRelease.service || '',
-        env: existingRelease.env || DEFAULT_ENV,
+        env: existingRelease.env || deploymentEnv,
         old_version: existingRelease.old_version || '',
         new_version: existingRelease.new_version || '',
         docker_image: existingRelease.docker_image || existingRelease.release_context?.docker_image || '',
@@ -534,15 +536,8 @@ const CreateRelease: React.FC = () => {
                 )}
               </div>
               <div>
-                <FieldLabel required={!isUpdate}>Env</FieldLabel>
-                {isUpdate ? (
-                  <input type="text" value={formData.env} disabled className={disabledInputClass} />
-                ) : (
-                  <select name="env" value={formData.env} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}>
-                    <option value="">Select Env</option>
-                    {AVAILABLE_ENVS.map(e => <option key={e} value={e}>{e}</option>)}
-                  </select>
-                )}
+                <FieldLabel>Env</FieldLabel>
+                <input type="text" value={formData.env} disabled className={disabledInputClass} />
               </div>
               <div><FieldLabel>Priority</FieldLabel><select name="priority" value={formData.priority} onChange={handleInputChange} disabled={isMidFlight} className={cn(isMidFlight ? disabledInputClass : inputClass, !isMidFlight && 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
               <div><FieldLabel>Description</FieldLabel><input type="text" name="description" value={formData.description} onChange={handleInputChange} placeholder="Deploying webhook Hotfix" disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} /></div>

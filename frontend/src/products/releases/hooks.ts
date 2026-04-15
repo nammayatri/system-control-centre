@@ -113,8 +113,8 @@ export function useRollbackRelease() {
 export function useRevertRelease() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ releaseId, requestedBy, info, immediate }: { releaseId: string; requestedBy?: string; info?: string; immediate?: boolean }) =>
-      revertRelease(releaseId, requestedBy, info, immediate),
+    mutationFn: ({ releaseId, requestedBy, info, immediate, isRevertSync }: { releaseId: string; requestedBy?: string; info?: string; immediate?: boolean; isRevertSync?: boolean }) =>
+      revertRelease(releaseId, requestedBy, info, immediate, isRevertSync),
     onSuccess: (_, vars) => {
       toast.success(vars.immediate ? 'Immediate revert initiated' : 'Revert initiated');
       qc.invalidateQueries({ queryKey: ['release', vars.releaseId] });

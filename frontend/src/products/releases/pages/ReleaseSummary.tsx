@@ -787,16 +787,20 @@ const ReleaseSummary: React.FC = () => {
           {s === 'COMPLETED' && (
             <>
               <PermissionGate product="autopilot" permission="RELEASE_REVERT">
-                <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: actor }), true)}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
+                <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: actor, isRevertSync: revertSyncChecked }), true)}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
               </PermissionGate>
               <PermissionGate product="autopilot" permission="RELEASE_REVERT">
-                <div className="flex items-center gap-2">
-                  <Button size="sm" variant="danger" loading={immRevertSyncMut.isPending} onClick={doImmediateRevert}><Zap className="w-3.5 h-3.5" /> Immediate Revert</Button>
-                  <label className="flex items-center gap-1.5 text-xs text-zinc-500 cursor-pointer">
-                    <input type="checkbox" checked={revertSyncChecked} onChange={(e) => setRevertSyncChecked(e.target.checked)} className="rounded border-zinc-300 accent-zinc-900" />
-                    Also revert in other cloud
-                  </label>
-                </div>
+                <Button size="sm" variant="danger" loading={immRevertSyncMut.isPending} onClick={doImmediateRevert}><Zap className="w-3.5 h-3.5" /> Immediate Revert</Button>
+              </PermissionGate>
+              {/* Single shared "Also revert in other cloud" checkbox — applies to both
+                  Revert and Immediate Revert. Only meaningful when the original
+                  release had sync_enabled, but always shown so operators can opt in
+                  consistently across the two buttons. */}
+              <PermissionGate product="autopilot" permission="RELEASE_REVERT">
+                <label className="flex items-center gap-1.5 text-xs text-zinc-500 cursor-pointer">
+                  <input type="checkbox" checked={revertSyncChecked} onChange={(e) => setRevertSyncChecked(e.target.checked)} className="rounded border-zinc-300 accent-zinc-900" />
+                  Also revert in other cloud
+                </label>
               </PermissionGate>
             </>
           )}

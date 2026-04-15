@@ -18,6 +18,7 @@ import Core.Environment (Flow)
 import Data.Aeson (Value (..), object, (.=))
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (addUTCTime, getCurrentTime)
@@ -25,6 +26,7 @@ import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Servant hiding (Unauthorized)
 import Shared.API.Response (APIResponse (..))
+import System.Environment (lookupEnv)
 
 -- | Auth API type
 type AuthAPI =
@@ -120,6 +122,10 @@ meH mAuth = do
                                         throwM $ Unauthorized "Account deactivated"
                                 Just person -> do
                                     products <- findAllProductsForPerson person
+                                    -- Single deployment env (one SCC instance serves one env).
+                                    -- Read from SC_ENV at runtime so k8s env vars control it
+                                    -- without rebuilding the frontend or backend images.
+                                    envVal <- liftIO (fromMaybe "UAT" <$> lookupEnv "SC_ENV")
                                     pure $
                                         object
                                             [ "person"
@@ -140,6 +146,10 @@ meH mAuth = do
                                                             ]
                                                     )
                                                     products
+                                            , "config"
+                                                .= object
+                                                    [ "env" .= T.pack envVal
+                                                    ]
                                             ]
 
 -- | POST /auth/verify

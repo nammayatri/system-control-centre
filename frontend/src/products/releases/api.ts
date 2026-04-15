@@ -535,8 +535,13 @@ export async function rollbackRelease(releaseId: string, reason?: string): Promi
     return data;
 }
 
-export async function revertRelease(releaseId: string, requestedBy?: string, info?: string, immediate?: boolean): Promise<any> {
-    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/revert`, { requestedBy: requestedBy || null, info: info || null, immediate: immediate || false });
+export async function revertRelease(releaseId: string, requestedBy?: string, info?: string, immediate?: boolean, isRevertSync?: boolean): Promise<any> {
+    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/revert`, {
+        requestedBy: requestedBy || null,
+        info: info || null,
+        immediate: immediate || false,
+        isRevertSync: isRevertSync || false,
+    });
     return data;
 }
 
