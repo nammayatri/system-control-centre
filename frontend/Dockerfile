@@ -3,19 +3,18 @@
 # System Control Centre — frontend
 # linux/amd64 only. Build and run as a standalone service.
 #
-# All VITE_* vars are baked into the JS bundle at build time. Build a
-# separate image per environment with the right --build-arg values.
+# VITE_* vars are baked into the JS bundle at build time. Only the API URL
+# is build-time; the deployment environment label (UAT/PROD/etc.) is served
+# by the backend via /auth/me at runtime, so one image can serve any env.
 #
 # Build:
 #   docker build --platform=linux/amd64 \
 #     --build-arg VITE_API_BASE_URL=https://api.example.com \
 #     --build-arg VITE_AUTH_API_BASE_URL=https://api.example.com \
-#     --build-arg VITE_DEFAULT_ENV=PROD \
-#     --build-arg VITE_AVAILABLE_ENVS=UAT,PROD,INTEG_CLUSTER \
-#     -t scc-frontend:prod .
+#     -t scc-frontend:latest .
 #
 # Run:
-#   docker run --platform=linux/amd64 -p 8080:80 scc-frontend:prod
+#   docker run --platform=linux/amd64 -p 8080:80 scc-frontend:latest
 
 # ── Build stage ────────────────────────────────────────────────────
 FROM --platform=linux/amd64 node:22-bookworm-slim AS builder
@@ -30,12 +29,8 @@ COPY . .
 # `docker build` still produces a runnable image.
 ARG VITE_API_BASE_URL=http://localhost:8012
 ARG VITE_AUTH_API_BASE_URL=
-ARG VITE_DEFAULT_ENV=UAT
-ARG VITE_AVAILABLE_ENVS=UAT,PROD,INTEG_CLUSTER
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL \
-    VITE_AUTH_API_BASE_URL=$VITE_AUTH_API_BASE_URL \
-    VITE_DEFAULT_ENV=$VITE_DEFAULT_ENV \
-    VITE_AVAILABLE_ENVS=$VITE_AVAILABLE_ENVS
+    VITE_AUTH_API_BASE_URL=$VITE_AUTH_API_BASE_URL
 
 RUN npm run build
 

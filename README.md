@@ -192,33 +192,21 @@ Both services build into standalone `linux/amd64` images and deploy independentl
 
 ### Frontend image
 
-`VITE_*` env vars are baked into the JS bundle at build time. Build a separate image per environment with the right `--build-arg` values. The defaults match local dev so an unconfigured `docker build` still produces a runnable image.
+Only the API URL is baked in at build time. The deployment environment label (UAT/PROD/etc.) is served by the backend via `/auth/me` at runtime, so **one image can serve any environment** — just point the backend's `SC_ENV` at the right value per deployment.
 
 | Build arg | Default | Purpose |
 |---|---|---|
 | `VITE_API_BASE_URL` | `http://localhost:8012` | Backend URL |
 | `VITE_AUTH_API_BASE_URL` | *(empty)* | Auth URL — empty falls back to `VITE_API_BASE_URL` |
-| `VITE_DEFAULT_ENV` | `UAT` | Initial env in the env switcher |
-| `VITE_AVAILABLE_ENVS` | `UAT,PROD,INTEG_CLUSTER` | Comma-separated list shown in switcher |
 
 ```bash
-# UAT build
 cd frontend
 docker build --platform=linux/amd64 \
-  --build-arg VITE_API_BASE_URL=https://api.uat.example.com \
-  --build-arg VITE_DEFAULT_ENV=UAT \
-  --build-arg VITE_AVAILABLE_ENVS=UAT,PROD,INTEG_CLUSTER \
-  -t scc-frontend:uat .
-
-# PROD build
-docker build --platform=linux/amd64 \
   --build-arg VITE_API_BASE_URL=https://api.example.com \
-  --build-arg VITE_DEFAULT_ENV=PROD \
-  --build-arg VITE_AVAILABLE_ENVS=PROD \
-  -t scc-frontend:prod .
+  -t scc-frontend:latest .
 
 # Run locally
-docker run --platform=linux/amd64 -p 8080:80 scc-frontend:uat
+docker run --platform=linux/amd64 -p 8080:80 scc-frontend:latest
 # → http://localhost:8080
 ```
 
