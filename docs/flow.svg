@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 460" width="100%" role="img" aria-label="System Control Centre release flow animation">
+  <title>System Control Centre — animated release flow</title>
+  <desc>User creates a release, PostgreSQL persists it, the background Runner picks it up, the Workflow engine drives a staged canary rollout via kubectl, and traffic shifts from the old version to the new one before the old deployment scales down.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b1324"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="oldBar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f97316"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <linearGradient id="newBar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#10b981"/>
+      <stop offset="1" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="cardGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e293b"/>
+      <stop offset="1" stop-color="#182236"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 10 3, 0 6" fill="#64748b"/>
+    </marker>
+    <path id="pipe" d="M170 135 L220 135 M370 135 L420 135 M550 135 L600 135 M750 135 L800 135" fill="none"/>
+    <path id="flowPath" d="M100 135 L870 135" fill="none"/>
+  </defs>
+
+  <style>
+    .bg { fill: url(#bg); }
+    .card { fill: url(#cardGrad); stroke: #334155; stroke-width: 1.5; }
+    .title { fill: #f1f5f9; font: 700 18px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-anchor: middle; }
+    .label { fill: #e2e8f0; font: 600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-anchor: middle; }
+    .sublabel { fill: #94a3b8; font: 400 11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-anchor: middle; }
+    .caption { fill: #cbd5e1; font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .pct { fill: #e2e8f0; font: 600 12px -apple-system, monospace; }
+    .pipe { stroke: #475569; stroke-width: 2; fill: none; }
+  </style>
+
+  <rect class="bg" width="1000" height="460"/>
+
+  <text x="500" y="36" class="title">System Control Centre — Release Flow</text>
+  <text x="500" y="56" class="sublabel">create → persist → pick up → staged rollout → complete</text>
+
+  <!-- Pipeline rails -->
+  <line class="pipe" x1="170" y1="135" x2="220" y2="135" marker-end="url(#arrow)"/>
+  <line class="pipe" x1="370" y1="135" x2="420" y2="135" marker-end="url(#arrow)"/>
+  <line class="pipe" x1="550" y1="135" x2="600" y2="135" marker-end="url(#arrow)"/>
+  <line class="pipe" x1="750" y1="135" x2="800" y2="135" marker-end="url(#arrow)"/>
+
+  <!-- Stage 1: User / API -->
+  <g transform="translate(40,100)">
+    <rect class="card" width="130" height="70" rx="10"/>
+    <text x="65" y="30" class="label">User · API</text>
+    <text x="65" y="50" class="sublabel">POST /releases</text>
+  </g>
+
+  <!-- Stage 2: Postgres -->
+  <g transform="translate(220,100)">
+    <rect class="card" width="150" height="70" rx="10"/>
+    <text x="75" y="28" class="label">PostgreSQL</text>
+    <text x="75" y="46" class="sublabel">release_tracker</text>
+    <text x="75" y="62" class="sublabel">CREATED</text>
+  </g>
+
+  <!-- Stage 3: Runner -->
+  <g transform="translate(420,100)">
+    <rect class="card" width="130" height="70" rx="10"/>
+    <text x="65" y="30" class="label">Runner</text>
+    <text x="65" y="50" class="sublabel">polls every 20s</text>
+    <!-- pulse -->
+    <circle cx="112" cy="18" r="4" fill="#22d3ee">
+      <animate attributeName="opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+
+  <!-- Stage 4: Workflow -->
+  <g transform="translate(600,100)">
+    <rect class="card" width="150" height="70" rx="10"/>
+    <text x="75" y="28" class="label">Workflow Engine</text>
+    <text x="75" y="46" class="sublabel">staged canary</text>
+    <text x="75" y="62" class="sublabel">INPROGRESS</text>
+  </g>
+
+  <!-- Stage 5: kubectl / k8s -->
+  <g transform="translate(800,100)">
+    <rect class="card" width="160" height="70" rx="10"/>
+    <text x="80" y="28" class="label">Kubernetes</text>
+    <text x="80" y="46" class="sublabel">kubectl: Deployment</text>
+    <text x="80" y="62" class="sublabel">VirtualService · HPA</text>
+  </g>
+
+  <!-- Moving packet -->
+  <circle r="6" fill="#22d3ee" filter="url(#glow)">
+    <animateMotion dur="6s" repeatCount="indefinite" rotate="auto">
+      <mpath href="#flowPath"/>
+    </animateMotion>
+  </circle>
+
+  <!-- Secondary packet (offset) -->
+  <circle r="4" fill="#a5f3fc" opacity="0.6" filter="url(#glow)">
+    <animateMotion dur="6s" begin="3s" repeatCount="indefinite" rotate="auto">
+      <mpath href="#flowPath"/>
+    </animateMotion>
+  </circle>
+
+  <!-- Divider -->
+  <line x1="60" y1="220" x2="940" y2="220" stroke="#1e293b" stroke-width="1"/>
+
+  <!-- Canary rollout section -->
+  <text x="500" y="252" class="label" font-size="15">Canary rollout — VirtualService weights shift over time</text>
+
+  <!-- Old version bar -->
+  <g transform="translate(100,280)">
+    <text x="0" y="-6" class="caption">Old  v1.2.0</text>
+    <rect x="0" y="4" width="360" height="24" rx="4" fill="#0b1324" stroke="#334155"/>
+    <rect x="0" y="4" height="24" rx="4" fill="url(#oldBar)">
+      <animate attributeName="width" values="360;360;270;180;90;0;0" keyTimes="0;0.1;0.3;0.5;0.7;0.9;1" dur="8s" repeatCount="indefinite"/>
+    </rect>
+    <text x="370" y="22" class="pct">
+      <tspan>
+        <animate attributeName="textLength" values="0;1" dur="0.1s" fill="freeze"/>
+      </tspan>
+      100% → 0%
+    </text>
+  </g>
+
+  <!-- New version bar -->
+  <g transform="translate(540,280)">
+    <text x="0" y="-6" class="caption">New v1.3.0</text>
+    <rect x="0" y="4" width="360" height="24" rx="4" fill="#0b1324" stroke="#334155"/>
+    <rect x="0" y="4" height="24" rx="4" fill="url(#newBar)">
+      <animate attributeName="width" values="0;0;90;180;270;360;360" keyTimes="0;0.1;0.3;0.5;0.7;0.9;1" dur="8s" repeatCount="indefinite"/>
+    </rect>
+    <text x="370" y="22" class="pct">0% → 100%</text>
+  </g>
+
+  <!-- Stage ticks -->
+  <g transform="translate(100,350)">
+    <g>
+      <circle cx="0" cy="0" r="8" fill="#1e293b" stroke="#475569"/>
+      <circle cx="0" cy="0" r="4" fill="#22d3ee">
+        <animate attributeName="opacity" values="0;1;0" keyTimes="0;0.1;0.3" dur="8s" repeatCount="indefinite"/>
+      </circle>
+      <text x="0" y="26" class="sublabel" text-anchor="middle">① stage 1</text>
+      <text x="0" y="40" class="sublabel" text-anchor="middle">25%</text>
+    </g>
+    <g transform="translate(180,0)">
+      <circle cx="0" cy="0" r="8" fill="#1e293b" stroke="#475569"/>
+      <circle cx="0" cy="0" r="4" fill="#22d3ee">
+        <animate attributeName="opacity" values="0;0;1;0" keyTimes="0;0.25;0.4;0.5" dur="8s" repeatCount="indefinite"/>
+      </circle>
+      <text x="0" y="26" class="sublabel" text-anchor="middle">② stage 2</text>
+      <text x="0" y="40" class="sublabel" text-anchor="middle">50%</text>
+    </g>
+    <g transform="translate(360,0)">
+      <circle cx="0" cy="0" r="8" fill="#1e293b" stroke="#475569"/>
+      <circle cx="0" cy="0" r="4" fill="#22d3ee">
+        <animate attributeName="opacity" values="0;0;1;0" keyTimes="0;0.45;0.6;0.7" dur="8s" repeatCount="indefinite"/>
+      </circle>
+      <text x="0" y="26" class="sublabel" text-anchor="middle">③ stage 3</text>
+      <text x="0" y="40" class="sublabel" text-anchor="middle">75%</text>
+    </g>
+    <g transform="translate(540,0)">
+      <circle cx="0" cy="0" r="8" fill="#1e293b" stroke="#475569"/>
+      <circle cx="0" cy="0" r="4" fill="#22d3ee">
+        <animate attributeName="opacity" values="0;0;1;0" keyTimes="0;0.65;0.8;0.9" dur="8s" repeatCount="indefinite"/>
+      </circle>
+      <text x="0" y="26" class="sublabel" text-anchor="middle">④ stage 4</text>
+      <text x="0" y="40" class="sublabel" text-anchor="middle">100%</text>
+    </g>
+    <g transform="translate(720,0)">
+      <circle cx="0" cy="0" r="8" fill="#1e293b" stroke="#10b981"/>
+      <circle cx="0" cy="0" r="4" fill="#10b981">
+        <animate attributeName="opacity" values="0;0;1" keyTimes="0;0.88;1" dur="8s" repeatCount="indefinite"/>
+      </circle>
+      <text x="0" y="26" class="label" font-size="11" fill="#10b981">COMPLETED</text>
+      <text x="0" y="40" class="sublabel" text-anchor="middle">scale-down old</text>
+    </g>
+    <!-- Connector line -->
+    <line x1="8" y1="0" x2="712" y2="0" stroke="#334155" stroke-width="1"/>
+  </g>
+</svg>

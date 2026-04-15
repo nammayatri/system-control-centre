@@ -2,6 +2,8 @@
 
 Centralized release management and configuration platform with role-based access control, automated deployment workflows, and progressive rollout strategies for Kubernetes-based backend services, mobile apps, and infrastructure.
 
+![Release flow](docs/flow.svg)
+
 ## Architecture
 
 The system follows a two-layer architecture: **Core** (authentication, RBAC, admin) and **Products** (self-contained product modules that plug into the core).
