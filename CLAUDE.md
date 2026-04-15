@@ -53,10 +53,11 @@ Calls in handlers become a one-liner: `result <- findFooById fid`.
 
 ### Quick Start (one command)
 ```bash
-cd backend
-nix develop          # enter nix shell (auto-via direnv if installed)
+nix develop          # from repo root — auto-via direnv if installed
 sc-dev               # starts everything: pg + db init + backend ghcid + frontend
 ```
+
+Nix/direnv/process-compose live at the repo root (`flake.nix`, `.envrc`, `nix/`). The backend Haskell project stays under `backend/`.
 
 `sc-dev` brings up the full stack via process-compose:
 - PostgreSQL on `127.0.0.1:5434` (data in `./.local/data/pg`, auto-init from `dev/sql-seed/`)
@@ -78,7 +79,7 @@ Press Ctrl+C to stop everything cleanly.
 
 ### Reset DB
 ```bash
-rm -rf backend/.local/data/pg
+rm -rf .local/data/pg
 sc-dev   # next start re-initialises everything
 ```
 

@@ -20,12 +20,15 @@ logs/
 *.tmp
 *.bak
 
-# ── Backend (Haskell / Cabal / Nix) ──
+# ── Nix / direnv (at repo root) ──
+.direnv/
+.envrc
+result
+
+# ── Backend (Haskell / Cabal) ──
 backend/dist-newstyle/
 backend/.cabal-dir/
 backend/.cabal-home/
-backend/.direnv/
-backend/.envrc
 backend/result
 backend/.ghc.environment.*
 backend/.hie/
@@ -49,3 +52,6 @@ CONTEXT.md
 backend/CONTEXT.md
 
 backend/.local/
+backend/.cache/
+.local/
+.cache/

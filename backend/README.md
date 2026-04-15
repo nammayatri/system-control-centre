@@ -10,6 +10,8 @@
 
 ### Quick Start (one command)
 
+Run from the **repo root** (one level up from `backend/`) — Nix flake and direnv live there.
+
 ```bash
 nix develop          # enter the dev shell (auto via direnv if installed)
 sc-dev               # starts everything: postgres + db init + backend + frontend
@@ -140,5 +142,7 @@ src/
 scripts/                             # test-api.sh (integration tests)
 dev/                                 # Canonical sql-seed/ + migrations/system-control/ (used by sc-dev)
 Dockerfile                           # Multi-stage Docker build
-flake.nix                            # Nix reproducible environment + process-compose dev stack
 ```
+
+Nix infrastructure lives at the **repo root**, not inside `backend/`:
+`../flake.nix`, `../flake.lock`, `../.envrc`, `../nix/pre-commit.nix`, `../.local/data/pg` (Postgres data).

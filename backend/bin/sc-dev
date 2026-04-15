@@ -9,12 +9,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-cd "$PROJECT_DIR"
+BACKEND_DIR="$(dirname "$SCRIPT_DIR")"
+ROOT_DIR="$(dirname "$BACKEND_DIR")"
+cd "$ROOT_DIR"
 
 LOG_DIR=".local/logs"
 RUN_LOG_FILE="$LOG_DIR/sc-dev.log"
-APP_LOG_FILE="system-control.log"
+APP_LOG_FILE="backend/system-control.log"
 mkdir -p "$LOG_DIR"
 # Fresh logs per run.
 : > "$RUN_LOG_FILE"
@@ -39,7 +40,7 @@ kill_by_port() {
 
 echo "[sc-dev] cleaning stale dev services..."
 # Stop previous process-compose/ghcid/vite instances tied to this repo.
-pkill -f "process-compose.*system-control-centre/backend" 2>/dev/null || true
+pkill -f "process-compose.*system-control-centre" 2>/dev/null || true
 pkill -f "ghcid.*exe:scc" 2>/dev/null || true
 pkill -f "vite.*system-control-centre/frontend" 2>/dev/null || true
 

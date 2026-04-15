@@ -31,6 +31,7 @@
         in
         {
           haskellProjects.default = {
+            projectRoot = ./backend;
             imports = [
               inputs.euler-hs.haskellFlakeProjectModules.output
             ];
@@ -84,15 +85,15 @@
                       echo "[db-init] creating system_control database"
                       createdb system_control
                       export PGDATABASE=system_control
-                      psql -v ON_ERROR_STOP=1 -f ${./dev/sql-seed/pre-init.sql}
-                      psql -v ON_ERROR_STOP=1 -f ${./dev/sql-seed/system-control-seed.sql}
+                      psql -v ON_ERROR_STOP=1 -f ${./backend/dev/sql-seed/pre-init.sql}
+                      psql -v ON_ERROR_STOP=1 -f ${./backend/dev/sql-seed/system-control-seed.sql}
                       echo "[db-init] schema seeded"
                     else
                       echo "[db-init] system_control exists, skipping seed"
                       export PGDATABASE=system_control
                     fi
                     shopt -s nullglob
-                    for f in ${./dev/migrations/system-control}/*.sql; do
+                    for f in ${./backend/dev/migrations/system-control}/*.sql; do
                       echo "[migrate] $(basename "$f")"
                       psql -v ON_ERROR_STOP=0 -f "$f" 2>&1 | grep -v "^NOTICE:" || true
                     done
@@ -105,26 +106,43 @@
               # Backend with ghcid hot-reload.
               # Inherits PATH from the surrounding `nix develop` shell so it picks up
               # GHC, cabal-install, ghcid, fourmolu, etc. from haskell-flake's devShell.
+              #
+              # Wrapped in `while true` so transient ghcid / cabal-repl deaths auto-recover
+              # (e.g. TH panics, cabal reconfigure errors) without manual intervention.
+              # availability.restart = "on_failure" is the outer safety net if the shell itself exits.
               backend = {
                 command = ''
+                  cd backend
                   user=$(whoami)
                   export SC_DATABASE_URL="postgres://$user@127.0.0.1:5434/system_control"
                   export PORT=8012
-                  exec ghcid \
-                    --command "cabal repl exe:scc" \
-                    --test "Main.main" \
-                    --restart=package.yaml \
-                    --restart=dhall-configs/system-control.dhall \
-                    --reload=src
+                  while true; do
+                    ghcid \
+                      --command "cabal repl exe:scc" \
+                      --test "Main.main" \
+                      --restart=package.yaml \
+                      --restart=scc.cabal \
+                      --restart=cabal.project \
+                      --restart=dhall-configs/system-control.dhall \
+                      --reload=src \
+                      --reload=dhall-configs \
+                      || true
+                    echo "[ghcid] exited (compile blocker or session death), restarting in 2s..."
+                    sleep 2
+                  done
                 '';
                 depends_on.db-init.condition = "process_completed_successfully";
+                availability = {
+                  restart = "on_failure";
+                  backoff_seconds = 2;
+                };
               };
 
-              # Frontend (vite dev server) — runs in ../frontend/
+              # Frontend (vite dev server) — runs in ./frontend/
               frontend = {
                 command = ''
                   export PATH="${pkgsLatest.nodejs_22}/bin:$PATH"
-                  cd ../frontend
+                  cd frontend
                   if [ ! -d node_modules ]; then
                     echo "[frontend] installing dependencies..."
                     npm install
@@ -132,6 +150,10 @@
                   exec npm run dev
                 '';
                 depends_on.backend.condition = "process_started";
+                availability = {
+                  restart = "on_failure";
+                  backoff_seconds = 2;
+                };
               };
             };
           };
@@ -181,7 +203,7 @@
               pkg-config
             ];
             shellHook = ''
-              export CABAL_DIR="$PWD/.cabal-dir"
+              export CABAL_DIR="$PWD/backend/.cabal-dir"
               export CABAL_CONFIG="$CABAL_DIR/config"
               mkdir -p "$CABAL_DIR"
               if [ ! -f "$CABAL_CONFIG" ]; then
@@ -191,8 +213,8 @@
               export SC_DATABASE_URL="postgres://$(whoami)@127.0.0.1:5434/system_control"
               export PORT=''${PORT:-8012}
 
-              # Add bin/ scripts to PATH (works with direnv, unlike shell functions)
-              export PATH="$PWD/bin:$PATH"
+              # Add backend/bin scripts to PATH (works with direnv, unlike shell functions)
+              export PATH="$PWD/backend/bin:$PATH"
 
               sc-help
             '';

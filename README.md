@@ -152,8 +152,7 @@ Without Nix you'd need: GHC 9.2.7, Cabal, PostgreSQL 14+, Node.js 20.19+, fourmo
 ### One-command dev (recommended)
 
 ```bash
-cd backend
-nix develop          # auto-activated by direnv if installed
+nix develop          # from repo root — auto-activated by direnv if installed
 sc-dev               # starts everything
 ```
 
@@ -176,7 +175,7 @@ sc-format      Format all Haskell files via treefmt (fourmolu)
 sc-help        Show this list
 ```
 
-To reset the DB: `rm -rf backend/.local/data/pg && sc-dev`
+To reset the DB: `rm -rf .local/data/pg && sc-dev`
 
 ### Default Login
 
