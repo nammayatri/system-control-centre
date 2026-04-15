@@ -291,19 +291,32 @@ createReleaseHBodyContinue mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..
     mConflict <- findInFlightSameService appGroup service
     case mConflict of
         Just existing ->
-            pure $
-                APIResponse
-                    "ERROR"
-                    ( "Service "
-                        <> service
-                        <> " in app group "
-                        <> appGroup
-                        <> " already has an in-flight release "
-                        <> NT.releaseId existing
-                        <> " (status="
-                        <> T.pack (show (NT.status existing))
-                        <> "). Wait for it to complete, abort, or discard."
-                    )
+            -- Distinguish VS edits from regular release trackers — both can
+            -- block a new release on the same service, but the resolution is
+            -- different (apply/discard the edit vs wait for the release).
+            let cat = NT.category existing
+                msg = case cat of
+                    VSEdit ->
+                        "Service "
+                            <> service
+                            <> " in app group "
+                            <> appGroup
+                            <> " has a pending VS edit "
+                            <> NT.releaseId existing
+                            <> " (status="
+                            <> T.pack (show (NT.status existing))
+                            <> "). Apply, force-unlock, or discard the VS edit before creating a release."
+                    _ ->
+                        "Service "
+                            <> service
+                            <> " in app group "
+                            <> appGroup
+                            <> " already has an in-flight release "
+                            <> NT.releaseId existing
+                            <> " (status="
+                            <> T.pack (show (NT.status existing))
+                            <> "). Wait for it to complete, abort, or discard."
+             in pure $ APIResponse "ERROR" msg
         Nothing -> do
             -- Julia parity (api/release/create.jl:103,195-221
             -- validateGCLTAbortInPreviousTracker): block a new release if
