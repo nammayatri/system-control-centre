@@ -130,7 +130,8 @@ sc-dev   # next start re-initialises everything
 - Frontend Shared UI: frontend/src/shared/ui/
 
 ## Cloud DB (DO NOT MODIFY -- read only for reference)
-NammaAP_DATABASE_URL=postgres://<user>:<password>@<aiven-host>:<port>/defaultdb?sslmode=require
+NammaAP_DATABASE_URL=postgres://<user>:<password>@<aiven-host>:<port>/<db>?sslmode=require
+# Actual connection string is stored out-of-repo (password vault / k8s secret).
 
 ## Important
 - NEVER add "Co-Authored-By: Claude" to commit messages
