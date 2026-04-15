@@ -6,6 +6,7 @@ import {
   fetchReleaseConfigs, createReleaseConfig, updateReleaseConfig, deleteReleaseConfig,
 } from '../../releases/api';
 import type { ProductConfig, ReleaseConfig } from '../../releases/api';
+import { PRODUCT_TYPES } from '../../../lib/constants';
 import { Button } from '../../../shared/ui/button';
 import { Badge } from '../../../shared/ui/badge';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
@@ -26,7 +27,7 @@ interface GroupWithServices {
 
 const EMPTY_GROUP_FORM: Partial<ProductConfig> = {
   appGroup: '', cluster: '', namespace: '', vs_name: '',
-  product_acronym: '', product_type: 'SERVICE', sync_cluster: '', need_infra_approval: 0,
+  product_acronym: '', product_type: 'BackendService', sync_cluster: '', need_infra_approval: 0,
 };
 
 const EMPTY_SERVICE_FORM: Partial<ReleaseConfig> = {
@@ -41,11 +42,20 @@ const truncateJson = (json: string, maxLen = 50): string => {
 };
 
 function typeBadgeVariant(type: string): 'blue' | 'warning' | 'purple' | 'default' {
+  // Match the canonical ReleaseCategory ADT names plus legacy aliases
+  // ('SERVICE'/'SCHEDULER') still in some old DB rows.
   switch (type) {
-    case 'SERVICE': return 'blue';
-    case 'SCHEDULER': return 'warning';
-    case 'CUSTOM': return 'purple';
-    default: return 'default';
+    case 'BackendService':
+    case 'SERVICE':
+      return 'blue';
+    case 'BackendScheduler':
+    case 'SCHEDULER':
+      return 'warning';
+    case 'BackendConfig':
+    case 'CUSTOM':
+      return 'purple';
+    default:
+      return 'default';
   }
 }
 
@@ -612,12 +622,13 @@ const DeploymentConfig: React.FC = () => {
                 <div>
                   <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Type</label>
                   <select
-                    value={groupForm.product_type || 'SERVICE'}
+                    value={groupForm.product_type || 'BackendService'}
                     onChange={e => setGroupForm(prev => ({ ...prev, product_type: e.target.value }))}
                     className={cn(inputClass, 'cursor-pointer')}
                   >
-                    <option value="SERVICE">SERVICE</option>
-                    <option value="SCHEDULER">SCHEDULER</option>
+                    {PRODUCT_TYPES.map(({ value, label }) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
                   </select>
                 </div>
                 <div>

@@ -31,7 +31,6 @@ import Data.Time.Clock (UTCTime, getCurrentTime)
 import Products.Autopilot.K8s.Deployment (
     buildCloneDeploymentCommand,
     buildConfigMapApplyCommand,
-    buildDeleteDeploymentCommand,
     buildScaleDeploymentCommand,
     buildScaleNamedDeploymentCommand,
     deploymentExists,
@@ -612,11 +611,15 @@ cleanupOldVersion = do
         _ <- runK8sIO $ runCmd (buildDeleteHpaCommand cfg (namespace ctx) oldHpaName)
         pure ()
 
-    -- Optionally delete old deployment
-    shouldDelete <- isScaleDownPodsOnCompletion
-    when shouldDelete $ do
-        logInfoS $ "  Deleting old deployment: " <> oldDepName
-        _ <- runK8sIO $ runCmd (buildDeleteDeploymentCommand cfg (namespace ctx) oldDepName)
+    -- Scale old deployment to 0 replicas (keep the resource so revert can
+    -- scale it back up). Deleting the deployment outright would block any
+    -- future revert because the workflow needs the old deployment present
+    -- (see revertReleaseH's deploymentExists check). Matches what
+    -- BackendServiceWorkflow does for backend services.
+    shouldScaleDown <- isScaleDownPodsOnCompletion
+    when shouldScaleDown $ do
+        logInfoS $ "  Scaling old deployment to 0: " <> oldDepName
+        _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
         pure ()
 
     -- Capture AFTER snapshot (new deployment)

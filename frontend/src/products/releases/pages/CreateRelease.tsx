@@ -8,7 +8,7 @@ import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs
 import type { ProductConfig } from '../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
-import { DEFAULT_ENV, AVAILABLE_ENVS } from '../../../lib/constants';
+import { DEFAULT_ENV, AVAILABLE_ENVS, normalizeProductType } from '../../../lib/constants';
 import { Trash2, Lock, ChevronDown, Info } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -343,27 +343,30 @@ const CreateRelease: React.FC = () => {
     }
 
     if (isUpdate && id) {
-      // Only editable fields + stages past the already-executed history are sent.
-      const futureStages = stages.slice(rolloutHistoryLength);
+      // Backend allows only these fields mid-flight: status, mode,
+      // rolloutStrategy (future stages must match history byte-for-byte),
+      // and changeLog. Anything else returns 4xx. Before mid-flight
+      // (CREATED) the backend accepts a wider set, but we still only
+      // surface the editable subset in this form.
+      const updates: Record<string, unknown> = {
+        mode: formData.mode,
+        rolloutStrategy: stages.map(s => ({
+          rolloutPercent: s.rollout,
+          cooloffMinutes: s.cooloff,
+          podCount: s.pods,
+        })),
+      };
+      if (!isMidFlight) {
+        updates.description = formData.description;
+        updates.changeLog = formData.change_log;
+        updates.priority = parseInt(formData.priority, 10) || 0;
+        updates.scheduleTime = formData.schedule_time || null;
+        updates.dockerImage = formData.docker_image;
+        updates.info = formData.info;
+        updates.envOverrideData = isEnvSwitch ? envData : null;
+      }
       try {
-        await updateMutation.mutateAsync({
-          releaseId: id,
-          updates: {
-            status: formData.status,
-            mode: formData.mode,
-            description: formData.description,
-            changeLog: formData.change_log,
-            priority: parseInt(formData.priority, 10) || 0,
-            scheduleTime: formData.schedule_time || null,
-            dockerImage: formData.docker_image,
-            info: formData.info,
-            rolloutStrategy: stages.map(s => ({
-              rolloutPercent: s.rollout,
-              cooloffMinutes: s.cooloff,
-              podCount: s.pods,
-            })),
-          },
-        });
+        await updateMutation.mutateAsync({ releaseId: id, updates });
         navigate(`/releases/${id}`);
       } catch (err: any) {
         setError(err?.response?.data?.message || err.message || 'Failed to update release');
@@ -377,7 +380,7 @@ const CreateRelease: React.FC = () => {
     }
 
     const selectedProductConfig = productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup);
-    const trackerType = selectedProductConfig?.product_type === 'SCHEDULER' ? 'BackendScheduler' : 'BackendService';
+    const trackerType = normalizeProductType(selectedProductConfig?.product_type);
 
     const buildPayload = (svc: string) => ({
       appGroup: formData.appGroup, service: [svc], env: formData.env,
@@ -442,6 +445,9 @@ const CreateRelease: React.FC = () => {
   const canToggleEnvSwitch = selectedServices.length === 1;
   const canToggleResourcesSwitch = selectedServices.length === 1;
   const isSubmitting = isUpdate ? updateMutation.isPending : createMutation.isPending;
+  // Mid-flight: backend rejects edits to most fields. Only status, rolloutStrategy,
+  // changeLog, mode, and envOverrideData can change once a release is live.
+  const isMidFlight = isUpdate && ['INPROGRESS', 'PAUSED', 'RESTARTING', 'REVERTING'].includes(formData.status);
   const pageTitle = isUpdate ? 'Update Release' : isClone ? 'Clone Release' : 'Create Release';
   const submitLabel = isUpdate
     ? (updateMutation.isPending ? 'Updating...' : 'Update Release')
@@ -468,6 +474,12 @@ const CreateRelease: React.FC = () => {
             </div>
           );
         })()}
+
+        {isMidFlight && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-xl text-sm">
+            This release is <strong>{formData.status}</strong>. Only <strong>mode</strong> and <strong>rollout stages</strong> are editable. For safety, pause the release before editing. Use the action buttons on the release page to pause/resume/abort. Abort and create a new release to change other fields.
+          </div>
+        )}
 
         <div className="bg-white rounded-xl border border-zinc-200">
           <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex justify-between items-center">
@@ -506,7 +518,7 @@ const CreateRelease: React.FC = () => {
                   <option value="MANUAL">MANUAL</option>
                 </select>
               </div>
-              <div><FieldLabel>Info</FieldLabel><input type="text" name="info" value={formData.info} onChange={handleInputChange} placeholder="Any Valid JSON" className={inputClass} /></div>
+              <div><FieldLabel>Info</FieldLabel><input type="text" name="info" value={formData.info} onChange={handleInputChange} placeholder="Any Valid JSON" disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} /></div>
             </div>
 
             <div className="space-y-4">
@@ -532,21 +544,13 @@ const CreateRelease: React.FC = () => {
                   </select>
                 )}
               </div>
-              <div><FieldLabel>Priority</FieldLabel><select name="priority" value={formData.priority} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
-              <div><FieldLabel>Description</FieldLabel><input type="text" name="description" value={formData.description} onChange={handleInputChange} placeholder="Deploying webhook Hotfix" className={inputClass} /></div>
+              <div><FieldLabel>Priority</FieldLabel><select name="priority" value={formData.priority} onChange={handleInputChange} disabled={isMidFlight} className={cn(isMidFlight ? disabledInputClass : inputClass, !isMidFlight && 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
+              <div><FieldLabel>Description</FieldLabel><input type="text" name="description" value={formData.description} onChange={handleInputChange} placeholder="Deploying webhook Hotfix" disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} /></div>
               <div>
                 <FieldLabel required={!isUpdate}>Docker Image</FieldLabel>
                 <input type="text" name="docker_image" value={formData.docker_image} onChange={handleInputChange}
-                  required={!isUpdate} placeholder="Enter Docker Image" className={inputClass} />
+                  required={!isUpdate} placeholder="Enter Docker Image" disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} />
               </div>
-              {isUpdate && (
-                <div>
-                  <FieldLabel>Status</FieldLabel>
-                  <select name="status" value={formData.status} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>
-                    {statusOptions.map(st => <option key={st} value={st}>{st}</option>)}
-                  </select>
-                </div>
-              )}
             </div>
 
             <div className="space-y-4">
@@ -600,12 +604,12 @@ const CreateRelease: React.FC = () => {
                   </div>
                 )}
               </div>
-              <div><FieldLabel>Schedule Time</FieldLabel><input type="text" name="schedule_time" value={formData.schedule_time} onChange={handleInputChange} placeholder="2022-11-01T19:39:35" className={inputClass} /></div>
+              <div><FieldLabel>Schedule Time</FieldLabel><input type="text" name="schedule_time" value={formData.schedule_time} onChange={handleInputChange} placeholder="2022-11-01T19:39:35" disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} /></div>
               <div><FieldLabel>Cluster</FieldLabel><input type="text" disabled value={formData.cluster} className={disabledInputClass} /></div>
               <div>
                 <FieldLabel required={!isUpdate}>Change Log</FieldLabel>
                 <input type="text" name="change_log" value={formData.change_log} onChange={handleInputChange}
-                  required={!isUpdate} placeholder="v1.0.0" className={inputClass} />
+                  required={!isUpdate} placeholder="v1.0.0" disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} />
               </div>
             </div>
           </div>
@@ -690,15 +694,16 @@ const CreateRelease: React.FC = () => {
           <div className="bg-white rounded-xl border border-zinc-200">
             <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex items-center gap-3 flex-wrap">
               <h2 className="text-base sm:text-lg font-semibold text-zinc-900">Env Switch</h2>
-              <Toggle checked={isEnvSwitch} onChange={() => canToggleEnvSwitch && formData.service && setIsEnvSwitch(!isEnvSwitch)} disabled={!canToggleEnvSwitch || !formData.service} />
+              <Toggle checked={isEnvSwitch} onChange={() => canToggleEnvSwitch && formData.service && !isMidFlight && setIsEnvSwitch(!isEnvSwitch)} disabled={!canToggleEnvSwitch || !formData.service || isMidFlight} />
               {!canToggleEnvSwitch && selectedServices.length > 1 && <span className="text-xs text-zinc-400 ml-2">Single service only</span>}
+              {isMidFlight && <span className="text-xs text-zinc-400 ml-2">Locked mid-flight</span>}
             </div>
             {isEnvSwitch && (
               <div className="p-4 sm:p-6">
                 <FieldLabel>Environment Variables JSON</FieldLabel>
                 <div className="border border-zinc-200 rounded-lg overflow-hidden mt-1">
-                  <Editor height="320px" defaultLanguage="json" theme="light" value={envData} onChange={(val) => setEnvData(val || '')}
-                    options={{ minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
+                  <Editor height="320px" defaultLanguage="json" theme="light" value={envData} onChange={(val) => !isMidFlight && setEnvData(val || '')}
+                    options={{ readOnly: isMidFlight, minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
                 </div>
               </div>
             )}

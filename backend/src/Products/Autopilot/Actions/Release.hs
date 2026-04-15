@@ -71,7 +71,7 @@ import qualified Data.Yaml as Yaml
 import Database.PostgreSQL.Simple (Only (..), SqlError (..), execute, withTransaction)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
 import Products.Autopilot.EventLog (logStatusUpdated)
-import Products.Autopilot.K8s.Deployment (buildPatchDeploymentEnvsCommand, deploymentExists)
+import Products.Autopilot.K8s.Deployment (buildPatchDeploymentEnvsCommand, deploymentExists, getRunningSchedulerVersion)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Notifications
@@ -114,9 +114,30 @@ applyMaybe (Just x) f acc = f x acc
 -- ============================================================================
 
 upsertProductH :: AuthedPerson -> UpsertProductReq -> Flow APIResponse
-upsertProductH _ap req = do
-    upsertProduct req.appGroup req.cluster req.namespace req.vsName req.productType req.productAcronym req.syncCluster req.needInfraApproval req.slackChannel
-    pure $ APIResponse "SUCCESS" "product_config upserted"
+upsertProductH _ap req =
+    case normalizeProductType req.productType of
+        Left err -> pure $ APIResponse "ERROR" err
+        Right canonical -> do
+            upsertProduct req.appGroup req.cluster req.namespace req.vsName canonical req.productAcronym req.syncCluster req.needInfraApproval req.slackChannel
+            pure $ APIResponse "SUCCESS" "product_config upserted"
+
+{- | Map any incoming productType string to the canonical 'ReleaseCategory'
+ADT name. Tolerates legacy aliases ('SERVICE', 'SCHEDULER') so old admin
+clients keep working, but rejects unknown values so we don't silently
+store garbage that breaks the workflow factory downstream. Empty input
+defaults to BackendService (preserves prior implicit behavior).
+-}
+normalizeProductType :: Text -> Either Text Text
+normalizeProductType raw = case T.toLower (T.strip raw) of
+    "" -> Right "BackendService"
+    "backendservice" -> Right "BackendService"
+    "service" -> Right "BackendService"
+    "backendscheduler" -> Right "BackendScheduler"
+    "scheduler" -> Right "BackendScheduler"
+    "backendconfig" -> Right "BackendConfig"
+    "config" -> Right "BackendConfig"
+    "vsedit" -> Right "VSEdit"
+    other -> Left ("Invalid productType: " <> other <> ". Expected one of BackendService, BackendScheduler, BackendConfig, VSEdit.")
 
 listProductsH :: AuthedPerson -> Flow [ProductResponse]
 listProductsH _ap = do
@@ -527,11 +548,19 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{
                 pure (if T.null oldVersion then "new" else oldVersion)
             else
                 if T.toLower oldVersion == "unknown" || T.null oldVersion
-                    then do
-                        discovered <- liftIO $ getPrimarySubsetFromVirtualService cfg (getProductNamespace pCfg) (getProductVsName pCfg) targetSvcHost
-                        pure $ case discovered of
-                            Right (Just subset) -> subset
-                            _ -> oldVersion
+                    then case trackerType of
+                        BackendScheduler -> do
+                            -- Schedulers have no VS — discover from deployment labels
+                            -- (pick the version with the most ready replicas).
+                            discovered <- liftIO $ getRunningSchedulerVersion cfg (getProductNamespace pCfg) targetSvcHost
+                            pure $ case discovered of
+                                Right (Just ver) -> ver
+                                _ -> oldVersion
+                        _ -> do
+                            discovered <- liftIO $ getPrimarySubsetFromVirtualService cfg (getProductNamespace pCfg) (getProductVsName pCfg) targetSvcHost
+                            pure $ case discovered of
+                                Right (Just subset) -> subset
+                                _ -> oldVersion
                     else pure oldVersion
     let derivedContext =
             K8sReleaseContext
@@ -792,6 +821,14 @@ revertReleaseH _ap rid req = do
                                 , revert = Just 1
                                 , prevAbHsDecision = Nothing
                                 , postMonitoringDecisionMap = Nothing
+                                , -- A revert restores the deployment to whatever it
+                                  -- already looks like in k8s. Carrying forward the
+                                  -- original release's dockerImage would re-apply
+                                  -- that image to the old deployment and produce a
+                                  -- misleading diff (showing a fake image change).
+                                  -- Clear it so the workflow leaves the existing
+                                  -- deployment's image alone.
+                                  K8s.dockerImage = Nothing
                                 }
                         revertedTargetState = K8sState $ emptyK8sState{context = revertedContext}
                         revertedTracker =
@@ -878,7 +915,12 @@ revertReleaseH _ap rid req = do
                         revertNs
                         revertTargetDep
                         (NT.oldVersion tracker)
-                        (fromMaybe "" (K8s.dockerImage oldCtx))
+                        -- Revert never patches the image; the workflow just clones
+                        -- the target deployment as-is. Passing the original
+                        -- release's image here would synthesise a fake image
+                        -- change in the preview diff (matches the runtime fix to
+                        -- 'revertedContext.dockerImage = Nothing').
+                        ""
                         Nothing -- revert tracker clears envOverrideData (see buildRevertedTracker)
                         "DEPLOYMENT_AFTER_PREVIEW"
                     notifyReleaseReverted revertedTracker
@@ -1021,12 +1063,16 @@ values, and end at 100. These are cheap shape checks that catch obviously
 broken payloads before they hit the DB or the workflow loop.
 
 2. __Mid-flight immutability__ (apply to @INPROGRESS@ / @PAUSED@ /
-@RESTARTING@ / @REVERTING@): while a release is live the ONLY fields a
-user may touch are @status@ (pause/resume/abort transitions),
+@RESTARTING@ / @REVERTING@): while a release is live the fields a user
+may touch are @status@ (pause/resume/abort transitions),
 @rolloutStrategy@ (limited to future-stage edits — stages that already
-appear in @rolloutHistory@ must be byte-identical), and @changeLog@
-(informational, safe to append during a rollout). Everything else is
-rejected because it would race the running workflow.
+appear in @rolloutHistory@ must be byte-identical), @mode@ (AUTO ↔
+MANUAL flip for pausing/resuming auto-advance), and @changeLog@
+(informational append). Everything else — including @envOverrideData@,
+@dockerImage@, approvals, priority, description — is rejected because
+it would race the running workflow, change release identity, or mutate
+pods that have already rolled out. Recommended UX: pause the release,
+edit mode or remaining stages, then resume.
 
 The separation matters: #1 runs even at @CREATED@ (catches bad initial
 strategies); #2 only runs once the rollout is live, so @CREATED@ releases
@@ -1050,7 +1096,7 @@ validateUpdateRequest tracker req = do
                             <> fieldName
                             <> "' while release is "
                             <> releaseStatusText oldStatus
-                            <> ". Pause it first."
+                            <> ". Abort and create a new release to change this field."
                 Nothing -> pure ()
             -- Status transition, if requested, must be pause/abort-only.
             case (req :: K8sUpdateTrackerReq).status of
@@ -1116,12 +1162,14 @@ validateStrategyShape steps = do
             else [] -- sentinel that never equals a valid list of length >= 1
 
 {- | Identify the first mid-flight-forbidden field set in the request, if any.
-During INPROGRESS/PAUSED/etc only status, rolloutStrategy, and changeLog
-are legal. Returns @Just fieldName@ for the first violation.
+During INPROGRESS/PAUSED/etc only @status@, @rolloutStrategy@, @mode@, and
+@changeLog@ are legal. Everything else (including @envOverrideData@ and
+@dockerImage@) is rejected — changing those mid-rollout would race the
+running pods or change release identity. Returns @Just fieldName@ for the
+first violation.
 -}
 forbiddenFieldDuringMidFlight :: K8sUpdateTrackerReq -> Maybe Text
 forbiddenFieldDuringMidFlight req
-    | isJust (req.mode) = Just "mode"
     | isJust (req.releaseManager) = Just "releaseManager"
     | isJust (req.priority) = Just "priority"
     | isJust (req.scheduleTime) = Just "scheduleTime"

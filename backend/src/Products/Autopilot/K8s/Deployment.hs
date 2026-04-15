@@ -15,6 +15,7 @@ module Products.Autopilot.K8s.Deployment (
     deploymentExists,
     getDeploymentEnvs,
     getRunningVersionFromVS,
+    getRunningSchedulerVersion,
     buildCloneDeploymentWithEnvsCommand,
     buildPatchDeploymentEnvsCommand,
     serviceExists,
@@ -154,6 +155,55 @@ getDeploymentReplicaStatus cfg ns depName = do
              in Right (pick 0, pick 1, pick 2)
   where
     parseInt s = case reads s of ((n, _) : _) -> n; _ -> 0
+
+{- | Discover the currently-running scheduler version by listing
+deployments labelled @app=<svcHost>@ and picking the one with the most
+ready replicas. Schedulers don't have a VirtualService so this is the
+analogue of 'getPrimarySubsetFromVirtualService'. Returns @Nothing@ when
+no labelled deployment has any ready replicas (e.g. fresh service or all
+versions scaled to zero); the caller decides the fallback.
+-}
+getRunningSchedulerVersion :: Config -> Text -> Text -> IO (Either Text (Maybe Text))
+getRunningSchedulerVersion cfg ns svcHost = do
+    res <-
+        runCmd
+            ( unwords
+                [ kubectlBin cfg
+                , "-n"
+                , shellQuote ns
+                , "get deployments"
+                , "-l"
+                , "app=" ++ T.unpack svcHost
+                , "-o"
+                , "json"
+                ]
+            )
+    case res of
+        Left (K8sError err) -> pure (Left err)
+        Right (K8sResult out) ->
+            case A.decodeStrict' (encodeUtf8 out) :: Maybe Value of
+                Nothing -> pure (Left "Failed to decode deployment list JSON")
+                Just v -> pure (Right (pickRunning v))
+  where
+    pickRunning (Object root) = case KM.lookup (K.fromText "items") root of
+        Just (Array items) ->
+            case [(ver, ready) | item <- foldr (:) [] items, Just (ver, ready) <- [extract item], ready > 0] of
+                [] -> Nothing
+                xs -> Just (fst (foldr1 maxByReady xs))
+        _ -> Nothing
+    pickRunning _ = Nothing
+    extract (Object item) = do
+        meta <- lookupObj "metadata" item
+        labels <- lookupObj "labels" meta
+        ver <- lookupTxt "version" labels
+        let ready = case lookupObj "status" item >>= KM.lookup (K.fromText "readyReplicas") of
+                Just (Number n) -> round n :: Int
+                _ -> 0
+        Just (ver, ready)
+    extract _ = Nothing
+    lookupObj key obj = case KM.lookup (K.fromText key) obj of Just (Object o) -> Just o; _ -> Nothing
+    lookupTxt key obj = case KM.lookup (K.fromText key) obj of Just (String t) -> Just t; _ -> Nothing
+    maxByReady a b = if snd a < snd b then b else a
 
 {- | Fetch envs from the first container of the currently running
 deployment (resolved from the VirtualService's active subset).

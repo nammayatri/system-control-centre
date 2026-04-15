@@ -28,3 +28,36 @@ export const AVAILABLE_ENVS: string[] = (
   import.meta.env.VITE_AVAILABLE_ENVS ||
   'UAT,PROD,INTEG_CLUSTER'
 ).split(',');
+
+// Mirror of backend's Products.Autopilot.Types.Workflow.ReleaseCategory ADT.
+// These strings are persisted in deployment_config.product_type and are the
+// canonical wire format for the trackerType field in /releases/create.
+export type ProductType = 'BackendService' | 'BackendScheduler' | 'BackendConfig' | 'VSEdit';
+
+export const PRODUCT_TYPES: { value: ProductType; label: string }[] = [
+  { value: 'BackendService',   label: 'Backend Service' },
+  { value: 'BackendScheduler', label: 'Backend Scheduler' },
+  { value: 'BackendConfig',    label: 'Backend Config' },
+];
+
+// Map any legacy / shorthand product_type value to its canonical ADT name.
+// Tolerates pre-rename data ('SERVICE', 'SCHEDULER') so old DB rows still
+// resolve correctly until they're migrated.
+export function normalizeProductType(raw: string | null | undefined): ProductType {
+  const v = String(raw || '').trim();
+  switch (v.toLowerCase()) {
+    case 'backendscheduler':
+    case 'scheduler':
+      return 'BackendScheduler';
+    case 'backendconfig':
+    case 'config':
+      return 'BackendConfig';
+    case 'vsedit':
+      return 'VSEdit';
+    case 'backendservice':
+    case 'service':
+    case '':
+    default:
+      return 'BackendService';
+  }
+}
