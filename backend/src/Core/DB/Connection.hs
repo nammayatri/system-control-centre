@@ -1,15 +1,18 @@
 module Core.DB.Connection (
     mkDBEnv,
     runDB,
+    runBeamLogged,
     withConn,
 )
 where
 
 import Core.Config (Config (..))
 import Core.Environment (DBEnv (..))
+import Core.Logging (logDebugG)
 import qualified Data.ByteString.Char8 as BS
 import Data.Pool (defaultPoolConfig, newPool, withResource)
-import Database.Beam.Postgres (Pg, runBeamPostgres)
+import Data.Text (Text)
+import Database.Beam.Postgres (Pg, runBeamPostgresDebug)
 import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 
 mkDBEnv :: Config -> IO DBEnv
@@ -18,7 +21,17 @@ mkDBEnv cfg = do
     pure (DBEnv pool)
 
 runDB :: DBEnv -> Pg a -> IO a
-runDB db action = withConn db (\conn -> runBeamPostgres conn action)
+runDB db action = withConn db (\conn -> runBeamLogged conn action)
+
+{- | Run a Beam Pg action on a raw Connection, routing the formatted SQL
+through 'logDebugG'. Emitted only at DEBUG log level (the callback is
+always invoked but 'logDebugG' drops it otherwise).
+-}
+runBeamLogged :: Connection -> Pg a -> IO a
+runBeamLogged conn = runBeamPostgresDebug logSql conn
+  where
+    logSql :: Text -> IO ()
+    logSql s = logDebugG ("[SQL] " <> s)
 
 withConn :: DBEnv -> (Connection -> IO a) -> IO a
 withConn DBEnv{..} = withResource dbPool

@@ -65,7 +65,7 @@ module Products.Autopilot.Queries.ReleaseTracker (
 )
 where
 
-import Core.DB.Connection (runDB, withConn)
+import Core.DB.Connection (runBeamLogged, runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
 import Data.Aeson (FromJSON, ToJSON, Value, fromJSON, toJSON)
 import qualified Data.Aeson as Aeson
@@ -187,7 +187,7 @@ conditionalUpdateTracker rt mts expectedStatus = withDb $ \db -> do
             if rowsDeleted == 0
                 then pure False
                 else do
-                    runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
+                    runBeamLogged conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
                     pure True
 
 {- | Atomic approve. Precondition is @is_approved=false AND status='CREATED'@,
@@ -218,7 +218,7 @@ conditionalUpdateApprove rt mts = withDb $ \db -> do
             if rowsDeleted == 0
                 then pure False
                 else do
-                    runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
+                    runBeamLogged conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
                     pure True
 
 {- | Like 'conditionalUpdateTracker' but accepts a raw 'ReleaseTrackerRow'.
@@ -246,7 +246,7 @@ conditionalUpdateTrackerRow row expectedStatus = withDb $ \db ->
             if rowsDeleted == 0
                 then pure False
                 else do
-                    runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
+                    runBeamLogged conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
                     pure True
 
 findReleaseTracker :: (MonadFlow m) => Text -> m (Maybe TrackerWithTarget)
@@ -788,7 +788,7 @@ insertReleaseTrackerRow row = withDb $ \db ->
                     _ -> rtSlackThreadTs row
                 mergedRow = row{rtSlackThreadTs = preservedTs}
             _ <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (rtId row))
-            runBeamPostgres conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
+            runBeamLogged conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
 
 -- | Non-terminal trackers with sync enabled + global_id; used by SyncWatcher.
 findActiveSyncTrackers :: (MonadFlow m) => m [ReleaseTracker]

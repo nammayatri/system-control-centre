@@ -6,7 +6,7 @@ module Products.Autopilot.Queries.ProductService where
 import qualified Control.Exception
 import Control.Monad (void)
 import qualified Control.Monad.Catch
-import Core.DB.Connection (runDB, withConn)
+import Core.DB.Connection (runBeamLogged, runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
 import Core.Logging (logInfoG)
 import Data.Maybe (fromMaybe)
@@ -14,7 +14,6 @@ import Data.Text (Text)
 import qualified Data.Text
 import qualified Data.Text.Read as TR
 import Database.Beam
-import Database.Beam.Postgres (runBeamPostgres)
 import Database.PostgreSQL.Simple (In (..), Only (..), execute, query, withTransaction)
 import Database.PostgreSQL.Simple.Types (PGArray (..))
 import GHC.Int (Int32)
@@ -178,10 +177,10 @@ upsertProduct ::
 upsertProduct productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval slackChannel' = withDb $ \db -> do
     withConn db $ \conn ->
         withTransaction conn $ do
-            runBeamPostgres conn $
+            runBeamLogged conn $
                 runDelete $
                     delete (deploymentConfig autopilotDb) (\p -> dcAppGroup p ==. val_ productName' &&. isNothing_ (dcService p))
-            runBeamPostgres conn $
+            runBeamLogged conn $
                 runInsert $
                     insert (deploymentConfig autopilotDb) $
                         insertExpressions
@@ -221,10 +220,10 @@ upsertService ::
 upsertService rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy = withDb $ \db -> do
     withConn db $ \conn ->
         withTransaction conn $ do
-            runBeamPostgres conn $
+            runBeamLogged conn $
                 runDelete $
                     delete (deploymentConfig autopilotDb) (\s -> dcAppGroup s ==. val_ product' &&. dcService s ==. val_ (Just serviceName'))
-            runBeamPostgres conn $
+            runBeamLogged conn $
                 runInsert $
                     insert (deploymentConfig autopilotDb) $
                         insertExpressions
