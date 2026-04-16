@@ -90,10 +90,19 @@ isViewPerm (AutopilotPerm p) = p `elem` [AP_RELEASE_VIEW, AP_PRODUCT_CONFIG_VIEW
 defaultPermissions :: SystemRole -> ProductSlug -> [Permission]
 defaultPermissions Admin p = allPermissions p
 defaultPermissions Viewer p = filter isViewPerm (allPermissions p)
-defaultPermissions Manager p = filter (not . isEditPerm) (allPermissions p)
+defaultPermissions Manager p = filter (not . isManagerRestrictedPerm) (allPermissions p)
 
-isEditPerm :: Permission -> Bool
-isEditPerm (AutopilotPerm p) = p `elem` [AP_PRODUCT_CONFIG_EDIT, AP_SERVICE_CONFIG_EDIT]
+{- | Permissions withheld from the Manager system role.
+Manager operates the release lifecycle end-to-end but cannot mutate
+deployment_config / server_config rows and cannot hard-delete releases.
+-}
+isManagerRestrictedPerm :: Permission -> Bool
+isManagerRestrictedPerm (AutopilotPerm p) =
+    p
+        `elem` [ AP_PRODUCT_CONFIG_EDIT
+               , AP_SERVICE_CONFIG_EDIT
+               , AP_RELEASE_DELETE
+               ]
 
 -- | Product typeclass - each product must implement this.
 class IsProduct (p :: ProductSlug) where

@@ -77,7 +77,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Lazy as LT
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Database.Beam
-import Database.Beam.Postgres
+import Database.Beam.Postgres ()
 import Database.PostgreSQL.Simple (Only (..), execute, execute_, query, withTransaction)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
 import qualified Debug.Trace as DT
