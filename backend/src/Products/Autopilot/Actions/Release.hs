@@ -1581,13 +1581,27 @@ immediateRevertH _ap rid req@ImmediateRevertReq{isRevertSync = mIsRevertSync} = 
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
-            let currentStatus = NT.status tracker
-            -- Julia parity: COMPLETED only. INPROGRESS is rejected because
-            -- in-place image-swapping a release that's still rolling out
-            -- would race the workflow's stage progression.
-            if currentStatus /= COMPLETED
-                then pure $ APIResponse "ERROR" ("Immediate revert requires status=COMPLETED (current: " <> T.pack (show currentStatus) <> ")")
-                else case mTargetState of
+            let hasEnvChange = maybe False (not . T.null) (NT.envOverrideData tracker)
+                currentStatus = NT.status tracker
+            -- Block immediate revert when the release carried env changes.
+            -- Immediate revert is an in-place image swap on the NEW deployment; it
+            -- cannot reliably reconstruct the OLD deployment's env vars once the
+            -- old deployment has been scaled down or deleted. Normal revert
+            -- (POST /releases/{id}/revert) creates a fresh revert release that
+            -- restores env + image together through the full workflow.
+            if hasEnvChange
+                then
+                    pure $
+                        APIResponse
+                            "ERROR"
+                            "Immediate revert is not allowed on releases with env changes. Use normal revert (POST /releases/{id}/revert) — it restores env and image together via the full revert workflow."
+                else
+                    -- Julia parity: COMPLETED only. INPROGRESS is rejected because
+                    -- in-place image-swapping a release that's still rolling out
+                    -- would race the workflow's stage progression.
+                    if currentStatus /= COMPLETED
+                        then pure $ APIResponse "ERROR" ("Immediate revert requires status=COMPLETED (current: " <> T.pack (show currentStatus) <> ")")
+                        else case mTargetState of
                     Just (K8sState k8s) -> do
                         let ctx = context k8s
                             K8s.K8sReleaseContext{K8s.namespace = ns} = ctx
