@@ -307,6 +307,11 @@ const CreateRelease: React.FC = () => {
     e.preventDefault();
     setError('');
 
+    if (/^[0-9a-fA-F]{7,40}$/.test(formData.change_log.trim())) {
+      toast.error('Change log cannot be a git commit ID. Please provide a descriptive changelog.');
+      return;
+    }
+
     if (!isUpdate && formData.new_version) {
       if (/[A-Z]/.test(formData.new_version)) {
         toast.error('New version cannot contain uppercase letters');
