@@ -24,6 +24,10 @@ import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getD
 import Products.Autopilot.K8s.Execute (isNotFoundError, runCmd)
 import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
+import Products.Autopilot.Mobile.Github (cancelRun)
+import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
+import Products.Autopilot.Mobile.Queries.Tracker (appCatalogForRow, gitOwner, gitRepo)
+import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..))
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks, releaseService)
 import Products.Autopilot.Queries.ReleaseTracker
@@ -98,73 +102,88 @@ rollbackInProgressOnStartup = do
         then logInfo "[STARTUP] No orphaned INPROGRESS releases found"
         else do
             logInfo $ "[STARTUP] Rolling back " <> T.pack (show (length orphaned)) <> " orphaned release(s)"
-            forM_ orphaned $ \(rt, mts) -> do
-                liftIO $ logInfoIO logEnv $ "[STARTUP] Rolling back: " <> releaseId rt <> " (status: " <> T.pack (show (NT.status rt)) <> ")"
-                -- Restore VS traffic to old version (best-effort). For REVERTING releases
-                -- this is also the correct recovery action: the revert was mid-flight, so
-                -- pointing traffic back to old version completes the revert's intent.
-                restoreVsTrafficOnFailure cfg rt mts
-                now <- liftIO getCurrentTime
-                -- Julia parity (api/rollback/rollback.jl:32-38): a REVERTING release
-                -- whose thread was lost on restart should be treated as a *completed*
-                -- revert (RECORDED in Julia), not a fresh abort. Our equivalent of the
-                -- "revert finished" terminal state is `REVERTED` (see
-                -- validateStatusTransition: REVERTING → REVERTED).
-                -- Defense-in-depth CAS: Layer 1 (synchronous startup in Main.hs)
-                -- guarantees no HTTP writes have landed yet, so in practice the
-                -- status we snapshotted at findInProgressReleaseTrackers still
-                -- matches. The CAS below guards against the RUNNER-mode path
-                -- where this sweep runs alongside the server, and against any
-                -- future regression that re-parallelises startup with HTTP.
-                let oldStatus = NT.status rt
-                    oldStatusText = releaseStatusToText oldStatus
-                case oldStatus of
-                    REVERTING -> do
-                        let reverted = rt{status = REVERTED, endTime = Just now}
-                        ok <- conditionalUpdateTracker reverted mts oldStatusText
-                        if not ok
-                            then
-                                liftIO $
-                                    logWarningIO logEnv $
-                                        "[STARTUP] Skipping revert completion for "
-                                            <> releaseId rt
-                                            <> " — status changed under us during restoreVsTrafficOnFailure"
-                            else do
-                                logStatusUpdated reverted "Revert completed on startup recovery"
-                                insertReleaseEvent
-                                    (releaseId rt)
-                                    "BUSINESS"
-                                    "STARTUP_REVERT_COMPLETED"
-                                    (toJSON ("Revert completed on startup recovery — VS traffic restored to old version" :: T.Text))
-                                releaseService (NT.appGroup reverted) (NT.service reverted)
-                    _ -> do
-                        let aborted = rt{status = ABORTED, endTime = Just now}
-                        -- Julia parity: persist cleanup marker before flipping
-                        -- status so the poll worker has something to sweep even
-                        -- if restoreVsTrafficOnFailure's scale-down failed above.
-                        scheduleNewDeploymentCleanup aborted mts
-                        ok <- conditionalUpdateTracker aborted mts oldStatusText
-                        if not ok
-                            then
-                                liftIO $
-                                    logWarningIO logEnv $
-                                        "[STARTUP] Skipping rollback for "
-                                            <> releaseId rt
-                                            <> " — status changed under us during restoreVsTrafficOnFailure"
-                            else do
-                                -- Production parity (events.jl:251-286 rollbackEvent!):
-                                -- BUSINESS / TRAFFIC_UPDATED with a message field on rollback.
-                                let previousRollout = case rolloutHistory rt of
-                                        [] -> 0
-                                        xs -> historyRolloutPercent (last xs)
-                                logTrafficUpdatedWithMessage aborted previousRollout "Rolling back traffic due to server restart"
-                                insertReleaseEvent
-                                    (releaseId rt)
-                                    "BUSINESS"
-                                    "STARTUP_ROLLBACK"
-                                    (toJSON ("ABORTED due to server restart — VS traffic restored to old version" :: T.Text))
-                                notifyReleaseAborted aborted
-                                releaseService (NT.appGroup aborted) (NT.service aborted)
+            forM_ orphaned $ \(rt, mts) -> case category rt of
+                MobileBuild ->
+                    -- Mobile rows in INPROGRESS represent live GitHub Actions
+                    -- runs that continue independently of the SCC process. The
+                    -- mobile workflow is fully resumable: each stage's
+                    -- stageGuard skips work that's already persisted, so the
+                    -- next runner tick picks the row up and continues polling
+                    -- the GH run from where it left off. Rolling them back
+                    -- here would mark them ABORTED while the underlying GH
+                    -- workflow is still building — exactly the wrong outcome.
+                    liftIO $
+                        logInfoIO logEnv $
+                            "[STARTUP] Skipping mobile release "
+                                <> releaseId rt
+                                <> " — GitHub Actions run continues independently; runner will resume polling"
+                _ -> do
+                    liftIO $ logInfoIO logEnv $ "[STARTUP] Rolling back: " <> releaseId rt <> " (status: " <> T.pack (show (NT.status rt)) <> ")"
+                    -- Restore VS traffic to old version (best-effort). For REVERTING releases
+                    -- this is also the correct recovery action: the revert was mid-flight, so
+                    -- pointing traffic back to old version completes the revert's intent.
+                    restoreVsTrafficOnFailure cfg rt mts
+                    now <- liftIO getCurrentTime
+                    -- Julia parity (api/rollback/rollback.jl:32-38): a REVERTING release
+                    -- whose thread was lost on restart should be treated as a *completed*
+                    -- revert (RECORDED in Julia), not a fresh abort. Our equivalent of the
+                    -- "revert finished" terminal state is `REVERTED` (see
+                    -- validateStatusTransition: REVERTING → REVERTED).
+                    -- Defense-in-depth CAS: Layer 1 (synchronous startup in Main.hs)
+                    -- guarantees no HTTP writes have landed yet, so in practice the
+                    -- status we snapshotted at findInProgressReleaseTrackers still
+                    -- matches. The CAS below guards against the RUNNER-mode path
+                    -- where this sweep runs alongside the server, and against any
+                    -- future regression that re-parallelises startup with HTTP.
+                    let oldStatus = NT.status rt
+                        oldStatusText = releaseStatusToText oldStatus
+                    case oldStatus of
+                        REVERTING -> do
+                            let reverted = rt{status = REVERTED, endTime = Just now}
+                            ok <- conditionalUpdateTracker reverted mts oldStatusText
+                            if not ok
+                                then
+                                    liftIO $
+                                        logWarningIO logEnv $
+                                            "[STARTUP] Skipping revert completion for "
+                                                <> releaseId rt
+                                                <> " — status changed under us during restoreVsTrafficOnFailure"
+                                else do
+                                    logStatusUpdated reverted "Revert completed on startup recovery"
+                                    insertReleaseEvent
+                                        (releaseId rt)
+                                        "BUSINESS"
+                                        "STARTUP_REVERT_COMPLETED"
+                                        (toJSON ("Revert completed on startup recovery — VS traffic restored to old version" :: T.Text))
+                                    releaseService (NT.appGroup reverted) (NT.service reverted)
+                        _ -> do
+                            let aborted = rt{status = ABORTED, endTime = Just now}
+                            -- Julia parity: persist cleanup marker before flipping
+                            -- status so the poll worker has something to sweep even
+                            -- if restoreVsTrafficOnFailure's scale-down failed above.
+                            scheduleNewDeploymentCleanup aborted mts
+                            ok <- conditionalUpdateTracker aborted mts oldStatusText
+                            if not ok
+                                then
+                                    liftIO $
+                                        logWarningIO logEnv $
+                                            "[STARTUP] Skipping rollback for "
+                                                <> releaseId rt
+                                                <> " — status changed under us during restoreVsTrafficOnFailure"
+                                else do
+                                    -- Production parity (events.jl:251-286 rollbackEvent!):
+                                    -- BUSINESS / TRAFFIC_UPDATED with a message field on rollback.
+                                    let previousRollout = case rolloutHistory rt of
+                                            [] -> 0
+                                            xs -> historyRolloutPercent (last xs)
+                                    logTrafficUpdatedWithMessage aborted previousRollout "Rolling back traffic due to server restart"
+                                    insertReleaseEvent
+                                        (releaseId rt)
+                                        "BUSINESS"
+                                        "STARTUP_ROLLBACK"
+                                        (toJSON ("ABORTED due to server restart — VS traffic restored to old version" :: T.Text))
+                                    notifyReleaseAborted aborted
+                                    releaseService (NT.appGroup aborted) (NT.service aborted)
             logInfo "[STARTUP] Rollback complete"
 
 -- ============================================================================
@@ -269,6 +288,7 @@ isEligibleToRun products multiRelease ongoing (rt, mts) = case category rt of
     BackendScheduler -> k8sEligible
     BackendConfig -> pure True
     VSEdit -> pure True
+    MobileBuild -> pure True
   where
     k8sEligible = do
         let k8sCluster = case mts of
@@ -349,97 +369,151 @@ trigger _db (rtStale, mtsStale) = do
             notifyReleaseAborted discarded
         Nothing -> do
             now <- liftIO getCurrentTime
-            -- Atomically claim: CREATED → INPROGRESS
-            let rtNew = rt{status = INPROGRESS, startTime = Just now}
-                row = toRow now now rtNew mts
-            claimed <- conditionalUpdateTrackerRow row "CREATED"
-            if not claimed
-                then logInfo $ "[RUNNER] Release " <> releaseId rt <> " already claimed, skipping"
+            -- Claim semantics:
+            --
+            -- \* Backend categories run their entire workflow in one runner
+            --   tick (no StageWaiting), so we CAS CREATED → INPROGRESS to
+            --   prevent two concurrent runner ticks from picking the same
+            --   row.
+            --
+            -- \* MobileBuild needs to be re-driven on every tick (poll-based
+            --   stages return StageWaiting). On the FIRST tick the row is
+            --   CREATED+approved → CAS to INPROGRESS as usual. On
+            --   SUBSEQUENT ticks, the row is already INPROGRESS+MobileBuild
+            --   (re-included by findRunnableReleaseTrackers) — skip the CAS
+            --   and re-execute the workflow directly. The workflow's
+            --   per-stage stageGuard skips already-completed stages and
+            --   re-runs the waiting one.
+            let alreadyInProgressMobile =
+                    NT.category rt == MobileBuild && NT.status rt == INPROGRESS
+            if alreadyInProgressMobile
+                then do
+                    logInfo $ "[RUNNER] Re-driving in-flight mobile workflow: " <> releaseId rt
+                    runReleaseWorkflow cfg rt mts
                 else do
-                    insertReleaseEvent (releaseId rt) "BUSINESS" "RUNNER_PICKED" (toJSON rt)
-                    -- Catch IO exceptions thrown via `liftIO $ throwIO $
-                    -- WorkflowError ...` from inside the workflow. The
-                    -- ExceptT inside `executeReleaseWorkflow` only catches
-                    -- typed `WorkFlowError` *returned* via Left — IO
-                    -- exceptions escape it entirely. Without this catch the
-                    -- exception bubbles up to forkFlow's `try @SomeException`
-                    -- safety net which silently swallows it, leaving the
-                    -- tracker dangling at INPROGRESS forever. Translating to
-                    -- Left funnels into the existing abort+cleanup branch.
-                    rawResult <- MC.try @_ @E.SomeException (dispatchWorkflow rtNew mts)
-                    let result = case rawResult of
-                            Right r -> r
-                            Left ex -> Left (DomainError (show ex))
-                    case result of
-                        Left err -> do
-                            cfg' <- getConfig
-                            -- Re-read tracker — user may have set ABORTING while workflow ran
-                            freshM <- findReleaseTracker (releaseId rt)
-                            let currentStatus' = case freshM of
-                                    Just (freshRT, _) -> status freshRT
-                                    Nothing -> status rtNew
-                                isUserAbort = currentStatus' == ABORTING || currentStatus' == USER_ABORTED
-                            if isUserAbort
-                                then do
-                                    -- Defer to handleAbortingRelease (Step 3 of poll loop)
-                                    logInfo $ "[RUNNER] Workflow exited due to user abort — deferring: " <> releaseId rt
-                                    insertReleaseEvent (releaseId rt) "BUSINESS" "WORKFLOW_ABORT_EXIT" (toJSON (show err))
-                                else do
-                                    endNow <- liftIO getCurrentTime
-                                    let abortedTracker = rtNew{status = ABORTED, releaseWFStatus = ROLLING_BACK, endTime = Just endNow}
-                                    -- Round 8 audit C1: CAS against INPROGRESS so a user
-                                    -- pause/abort/discard that landed mid-workflow isn't
-                                    -- silently overwritten by the workflow's failure path.
-                                    casOk <- conditionalUpdateTracker abortedTracker mts (releaseStatusToText INPROGRESS)
-                                    if not casOk
-                                        then logWarning $ "[RUNNER] Workflow failed but tracker " <> releaseId rt <> " was concurrently modified — leaving as-is, the user state wins"
-                                        else do
-                                            insertReleaseEvent (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
-                                            -- Julia parity (release/watcher.jl:342-521 per-type
-                                            -- failure handlers): VS traffic restore is meaningful
-                                            -- only for categories that actually flip a VS during
-                                            -- rollout. Schedulers, CronJobs, Jobs, and BackendConfig
-                                            -- have no VirtualService to restore — calling kubectl
-                                            -- on a non-existent VS would just emit a confusing
-                                            -- "VS not found" error and waste a kubectl roundtrip.
-                                            -- Dispatch by category to match Julia's per-type
-                                            -- failure handlers. The leaked-deployment cleanup
-                                            -- (scheduleNewDeploymentCleanup) and Slack abort
-                                            -- notification still run for every category.
-                                            case category rt of
-                                                BackendService -> restoreVsTrafficOnFailure cfg' rt mts
-                                                _ ->
-                                                    logInfo $
-                                                        "[RUNNER] Skipping VS restore for non-BackendService category "
-                                                            <> T.pack (show (category rt))
-                                                            <> " (no VS to restore)"
-                                            -- Julia parity: mark for later poll-driven
-                                            -- cleanup in case restoreVsTrafficOnFailure's
-                                            -- kubectl scale-down itself failed.
-                                            scheduleNewDeploymentCleanup abortedTracker mts
-                                            notifyReleaseAborted abortedTracker
-                                            releaseService (NT.appGroup abortedTracker) (NT.service abortedTracker)
-                        Right _ -> do
-                            -- The workflow persists state via persistWorkflowState in each cprV2
-                            -- stage, but the Recorded monad's bind may short-circuit the final
-                            -- stage's persist. Re-read from DB to verify, and force COMPLETED if
-                            -- the workflow reported success but the status wasn't persisted.
-                            freshM <- findReleaseTracker (releaseId rt)
-                            case freshM of
-                                Just (freshRT, freshTS)
-                                    | NT.status freshRT /= COMPLETED -> do
-                                        now' <- liftIO getCurrentTime
-                                        let completed = freshRT{NT.status = COMPLETED, NT.endTime = Just now'}
-                                        -- Round 8 audit H1: CAS against the snapshot we just
-                                        -- read. If a parallel immediateRevert / abort flipped
-                                        -- the row between findReleaseTracker and now, leave
-                                        -- their status alone instead of clobbering it with
-                                        -- COMPLETED.
-                                        _ <- conditionalUpdateTracker completed freshTS (releaseStatusToText (NT.status freshRT))
-                                        pure ()
-                                _ -> pure ()
-                            insertReleaseEvent (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
-                            releaseService (NT.appGroup rt) (NT.service rt)
+                    let rtNew = rt{status = INPROGRESS, startTime = Just now}
+                        row = toRow now now rtNew mts
+                    claimed <- conditionalUpdateTrackerRow row "CREATED"
+                    if not claimed
+                        then logInfo $ "[RUNNER] Release " <> releaseId rt <> " already claimed, skipping"
+                        else do
+                            insertReleaseEvent (releaseId rt) "BUSINESS" "RUNNER_PICKED" (toJSON rt)
+                            runReleaseWorkflow cfg rtNew mts
+
+{- | Run the release workflow against a tracker that is already (or has
+just been) marked INPROGRESS. Handles the three result branches:
+
+  * @Left RetriableError@ — a stage returned 'StageWaiting' (mobile
+    poll-style stages: ResolveRunId / PollMatrixJobs / ConfirmTag, or
+    stage 2 advisory-lock contention). The runner does NOT touch the
+    row: status stays INPROGRESS, no abort, no restore. The next runner
+    tick re-enters via the INPROGRESS+MobileBuild branch of
+    'findRunnableReleaseTrackers' and per-stage 'stageGuard' resumes
+    where the workflow paused.
+
+  * @Left other@ — terminal failure: abort + cleanup as before.
+
+  * @Right _@ — completion: persist COMPLETED unless a concurrent edit
+    moved the row.
+
+Factored out of 'trigger' so both the first-tick (CAS) and re-tick
+(no-CAS) paths share one execution body.
+-}
+runReleaseWorkflow :: Config -> ReleaseTracker -> Maybe TargetState -> Flow ()
+runReleaseWorkflow _cfg rtNew mts = do
+    let rt = rtNew
+    -- Catch IO exceptions thrown via `liftIO $ throwIO $
+    -- WorkflowError ...` from inside the workflow. The
+    -- ExceptT inside `executeReleaseWorkflow` only catches
+    -- typed `WorkFlowError` *returned* via Left — IO
+    -- exceptions escape it entirely. Without this catch the
+    -- exception bubbles up to forkFlow's `try @SomeException`
+    -- safety net which silently swallows it, leaving the
+    -- tracker dangling at INPROGRESS forever. Translating to
+    -- Left funnels into the existing abort+cleanup branch.
+    rawResult <- MC.try @_ @E.SomeException (dispatchWorkflow rtNew mts)
+    let result = case rawResult of
+            Right r -> r
+            Left ex -> Left (DomainError (show ex))
+    case result of
+        Left (RetriableError msg) ->
+            -- StageWaiting — re-tick on next poll. Don't write status,
+            -- don't restore VS traffic, don't notify abort. Logged so
+            -- operators can see the workflow is alive in the audit trail.
+            logInfo $
+                "[RUNNER] Workflow waiting (will retry on next tick): "
+                    <> releaseId rt
+                    <> " — "
+                    <> T.pack msg
+        Left err -> do
+            cfg' <- getConfig
+            -- Re-read tracker — user may have set ABORTING while workflow ran
+            freshM <- findReleaseTracker (releaseId rt)
+            let currentStatus' = case freshM of
+                    Just (freshRT, _) -> status freshRT
+                    Nothing -> status rtNew
+                isUserAbort = currentStatus' == ABORTING || currentStatus' == USER_ABORTED
+            if isUserAbort
+                then do
+                    -- Defer to handleAbortingRelease (Step 3 of poll loop)
+                    logInfo $ "[RUNNER] Workflow exited due to user abort — deferring: " <> releaseId rt
+                    insertReleaseEvent (releaseId rt) "BUSINESS" "WORKFLOW_ABORT_EXIT" (toJSON (show err))
+                else do
+                    endNow <- liftIO getCurrentTime
+                    let abortedTracker = rtNew{status = ABORTED, releaseWFStatus = ROLLING_BACK, endTime = Just endNow}
+                    -- Round 8 audit C1: CAS against INPROGRESS so a user
+                    -- pause/abort/discard that landed mid-workflow isn't
+                    -- silently overwritten by the workflow's failure path.
+                    casOk <- conditionalUpdateTracker abortedTracker mts (releaseStatusToText INPROGRESS)
+                    if not casOk
+                        then logWarning $ "[RUNNER] Workflow failed but tracker " <> releaseId rt <> " was concurrently modified — leaving as-is, the user state wins"
+                        else do
+                            insertReleaseEvent (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
+                            -- Julia parity (release/watcher.jl:342-521 per-type
+                            -- failure handlers): VS traffic restore is meaningful
+                            -- only for categories that actually flip a VS during
+                            -- rollout. Schedulers, CronJobs, Jobs, and BackendConfig
+                            -- have no VirtualService to restore — calling kubectl
+                            -- on a non-existent VS would just emit a confusing
+                            -- "VS not found" error and waste a kubectl roundtrip.
+                            -- Dispatch by category to match Julia's per-type
+                            -- failure handlers. The leaked-deployment cleanup
+                            -- (scheduleNewDeploymentCleanup) and Slack abort
+                            -- notification still run for every category.
+                            case category rt of
+                                BackendService -> restoreVsTrafficOnFailure cfg' rt mts
+                                _ ->
+                                    logInfo $
+                                        "[RUNNER] Skipping VS restore for non-BackendService category "
+                                            <> T.pack (show (category rt))
+                                            <> " (no VS to restore)"
+                            -- Julia parity: mark for later poll-driven
+                            -- cleanup in case restoreVsTrafficOnFailure's
+                            -- kubectl scale-down itself failed.
+                            scheduleNewDeploymentCleanup abortedTracker mts
+                            notifyReleaseAborted abortedTracker
+                            releaseService (NT.appGroup abortedTracker) (NT.service abortedTracker)
+        Right _ -> do
+            -- The workflow persists state via persistWorkflowState in each cprV2
+            -- stage, but the Recorded monad's bind may short-circuit the final
+            -- stage's persist. Re-read from DB to verify, and force COMPLETED if
+            -- the workflow reported success but the status wasn't persisted.
+            freshM <- findReleaseTracker (releaseId rt)
+            case freshM of
+                Just (freshRT, freshTS)
+                    | NT.status freshRT /= COMPLETED -> do
+                        now' <- liftIO getCurrentTime
+                        let completed = freshRT{NT.status = COMPLETED, NT.endTime = Just now'}
+                        -- Round 8 audit H1: CAS against the snapshot we just
+                        -- read. If a parallel immediateRevert / abort flipped
+                        -- the row between findReleaseTracker and now, leave
+                        -- their status alone instead of clobbering it with
+                        -- COMPLETED.
+                        _ <- conditionalUpdateTracker completed freshTS (releaseStatusToText (NT.status freshRT))
+                        pure ()
+                _ -> pure ()
+            insertReleaseEvent (releaseId rt) "BUSINESS" "COMPLETED" (toJSON ("success" :: String))
+            releaseService (NT.appGroup rt) (NT.service rt)
 
 dispatchWorkflow :: ReleaseTracker -> Maybe TargetState -> Flow (Either WorkFlowError ReleaseState)
 dispatchWorkflow rt mts = do
@@ -642,10 +716,19 @@ waitForFirstPodReady cfg ns depName = go (15 :: Int)
 handleAbortingRelease :: Config -> ReleaseTracker -> Maybe TargetState -> Flow ()
 handleAbortingRelease cfg rt mts = do
     logInfo $ "[handleAbortingRelease] Processing abort for " <> releaseId rt
-    restoreVsTrafficOnFailure cfg rt mts
-    -- Julia parity: persist cleanup marker so a crash/kubectl-fail between
-    -- now and the next poll doesn't leak the new deployment. Idempotent.
-    scheduleNewDeploymentCleanup rt mts
+    -- MobileBuild: best-effort cancellation of the in-flight GitHub
+    -- Actions run before flipping the row to USER_ABORTED. Without this
+    -- the GHA workflow keeps building (and may publish to Play Store)
+    -- even after the user clicked Abort in the SCC UI. Failures are
+    -- swallowed — the row's terminal state still flips so the operator
+    -- sees the abort took effect.
+    case category rt of
+        MobileBuild -> cancelMobileGhRun rt mts
+        _ -> do
+            restoreVsTrafficOnFailure cfg rt mts
+            -- Julia parity: persist cleanup marker so a crash/kubectl-fail between
+            -- now and the next poll doesn't leak the new deployment. Idempotent.
+            scheduleNewDeploymentCleanup rt mts
     now <- liftIO getCurrentTime
     let aborted = rt{status = USER_ABORTED, endTime = Just now}
     -- Round 8 audit C2: CAS against ABORTING. If a parallel runner instance
@@ -667,6 +750,73 @@ handleAbortingRelease cfg rt mts = do
             insertReleaseEvent (releaseId rt) "BUSINESS" "ABORT_HANDLED" (toJSON ("User abort processed" :: String))
             notifyReleaseAborted aborted
             releaseService (NT.appGroup aborted) (NT.service aborted)
+
+{- | Best-effort cancel of a mobile release's in-flight GitHub Actions
+run. Called from 'handleAbortingRelease' when the user moves a
+@MobileBuild@ row to @ABORTING@.
+
+No-ops cleanly when there is no @external_run_id@ set yet (the dispatch
+hadn't been made or the run id hadn't been resolved). Logs every
+failure but never throws — the row's terminal state still flips to
+@USER_ABORTED@ regardless. The GH cancel API is idempotent so a second
+call after a real cancellation is harmless.
+-}
+cancelMobileGhRun :: ReleaseTracker -> Maybe TargetState -> Flow ()
+cancelMobileGhRun rt mts = do
+    case mts of
+        Just (MobileBuildState mb) ->
+            case mbExternalRunId mb of
+                Just runId | not (T.null runId) -> do
+                    logInfo $
+                        "[handleAbortingRelease] Cancelling GH run "
+                            <> runId
+                            <> " for mobile release "
+                            <> releaseId rt
+                    -- Look up owner/repo via AppCatalog. Wrap each remote
+                    -- call in a try @SomeException so a failure here
+                    -- (missing creds, GH API hiccup, missing app catalog
+                    -- row) never blocks the row's transition to
+                    -- USER_ABORTED.
+                    attempt <-
+                        MC.try @_ @E.SomeException $ do
+                            ac <- appCatalogForRow rt
+                            creds <- loadGhCreds
+                            cancelRun creds (gitOwner ac) (gitRepo ac) runId
+                    case attempt of
+                        Right (Right ()) -> do
+                            logInfo $ "[handleAbortingRelease] GH run cancelled: " <> runId
+                            insertReleaseEvent
+                                (releaseId rt)
+                                "BUSINESS"
+                                "GH_RUN_CANCELLED"
+                                (object ["run_id" .= runId])
+                        Right (Left ghErr) -> do
+                            logWarning $
+                                "[handleAbortingRelease] cancelRun returned error for "
+                                    <> runId
+                                    <> ": "
+                                    <> ghErr
+                            insertReleaseEvent
+                                (releaseId rt)
+                                "BUSINESS"
+                                "GH_RUN_CANCEL_FAILED"
+                                (object ["run_id" .= runId, "error" .= ghErr])
+                        Left ex ->
+                            logWarning $
+                                "[handleAbortingRelease] cancelRun threw for "
+                                    <> runId
+                                    <> ": "
+                                    <> T.pack (show ex)
+                _ ->
+                    logInfo $
+                        "[handleAbortingRelease] Mobile release "
+                            <> releaseId rt
+                            <> " has no external_run_id; nothing to cancel on GitHub"
+        _ ->
+            logInfo $
+                "[handleAbortingRelease] release "
+                    <> releaseId rt
+                    <> " is MobileBuild but has no MobileBuildState target; skipping GH cancel"
 
 -- ============================================================================
 -- Scale-Down of Old Deployments After Delay

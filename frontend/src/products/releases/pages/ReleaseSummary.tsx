@@ -595,6 +595,171 @@ const RolloutStrategyTab: React.FC<{
   );
 };
 
+/**
+ * Mobile-only summary panel rendered when the release category is
+ * 'MobileBuild'. Mobile releases don't have K8s pods/diff/strategy, so
+ * the regular summary cards (PodHealth, Rollout etc.) are skipped above
+ * and this section takes their place.
+ *
+ * Source of fields:
+ *   - The release's `release_context` and `metadata` (loose JSON blobs)
+ *     may contain dispatch/run identifiers populated by the mobile
+ *     workflow as it progresses.
+ *   - `tracker_type` ('MobileBuild') gates rendering.
+ *   - The fine-grained `MobileBuildWFStatus` event timeline is derived
+ *     from the BUSINESS-category events in the release event log
+ *     (GH_DISPATCHED / RUN_ID_RESOLVED / MATRIX_JOB_UPDATED / TAG_PUSHED
+ *     etc.) — we filter them and render in chronological order.
+ *
+ * Each block hides itself if its source field is missing — so a freshly
+ * created mobile release that hasn't been dispatched yet shows only the
+ * basic header + the (empty) timeline.
+ */
+const MobileReleaseDetailSection: React.FC<{
+  release: any;
+  events: RolloutEvent[];
+}> = ({ release, events }) => {
+  // The mobile workflow stores fine-grained state in the `target_state`
+  // column on the backend, but the public ReleaseTracker JSON doesn't
+  // expose that field. Both `release_context` and `metadata` may carry
+  // workflow-populated breadcrumbs (run_id, tag_pushed, matrix job
+  // status, dispatched workflow URL); read defensively from either.
+  const ctx = release.release_context || {};
+  const meta = release.metadata || {};
+
+  const ghRunUrl: string | undefined =
+    meta.github_run_url ||
+    meta.gh_run_url ||
+    meta.expected_run_url ||
+    ctx.github_run_url ||
+    ctx.expected_run_url;
+  const matrixJobStatus: string | undefined =
+    meta.matrix_job_status || ctx.matrix_job_status || ctx.mb_matrix_job_status;
+  const tagPushed: string | undefined =
+    meta.tag_pushed || ctx.tag_pushed || ctx.mbc_tag_pushed;
+  // The MobileBuildContext stores GitHub repo on the AppCatalog row, not
+  // on the release. We surface it from the metadata fallback only. If
+  // neither field is present, the tag link is rendered as plain text.
+  const githubRepo: string | undefined = meta.github_repo || ctx.github_repo;
+
+  // Workflow-stage event timeline. We pick up any BUSINESS-category
+  // event the mobile workflow is known to log, in the order they were
+  // emitted. New labels added on the backend appear here automatically
+  // because the filter is permissive (label-prefix match).
+  const MOBILE_LABELS = new Set([
+    'GH_DISPATCHED',
+    'RUN_ID_RESOLVED',
+    'MATRIX_JOB_UPDATED',
+    'STORE_SUBMITTED',
+    'TAG_PUSHED',
+    'BUILD_STARTED',
+    'BUILD_COMPLETED',
+    'MOBILE_RELEASE_CREATED',
+  ]);
+  const stageEvents = events
+    .filter(
+      e =>
+        MOBILE_LABELS.has(e.label) ||
+        e.label?.startsWith('MB_') ||
+        e.label?.startsWith('MOBILE_'),
+    )
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+  // Map a matrix job status to a Badge variant. Treat anything we don't
+  // recognize as `default` so a new GH status string doesn't render
+  // as an error.
+  const matrixVariant = (s?: string): 'success' | 'warning' | 'danger' | 'default' | 'muted' => {
+    if (!s) return 'muted';
+    const lc = s.toLowerCase();
+    if (lc === 'success' || lc === 'completed' || lc === 'passed') return 'success';
+    if (lc === 'in_progress' || lc === 'running' || lc === 'queued' || lc === 'pending') return 'warning';
+    if (lc === 'failure' || lc === 'failed' || lc === 'cancelled' || lc === 'timed_out') return 'danger';
+    return 'default';
+  };
+
+  return (
+    <div className="border border-zinc-200 rounded-lg p-4 mb-6">
+      <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-3">Mobile Build</h3>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-4 sm:gap-x-6 gap-y-3 mb-4">
+        <div>
+          <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">App</div>
+          <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm min-h-[38px] break-all">{release.appGroup || '-'}</div>
+        </div>
+        <div>
+          <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">Surface</div>
+          <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm min-h-[38px] break-all">{release.service || '-'}</div>
+        </div>
+        <div>
+          <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">Platform</div>
+          <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm min-h-[38px] break-all">{release.env || '-'}</div>
+        </div>
+        <div>
+          <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">Version</div>
+          <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm font-mono text-xs min-h-[38px] break-all">{release.new_version || '-'}</div>
+        </div>
+        <div>
+          <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">Matrix Job Status</div>
+          <div className="min-h-[38px] flex items-center">
+            <Badge variant={matrixVariant(matrixJobStatus)} size="sm">
+              {matrixJobStatus || 'pending'}
+            </Badge>
+          </div>
+        </div>
+        {ghRunUrl && (
+          <div>
+            <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">GitHub Workflow Run</div>
+            <a
+              href={ghRunUrl}
+              target="_blank"
+              rel="noopener"
+              className="inline-flex items-center gap-1.5 text-sm text-blue-700 hover:underline border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 min-h-[38px] break-all"
+            >
+              <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{ghRunUrl}</span>
+            </a>
+          </div>
+        )}
+        {tagPushed && (
+          <div>
+            <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">Pushed Tag</div>
+            {githubRepo ? (
+              <a
+                href={`https://github.com/${githubRepo}/releases/tag/${encodeURIComponent(tagPushed)}`}
+                target="_blank"
+                rel="noopener"
+                className="inline-flex items-center gap-1.5 text-sm text-blue-700 hover:underline border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 font-mono text-xs min-h-[38px] break-all"
+              >
+                <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                {tagPushed}
+              </a>
+            ) : (
+              <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm font-mono text-xs min-h-[38px] break-all">{tagPushed}</div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4">
+        <h4 className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">Workflow Stages</h4>
+        {stageEvents.length === 0 ? (
+          <p className="text-xs text-zinc-400">No workflow stage events recorded yet.</p>
+        ) : (
+          <ol className="space-y-1.5">
+            {stageEvents.map((evt, idx) => (
+              <li key={idx} className="flex items-start gap-3 text-xs">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-violet-500 mt-1.5 shrink-0" />
+                <span className="font-mono text-zinc-500 whitespace-nowrap">{formatDate(evt.timestamp)}</span>
+                <span className="font-mono text-zinc-800 font-medium">{evt.label}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const ReleaseSummary: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -702,7 +867,11 @@ const ReleaseSummary: React.FC = () => {
   const tabs = [
     { key: 'summary' as const, label: 'Summary' },
     { key: 'events' as const, label: 'Events' },
-    { key: 'env-diff' as const, label: 'ENV Diff' },
+    // ENV diff is K8s-specific (compares deployment YAML before/after).
+    // Mobile builds don't deploy YAML, so hide the tab for them.
+    ...(release.tracker_type === 'MobileBuild'
+      ? []
+      : [{ key: 'env-diff' as const, label: 'ENV Diff' }]),
     { key: 'json' as const, label: 'JSON Data' },
   ];
 
@@ -880,25 +1049,46 @@ const ReleaseSummary: React.FC = () => {
               ))}
             </div>
 
-            <PodHealthSection releaseId={id!} release={release} />
+            {/* Mobile releases skip the K8s-specific summary blocks. They have
+                no pods, no rollout strategy, no env diff — instead we show a
+                workflow-stage timeline + GH run link below. The Release Details
+                block at the bottom still renders for both categories. */}
+            {category === 'MobileBuild' ? (
+              <MobileReleaseDetailSection release={release} events={events} />
+            ) : (
+              <>
+                <PodHealthSection releaseId={id!} release={release} />
 
-            <RolloutHistoryInline history={release.rollout_history} />
+                <RolloutHistoryInline history={release.rollout_history} />
 
-            <RolloutStrategyTab
-              releaseId={id!}
-              strategy={release.rollout_strategy}
-              historyLength={release.rollout_history?.length || 0}
-              status={s}
-            />
+                <RolloutStrategyTab
+                  releaseId={id!}
+                  strategy={release.rollout_strategy}
+                  historyLength={release.rollout_history?.length || 0}
+                  status={s}
+                />
+              </>
+            )}
 
             <div className="border border-zinc-200 rounded-lg p-4 mb-6">
               <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider mb-4">Release Details</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 sm:gap-x-6 gap-y-3">
-                <InfoField label="App Group" value={release.appGroup} />
-                <InfoField label="Service" value={release.service} />
-                <InfoField label="Old Version" value={release.old_version} mono />
-                <InfoField label="New Version" value={release.new_version} mono />
-                <InfoField label="Docker Image" value={dockerImage} mono />
+                {category === 'MobileBuild' ? (
+                  <>
+                    <InfoField label="App" value={release.appGroup} />
+                    <InfoField label="Surface" value={release.service} />
+                    <InfoField label="Platform" value={release.env} />
+                    <InfoField label="Version" value={release.new_version} mono />
+                  </>
+                ) : (
+                  <>
+                    <InfoField label="App Group" value={release.appGroup} />
+                    <InfoField label="Service" value={release.service} />
+                    <InfoField label="Old Version" value={release.old_version} mono />
+                    <InfoField label="New Version" value={release.new_version} mono />
+                    <InfoField label="Docker Image" value={dockerImage} mono />
+                  </>
+                )}
                 <InfoField label="Release Manager" value={release.release_manager || '-'} />
                 <InfoField label="Infra Approved" value={release.is_infra_approved ? 'Yes' : 'No'} />
                 {release.description && <InfoField label="Description" value={release.description} />}

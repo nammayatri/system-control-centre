@@ -1,6 +1,7 @@
 {- | 'TargetState' is a discriminated union over deployment platforms
 ('K8sState' for K8s deployments, 'ConfigState' for ConfigMap/Secret
-applies). Re-exports the target-specific submodules.
+applies, 'MobileBuildState' for React Native mobile builds).
+Re-exports the target-specific submodules.
 -}
 module Products.Autopilot.Types.Target (
     -- * Top-level Target State
@@ -17,15 +18,18 @@ where
 import Data.Aeson (FromJSON, ToJSON)
 import GHC.Generics (Generic)
 
+import Products.Autopilot.Mobile.Types (MobileBuildTargetState)
 import Products.Autopilot.Types.Target.Config
 import Products.Autopilot.Types.Target.Kubernetes
 
 {- | Category → variant:
-BackendService/Scheduler/VSEdit → 'K8sState'; BackendConfig → 'ConfigState'.
+BackendService/Scheduler/VSEdit → 'K8sState'; BackendConfig → 'ConfigState';
+MobileBuild → 'MobileBuildState'.
 -}
 data TargetState
     = K8sState K8sDeploymentState
     | ConfigState ConfigDeploymentState
+    | MobileBuildState MobileBuildTargetState
     deriving (Eq, Show, Generic)
 
 instance ToJSON TargetState

@@ -23,6 +23,7 @@ harness in CONTEXT.md.
 -}
 module Main where
 
+import qualified Data.Aeson as Aeson
 import Data.Char (isAlphaNum)
 import Data.List (sort)
 import Data.Maybe (isJust, isNothing)
@@ -30,8 +31,17 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Products.Autopilot.Config (autopilotConfigs)
 import Products.Autopilot.K8s.Execute (shellQuote)
+import Products.Autopilot.Mobile.Github (
+    Job (..),
+    JobsResp (..),
+    WorkflowRun (..),
+    WorkflowRunsResp (..),
+ )
+import Products.Autopilot.Mobile.Types
+import Products.Autopilot.Mobile.Versioning (TrackInfo (..), computeNextVersion)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
+import Products.Autopilot.Types.Workflow (ReleaseCategory (..), getDefaultDeploymentTarget)
 import Products.ConfigCatalog (allConfigEntries, findConfigEntry)
 import Products.Types
 import Shared.Config.Registry (validateConfigValue)
@@ -89,6 +99,13 @@ main = do
     section "[13] Revert Lifecycle Status Transitions" testRevertTransitions
     section "[14] Restart Lifecycle Status Transitions" testRestartTransitions
     section "[15] DISCARDING (async) State Machine" testDiscardingTransitions
+    section "[16] ReleaseCategory MobileBuild" testReleaseCategoryMobileBuild
+    section "[17] Mobile Permission Membership + Round-Trip" testMobilePermissionsExist
+    section "[18] MobileBuildWFStatus State Machine" testMobileBuildWFStatusTransitions
+    section "[19] MobileBuildContext JSON Round-Trip" testMobileBuildContextJsonRoundTrip
+    section "[20] Mobile Version Bump (Play Console algorithm)" testVersionBumpLogic
+    section "[21] GitHub Workflow Runs JSON Parser" testGithubRunsParser
+    section "[22] GitHub Jobs JSON Parser" testGithubJobsParser
 
     putStrLn ""
     putStrLn "==========================================="
@@ -376,9 +393,15 @@ testPermissions = do
         AutopilotPerm AP_PRODUCT_CONFIG_EDIT `notElem` managerPerms
     assertBool "Manager DOES NOT have SERVICE_CONFIG_EDIT" $
         AutopilotPerm AP_SERVICE_CONFIG_EDIT `notElem` managerPerms
+    assertBool "Manager DOES NOT have RELEASE_DELETE" $
+        AutopilotPerm AP_RELEASE_DELETE `notElem` managerPerms
+    assertBool "Manager DOES NOT have MOBILE_APP_MANAGE" $
+        AutopilotPerm AP_MOBILE_APP_MANAGE `notElem` managerPerms
+    assertBool "Manager has MOBILE_DISPATCH" $
+        AutopilotPerm AP_MOBILE_DISPATCH `elem` managerPerms
     assertEqual
-        "Manager has all perms minus 2 edit perms"
-        (length allPerms - 2)
+        "Manager has all perms minus the 4 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE, MOBILE_APP_MANAGE)"
+        (length allPerms - 4)
         (length managerPerms)
 
     -- permissionToText round-trip for a few constructors
@@ -793,3 +816,171 @@ testDiscardingTransitions = do
     assertBool "DISCARDED -X-> anything" $
         not $
             any (validateStatusTransition DISCARDED) [INPROGRESS, COMPLETED, REVERTING]
+
+-- ============================================================================
+-- [16] ReleaseCategory MobileBuild
+-- ============================================================================
+
+testReleaseCategoryMobileBuild :: IO ()
+testReleaseCategoryMobileBuild = do
+    putStrLn "ReleaseCategory: MobileBuild constructor"
+    let allCategories = [minBound .. maxBound :: ReleaseCategory]
+    assertBool
+        "MobileBuild is in [minBound..maxBound]"
+        (MobileBuild `elem` allCategories)
+    assertEqual
+        "default target for MobileBuild"
+        "github-actions"
+        (getDefaultDeploymentTarget MobileBuild)
+
+-- ============================================================================
+-- [17] Mobile Permission Membership + Round-Trip
+-- ============================================================================
+
+testMobilePermissionsExist :: IO ()
+testMobilePermissionsExist = do
+    putStrLn "Mobile permissions: enum membership + text round-trip"
+    let perms = [minBound .. maxBound :: AutopilotPermission]
+    assertBool "AP_MOBILE_DISPATCH in enum" (AP_MOBILE_DISPATCH `elem` perms)
+    assertBool "AP_MOBILE_APP_MANAGE in enum" (AP_MOBILE_APP_MANAGE `elem` perms)
+    assertEqual
+        "AP_MOBILE_DISPATCH textual"
+        "MOBILE_DISPATCH"
+        (autopilotPermissionToText AP_MOBILE_DISPATCH)
+    assertEqual
+        "AP_MOBILE_APP_MANAGE textual"
+        "MOBILE_APP_MANAGE"
+        (autopilotPermissionToText AP_MOBILE_APP_MANAGE)
+    assertEqual
+        "round-trip MOBILE_DISPATCH"
+        (Just AP_MOBILE_DISPATCH)
+        (textToAutopilotPermission "MOBILE_DISPATCH")
+    assertEqual
+        "round-trip MOBILE_APP_MANAGE"
+        (Just AP_MOBILE_APP_MANAGE)
+        (textToAutopilotPermission "MOBILE_APP_MANAGE")
+
+-- ============================================================================
+-- [18] MobileBuildWFStatus State Machine
+-- ============================================================================
+
+testMobileBuildWFStatusTransitions :: IO ()
+testMobileBuildWFStatusTransitions = do
+    putStrLn "MobileBuildWFStatus: transition validity"
+    -- Forward path
+    assertBool
+        "MBInit -> MBVersionResolved"
+        (validMBTransition MBInit MBVersionResolved)
+    assertBool
+        "MBVersionResolved -> MBDispatched"
+        (validMBTransition MBVersionResolved MBDispatched)
+    assertBool
+        "MBDispatched -> MBRunIdResolved"
+        (validMBTransition MBDispatched MBRunIdResolved)
+    assertBool
+        "MBRunIdResolved -> MBBuilding"
+        (validMBTransition MBRunIdResolved MBBuilding)
+    assertBool
+        "MBBuilding -> MBSubmittedToStore"
+        (validMBTransition MBBuilding MBSubmittedToStore)
+    assertBool
+        "MBSubmittedToStore -> MBTagPushed"
+        (validMBTransition MBSubmittedToStore MBTagPushed)
+    assertBool
+        "MBTagPushed -> MBCompleted"
+        (validMBTransition MBTagPushed MBCompleted)
+    -- Failure can come from any non-terminal state
+    assertBool
+        "MBBuilding -> MBFailed allowed"
+        (validMBTransition MBBuilding (MBFailed "x"))
+    assertBool
+        "MBCompleted -> MBFailed NOT allowed (terminal)"
+        (not (validMBTransition MBCompleted (MBFailed "x")))
+    -- Skipping not allowed
+    assertBool
+        "MBInit -> MBBuilding NOT allowed"
+        (not (validMBTransition MBInit MBBuilding))
+
+-- ============================================================================
+-- [19] MobileBuildContext JSON Round-Trip
+-- ============================================================================
+
+testMobileBuildContextJsonRoundTrip :: IO ()
+testMobileBuildContextJsonRoundTrip = do
+    putStrLn "MobileBuildContext: JSON round-trip"
+    let ctx =
+            MobileBuildContext
+                { mbcVersionCode = Just 12345
+                , mbcChangeLog = "hello"
+                , mbcDestination = MBGooglePlay
+                , mbcReleaseGroupId = "rg_abc"
+                , mbcMatrixJobName = "NammaYatri-Release"
+                , mbcOtaNamespace = Just "nammayatriv2"
+                , mbcTagPushed = Nothing
+                }
+    let encoded = Aeson.encode ctx
+    let decoded = Aeson.decode encoded :: Maybe MobileBuildContext
+    assertEqual "round-trip equals original" (Just ctx) decoded
+
+-- ============================================================================
+-- [20] Mobile Version Bump (mirrors fastlane-android.yaml lines 124-189)
+-- ============================================================================
+
+testVersionBumpLogic :: IO ()
+testVersionBumpLogic = do
+    putStrLn "Mobile version bump: workflow's algorithm"
+    assertEqual
+        "internal == production bumps patch"
+        ("2.5.1", 12346)
+        (computeNextVersion (TrackInfo "2.5.0" 12345) (TrackInfo "2.5.0" 12340))
+    assertEqual
+        "internal > production uses internal name, code = internal+1"
+        ("2.6.0", 12346)
+        (computeNextVersion (TrackInfo "2.6.0" 12345) (TrackInfo "2.5.0" 12340))
+    assertEqual
+        "empty/no-prior baseline: 0.0.0 -> 0.0.1, code 1"
+        ("0.0.1", 1)
+        (computeNextVersion (TrackInfo "0.0.0" 0) (TrackInfo "0.0.0" 0))
+    -- Edge case: production has shipped but internal is at baseline.
+    -- The workflow's algorithm uses internal's name verbatim, which can
+    -- regress. SCC mirrors workflow behavior; if production-regression
+    -- protection is wanted, add it as a follow-up improvement.
+    assertEqual
+        "production shipped but internal at baseline -> uses internal name (potential regression)"
+        ("0.0.0", 1)
+        (computeNextVersion (TrackInfo "0.0.0" 0) (TrackInfo "2.5.0" 123))
+
+-- ============================================================================
+-- [21] GitHub Workflow Runs JSON Parser
+-- ============================================================================
+
+testGithubRunsParser :: IO ()
+testGithubRunsParser = do
+    putStrLn "GitHub runs JSON parser"
+    let body =
+            "{\"workflow_runs\":[{\"id\":42,\"event\":\"workflow_dispatch\",\"status\":\"queued\",\"conclusion\":null,\"created_at\":\"2026-05-11T10:00:00Z\",\"head_branch\":\"master\",\"html_url\":\"https://github.com/foo/bar/actions/runs/42\",\"name\":\"x\",\"display_title\":\"y\"}]}"
+    case Aeson.eitherDecode body :: Either String WorkflowRunsResp of
+        Right resp -> do
+            assertEqual "parsed run id" 42 (wrId (head (wrrRuns resp)))
+            assertEqual "parsed run event" "workflow_dispatch" (wrEvent (head (wrrRuns resp)))
+            assertEqual "parsed run status" "queued" (wrStatus (head (wrrRuns resp)))
+            assertEqual "null conclusion -> Nothing" Nothing (wrConclusion (head (wrrRuns resp)))
+            assertEqual "parsed display_title" (Just "y") (wrDisplayTitle (head (wrrRuns resp)))
+        Left e -> fail ("parse failed: " <> e)
+
+-- ============================================================================
+-- [22] GitHub Jobs JSON Parser
+-- ============================================================================
+
+testGithubJobsParser :: IO ()
+testGithubJobsParser = do
+    putStrLn "GitHub jobs JSON parser"
+    let body =
+            "{\"jobs\":[{\"id\":1,\"name\":\"NammaYatri-Release\",\"status\":\"in_progress\",\"conclusion\":null,\"started_at\":\"2026-05-11T10:01:00Z\",\"completed_at\":null,\"html_url\":\"https://github.com/foo/bar/actions/runs/42/job/1\"}]}"
+    case Aeson.eitherDecode body :: Either String JobsResp of
+        Right resp -> do
+            assertEqual "parsed job name" "NammaYatri-Release" (jName (head (jrJobs resp)))
+            assertEqual "parsed job status" "in_progress" (jStatus (head (jrJobs resp)))
+            assertEqual "null conclusion -> Nothing" Nothing (jConclusion (head (jrJobs resp)))
+            assertEqual "null completed_at -> Nothing" Nothing (jCompletedAt (head (jrJobs resp)))
+        Left e -> fail ("parse failed: " <> e)

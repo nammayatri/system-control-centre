@@ -19,6 +19,7 @@ import qualified Data.Text as T
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
 import Products.Autopilot.Types.Workflow (ReleaseCategory (..))
 
+import Products.Autopilot.Mobile.Workflow (mobileBuildSpec)
 import Products.Autopilot.Workflow.BackendConfigWorkflow (backendConfigSpec)
 import Products.Autopilot.Workflow.BackendSchedulerWorkflow (backendSchedulerSpec)
 import Products.Autopilot.Workflow.BackendServiceWorkflow (backendServiceSpec)
@@ -53,6 +54,7 @@ getWorkflowForCategory = \case
     BackendScheduler -> runWorkflowSpec backendSchedulerSpec
     BackendConfig -> runWorkflowSpec backendConfigSpec
     VSEdit -> notImplementedWorkflow "VSEdit"
+    MobileBuild -> runWorkflowSpec mobileBuildSpec
 
 notImplementedWorkflow :: Text -> WorkflowExecutor
 notImplementedWorkflow categoryName = do

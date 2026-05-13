@@ -37,6 +37,7 @@ export interface Matches {
 }
 
 export interface ReleaseContext {
+    // ── K8s / backend fields ────────────────────────────────────────
     cluster: string;
     namespace: string;
     deployment_name: string;
@@ -55,6 +56,15 @@ export interface ReleaseContext {
     sync_cluster_rollout_strategy: string;
     sync_x_forwarded_email: string;
     sync_x_pomerium_jwt: string;
+    // ── Mobile-build fields (populated only for MobileBuild releases) ─
+    kind?: string;
+    release_group_id?: string;
+    version_code?: number;
+    tag_pushed?: string | null;
+    matrix_job_name?: string;
+    destination?: string;
+    ota_namespace?: string | null;
+    change_log?: string;
 }
 
 // ── All statuses (UPPERCASE — canonical) ─────
@@ -323,6 +333,15 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         sync_cluster_rollout_strategy: r.releaseContext?.syncClusterRolloutStrategy || '',
         sync_x_forwarded_email: r.releaseContext?.syncXForwardedEmail || '',
         sync_x_pomerium_jwt: r.releaseContext?.syncXPomeriumJwt || '',
+        // Mobile fields pass through unchanged from the raw API (snake_case JSON keys).
+        kind:             (r.releaseContext as any)?.kind,
+        release_group_id: (r.releaseContext as any)?.release_group_id,
+        version_code:     (r.releaseContext as any)?.version_code,
+        tag_pushed:       (r.releaseContext as any)?.tag_pushed,
+        matrix_job_name:  (r.releaseContext as any)?.matrix_job_name,
+        destination:      (r.releaseContext as any)?.destination,
+        ota_namespace:    (r.releaseContext as any)?.ota_namespace,
+        change_log:       (r.releaseContext as any)?.change_log,
     },
 
     rollout_strategy: (r.rolloutStrategy || []).map(s => ({
@@ -378,8 +397,22 @@ export function statusColor(status: ReleaseStatus | string): string {
 
 // ── API Calls ──────────────────────────────────────────────────────
 
-export async function fetchAPReleases(from: string, to: string): Promise<APRelease[]> {
-    const { data } = await apiClient.get('/releases', { params: { from, to } });
+/**
+ * Category filter accepted by the list endpoint. The backend understands
+ * the high-level grouping ("backend"/"mobile") and uses it to expand into
+ * the matching ReleaseCategory variants. Pass `undefined`/omit for no
+ * filter.
+ */
+export type ReleaseCategoryFilter = 'backend' | 'mobile' | undefined;
+
+export async function fetchAPReleases(
+    from: string,
+    to: string,
+    category?: ReleaseCategoryFilter,
+): Promise<APRelease[]> {
+    const params: Record<string, string> = { from, to };
+    if (category) params.category = category;
+    const { data } = await apiClient.get('/releases', { params });
     const rows = Array.isArray(data) ? data : [];
     return rows.map(normalizeRelease);
 }
@@ -836,3 +869,56 @@ export async function fetchConfigMapData(product: string, name: string): Promise
     const { data } = await apiClient.get('/configmap', { params: { PRODUCT: product, NAME: name } });
     return data.configMap || '';
 }
+
+// ── Mobile Releases API ───────────────────────────────────────────
+// Parallel namespace for the mobile-release flow. Kept separate from
+// the legacy free-function exports above so call sites read clearly
+// (`mobileApi.listApps()` vs `fetchAPReleases(...)`). Each method
+// unwraps the AxiosResponse and returns the data payload directly,
+// matching how the existing helpers above are written.
+
+import type {
+    AppCatalogEntry,
+    CreateMobileReleasesReq,
+    CreateMobileReleasesResp,
+    DispatchMobileReleasesResp,
+    VersionPreviewItem,
+    LiveReleasesResp,
+} from './types';
+
+export const mobileApi = {
+    listApps: async (): Promise<AppCatalogEntry[]> => {
+        const { data } = await apiClient.get('/mobile/apps');
+        return Array.isArray(data) ? data : [];
+    },
+
+    createApp: async (body: Partial<AppCatalogEntry>): Promise<AppCatalogEntry> => {
+        const { data } = await apiClient.post('/mobile/apps', body);
+        return data;
+    },
+
+    patchApp: async (id: number, body: Partial<AppCatalogEntry>): Promise<AppCatalogEntry> => {
+        const { data } = await apiClient.patch(`/mobile/apps/${id}`, body);
+        return data;
+    },
+
+    previewVersions: async (appCatalogIds: number[]): Promise<{ previews: VersionPreviewItem[] }> => {
+        const { data } = await apiClient.post('/mobile/versions/preview', { appCatalogIds });
+        return data;
+    },
+
+    createReleases: async (req: CreateMobileReleasesReq): Promise<CreateMobileReleasesResp> => {
+        const { data } = await apiClient.post('/releases/mobile/create', req);
+        return data;
+    },
+
+    dispatchReleases: async (releaseIds: string[]): Promise<DispatchMobileReleasesResp> => {
+        const { data } = await apiClient.post('/releases/mobile/dispatch', { releaseIds });
+        return data;
+    },
+
+    liveReleases: async (category: 'all' | 'backend' | 'mobile' = 'all'): Promise<LiveReleasesResp> => {
+        const { data } = await apiClient.get(`/releases/live?category=${category}`);
+        return data;
+    },
+};
