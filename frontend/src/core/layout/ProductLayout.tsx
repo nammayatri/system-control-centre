@@ -19,13 +19,70 @@ const iconMap: Record<string, React.ReactNode> = {
   List: <List className="w-3.5 h-3.5" />,
 };
 
-function findCurrentProduct(pathname: string): ProductDefinition | undefined {
-  return PRODUCT_REGISTRY.find(p =>
-    p.routes.some(r => {
+/**
+ * Resolve the current product entry from the URL.
+ *
+ * Two registry entries may share the same `slug` (Backend Releases and
+ * Mobile Releases both back the `autopilot` slug). The naive `.find()`
+ * picks whichever was registered first, which routes mobile-only paths
+ * like `/releases/mobile/new` or `/releases/live` into the backend tile
+ * — wrong sidebar, wrong product name. Two-step resolution:
+ *
+ *   1. If `?category=` is present, prefer the registry entry whose
+ *      `defaultCategoryFilter` matches it. This handles the
+ *      `/releases?category=mobile` (and `=backend`) case the list page
+ *      uses to switch tiles without changing pathname.
+ *   2. Otherwise rank candidates whose routes match the pathname, and
+ *      pick the one with the longest matching route base. A mobile
+ *      route `/releases/mobile/new` (base `/releases/mobile/new`) wins
+ *      over the backend route `/releases/:id` (base `/releases`) for
+ *      `/releases/mobile/new` even though both technically match.
+ */
+function findCurrentProduct(
+  pathname: string,
+  search: string,
+): ProductDefinition | undefined {
+  const params = new URLSearchParams(search);
+  const category = params.get('category');
+
+  const matchesPath = (p: ProductDefinition): { matched: boolean; bestLen: number } => {
+    let bestLen = -1;
+    for (const r of p.routes) {
       const routeBase = r.path.split('/:')[0];
-      return pathname === routeBase || pathname.startsWith(routeBase + '/');
-    })
-  );
+      if (pathname === routeBase || pathname.startsWith(routeBase + '/')) {
+        if (routeBase.length > bestLen) bestLen = routeBase.length;
+      }
+    }
+    return { matched: bestLen >= 0, bestLen };
+  };
+
+  // 1. ?category= takes precedence when present. We accept either a route
+  //    match OR a basePath match — the mobile entry's "All Mobile Releases"
+  //    nav target is `/releases?category=mobile`, which lands on the
+  //    backend tile's `/releases` route. The category param is the
+  //    deliberate signal that the user wants the mobile tile.
+  if (category) {
+    const byCategory = PRODUCT_REGISTRY.find(
+      p =>
+        p.defaultCategoryFilter === category &&
+        (matchesPath(p).matched ||
+          pathname === p.basePath ||
+          pathname.startsWith(p.basePath + '/')),
+    );
+    if (byCategory) return byCategory;
+  }
+
+  // 2. Longest-prefix wins. Stable order preserves first-registered as tie-breaker.
+  let best: ProductDefinition | undefined;
+  let bestLen = -1;
+  for (const p of PRODUCT_REGISTRY) {
+    const { matched, bestLen: len } = matchesPath(p);
+    if (matched && len > bestLen) {
+      best = p;
+      bestLen = len;
+    }
+  }
+  return best;
 }
 
 interface SidebarBodyProps {
@@ -63,7 +120,7 @@ const ProductLayout: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const currentProduct = findCurrentProduct(location.pathname);
+  const currentProduct = findCurrentProduct(location.pathname, location.search);
   const isActive = (path: string) => location.pathname === path || location.pathname.startsWith(path + '/');
 
   // Close mobile drawer on route change

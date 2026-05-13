@@ -25,7 +25,9 @@ data ReleaseCategory
       BackendConfig
     | -- | VirtualService edits (lock/unlock/apply/revert).
       VSEdit
-    deriving (Eq, Show, Read, Generic, Ord)
+    | -- | Mobile app builds triggered via GitHub Actions.
+      MobileBuild
+    deriving (Eq, Show, Read, Generic, Ord, Enum, Bounded)
 
 instance ToJSON ReleaseCategory
 
@@ -36,6 +38,7 @@ getDefaultDeploymentTarget BackendService = "kubernetes"
 getDefaultDeploymentTarget BackendScheduler = "kubernetes"
 getDefaultDeploymentTarget BackendConfig = "kubernetes-config"
 getDefaultDeploymentTarget VSEdit = "kubernetes"
+getDefaultDeploymentTarget MobileBuild = "github-actions"
 
 {- | Generic release workflow stages. Category-specific sub-stages live
 in @targetState@.

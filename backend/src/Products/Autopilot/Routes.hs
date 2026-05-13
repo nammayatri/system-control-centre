@@ -15,6 +15,7 @@ import Products.Autopilot.Actions.ConfigMap as ConfigMap
 import Products.Autopilot.Actions.K8sResource as K8sResource
 import Products.Autopilot.Actions.Release as Release
 import Products.Autopilot.Actions.VSEdit as VSEdit
+import Products.Autopilot.Mobile.Routes (MobileAPI, mobileServer)
 import Products.Autopilot.Types (ReleaseTracker)
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Permission (AutopilotPermission (..))
@@ -30,7 +31,7 @@ type CoreAPI =
         :<|> "products" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> ReqBody '[JSON] UpsertProductReq :> Post '[JSON] APIResponse
         :<|> "products" :> Protected 'AP_PRODUCT_CONFIG_VIEW :> Capture "product" Text :> "services" :> Get '[JSON] [ServiceResponse]
         :<|> "services" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> ReqBody '[JSON] UpsertServiceReq :> Post '[JSON] APIResponse
-        :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> QueryParam "from" Text :> QueryParam "to" Text :> Get '[JSON] [ReleaseTracker]
+        :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> QueryParam "from" Text :> QueryParam "to" Text :> QueryParam "category" Text :> Get '[JSON] [ReleaseTracker]
         :<|> "releases" :> Protected 'AP_RELEASE_CREATE :> "create" :> Header "X-Forwarded-Email" Text :> Header "x-pomerium-jwt-assertion" Text :> ReqBody '[JSON] K8sCreateReleaseReq :> Post '[JSON] APIResponse
         :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> Get '[JSON] (Maybe ReleaseTracker)
         :<|> "releases" :> Protected 'AP_RELEASE_APPROVE :> Capture "releaseId" Text :> "approve" :> ReqBody '[JSON] ApproveReleaseReq :> Post '[JSON] (Maybe ReleaseTracker)
@@ -89,6 +90,8 @@ type CoreAPI =
         -- Decision-engine post-monitoring webhook. UNAUTHENTICATED — trusts
         -- the run_id (releaseId-post) as the auth token; caller is the AB engine.
         :<|> "decision" :> "webhook" :> Capture "runId" Text :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
+        -- Mobile releases: app catalog CRUD (suffix mount per unified-product principle)
+        :<|> MobileAPI
 
 coreServer :: ServerT CoreAPI Flow
 coreServer =
@@ -159,3 +162,5 @@ coreServer =
         :<|> ConfigMap.fetchSecondaryConfigMapH
         -- Post-monitoring webhook receiver
         :<|> Release.decisionWebhookH
+        -- Mobile releases (suffix mount of MobileAPI)
+        :<|> mobileServer

@@ -39,6 +39,8 @@ data AutopilotPermission
     | AP_CONFIG_DISCARD
     | AP_CONFIG_REVERT
     | AP_FORCE_UNLOCK
+    | AP_MOBILE_DISPATCH
+    | AP_MOBILE_APP_MANAGE
     deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 autopilotPermissionToText :: AutopilotPermission -> Text
@@ -61,6 +63,8 @@ autopilotPermissionToText AP_CONFIG_EDIT = "CONFIG_EDIT"
 autopilotPermissionToText AP_CONFIG_DISCARD = "CONFIG_DISCARD"
 autopilotPermissionToText AP_CONFIG_REVERT = "CONFIG_REVERT"
 autopilotPermissionToText AP_FORCE_UNLOCK = "FORCE_UNLOCK"
+autopilotPermissionToText AP_MOBILE_DISPATCH = "MOBILE_DISPATCH"
+autopilotPermissionToText AP_MOBILE_APP_MANAGE = "MOBILE_APP_MANAGE"
 
 textToAutopilotPermission :: Text -> Maybe AutopilotPermission
 textToAutopilotPermission "RELEASE_VIEW" = Just AP_RELEASE_VIEW
@@ -82,6 +86,8 @@ textToAutopilotPermission "CONFIG_EDIT" = Just AP_CONFIG_EDIT
 textToAutopilotPermission "CONFIG_DISCARD" = Just AP_CONFIG_DISCARD
 textToAutopilotPermission "CONFIG_REVERT" = Just AP_CONFIG_REVERT
 textToAutopilotPermission "FORCE_UNLOCK" = Just AP_FORCE_UNLOCK
+textToAutopilotPermission "MOBILE_DISPATCH" = Just AP_MOBILE_DISPATCH
+textToAutopilotPermission "MOBILE_APP_MANAGE" = Just AP_MOBILE_APP_MANAGE
 textToAutopilotPermission _ = Nothing
 
 -- | Human-readable description (exhaustive, -Wall catches missing variants).
@@ -105,6 +111,8 @@ permissionDescription AP_CONFIG_EDIT = "Edit ConfigMap and VS edit releases"
 permissionDescription AP_CONFIG_DISCARD = "Discard ConfigMap and VS edit releases"
 permissionDescription AP_CONFIG_REVERT = "Revert ConfigMap releases"
 permissionDescription AP_FORCE_UNLOCK = "Force-release a VS edit lock held by another user (operator recovery; superadmin only)"
+permissionDescription AP_MOBILE_DISPATCH = "Dispatch mobile release to GitHub Actions"
+permissionDescription AP_MOBILE_APP_MANAGE = "Manage mobile app catalog (admin)"
 
 -- 'permissionName' MUST match 'autopilotPermissionToText' for the same
 -- constructor; the RBAC check compares this string against the DB.
@@ -184,3 +192,11 @@ instance KnownPermission 'AP_CONFIG_REVERT where
 instance KnownPermission 'AP_FORCE_UNLOCK where
     permissionProduct _ = "autopilot"
     permissionName _ = "FORCE_UNLOCK"
+
+instance KnownPermission 'AP_MOBILE_DISPATCH where
+    permissionProduct _ = "autopilot"
+    permissionName _ = "MOBILE_DISPATCH"
+
+instance KnownPermission 'AP_MOBILE_APP_MANAGE where
+    permissionProduct _ = "autopilot"
+    permissionName _ = "MOBILE_APP_MANAGE"

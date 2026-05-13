@@ -102,6 +102,7 @@ isManagerRestrictedPerm (AutopilotPerm p) =
         `elem` [ AP_PRODUCT_CONFIG_EDIT
                , AP_SERVICE_CONFIG_EDIT
                , AP_RELEASE_DELETE
+               , AP_MOBILE_APP_MANAGE
                ]
 
 -- | Product typeclass - each product must implement this.
