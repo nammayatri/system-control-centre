@@ -15,6 +15,7 @@ import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import Database.Beam
 import GHC.Int (Int32)
+import Products.Autopilot.Mobile.Types.Storage (AppCatalogT, appCatalog)
 
 -- | Product-level row when @dcService@ IS NULL; service-level otherwise.
 data DeploymentConfigT f = DeploymentConfigT
@@ -81,6 +82,8 @@ data ReleaseTrackerT f = ReleaseTrackerT
     , rtSyncEnabled :: Columnar f (Maybe Text)
     , rtEnvOverrideData :: Columnar f (Maybe Text)
     , rtSlackThreadTs :: Columnar f (Maybe Text)
+    , rtDispatchId :: Columnar f (Maybe Text)
+    , rtExternalRunId :: Columnar f (Maybe Text)
     , rtCreatedAt :: Columnar f UTCTime
     , rtUpdatedAt :: Columnar f UTCTime
     }
@@ -116,6 +119,7 @@ data AutopilotDb f = AutopilotDb
     { deploymentConfig :: f (TableEntity DeploymentConfigT)
     , releaseTrackers :: f (TableEntity ReleaseTrackerT)
     , releaseEvents :: f (TableEntity ReleaseEventT)
+    , appCatalogs :: f (TableEntity AppCatalogT)
     }
     deriving (Generic, Database be)
 
@@ -181,6 +185,8 @@ autopilotDb =
                             , rtSyncEnabled = fieldNamed "sync_enabled"
                             , rtEnvOverrideData = fieldNamed "env_override_data"
                             , rtSlackThreadTs = fieldNamed "slack_thread_ts"
+                            , rtDispatchId = fieldNamed "dispatch_id"
+                            , rtExternalRunId = fieldNamed "external_run_id"
                             , rtCreatedAt = fieldNamed "date_created"
                             , rtUpdatedAt = fieldNamed "last_updated"
                             }
@@ -195,4 +201,5 @@ autopilotDb =
                             , rePayload = fieldNamed "re_payload"
                             , reCreatedAt = fieldNamed "re_created_at"
                             }
+            , appCatalogs = appCatalog
             }

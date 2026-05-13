@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X, SlidersHorizontal } from 'lucide-react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X, SlidersHorizontal, Server, Smartphone } from 'lucide-react';
 import { useReleases } from '../hooks';
 import { useRefreshAnimation } from '../../../shared/hooks';
 import { StatusBadge } from '../components/StatusBadge';
@@ -72,6 +72,11 @@ const formatISODate = (isoString?: string) => {
   }) + ' IST';
 };
 
+type CategoryFilter = 'all' | 'backend' | 'mobile';
+
+const isCategoryFilter = (v: string | null): v is CategoryFilter =>
+  v === 'all' || v === 'backend' || v === 'mobile';
+
 const ListRelease: React.FC = () => {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -91,6 +96,21 @@ const ListRelease: React.FC = () => {
   const [refreshTick, setRefreshTick] = useState(0);
   const datePickerRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // ?category= drives both the API filter and the active chip. The
+  // ProductLayout also reads this to switch between Backend/Mobile tiles
+  // on the same `/releases` pathname, so updating the URL keeps the
+  // sidebar context in sync.
+  const rawCategory = searchParams.get('category');
+  const category: CategoryFilter = isCategoryFilter(rawCategory) ? rawCategory : 'all';
+  const apiCategory = category === 'all' ? undefined : category;
+  const setCategory = (next: CategoryFilter) => {
+    const sp = new URLSearchParams(searchParams);
+    if (next === 'all') sp.delete('category');
+    else sp.set('category', next);
+    setSearchParams(sp, { replace: true });
+  };
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 300);
@@ -98,7 +118,11 @@ const ListRelease: React.FC = () => {
   }, [search]);
 
   const dateRange = useMemo(() => getDateRange(timeRange, customFrom, customTo), [timeRange, customFrom, customTo, refreshTick]);
-  const { data: releases = [], isLoading, isFetching, refetch } = useReleases(dateRange.from.toISOString(), dateRange.to.toISOString());
+  const { data: releases = [], isLoading, isFetching, refetch } = useReleases(
+    dateRange.from.toISOString(),
+    dateRange.to.toISOString(),
+    apiCategory,
+  );
 
   const doRefresh = useCallback(() => {
     setRefreshTick((n) => n + 1);
@@ -115,7 +139,7 @@ const ListRelease: React.FC = () => {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  useEffect(() => { setCurrentPage(1); }, [debouncedSearch, statusFilter, productFilter]);
+  useEffect(() => { setCurrentPage(1); }, [debouncedSearch, statusFilter, productFilter, category]);
 
   const handleCustomRangeApply = () => {
     if (customFrom && customTo) {
@@ -184,8 +208,35 @@ const ListRelease: React.FC = () => {
 
   const activeFilterCount = (statusFilter ? 1 : 0) + (productFilter ? 1 : 0);
 
+  const categoryChips: { key: CategoryFilter; label: string; icon?: React.ReactNode }[] = [
+    { key: 'all', label: 'All' },
+    { key: 'backend', label: 'Backend', icon: <Server className="w-3.5 h-3.5" /> },
+    { key: 'mobile', label: 'Mobile', icon: <Smartphone className="w-3.5 h-3.5" /> },
+  ];
+
   return (
     <div className="flex flex-col flex-1 w-full">
+      <div className="flex items-center gap-1.5 mb-4 sm:mb-5 flex-wrap" role="tablist" aria-label="Release category">
+        {categoryChips.map(chip => (
+          <button
+            key={chip.key}
+            type="button"
+            role="tab"
+            aria-selected={category === chip.key}
+            onClick={() => setCategory(chip.key)}
+            className={cn(
+              'inline-flex items-center gap-1.5 h-8 px-3 rounded-full text-xs font-medium border cursor-pointer transition-colors duration-150',
+              category === chip.key
+                ? 'bg-zinc-900 text-white border-zinc-900'
+                : 'bg-white text-zinc-600 border-zinc-300 hover:bg-zinc-50'
+            )}
+          >
+            {chip.icon}
+            {chip.label}
+          </button>
+        ))}
+      </div>
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-4 sm:mb-6">
         {kpiCards.map((kpi, i) => (
           <div
@@ -389,8 +440,9 @@ const ListRelease: React.FC = () => {
               <thead>
                 <tr className="bg-zinc-50 border-b border-zinc-200 text-[11px] text-zinc-500 font-medium uppercase tracking-wider">
                   <th className="py-3 px-4 w-12">#</th>
-                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('appGroup')}>App Group</th>
-                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('service')}>Service</th>
+                  <th className="py-3 px-4 w-24">Category</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('appGroup')}>App / Group</th>
+                  <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('service')}>Service / Surface</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('new_version')}>Version</th>
                   <th className="py-3 px-4">Status</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('release_manager')}>Release Manager</th>
@@ -400,10 +452,17 @@ const ListRelease: React.FC = () => {
               </thead>
               <tbody className="text-sm">
                 {filteredReleases.length === 0 ? (
-                  <tr><td colSpan={8} className="py-16 text-center text-zinc-400">No releases found</td></tr>
+                  <tr><td colSpan={9} className="py-16 text-center text-zinc-400">No releases found</td></tr>
                 ) : (
                   paginatedReleases.map((release, index) => {
                     const isRevert = release.release_context?.revert === 1;
+                    const isMobile = release.tracker_type === 'MobileBuild';
+                    // Mobile rows reuse the underlying tracker columns with relabeled
+                    // semantics (app/surface/platform). Backend rows render the
+                    // historical (app_group/service/env) layout. Same data, different
+                    // user-facing labels — matches what was inserted in
+                    // insertMobileTracker (rtAppGroup=acName, rtService=acSurface,
+                    // rtEnv=acPlatform).
                     return (
                       <tr
                         key={release.id}
@@ -414,6 +473,12 @@ const ListRelease: React.FC = () => {
                         onClick={() => navigate(`/releases/${release.id}`)}
                       >
                         <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + index + 1}</td>
+                        <td className="py-3 px-4">
+                          <span className="inline-flex items-center gap-1 text-[11px] text-zinc-600">
+                            {isMobile ? <Smartphone className="w-3.5 h-3.5 text-violet-600" /> : <Server className="w-3.5 h-3.5 text-sky-600" />}
+                            {isMobile ? 'Mobile' : 'Backend'}
+                          </span>
+                        </td>
                         <td className="py-3 px-4 text-xs text-zinc-600">{release.appGroup}</td>
                         <td className="py-3 px-4 font-medium text-zinc-800">{release.service}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">{release.new_version}</td>
@@ -421,7 +486,10 @@ const ListRelease: React.FC = () => {
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <StatusBadge status={release.status} />
                             {release.env && (
-                              <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-sky-700 text-white">
+                              <span className={cn(
+                                'rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white',
+                                isMobile ? 'bg-violet-600' : 'bg-sky-700',
+                              )}>
                                 {release.env}
                               </span>
                             )}
@@ -479,6 +547,7 @@ const ListRelease: React.FC = () => {
             <div className="divide-y divide-zinc-100">
               {paginatedReleases.map((release) => {
                 const isRevert = release.release_context?.revert === 1;
+                const isMobile = release.tracker_type === 'MobileBuild';
                 return (
                   <div
                     key={release.id}
@@ -487,8 +556,20 @@ const ListRelease: React.FC = () => {
                   >
                     <div className="flex items-start justify-between gap-3 mb-2">
                       <div className="min-w-0 flex-1">
-                        <div className="text-sm font-medium text-zinc-900 truncate">{release.service}</div>
-                        <div className="text-xs text-zinc-500 mt-0.5 truncate">{release.appGroup}</div>
+                        <div className="flex items-center gap-1.5 mb-0.5">
+                          {isMobile
+                            ? <Smartphone className="w-3.5 h-3.5 text-violet-600 shrink-0" />
+                            : <Server className="w-3.5 h-3.5 text-sky-600 shrink-0" />}
+                          <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+                            {isMobile ? 'Mobile' : 'Backend'}
+                          </span>
+                        </div>
+                        <div className="text-sm font-medium text-zinc-900 truncate">
+                          {isMobile ? release.appGroup : release.service}
+                        </div>
+                        <div className="text-xs text-zinc-500 mt-0.5 truncate">
+                          {isMobile ? `${release.service} · ${release.env}` : release.appGroup}
+                        </div>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
                         <button
@@ -509,7 +590,8 @@ const ListRelease: React.FC = () => {
                     </div>
                     <div className="flex items-center gap-1.5 flex-wrap mb-2">
                       <StatusBadge status={release.status} />
-                      {release.env && (
+                      {/* For mobile rows the platform is already shown inline above; skip the badge to avoid duplicating it. */}
+                      {release.env && !isMobile && (
                         <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-sky-700 text-white">
                           {release.env}
                         </span>
