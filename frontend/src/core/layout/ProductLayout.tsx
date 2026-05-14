@@ -92,25 +92,49 @@ interface SidebarBodyProps {
   onItemClick?: () => void;
 }
 
-const SidebarBody: React.FC<SidebarBodyProps> = ({ product, collapsed, isActive, onItemClick }) => (
+interface SidebarBodyPropsWithLocation extends SidebarBodyProps {
+  currentSearch: string;
+}
+
+const SidebarBody: React.FC<SidebarBodyPropsWithLocation> = ({ product, collapsed, isActive, currentSearch, onItemClick }) => (
   <nav className="flex-1 overflow-y-auto py-3">
-    {product?.navItems.map((item) => (
-      <Link
-        key={item.path}
-        to={item.path}
-        onClick={onItemClick}
-        className={cn(
-          'flex items-center gap-2.5 px-4 h-11 md:h-10 text-sm cursor-pointer transition-colors duration-150',
-          collapsed && 'md:justify-center md:px-0',
-          isActive(item.path)
-            ? 'text-zinc-50 bg-zinc-800 border-l-2 border-emerald-500'
-            : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 border-l-2 border-transparent'
-        )}
-      >
-        <span className="shrink-0">{iconMap[item.icon] || null}</span>
-        {(!collapsed || onItemClick) && <span className="truncate">{item.label}</span>}
-      </Link>
-    ))}
+    {product?.navItems.map((item) => {
+      // Split the nav item's path into pathname + query string. A nav item
+      // path like `/releases?category=mobile` must match BOTH the pathname
+      // and every query param it declares — otherwise the backend tile's
+      // `/releases` and the mobile tile's `/releases?category=mobile` would
+      // both light up on `/releases?category=mobile`.
+      const [itemPath, itemQuery] = item.path.split('?');
+      const queryMatches = (() => {
+        if (!itemQuery) return true;
+        const want = new URLSearchParams(itemQuery);
+        const have = new URLSearchParams(currentSearch);
+        for (const [k, v] of want) {
+          if (have.get(k) !== v) return false;
+        }
+        return true;
+      })();
+      const active =
+        (isActive(itemPath) && queryMatches) ||
+        (item.matchPaths?.some((p) => isActive(p)) ?? false);
+      return (
+        <Link
+          key={item.path}
+          to={item.path}
+          onClick={onItemClick}
+          className={cn(
+            'flex items-center gap-2.5 px-4 h-11 md:h-10 text-sm cursor-pointer transition-colors duration-150',
+            collapsed && 'md:justify-center md:px-0',
+            active
+              ? 'text-zinc-50 bg-zinc-800 border-l-2 border-emerald-500'
+              : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 border-l-2 border-transparent'
+          )}
+        >
+          <span className="shrink-0">{iconMap[item.icon] || null}</span>
+          {(!collapsed || onItemClick) && <span className="truncate">{item.label}</span>}
+        </Link>
+      );
+    })}
   </nav>
 );
 
@@ -167,7 +191,7 @@ const ProductLayout: React.FC = () => {
           )}
         </div>
 
-        <SidebarBody product={currentProduct} collapsed={collapsed} isActive={isActive} />
+        <SidebarBody product={currentProduct} collapsed={collapsed} isActive={isActive} currentSearch={location.search} />
 
         <div className="shrink-0 border-t border-zinc-800">
           <button
@@ -223,6 +247,7 @@ const ProductLayout: React.FC = () => {
           product={currentProduct}
           collapsed={false}
           isActive={isActive}
+          currentSearch={location.search}
           onItemClick={() => setMobileOpen(false)}
         />
       </aside>

@@ -95,6 +95,22 @@ validate_required MOBILE_DISPATCH_ENABLED
 
 ok "All required values present"
 
+# Optional iOS / App Store Connect setup. If ASC_ISSUER_ID is blank we
+# skip iOS-side server_config updates entirely — the script keeps
+# working for Android-only contributors with no change in behaviour.
+ASC_ISSUER_ID="${ASC_ISSUER_ID:-}"
+ASC_KEY_ID="${ASC_KEY_ID:-}"
+ASC_PRIVATE_KEY_P8_PATH="${ASC_PRIVATE_KEY_P8_PATH:-}"
+ASC_ENABLED=0
+if [[ -n "$ASC_ISSUER_ID" ]]; then
+    validate_required ASC_KEY_ID
+    validate_file     ASC_PRIVATE_KEY_P8_PATH
+    ASC_ENABLED=1
+    ok "App Store Connect (iOS) credentials present"
+else
+    info "App Store Connect (iOS) credentials not provided — skipping iOS server_config rows"
+fi
+
 # ── 4. Read file contents ────────────────────────────────────────────────────
 
 GH_PRIVATE_KEY="$(cat "$GITHUB_APP_PRIVATE_KEY_PATH")"
@@ -106,6 +122,16 @@ if ! grep -q "BEGIN" <<< "$GH_PRIVATE_KEY"; then
 fi
 if ! echo "$PLAY_JSON" | grep -q "service_account"; then
     warn "Play Console JSON doesn't have a 'service_account' type field — verify it's the right key file"
+fi
+
+# Read the ASC .p8 if iOS setup was opted into. The .p8 is a PEM-format
+# EC private key; check the BEGIN line same way we check the GH PEM.
+ASC_P8=""
+if (( ASC_ENABLED == 1 )); then
+    ASC_P8="$(cat "$ASC_PRIVATE_KEY_P8_PATH")"
+    if ! grep -q "BEGIN" <<< "$ASC_P8"; then
+        fail "ASC private key doesn't look like a PEM file (missing BEGIN line). Did you download the .p8?"
+    fi
 fi
 
 ok "Credentials loaded from disk"
@@ -128,7 +154,23 @@ UPDATE server_config SET value = :'play_json',       enabled = 1 WHERE name = 'p
 UPDATE server_config SET value = :'dispatch_enabled', enabled = 1 WHERE name = 'mobile_dispatch_enabled';
 SQL
 
-ok "server_config rows updated"
+ok "server_config rows updated (Android side)"
+
+# iOS / App Store Connect server_config rows. Only updated if the
+# operator supplied ASC creds in the env file. Three rows total —
+# mirrors how the Android side keeps 3 GH App rows + 1 Play JSON row.
+if (( ASC_ENABLED == 1 )); then
+    psql "$SC_DATABASE_URL" -v ON_ERROR_STOP=1 \
+        -v "asc_issuer=$ASC_ISSUER_ID" \
+        -v "asc_key_id=$ASC_KEY_ID" \
+        -v "asc_p8=$ASC_P8" \
+        <<'SQL'
+UPDATE server_config SET value = :'asc_issuer', enabled = 1 WHERE name = 'app_store_connect_issuer_id';
+UPDATE server_config SET value = :'asc_key_id', enabled = 1 WHERE name = 'app_store_connect_key_id';
+UPDATE server_config SET value = :'asc_p8',     enabled = 1 WHERE name = 'app_store_connect_private_key_p8';
+SQL
+    ok "server_config rows updated (iOS / App Store Connect side)"
+fi
 
 # ── 6. Enable apps in catalog ────────────────────────────────────────────────
 
@@ -178,7 +220,8 @@ SELECT name,
             ELSE value END AS value
   FROM server_config
  WHERE name IN ('github_app_id','github_app_installation_id','github_app_private_key',
-                'play_console_service_account_json','mobile_dispatch_enabled','mobile_run_poll_seconds')
+                'play_console_service_account_json','mobile_dispatch_enabled','mobile_run_poll_seconds',
+                'app_store_connect_issuer_id','app_store_connect_key_id','app_store_connect_private_key_p8')
  ORDER BY name;
 
 \echo

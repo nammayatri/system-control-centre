@@ -228,6 +228,16 @@ INSERT INTO server_config (type, name, value, product, enabled, last_updated) VA
   ('secret', 'play_console_service_account_json', '', 'autopilot', 0, now())
 ON CONFLICT DO NOTHING;
 
+-- App Store Connect API credentials for iOS version resolution (added 2026-05-14).
+-- One org-wide key; if the key's Apple team doesn't have access to a particular
+-- app, that row's version resolution falls back to the workflow's per-team
+-- auto-detect (`fastlane.yaml:261-346`). See spec §iOS-1.
+INSERT INTO server_config (type, name, value, product, enabled, last_updated) VALUES
+  ('secret', 'app_store_connect_issuer_id',      '', 'autopilot', 0, now()),
+  ('secret', 'app_store_connect_key_id',         '', 'autopilot', 0, now()),
+  ('secret', 'app_store_connect_private_key_p8', '', 'autopilot', 0, now())
+ON CONFLICT DO NOTHING;
+
 -- Section 3: Grant new perms on existing system roles
 UPDATE sc_role
    SET permissions = array_append(permissions, 'MOBILE_DISPATCH')
