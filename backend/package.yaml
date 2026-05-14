@@ -44,12 +44,16 @@ ghc-options:
 dependencies:
   - base >= 4.16 && < 5
   - aeson
+  - asn1-encoding
+  - asn1-types
   - async
+  - base64-bytestring
   - beam-core
   - beam-postgres
   - bytestring
   - case-insensitive
   - containers
+  - cryptonite
   - fast-logger
   - directory
   - exceptions
@@ -58,6 +62,7 @@ dependencies:
   - http-client-tls
   - http-types
   - jwt
+  - memory
   - mtl
   - postgresql-simple
   - process
@@ -139,6 +144,8 @@ library:
     - Products.Autopilot.Mobile.Handlers.Versions
     - Products.Autopilot.Mobile.Routes
     - Products.Autopilot.Mobile.Versioning
+    - Products.Autopilot.Mobile.Versioning.Play
+    - Products.Autopilot.Mobile.Versioning.Apple
     - Products.Autopilot.Mobile.Github
     - Products.Autopilot.Mobile.Github.Auth
     - Products.Autopilot.Mobile.Workflow

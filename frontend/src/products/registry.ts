@@ -18,6 +18,12 @@ export interface ProductNavItem {
   path: string;
   icon: string;          // Lucide icon name
   permission?: string;   // optional: hide nav item unless caller has this permission
+  // Optional extra route prefixes that should also keep this nav item
+  // highlighted as "active". Useful for routes that conceptually belong to
+  // a nav item but aren't reachable directly from it (e.g.,
+  // `/release-groups/:groupId` is part of the Mobile Releases flow but
+  // sits at a different URL root than `/releases?category=mobile`).
+  matchPaths?: string[];
 }
 
 export interface ProductRoute {
@@ -65,6 +71,7 @@ import VSEditSummary from './vs-editor/pages/VSEditSummary';
 // ── Product: Mobile Releases (stubs land in T23–T26) ──────────────
 import CreateMobileRelease from './releases/pages/mobile/CreateMobileRelease';
 import ReleaseGroupDetail from './releases/pages/mobile/ReleaseGroupDetail';
+import ReleaseGroupsList from './releases/pages/mobile/ReleaseGroupsList';
 import MobileAppsAdmin from './releases/pages/mobile/MobileAppsAdmin';
 import LiveReleases from './releases/pages/LiveReleases';
 
@@ -147,12 +154,22 @@ const mobileReleasesProduct: ProductDefinition = {
   viewPermission: 'RELEASE_VIEW',
   navItems: [
     { label: 'All Mobile Releases', path: '/releases?category=mobile', icon: 'List' },
+    {
+      label: 'Release Groups',
+      // List page; clicking a row deep-links to `/release-groups/<UUID>`.
+      // matchPaths keeps this nav item highlighted on the detail page too,
+      // even though the URL has a different prefix.
+      path: '/release-groups',
+      icon: 'Layers',
+      matchPaths: ['/release-groups'],
+    },
     { label: 'New Mobile Release', path: '/releases/mobile/new', icon: 'Plus' },
     { label: 'Live Releases', path: '/releases/live', icon: 'Activity' },
     { label: 'Mobile Apps', path: '/mobile/apps', icon: 'Package', permission: 'MOBILE_APP_MANAGE' },
   ],
   routes: [
     { path: '/releases/mobile/new', component: CreateMobileRelease, permission: 'RELEASE_CREATE' },
+    { path: '/release-groups', component: ReleaseGroupsList },
     { path: '/release-groups/:groupId', component: ReleaseGroupDetail },
     { path: '/mobile/apps', component: MobileAppsAdmin, permission: 'MOBILE_APP_MANAGE' },
     { path: '/releases/live', component: LiveReleases },

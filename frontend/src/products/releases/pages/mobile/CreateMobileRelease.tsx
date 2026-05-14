@@ -13,6 +13,7 @@ import type {
   MobileDestination,
   VersionPreviewItem,
 } from '../../types';
+import { destinationsForPlatform } from '../../types';
 import { Button } from '../../../../shared/ui/button';
 import { Textarea, SelectInput } from '../../../../shared/ui/input';
 import { Skeleton } from '../../../../shared/ui/skeleton';
@@ -57,8 +58,55 @@ export default function CreateMobileRelease() {
   const [changeLog, setChangeLog] = useState('');
   const [destination, setDestination] = useState<MobileDestination>('GooglePlay');
 
+  // Lookup helper used by every per-row branch below: given an app catalog id,
+  // tell us if it's an iOS row. iOS rows render a single "Version Number"
+  // input and skip the numeric code; Android rows render both inputs.
+  const isIosId = (id: number): boolean =>
+    enabledApps.find((a) => a.id === id)?.platform === 'ios';
+
+  // Platforms in the current selection — drives the destination dropdown
+  // and gives us a quick check for mixed-platform validation messaging.
+  const selectedPlatforms = useMemo(() => {
+    const s = new Set<'android' | 'ios'>();
+    for (const id of selectedIds) {
+      const p = enabledApps.find((a) => a.id === id)?.platform;
+      if (p) s.add(p);
+    }
+    return s;
+  }, [selectedIds, enabledApps]);
+
+  // Destination dropdown options — depend on the selection's platforms.
+  // Mixed selections show all four so the user can pick a value that lands
+  // on every row's audit context (the field is required by the create API
+  // regardless of platform — see spec §iOS-2).
+  const destinationOptions = useMemo(() => {
+    if (selectedPlatforms.size === 0) return destinationsForPlatform('android');
+    if (selectedPlatforms.size === 1 && selectedPlatforms.has('ios')) {
+      return destinationsForPlatform('ios');
+    }
+    if (selectedPlatforms.size === 1 && selectedPlatforms.has('android')) {
+      return destinationsForPlatform('android');
+    }
+    // Mixed — show all four
+    return [
+      ...destinationsForPlatform('android'),
+      ...destinationsForPlatform('ios'),
+    ];
+  }, [selectedPlatforms]);
+
+  // If the destination is no longer valid for the current selection (e.g.
+  // user toggled from android-only to ios-only), reset to a sensible
+  // default for the new platform set.
+  useEffect(() => {
+    if (!destinationOptions.includes(destination)) {
+      setDestination(destinationOptions[0]);
+    }
+  }, [destinationOptions, destination]);
+
   // When a fresh preview lands, prefill any unedited rows with the suggested
-  // version. Don't clobber values the user has already typed.
+  // version. Don't clobber values the user has already typed. Per-platform:
+  //   - Android rows fill `versionName` + `versionCode` from the two-field response.
+  //   - iOS rows fill `versionName` from `nextVersionNumber` (single field).
   useEffect(() => {
     if (!previews.length) return;
     setVersionEdits((prev) => {
@@ -66,8 +114,10 @@ export default function CreateMobileRelease() {
       for (const p of previews) {
         if (!next[p.appCatalogId]) {
           next[p.appCatalogId] = {
-            versionName: p.nextVersionName ?? '',
-            versionCode: p.nextVersionCode != null ? String(p.nextVersionCode) : '',
+            versionName:
+              p.nextVersionName ?? p.nextVersionNumber ?? '',
+            versionCode:
+              p.nextVersionCode != null ? String(p.nextVersionCode) : '',
           };
         }
       }
@@ -97,21 +147,27 @@ export default function CreateMobileRelease() {
   const createMutation = useCreateMobileReleases();
 
   // Submission validity: at least one app, every selected app has a non-empty
-  // version name and a numeric code, and a non-empty changelog.
+  // version name (Android: + numeric code; iOS: no code — workflow computes
+  // the build number), and a non-empty changelog.
   const validation = useMemo(() => {
     if (selectedIds.length === 0) return { ok: false, reason: 'Select at least one app' };
     if (!changeLog.trim()) return { ok: false, reason: 'Change log is required' };
     for (const id of selectedIds) {
       const v = versionEdits[id];
+      const ios = isIosId(id);
+      const fieldLabel = ios ? 'version number' : 'version name';
       if (!v?.versionName.trim()) {
-        return { ok: false, reason: 'All selected apps need a version name' };
+        return { ok: false, reason: `All selected apps need a ${fieldLabel}` };
       }
-      if (v.versionCode.trim() === '' || !/^\d+$/.test(v.versionCode.trim())) {
-        return { ok: false, reason: 'All selected apps need a numeric version code' };
+      // iOS: code is computed by the workflow — no input required.
+      if (!ios) {
+        if (v.versionCode.trim() === '' || !/^\d+$/.test(v.versionCode.trim())) {
+          return { ok: false, reason: 'Android rows need a numeric version code' };
+        }
       }
     }
     return { ok: true as const };
-  }, [selectedIds, versionEdits, changeLog]);
+  }, [selectedIds, versionEdits, changeLog, enabledApps]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -121,10 +177,13 @@ export default function CreateMobileRelease() {
     }
     const items: CreateMobileReleasesItem[] = selectedIds.map((id) => {
       const v = versionEdits[id];
+      const ios = isIosId(id);
       return {
         appCatalogId: id,
         versionName: v.versionName.trim(),
-        versionCode: parseInt(v.versionCode, 10),
+        // iOS rows send `null` so the backend leaves mbcVersionCode unset;
+        // the workflow's `fastlane fetch_build_number` resolves it later.
+        versionCode: ios ? null : parseInt(v.versionCode, 10),
       };
     });
     const req: CreateMobileReleasesReq = {
@@ -235,10 +294,19 @@ export default function CreateMobileRelease() {
                 if (!app) return null;
                 const preview = previewById.get(id);
                 const v = versionEdits[id] || { versionName: '', versionCode: '' };
+                const ios = app.platform === 'ios';
+                // Android rows render a 3-column grid (name + code + status);
+                // iOS rows collapse to a 2-column grid (just the version_number
+                // input + status) since the build number is workflow-computed.
                 return (
                   <div
                     key={id}
-                    className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto] gap-3 items-end"
+                    className={cn(
+                      'grid grid-cols-1 gap-3 items-end',
+                      ios
+                        ? 'sm:grid-cols-[1fr_auto]'
+                        : 'sm:grid-cols-[1fr_auto_auto]',
+                    )}
                   >
                     <div>
                       <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">
@@ -251,22 +319,33 @@ export default function CreateMobileRelease() {
                         type="text"
                         value={v.versionName}
                         onChange={(e) => setVersionField(id, 'versionName', e.target.value)}
-                        placeholder={preview?.nextVersionName || '2.5.1'}
+                        placeholder={
+                          preview?.nextVersionName ??
+                          preview?.nextVersionNumber ??
+                          '2.5.1'
+                        }
                         className="w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400"
                       />
+                      {ios && (
+                        <p className="mt-1 text-[11px] text-zinc-500">
+                          Build number is computed by the build workflow.
+                        </p>
+                      )}
                     </div>
-                    <div className="sm:w-32">
-                      <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">
-                        Code
-                      </label>
-                      <input
-                        type="number"
-                        value={v.versionCode}
-                        onChange={(e) => setVersionField(id, 'versionCode', e.target.value)}
-                        placeholder={preview?.nextVersionCode != null ? String(preview.nextVersionCode) : '12345'}
-                        className="w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400"
-                      />
-                    </div>
+                    {!ios && (
+                      <div className="sm:w-32">
+                        <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">
+                          Code
+                        </label>
+                        <input
+                          type="number"
+                          value={v.versionCode}
+                          onChange={(e) => setVersionField(id, 'versionCode', e.target.value)}
+                          placeholder={preview?.nextVersionCode != null ? String(preview.nextVersionCode) : '12345'}
+                          className="w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400"
+                        />
+                      </div>
+                    )}
                     <div className="text-xs text-zinc-400 pb-2">
                       {preview?.source && !preview.err && (
                         <span>auto · {preview.source}</span>
@@ -314,11 +393,25 @@ export default function CreateMobileRelease() {
             <SelectInput
               value={destination}
               onChange={(e) => setDestination(e.target.value as MobileDestination)}
-              options={[
-                { value: 'GooglePlay', label: 'Google Play' },
-                { value: 'Firebase', label: 'Firebase' },
-              ]}
+              options={destinationOptions.map((d) => ({
+                value: d,
+                label:
+                  d === 'GooglePlay'
+                    ? 'Google Play'
+                    : d === 'Firebase'
+                      ? 'Firebase'
+                      : d === 'TestFlight'
+                        ? 'TestFlight'
+                        : 'App Store',
+              }))}
             />
+            {selectedPlatforms.size > 1 && (
+              <p className="mt-2 text-[11px] text-zinc-500">
+                Mixed Android + iOS selection — this destination is stored on
+                every row's audit context. The build workflow itself does not
+                read this value; release type is set internally by Catalyst.
+              </p>
+            )}
           </div>
         </section>
 

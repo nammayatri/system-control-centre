@@ -70,6 +70,8 @@ library
       Products.Autopilot.Mobile.Handlers.Versions
       Products.Autopilot.Mobile.Routes
       Products.Autopilot.Mobile.Versioning
+      Products.Autopilot.Mobile.Versioning.Play
+      Products.Autopilot.Mobile.Versioning.Apple
       Products.Autopilot.Mobile.Github
       Products.Autopilot.Mobile.Github.Auth
       Products.Autopilot.Mobile.Workflow
@@ -129,13 +131,17 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields
   build-depends:
       aeson
+    , asn1-encoding
+    , asn1-types
     , async
     , base >=4.16 && <5
+    , base64-bytestring
     , beam-core
     , beam-postgres
     , bytestring
     , case-insensitive
     , containers
+    , cryptonite
     , directory
     , exceptions
     , fast-logger
@@ -144,6 +150,7 @@ library
     , http-client-tls
     , http-types
     , jwt
+    , memory
     , mtl
     , postgresql-simple
     , process

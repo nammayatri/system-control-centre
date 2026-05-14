@@ -21,17 +21,30 @@ import Data.Text (Text)
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
-data MobileDestination = MBGooglePlay | MBFirebase
+-- | Where a release row is conceptually targeted. Pure metadata — neither
+-- the Android workflow nor the iOS workflow reads this value; SCC stores
+-- it in @releaseContext.destination@ for audit / display only. The field
+-- is required on the create API though, which is why iOS rows need their
+-- own variants instead of reusing the Android labels.
+data MobileDestination
+    = MBGooglePlay -- ^ Android: Google Play production track.
+    | MBFirebase -- ^ Android: Firebase App Distribution.
+    | MBTestFlight -- ^ iOS: TestFlight beta channel.
+    | MBAppStore -- ^ iOS: App Store (production).
     deriving (Eq, Show, Read, Generic)
 
 instance ToJSON MobileDestination where
     toJSON MBGooglePlay = "GooglePlay"
     toJSON MBFirebase = "Firebase"
+    toJSON MBTestFlight = "TestFlight"
+    toJSON MBAppStore = "AppStore"
 
 instance FromJSON MobileDestination where
     parseJSON = Aeson.withText "MobileDestination" $ \case
         "GooglePlay" -> pure MBGooglePlay
         "Firebase" -> pure MBFirebase
+        "TestFlight" -> pure MBTestFlight
+        "AppStore" -> pure MBAppStore
         other -> fail $ "unknown destination: " <> show other
 
 data MobileBuildContext = MobileBuildContext

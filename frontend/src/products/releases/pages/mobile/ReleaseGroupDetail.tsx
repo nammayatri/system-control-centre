@@ -54,6 +54,68 @@ export default function ReleaseGroupDetail() {
 
   const groupingMissing = !isLoading && releases.length > 0 && groupReleases.length === 0;
 
+  // Group-level summary state. Surfaces "is everything approved / dispatched /
+  // completed" without forcing the user to count badges across rows. Derived
+  // entirely from the per-row `status` + `is_approved` fields.
+  //
+  //   - All COMPLETED  → "Completed"          (green)
+  //   - All terminal w/ any non-COMPLETED → "Failed"  (red — Aborted/Discarded mix)
+  //   - Any INPROGRESS → "In progress"        (blue)
+  //   - All CREATED + all approved → "Approved" (emerald) — ready to dispatch
+  //   - Some approved  → "Partially approved" (amber, with count)
+  //   - None approved  → "Pending approval"   (zinc)
+  type GroupState = {
+    label: string;
+    tone: 'emerald' | 'blue' | 'green' | 'red' | 'amber' | 'zinc';
+    sub?: string;
+  };
+  const groupState: GroupState | null = useMemo(() => {
+    if (groupReleases.length === 0) return null;
+    const total = groupReleases.length;
+    const completed = groupReleases.filter((r) => r.status === 'COMPLETED').length;
+    const inProgress = groupReleases.filter((r) => r.status === 'INPROGRESS').length;
+    const created = groupReleases.filter((r) => r.status === 'CREATED').length;
+    const approved = groupReleases.filter((r) => r.is_approved === 1).length;
+    const terminal = groupReleases.filter((r) =>
+      ['COMPLETED', 'ABORTED', 'USER_ABORTED', 'DISCARDED', 'REVERTED'].includes(r.status),
+    ).length;
+
+    if (completed === total) {
+      return { label: 'Completed', tone: 'green', sub: `${total}/${total}` };
+    }
+    if (terminal === total) {
+      return { label: 'Failed', tone: 'red', sub: `${completed}/${total} completed` };
+    }
+    if (inProgress > 0) {
+      return {
+        label: 'In progress',
+        tone: 'blue',
+        sub: `${inProgress} dispatching · ${completed} done`,
+      };
+    }
+    if (created === total && approved === total) {
+      return { label: 'Approved · ready to dispatch', tone: 'emerald', sub: `${total}/${total}` };
+    }
+    if (approved > 0) {
+      return {
+        label: 'Partially approved',
+        tone: 'amber',
+        sub: `${approved}/${total} approved`,
+      };
+    }
+    return { label: 'Pending approval', tone: 'zinc', sub: `0/${total} approved` };
+  }, [groupReleases]);
+
+  // Tailwind class map keyed by tone — keeps the JSX below readable.
+  const toneClasses: Record<GroupState['tone'], string> = {
+    emerald: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+    blue: 'bg-blue-50 text-blue-800 border-blue-200',
+    green: 'bg-green-50 text-green-800 border-green-200',
+    red: 'bg-rose-50 text-rose-800 border-rose-200',
+    amber: 'bg-amber-50 text-amber-800 border-amber-200',
+    zinc: 'bg-zinc-50 text-zinc-700 border-zinc-200',
+  };
+
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const allChecked = groupReleases.length > 0 && groupReleases.every((r) => selectedIds.has(r.id));
 
@@ -131,9 +193,28 @@ export default function ReleaseGroupDetail() {
       <div className="bg-white rounded-xl border border-zinc-200">
         <header className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
-            <h1 className="text-base sm:text-lg font-semibold text-zinc-900 flex items-center gap-2">
+            <h1 className="text-base sm:text-lg font-semibold text-zinc-900 flex items-center gap-2 flex-wrap">
               <Smartphone className="w-4 h-4 text-violet-600" />
               Release group
+              {groupState && (
+                <span
+                  className={cn(
+                    'inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider border rounded-full px-2.5 py-0.5',
+                    toneClasses[groupState.tone],
+                  )}
+                  // The aggregate state pill — see groupState computation above.
+                  // Shows "Approved · ready to dispatch" once every row in
+                  // the group is approved (CREATED + is_approved=1). Once
+                  // dispatched, transitions through "In progress" → "Completed".
+                >
+                  {groupState.label}
+                  {groupState.sub && (
+                    <span className="font-normal normal-case tracking-normal text-[10px] opacity-80">
+                      · {groupState.sub}
+                    </span>
+                  )}
+                </span>
+              )}
             </h1>
             <p className="text-xs text-zinc-500 mt-0.5 font-mono truncate">{groupId}</p>
           </div>
@@ -237,7 +318,13 @@ export default function ReleaseGroupDetail() {
                         </td>
                         <td className="py-3 px-4">
                           <button
-                            onClick={() => navigate(`/releases/${r.id}`)}
+                            // `?category=mobile` keeps the sidebar on the
+                            // Mobile Releases tile when this opens the
+                            // individual release summary (without it the
+                            // shared /releases/:id route falls back to the
+                            // Backend Releases product — see ProductLayout's
+                            // findCurrentProduct).
+                            onClick={() => navigate(`/releases/${r.id}?category=mobile`)}
                             className="text-xs text-zinc-600 hover:text-zinc-900 underline"
                           >
                             Open

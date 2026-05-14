@@ -14,6 +14,17 @@
 
 ---
 
+## Status & extensions
+
+| Phase | Scope | Status |
+|---|---|---|
+| Phases 1–10 | Android MVP (customer-android, 10 apps) | ✅ Shipped on `feat/mobile-releases` |
+| **Phase 11** | **iOS extension (customer + provider iOS surfaces)** | 🆕 **proposed by this plan addition (2026-05-13, shivendra02shah@gmail.com)** |
+
+Phase 11 is **purely additive**: nothing in Phases 1–10 is rewritten. The iOS path branches off `Stage 1 (ResolveVersion)` in the existing `mobileBuildSpec` and adds one optional new stage. The DB-schema changes are **appended in place** to `0011-mobile-releases.sql` (this repo's migration runner re-applies every file on every startup with idempotent guards — no checksums, no migration-tracking table). Android rows are unaffected.
+
+---
+
 ## Working agreement
 
 - TDD where it adds signal: pure logic (state machine transitions, JSON round-trip, version bump rule, CSV grouping) gets a test before implementation. Schema migrations, ADT additions that the compiler enforces, and HTTP-handler wiring don't need failing tests up front — the compiler + a smoke test cover them.
@@ -3587,6 +3598,492 @@ git commit --allow-empty -m "Verified mobile release E2E with sandbox repo"
 
 ---
 
+## Phase 11 — iOS extension (App Store Connect-driven version resolution)
+
+> Author of Phase 11: **shivendra02shah@gmail.com**, 2026-05-13.
+> All Android tasks (1–27) remain unchanged. Each iOS task is a small, isolated diff against the shipped Android implementation.
+>
+> **Design choice:** SCC **does not wait for Apple's TestFlight processing**, neither inside an SCC stage nor by dictating fastlane flags to the iOS GH workflow. SCC dispatches whatever workflow `app_catalog.workflow_path` points to, observes the matrix job + pushed tag, and stops. iOS `MBCompleted` therefore means "uploaded to ASC, Apple processing pending" — different from Android's "live on Play." Trade-off documented in spec §2 iOS-4. Consequence: **no new `MobileBuildWFStatus` variant, no new workflow stage, no SCC-side polling, no constraint on the mobile team's workflow.**
+
+### Task 28: Append iOS additions to `0011-mobile-releases.sql` (in place)
+
+**Files:**
+- Modify: `backend/dev/migrations/system-control/0011-mobile-releases.sql` (append iOS column + iOS catalog seed at the bottom — do NOT create `0012-*.sql`)
+- Modify: `backend/dev/sql-seed/system-control-seed.sql` (add 3 ASC secret placeholders)
+
+**Why edit in place instead of creating `0012-ios-extension.sql`:** the SCC migration runner (see `flake.nix:95-99`) **re-applies every `.sql` file in `dev/migrations/system-control/` on every startup**, with `ON_ERROR_STOP=0`. There's no migration-tracking table, no checksums. Every statement is expected to be idempotent (`IF NOT EXISTS`, `ON CONFLICT DO NOTHING`). This means:
+
+- Editing `0011` in place is safe — every dev's next `sc-dev` startup re-runs the whole file, picks up the new statements (existing ones no-op).
+- A separate `0012-ios-extension.sql` would work too, but adds a file for no semantic gain — "mobile releases" is one conceptual unit.
+- The Android catalog seed already lives inline in `0011` (it's not in `system-control-seed.sql`, because seed runs before migrations). The iOS catalog seed belongs in the same place for the same reason.
+
+ASC secrets, on the other hand, go in `system-control-seed.sql` — consistent with where `github_app_*` and `play_console_service_account_json` rows already live (lines 207–240).
+
+- [ ] **Step 1: Append iOS block to `0011-mobile-releases.sql`** (see the full SQL in spec §8.3 block). Layout:
+  - The existing Android `ALTER TABLE` + `CREATE INDEX` + 10-row INSERT stays at the top, unchanged.
+  - Below it, add 10 iOS rows with `platform='ios'`, `workflow_path='.github/workflows/fastlane.yaml'` (note: real filename is `fastlane.yaml`, not `fastlane-ios.yaml`), `package_name=<bundle_id>`, `enabled=false`, all guarded by `ON CONFLICT (name, surface, platform) DO NOTHING`. **No new column.** ASC numeric app id is resolved at runtime in `Versioning/Apple.hs` via bundle id lookup.
+
+- [ ] **Step 2: Append ASC secret placeholders** to `backend/dev/sql-seed/system-control-seed.sql`, alongside the existing mobile section (line 207+):
+
+```sql
+INSERT INTO server_config (type, name, value, product, enabled, last_updated) VALUES
+  ('secret', 'app_store_connect_issuer_id',      '', 'autopilot', 0, now()),
+  ('secret', 'app_store_connect_key_id',         '', 'autopilot', 0, now()),
+  ('secret', 'app_store_connect_private_key_p8', '', 'autopilot', 0, now())
+ON CONFLICT DO NOTHING;
+```
+
+- [ ] **Step 3: Apply locally — NO RESET NEEDED**
+
+```bash
+sc-dev   # the runner re-applies 0011 on startup; you'll see "[migrate] 0011-mobile-releases.sql" again
+# Ctrl+C once it logs "[db-init] done"
+```
+
+Resetting (`rm -rf .local/data/pg`) is only needed if you're worried about pre-existing inconsistent state. For a clean development cycle it's optional.
+
+- [ ] **Step 4: Verify**
+
+```bash
+psql "$SC_DATABASE_URL" -c "SELECT name, type, enabled FROM server_config WHERE name LIKE 'app_store_connect_%';"  # expect 3 rows, all enabled=0 initially
+psql "$SC_DATABASE_URL" -c "SELECT COUNT(*) FROM app_catalog WHERE platform='ios';"   # expect 10
+psql "$SC_DATABASE_URL" -c "SELECT name, package_name FROM app_catalog WHERE platform='ios' LIMIT 3;"  # bundle ids populated
+```
+
+> **Why the in-place edit is safe in *this* repo and not in others:** SCC's migration runner is a `for f in *.sql; do psql -f "$f"; done` loop — there's no `schema_migrations` table or checksum. Migration files are treated as **idempotent seed scripts that re-run every startup**, not as the immutable append-only history that Flyway / Liquibase / Alembic enforce. The "never edit a shipped migration" rule from those tools doesn't apply here.
+
+### Task 29: Rename Versioning.hs → Versioning/Play.hs (Android code move)
+
+**Files:**
+- Rename: `backend/src/Products/Autopilot/Mobile/Versioning.hs` → `backend/src/Products/Autopilot/Mobile/Versioning/Play.hs`
+- Update: all imports of `Products.Autopilot.Mobile.Versioning` (call sites are `Mobile/Workflow.hs` and `Mobile/Handlers/Versions.hs`).
+- Rename the module declaration `module Products.Autopilot.Mobile.Versioning` → `module Products.Autopilot.Mobile.Versioning.Play`.
+
+**Why:** Makes room for a thin dispatcher `Versioning.hs` (Task 30) and a sibling `Versioning/Apple.hs` (Task 30). Pure mechanical rename — **no logic changes**.
+
+- [ ] **Step 1:** Move the file, update the module declaration.
+- [ ] **Step 2:** Update the two call sites' imports (`import qualified Products.Autopilot.Mobile.Versioning as V` → `import qualified Products.Autopilot.Mobile.Versioning.Play as V` for now — Task 30 replaces this with the dispatcher).
+- [ ] **Step 3:** `sc-build && sc-test` — must remain green. The Android unit tests should pass unchanged.
+- [ ] **Step 4:** Commit: `Move Versioning.hs to Versioning/Play.hs (no logic changes)` — one-commit refactor lets git track the rename cleanly.
+
+### Task 30: Versioning dispatcher + Apple version-resolution client (auth inlined)
+
+**Files:**
+- Create: `backend/src/Products/Autopilot/Mobile/Versioning/Apple.hs`
+- Create (thin re-write): `backend/src/Products/Autopilot/Mobile/Versioning.hs` — the dispatcher.
+- Modify: `backend/package.yaml` + `backend/scc.cabal` — expose `cryptonite`, `asn1-encoding`, `asn1-types`, `base64-bytestring`, `memory` to the lib's `build-depends`. All five are already in the nix env (transitively pulled in by `Web.JWT` / `http-client-tls`); we just need them explicitly so the new module can import them. **No new package added to the dep tree.**
+
+**Why:** Single dispatch point so callers don't branch on platform. Apple client mirrors **the full shape of `Versioning/Play.hs`** — creds loader, JWT signer, and API calls all live in **one file**, matching the precedent set by Play. No separate `Auth.hs` (matching Play, *not* `Github/Auth.hs`).
+
+**Apple.hs shape (everything inline):**
+
+```haskell
+module Products.Autopilot.Mobile.Versioning.Apple
+  ( -- pure
+    computeNextIosVersion
+    -- IO
+  , AscError (..)
+  , AscCreds (..)
+  , loadAscCreds         -- reads 3 server_config rows
+  , fetchAscVersions     -- :: AscCreds -> Text {- asc_app_id -} -> IO (Either AscError (Maybe Text, Maybe Int))
+  , resolve              -- :: MonadFlow m => AppCatalog -> m (Either Text (Text, Int))
+                         --    the dispatcher-shaped entry point
+  ) where
+
+-- ES256 signing built directly on cryptonite + asn1-encoding (Web.JWT
+-- doesn't expose EC private keys). PKCS#8 .p8 parsing inlined here.
+import qualified Crypto.PubKey.ECC.ECDSA as ECDSA
+import qualified Crypto.PubKey.ECC.Types as ECC
+import Crypto.Hash.Algorithms (SHA256 (..))
+import Data.ASN1.BinaryEncoding (DER (..))
+import Data.ASN1.Encoding (decodeASN1')
+import qualified Data.ByteString.Base64 as B64
+import qualified Data.ByteString.Base64.URL as B64U
+
+ascBase = "https://api.appstoreconnect.apple.com"
+
+-- Module layout (matches Versioning/Play.hs section-by-section):
+--   1. Pure algorithm   — computeNextIosVersion
+--   2. Creds + errors   — AscCreds, AscError, loadAscCreds
+--   3. JWT minter       — mintAscToken inline (NOT a separate module)
+--      • ES256 signing of header { alg="ES256", kid=ascKeyId, typ="JWT" }
+--        — built on cryptonite's Crypto.PubKey.ECC.ECDSA (RFC 5915 / FIPS 186)
+--        with manual ASN.1 → raw R||S conversion for the JWS wire format
+--        (RFC 7515 §3.4). The PKCS#8 .p8 parser uses asn1-encoding + a small
+--        hand-rolled walker for the PrivateKeyInfo SEQUENCE shape.
+--      • payload { iss=ascIssuerId, iat, exp=iat+20min, aud="appstoreconnect-v1" }
+--      • returns Text — used directly as the bearer token (no OAuth exchange step)
+--   4. API client       — fetchAscVersions, calling the two endpoints below
+--   5. Dispatcher entry — resolve :: AppCatalog -> m (Either Text (Text, Int))
+
+-- Endpoints (version resolution only — SCC doesn't poll ASC for build state):
+-- GET /v1/apps/:id/preReleaseVersions  (TestFlight)
+-- GET /v1/apps/:id/appStoreVersions    (production)
+```
+
+> **No token caching for v1.** Each ASC call mints its own JWT. ES256 signing is microseconds; ASC version-resolution calls happen ≤10 times per release row (once at Stage 1 + once per `versions/preview` request), so the cost is negligible. If iOS volume ever justifies caching, promote this to its own `Apple/Auth.hs` with an IORef — 10-min refactor.
+
+**Versioning.hs (dispatcher) shape:**
+
+```haskell
+module Products.Autopilot.Mobile.Versioning
+  ( resolveNextVersion
+  , module Products.Autopilot.Mobile.Versioning.Play   -- legacy re-exports
+  , module Products.Autopilot.Mobile.Versioning.Apple
+  ) where
+
+import Products.Autopilot.Mobile.Versioning.Play  hiding (resolve)
+import Products.Autopilot.Mobile.Versioning.Apple hiding (resolve)
+import qualified Products.Autopilot.Mobile.Versioning.Play  as P
+import qualified Products.Autopilot.Mobile.Versioning.Apple as A
+
+resolveNextVersion :: MonadFlow m => AppCatalog -> m (Either Text (Text, Int))
+resolveNextVersion ac = case acPlatform ac of
+  "android" -> P.resolve ac
+  "ios"     -> A.resolve ac
+  other     -> pure (Left ("unsupported platform: " <> other))
+```
+
+- [ ] **Step 1: TDD `computeNextIosVersion`** — pure function. Test cases:
+  - Production = `2.5.0`, TestFlight build = `42` → next = `(2.5.0, 43)` (patch bump only when production already shipped this version).
+  - Production = `2.5.0`, no TestFlight → `(2.5.1, 1)`.
+  - No production yet, no TestFlight → `(1.0.0, 1)`.
+
+- [ ] **Step 2: Inline JWT signer** in `Versioning/Apple.hs`. Mirror the layout of Play's section "JWT minting + OAuth exchange" (lines ~203–253 of today's `Versioning.hs`). Differences from Play:
+  - Algorithm: ES256 (Play uses RS256).
+  - Header: include `kid` (Play does not).
+  - No OAuth exchange — the signed JWT *is* the bearer token.
+  - Audience: `"appstoreconnect-v1"` (Play uses `"https://oauth2.googleapis.com/token"`).
+
+  Unit test in `backend/test/Main.hs`: sign with a fixture `.p8` (generate once via `openssl ecparam -name prime256v1 -genkey -noout -out test.p8`), decode the JWT (no signature verify), assert header `alg=ES256` + `kid` set, payload `iss` + `aud="appstoreconnect-v1"` + `exp ≤ now+20m`.
+
+- [ ] **Step 3: `loadAscCreds`** reads the three `server_config` rows (`type='secret'`, names `app_store_connect_issuer_id` / `..._key_id` / `..._private_key_p8`). Returns `Nothing` if any is empty. Matches `loadPlayCreds`'s shape exactly.
+
+- [ ] **Step 4: Implement the two ASC HTTP calls** using `Core/Http/Client.hs`. Bearer token = the inline-minted JWT. Decode JSON with `aeson`.
+
+- [ ] **Step 5: Wire retry** via the existing retry helper. 3 retries with backoff; on terminal HTTP fail return `Left AscError`.
+
+- [ ] **Step 6: Define a `VersionResolution` sum type** in `Versioning.hs` so the dispatcher signature is honest:
+
+```haskell
+data VersionResolution
+  = AndroidVersion { vName :: Text, vCode :: Int }   -- two-field, matches Play's existing tuple
+  | IosVersion     { vNumber :: Text }                -- single field, matches Apple convention
+  deriving (Eq, Show, Generic)
+
+resolveNextVersion :: MonadFlow m => AppCatalog -> m (Either Text VersionResolution)
+```
+
+`Apple.resolve` returns `IosVersion`, `Play.resolve` returns `AndroidVersion`. Callers pattern-match.
+
+- [ ] **Step 7: Extract a `Play.resolve` helper in `Versioning/Play.hs`** with shape `AppCatalog -> m (Either Text VersionResolution)` returning `AndroidVersion`. Existing Play body delegates to this new helper. **No logic changes.**
+
+- [ ] **Step 8: Write the dispatcher** in the new top-level `Versioning.hs`.
+
+- [ ] **Step 9: ASC numeric-app-id lookup** in `Apple.resolve`: call `GET /v1/apps?filter[bundleId]=<package_name>` (mirrors `fastlane.yaml:304-312`), take `data[0].id` as the ASC app id, then call `GET /v1/apps/:id/preReleaseVersions` to find the latest TestFlight build. Return `Left "asc_app_not_found"` if the bundle lookup is empty.
+
+- [ ] **Step 10: Table-driven dispatcher test** in `backend/test/Main.hs`:
+  - `(platform="android", …)` → returns `AndroidVersion { vName, vCode }`.
+  - `(platform="ios", …)` → returns `IosVersion { vNumber }`.
+  - `(platform="windows", …)` → returns `Left "unsupported platform: windows"`.
+
+- [ ] **Step 11: `sc-build && sc-test`** should pass.
+
+### Task 31: Extend `MobileDestination` + update `execResolveVersion` / `execDispatchWorkflow` / `previewVersionsH`
+
+**Files:**
+- Modify: `backend/src/Products/Autopilot/Mobile/Types.hs` (extend the ADT)
+- Modify: `backend/src/Products/Autopilot/Mobile/Workflow.hs` (both Stage 1 and Stage 3)
+- Modify: `backend/src/Products/Autopilot/Mobile/Handlers/Versions.hs`
+
+**Why:** Three call sites need to be platform-aware now. Stage 1 (`execResolveVersion`) writes the resolved version to the tracker. Stage 3 (`execDispatchWorkflow`) sends a different `inputs` shape per platform. `previewVersionsH` returns a different response shape per platform. Plus a small ADT extension so iOS callers have correct `destination` values to pass through the create API (currently the field is required and only accepts Android labels).
+
+#### Step 0 — Extend `MobileDestination` (preparatory)
+
+The destination is metadata only — neither GH workflow reads it (verified by grep). But `CreateMobileReleasesReq.destination` requires it on every create, so iOS callers need real values to pass.
+
+```haskell
+-- backend/src/Products/Autopilot/Mobile/Types.hs
+data MobileDestination
+  = MBGooglePlay      -- Android, production track  (existing)
+  | MBFirebase        -- Android, App Distribution  (existing)
+  | MBTestFlight      -- NEW — iOS beta channel
+  | MBAppStore        -- NEW — iOS production (App Store)
+  deriving (Eq, Show, Read, Generic, Enum, Bounded)
+
+-- ToJSON / FromJSON instances: "TestFlight" / "AppStore"
+```
+
+- [ ] **Edit the ADT, update JSON instances.** Then `sc-build` — the compiler will flag every `case` on `MobileDestination` that is now non-exhaustive. Likely sites:
+  - `Mobile/Types.hs` (JSON instances)
+  - `Mobile/Handlers/Release.hs` (the `destination` field on `CreateMobileReleasesReq`)
+  - Frontend `types.ts` mirror (Task 32 step 1)
+- [ ] **Round-trip test** in `backend/test/Main.hs` — JSON encode/decode each new variant: `"TestFlight"` and `"AppStore"`.
+- [ ] **Note:** the workflow_dispatch payload does NOT include `destination`. The field travels only in SCC's internal `releaseContext` JSON for audit/UI purposes.
+
+#### Step 1 — `execResolveVersion` (Stage 1)
+
+```haskell
+execResolveVersion = mobileStage "ResolveVersion" $ do
+  rs <- gets id
+  let rt = releaseTracker rs
+  ac <- appCatalogForRow rt
+  res <- Versioning.resolveNextVersion ac
+  case res of
+    Right (AndroidVersion name code) -> do
+      persistAndroidVersion rt name code      -- existing path (Android = two fields)
+      setMbWfStatus MBVersionResolved
+      pure StageDone
+    Right (IosVersion number) -> do
+      persistIosVersion rt number             -- NEW: write only newVersion = version_number
+      setMbWfStatus MBVersionResolved          -- (build_number is filled in later from the tag)
+      pure StageDone
+    Left err -> abort err
+```
+
+For iOS, write `releaseTracker.newVersion = version_number` and leave `mbContext.versionCode` unset (the workflow's `fastlane fetch_build_number` resolves the build number; SCC reads it from the pushed tag in Stage 6 `ConfirmTag`).
+
+#### Step 2 — `execDispatchWorkflow` (Stage 3) — platform-aware `inputs`
+
+```haskell
+execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
+  rs <- gets id
+  let rt = releaseTracker rs
+  ac <- appCatalogForRow rt
+  let dispatchInputs = case acPlatform ac of
+        "android" -> object
+          [ "selected_apps" .= csvOfSelectedApps rs
+          , "version_name"  .= (newVersion rt)        -- two-field Android shape
+          , "version_code"  .= (versionCode (mbContext (targetState rs)))
+          , "change_log"    .= (changeLog (mbContext (targetState rs)))
+          , "payload"       .= object ["scc_dispatch_nonce" .= nonce]
+          ]
+        "ios" -> object
+          [ "selected_apps"  .= csvOfSelectedApps rs
+          , "version_number" .= (newVersion rt)         -- single-field iOS shape
+          , "change_log"     .= (changeLog (mbContext (targetState rs)))
+          , "payload"        .= object ["scc_dispatch_nonce" .= nonce]
+          ]
+        other -> error $ "unsupported platform in dispatch: " <> T.unpack other
+  -- existing POST-to-GH machinery follows, unchanged
+```
+
+The `inputs` shapes match the workflow contracts:
+- Android (`fastlane-android.yaml:17-22`): `version_name`, `version_code`.
+- iOS (`fastlane.yaml:17-19`): `version_number`.
+
+`notify_slack` defaults to `true` in both workflows so SCC omits it. `payload` carries the SCC dispatch nonce (existing pattern).
+
+#### Step 3 — `previewVersionsH`
+
+```haskell
+previewVersionsH _ req = do
+  let ids = ... -- existing
+  results <- forM ids $ \cid -> do
+    ac <- findAppCatalogById cid
+    res <- Versioning.resolveNextVersion ac
+    pure $ case res of
+      Right (AndroidVersion n c) ->
+        object [ "app_catalog_id"    .= cid
+               , "next_version_name" .= n
+               , "next_version_code" .= c
+               , "source"            .= ("play_console" :: Text)
+               ]
+      Right (IosVersion n) ->
+        object [ "app_catalog_id"     .= cid
+               , "next_version_number" .= n          -- single field for iOS
+               , "source"              .= ("app_store_connect" :: Text)
+               ]
+      Left err -> object [ "app_catalog_id" .= cid, "error" .= err ]
+  pure $ object ["previews" .= results]
+```
+
+Different response shape per platform. Frontend handles both.
+
+#### Step 4 — Tests
+
+- Stage 1: `platform="ios"` + ASC mock returning `IosVersion "2.5.1"` → tracker's `newVersion = "2.5.1"`.
+- Stage 3: `platform="ios"` row → POST body's `inputs.version_number` is set; `inputs.version_name` and `inputs.version_code` are absent. `platform="android"` (regression) → unchanged shape.
+- `previewVersionsH` mixed request → iOS rows have `next_version_number`, Android rows have `next_version_name`+`next_version_code`.
+
+> **Watch-out (no preemptive change):** `Mobile/Handlers/Release.hs:166` hardcodes `mbcMatrixJobName = acName app_ <> "-Release"`, which matches Android's `<name>-Release` job naming. iOS jobs are named `<target>-<release_type>` (`fastlane.yaml:143`) where `release_type` comes from Catalyst. **If Catalyst's `ios_prod` extraction yields `release_type=Release`, the existing equality match works for iOS too** and no change is needed. If it yields anything else (`AppStore`, `TestFlight`, `AdHoc`…) iOS rows will hang in `MBBuilding` because `execPollMatrixJobs` won't find the matching job. **Do not preemptively change this** — verify empirically during the E2E dogfood (Task 34); if it hangs, switch the matcher from equality to prefix-match (`T.isPrefixOf` on `<acName>-`). Documented as a known imprecision rather than a required step so we don't refactor on speculation.
+
+### Task 32: Frontend — per-platform version-field rendering + iOS preview-source handling
+
+**Files:**
+- Modify: `frontend/src/products/releases/types.ts` — adjust `VersionPreview` to be a discriminated union (Android two-field vs iOS single-field response shapes).
+- Modify: `frontend/src/products/releases/pages/mobile/CreateMobileRelease.tsx` — show different version inputs by platform; consume the discriminated preview response.
+- Modify: `frontend/src/products/releases/pages/ReleaseSummary.tsx` — iOS post-completion footnote.
+
+**Why:** UI mirror for the platform-aware version model + the extended `MobileDestination`:
+- Android rows have **two version fields** (version_name + version_code) — already there.
+- iOS rows have **one version field** (version_number); the workflow computes the build number.
+- The destination dropdown is **platform-aware**: Android shows `GooglePlay | Firebase`, iOS shows `TestFlight | AppStore`. The field is still required on every row (it ends up in the row's audit context), but the choices differ.
+
+- [ ] **Step 1: Update `types.ts`**:
+
+```ts
+// Mirror of the backend ADT — must stay in sync.
+type MobileDestination = "GooglePlay" | "Firebase" | "TestFlight" | "AppStore";
+
+// Discriminated preview (per spec §6.3).
+type VersionPreview =
+  | { app_catalog_id: number; source: "play_console";      next_version_name: string; next_version_code: number }
+  | { app_catalog_id: number; source: "app_store_connect"; next_version_number: string }
+  | { app_catalog_id: number; error: string };
+```
+
+- [ ] **Step 2: In `CreateMobileRelease.tsx`**, render per row based on `platform`:
+  - **Android row:** existing two input fields (Version Name, Version Code). Destination dropdown shows `GooglePlay | Firebase`. On preview response, pre-fill both version fields from `next_version_name` + `next_version_code`.
+  - **iOS row:** single input field labelled "Version Number". Destination dropdown shows `TestFlight | AppStore` (default `TestFlight`). On preview response, pre-fill from `next_version_number`. Show a hint: "Build number is computed by the build workflow."
+  - **Mixed selection:** render per-row, each row using its own platform's choices. Two separate destination dropdowns rendered (one set of choices per platform), or per-row dropdowns — whichever is more ergonomic. The form ends up with a mix of one-field and two-field rows. That's expected and honest.
+
+- [ ] **Step 3: In `ReleaseSummary.tsx`**, for iOS rows that have reached `MBCompleted`, show a small footnote under the status card: *"This build is now uploaded to App Store Connect. Apple's processing typically takes 5–30 min before it appears in TestFlight."* — so users understand that `COMPLETED` on iOS doesn't necessarily mean "live yet" (conservative wording; safe whether the workflow waits or not).
+
+- [ ] **Step 4: Tests** — unit-test the discriminated preview parser; smoke-test the create page rendering Android-only, iOS-only, and mixed selections; verify the destination dropdown shows the right options per platform.
+
+### Task 33: Extend `local-mobile-secrets.env.example` + `setup-mobile-local.sh` for iOS
+
+**Files:**
+- Modify: `backend/dev/local-mobile-secrets.env.example`
+- Modify: `backend/scripts/setup-mobile-local.sh`
+
+**Why:** Android already has a clean local-setup ergonomics — copy the example, fill in real values, run the script, you're done. iOS should plug into the SAME ergonomics, not create a parallel iOS-only setup. iOS adds 3 ASC secret rows to `server_config`; **no per-app values to write** (the ASC numeric app id is resolved at runtime via bundle id, see Task 30 step 9).
+
+#### Step 1: Extend the env example
+
+Append an iOS section to `backend/dev/local-mobile-secrets.env.example`, mirroring the existing GitHub App + Play Console blocks:
+
+```bash
+# ─────────────────────────────────────────────────────────────────────────────
+# App Store Connect credentials (iOS only — leave blank to skip iOS setup)
+# How to obtain: App Store Connect → Users and Access → Integrations → App
+# Store Connect API → generate an API Key with "Developer" role. Download the
+# .p8 file (you can only download it once — save it). Note the Issuer ID
+# (UUID, top of the page) and the Key ID (10-character string next to the key).
+# ─────────────────────────────────────────────────────────────────────────────
+ASC_ISSUER_ID=
+ASC_KEY_ID=
+
+# Absolute path to the downloaded .p8 file. The script reads the contents and
+# stores them in server_config.
+ASC_PRIVATE_KEY_P8_PATH=
+```
+
+**No `ASC_APP_IDS` env var.** ASC numeric app ids are resolved at runtime by `Versioning/Apple.hs` via `GET /v1/apps?filter[bundleId]=<bundle_id>` — same approach as the iOS workflow. The mapping lives nowhere on disk.
+
+No new feature flag — `MOBILE_DISPATCH_ENABLED` already covers both platforms. No iOS-specific `ENABLE_APPS` either; reuse the existing `ENABLE_APPS` list (the script enables every matching row, both platforms).
+
+#### Step 2: Extend the setup script
+
+Modify `backend/scripts/setup-mobile-local.sh` to:
+
+1. **Treat ASC values as optional.** If `ASC_ISSUER_ID` is blank → skip iOS setup with an `info` log, don't fail. This lets Android-only contributors keep using the script unchanged.
+
+2. **If ASC values are present:**
+   - Add a `validate_file ASC_PRIVATE_KEY_P8_PATH` call alongside the existing `validate_file GITHUB_APP_PRIVATE_KEY_PATH`.
+   - Read the `.p8` file contents via `cat`.
+   - Add a "BEGIN PRIVATE KEY" sanity check like the existing GH PEM check.
+   - Add three more `UPDATE server_config` rows to the existing psql block, between the Play and feature-flag lines:
+     ```sql
+     UPDATE server_config SET value = :'asc_issuer',  enabled = 1 WHERE name = 'app_store_connect_issuer_id';
+     UPDATE server_config SET value = :'asc_key_id',  enabled = 1 WHERE name = 'app_store_connect_key_id';
+     UPDATE server_config SET value = :'asc_p8',      enabled = 1 WHERE name = 'app_store_connect_private_key_p8';
+     ```
+
+3. **Final verification block (Step 8) gets one more SELECT** querying the three ASC server_config rows alongside the existing GH/Play check.
+
+The script remains idempotent and gracefully handles both Android-only and Android+iOS configurations.
+
+#### Step 3: Smoke-test the script
+
+```bash
+# Fill in ASC values in local-mobile-secrets.env, then:
+nix develop --command bash backend/scripts/setup-mobile-local.sh
+
+# Expected final-state output:
+#   - app_store_connect_* rows show <NNN chars> for the .p8 line
+#   - All three rows are enabled=1
+```
+
+> **Per-team ASC creds caveat:** the iOS workflow uses different ASC keys per app (lines 276–285 of `fastlane.yaml` hardcode a `key_id_map` and `issuer_map` for Cumta and YatriSathi, with a default for everyone else). SCC's single-creds model mirrors how Android works (one Play service account for the whole org); if your chosen ASC key doesn't have access to an app's Apple team, SCC's version resolution will fail for that app and Stage 1 will abort with `asc_app_not_found`. To avoid that, dispatch with `version_number` blank and let the workflow's per-team auto-detect do the work — i.e. drop SCC's `Versioning/Apple.hs` call for that one row, or rotate the ASC key on the team holding most apps and only fall back for the outliers. Out of v1 scope but worth flagging.
+
+### Task 34: E2E iOS verification with a sandbox TestFlight app
+
+**Files:** none (manual verification — leverages the setup script from Task 33)
+
+**Why:** Validates the full iOS loop. Can't be automated for MVP — Apple's processing is genuinely async. **Uses the same ergonomics as Android: edit `local-mobile-secrets.env`, run the script, drive the UI.**
+
+- [ ] **Step 1: Create a sandbox app in App Store Connect** (use a personal Apple developer account or a sandbox team). Under "App Information," note the **numeric app id** (e.g. `1234567890`).
+
+- [ ] **Step 2: Generate an ASC API key**
+
+In App Store Connect → Users and Access → Integrations → App Store Connect API → "+":
+- Role: **Developer** (minimum needed for `appStoreVersions` + `preReleaseVersions` reads).
+- Download the `.p8` (one-shot — save it locally, e.g. `~/.scc-secrets/AuthKey_ABC1234XYZ.p8`).
+- Note the **Issuer ID** (UUID near the top of the page) and the **Key ID** (10-char string next to the key).
+
+- [ ] **Step 3: Fill in `local-mobile-secrets.env`**
+
+```bash
+cp backend/dev/local-mobile-secrets.env.example backend/dev/local-mobile-secrets.env  # if not already
+$EDITOR backend/dev/local-mobile-secrets.env
+
+# In the iOS section:
+ASC_ISSUER_ID=<UUID>
+ASC_KEY_ID=<KEY_ID>
+ASC_PRIVATE_KEY_P8_PATH=/Users/<you>/.scc-secrets/AuthKey_<KEY_ID>.p8
+ENABLE_APPS=NammaYatri   # enables both Android + iOS rows for NammaYatri
+```
+
+Note: no `ASC_APP_IDS` — the ASC numeric app id is resolved at runtime from the row's `package_name` (bundle id).
+
+- [ ] **Step 4: Run the setup script**
+
+```bash
+nix develop --command bash backend/scripts/setup-mobile-local.sh
+```
+
+Expected: the script confirms server_config rows are updated, ASC secrets show length not content, the iOS NammaYatri row is `enabled=true`. If anything mis-validates (file not readable, bad PEM shape, etc.) the script exits with a clear `[fail]` line.
+
+- [ ] **Step 5: Verify the iOS workflow contract**
+
+You don't need to author a new workflow — `.github/workflows/fastlane.yaml` already accepts the right shape (`selected_apps`, `change_log`, `version_number`, `notify_slack`, `payload`). Just verify it points at a non-prod app + sandbox runner labels for the dogfood, or use a sandbox repo that mirrors it. Point the iOS app_catalog row at the right place:
+
+```sql
+UPDATE app_catalog
+   SET github_repo='<your-username>/scc-mobile-test',
+       workflow_path='.github/workflows/fastlane.yaml',
+       package_name='com.example.sandbox.ios'      -- bundle id of the sandbox ASC app
+ WHERE name='NammaYatri' AND platform='ios';
+```
+
+(Or set `SANDBOX_GITHUB_REPO` / `SANDBOX_WORKFLOW_PATH` in the env file and re-run the script — it has built-in sandbox redirection for the enabled rows.)
+
+- [ ] **Step 6: Drive the full flow from the UI**
+
+1. Open Mobile Releases → New Mobile Release.
+2. Select the iOS sandbox app. Verify the version preview returns `source: app_store_connect` with `next_version_number` populated. The form should show ONE input ("Version Number") for the iOS row, not two. The destination dropdown should offer `TestFlight | AppStore` (defaulting to `TestFlight`), not the Android choices.
+3. Approve + Dispatch.
+4. Watch the row pass through `MBDispatched → MBRunIdResolved → MBBuilding`. Duration depends on whether the iOS workflow waits for ASC processing — could be a few minutes (no wait) or 15–40 min (waits).
+5. Once fastlane returns success, the matrix job completes; SCC advances `MBBuilding → MBSubmittedToStore → MBTagPushed → MBCompleted` within the next runner tick.
+6. Visit `/releases/live` — the iOS row should appear in the Mobile section.
+
+- [ ] **Step 7: Test the failure paths**
+
+- Change `package_name` on the row to a bundle id Apple doesn't recognize → release aborts at Stage 1 with `asc_app_not_found` (the `GET /v1/apps?filter[bundleId]=...` call returned empty).
+- Set a wrong Key ID in the env file + re-run the script → Apple resolution fails with `asc_api_unauthorized`; fix the value, re-run, the runner picks back up on its next tick.
+- Cause fastlane to fail (e.g. wrong signing cert) → matrix job `conclusion=failure` → `MBFailed "build_failed"` (existing path, no iOS-specific handling).
+- Let the iOS job hit its `timeout-minutes` → `conclusion=cancelled` → `MBFailed "cancelled_externally"` (existing path).
+
+- [ ] **Step 8: Document successful iOS E2E**
+
+```bash
+git commit --allow-empty -m "Verified iOS mobile release E2E with sandbox TestFlight app"
+```
+
+---
+
 ## Self-review notes (the plan vs the spec)
 
 After writing this plan, I cross-referenced it against the spec sections:
@@ -3605,3 +4102,30 @@ After writing this plan, I cross-referenced it against the spec sections:
 - `loadGhCreds` in Task 15 assumes `getConfigSecret` exists in `RuntimeConfig`; if it doesn't, add a small wrapper that reads `server_config WHERE type='secret' AND name=:name`.
 
 These are all flagged with explicit notes in the relevant tasks rather than left as silent unknowns.
+
+### Phase 11 coverage (iOS extension)
+
+Added 2026-05-13, revised 2026-05-14 after reading the real iOS workflow (`fastlane.yaml`). Phase 11 is now 7 tasks (28–34) — smaller, and aligned with the workflow's actual input contract.
+
+| Spec § | Tasks |
+|---|---|
+| §2 Q&A rows iOS-1 … iOS-6 (the 6 iOS decisions) | Touched by Tasks 28–34 collectively. iOS-4 (no SCC wait for ASC processing) needs no code — it's a stance, documented. iOS-5 (workflow contract: `version_number` single field) implemented by Task 31 step 2. |
+| §3 Architecture (`Versioning.hs` dispatcher + `Versioning/{Play,Apple}.hs`; auth inlined into `Apple.hs`) | Tasks 29 (Play move), 30 (Apple client + inlined JWT + dispatcher + runtime ASC-app-id lookup via bundle id). |
+| §4 Data model — **no new column, no new status** (small ADT extension on `MobileDestination` to add `MBTestFlight` / `MBAppStore` so iOS callers have meaningful values for SCC's required `destination` field; metadata only, not read by workflows) | Task 28 (catalog seed), Task 31 Step 0 (ADT extension). |
+| §5 Lifecycle (Stage 1 via Versioning dispatcher; **Stage 3 dispatch payload branches on platform**; no new stage) | Task 31 (both stages + handler). |
+| §6 HTTP API (preview response shape differs per platform: `next_version_name`+`next_version_code` for Android, `next_version_number` for iOS) | Task 31 (HTTP handler) + Task 32 (frontend discriminated parser). |
+| §7 Frontend (per-platform version-field rendering, platform-aware destination dropdown (`TestFlight\|AppStore` for iOS), iOS completion footnote) | Task 32. |
+| §8 Migration changes appended to `0011-mobile-releases.sql` in place (no new migration file, no new column) | Task 28. |
+| §8 Phase 5 admin runbook — extends `local-mobile-secrets.env.example` + `setup-mobile-local.sh` to handle iOS (3 new ASC secrets; no per-app values) | Task 33. |
+| §8 Failure modes (`asc_app_not_found`, ASC unauthorized, fastlane fail/timeout) | Task 34 step 7 tests them. |
+| §9 Non-goals (iOS removed from deferred list; App Store production review still deferred) | Implicit — Phase 11 closes the iOS gap; production review remains out of scope. |
+
+**Known imprecisions in Phase 11** (called out at the relevant task):
+- Task 30 — the iOS buildNumber bump rule is **not** SCC's concern; the workflow's `fastlane fetch_build_number` computes it. SCC only resolves the `version_number` (semver string). The iOS workflow's own auto-version logic (lines 261–346 of `fastlane.yaml`) does a patch bump from the latest TestFlight build; SCC mirrors that pure logic in `Versioning/Apple.hs:computeNextIosVersion`.
+- Task 30 — extracting `Play.resolve` from the existing Play body so the dispatcher has symmetric branches is mechanical but touches the most-tested module. Land it in a separate commit ahead of the dispatcher itself.
+- Task 30 — JWT signing is inlined in `Versioning/Apple.hs` (matches Play's pattern). If iOS volume grows and ASC throttles, lift the signer into a separate file with IORef-backed caching — see `Mobile/Github/Auth.hs`.
+- Task 30 — **ES256 implemented (2026-05-14).** Web.JWT only supports RS/HS algorithms, so the signer is built on `cryptonite`'s `Crypto.PubKey.ECC.ECDSA` (P-256 + SHA-256) with a hand-rolled PKCS#8 .p8 parser (`asn1-encoding`) and ASN.1→raw R‖S conversion (`ecdsaSigToRaw`, RFC 7515 §3.4). No new package added; `cryptonite`, `asn1-encoding`, `asn1-types`, `base64-bytestring`, `memory` were already in the nix env, declared explicitly in `package.yaml`/`scc.cabal` so the new module can import them.
+- Task 30 — `Versioning/Apple.hs` uses a single org-wide ASC API key from `server_config`. The iOS workflow uses per-app keys (Cumta and YatriSathi have their own, default for the rest — `fastlane.yaml:276-285`). If SCC's chosen key doesn't have access to an app's Apple team, version resolution fails for that app with `asc_app_not_found`; the fallback is to skip SCC-side resolution and let the workflow's per-team auto-detect take over (i.e. dispatch with `version_number` blank). Documented in Task 33's "Per-team ASC creds caveat".
+- Task 31 — the iOS `inputs` shape (`version_number` single field, no `version_name`/`version_code`) is the load-bearing difference between platforms; a build-time test that asserts the constructed JSON has the right keys for each platform is the most valuable regression coverage.
+- **Matrix-job-name match (no preemptive change)** — `Mobile/Handlers/Release.hs:166` hardcodes `<acName>-Release`. Android jobs are named `<name>-Release` (literal suffix in `fastlane-android.yaml:74`), so the equality match in `execPollMatrixJobs` works. iOS jobs are named `<target>-<release_type>` (`fastlane.yaml:143`) where `release_type` comes from Catalyst. If Catalyst's `ios_prod` matrix uses `release_type=Release` the existing code works for iOS unchanged. **Only fix if E2E dogfood (Task 34) shows iOS rows hanging in `MBBuilding`** — at that point change `execPollMatrixJobs` from equality to prefix match (`T.isPrefixOf` on `<acName>-`). Discovered while tracing the workflow files end-to-end; flagged here so the fix is obvious if needed, not pre-applied because it may not be needed.
+- Task 34 step 5 — SCC requires that `app_catalog.workflow_path` for iOS rows points at `fastlane.yaml` (not `fastlane-ios.yaml` — different name in the real repo). The workflow already accepts the right `inputs` shape today; no changes required from the mobile team.

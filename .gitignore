@@ -52,7 +52,8 @@ frontend/.vite/
 *-service-account*.json
 *service_account*.json
 namma-yatri-*.json
-
+# App Store Connect API keys (Apple distributes as AuthKey_<KEY_ID>.p8)
+*.p8
 # ── Context (not for git) ──
 CONTEXT.md
 backend/CONTEXT.md

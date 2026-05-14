@@ -40,3 +40,25 @@ VALUES
   ('BharatTaxi',    'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android.yaml', 'in.mobility.bharatTaxi',             'Bharat Taxi (Customer Android)',     false),
   ('Lynx',          'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android.yaml', 'in.mobility.international',          'Lynx (Customer Android)',            false)
 ON CONFLICT (name, surface, platform) DO NOTHING;
+
+-- ─── iOS extension (added 2026-05-14) ───────────────────────────────
+-- Same 10 apps with platform='ios'. Workflow file is fastlane.yaml (NOT
+-- fastlane-ios.yaml — verified against nammayatri/ny-react-native's actual
+-- workflow tree). package_name holds the iOS bundle id for these rows.
+-- The ASC numeric app id is resolved at runtime via
+--   GET /v1/apps?filter[bundleId]=<bundle_id>
+-- so no extra column is needed. Disabled by default; admins enable per app.
+-- ON CONFLICT keeps this idempotent on re-run.
+INSERT INTO app_catalog (name, surface, platform, github_repo, workflow_path, package_name, display_label, enabled)
+VALUES
+  ('Cumta',         'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane.yaml', 'in.mobility.cumta',                  'Cumta (Customer iOS)',           false),
+  ('NammaYatri',    'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane.yaml', 'in.juspay.nammayatri',               'Namma Yatri (Customer iOS)',     false),
+  ('ManaYatri',     'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane.yaml', 'in.mobility.manayatri',              'Mana Yatri (Customer iOS)',      false),
+  ('Yatri',         'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane.yaml', 'net.openkochi.yatri',                'Yatri (Customer iOS)',           false),
+  ('OdishaYatri',   'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane.yaml', 'in.mobility.odishayatri',            'Odisha Yatri (Customer iOS)',    false),
+  ('YatriSathi',    'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane.yaml', 'in.juspay.yatrisathi',              'Yatri Sathi (Customer iOS)',     false),
+  ('KeralaSavaari', 'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane.yaml', 'in.mobility.keralasavaariconsumer',  'Kerala Savaari (Customer iOS)',  false),
+  ('Bridge',        'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane.yaml', 'com.mobility.bridge',                'Bridge (Customer iOS)',          false),
+  ('BharatTaxi',    'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane.yaml', 'in.mobility.bharatTaxi',             'Bharat Taxi (Customer iOS)',     false),
+  ('Lynx',          'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane.yaml', 'in.mobility.international',          'Lynx (Customer iOS)',            false)
+ON CONFLICT (name, surface, platform) DO NOTHING;
