@@ -40,6 +40,7 @@ module Products.Autopilot.Mobile.Workflow (
 ) where
 
 import Control.Exception (Exception, SomeException, fromException, throwIO, try)
+import qualified Control.Monad.Catch as MC
 import Control.Monad (when)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
@@ -96,10 +97,8 @@ import Products.Autopilot.Mobile.Types (
  )
 import Products.Autopilot.Mobile.Types.Storage (AppCatalogT (..))
 import Products.Autopilot.Mobile.Versioning (
-    PlayApiError,
-    computeNextVersion,
-    fetchPlayTracks,
-    loadPlayCreds,
+    VersionResolution (..),
+    resolveNextVersion,
  )
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
@@ -232,6 +231,42 @@ hasExternalRunId rs = case mobileTarget rs of
         Nothing -> False
     Nothing -> False
 
+{- | Classify an error tag produced by "Versioning.resolveNextVersion" (or
+its sub-resolvers in @Versioning.Play@ / @Versioning.Apple@) as either a
+configuration error (terminal — caller should @abort@) or a transient
+runtime error (caller should @retry@).
+
+Configuration errors mean the operator needs to do something out-of-band
+(populate @server_config@, fix @app_catalog.package_name@, etc.). Looping
+on @retry@ for these wastes runner ticks and hides the problem from the
+release row's audit trail — by the time anyone notices, the row has
+been "INPROGRESS" silently for hours.
+
+Pattern-matched substrings cover both platforms:
+
+* @"_not_configured"@ / @"creds_missing"@ — missing server_config rows.
+* @"_app_not_found:"@ / @"_package_not_found:"@ — wrong / missing
+  bundle id / package name in @app_catalog@.
+* @"unsupported platform: "@ — unknown @platform@ column value.
+* @"asc_app_id"@ / @"package_name"@ — earlier-stage guards that hit
+  these specific tags also belong here.
+
+Anything else (HTTP 5xx, 401 from transient creds rotation, etc.) is
+treated as transient and retried.
+-}
+isConfigError :: T.Text -> Bool
+isConfigError tag =
+    any
+        (`T.isInfixOf` tag)
+        [ "_not_configured"
+        , "creds_missing"
+        , "_app_not_found"
+        , "_package_not_found"
+        , "unsupported platform"
+        , "no package_name"
+        , "asc_app_id"
+        ]
+
 {- | Total ordering on @MobileBuildWFStatus@ for skip-guard checks.
 
 The constructors are not Ord-derivable because @MBFailed Text@ carries
@@ -255,20 +290,24 @@ mbStatusOrder = \case
 
 -- ─── Stage executors ───────────────────────────────────────────────
 
-{- | Stage 1: Resolve next version via Play Console.
+{- | Stage 1: Resolve next version via the platform-appropriate backend.
 
-* Loads the Play service-account credentials.
-* Looks up the AppCatalog row to get the @package_name@.
-* Calls 'fetchPlayTracks' → (internal, production) tracks.
-* Computes next version + code via the existing pure helper.
-* Writes results to both @releaseTracker.newVersion@ and
-  @targetState.mbContext.versionCode@.
+Delegates to "Mobile.Versioning"'s dispatcher (`resolveNextVersion`),
+which picks Play Console for @platform="android"@ or App Store Connect
+for @platform="ios"@. Returns a 'VersionResolution' sum:
+
+* 'AndroidVersion' — carries both @vName@ and @vCode@; we write both
+  to the tracker (existing behaviour).
+* 'IosVersion' — carries only @vNumber@; @mbcVersionCode@ stays
+  'Nothing'. The iOS workflow's @fastlane fetch_build_number@ computes
+  the build number, and we recover it later from the pushed tag's
+  @+NNN@ suffix in the @ConfirmTag@ stage.
 
 Failure modes:
 
-* Missing Play credentials or @package_name@ — abort with a domain
-  error (not retryable; user must fix server_config / app_catalog).
-* Play API error — surface as retriable so the next tick retries.
+* Missing credentials or @package_name@ / bundle id — abort with a
+  domain error (not retryable; user must fix server_config / app_catalog).
+* Backend API hiccups — surface as retriable so the next tick retries.
 -}
 execResolveVersion :: forall m. (StageM ReleaseState m) => m StageOutcome
 execResolveVersion = mobileStage "ResolveVersion" $ do
@@ -282,38 +321,72 @@ execResolveVersion = mobileStage "ResolveVersion" $ do
                 "AppCatalog row for "
                     <> appGroup rt
                     <> " has no package_name; cannot resolve next version"
-    mCreds <- loadPlayCreds
-    creds <- case mCreds of
-        Just c -> pure c
-        Nothing -> abort "play_console_service_account_json not configured in server_config"
-    res <- fetchPlayTracks creds pkgName
-    (internal, production) <- case res of
-        Right ts -> pure ts
-        Left (e :: PlayApiError) ->
-            -- Retriable: Play API hiccups happen; the runner ticks again.
-            retry ("fetchPlayTracks failed: " <> T.pack (show e))
-    let (nextName, nextCode) = computeNextVersion internal production
-    logInfoIO $
-        "[ResolveVersion] "
-            <> releaseId rt
-            <> " resolved version "
-            <> nextName
-            <> " (code "
-            <> T.pack (show nextCode)
-            <> ")"
-    -- Both updates are idempotent: writing the same values again is a no-op.
-    modify $ \s ->
-        let rt' = (releaseTracker s){newVersion = nextName}
-            ts' =
-                applyMobileTarget s $ \mt ->
-                    mt
-                        { mbContext = (mbContext mt){mbcVersionCode = Just nextCode}
-                        , mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
-                        }
-         in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
-    logEvent (releaseId rt) "VERSION_RESOLVED" $
-        object ["version_name" .= nextName, "version_code" .= nextCode]
-    pure StageSuccess
+    res <- resolveNextVersion (acPlatform ac) pkgName
+    case res of
+        Left err
+            -- Configuration errors are NOT retriable — the runner would
+            -- loop forever waiting for the operator to update server_config
+            -- without ever surfacing the problem on the release row.
+            -- Abort with the stable error tag so the row transitions to
+            -- MBFailed and the UI shows it as ABORTED with a clear cause.
+            -- Patterns matched here cover both Play and Apple variants:
+            --   - "<*>_not_configured", "<*>_creds_missing"
+            --   - "asc_app_not_found:..." / "play_package_not_found:..."
+            --   - "unsupported platform: ..."
+            -- API hiccups (asc_http_error, play_unauthorized, etc.) still
+            -- flow through retry so transient outages recover on their own.
+            | isConfigError err -> abort err
+            | otherwise -> retry err
+        Right (AndroidVersion nextName nextCode) -> do
+            logInfoIO $
+                "[ResolveVersion] "
+                    <> releaseId rt
+                    <> " resolved Android version "
+                    <> nextName
+                    <> " (code "
+                    <> T.pack (show nextCode)
+                    <> ")"
+            -- Both updates are idempotent: writing the same values again is a no-op.
+            modify $ \s ->
+                let rt' = (releaseTracker s){newVersion = nextName}
+                    ts' =
+                        applyMobileTarget s $ \mt ->
+                            mt
+                                { mbContext = (mbContext mt){mbcVersionCode = Just nextCode}
+                                , mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
+                                }
+                 in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
+            logEvent (releaseId rt) "VERSION_RESOLVED" $
+                object
+                    [ "version_name" .= nextName
+                    , "version_code" .= nextCode
+                    , "source" .= ("play_console" :: T.Text)
+                    ]
+            pure StageSuccess
+        Right (IosVersion nextNumber) -> do
+            logInfoIO $
+                "[ResolveVersion] "
+                    <> releaseId rt
+                    <> " resolved iOS version_number "
+                    <> nextNumber
+                    <> " (build number computed by workflow)"
+            -- iOS rows: only newVersion is written. mbcVersionCode stays
+            -- Nothing — the workflow computes it via fastlane and we read
+            -- it later from the pushed tag in ConfirmTag.
+            modify $ \s ->
+                let rt' = (releaseTracker s){newVersion = nextNumber}
+                    ts' =
+                        applyMobileTarget s $ \mt ->
+                            mt
+                                { mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
+                                }
+                 in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
+            logEvent (releaseId rt) "VERSION_RESOLVED" $
+                object
+                    [ "version_number" .= nextNumber
+                    , "source" .= ("app_store_connect" :: T.Text)
+                    ]
+            pure StageSuccess
 
 {- | Stage 2: Acquire the dispatch-group advisory lock.
 
@@ -384,7 +457,16 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
     rs <- gets id
     let rt = releaseTracker rs
     ac <- appCatalogForRow rt
-    creds <- loadGhCreds
+    -- 'loadGhCreds' throws 'InternalError' when any of the three
+    -- @github_app_*@ rows are blank (see Mobile/Github/Auth.hs:147-149).
+    -- That exception would otherwise bubble up to forkFlow's safety net
+    -- and get silently logged — leaving the row stuck at @MBVersionResolved@
+    -- forever. Catch it here and abort with a stable error tag so the row
+    -- transitions to MBFailed and the UI surfaces the cause clearly.
+    eCreds <- MC.try @_ @SomeException loadGhCreds
+    creds <- case eCreds of
+        Right c -> pure c
+        Left _ -> abort "github_app_credentials_not_configured"
     mDid <- findDispatchIdForRelease (releaseId rt)
     dispatchId <- case mDid of
         Just d | not (T.null d) -> pure d
@@ -398,28 +480,48 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
         Nothing -> abort "MobileBuildState missing at DispatchWorkflow stage"
     let -- selected_apps is the comma-separated list of catalyst app NAMES
         -- (e.g. "NammaYatri,KeralaSavaari"), not surfaces. The workflow
-        -- passes this to `catalyst -extract android_prod --apps` which
-        -- matches on the top-level keys of catalyst.yaml.
+        -- passes this to `catalyst -extract <platform>_prod --apps` which
+        -- matches on the top-level keys of catalyst.yaml. Same shape on
+        -- Android and iOS workflows.
         selectedApps =
             T.intercalate "," $
                 map (acName . snd) (sortOn (acName . snd) siblings)
         versionName = newVersion rt
+        -- Only meaningful for Android rows. iOS rows have versionCode = 0
+        -- here because the iOS workflow's `fastlane fetch_build_number`
+        -- computes the build number internally; we never send it.
         versionCode = case mbcVersionCode (mbContext target) of
             Just c -> c
-            Nothing -> 0 -- ResolveVersion guarantees this is set; defensive default.
+            Nothing -> 0
     -- NOTE: We deliberately do NOT pass the workflow's `payload` input. The
     -- workflow's Set-Matrix step treats any non-empty payload as a full matrix
     -- envelope (`echo "$PAYLOAD" | jq -c '.matrices'`) and bypasses the
     -- selected_apps + catalyst path. SCC matches runs by actor + created_at
     -- window in ResolveRunId, not by an in-payload nonce.
     dispatchedAt <- liftIO getCurrentTime
+    -- Build the workflow_dispatch inputs map. Two different shapes — the
+    -- Android workflow declares `version_name` + `version_code` (two fields),
+    -- the iOS workflow declares `version_number` (one field, semver string;
+    -- the workflow computes the build number itself). Inputs not declared
+    -- by a workflow are silently ignored by GitHub, but we keep the maps
+    -- tight so the dispatch payload is honest about what each platform
+    -- actually consumes.
     let inputs =
-            KM.fromList
-                [ ("selected_apps", Aeson.String selectedApps)
-                , ("version_name", Aeson.String versionName)
-                , ("version_code", Aeson.String (T.pack (show versionCode)))
-                , ("change_log", Aeson.String (mbcChangeLog (mbContext target)))
-                ]
+            case acPlatform ac of
+                "ios" ->
+                    KM.fromList
+                        [ ("selected_apps", Aeson.String selectedApps)
+                        , ("version_number", Aeson.String versionName)
+                        , ("change_log", Aeson.String (mbcChangeLog (mbContext target)))
+                        ]
+                _ ->
+                    -- Android (default; "android" or anything legacy).
+                    KM.fromList
+                        [ ("selected_apps", Aeson.String selectedApps)
+                        , ("version_name", Aeson.String versionName)
+                        , ("version_code", Aeson.String (T.pack (show versionCode)))
+                        , ("change_log", Aeson.String (mbcChangeLog (mbContext target)))
+                        ]
         body =
             WorkflowDispatchReq
                 { wdrRef = "main"

@@ -16,7 +16,20 @@ export type AppCatalogEntry = {
   createdAt: string;
 };
 
-export type MobileDestination = 'GooglePlay' | 'Firebase';
+// Mirror of the backend ADT. Android destinations on the left, iOS on the
+// right — must stay in sync with `MobileDestination` in
+// `backend/src/Products/Autopilot/Mobile/Types.hs`.
+export type MobileDestination =
+  | 'GooglePlay' // Android: Google Play production track.
+  | 'Firebase' // Android: Firebase App Distribution.
+  | 'TestFlight' // iOS: TestFlight beta channel.
+  | 'AppStore'; // iOS: App Store (production).
+
+/** UI helper: which destinations are valid for a given platform. */
+export const destinationsForPlatform = (
+  platform: 'android' | 'ios',
+): MobileDestination[] =>
+  platform === 'ios' ? ['TestFlight', 'AppStore'] : ['GooglePlay', 'Firebase'];
 
 export type CreateMobileReleasesItem = {
   appCatalogId: number;
@@ -45,10 +58,23 @@ export type DispatchInfo = {
 
 export type DispatchMobileReleasesResp = { dispatches: DispatchInfo[] };
 
+/**
+ * One row in the `/mobile/versions/preview` response.
+ *
+ * Discriminated by which fields are set, matching the backend's per-platform
+ * response shape:
+ *
+ *  - Android success: `nextVersionName` + `nextVersionCode` + `source = "play_console"`.
+ *  - iOS success: `nextVersionNumber` + `source = "app_store_connect"`.
+ *  - Error: `err` carries the stable tag from the resolver.
+ */
 export type VersionPreviewItem = {
   appCatalogId: number;
+  // Android — two fields
   nextVersionName?: string;
   nextVersionCode?: number;
+  // iOS — one field (build number is computed by the workflow itself)
+  nextVersionNumber?: string;
   source?: string;
   err?: string;
 };

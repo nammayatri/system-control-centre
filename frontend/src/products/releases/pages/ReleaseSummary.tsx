@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useRefreshAnimation } from '../../../shared/hooks';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../../core/auth/AuthContext';
 import {
@@ -740,6 +740,21 @@ const MobileReleaseDetailSection: React.FC<{
         )}
       </div>
 
+      {/* iOS-only completion footnote. SCC marks the row COMPLETED when the
+          GH workflow finishes — but on iOS, Apple's TestFlight processing is
+          asynchronous on Apple's side. So COMPLETED here means "uploaded to
+          ASC, processing pending", not necessarily "live in TestFlight". This
+          footnote tells users not to be alarmed when the build doesn't appear
+          in TestFlight immediately. Conservative wording — safe whether the
+          workflow waits for processing internally or not. See spec §iOS-4. */}
+      {release.env === 'ios' && release.status === 'COMPLETED' && (
+        <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-xs text-blue-900 leading-relaxed">
+          <strong className="font-semibold">iOS note:</strong>{' '}
+          This build is now uploaded to App Store Connect. Apple's processing
+          typically takes 5–30 min before it appears in TestFlight.
+        </div>
+      )}
+
       <div className="mt-4">
         <h4 className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">Workflow Stages</h4>
         {stageEvents.length === 0 ? (
@@ -763,9 +778,29 @@ const MobileReleaseDetailSection: React.FC<{
 const ReleaseSummary: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'env-diff' | 'json'>('summary');
 
   const { data: release, isLoading, isFetching, error, refetch } = useRelease(id);
+
+  // Self-correcting sidebar tile: when this page loads a MobileBuild
+  // release at the bare `/releases/:id` URL (no `?category=mobile`), the
+  // ProductLayout's longest-prefix match picks the Backend Releases tile
+  // and the sidebar shows Backend nav items. Once the data loads and we
+  // know it's actually a mobile release, rewrite the URL to add
+  // `?category=mobile` so findCurrentProduct switches to the Mobile tile.
+  // useNavigate's `replace: true` keeps the back-stack clean.
+  useEffect(() => {
+    if (!release) return;
+    if (release.tracker_type !== 'MobileBuild') return;
+    const params = new URLSearchParams(location.search);
+    if (params.get('category') === 'mobile') return;
+    params.set('category', 'mobile');
+    navigate(
+      { pathname: location.pathname, search: `?${params.toString()}`, hash: location.hash },
+      { replace: true },
+    );
+  }, [release, location.pathname, location.search, location.hash, navigate]);
   const { data: events = [] } = useReleaseEvents(id);
   const qc = useQueryClient();
   const { user: authUser } = useAuth();

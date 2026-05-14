@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X, SlidersHorizontal, Server, Smartphone } from 'lucide-react';
+import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X, SlidersHorizontal, Server, Smartphone, Layers } from 'lucide-react';
 import { useReleases } from '../hooks';
 import { useRefreshAnimation } from '../../../shared/hooks';
 import { StatusBadge } from '../components/StatusBadge';
@@ -426,7 +426,7 @@ const ListRelease: React.FC = () => {
           </button>
 
           <PermissionGate product="autopilot" permission="RELEASE_CREATE">
-            <Link to="/releases/new">
+            <Link to={category == 'mobile' ? "/releases/mobile/new": "/releases/new"}>
               <Button size="sm"><Plus className="w-4 h-4" /> Create Release</Button>
             </Link>
           </PermissionGate>
@@ -463,6 +463,13 @@ const ListRelease: React.FC = () => {
                     // user-facing labels — matches what was inserted in
                     // insertMobileTracker (rtAppGroup=acName, rtService=acSurface,
                     // rtEnv=acPlatform).
+                    // Mobile rows pass `?category=mobile` so the ProductLayout
+                    // sidebar resolves to the Mobile Releases tile (otherwise
+                    // /releases/:id matches the longest backend route prefix and
+                    // shows the Backend sidebar).
+                    const releaseHref = isMobile
+                      ? `/releases/${release.id}?category=mobile`
+                      : `/releases/${release.id}`;
                     return (
                       <tr
                         key={release.id}
@@ -470,7 +477,7 @@ const ListRelease: React.FC = () => {
                           'border-b border-zinc-100 hover:bg-zinc-100 cursor-pointer transition-colors duration-150',
                           index % 2 === 1 ? 'bg-zinc-50' : 'bg-white'
                         )}
-                        onClick={() => navigate(`/releases/${release.id}`)}
+                        onClick={() => navigate(releaseHref)}
                       >
                         <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + index + 1}</td>
                         <td className="py-3 px-4">
@@ -509,6 +516,25 @@ const ListRelease: React.FC = () => {
                         <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatISODate(release.date_created)}</td>
                         <td className="py-3 px-4 text-center">
                           <div className="inline-flex items-center gap-0.5">
+                            {/* Mobile rows only: link to the release group. The page
+                                at /release-groups/<id> has no sidebar entry and is
+                                otherwise only reachable on the redirect after
+                                creating a release; this row-level button is the
+                                primary discovery path. */}
+                            {isMobile && release.release_context?.release_group_id && (
+                              <SimpleTooltip content="Open release group">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    navigate(`/release-groups/${release.release_context!.release_group_id}`);
+                                  }}
+                                  className="p-1.5 rounded-lg text-zinc-400 hover:text-violet-700 hover:bg-violet-50 transition-colors duration-150 cursor-pointer"
+                                  aria-label="Open release group"
+                                >
+                                  <Layers className="w-3.5 h-3.5" />
+                                </button>
+                              </SimpleTooltip>
+                            )}
                             <SimpleTooltip content="Clone release">
                               <button
                                 onClick={(e) => { e.stopPropagation(); navigate(`/releases/${release.id}/clone`); }}
@@ -548,10 +574,15 @@ const ListRelease: React.FC = () => {
               {paginatedReleases.map((release) => {
                 const isRevert = release.release_context?.revert === 1;
                 const isMobile = release.tracker_type === 'MobileBuild';
+                // Same `?category=mobile` mechanism as the desktop table —
+                // keeps the sidebar tile correct after the click.
+                const releaseHref = isMobile
+                  ? `/releases/${release.id}?category=mobile`
+                  : `/releases/${release.id}`;
                 return (
                   <div
                     key={release.id}
-                    onClick={() => navigate(`/releases/${release.id}`)}
+                    onClick={() => navigate(releaseHref)}
                     className="p-4 cursor-pointer hover:bg-zinc-50 transition-colors active:bg-zinc-100"
                   >
                     <div className="flex items-start justify-between gap-3 mb-2">
@@ -572,6 +603,18 @@ const ListRelease: React.FC = () => {
                         </div>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
+                        {isMobile && release.release_context?.release_group_id && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate(`/release-groups/${release.release_context!.release_group_id}`);
+                            }}
+                            className="w-9 h-9 rounded-lg flex items-center justify-center text-zinc-400 hover:text-violet-700 hover:bg-violet-50"
+                            aria-label="Open release group"
+                          >
+                            <Layers className="w-4 h-4" />
+                          </button>
+                        )}
                         <button
                           onClick={(e) => { e.stopPropagation(); navigate(`/releases/${release.id}/clone`); }}
                           className="w-9 h-9 rounded-lg flex items-center justify-center text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100"
