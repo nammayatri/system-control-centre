@@ -16,6 +16,8 @@ module Products.Autopilot.RuntimeConfig (
     getABHSAllowedTimeDiffMins,
     isSyncClusterEnabled,
     isMultiReleasePerProduct,
+    isStoreSyncEnabled,
+    getStoreSyncIntervalMinutes,
     isUnderMaintenance,
     -- Delays / numeric (MonadFlow versions)
     getReleaseWatchDelay,
@@ -204,6 +206,12 @@ always blocked regardless.
 -}
 isMultiReleasePerProduct :: (MonadFlow m) => m Bool
 isMultiReleasePerProduct = getConfigBoolForProduct "multi_release_per_product" (Just "autopilot") False
+
+isStoreSyncEnabled :: (MonadFlow m) => m Bool
+isStoreSyncEnabled = getConfigBoolForProduct "store_sync_enabled" (Just "autopilot") False
+
+getStoreSyncIntervalMinutes :: (MonadFlow m) => m Int
+getStoreSyncIntervalMinutes = getConfigIntForProduct "store_sync_interval_minutes" (Just "autopilot") 30
 
 -- | Reads @ap_under_maintenance@ from server_config ({"ap_under_maintenance":bool}).
 isUnderMaintenance :: (MonadFlow m) => m Bool

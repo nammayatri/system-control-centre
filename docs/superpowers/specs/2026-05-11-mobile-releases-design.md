@@ -32,7 +32,7 @@ Goal: bring mobile releases under SCC, presenting them in the same UI alongside 
 | 8 | App catalog source | **Manual SCC table** (`app_catalog`), seeded from `catalyst.yaml`. |
 | Arch | Architecture approach | **Approach A — extend existing tables, single product slug.** Per user direction: "It is supposed to be a single tool for releases." |
 | Auto-version | Where Play API is called | **Move into SCC.** New module `Mobile/Versioning.hs`. Workflow's existing auto-detect step is bypassed when `inputs.version_name` + `inputs.version_code` are passed. |
-| GH auth | Authentication mechanism | **GitHub App.** Stored as App ID + private key + installation ID in `server_config`; SCC mints short-lived installation tokens. |
+| GH auth | Authentication mechanism | **GitHub App.** Stored as App ID + private key + installation ID in `server_config`; SCC mints short-lived installation tokens. JWT `iat` is backdated 60 s and `exp` set to 9 min (not 10) to tolerate clock drift between SCC and GitHub servers. |
 | **iOS-1** | **iOS version source** | **App Store Connect API.** Existing `Mobile/Versioning.hs` becomes a thin dispatcher over `Versioning/Play.hs` (renamed from today's content) + new `Versioning/Apple.hs` (App Store Connect client). JWT auth with ES256 + a `.p8` private key — **inlined into `Versioning/Apple.hs`** to match Play's shape (Play also signs its JWT inline in the same file). No separate auth module. ES256 is signed natively via `cryptonite`'s ECDSA P-256 (`Web.JWT` only does RS/HS); PKCS#8 .p8 keys are parsed with `asn1-encoding`; ASN.1 ECDSA signatures are converted to JWS raw `R‖S` wire format inline. No new package dependency. `Stage 1 (ResolveVersion)` calls the dispatcher — branching lives inside `Versioning.hs`, not in each caller. |
 | **iOS-2** | **iOS destinations** | **Extend `MobileDestination` with `MBTestFlight` and `MBAppStore`.** Important nuance: `MobileDestination` is **metadata only** — neither the Android workflow nor the iOS workflow reads it (verified by grep). But SCC's own create API (`CreateMobileReleasesReq.destination`) requires the field. Without iOS variants, iOS callers would be forced to pass `MBGooglePlay`/`MBFirebase` as placeholders, which corrupts the audit log. Adding the two iOS variants gives iOS callers correct values to pass and lets the UI render an appropriate dropdown per platform. The workflow continues to ignore the field — SCC is not gating any behavior on it. If the team later wants the iOS workflow to read this and route between TestFlight/AppStore lanes, the field is already in place. |
 | **iOS-3** | **iOS app identifier** | Repurpose `package_name` to hold either an Android package name (`in.juspay.nammayatri`) or an iOS bundle id (`in.juspay.nammayatri.ios`). The Versioning module is the only thing that interprets it. **No new `asc_app_id` column** — SCC looks up the App Store Connect numeric app id at runtime via `GET /v1/apps?filter[bundleId]=<bundle_id>`, mirroring the iOS workflow's own approach (`fastlane.yaml:304-312`). Avoids per-row drift between SCC's catalog and ASC. |
@@ -51,7 +51,7 @@ backend/src/Products/Autopilot/Mobile/
   Types.hs                    MobileBuildContext, MobileBuildTargetState, MobileBuildWFStatus,
                               MobileDestination (+ MBTestFlight, MBAppStore for iOS — metadata only, not read by workflow)
   Github.hs                   GH App auth, workflow_dispatch, list runs, jobs, refs
-  Github/Auth.hs              GH App JWT + installation token cache
+  Github/Auth.hs              GH App JWT (iat−60s, exp=9min for clock-drift tolerance) + installation token cache
   Versioning.hs               Thin dispatcher: branches on AppCatalog.platform.
                               Re-exports the public surface of both backends.
   Versioning/Play.hs          ← Renamed from old Versioning.hs. Play Console client (Android)
@@ -347,6 +347,7 @@ User-action "dispatch these N rows" maps to:
 | `workflow_dispatch` returns non-2xx | 4xx/5xx from GH API | Retry once; on second fail → `MBFailed "dispatch"` |
 | Run lookup never finds nonce | Timeout after 5 min in `ResolveRunId` | `MBFailed "run_lookup_timeout"`; manual override path: operator PATCHes `external_run_id` |
 | Matrix job fails | `conclusion=failure` from GH | `MBFailed "build_failed"` with link to GH job logs |
+| GH App token refresh fails during polling (clock drift, transient 401) | `InternalError` from `getInstallationToken` | Post-dispatch stages (4–6) use `loadGhCredsSafe` which catches the error and converts it to a retriable wait. JWT `iat` is backdated 60 s and `exp` set to 9 min to prevent clock-drift rejections in the first place. |
 | SCC crashes mid-build | Next runner tick observes orphan INPROGRESS row | Resume — stage guards skip completed stages |
 | GH run cancelled outside SCC | `conclusion=cancelled` | `MBFailed "cancelled_externally"` |
 | Tag never appears (uploaded but no tag) | `ConfirmTag` polls ~5 min then gives up | Mark `MBCompleted` but emit `BUSINESS / TAG_MISSING` event |

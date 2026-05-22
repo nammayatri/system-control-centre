@@ -1,21 +1,24 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, Smartphone, Apple, Cpu } from 'lucide-react';
+import { AlertTriangle, Smartphone, Apple, Cpu, GitBranch, ChevronDown, Search } from 'lucide-react';
 import {
   useMobileApps,
+  useMobileBranches,
   usePreviewVersions,
   useCreateMobileReleases,
 } from '../../hooks';
 import type {
   AppCatalogEntry,
+  BranchInfo,
+  BuildType,
   CreateMobileReleasesItem,
   CreateMobileReleasesReq,
-  MobileDestination,
+  LatestBuild,
   VersionPreviewItem,
 } from '../../types';
-import { destinationsForPlatform } from '../../types';
+import { destinationFor } from '../../types';
 import { Button } from '../../../../shared/ui/button';
-import { Textarea, SelectInput } from '../../../../shared/ui/input';
+import { Textarea } from '../../../../shared/ui/input';
 import { Skeleton } from '../../../../shared/ui/skeleton';
 import { cn } from '../../../../lib/utils';
 import { toast } from 'sonner';
@@ -30,6 +33,32 @@ const PlatformIcon = ({ platform }: { platform: string }) =>
     ? <Apple className="w-4 h-4 text-zinc-500" />
     : <Cpu className="w-4 h-4 text-emerald-600" />;
 
+const formatShort = (d: string) => {
+  const date = new Date(d);
+  if (isNaN(date.getTime())) return '';
+  return date.toLocaleDateString('en-IN', { month: 'short', day: '2-digit' });
+};
+
+const LatestBuildBadge = ({ build, label }: { build: LatestBuild; label: string }) => (
+  <span
+    className={cn(
+      'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium',
+      label === 'debug'
+        ? 'bg-amber-50 text-amber-700 border border-amber-200'
+        : 'bg-emerald-50 text-emerald-700 border border-emerald-200',
+    )}
+  >
+    <span className="uppercase">{label}</span>
+    <span className="font-mono">v{build.version}</span>
+    {build.versionCode != null && (
+      <span className="text-[9px] opacity-70">+{build.versionCode}</span>
+    )}
+    {build.completedAt && (
+      <span className="opacity-60">{formatShort(build.completedAt)}</span>
+    )}
+  </span>
+);
+
 export default function CreateMobileRelease() {
   const navigate = useNavigate();
   const { data: apps, isLoading: appsLoading, error: appsError } = useMobileApps();
@@ -40,6 +69,39 @@ export default function CreateMobileRelease() {
     () => (apps || []).filter((a) => a.enabled),
     [apps],
   );
+
+  const [sourceRef, setSourceRef] = useState<string>('main');
+  const [branchSearch, setBranchSearch] = useState('main');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [branchDropdownOpen, setBranchDropdownOpen] = useState(false);
+  const branchInputRef = useRef<HTMLInputElement>(null);
+  const branchContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const q = branchSearch.trim();
+      setDebouncedSearch(q.length >= 2 ? q : '');
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [branchSearch]);
+
+  const { data: branchesData, isLoading: branchesLoading } = useMobileBranches(
+    debouncedSearch || undefined,
+  );
+  const filteredBranches: BranchInfo[] = branchesData ?? [];
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (branchContainerRef.current && !branchContainerRef.current.contains(e.target as Node)) {
+        setBranchDropdownOpen(false);
+        if (!branchSearch.trim()) {
+          setBranchSearch(sourceRef);
+        }
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [branchSearch, sourceRef]);
 
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   // Debounced selection feeds the preview query so toggling several apps in
@@ -56,7 +118,7 @@ export default function CreateMobileRelease() {
 
   const [versionEdits, setVersionEdits] = useState<Record<number, VersionEdit>>({});
   const [changeLog, setChangeLog] = useState('');
-  const [destination, setDestination] = useState<MobileDestination>('GooglePlay');
+  const [buildType, setBuildType] = useState<BuildType>('release');
 
   // Lookup helper used by every per-row branch below: given an app catalog id,
   // tell us if it's an iOS row. iOS rows render a single "Version Number"
@@ -75,33 +137,16 @@ export default function CreateMobileRelease() {
     return s;
   }, [selectedIds, enabledApps]);
 
-  // Destination dropdown options — depend on the selection's platforms.
-  // Mixed selections show all four so the user can pick a value that lands
-  // on every row's audit context (the field is required by the create API
-  // regardless of platform — see spec §iOS-2).
-  const destinationOptions = useMemo(() => {
-    if (selectedPlatforms.size === 0) return destinationsForPlatform('android');
-    if (selectedPlatforms.size === 1 && selectedPlatforms.has('ios')) {
-      return destinationsForPlatform('ios');
-    }
-    if (selectedPlatforms.size === 1 && selectedPlatforms.has('android')) {
-      return destinationsForPlatform('android');
-    }
-    // Mixed — show all four
-    return [
-      ...destinationsForPlatform('android'),
-      ...destinationsForPlatform('ios'),
-    ];
-  }, [selectedPlatforms]);
-
-  // If the destination is no longer valid for the current selection (e.g.
-  // user toggled from android-only to ios-only), reset to a sensible
-  // default for the new platform set.
-  useEffect(() => {
-    if (!destinationOptions.includes(destination)) {
-      setDestination(destinationOptions[0]);
-    }
-  }, [destinationOptions, destination]);
+  // Derive the destination per-platform from the build type. For mixed
+  // selections (android + ios), each row gets its own destination at
+  // submit time — the API field uses the first selected platform's value
+  // as the top-level destination (per-row destination is what matters for
+  // workflow path resolution on the backend).
+  const primaryPlatform: 'android' | 'ios' =
+    selectedPlatforms.has('ios') && !selectedPlatforms.has('android')
+      ? 'ios'
+      : 'android';
+  const destination = destinationFor(buildType, primaryPlatform);
 
   // When a fresh preview lands, prefill any unedited rows with the suggested
   // version. Don't clobber values the user has already typed. Per-platform:
@@ -149,25 +194,28 @@ export default function CreateMobileRelease() {
   // Submission validity: at least one app, every selected app has a non-empty
   // version name (Android: + numeric code; iOS: no code — workflow computes
   // the build number), and a non-empty changelog.
+  const isDebug = buildType === 'debug';
+
   const validation = useMemo(() => {
     if (selectedIds.length === 0) return { ok: false, reason: 'Select at least one app' };
     if (!changeLog.trim()) return { ok: false, reason: 'Change log is required' };
-    for (const id of selectedIds) {
-      const v = versionEdits[id];
-      const ios = isIosId(id);
-      const fieldLabel = ios ? 'version number' : 'version name';
-      if (!v?.versionName.trim()) {
-        return { ok: false, reason: `All selected apps need a ${fieldLabel}` };
-      }
-      // iOS: code is computed by the workflow — no input required.
-      if (!ios) {
-        if (v.versionCode.trim() === '' || !/^\d+$/.test(v.versionCode.trim())) {
-          return { ok: false, reason: 'Android rows need a numeric version code' };
+    if (!isDebug) {
+      for (const id of selectedIds) {
+        const v = versionEdits[id];
+        const ios = isIosId(id);
+        const fieldLabel = ios ? 'version number' : 'version name';
+        if (!v?.versionName.trim()) {
+          return { ok: false, reason: `All selected apps need a ${fieldLabel}` };
+        }
+        if (!ios) {
+          if (v.versionCode.trim() === '' || !/^\d+$/.test(v.versionCode.trim())) {
+            return { ok: false, reason: 'Android rows need a numeric version code' };
+          }
         }
       }
     }
     return { ok: true as const };
-  }, [selectedIds, versionEdits, changeLog, enabledApps]);
+  }, [selectedIds, versionEdits, changeLog, enabledApps, isDebug]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -176,19 +224,21 @@ export default function CreateMobileRelease() {
       return;
     }
     const items: CreateMobileReleasesItem[] = selectedIds.map((id) => {
+      if (isDebug) {
+        return { appCatalogId: id, versionName: null, versionCode: null };
+      }
       const v = versionEdits[id];
       const ios = isIosId(id);
       return {
         appCatalogId: id,
         versionName: v.versionName.trim(),
-        // iOS rows send `null` so the backend leaves mbcVersionCode unset;
-        // the workflow's `fastlane fetch_build_number` resolves it later.
         versionCode: ios ? null : parseInt(v.versionCode, 10),
       };
     });
     const req: CreateMobileReleasesReq = {
       changeLog: changeLog.trim(),
       destination,
+      sourceRef: sourceRef && sourceRef !== 'main' ? sourceRef : null,
       items,
     };
     try {
@@ -267,6 +317,16 @@ export default function CreateMobileRelease() {
                           <div className="text-xs text-zinc-500 truncate">
                             {app.surface} · {app.platform}
                           </div>
+                          {(app.latestReleaseBuild || app.latestDebugBuild) && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {app.latestReleaseBuild && (
+                                <LatestBuildBadge build={app.latestReleaseBuild} label="release" />
+                              )}
+                              {app.latestDebugBuild && (
+                                <LatestBuildBadge build={app.latestDebugBuild} label="debug" />
+                              )}
+                            </div>
+                          )}
                         </div>
                       </label>
                     </li>
@@ -277,8 +337,111 @@ export default function CreateMobileRelease() {
           </div>
         </section>
 
-        {/* ─── Versions card ─────────────────────────── */}
-        {selectedIds.length > 0 && (
+        {/* ─── Source branch ────────────────────────── */}
+        <section className="bg-white rounded-xl border border-zinc-200">
+          <header className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
+            <h2 className="text-base sm:text-lg font-semibold text-zinc-900 flex items-center gap-2">
+              <GitBranch className="w-4 h-4 text-zinc-500" />
+              Source
+            </h2>
+            <p className="text-xs text-zinc-500 mt-0.5">
+              Branch or tag the workflow will check out. Defaults to <code className="text-zinc-700">main</code>.
+            </p>
+          </header>
+          <div className="p-4 sm:p-6 space-y-3">
+            <div className="relative" ref={branchContainerRef}>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 pointer-events-none" />
+                <input
+                  ref={branchInputRef}
+                  type="text"
+                  value={branchSearch}
+                  onChange={(e) => {
+                    setBranchSearch(e.target.value);
+                    setSourceRef(e.target.value.trim());
+                    setBranchDropdownOpen(true);
+                  }}
+                  onFocus={() => {
+                    setBranchDropdownOpen(true);
+                    branchInputRef.current?.select();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      setBranchDropdownOpen(false);
+                      branchInputRef.current?.blur();
+                    }
+                    if (e.key === 'Enter' && branchDropdownOpen) {
+                      e.preventDefault();
+                      if (filteredBranches.length > 0) {
+                        const pick = filteredBranches[0];
+                        setSourceRef(pick.name);
+                        setBranchSearch(pick.name);
+                      }
+                      setBranchDropdownOpen(false);
+                    }
+                  }}
+                  placeholder="Search branch or enter name…"
+                  className="w-full h-10 sm:h-9 border border-zinc-300 rounded-lg pl-9 pr-8 text-sm font-mono bg-white focus:outline-none focus:ring-2 focus:ring-zinc-400"
+                />
+                <ChevronDown
+                  className={cn(
+                    'absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 cursor-pointer transition-transform',
+                    branchDropdownOpen && 'rotate-180',
+                  )}
+                  onClick={() => {
+                    setBranchDropdownOpen((o) => !o);
+                    if (!branchDropdownOpen) branchInputRef.current?.focus();
+                  }}
+                />
+              </div>
+
+              {branchDropdownOpen && (
+                <ul className="absolute z-20 mt-1 w-full max-h-56 overflow-auto rounded-lg border border-zinc-200 bg-white shadow-lg">
+                  {branchesLoading ? (
+                    <li className="px-3 py-2 text-sm text-zinc-400">Loading branches…</li>
+                  ) : filteredBranches.length === 0 ? (
+                    <li className="px-3 py-2 text-sm text-zinc-500">
+                      {branchSearch.trim()
+                        ? <>No matches — <span className="font-mono text-zinc-700">{branchSearch.trim()}</span> will be used as-is</>
+                        : 'No branches found'}
+                    </li>
+                  ) : (
+                    filteredBranches.map((b) => (
+                      <li
+                        key={b.name}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          setSourceRef(b.name);
+                          setBranchSearch(b.name);
+                          setBranchDropdownOpen(false);
+                        }}
+                        className={cn(
+                          'px-3 py-2 text-sm font-mono cursor-pointer hover:bg-zinc-50 flex items-center justify-between',
+                          sourceRef === b.name && 'bg-zinc-50 font-medium',
+                        )}
+                      >
+                        <span className="truncate">{b.name}</span>
+                        <span className="text-[10px] text-zinc-400 font-mono ml-2 shrink-0">
+                          {b.sha.slice(0, 7)}
+                        </span>
+                      </li>
+                    ))
+                  )}
+                </ul>
+              )}
+            </div>
+
+            {sourceRef !== 'main' && sourceRef.trim() !== '' && (
+              <p className="text-xs text-amber-700 flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                Building from <code className="font-mono">{sourceRef}</code> instead of main
+              </p>
+            )}
+          </div>
+        </section>
+
+        {/* ─── Versions card (hidden for debug builds) ── */}
+        {selectedIds.length > 0 && !isDebug && (
           <section className="bg-white rounded-xl border border-zinc-200">
             <header className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex items-center justify-between gap-3">
               <h2 className="text-base sm:text-lg font-semibold text-zinc-900">
@@ -382,36 +545,36 @@ export default function CreateMobileRelease() {
           </div>
         </section>
 
-        {/* ─── Destination ──────────────────────────── */}
+        {/* ─── Build Type ──────────────────────────── */}
         <section className="bg-white rounded-xl border border-zinc-200">
           <header className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
             <h2 className="text-base sm:text-lg font-semibold text-zinc-900">
-              Destination
+              Build type
             </h2>
           </header>
-          <div className="p-4 sm:p-6 max-w-xs">
-            <SelectInput
-              value={destination}
-              onChange={(e) => setDestination(e.target.value as MobileDestination)}
-              options={destinationOptions.map((d) => ({
-                value: d,
-                label:
-                  d === 'GooglePlay'
-                    ? 'Google Play'
-                    : d === 'Firebase'
-                      ? 'Firebase'
-                      : d === 'TestFlight'
-                        ? 'TestFlight'
-                        : 'App Store',
-              }))}
-            />
-            {selectedPlatforms.size > 1 && (
-              <p className="mt-2 text-[11px] text-zinc-500">
-                Mixed Android + iOS selection — this destination is stored on
-                every row's audit context. The build workflow itself does not
-                read this value; release type is set internally by Catalyst.
-              </p>
-            )}
+          <div className="p-4 sm:p-6">
+            <div className="inline-flex rounded-lg border border-zinc-200 overflow-hidden">
+              {(['release', 'debug'] as const).map((bt) => (
+                <button
+                  key={bt}
+                  type="button"
+                  onClick={() => setBuildType(bt)}
+                  className={cn(
+                    'px-5 py-2 text-sm font-medium transition-colors',
+                    buildType === bt
+                      ? 'bg-zinc-900 text-white'
+                      : 'bg-white text-zinc-600 hover:bg-zinc-50',
+                  )}
+                >
+                  {bt === 'release' ? 'Release' : 'Debug'}
+                </button>
+              ))}
+            </div>
+            <p className="mt-2.5 text-xs text-zinc-500">
+              {buildType === 'debug'
+                ? `Builds will be uploaded to ${primaryPlatform === 'ios' ? 'TestFlight' : 'Firebase App Distribution'}.`
+                : `Builds will be uploaded to ${primaryPlatform === 'ios' ? 'App Store' : 'Google Play'}.`}
+            </p>
           </div>
         </section>
 

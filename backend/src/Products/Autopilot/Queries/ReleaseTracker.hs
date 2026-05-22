@@ -643,6 +643,9 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
         , rtSlackThreadTs = slackThreadTs
         , rtDispatchId = Nothing
         , rtExternalRunId = Nothing
+        , rtCommitSha = commitSha
+        , rtSourceRef = sourceRef
+        , rtRevertsReleaseId = revertsReleaseId
         , rtCreatedAt = createdAt
         , rtUpdatedAt = updatedAt
         }
@@ -696,6 +699,9 @@ fromRow ReleaseTrackerT{..} =
                 , envOverrideData = rtEnvOverrideData
                 , slackThreadTs = rtSlackThreadTs
                 , releaseContext = mReleaseContext
+                , sourceRef = rtSourceRef
+                , commitSha = rtCommitSha
+                , revertsReleaseId = rtRevertsReleaseId
                 }
      in
         (tracker, mTargetState)

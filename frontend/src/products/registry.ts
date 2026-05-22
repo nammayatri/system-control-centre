@@ -73,6 +73,7 @@ import CreateMobileRelease from './releases/pages/mobile/CreateMobileRelease';
 import ReleaseGroupDetail from './releases/pages/mobile/ReleaseGroupDetail';
 import ReleaseGroupsList from './releases/pages/mobile/ReleaseGroupsList';
 import MobileAppsAdmin from './releases/pages/mobile/MobileAppsAdmin';
+import MobileRevert from './releases/pages/mobile/MobileRevert';
 import LiveReleases from './releases/pages/LiveReleases';
 
 const backendReleasesProduct: ProductDefinition = {
@@ -169,6 +170,7 @@ const mobileReleasesProduct: ProductDefinition = {
   ],
   routes: [
     { path: '/releases/mobile/new', component: CreateMobileRelease, permission: 'RELEASE_CREATE' },
+    { path: '/releases/:id/revert', component: MobileRevert, permission: 'RELEASE_REVERT' },
     { path: '/release-groups', component: ReleaseGroupsList },
     { path: '/release-groups/:groupId', component: ReleaseGroupDetail },
     { path: '/mobile/apps', component: MobileAppsAdmin, permission: 'MOBILE_APP_MANAGE' },

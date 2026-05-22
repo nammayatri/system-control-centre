@@ -17,10 +17,19 @@ module Products.Autopilot.Mobile.Queries.Tracker (
     setExternalRunIdForDispatch,
     incrementResolveAttempts,
     appCatalogForRow,
+    appCatalogForRowRaw,
     logEvent,
     gitOwner,
     gitRepo,
     insertMobileTracker,
+    -- Revert helpers
+    findPreviousGoodMobileRelease,
+    findPreviousGoodSCCRelease,
+    findMobileReleaseById,
+    parseMobileTargetState,
+    insertMobileRevertTracker,
+    markReleaseRevertedBy,
+    ReleaseTrackerRow,
 ) where
 
 import Control.Monad.Catch (throwM)
@@ -29,6 +38,8 @@ import Core.DB.Connection (runDB)
 import Core.Environment (MonadFlow, withDb)
 import Data.Aeson (Value)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.Aeson.Key as AK
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -37,6 +48,8 @@ import Data.Time.Clock (UTCTime)
 import Database.Beam
 import Products.Autopilot.Mobile.Types (
     MobileBuildTargetState (..),
+    isDebugDestination,
+    MobileBuildContext (..),
  )
 import Products.Autopilot.Mobile.Types.Storage (
     AppCatalog,
@@ -91,21 +104,32 @@ findSiblingsByDispatchId dispatchId = withDb $ \db -> do
                         pure (rt, ac)
     pure (map (\(rt, ac) -> (rowToDomain rt, ac)) rows)
 
-{- | Set @external_run_id@ on every tracker row in the dispatch group.
-A single SQL UPDATE so siblings can never disagree on which GHA run
-they're tied to.
+{- | Set @external_run_id@ and @commit_sha@ on every tracker row in the
+dispatch group. A single SQL UPDATE so siblings can never disagree on
+which GHA run they're tied to or which commit they built from.
+
+@commit_sha@ is the @head_sha@ returned by the GH run API — i.e. the
+SHA of HEAD at dispatch time on whichever ref the dispatch carried
+(branch or tag). All siblings in the dispatch group share the same
+ref, so they all carry the same SHA.
 -}
 setExternalRunIdForDispatch ::
     (MonadFlow m) =>
     Text ->
     Text ->
+    Text ->
     m ()
-setExternalRunIdForDispatch dispatchId runId = withDb $ \db ->
+setExternalRunIdForDispatch dispatchId runId headSha = withDb $ \db ->
     runDB db $
         runUpdate $
             update
                 (releaseTrackers autopilotDb)
-                (\rt -> rtExternalRunId rt <-. val_ (Just runId))
+                ( \rt ->
+                    mconcat
+                        [ rtExternalRunId rt <-. val_ (Just runId)
+                        , rtCommitSha rt <-. val_ (Just headSha)
+                        ]
+                )
                 (\rt -> rtDispatchId rt ==. val_ (Just dispatchId))
 
 {- | Bump the ResolveRunId attempt counter stored in the tracker's
@@ -175,15 +199,33 @@ appCatalogForRow ::
     (MonadFlow m) =>
     ReleaseTracker ->
     m AppCatalog
-appCatalogForRow rt = withDb $ \db -> do
+appCatalogForRow rt = appCatalogByKey (appGroup rt) (service rt) (env rt)
+
+{- | Row-variant of 'appCatalogForRow'. Same lookup, but takes the raw
+Beam row so callers that haven't projected to the domain type (e.g.
+the revert handler) don't need to construct a stub 'ReleaseTracker'.
+-}
+appCatalogForRowRaw ::
+    (MonadFlow m) =>
+    ReleaseTrackerRow ->
+    m AppCatalog
+appCatalogForRowRaw rt = appCatalogByKey (rtAppGroup rt) (rtService rt) (rtEnv rt)
+
+appCatalogByKey ::
+    (MonadFlow m) =>
+    Text ->
+    Text ->
+    Text ->
+    m AppCatalog
+appCatalogByKey nameK surfaceK platformK = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $ do
                     ac <- all_ (appCatalogs autopilotDb)
-                    guard_ (acName ac ==. val_ (appGroup rt))
-                    guard_ (acSurface ac ==. val_ (service rt))
-                    guard_ (acPlatform ac ==. val_ (env rt))
+                    guard_ (acName ac ==. val_ nameK)
+                    guard_ (acSurface ac ==. val_ surfaceK)
+                    guard_ (acPlatform ac ==. val_ platformK)
                     pure ac
     case rows of
         (x : _) -> pure x
@@ -191,11 +233,11 @@ appCatalogForRow rt = withDb $ \db -> do
             throwM $
                 DBError "appCatalogForRow" $
                     "no app_catalog row for ("
-                        <> appGroup rt
+                        <> nameK
                         <> ", "
-                        <> service rt
+                        <> surfaceK
                         <> ", "
-                        <> env rt
+                        <> platformK
                         <> ")"
 
 {- | Generic BUSINESS-category event emitter. Wraps
@@ -235,10 +277,11 @@ insertMobileTracker ::
     AppCatalog ->
     MobileBuildTargetState ->
     Maybe Text ->
+    Maybe Text ->
     Text ->
     UTCTime ->
     m ()
-insertMobileTracker rid ac targetState mVersionName createdBy_ createdAt =
+insertMobileTracker rid ac targetState mVersionName mSourceRef createdBy_ createdAt =
     insertReleaseTrackerRow row
   where
     versionName = fromMaybe "" mVersionName
@@ -280,6 +323,9 @@ insertMobileTracker rid ac targetState mVersionName createdBy_ createdAt =
             , rtSlackThreadTs = Nothing
             , rtDispatchId = Nothing
             , rtExternalRunId = Nothing
+            , rtCommitSha = Nothing
+            , rtSourceRef = mSourceRef
+            , rtRevertsReleaseId = Nothing
             , rtCreatedAt = createdAt
             , rtUpdatedAt = createdAt
             }
@@ -328,6 +374,9 @@ rowToDomain ReleaseTrackerT{..} =
         , envOverrideData = rtEnvOverrideData
         , slackThreadTs = rtSlackThreadTs
         , releaseContext = Nothing
+        , sourceRef = rtSourceRef
+        , commitSha = rtCommitSha
+        , revertsReleaseId = rtRevertsReleaseId
         }
 
 parseCategory :: Text -> ReleaseCategory
@@ -341,3 +390,242 @@ parseWFStatus = parseReleaseWFStatus
 
 parseModeT :: Maybe Text -> Mode
 parseModeT = parseMode
+
+-- ─── Revert helpers ────────────────────────────────────────────────
+
+{- | Decode a @release_tracker.release_context@ string into a
+'MobileBuildTargetState'. Returns @Nothing@ for backend rows (whose
+target state is K8s-shaped) and for rows whose JSON failed to parse.
+
+The revert handler needs this to read @mbcTagPushed@ (the tag pushed
+by the workflow at release time — used as the dispatch ref for
+revert) and @mbcVersionCode@ (the version code that shipped, so we
+can compute @bad + 1@ for the revert).
+-}
+parseMobileTargetState :: Maybe Text -> Maybe MobileBuildTargetState
+parseMobileTargetState Nothing = Nothing
+parseMobileTargetState (Just t) =
+    case Aeson.eitherDecodeStrict (TE.encodeUtf8 t) of
+        Right (MobileBuildState s) -> Just s
+        _ -> Nothing
+
+{- | Fetch a single mobile release tracker by ID, paired with its
+parsed mobile target state. Returns @Nothing@ if the row is not found
+or is not a mobile release.
+-}
+findMobileReleaseById ::
+    (MonadFlow m) =>
+    Text ->
+    m (Maybe (ReleaseTrackerRow, Maybe MobileBuildTargetState))
+findMobileReleaseById releaseId' = withDb $ \db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $ do
+                    rt <- all_ (releaseTrackers autopilotDb)
+                    guard_ (rtId rt ==. val_ releaseId')
+                    guard_ (rtCategory rt ==. val_ "MobileBuild")
+                    pure rt
+    pure $ case rows of
+        (row : _) -> Just (row, parseMobileTargetState (rtTargetState row))
+        [] -> Nothing
+
+{- | Find the most recent COMPLETED *release* (non-debug) mobile release
+for the same app (matching @(app_group, service, env)@) strictly older
+than the given cutoff. Debug builds (Firebase / TestFlight) are excluded
+because they have no real Git tag and cannot be used as revert targets.
+
+Fetches up to 20 candidates and filters in Haskell because the
+destination lives inside the @target_state@ JSONB column.
+-}
+findPreviousGoodMobileRelease ::
+    (MonadFlow m) =>
+    Text ->
+    -- ^ app_group (app name, e.g. "NammaYatri")
+    Text ->
+    -- ^ service (surface, e.g. "customer")
+    Text ->
+    -- ^ env (platform, e.g. "android")
+    UTCTime ->
+    -- ^ cutoff: rows strictly older than this
+    m (Maybe (ReleaseTrackerRow, Maybe MobileBuildTargetState))
+findPreviousGoodMobileRelease appGroup' service' env' cutoff = withDb $ \db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $
+                    limit_ 20 $
+                        orderBy_ (desc_ . rtCreatedAt) $ do
+                            rt <- all_ (releaseTrackers autopilotDb)
+                            guard_ (rtCategory rt ==. val_ "MobileBuild")
+                            guard_ (rtAppGroup rt ==. val_ appGroup')
+                            guard_ (rtService rt ==. val_ service')
+                            guard_ (rtEnv rt ==. val_ env')
+                            guard_ (rtStatus rt ==. val_ "COMPLETED")
+                            guard_ (rtCreatedAt rt <. val_ cutoff)
+                            pure rt
+    pure (firstNonDebug rows)
+
+findPreviousGoodSCCRelease ::
+    (MonadFlow m) =>
+    Text ->
+    Text ->
+    Text ->
+    m (Maybe (ReleaseTrackerRow, Maybe MobileBuildTargetState))
+findPreviousGoodSCCRelease appGroup' service' env' = withDb $ \db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $
+                    limit_ 20 $
+                        orderBy_ (desc_ . rtCreatedAt) $ do
+                            rt <- all_ (releaseTrackers autopilotDb)
+                            guard_ (rtCategory rt ==. val_ "MobileBuild")
+                            guard_ (rtAppGroup rt ==. val_ appGroup')
+                            guard_ (rtService rt ==. val_ service')
+                            guard_ (rtEnv rt ==. val_ env')
+                            guard_ (rtStatus rt ==. val_ "COMPLETED")
+                            guard_ (rtMode rt /=. val_ (Just "STORE_SYNC"))
+                            pure rt
+    pure (firstNonDebug rows)
+
+firstNonDebug :: [ReleaseTrackerRow] -> Maybe (ReleaseTrackerRow, Maybe MobileBuildTargetState)
+firstNonDebug [] = Nothing
+firstNonDebug (row : rest)
+    | isReverted row = firstNonDebug rest
+    | otherwise =
+        case parseMobileTargetState (rtTargetState row) of
+            Just st | isDebugDestination (mbcDestination (mbContext st)) -> firstNonDebug rest
+            parsed -> Just (row, parsed)
+
+isReverted :: ReleaseTrackerRow -> Bool
+isReverted row = case rtMetadata row of
+    Nothing -> False
+    Just t -> case Aeson.eitherDecodeStrict (TE.encodeUtf8 t) of
+        Right (Aeson.Object o) -> KM.member (AK.fromText "reverted_by") o
+        _ -> False
+
+-- Re-export to keep the import surface tight for callers that need
+-- the Beam row type without pulling Schema in directly.
+type ReleaseTrackerRow = ReleaseTrackerT Identity
+
+{- | Insert a mobile revert tracker row. Differs from the normal
+'insertMobileTracker' in three places:
+
+* @source_ref@ is set to @refs\/tags\/<previous-good-tag>@ so the
+  dispatched workflow checks out the previous good commit.
+* @reverts_release_id@ links back to the release being reverted.
+* @change_log@ is provided up-front (auto-generated from the Compare
+  API by the caller; operator may have edited it in the UI).
+
+Other fields mirror 'insertMobileTracker': status = CREATED,
+isApproved = False, dispatch_id = NULL (the operator hits the
+existing dispatch endpoint once the revert is approved).
+-}
+insertMobileRevertTracker ::
+    (MonadFlow m) =>
+    Text ->
+    -- ^ new release id (UUID)
+    AppCatalog ->
+    -- ^ app catalog row matching the bad release
+    MobileBuildTargetState ->
+    -- ^ initial target state (mbContext.versionCode = bad+1, etc.)
+    Text ->
+    -- ^ new version name (e.g. "1.2.4")
+    Text ->
+    -- ^ change log (auto-generated; operator may have edited)
+    Text ->
+    -- ^ source_ref (e.g. "refs/tags/nammayatri/prod/android/v1.2.2+450")
+    Text ->
+    -- ^ reverts_release_id (the bad release's id)
+    Text ->
+    -- ^ created_by (operator email from AuthedPerson)
+    UTCTime ->
+    m ()
+insertMobileRevertTracker rid ac targetState versionName changeLog_ sourceRef_ revertsId createdBy_ createdAt =
+    insertReleaseTrackerRow row
+  where
+    encodedCtx = encodeJsonText (MobileBuildState targetState)
+    row =
+        ReleaseTrackerT
+            { rtId = rid
+            , rtOldVersion = ""
+            , rtNewVersion = versionName
+            , rtAppGroup = acName ac
+            , rtService = acSurface ac
+            , rtPriority = 0
+            , rtEnv = acPlatform ac
+            , rtCategory = "MobileBuild"
+            , rtStatus = "CREATED"
+            , rtReleaseWFStatus = "INIT"
+            , rtMode = Just "MANUAL"
+            , rtCreatedBy = createdBy_
+            , rtApprovedBy = Nothing
+            , rtIsApproved = Just False
+            , rtIsInfraApproved = Just False
+            , rtReleaseTag = Just rid
+            , rtScheduleTime = Nothing
+            , rtStartTime = Nothing
+            , rtEndTime = Nothing
+            , rtRolloutStrategy = Nothing
+            , rtRolloutHistory = Nothing
+            , rtTargetState = Just encodedCtx
+            , rtInfo = Nothing
+            , rtDescription = Nothing
+            , rtChangeLog = Just changeLog_
+            , rtMetadata = Nothing
+            , rtGlobalId = Nothing
+            , rtSyncEnabled = Nothing
+            , rtEnvOverrideData = Nothing
+            , rtSlackThreadTs = Nothing
+            , rtDispatchId = Nothing
+            , rtExternalRunId = Nothing
+            , rtCommitSha = Nothing
+            , rtSourceRef = Just sourceRef_
+            , rtRevertsReleaseId = Just revertsId
+            , rtCreatedAt = createdAt
+            , rtUpdatedAt = createdAt
+            }
+
+{- | Stamp @metadata.reverted_by = <revertId>@ on the bad release row.
+Drives the "⤴ Reverted by X" banner on the bad release's detail page.
+
+Implementation: read the existing @metadata@ JSON (or @{}@ if NULL),
+set the @reverted_by@ key, write it back. Single UPDATE.
+-}
+markReleaseRevertedBy ::
+    (MonadFlow m) =>
+    Text ->
+    -- ^ bad release id
+    Text ->
+    -- ^ revert release id
+    m ()
+markReleaseRevertedBy badId revertId = withDb $ \db -> do
+    -- Read existing metadata.
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $ do
+                    rt <- all_ (releaseTrackers autopilotDb)
+                    guard_ (rtId rt ==. val_ badId)
+                    pure (rtMetadata rt)
+    -- Merge existing keys with the new "reverted_by" key. If the
+    -- existing metadata is missing or not an object, start fresh.
+    let existingMap :: KM.KeyMap Aeson.Value
+        existingMap = case rows of
+            (Just existing : _) ->
+                case Aeson.eitherDecodeStrict (TE.encodeUtf8 existing) of
+                    Right (Aeson.Object o) -> o
+                    _ -> KM.empty
+            _ -> KM.empty
+        updated =
+            Aeson.Object
+                ( KM.insert "reverted_by" (Aeson.String revertId) existingMap
+                )
+        encoded = encodeJsonText updated
+    runDB db $
+        runUpdate $
+            update
+                (releaseTrackers autopilotDb)
+                (\rt -> rtMetadata rt <-. val_ (Just encoded))
+                (\rt -> rtId rt ==. val_ badId)

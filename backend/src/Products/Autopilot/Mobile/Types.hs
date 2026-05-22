@@ -10,6 +10,7 @@ module Products.Autopilot.Mobile.Types (
     MobileDestination (..),
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
+    isDebugDestination,
     validMBTransition,
     isMBTerminal,
 ) where
@@ -21,11 +22,10 @@ import Data.Text (Text)
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
--- | Where a release row is conceptually targeted. Pure metadata — neither
--- the Android workflow nor the iOS workflow reads this value; SCC stores
--- it in @releaseContext.destination@ for audit / display only. The field
--- is required on the create API though, which is why iOS rows need their
--- own variants instead of reusing the Android labels.
+-- | Where a release row is targeted. Controls which GitHub Actions workflow
+-- file is dispatched: debug destinations (Firebase, TestFlight) use the
+-- debug workflow YAMLs; production destinations (GooglePlay, AppStore) use
+-- the production ones. See 'resolveWorkflowPath'.
 data MobileDestination
     = MBGooglePlay -- ^ Android: Google Play production track.
     | MBFirebase -- ^ Android: Firebase App Distribution.
@@ -46,6 +46,11 @@ instance FromJSON MobileDestination where
         "TestFlight" -> pure MBTestFlight
         "AppStore" -> pure MBAppStore
         other -> fail $ "unknown destination: " <> show other
+
+isDebugDestination :: MobileDestination -> Bool
+isDebugDestination MBFirebase = True
+isDebugDestination MBTestFlight = True
+isDebugDestination _ = False
 
 data MobileBuildContext = MobileBuildContext
     { mbcVersionCode :: Maybe Int32
