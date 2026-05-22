@@ -131,6 +131,14 @@ export interface APRelease {
     rollout_history: RolloutHistoryEvent[];
     events: RolloutEvent[];
     release_context: ReleaseContext;
+    // ── Revert chain (mobile + future backend revert plumbing) ──────
+    // Server-side optional; null on rows that pre-date 0012-mobile-revert.
+    sourceRef?: string | null;
+    commitSha?: string | null;
+    revertsReleaseId?: string | null;
+    // `metadata.reverted_by` is set on a bad release once its revert
+    // row has been created. Drives the "Reverted by" banner.
+    metadata?: { reverted_by?: string;[k: string]: any } | null;
 }
 
 // ── ConfigMap type ─────────────────────────────────────────────────
@@ -366,6 +374,13 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     })),
 
     events: [],
+
+    // Revert-chain fields — added by migration 0012-mobile-revert.
+    // Pre-0012 rows have nulls; consumers must handle undefined too.
+    sourceRef: (r as any).sourceRef ?? null,
+    commitSha: (r as any).commitSha ?? null,
+    revertsReleaseId: (r as any).revertsReleaseId ?? null,
+    metadata: (r as any).metadata ?? null,
 });
 
 export function statusColor(status: ReleaseStatus | string): string {
@@ -613,6 +628,88 @@ export async function fastForwardRelease(releaseId: string): Promise<any> {
 
 export async function immediateRevertRelease(releaseId: string, isRevertSync: boolean): Promise<any> {
     const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/revert/immediate`, { isRevertSync });
+    return data;
+}
+
+// ── Mobile revert ─────────────────────────────────────────────────
+// GET /releases/:id/mobile-revert/draft  — read-only preview
+// POST /releases/:id/mobile-revert       — confirm + create
+//
+// Both gated by RELEASE_REVERT permission. The draft returns the
+// previous good release's tag + auto-generated changelog; the create
+// endpoint enforces version-name and version-code strictly-greater
+// than the bad release's.
+
+export interface RevertCommit {
+    rcShortSha: string;
+    rcSubject: string;
+    rcAuthorLogin: string;
+    rcHtmlUrl: string;
+    rcPrNumber: number | null;
+}
+
+export interface RevertDraft {
+    rdBadReleaseId: string;
+    rdBadVersion: string;
+    rdBadVersionCode: number | null;
+    rdPrevGoodReleaseId: string;
+    rdPrevGoodVersion: string;
+    rdPrevGoodShortSha: string;
+    rdPrevGoodTag: string;
+    rdSuggestedVersion: string;
+    rdSuggestedCode: number | null;
+    rdChangelog: string;
+    rdCommits: RevertCommit[];
+    rdCommitCount: number;
+    rdPlatform: string; // "android" | "ios"
+    rdIsStoreSyncRevert: boolean;
+    rdStoreVersion: string | null;
+    rdStoreVersionCode: number | null;
+}
+
+export interface RevertCreateReq {
+    rrNewVersionName: string;
+    rrNewVersionCode: number | null;
+    rrChangelog: string;
+    rrSourceCommit?: string | null;
+}
+
+export interface RevertCreateResp {
+    rrRevertReleaseId: string;
+}
+
+export async function getMobileRevertDraft(releaseId: string): Promise<RevertDraft> {
+    const { data } = await apiClient.get(`/releases/${encodeURIComponent(releaseId)}/mobile-revert/draft`);
+    return data;
+}
+
+export async function createMobileRevert(
+    releaseId: string,
+    body: RevertCreateReq,
+): Promise<RevertCreateResp> {
+    const { data } = await apiClient.post(
+        `/releases/${encodeURIComponent(releaseId)}/mobile-revert`,
+        body,
+    );
+    return data;
+}
+
+export interface VerifyCommitResp {
+    vcFullSha: string;
+    vcShortSha: string;
+    vcMessage: string;
+    vcAuthor: string;
+    vcHtmlUrl: string;
+}
+
+export async function verifyRevertCommit(
+    releaseId: string,
+    sha: string,
+): Promise<VerifyCommitResp> {
+    const { data } = await apiClient.get(
+        `/releases/${encodeURIComponent(releaseId)}/mobile-revert/verify-commit`,
+        { params: { sha } },
+    );
     return data;
 }
 
@@ -881,6 +978,7 @@ export async function fetchConfigMapData(product: string, name: string): Promise
 
 import type {
     AppCatalogEntry,
+    BranchInfo,
     CreateMobileReleasesReq,
     CreateMobileReleasesResp,
     DispatchMobileReleasesResp,
@@ -922,5 +1020,12 @@ export const mobileApi = {
     liveReleases: async (category: 'all' | 'backend' | 'mobile' = 'all'): Promise<LiveReleasesResp> => {
         const { data } = await apiClient.get(`/releases/live?category=${category}`);
         return data;
+    },
+
+    listBranches: async (q?: string): Promise<BranchInfo[]> => {
+        const params: Record<string, string> = {};
+        if (q) params.q = q;
+        const { data } = await apiClient.get('/mobile/branches', { params });
+        return data?.branches ?? [];
     },
 };

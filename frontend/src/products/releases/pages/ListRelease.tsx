@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X, SlidersHorizontal, Server, Smartphone, Layers } from 'lucide-react';
+import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X, SlidersHorizontal, Server, Smartphone, Layers, Undo2, Apple } from 'lucide-react';
 import { useReleases } from '../hooks';
 import { useRefreshAnimation } from '../../../shared/hooks';
 import { StatusBadge } from '../components/StatusBadge';
@@ -11,6 +11,43 @@ import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
 import type { ReleaseStatus } from '../api';
+
+const AndroidIcon = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
+    <path d="M17.6 9.48l1.84-3.18c.16-.31.04-.69-.27-.85a.637.637 0 00-.83.22l-1.88 3.24a11.463 11.463 0 00-8.92 0L5.66 5.67c-.19-.29-.58-.38-.87-.2-.28.18-.37.54-.19.83L6.4 9.48A10.78 10.78 0 003 16h18a10.78 10.78 0 00-3.4-6.52zM8.86 13a.98.98 0 110-1.96.98.98 0 010 1.96zm6.28 0a.98.98 0 110-1.96.98.98 0 010 1.96z"/>
+  </svg>
+);
+
+const PlatformBadge = ({ platform, isMobile }: { platform: string; isMobile: boolean }) => {
+  if (!isMobile) {
+    return (
+      <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-sky-700 text-white">
+        {platform}
+      </span>
+    );
+  }
+  if (platform === 'android') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-[#3DDC84]/15 text-[#1B8A4F] border border-[#3DDC84]/30">
+        <AndroidIcon className="w-3 h-3" />
+        Android
+      </span>
+    );
+  }
+  if (platform === 'ios') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-zinc-500/15 text-zinc-700 border border-zinc-400/30">
+        <Apple className="w-3 h-3" />
+        iOS
+      </span>
+    );
+  }
+  return (
+    <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-violet-600 text-white">
+      {platform}
+    </span>
+  );
+};
 
 type TimeRange = 'last_30_mins' | 'last_1_hour' | 'last_6_hours' | 'today' | 'yesterday' | 'last_2_days' | 'last_7_days' | 'last_30_days' | 'this_month' | 'last_month' | 'custom';
 
@@ -88,6 +125,7 @@ const ListRelease: React.FC = () => {
   const [customTo, setCustomTo] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [productFilter, setProductFilter] = useState<string>('');
+  const [platformFilter, setPlatformFilter] = useState<string>('');
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   const [sortField, setSortField] = useState<string>('date_created');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -139,7 +177,8 @@ const ListRelease: React.FC = () => {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  useEffect(() => { setCurrentPage(1); }, [debouncedSearch, statusFilter, productFilter, category]);
+  useEffect(() => { setCurrentPage(1); }, [debouncedSearch, statusFilter, productFilter, platformFilter, category]);
+  useEffect(() => { if (category !== 'mobile') setPlatformFilter(''); }, [category]);
 
   const handleCustomRangeApply = () => {
     if (customFrom && customTo) {
@@ -172,7 +211,8 @@ const ListRelease: React.FC = () => {
       const matchesSearch = !q || r.service?.toLowerCase().includes(q) || r.new_version?.toLowerCase().includes(q) || r.id?.toLowerCase().includes(q) || r.status?.toLowerCase().includes(q);
       const matchesStatus = !statusFilter || r.status === statusFilter;
       const matchesProduct = !productFilter || r.appGroup === productFilter;
-      return matchesSearch && matchesStatus && matchesProduct;
+      const matchesPlatform = !platformFilter || r.env === platformFilter;
+      return matchesSearch && matchesStatus && matchesProduct && matchesPlatform;
     });
 
     list.sort((a, b) => {
@@ -183,7 +223,7 @@ const ListRelease: React.FC = () => {
     });
 
     return list;
-  }, [releases, debouncedSearch, statusFilter, productFilter, sortField, sortDir]);
+  }, [releases, debouncedSearch, statusFilter, productFilter, platformFilter, sortField, sortDir]);
 
   const totalPages = Math.ceil(filteredReleases.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
@@ -206,7 +246,7 @@ const ListRelease: React.FC = () => {
     { label: 'Failed Today', value: kpis.failedToday, dotColor: 'bg-red-500' },
   ];
 
-  const activeFilterCount = (statusFilter ? 1 : 0) + (productFilter ? 1 : 0);
+  const activeFilterCount = (statusFilter ? 1 : 0) + (productFilter ? 1 : 0) + (platformFilter ? 1 : 0);
 
   const categoryChips: { key: CategoryFilter; label: string; icon?: React.ReactNode }[] = [
     { key: 'all', label: 'All' },
@@ -349,6 +389,17 @@ const ListRelease: React.FC = () => {
                 <option value="">All Groups</option>
                 {productOptions.map(p => <option key={p} value={p}>{p}</option>)}
               </select>
+              {category === 'mobile' && (
+                <select
+                  value={platformFilter}
+                  onChange={(e) => setPlatformFilter(e.target.value)}
+                  className="w-full border border-zinc-300 rounded-lg px-3 h-10 text-sm text-zinc-600 bg-white"
+                >
+                  <option value="">All Platforms</option>
+                  <option value="android">Android</option>
+                  <option value="ios">iOS</option>
+                </select>
+              )}
             </div>
           )}
           <PermissionGate product="autopilot" permission="RELEASE_CREATE">
@@ -419,6 +470,14 @@ const ListRelease: React.FC = () => {
             {productOptions.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
 
+          {category === 'mobile' && (
+            <select value={platformFilter} onChange={(e) => setPlatformFilter(e.target.value)} className="border border-zinc-300 rounded-lg px-3 h-9 text-sm text-zinc-600 bg-white cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400">
+              <option value="">All Platforms</option>
+              <option value="android">Android</option>
+              <option value="ios">iOS</option>
+            </select>
+          )}
+
           <div className="flex-1" />
 
           <button onClick={handleRefresh} aria-label="Refresh" className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150">
@@ -455,8 +514,10 @@ const ListRelease: React.FC = () => {
                   <tr><td colSpan={9} className="py-16 text-center text-zinc-400">No releases found</td></tr>
                 ) : (
                   paginatedReleases.map((release, index) => {
-                    const isRevert = release.release_context?.revert === 1;
+                    const isRevert = release.release_context?.revert === 1 || !!release.revertsReleaseId;
                     const isMobile = release.tracker_type === 'MobileBuild';
+                    const isDebugBuild = isMobile && (release.release_context?.destination === 'Firebase' || release.release_context?.destination === 'TestFlight');
+                    const isMobileRevertBuild = isMobile && !!release.revertsReleaseId;
                     // Mobile rows reuse the underlying tracker columns with relabeled
                     // semantics (app/surface/platform). Backend rows render the
                     // historical (app_group/service/env) layout. Same data, different
@@ -493,12 +554,7 @@ const ListRelease: React.FC = () => {
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <StatusBadge status={release.status} />
                             {release.env && (
-                              <span className={cn(
-                                'rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white',
-                                isMobile ? 'bg-violet-600' : 'bg-sky-700',
-                              )}>
-                                {release.env}
-                              </span>
+                              <PlatformBadge platform={release.env} isMobile={isMobile} />
                             )}
                             {release.env_override_data && (
                               <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-blue-700 text-white">
@@ -510,17 +566,17 @@ const ListRelease: React.FC = () => {
                                 REVERT
                               </span>
                             )}
+                            {isDebugBuild && (
+                              <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-amber-600 text-white">
+                                DEBUG
+                              </span>
+                            )}
                           </div>
                         </td>
                         <td className="py-3 px-4 text-xs text-zinc-600">{release.release_manager || '-'}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatISODate(release.date_created)}</td>
                         <td className="py-3 px-4 text-center">
                           <div className="inline-flex items-center gap-0.5">
-                            {/* Mobile rows only: link to the release group. The page
-                                at /release-groups/<id> has no sidebar entry and is
-                                otherwise only reachable on the redirect after
-                                creating a release; this row-level button is the
-                                primary discovery path. */}
                             {isMobile && release.release_context?.release_group_id && (
                               <SimpleTooltip content="Open release group">
                                 <button
@@ -532,6 +588,29 @@ const ListRelease: React.FC = () => {
                                   aria-label="Open release group"
                                 >
                                   <Layers className="w-3.5 h-3.5" />
+                                </button>
+                              </SimpleTooltip>
+                            )}
+                            {/* Revert action for completed mobile releases. Hidden
+                                if the release was already reverted (drives the
+                                "Reverted by X" banner on detail page) to prevent
+                                double-reverts. Click navigates to the full revert
+                                page; permission gating mirrors the detail page. */}
+                            {isMobile
+                              && !isDebugBuild
+                              && !isMobileRevertBuild
+                              && release.status === 'COMPLETED'
+                              && !release.metadata?.reverted_by && (
+                              <SimpleTooltip content="Revert this release">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    navigate(`/releases/${release.id}/revert?category=mobile`);
+                                  }}
+                                  className="p-1.5 rounded-lg text-zinc-400 hover:text-violet-700 hover:bg-violet-50 transition-colors duration-150 cursor-pointer"
+                                  aria-label="Revert release"
+                                >
+                                  <Undo2 className="w-3.5 h-3.5" />
                                 </button>
                               </SimpleTooltip>
                             )}
@@ -572,8 +651,9 @@ const ListRelease: React.FC = () => {
           ) : (
             <div className="divide-y divide-zinc-100">
               {paginatedReleases.map((release) => {
-                const isRevert = release.release_context?.revert === 1;
+                const isRevert = release.release_context?.revert === 1 || !!release.revertsReleaseId;
                 const isMobile = release.tracker_type === 'MobileBuild';
+                const isDebugBuild = isMobile && (release.release_context?.destination === 'Firebase' || release.release_context?.destination === 'TestFlight');
                 // Same `?category=mobile` mechanism as the desktop table —
                 // keeps the sidebar tile correct after the click.
                 const releaseHref = isMobile
@@ -598,8 +678,14 @@ const ListRelease: React.FC = () => {
                         <div className="text-sm font-medium text-zinc-900 truncate">
                           {isMobile ? release.appGroup : release.service}
                         </div>
-                        <div className="text-xs text-zinc-500 mt-0.5 truncate">
-                          {isMobile ? `${release.service} · ${release.env}` : release.appGroup}
+                        <div className="text-xs text-zinc-500 mt-0.5 truncate flex items-center gap-1.5">
+                          {isMobile ? (
+                            <>
+                              {release.service}
+                              <span className="text-zinc-300">·</span>
+                              <PlatformBadge platform={release.env} isMobile />
+                            </>
+                          ) : release.appGroup}
                         </div>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
@@ -647,6 +733,11 @@ const ListRelease: React.FC = () => {
                       {isRevert && (
                         <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-violet-700 text-white">
                           REVERT
+                        </span>
+                      )}
+                      {isDebugBuild && (
+                        <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-amber-600 text-white">
+                          DEBUG
                         </span>
                       )}
                     </div>

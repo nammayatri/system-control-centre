@@ -157,13 +157,13 @@ refresh creds = do
     liftIO (modifyMVar_ tokenCache (\_ -> pure (Just new)))
     pure (itToken new)
 
-{- | Mint a 10-minute RS256 JWT using the GitHub App's private key.
+{- | Mint a short-lived RS256 JWT using the GitHub App's private key.
 
 Claims:
 
 * @iss@ = numeric App ID
-* @iat@ = now (seconds since epoch)
-* @exp@ = now + 600
+* @iat@ = now − 60 s (backdated per GitHub's recommendation to tolerate clock drift)
+* @exp@ = now + 540 s (9 min 0 s — safely under GitHub's 10-min ceiling)
 -}
 mintAppJwt :: (MonadFlow m) => GhAppCreds -> m Text
 mintAppJwt GhAppCreds{..} = do
@@ -174,8 +174,8 @@ mintAppJwt GhAppCreds{..} = do
             throwM (InternalError "GitHub App private key is not a valid RSA PEM")
         Just rsa -> do
             let signer = JWT.EncodeRSAPrivateKey rsa
-                iat = JWT.numericDate (fromInteger nowSec)
-                expAt = JWT.numericDate (fromInteger (nowSec + 600))
+                iat = JWT.numericDate (fromInteger (nowSec - 60))
+                expAt = JWT.numericDate (fromInteger (nowSec + 540))
                 claims =
                     mempty
                         { JWT.iss = JWT.stringOrURI gacAppId

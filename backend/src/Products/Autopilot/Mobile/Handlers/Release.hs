@@ -33,6 +33,10 @@ module Products.Autopilot.Mobile.Handlers.Release (
     DispatchInfo (..),
     DispatchMobileReleasesResp (..),
     dispatchMobileReleasesH,
+
+    -- * Branches
+    BranchesResp (..),
+    listBranchesH,
 ) where
 
 import Control.Monad (unless)
@@ -43,7 +47,7 @@ import Core.DB.Connection (runDB)
 import Core.Environment (Flow, withDb)
 import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericToJSON, object, (.=))
 import Data.Int (Int32)
-import Data.List (sortOn)
+import Data.List (partition, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -51,8 +55,12 @@ import Data.Time.Clock (UTCTime, getCurrentTime)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Database.Beam
-import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById)
+import Products.Autopilot.Mobile.Github (BranchInfo (..), listBranches, searchBranches)
+import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
+import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById, listEnabledAppCatalog)
 import Products.Autopilot.Mobile.Queries.Tracker (
+    gitOwner,
+    gitRepo,
     insertMobileTracker,
     logEvent,
  )
@@ -61,6 +69,7 @@ import Products.Autopilot.Mobile.Types (
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
     MobileDestination,
+    isDebugDestination,
  )
 import Products.Autopilot.Mobile.Types.Storage (
     AppCatalog,
@@ -97,6 +106,7 @@ data CreateMobileReleasesReq = CreateMobileReleasesReq
     { releaseGroupLabel :: Maybe Text
     , changeLog :: Text
     , destination :: MobileDestination
+    , sourceRef :: Maybe Text
     , items :: [CreateMobileReleasesItem]
     }
     deriving (Generic, Show)
@@ -133,7 +143,7 @@ createMobileReleasesH ap CreateMobileReleasesReq{..} = do
         _ -> pure ()
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
-    summaries <- mapM (createOne ap groupId changeLog destination now) items
+    summaries <- mapM (createOne ap groupId changeLog destination sourceRef now) items
     pure
         CreateMobileReleasesResp
             { releaseGroupId = groupId
@@ -146,10 +156,11 @@ createOne ::
     Text ->
     Text ->
     MobileDestination ->
+    Maybe Text ->
     UTCTime ->
     CreateMobileReleasesItem ->
     Flow CreatedReleaseSummary
-createOne ap groupId changeLog_ dest now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode} = do
+createOne ap groupId changeLog_ dest mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode} = do
     mApp <- findAppCatalogById aid
     case mApp of
         Nothing ->
@@ -163,7 +174,7 @@ createOne ap groupId changeLog_ dest now CreateMobileReleasesItem{appCatalogId =
                         , mbcChangeLog = changeLog_
                         , mbcDestination = dest
                         , mbcReleaseGroupId = groupId
-                        , mbcMatrixJobName = acName app_ <> "-Release"
+                        , mbcMatrixJobName = acName app_ <> if isDebugDestination dest then "-Debug" else "-Release"
                         , mbcOtaNamespace = Nothing
                         , mbcTagPushed = Nothing
                         }
@@ -177,7 +188,7 @@ createOne ap groupId changeLog_ dest now CreateMobileReleasesItem{appCatalogId =
                         , mbBuildCompletedAt = Nothing
                         , mbResolveAttempts = Nothing
                         }
-            insertMobileTracker rid app_ target mVer (apEmail ap) now
+            insertMobileTracker rid app_ target mVer mSourceRef (apEmail ap) now
             pure
                 CreatedReleaseSummary
                     { id = rid
@@ -381,3 +392,36 @@ logDispatchEvent did (rt, _ac, mTs) = do
             [ "release_group_id" .= groupId
             , "dispatch_id" .= did
             ]
+
+-- ─── Branches ────────────────────────────────────────────────────
+
+newtype BranchesResp = BranchesResp
+    { branches :: [BranchInfo]
+    }
+    deriving (Generic, Show)
+
+instance ToJSON BranchesResp
+instance FromJSON BranchesResp
+
+listBranchesH :: AuthedPerson -> Maybe Text -> Flow BranchesResp
+listBranchesH _ap mQuery = do
+    apps <- listEnabledAppCatalog
+    case apps of
+        [] -> throwM $ BadRequest "No enabled apps in catalog"
+        (ac : _) -> do
+            creds <- loadGhCreds
+            let owner = gitOwner ac
+                repo = gitRepo ac
+            result <- case mQuery of
+                Just q | not (T.null q) -> searchBranches creds owner repo q
+                _ -> do
+                    res <- listBranches creds owner repo
+                    pure $ fmap pinMain res
+            case result of
+                Left e -> throwM $ BadRequest ("GitHub API error: " <> e)
+                Right bs -> pure BranchesResp{branches = bs}
+  where
+    pinMain :: [BranchInfo] -> [BranchInfo]
+    pinMain bs =
+        let (mains, rest) = partition (\b -> biName b == "main" || biName b == "master") bs
+         in mains ++ rest

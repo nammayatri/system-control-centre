@@ -84,6 +84,9 @@ data ReleaseTrackerT f = ReleaseTrackerT
     , rtSlackThreadTs :: Columnar f (Maybe Text)
     , rtDispatchId :: Columnar f (Maybe Text)
     , rtExternalRunId :: Columnar f (Maybe Text)
+    , rtCommitSha :: Columnar f (Maybe Text)
+    , rtSourceRef :: Columnar f (Maybe Text)
+    , rtRevertsReleaseId :: Columnar f (Maybe Text)
     , rtCreatedAt :: Columnar f UTCTime
     , rtUpdatedAt :: Columnar f UTCTime
     }
@@ -187,6 +190,9 @@ autopilotDb =
                             , rtSlackThreadTs = fieldNamed "slack_thread_ts"
                             , rtDispatchId = fieldNamed "dispatch_id"
                             , rtExternalRunId = fieldNamed "external_run_id"
+                            , rtCommitSha = fieldNamed "commit_sha"
+                            , rtSourceRef = fieldNamed "source_ref"
+                            , rtRevertsReleaseId = fieldNamed "reverts_release_id"
                             , rtCreatedAt = fieldNamed "date_created"
                             , rtUpdatedAt = fieldNamed "last_updated"
                             }

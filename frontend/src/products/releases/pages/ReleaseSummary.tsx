@@ -9,8 +9,10 @@ import {
   useImmediateRevert, useDeleteRelease, useRestartRelease,
   useFastForwardRelease, useImmediateRevertWithSync,
   useReleaseDiff, usePodHealth, useResources, useUpdateTracker,
+  useMobileApps, useDispatchMobileReleases,
 } from '../hooks';
 import type { RolloutHistoryEvent, RolloutEvent, RolloutStrategyEvent, PodInfo } from '../api';
+import type { LatestBuild } from '../types';
 import { Badge } from '../../../shared/ui/badge';
 import { StatusBadge } from '../components/StatusBadge';
 import { Button } from '../../../shared/ui/button';
@@ -21,12 +23,19 @@ import {
   Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap,
   Search, Trash2, ChevronRight as ChevronRightIcon, FastForward, RotateCw,
   ExternalLink, Network, BarChart3, Pencil, Lock, Save, Info,
+  Undo2, ArrowUpRight, Apple, GitBranch, Send,
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { toast } from 'sonner';
 import ReactDiffViewer from 'react-diff-viewer-continued';
 import YAML from 'yaml';
+
+const AndroidIcon = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
+    <path d="M17.6 9.48l1.84-3.18c.16-.31.04-.69-.27-.85a.637.637 0 00-.83.22l-1.88 3.24a11.463 11.463 0 00-8.92 0L5.66 5.67c-.19-.29-.58-.38-.87-.2-.28.18-.37.54-.19.83L6.4 9.48A10.78 10.78 0 003 16h18a10.78 10.78 0 00-3.4-6.52zM8.86 13a.98.98 0 110-1.96.98.98 0 010 1.96zm6.28 0a.98.98 0 110-1.96.98.98 0 010 1.96z"/>
+  </svg>
+);
 
 // Format in Asia/Kolkata so dashboard users worldwide see the same timestamps as on-call India.
 const formatDate = (d?: string) => {
@@ -615,10 +624,37 @@ const RolloutStrategyTab: React.FC<{
  * created mobile release that hasn't been dispatched yet shows only the
  * basic header + the (empty) timeline.
  */
+const formatShortDate = (d: string) => {
+  const date = new Date(d);
+  if (isNaN(date.getTime())) return '';
+  return date.toLocaleDateString('en-IN', { month: 'short', day: '2-digit' });
+};
+
+const PrevBuildBadge = ({ build, label }: { build: LatestBuild; label: string }) => (
+  <span
+    className={cn(
+      'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium',
+      label === 'debug'
+        ? 'bg-amber-50 text-amber-700 border border-amber-200'
+        : 'bg-emerald-50 text-emerald-700 border border-emerald-200',
+    )}
+  >
+    <span className="uppercase">{label}</span>
+    <span className="font-mono">v{build.version}</span>
+    {build.versionCode != null && (
+      <span className="text-[9px] opacity-70">+{build.versionCode}</span>
+    )}
+    {build.completedAt && (
+      <span className="opacity-60">{formatShortDate(build.completedAt)}</span>
+    )}
+  </span>
+);
+
 const MobileReleaseDetailSection: React.FC<{
   release: any;
   events: RolloutEvent[];
 }> = ({ release, events }) => {
+  const { data: apps = [] } = useMobileApps();
   // The mobile workflow stores fine-grained state in the `target_state`
   // column on the backend, but the public ReleaseTracker JSON doesn't
   // expose that field. Both `release_context` and `metadata` may carry
@@ -665,9 +701,10 @@ const MobileReleaseDetailSection: React.FC<{
     )
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-  // Map a matrix job status to a Badge variant. Treat anything we don't
-  // recognize as `default` so a new GH status string doesn't render
-  // as an error.
+  const matchedApp = apps.find(
+    a => a.name === release.appGroup && a.surface === release.service && a.platform === release.env,
+  );
+
   const matrixVariant = (s?: string): 'success' | 'warning' | 'danger' | 'default' | 'muted' => {
     if (!s) return 'muted';
     const lc = s.toLowerCase();
@@ -738,15 +775,29 @@ const MobileReleaseDetailSection: React.FC<{
             )}
           </div>
         )}
+        {release.sourceRef && (
+          <div>
+            <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">Source Branch</div>
+            <div className="inline-flex items-center gap-1.5 border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm font-mono text-xs min-h-[38px] break-all">
+              <GitBranch className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+              {release.sourceRef}
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* iOS-only completion footnote. SCC marks the row COMPLETED when the
-          GH workflow finishes — but on iOS, Apple's TestFlight processing is
-          asynchronous on Apple's side. So COMPLETED here means "uploaded to
-          ASC, processing pending", not necessarily "live in TestFlight". This
-          footnote tells users not to be alarmed when the build doesn't appear
-          in TestFlight immediately. Conservative wording — safe whether the
-          workflow waits for processing internally or not. See spec §iOS-4. */}
+      {matchedApp && (matchedApp.latestReleaseBuild || matchedApp.latestDebugBuild) && (
+        <div className="flex items-center gap-2 flex-wrap mt-1 mb-3">
+          <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">Latest builds:</span>
+          {matchedApp.latestReleaseBuild && (
+            <PrevBuildBadge build={matchedApp.latestReleaseBuild} label="release" />
+          )}
+          {matchedApp.latestDebugBuild && (
+            <PrevBuildBadge build={matchedApp.latestDebugBuild} label="debug" />
+          )}
+        </div>
+      )}
+
       {release.env === 'ios' && release.status === 'COMPLETED' && (
         <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-xs text-blue-900 leading-relaxed">
           <strong className="font-semibold">iOS note:</strong>{' '}
@@ -822,6 +873,7 @@ const ReleaseSummary: React.FC = () => {
     }
   }, [release?.sync_enabled]);
 
+
   const approveMut = useApproveRelease();
   const discardMut = useDiscardRelease();
   const pauseMut = usePauseRelease();
@@ -834,6 +886,7 @@ const ReleaseSummary: React.FC = () => {
   const fastForwardMut = useFastForwardRelease();
   const immRevertSyncMut = useImmediateRevertWithSync();
   const updateTrackerMut = useUpdateTracker();
+  const dispatchMobileMut = useDispatchMobileReleases();
 
   const confirmAction = useConfirm();
 
@@ -917,6 +970,16 @@ const ReleaseSummary: React.FC = () => {
   const newService = release.new_service;
   const cronjobSuspend = release.cronjob_suspend;
 
+  // Mobile-revert derived values. State for the modal is declared near
+  // the other useState calls above so it lives ABOVE the !release
+  // early-return (rules of hooks). These are pure reads of `release`.
+  const isMobile = category === 'MobileBuild';
+  // Revert-chain banner data (mobile-only for now; backend revert uses
+  // a different mechanism). `revertsReleaseId` = "this row IS a revert
+  // of X"; `metadata.reverted_by` = "X has been reverted by this row".
+  const revertsTarget = release.revertsReleaseId || null;
+  const revertedByTarget = release.metadata?.reverted_by || null;
+
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
       <div className="flex items-center text-sm text-zinc-500 font-medium mb-3 sm:mb-4 flex-wrap gap-y-1">
@@ -938,11 +1001,53 @@ const ReleaseSummary: React.FC = () => {
         )}
       </div>
 
+      {/* Revert-chain banners (mobile). These render above the title so the
+          relationship between bad/revert releases is the first thing operators
+          see when triaging. */}
+      {isMobile && revertsTarget && (
+        <div className="mb-3 rounded-lg border border-violet-200 bg-violet-50 px-4 py-2.5 text-xs text-violet-900 flex items-center gap-2">
+          <Undo2 className="w-4 h-4 shrink-0 text-violet-600" />
+          <span>
+            This is a revert of release{' '}
+            <Link
+              to={`/releases/${revertsTarget}?category=mobile`}
+              className="font-mono font-medium hover:underline"
+            >
+              {revertsTarget.slice(0, 8)}
+            </Link>
+            {release.commitSha && (
+              <>
+                . Built from commit{' '}
+                <code className="font-mono">{release.commitSha.slice(0, 7)}</code>.
+              </>
+            )}
+          </span>
+        </div>
+      )}
+      {isMobile && revertedByTarget && (
+        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-900 flex items-center gap-2">
+          <ArrowUpRight className="w-4 h-4 shrink-0 text-amber-600" />
+          <span>
+            This release was reverted by{' '}
+            <Link
+              to={`/releases/${revertedByTarget}?category=mobile`}
+              className="font-mono font-medium hover:underline"
+            >
+              {revertedByTarget.slice(0, 8)}
+            </Link>
+            .
+          </span>
+        </div>
+      )}
+
       <div className="flex flex-col gap-3 mb-4 sm:mb-5">
         <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
           <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Release Summary</h1>
           <StatusBadge status={release.status} />
-          {release.release_context?.revert === 1 && <Badge variant="purple" dot>REVERT</Badge>}
+          {(release.release_context?.revert === 1 || revertsTarget) && <Badge variant="purple" dot>REVERT</Badge>}
+          {isMobile && (release.release_context?.destination === 'Firebase' || release.release_context?.destination === 'TestFlight') && (
+            <Badge variant="warning" dot>DEBUG</Badge>
+          )}
           {release.ab_hs_status && release.ab_hs_status !== 'Uninitiated' && <Badge variant="info">AB: {release.ab_hs_status}</Badge>}
           {KIBANA_URL && (
             <a href={KIBANA_URL} target="_blank" rel="noopener" className="text-xs text-zinc-500 border border-zinc-200 rounded px-2 py-1 hover:bg-zinc-50 inline-flex items-center gap-1">
@@ -964,6 +1069,11 @@ const ReleaseSummary: React.FC = () => {
           {s === 'CREATED' && release.is_approved === 0 && (
             <PermissionGate product="autopilot" permission="RELEASE_APPROVE">
               <Button size="sm" variant="success" loading={approveMut.isPending} onClick={() => doAction('approve', () => approveMut.mutateAsync({ releaseId: id!, approvedBy: actor }))}><Check className="w-3.5 h-3.5" /> Approve</Button>
+            </PermissionGate>
+          )}
+          {s === 'CREATED' && isMobile && !!release.is_approved && (
+            <PermissionGate product="autopilot" permission="MOBILE_DISPATCH">
+              <Button size="sm" variant="outline" className="border-emerald-300 text-emerald-700 hover:bg-emerald-50" loading={dispatchMobileMut.isPending} onClick={() => doAction('dispatch', () => dispatchMobileMut.mutateAsync([id!]), false, 'This will dispatch the GitHub workflow for this release. The runner will pick it up and start the build.')}><Send className="w-3.5 h-3.5" /> Dispatch</Button>
             </PermissionGate>
           )}
           {s === 'CREATED' && (
@@ -988,7 +1098,7 @@ const ReleaseSummary: React.FC = () => {
               <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
             </PermissionGate>
           )}
-          {s === 'COMPLETED' && (
+          {s === 'COMPLETED' && !isMobile && (
             <>
               <PermissionGate product="autopilot" permission="RELEASE_REVERT">
                 <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: actor, isRevertSync: revertSyncChecked }), true)}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
@@ -1007,6 +1117,27 @@ const ReleaseSummary: React.FC = () => {
                 </label>
               </PermissionGate>
             </>
+          )}
+          {/* Mobile releases use a dedicated revert flow: opens a modal,
+              loads a draft from the BE, lets the operator review the
+              previous-good commit + auto-generated changelog, and POSTs
+              a new release row with source_ref pointing at the previous
+              good tag. The K8s-specific "Immediate Revert" and
+              "Also revert in other cloud" controls don't apply. */}
+          {s === 'COMPLETED' && isMobile && !revertedByTarget
+            && !revertsTarget
+            && release.release_context?.destination !== 'Firebase'
+            && release.release_context?.destination !== 'TestFlight' && (
+            <PermissionGate product="autopilot" permission="RELEASE_REVERT">
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-violet-300 text-violet-700 hover:bg-violet-50"
+                onClick={() => navigate(`/releases/${id}/revert?category=mobile`)}
+              >
+                <Undo2 className="w-3.5 h-3.5" /> Revert
+              </Button>
+            </PermissionGate>
           )}
           {(s === 'ABORTED' || s === 'USER_ABORTED' || s === 'GCLT_ABORTED' || s === 'REVERTED') && (
             <PermissionGate product="autopilot" permission="RELEASE_CREATE">
@@ -1112,7 +1243,24 @@ const ReleaseSummary: React.FC = () => {
                   <>
                     <InfoField label="App" value={release.appGroup} />
                     <InfoField label="Surface" value={release.service} />
-                    <InfoField label="Platform" value={release.env} />
+                    <div>
+                      <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">Platform</div>
+                      <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm min-h-[38px] flex items-center gap-2">
+                        {release.env === 'android' ? (
+                          <span className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide bg-[#3DDC84]/15 text-[#1B8A4F] border border-[#3DDC84]/30">
+                            <AndroidIcon className="w-3.5 h-3.5" />
+                            Android
+                          </span>
+                        ) : release.env === 'ios' ? (
+                          <span className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide bg-zinc-500/15 text-zinc-700 border border-zinc-400/30">
+                            <Apple className="w-3.5 h-3.5" />
+                            iOS
+                          </span>
+                        ) : (
+                          <span className="text-sm">{release.env || '-'}</span>
+                        )}
+                      </div>
+                    </div>
                     <InfoField label="Version" value={release.new_version} mono />
                   </>
                 ) : (
