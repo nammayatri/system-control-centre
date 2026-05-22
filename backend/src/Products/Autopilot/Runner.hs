@@ -25,6 +25,7 @@ import Products.Autopilot.K8s.Execute (isNotFoundError, runCmd)
 import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Mobile.Github (cancelRun)
+import Products.Autopilot.Mobile.StoreSync (storeSyncLoop)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
 import Products.Autopilot.Mobile.Queries.Tracker (appCatalogForRow, gitOwner, gitRepo)
 import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..))
@@ -50,6 +51,7 @@ by the stale rollback sweep.
 runnerLoop :: AppState -> IO ()
 runnerLoop st = do
     runnerStartupRecovery st
+    runFlow st $ forkFlow storeSyncLoop
     runnerPollLoop st
 
 {- | Startup recovery. Must run BEFORE the HTTP port binds, or concurrent

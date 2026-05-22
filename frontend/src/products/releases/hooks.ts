@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import {
   fetchAPReleases,
   fetchReleaseDetails,
@@ -307,6 +307,15 @@ export function useMobileApps() {
   });
 }
 
+export function useMobileBranches(search?: string) {
+  return useQuery({
+    queryKey: ['mobile', 'branches', search ?? ''],
+    queryFn: () => mobileApi.listBranches(search),
+    staleTime: search ? 30_000 : 5 * 60_000,
+    placeholderData: keepPreviousData,
+  });
+}
+
 export function usePreviewVersions(appCatalogIds: number[]) {
   // sort the ids so the cache key is order-independent
   const sortedKey = [...appCatalogIds].sort((a, b) => a - b).join(',');
@@ -335,8 +344,10 @@ export function useDispatchMobileReleases() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: mobileApi.dispatchReleases,
-    onSuccess: () => {
+    onSuccess: (resp) => {
+      toast.success(`Dispatched ${resp.dispatches.length} workflow${resp.dispatches.length === 1 ? '' : 's'}`);
       qc.invalidateQueries({ queryKey: ['releases'] });
+      qc.invalidateQueries({ queryKey: ['release'] });
     },
     onError: (err: any) => {
       toast.error(err?.response?.data?.message || err.message || 'Failed to dispatch mobile releases');

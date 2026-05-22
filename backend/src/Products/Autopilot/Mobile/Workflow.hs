@@ -78,7 +78,7 @@ import Products.Autopilot.Mobile.Github (
     listTags,
     listWorkflowRuns,
  )
-import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
+import Products.Autopilot.Mobile.Github.Auth (GhAppCreds (..), loadGhCreds)
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRow,
     findSiblingsByDispatchId,
@@ -86,6 +86,7 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     gitRepo,
     incrementResolveAttempts,
     logEvent,
+    markReleaseRevertedBy,
     setExternalRunIdForDispatch,
  )
 import Products.Autopilot.Mobile.Types (
@@ -94,6 +95,7 @@ import Products.Autopilot.Mobile.Types (
     MobileBuildWFStatus (..),
     MobileDestination (..),
     isMBTerminal,
+    isDebugDestination,
  )
 import Products.Autopilot.Mobile.Types.Storage (AppCatalogT (..))
 import Products.Autopilot.Mobile.Versioning (
@@ -313,80 +315,83 @@ execResolveVersion :: forall m. (StageM ReleaseState m) => m StageOutcome
 execResolveVersion = mobileStage "ResolveVersion" $ do
     rs <- gets id
     let rt = releaseTracker rs
-    ac <- appCatalogForRow rt
-    pkgName <- case acPackageName ac of
-        Just p | not (T.null p) -> pure p
-        _ ->
-            abort $
-                "AppCatalog row for "
-                    <> appGroup rt
-                    <> " has no package_name; cannot resolve next version"
-    res <- resolveNextVersion (acPlatform ac) pkgName
-    case res of
-        Left err
-            -- Configuration errors are NOT retriable — the runner would
-            -- loop forever waiting for the operator to update server_config
-            -- without ever surfacing the problem on the release row.
-            -- Abort with the stable error tag so the row transitions to
-            -- MBFailed and the UI shows it as ABORTED with a clear cause.
-            -- Patterns matched here cover both Play and Apple variants:
-            --   - "<*>_not_configured", "<*>_creds_missing"
-            --   - "asc_app_not_found:..." / "play_package_not_found:..."
-            --   - "unsupported platform: ..."
-            -- API hiccups (asc_http_error, play_unauthorized, etc.) still
-            -- flow through retry so transient outages recover on their own.
-            | isConfigError err -> abort err
-            | otherwise -> retry err
-        Right (AndroidVersion nextName nextCode) -> do
+        isDebug = case mobileTarget rs of
+            Just target -> isDebugDestination (mbcDestination (mbContext target))
+            Nothing -> False
+    if isDebug
+        then do
             logInfoIO $
                 "[ResolveVersion] "
                     <> releaseId rt
-                    <> " resolved Android version "
-                    <> nextName
-                    <> " (code "
-                    <> T.pack (show nextCode)
-                    <> ")"
-            -- Both updates are idempotent: writing the same values again is a no-op.
+                    <> " debug destination, skipping store version resolution"
             modify $ \s ->
-                let rt' = (releaseTracker s){newVersion = nextName}
-                    ts' =
+                let ts' =
                         applyMobileTarget s $ \mt ->
-                            mt
-                                { mbContext = (mbContext mt){mbcVersionCode = Just nextCode}
-                                , mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
-                                }
-                 in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
+                            mt{mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved}
+                 in s{targetState = Just (MobileBuildState ts')}
             logEvent (releaseId rt) "VERSION_RESOLVED" $
-                object
-                    [ "version_name" .= nextName
-                    , "version_code" .= nextCode
-                    , "source" .= ("play_console" :: T.Text)
-                    ]
+                object ["source" .= ("debug_skip" :: T.Text)]
             pure StageSuccess
-        Right (IosVersion nextNumber) -> do
-            logInfoIO $
-                "[ResolveVersion] "
-                    <> releaseId rt
-                    <> " resolved iOS version_number "
-                    <> nextNumber
-                    <> " (build number computed by workflow)"
-            -- iOS rows: only newVersion is written. mbcVersionCode stays
-            -- Nothing — the workflow computes it via fastlane and we read
-            -- it later from the pushed tag in ConfirmTag.
-            modify $ \s ->
-                let rt' = (releaseTracker s){newVersion = nextNumber}
-                    ts' =
-                        applyMobileTarget s $ \mt ->
-                            mt
-                                { mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
-                                }
-                 in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
-            logEvent (releaseId rt) "VERSION_RESOLVED" $
-                object
-                    [ "version_number" .= nextNumber
-                    , "source" .= ("app_store_connect" :: T.Text)
-                    ]
-            pure StageSuccess
+        else do
+            ac <- appCatalogForRow rt
+            pkgName <- case acPackageName ac of
+                Just p | not (T.null p) -> pure p
+                _ ->
+                    abort $
+                        "AppCatalog row for "
+                            <> appGroup rt
+                            <> " has no package_name; cannot resolve next version"
+            res <- resolveNextVersion (acPlatform ac) pkgName
+            case res of
+                Left err
+                    | isConfigError err -> abort err
+                    | otherwise -> retry err
+                Right (AndroidVersion nextName nextCode) -> do
+                    logInfoIO $
+                        "[ResolveVersion] "
+                            <> releaseId rt
+                            <> " resolved Android version "
+                            <> nextName
+                            <> " (code "
+                            <> T.pack (show nextCode)
+                            <> ")"
+                    modify $ \s ->
+                        let rt' = (releaseTracker s){newVersion = nextName}
+                            ts' =
+                                applyMobileTarget s $ \mt ->
+                                    mt
+                                        { mbContext = (mbContext mt){mbcVersionCode = Just nextCode}
+                                        , mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
+                                        }
+                         in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
+                    logEvent (releaseId rt) "VERSION_RESOLVED" $
+                        object
+                            [ "version_name" .= nextName
+                            , "version_code" .= nextCode
+                            , "source" .= ("play_console" :: T.Text)
+                            ]
+                    pure StageSuccess
+                Right (IosVersion nextNumber) -> do
+                    logInfoIO $
+                        "[ResolveVersion] "
+                            <> releaseId rt
+                            <> " resolved iOS version_number "
+                            <> nextNumber
+                            <> " (build number computed by workflow)"
+                    modify $ \s ->
+                        let rt' = (releaseTracker s){newVersion = nextNumber}
+                            ts' =
+                                applyMobileTarget s $ \mt ->
+                                    mt
+                                        { mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
+                                        }
+                         in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
+                    logEvent (releaseId rt) "VERSION_RESOLVED" $
+                        object
+                            [ "version_number" .= nextNumber
+                            , "source" .= ("app_store_connect" :: T.Text)
+                            ]
+                    pure StageSuccess
 
 {- | Stage 2: Acquire the dispatch-group advisory lock.
 
@@ -506,33 +511,45 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
     -- by a workflow are silently ignored by GitHub, but we keep the maps
     -- tight so the dispatch payload is honest about what each platform
     -- actually consumes.
-    let inputs =
-            case acPlatform ac of
-                "ios" ->
+    let dest = mbcDestination (mbContext target)
+        changeLogVal = mbcChangeLog (mbContext target)
+        inputs =
+            if isDebugDestination dest
+                then
                     KM.fromList
                         [ ("selected_apps", Aeson.String selectedApps)
-                        , ("version_number", Aeson.String versionName)
-                        , ("change_log", Aeson.String (mbcChangeLog (mbContext target)))
+                        , ("change_log", Aeson.String changeLogVal)
                         ]
-                _ ->
-                    -- Android (default; "android" or anything legacy).
-                    KM.fromList
-                        [ ("selected_apps", Aeson.String selectedApps)
-                        , ("version_name", Aeson.String versionName)
-                        , ("version_code", Aeson.String (T.pack (show versionCode)))
-                        , ("change_log", Aeson.String (mbcChangeLog (mbContext target)))
-                        ]
+                else case acPlatform ac of
+                    "ios" ->
+                        KM.fromList
+                            [ ("selected_apps", Aeson.String selectedApps)
+                            , ("version_number", Aeson.String versionName)
+                            , ("change_log", Aeson.String changeLogVal)
+                            ]
+                    _ ->
+                        KM.fromList
+                            [ ("selected_apps", Aeson.String selectedApps)
+                            , ("version_name", Aeson.String versionName)
+                            , ("version_code", Aeson.String (T.pack (show versionCode)))
+                            , ("change_log", Aeson.String changeLogVal)
+                            ]
+        ref = fromMaybe "main" (sourceRef rt)
         body =
             WorkflowDispatchReq
-                { wdrRef = "main"
+                { wdrRef = ref
                 , wdrInputs = inputs
                 }
+        wfPath =
+            if isDebugDestination dest
+                then fromMaybe (acWorkflowPath ac) (acDebugWorkflowPath ac)
+                else acWorkflowPath ac
     res <-
         dispatchWorkflow
             creds
             (gitOwner ac)
             (gitRepo ac)
-            (acWorkflowPath ac)
+            wfPath
             body
     case res of
         Right () -> do
@@ -540,7 +557,9 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                 "[DispatchWorkflow] "
                     <> releaseId rt
                     <> " dispatched workflow="
-                    <> acWorkflowPath ac
+                    <> wfPath
+                    <> " ref="
+                    <> ref
                     <> " selected_apps=["
                     <> selectedApps
                     <> "]"
@@ -558,7 +577,8 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                     }
             logEvent (releaseId rt) "GH_DISPATCHED" $
                 object
-                    [ "workflow_path" .= acWorkflowPath ac
+                    [ "workflow_path" .= wfPath
+                    , "ref" .= ref
                     , "selected_apps" .= selectedApps
                     , "version_name" .= versionName
                     , "version_code" .= versionCode
@@ -596,7 +616,7 @@ execResolveRunId = do
                 Just t -> pure t
                 Nothing -> abort "MobileBuildState missing at ResolveRunId"
             ac <- appCatalogForRow rt
-            creds <- loadGhCreds
+            creds <- loadGhCredsSafe
             mDid <- findDispatchIdForRelease (releaseId rt)
             dispatchId <- case mDid of
                 Just d -> pure d
@@ -618,12 +638,17 @@ execResolveRunId = do
                         , "reason" .= ("ResolveRunId exceeded 10 attempts" :: Text)
                         ]
                 abort "ResolveRunId: max attempts exceeded"
+            let dest = mbcDestination (mbContext target)
+                wfPath =
+                    if isDebugDestination dest
+                        then fromMaybe (acWorkflowPath ac) (acDebugWorkflowPath ac)
+                        else acWorkflowPath ac
             res <-
                 listWorkflowRuns
                     creds
                     (gitOwner ac)
                     (gitRepo ac)
-                    (acWorkflowPath ac)
+                    wfPath
             allRuns <- case res of
                 Right xs -> pure xs
                 Left e -> retry ("listWorkflowRuns failed: " <> e)
@@ -639,7 +664,8 @@ execResolveRunId = do
             case candidates of
                 (r : _) -> do
                     let runIdT = T.pack (show (wrId r))
-                    setExternalRunIdForDispatch dispatchId runIdT
+                        headSha = wrHeadSha r
+                    setExternalRunIdForDispatch dispatchId runIdT headSha
                     modify $ \s ->
                         s
                             { targetState =
@@ -655,6 +681,7 @@ execResolveRunId = do
                     logEvent (releaseId rt) "GH_RUN_RESOLVED" $
                         object
                             [ "run_id" .= runIdT
+                            , "head_sha" .= headSha
                             , "html_url" .= wrHtmlUrl r
                             , "created_at" .= wrCreatedAt r
                             , "candidates" .= length candidates
@@ -664,6 +691,8 @@ execResolveRunId = do
                             <> releaseId rt
                             <> " bound to run_id="
                             <> runIdT
+                            <> " head_sha="
+                            <> headSha
                     pure StageSuccess
                 [] -> do
                     logInfoIO $
@@ -697,7 +726,7 @@ execPollMatrixJobs = mobileStage "PollMatrixJobs" $ do
         Just r | not (T.null r) -> pure r
         _ -> abort "external_run_id missing at PollMatrixJobs"
     ac <- appCatalogForRow rt
-    creds <- loadGhCreds
+    creds <- loadGhCredsSafe
     res <- listJobs creds (gitOwner ac) (gitRepo ac) runId
     jobs <- case res of
         Right xs -> pure xs
@@ -809,25 +838,13 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
     target <- case mobileTarget rs of
         Just t -> pure t
         Nothing -> abort "MobileBuildState missing at ConfirmTag"
-    ac <- appCatalogForRow rt
-    creds <- loadGhCreds
-    let segment = normalizeAppSegment (acName ac)
-        platform = acPlatform ac
-        prefix = segment <> "/prod/" <> platform <> "/v"
-    res <- listTags creds (gitOwner ac) (gitRepo ac) prefix
-    refs <- case res of
-        Right xs -> pure xs
-        Left e -> retry ("listTags failed: " <> e)
-    case refs of
-        [] -> do
+    let isDebug = isDebugDestination (mbcDestination (mbContext target))
+    if isDebug
+        then do
             logInfoIO $
                 "[ConfirmTag] "
                     <> releaseId rt
-                    <> " no tags yet for prefix="
-                    <> prefix
-            pure StageWaiting
-        (r : _) -> do
-            let tagName = stripRefsTags r
+                    <> " debug destination, skipping tag confirmation"
             modify $ \s ->
                 s
                     { targetState =
@@ -835,19 +852,54 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                             MobileBuildState
                                 ( applyMobileTarget s $ \mt ->
                                     mt
-                                        { mbContext = (mbContext target){mbcTagPushed = Just tagName}
+                                        { mbContext = (mbContext target){mbcTagPushed = Just "debug-no-tag"}
                                         , mbWfStatus = bumpStatus (mbWfStatus mt) MBTagPushed
                                         }
                                 )
                     }
             logEvent (releaseId rt) "TAG_OBSERVED" $
-                object ["tag" .= tagName, "ref" .= r, "prefix" .= prefix]
-            logInfoIO $
-                "[ConfirmTag] "
-                    <> releaseId rt
-                    <> " bound to tag="
-                    <> tagName
+                object ["tag" .= ("debug-no-tag" :: Text), "source" .= ("debug_skip" :: Text)]
             pure StageSuccess
+        else do
+            ac <- appCatalogForRow rt
+            creds <- loadGhCredsSafe
+            let segment = normalizeAppSegment (acName ac)
+                platform = acPlatform ac
+                prefix = segment <> "/prod/" <> platform <> "/v"
+            res <- listTags creds (gitOwner ac) (gitRepo ac) prefix
+            refs <- case res of
+                Right xs -> pure xs
+                Left e -> retry ("listTags failed: " <> e)
+            case refs of
+                [] -> do
+                    logInfoIO $
+                        "[ConfirmTag] "
+                            <> releaseId rt
+                            <> " no tags yet for prefix="
+                            <> prefix
+                    pure StageWaiting
+                (r : _) -> do
+                    let tagName = stripRefsTags r
+                    modify $ \s ->
+                        s
+                            { targetState =
+                                Just $
+                                    MobileBuildState
+                                        ( applyMobileTarget s $ \mt ->
+                                            mt
+                                                { mbContext = (mbContext target){mbcTagPushed = Just tagName}
+                                                , mbWfStatus = bumpStatus (mbWfStatus mt) MBTagPushed
+                                                }
+                                        )
+                            }
+                    logEvent (releaseId rt) "TAG_OBSERVED" $
+                        object ["tag" .= tagName, "ref" .= r, "prefix" .= prefix]
+                    logInfoIO $
+                        "[ConfirmTag] "
+                            <> releaseId rt
+                            <> " bound to tag="
+                            <> tagName
+                    pure StageSuccess
 
 {- | Stage 7: Map fine-grained @MobileBuildWFStatus@ to the user-facing
 'ReleaseStatus' that appears on the dashboard.
@@ -904,6 +956,10 @@ execFinalize = mobileStage "Finalize" $ do
                     , "new_status" .= newStatus
                     , "mb_wf_status" .= T.pack (show mb)
                     ]
+            case (newStatus, revertsReleaseId rt) of
+                (COMPLETED, Just badId) ->
+                    markReleaseRevertedBy badId (releaseId rt)
+                _ -> pure ()
             logInfoIO $
                 "[Finalize] "
                     <> releaseId rt
@@ -986,6 +1042,17 @@ retry msg = liftIO (throwIO (MobileRetry msg))
 -- | Lift @logInfoG@ inside a 'StateFlow' (which has 'MonadIO').
 logInfoIO :: Text -> StateFlow ()
 logInfoIO = liftIO . logInfoG
+
+-- | 'loadGhCreds' variant for post-dispatch polling stages. If the token
+-- refresh fails (clock drift, transient 401, etc.) we retry on the next
+-- tick instead of killing the release — the creds already worked for
+-- dispatch, so the failure is transient.
+loadGhCredsSafe :: StateFlow GhAppCreds
+loadGhCredsSafe = do
+    eCreds <- MC.try @_ @SomeException loadGhCreds
+    case eCreds of
+        Right c -> pure c
+        Left ex -> retry ("GH auth refresh failed (will retry): " <> T.pack (show ex))
 
 -- ─── Helpers on ReleaseState / TargetState ─────────────────────────
 

@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {- | Queries for the @app_catalog@ table — the catalog of mobile apps
 releasable through SCC. Polymorphic in MonadFlow per the codebase convention.
@@ -11,15 +12,18 @@ module Products.Autopilot.Mobile.Queries.AppCatalog (
     updateAppCatalog,
     NewAppCatalogRow (..),
     PatchAppCatalogRow (..),
+    LatestBuildRow (..),
+    fetchLatestBuildsPerApp,
 ) where
 
 import Control.Monad.Catch (throwM)
 import Core.AppError (DBError (..))
-import Core.DB.Connection (runDB)
+import Core.DB.Connection (runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
 import Data.Int (Int32)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
+import Data.Time.Clock (UTCTime)
 import Database.Beam
 import Database.Beam.Postgres (Pg)
 import Database.Beam.Postgres.Full (
@@ -29,6 +33,7 @@ import Database.Beam.Postgres.Full (
     runPgUpdateReturningList,
     updateReturning,
  )
+import Database.PostgreSQL.Simple (query_)
 import Products.Autopilot.Mobile.Types.Storage
 import Products.Autopilot.Types.Storage.Schema (AutopilotDb (..), autopilotDb)
 
@@ -39,6 +44,7 @@ data NewAppCatalogRow = NewAppCatalogRow
     , nacPlatform :: Text
     , nacGithubRepo :: Text
     , nacWorkflowPath :: Text
+    , nacDebugWorkflowPath :: Maybe Text
     , nacPackageName :: Maybe Text
     , nacDisplayLabel :: Maybe Text
     , nacEnabled :: Maybe Bool
@@ -51,6 +57,7 @@ data PatchAppCatalogRow = PatchAppCatalogRow
     , pacDisplayLabel :: Maybe Text
     , pacPackageName :: Maybe Text
     , pacWorkflowPath :: Maybe Text
+    , pacDebugWorkflowPath :: Maybe Text
     }
 
 -- | All rows.
@@ -101,6 +108,7 @@ insertAppCatalog NewAppCatalogRow{..} = withDb $ \db -> do
                             , acPlatform = val_ nacPlatform
                             , acGithubRepo = val_ nacGithubRepo
                             , acWorkflowPath = val_ nacWorkflowPath
+                            , acDebugWorkflowPath = val_ nacDebugWorkflowPath
                             , acPackageName = val_ nacPackageName
                             , acDisplayLabel = val_ nacDisplayLabel
                             , acEnabled = val_ enabled'
@@ -139,6 +147,7 @@ updateAppCatalog aid PatchAppCatalogRow{..} = withDb $ \db ->
                                         , fmap (\v -> acDisplayLabel a <-. val_ (Just v)) pacDisplayLabel
                                         , fmap (\v -> acPackageName a <-. val_ (Just v)) pacPackageName
                                         , fmap (\v -> acWorkflowPath a <-. val_ v) pacWorkflowPath
+                                        , fmap (\v -> acDebugWorkflowPath a <-. val_ (Just v)) pacDebugWorkflowPath
                                         ]
                             )
                             (\a -> acId a ==. val_ aid)
@@ -148,8 +157,8 @@ updateAppCatalog aid PatchAppCatalogRow{..} = withDb $ \db ->
                     (x : _) -> Just x
 
     isNoop =
-        case (pacEnabled, pacDisplayLabel, pacPackageName, pacWorkflowPath) of
-            (Nothing, Nothing, Nothing, Nothing) -> True
+        case (pacEnabled, pacDisplayLabel, pacPackageName, pacWorkflowPath, pacDebugWorkflowPath) of
+            (Nothing, Nothing, Nothing, Nothing, Nothing) -> True
             _ -> False
 
     lookupCurrent :: Pg (Maybe AppCatalog)
@@ -163,3 +172,66 @@ updateAppCatalog aid PatchAppCatalogRow{..} = withDb $ \db ->
         pure $ case rows of
             [] -> Nothing
             (x : _) -> Just x
+
+-- ─── Latest-build aggregation ─────────────────────────────────────
+
+{- | Summary of the latest completed build per (app, surface, platform,
+build_type). Returned by the raw SQL query in 'fetchLatestBuildsPerApp'.
+-}
+data LatestBuildRow = LatestBuildRow
+    { lbrAppGroup :: Text
+    , lbrSurface :: Text
+    , lbrPlatform :: Text
+    , lbrBuildType :: Text -- ^ @"debug"@ or @"release"@
+    , lbrVersion :: Text
+    , lbrVersionCode :: Maybe Int32
+    , lbrDestination :: Maybe Text
+    , lbrTagPushed :: Maybe Text
+    , lbrCommitSha :: Maybe Text
+    , lbrCompletedAt :: UTCTime
+    }
+
+{- | For every unique (app_group, service, env, build_type) combination
+in @release_tracker@ where @category = 'MobileBuild'@ and
+@status = 'COMPLETED'@, return the single most recent row.
+
+Build type is inferred from the @destination@ field inside
+@release_context.contents.mbContext@:
+
+* Debug: destination ∈ {Firebase, TestFlight}
+* Release: destination ∈ {GooglePlay, AppStore}
+
+Uses a raw SQL query (via @withConn@) because the window function
+(@ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)@) is beyond what
+Beam's DSL can express cleanly.
+-}
+fetchLatestBuildsPerApp :: (MonadFlow m) => m [LatestBuildRow]
+fetchLatestBuildsPerApp = withDb $ \db ->
+    withConn db $ \conn -> do
+        rows <-
+            query_ conn
+                "SELECT app_group, service, env, \
+                \  CASE WHEN (release_context::jsonb -> 'contents' -> 'mbContext' ->> 'destination') IN ('Firebase', 'TestFlight') \
+                \       THEN 'debug' ELSE 'release' END AS build_type, \
+                \  new_version, \
+                \  (release_context::jsonb -> 'contents' -> 'mbContext' ->> 'version_code')::int AS version_code, \
+                \  release_context::jsonb -> 'contents' -> 'mbContext' ->> 'destination' AS destination, \
+                \  release_context::jsonb -> 'contents' -> 'mbContext' ->> 'tag_pushed' AS tag_pushed, \
+                \  commit_sha, \
+                \  date_created \
+                \FROM ( \
+                \  SELECT *, ROW_NUMBER() OVER ( \
+                \    PARTITION BY app_group, service, env, \
+                \      CASE WHEN (release_context::jsonb -> 'contents' -> 'mbContext' ->> 'destination') IN ('Firebase', 'TestFlight') \
+                \           THEN 'debug' ELSE 'release' END \
+                \    ORDER BY date_created DESC \
+                \  ) AS rn \
+                \  FROM release_tracker \
+                \  WHERE category = 'MobileBuild' AND status = 'COMPLETED' \
+                \    AND release_context IS NOT NULL \
+                \) sub WHERE rn = 1"
+        pure (map toLatestBuildRow rows)
+
+toLatestBuildRow :: (Text, Text, Text, Text, Text, Maybe Int32, Maybe Text, Maybe Text, Maybe Text, UTCTime) -> LatestBuildRow
+toLatestBuildRow (ag, suf, plt, bt, ver, vc, dest, tag, sha, ca) =
+    LatestBuildRow ag suf plt bt ver vc dest tag sha ca

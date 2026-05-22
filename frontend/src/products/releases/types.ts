@@ -3,6 +3,15 @@
 // GitHub Actions). Backend release types still live in api.ts for
 // historical reasons; this file is the home for new mobile-only types.
 
+export type LatestBuild = {
+  version: string;
+  versionCode?: number;
+  destination?: string;
+  tagPushed?: string;
+  commitSha?: string;
+  completedAt: string;
+};
+
 export type AppCatalogEntry = {
   id: number;
   name: string;
@@ -10,10 +19,13 @@ export type AppCatalogEntry = {
   platform: 'android' | 'ios';
   githubRepo: string;
   workflowPath: string;
+  debugWorkflowPath: string | null;
   packageName: string | null;
   displayLabel: string | null;
   enabled: boolean;
   createdAt: string;
+  latestReleaseBuild?: LatestBuild | null;
+  latestDebugBuild?: LatestBuild | null;
 };
 
 // Mirror of the backend ADT. Android destinations on the left, iOS on the
@@ -24,6 +36,17 @@ export type MobileDestination =
   | 'Firebase' // Android: Firebase App Distribution.
   | 'TestFlight' // iOS: TestFlight beta channel.
   | 'AppStore'; // iOS: App Store (production).
+
+export type BuildType = 'debug' | 'release';
+
+/** Given a build type + platform, return the implied destination. */
+export const destinationFor = (
+  buildType: BuildType,
+  platform: 'android' | 'ios',
+): MobileDestination =>
+  buildType === 'debug'
+    ? platform === 'ios' ? 'TestFlight' : 'Firebase'
+    : platform === 'ios' ? 'AppStore' : 'GooglePlay';
 
 /** UI helper: which destinations are valid for a given platform. */
 export const destinationsForPlatform = (
@@ -41,7 +64,13 @@ export type CreateMobileReleasesReq = {
   releaseGroupLabel?: string;
   changeLog: string;
   destination: MobileDestination;
+  sourceRef?: string | null;
   items: CreateMobileReleasesItem[];
+};
+
+export type BranchInfo = {
+  name: string;
+  sha: string;
 };
 
 export type CreateMobileReleasesResp = {
