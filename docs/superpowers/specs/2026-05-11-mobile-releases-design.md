@@ -54,11 +54,15 @@ backend/src/Products/Autopilot/Mobile/
   Github/Auth.hs              GH App JWT (iat−60s, exp=9min for clock-drift tolerance) + installation token cache
   Versioning.hs               Thin dispatcher: branches on AppCatalog.platform.
                               Re-exports the public surface of both backends.
+                              Exposes resolveNextVersionWithToken for batch callers
+                              that pre-mint the ASC JWT once and share it across iOS apps.
   Versioning/Play.hs          ← Renamed from old Versioning.hs. Play Console client (Android)
                                 — JWT (RS256) + OAuth exchange + API calls + creds loader, all inline.
   Versioning/Apple.hs         NEW — App Store Connect client (iOS version resolution only)
                                 — JWT (ES256) + API calls + creds loader, all inline. Matches Play's shape.
                                 No separate Auth.hs; no IORef caching (ASC calls are low-frequency).
+                                Exports mintAscToken + resolveWithToken for batch callers
+                                that need to share a single JWT across multiple iOS apps.
   Workflow.hs                 mobileBuildSpec :: WorkflowSpec ReleaseState.
                               Stage 1 calls Versioning.resolveNextVersion (one entry point).
   Routes.hs                   Servant endpoints for mobile-specific actions
@@ -69,11 +73,12 @@ backend/src/Products/Autopilot/Mobile/
 `Mobile/Versioning.hs` becomes the **single entry point** for version resolution. Callers pass `acPlatform` and `acPackageName` directly (rather than the whole `AppCatalog` record) so the dispatcher stays orthogonal to the catalog schema. The return type is a discriminated `VersionResolution` sum — Android needs both name + code, iOS needs only a single version number, so a fixed tuple would force one of the surfaces to carry a dead field.
 
 ```haskell
--- Mobile/Versioning.hs (~25 lines)
+-- Mobile/Versioning.hs
 module Products.Autopilot.Mobile.Versioning
   ( VersionResolution(..)
-  , resolveNextVersion       -- the dispatcher
-  , module Play              -- legacy re-exports during the transition
+  , resolveNextVersion            -- single-app dispatcher
+  , resolveNextVersionWithToken   -- batch dispatcher (shared ASC JWT)
+  , module Play
   , module Apple
   ) where
 import qualified Products.Autopilot.Mobile.Versioning.Play  as Play
@@ -88,9 +93,24 @@ resolveNextVersion platform pkgName = case platform of
   "android" -> fmap (uncurry AndroidVersion) <$> Play.resolve pkgName
   "ios"     -> fmap IosVersion              <$> Apple.resolve  pkgName
   other     -> pure (Left ("unsupported platform: " <> other))
+
+-- Batch variant: accepts a pre-minted ASC JWT so all iOS apps in a
+-- single request share one token (avoids Apple rejecting duplicate
+-- JWTs minted in the same second).
+resolveNextVersionWithToken :: MonadFlow m => Maybe Text -> Text -> Text -> m (Either Text VersionResolution)
+resolveNextVersionWithToken mAscToken platform pkgName = case platform of
+  "android" -> fmap (uncurry AndroidVersion) <$> Play.resolve pkgName
+  "ios"     -> case mAscToken of
+    Just tok -> fmap IosVersion <$> Apple.resolveWithToken tok pkgName
+    Nothing  -> fmap IosVersion <$> Apple.resolve pkgName
+  other     -> pure (Left ("unsupported platform: " <> other))
 ```
 
-Both callers (`Mobile/Workflow.hs:execResolveVersion` and `Mobile/Handlers/Versions.hs:previewVersionsH`) collapse to one call — no per-caller platform branching. **There is no SCC-side polling of ASC build state**; fastlane handles that wait inside the iOS GH workflow (see §2 iOS-4).
+**Two dispatcher entry points:**
+- `resolveNextVersion` — used by `Workflow.hs:execResolveVersion` (single app per call, no token sharing needed).
+- `resolveNextVersionWithToken` — used by `Handlers/Versions.hs:previewVersionsH` (batch of apps: handler mints one ASC JWT upfront and passes it to every iOS resolve call). This fixes an intermittent `asc_unauthorized` error where Apple rejected the second JWT when two iOS apps were resolved in the same second with identical `iat`/`exp` claims but different ECDSA signatures.
+
+**There is no SCC-side polling of ASC build state**; fastlane handles that wait inside the iOS GH workflow (see §2 iOS-4).
 
 **Reuse vs. extend vs. add (Android MVP — shipped):**
 
@@ -110,7 +130,7 @@ Both callers (`Mobile/Workflow.hs:execResolveVersion` and `Mobile/Handlers/Versi
 | Every Android-side module above (the iOS path is additive — nothing is rewritten) | `Mobile/Versioning.hs` becomes a **dispatcher**; existing Play code moves to `Mobile/Versioning/Play.hs` (rename) | `Mobile/Versioning/Apple.hs` (App Store Connect version-resolution client — ES256 JWT signer + API client + creds loader, all inline, matching `Versioning/Play.hs`'s shape) |
 | `release_tracker`, `app_catalog`, `release_events` schema — **no new columns** (`asc_app_id` is looked up at runtime via bundle id, not stored per-row) | `app_catalog` seed (append 10 iOS rows to `0011-mobile-releases.sql` in place) | Three new `server_config` secrets: `app_store_connect_issuer_id`, `app_store_connect_key_id`, `app_store_connect_private_key_p8` (appended to `system-control-seed.sql`) |
 | `Mobile/Workflow.hs` engine, lock pattern, **all 7 existing stages** (no new stage, no new status) | `execResolveVersion` calls `Versioning.resolveNextVersion` (dispatcher branches on platform); `execDispatchWorkflow` branches on platform too — Android sends `version_name`+`version_code`, iOS sends `version_number` | — |
-| `MobileBuildWFStatus` ADT (**no changes** — no new fine-grained statuses needed) | `MobileDestination` ADT (+ `MBTestFlight`, `MBAppStore`); `Mobile/Handlers/Versions.hs:previewVersionsH` collapses to a single dispatcher call; response shape on iOS rows is `{ next_version_number, source: "app_store_connect" }` (single field) | — |
+| `MobileBuildWFStatus` ADT (**no changes** — no new fine-grained statuses needed) | `MobileDestination` ADT (+ `MBTestFlight`, `MBAppStore`); `Mobile/Handlers/Versions.hs:previewVersionsH` uses `resolveNextVersionWithToken` (batch dispatcher with shared ASC JWT); response shape on iOS rows is `{ next_version_number, source: "app_store_connect" }` (single field) | — |
 | `Mobile/Github.hs` + `Github/Auth.hs` (workflow dispatch identical for iOS — same `workflow_dispatch` endpoint, just different `inputs` shape) | `Mobile/Workflow.hs:execDispatchWorkflow` (platform-aware payload assembly) | iOS GH workflows (`fastlane.yaml` consumer, `provider-prod-ios-gen.yaml` driver) — authored in `nammayatri/ny-react-native`, **out of SCC scope**. SCC dispatches whatever workflow the catalog row names. The workflow already auto-detects from ASC as a fallback (its inline Python — `fastlane.yaml:261-346`), so if SCC's `Versioning/Apple.hs` fails for any reason (creds missing, network glitch), the workflow takes over — same robustness Android already has. |
 | `AP_RELEASE_*`, `AP_MOBILE_*` permissions (no new perms needed) | `CreateMobileRelease`: per-platform version-field label ("Version Number" for iOS, "Version Name + Code" for Android); preview source label `app_store_connect` | — |
 | All frontend pages (rows with `platform='ios'` already render) | — | — |

@@ -37,6 +37,10 @@ module Products.Autopilot.Mobile.Handlers.Release (
     -- * Branches
     BranchesResp (..),
     listBranchesH,
+
+    -- * Changelog preview
+    ChangelogPreviewResp (..),
+    changelogPreviewH,
 ) where
 
 import Control.Monad (unless)
@@ -57,8 +61,10 @@ import qualified Data.UUID.V4 as UUID
 import Database.Beam
 import Products.Autopilot.Mobile.Github (BranchInfo (..), listBranches, searchBranches)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
-import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById, listEnabledAppCatalog)
+import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), CompareResult (..), compareRefs)
+import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), fetchLatestBuildsPerApp, findAppCatalogById, listEnabledAppCatalog)
 import Products.Autopilot.Mobile.Queries.Tracker (
+    appCatalogByKey,
     gitOwner,
     gitRepo,
     insertMobileTracker,
@@ -425,3 +431,84 @@ listBranchesH _ap mQuery = do
     pinMain bs =
         let (mains, rest) = partition (\b -> biName b == "main" || biName b == "master") bs
          in mains ++ rest
+
+-- ─── Changelog preview ──────────────────────────────────────────
+
+data ChangelogPreviewResp = ChangelogPreviewResp
+    { cpCommits :: [CommitInfo]
+    , cpAheadBy :: Int
+    , cpStatus :: Text
+    , cpBaseTag :: Maybe Text
+    , cpBaseVersion :: Maybe Text
+    , cpCompareUrl :: Maybe Text
+    }
+    deriving (Generic, Show)
+
+instance ToJSON ChangelogPreviewResp where
+    toJSON = genericToJSON defaultOptions{omitNothingFields = True}
+
+changelogPreviewH :: AuthedPerson -> Text -> Text -> Text -> Text -> Flow ChangelogPreviewResp
+changelogPreviewH _ap appName surface platform branch = do
+    ac <- appCatalogByKey appName surface platform
+    creds <- loadGhCreds
+    let owner = gitOwner ac
+        repo = gitRepo ac
+    builds <- fetchLatestBuildsPerApp
+    let lastRelease = findLastReleaseBuild builds appName surface platform
+    case lastRelease of
+        Nothing ->
+            pure emptyPreview
+        Just lb -> do
+            let baseRef = case lbrTagPushed lb of
+                    Just t | not (T.null t) && t /= "debug-no-tag" -> t
+                    _ -> case lbrCommitSha lb of
+                        Just s | not (T.null s) -> s
+                        _ -> ""
+            if T.null baseRef
+                then pure emptyPreview
+                else do
+                    result <- compareRefs creds owner repo baseRef branch
+                    case result of
+                        Right cr ->
+                            pure
+                                ChangelogPreviewResp
+                                    { cpCommits = take 50 (crCommits cr)
+                                    , cpAheadBy = crAheadBy cr
+                                    , cpStatus = crStatus cr
+                                    , cpBaseTag = lbrTagPushed lb
+                                    , cpBaseVersion = Just (lbrVersion lb)
+                                    , cpCompareUrl =
+                                        Just $
+                                            "https://github.com/"
+                                                <> owner
+                                                <> "/"
+                                                <> repo
+                                                <> "/compare/"
+                                                <> baseRef
+                                                <> "..."
+                                                <> branch
+                                    }
+                        Left _ ->
+                            pure emptyPreview
+  where
+    emptyPreview =
+        ChangelogPreviewResp
+            { cpCommits = []
+            , cpAheadBy = 0
+            , cpStatus = "unknown"
+            , cpBaseTag = Nothing
+            , cpBaseVersion = Nothing
+            , cpCompareUrl = Nothing
+            }
+
+findLastReleaseBuild :: [LatestBuildRow] -> Text -> Text -> Text -> Maybe LatestBuildRow
+findLastReleaseBuild builds appName surface platform =
+    case filter matches builds of
+        (x : _) -> Just x
+        [] -> Nothing
+  where
+    matches b =
+        lbrAppGroup b == appName
+            && lbrSurface b == surface
+            && lbrPlatform b == platform
+            && lbrBuildType b == "release"

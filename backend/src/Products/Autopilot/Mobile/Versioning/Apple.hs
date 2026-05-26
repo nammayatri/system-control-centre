@@ -39,10 +39,12 @@ module Products.Autopilot.Mobile.Versioning.Apple (
     AscError (..),
     fetchAscVersions,
     loadAscCreds,
+    mintAscToken,
     renderAscErr,
 
-    -- * Dispatcher entry point
+    -- * Dispatcher entry points
     resolve,
+    resolveWithToken,
 ) where
 
 import Control.Exception (Exception)
@@ -187,11 +189,14 @@ runFetch creds bundleId = do
     eToken <- mintAscToken creds
     case eToken of
         Left err -> pure (Left err)
-        Right token -> do
-            eAppId <- lookupAppByBundleId token bundleId
-            case eAppId of
-                Left err -> pure (Left err)
-                Right appId -> fetchLatestTestFlightVersion token appId
+        Right token -> runFetchWithToken token bundleId
+
+runFetchWithToken :: Text -> Text -> IO (Either AscError (Maybe Text))
+runFetchWithToken token bundleId = do
+    eAppId <- lookupAppByBundleId token bundleId
+    case eAppId of
+        Left err -> pure (Left err)
+        Right appId -> fetchLatestTestFlightVersion token appId
 
 -- ─── JWT minting (ES256, inlined) ──────────────────────────────────
 
@@ -587,3 +592,16 @@ resolve bundleId = do
             case res of
                 Left e -> pure (Left (renderAscErr e))
                 Right mTfVersion -> pure (Right (computeNextIosVersion mTfVersion))
+
+resolveWithToken ::
+    (MonadFlow m) =>
+    -- | Pre-minted ASC bearer token (shared across a batch).
+    Text ->
+    -- | iOS bundle id (from @app_catalog.package_name@).
+    Text ->
+    m (Either Text Text)
+resolveWithToken token bundleId = do
+    res <- liftIO (runFetchWithToken token bundleId)
+    case res of
+        Left e -> pure (Left (renderAscErr e))
+        Right mTfVersion -> pure (Right (computeNextIosVersion mTfVersion))
