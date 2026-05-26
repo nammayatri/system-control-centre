@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -12,13 +12,17 @@ import {
   Smartphone,
   Tag,
   GitCommit,
+  GitBranch,
   Hash,
   Calendar,
   Store,
   Info,
   CheckCircle2,
   Loader2,
+  Search,
+  ChevronDown,
 } from 'lucide-react';
+import { cn } from '../../../../lib/utils';
 import { Button } from '../../../../shared/ui/button';
 import { Input } from '../../../../shared/ui/input';
 import { CardSkeleton } from '../../../../shared/ui/skeleton';
@@ -29,6 +33,8 @@ import {
   type RevertDraft,
   type VerifyCommitResp,
 } from '../../api';
+import { useMobileBranches } from '../../hooks';
+import type { BranchInfo } from '../../types';
 
 /**
  * Mobile-release Revert page.
@@ -37,9 +43,8 @@ import {
  *   - The "Revert" button on the release detail page.
  *   - The "Revert" action icon in the releases list.
  *
- * Routing: `/releases/:id/revert` (mobile releases only — backend
- * releases use a different revert mechanism). The URL keeps
- * `?category=mobile` so the sidebar's Mobile tile stays highlighted.
+ * Routing: `/mobile/releases/:id/revert` (mobile releases only — backend
+ * releases use a different revert mechanism).
  *
  * The page loads a draft from the BE, seeds editable fields with
  * server-suggested defaults, validates client-side (server re-validates
@@ -70,11 +75,47 @@ const MobileRevert: React.FC = () => {
   const [versionCode, setVersionCode] = useState('');
   const [changelog, setChangelog] = useState('');
   const [sourceMode, setSourceMode] = useState<'prevGood' | 'customCommit'>('prevGood');
+  const [customInputMode, setCustomInputMode] = useState<'sha' | 'branch'>('sha');
   const [customCommit, setCustomCommit] = useState('');
   const [verifiedCommit, setVerifiedCommit] = useState<VerifyCommitResp | null>(null);
 
+  // Branch search state
+  const [branchSearch, setBranchSearch] = useState('');
+  const [debouncedBranchSearch, setDebouncedBranchSearch] = useState('');
+  const [branchDropdownOpen, setBranchDropdownOpen] = useState(false);
+  const branchInputRef = useRef<HTMLInputElement>(null);
+  const branchContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedBranchSearch(branchSearch.trim()), 300);
+    return () => clearTimeout(t);
+  }, [branchSearch]);
+
+  const { data: branchesData, isLoading: branchesLoading } = useMobileBranches(
+    sourceMode === 'customCommit' && customInputMode === 'branch'
+      ? debouncedBranchSearch || undefined
+      : undefined,
+  );
+  const filteredBranches: BranchInfo[] = branchesData ?? [];
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (branchContainerRef.current && !branchContainerRef.current.contains(e.target as Node)) {
+        setBranchDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const pendingVerifyRef = useRef<string | null>(null);
+
   const verifyMut = useMutation({
-    mutationFn: () => verifyRevertCommit(id!, customCommit.trim()),
+    mutationFn: () => {
+      const ref = pendingVerifyRef.current ?? customCommit.trim();
+      pendingVerifyRef.current = null;
+      return verifyRevertCommit(id!, ref);
+    },
     onSuccess: (resp) => {
       setVerifiedCommit(resp);
       setCustomCommit(resp.vcFullSha);
@@ -115,10 +156,15 @@ const MobileRevert: React.FC = () => {
     if (!changelog.trim()) return 'Changelog cannot be empty';
     if (sourceMode === 'customCommit') {
       const trimmed = customCommit.trim();
-      if (!trimmed) return 'Commit SHA is required when using custom commit';
-      if (!/^[0-9a-f]{7,40}$/i.test(trimmed)) return 'Commit SHA must be 7–40 hex characters';
+      if (!trimmed) return customInputMode === 'sha'
+        ? 'Commit SHA is required when using custom commit'
+        : 'Select a branch to build from';
+      if (customInputMode === 'sha' && !/^[0-9a-f]{7,40}$/i.test(trimmed))
+        return 'Commit SHA must be 7–40 hex characters';
       if (!verifiedCommit || verifiedCommit.vcFullSha !== trimmed)
-        return 'Please verify the commit SHA before creating the revert';
+        return customInputMode === 'sha'
+          ? 'Please verify the commit SHA before creating the revert'
+          : 'Please verify the branch before creating the revert';
     }
     return null;
   })();
@@ -135,7 +181,7 @@ const MobileRevert: React.FC = () => {
       toast.success('Revert release created. Approve it to dispatch the rebuild.');
       qc.invalidateQueries({ queryKey: ['release', id] });
       qc.invalidateQueries({ queryKey: ['releases'] });
-      navigate(`/releases/${resp.rrRevertReleaseId}?category=mobile`);
+      navigate(`/mobile/releases/${resp.rrRevertReleaseId}`);
     },
     onError: (err: any) => {
       const msg =
@@ -147,12 +193,12 @@ const MobileRevert: React.FC = () => {
   // ── Header crumbs ──────────────────────────────────────────────
   const crumbs = (
     <div className="flex items-center text-sm text-zinc-500 font-medium mb-3 sm:mb-4 flex-wrap gap-y-1">
-      <Link to="/releases?category=mobile" className="hover:text-zinc-700 transition-colors">
+      <Link to="/mobile/releases" className="hover:text-zinc-700 transition-colors">
         Releases
       </Link>
       <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300 shrink-0" />
       <Link
-        to={`/releases/${id}?category=mobile`}
+        to={`/mobile/releases/${id}`}
         className="font-mono text-xs hover:text-zinc-700 transition-colors truncate max-w-[200px]"
       >
         {id}
@@ -205,13 +251,13 @@ const MobileRevert: React.FC = () => {
               <Button
                 variant="primary"
                 className="bg-violet-600 hover:bg-violet-700 text-white"
-                onClick={() => navigate('/releases/mobile/new?category=mobile')}
+                onClick={() => navigate('/mobile/releases/new')}
               >
                 Create new release instead
               </Button>
               <Button
                 variant="secondary"
-                onClick={() => navigate(`/releases/${id}?category=mobile`)}
+                onClick={() => navigate(`/mobile/releases/${id}`)}
               >
                 <ArrowLeft className="w-4 h-4" /> Back to release
               </Button>
@@ -351,36 +397,171 @@ const MobileRevert: React.FC = () => {
                     className="mt-0.5 accent-violet-600"
                   />
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-zinc-900">Custom commit</div>
+                    <div className="text-sm font-medium text-zinc-900">Custom source</div>
                     <div className="text-xs text-zinc-500 mt-0.5">
-                      Enter a specific commit SHA to build from
+                      Build from a specific commit SHA or a branch
                     </div>
                     {sourceMode === 'customCommit' && (
                       <div className="mt-2 space-y-2">
-                        <div className="flex items-center gap-2">
-                          <Input
-                            value={customCommit}
-                            onChange={(e) => {
-                              setCustomCommit(e.target.value);
-                              if (verifiedCommit && verifiedCommit.vcFullSha !== e.target.value.trim())
-                                setVerifiedCommit(null);
+                        {/* SHA / Branch toggle */}
+                        <div className="flex gap-1 rounded-lg bg-zinc-100 p-0.5 w-fit">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCustomInputMode('sha');
+                              setVerifiedCommit(null);
+                              setCustomCommit('');
                             }}
-                            placeholder="e.g. a1b2c3d4e5f6..."
-                            className="max-w-md font-mono text-sm"
-                          />
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={!customCommit.trim() || !/^[0-9a-f]{7,40}$/i.test(customCommit.trim()) || verifyMut.isPending}
-                            onClick={() => verifyMut.mutate()}
-                          >
-                            {verifyMut.isPending ? (
-                              <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Verifying</>
-                            ) : (
-                              'Verify'
+                            className={cn(
+                              'flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-colors',
+                              customInputMode === 'sha'
+                                ? 'bg-white text-zinc-900 shadow-sm'
+                                : 'text-zinc-500 hover:text-zinc-700',
                             )}
-                          </Button>
+                          >
+                            <Hash className="w-3 h-3" /> Commit SHA
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCustomInputMode('branch');
+                              setVerifiedCommit(null);
+                              setCustomCommit('');
+                              setBranchSearch('');
+                            }}
+                            className={cn(
+                              'flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-colors',
+                              customInputMode === 'branch'
+                                ? 'bg-white text-zinc-900 shadow-sm'
+                                : 'text-zinc-500 hover:text-zinc-700',
+                            )}
+                          >
+                            <GitBranch className="w-3 h-3" /> Branch
+                          </button>
                         </div>
+
+                        {customInputMode === 'sha' ? (
+                          <>
+                            <div className="flex items-center gap-2">
+                              <Input
+                                value={customCommit}
+                                onChange={(e) => {
+                                  setCustomCommit(e.target.value);
+                                  if (verifiedCommit && verifiedCommit.vcFullSha !== e.target.value.trim())
+                                    setVerifiedCommit(null);
+                                }}
+                                placeholder="e.g. a1b2c3d4e5f6..."
+                                className="max-w-md font-mono text-sm"
+                              />
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={!customCommit.trim() || !/^[0-9a-f]{7,40}$/i.test(customCommit.trim()) || verifyMut.isPending}
+                                onClick={() => verifyMut.mutate()}
+                              >
+                                {verifyMut.isPending ? (
+                                  <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Verifying</>
+                                ) : (
+                                  'Verify'
+                                )}
+                              </Button>
+                            </div>
+                            <p className="text-[11px] text-zinc-400">
+                              {verifiedCommit
+                                ? 'Commit verified. A temporary tag will be created at this commit for the build.'
+                                : 'Enter a SHA and click Verify to confirm it exists in the repo.'}
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <div className="relative" ref={branchContainerRef}>
+                              <div className="relative">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 pointer-events-none" />
+                                <input
+                                  ref={branchInputRef}
+                                  type="text"
+                                  value={branchSearch}
+                                  onChange={(e) => {
+                                    setBranchSearch(e.target.value);
+                                    setBranchDropdownOpen(true);
+                                    setVerifiedCommit(null);
+                                    setCustomCommit('');
+                                  }}
+                                  onFocus={() => {
+                                    setBranchDropdownOpen(true);
+                                    branchInputRef.current?.select();
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Escape') {
+                                      setBranchDropdownOpen(false);
+                                      branchInputRef.current?.blur();
+                                    }
+                                    if (e.key === 'Enter' && branchDropdownOpen) {
+                                      e.preventDefault();
+                                      if (filteredBranches.length > 0) {
+                                        const pick = filteredBranches[0];
+                                        setBranchSearch(pick.name);
+                                        setCustomCommit(pick.name);
+                                        setBranchDropdownOpen(false);
+                                        pendingVerifyRef.current = pick.name;
+                                        verifyMut.mutate();
+                                      }
+                                    }
+                                  }}
+                                  placeholder="Search branch…"
+                                  className="w-full h-9 border border-zinc-300 rounded-lg pl-9 pr-8 text-sm font-mono bg-white focus:outline-none focus:ring-2 focus:ring-zinc-400 max-w-md"
+                                />
+                                <ChevronDown
+                                  className={cn(
+                                    'absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 cursor-pointer transition-transform',
+                                    branchDropdownOpen && 'rotate-180',
+                                  )}
+                                  onClick={() => {
+                                    setBranchDropdownOpen((o) => !o);
+                                    if (!branchDropdownOpen) branchInputRef.current?.focus();
+                                  }}
+                                />
+                              </div>
+                              {branchDropdownOpen && (
+                                <ul className="absolute z-20 mt-1 w-full max-w-md max-h-56 overflow-auto rounded-lg border border-zinc-200 bg-white shadow-lg">
+                                  {branchesLoading ? (
+                                    <li className="px-3 py-2 text-sm text-zinc-400">Loading branches…</li>
+                                  ) : filteredBranches.length === 0 ? (
+                                    <li className="px-3 py-2 text-sm text-zinc-500">
+                                      {branchSearch.trim()
+                                        ? 'No matching branches'
+                                        : 'Type to search branches'}
+                                    </li>
+                                  ) : (
+                                    filteredBranches.map((b) => (
+                                      <li
+                                        key={b.name}
+                                        onMouseDown={(e) => {
+                                          e.preventDefault();
+                                          setBranchSearch(b.name);
+                                          setCustomCommit(b.name);
+                                          setBranchDropdownOpen(false);
+                                          setVerifiedCommit(null);
+                                          pendingVerifyRef.current = b.name;
+                                          verifyMut.mutate();
+                                        }}
+                                        className="px-3 py-2 text-sm font-mono cursor-pointer hover:bg-zinc-50"
+                                      >
+                                        {b.name}
+                                      </li>
+                                    ))
+                                  )}
+                                </ul>
+                              )}
+                            </div>
+                            <p className="text-[11px] text-zinc-400">
+                              {verifiedCommit
+                                ? 'Branch resolved. The build will use the latest commit on this branch.'
+                                : 'Select a branch to resolve its HEAD commit.'}
+                            </p>
+                          </>
+                        )}
+
                         {verifiedCommit && (
                           <div className="flex items-start gap-2 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-900">
                             <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-green-600" />
@@ -401,11 +582,6 @@ const MobileRevert: React.FC = () => {
                             </div>
                           </div>
                         )}
-                        <p className="text-[11px] text-zinc-400">
-                          {verifiedCommit
-                            ? 'Commit verified. A temporary tag will be created at this commit for the build.'
-                            : 'Enter a SHA and click Verify to confirm it exists in the repo.'}
-                        </p>
                       </div>
                     )}
                   </div>
@@ -601,7 +777,11 @@ const MobileRevert: React.FC = () => {
                 {sourceMode === 'customCommit' && customCommit.trim() && (
                   <div className="flex justify-between gap-2">
                     <dt className="text-zinc-500">Source</dt>
-                    <dd className="text-amber-700 text-[11px] font-medium">Custom commit</dd>
+                    <dd className="text-amber-700 text-[11px] font-medium">
+                      {customInputMode === 'branch' && branchSearch.trim()
+                        ? <>Branch: <span className="font-mono">{branchSearch.trim()}</span></>
+                        : 'Custom commit'}
+                    </dd>
                   </div>
                 )}
                 <div className="flex justify-between gap-2">
@@ -630,7 +810,7 @@ const MobileRevert: React.FC = () => {
                 <Button
                   variant="outline"
                   fullWidth
-                  onClick={() => navigate(`/releases/${id}?category=mobile`)}
+                  onClick={() => navigate(`/mobile/releases/${id}`)}
                   disabled={createMut.isPending}
                 >
                   Cancel

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement all mobile release features after the MVP. Covers: mobile revert (full flow + store-sync integration + debug exclusion + revert-build exclusion + custom commit source), branch picker + server-side search, debug/release build types, latest build enrichment, periodic store sync, platform filter, apps admin redesign, dispatch from summary.
+**Goal:** Implement all mobile release features after the MVP. Covers: mobile revert (full flow + store-sync integration + debug exclusion + revert-build exclusion + custom commit source), branch picker + server-side search, debug/release build types, latest build enrichment, periodic store sync, platform filter, apps admin redesign, dispatch from summary, Firebase observability (Crashlytics + Performance Monitoring + Alerts).
 
 **Architecture:** Three new nullable columns on `release_tracker` (`commit_sha`, `source_ref`, `reverts_release_id`). New module tree: `Mobile/Github/Compare.hs`, `Mobile/Changelog.hs`, `Mobile/Handlers/Revert.hs`, `Mobile/StoreSync.hs`. Extend `Mobile/Github.hs` with branch listing, commit verification, and tag creation. Frontend: new `MobileRevert.tsx` page, branch combobox on create form, build-type toggle, platform filter, apps admin redesign, dispatch button on summary.
 
@@ -27,6 +27,7 @@
 | Phase 5 | Store-sync revert integration | ✅ Done |
 | Phase 6 | Revert hardening (debug exclusion, revert-build exclusion, custom commit) | ✅ Done |
 | Phase 7 | UI polish (platform filter, apps admin redesign, dispatch button) | ✅ Done |
+| Phase 8 | Post-release health monitoring (crash, perf, alerts) | ⚠️ No in-app dashboards (Firebase Crashlytics has no public read REST API). Deep-link to Firebase Console implemented instead — sidebar link + per-release Crashlytics button with project/app/version context. |
 
 ---
 
@@ -1666,7 +1667,8 @@ cd frontend && npx tsc --noEmit
 - **Phase 4** — latest build enrichment feeds into Phase 5's version suggestions.
 - **Phase 5** — store-sync revert depends on Phase 4's store sync module.
 - **Phase 6** — hardening (debug exclusion, revert-build exclusion, custom commit) layers on Phase 1's revert flow.
-- **Phase 7 last** — pure UI polish, no backend dependencies.
+- **Phase 7** — pure UI polish, no backend dependencies.
+- **Phase 8: Deep-link to Firebase Crashlytics** — no public read REST API, so in-app dashboards are not possible. Instead: added `firebase_project_id` column to `app_catalog` (migration 0017), Crashlytics sidebar link in Mobile Releases, and a per-release Crashlytics button on ReleaseSummary that deep-links with project + package name + version + version code.
 
 ---
 

@@ -204,7 +204,7 @@ const ConfigMapSummary: React.FC = () => {
             <Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh"><RefreshCw className={`w-4 h-4 ${refreshSpinning ? 'animate-spin' : ''}`} /></Button>
           </SimpleTooltip>
           <SimpleTooltip content="Clone">
-            <Button size="icon" variant="ghost" onClick={() => navigate(`/configmap/new?clone_id=${data.id}`)}><Copy className="w-4 h-4" /></Button>
+            <Button size="icon" variant="ghost" onClick={() => navigate(`/backend/configmap/new?clone_id=${data.id}`)}><Copy className="w-4 h-4" /></Button>
           </SimpleTooltip>
         </div>
       </div>
@@ -282,7 +282,7 @@ const ConfigMapSummary: React.FC = () => {
       </div>
 
       <div className="flex justify-end pt-5">
-        <Button variant="secondary" onClick={() => navigate('/configmap')}>Back to ConfigMaps</Button>
+        <Button variant="secondary" onClick={() => navigate('/backend/configmap')}>Back to ConfigMaps</Button>
       </div>
     </div>
   );

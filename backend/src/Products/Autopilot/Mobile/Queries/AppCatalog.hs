@@ -47,6 +47,7 @@ data NewAppCatalogRow = NewAppCatalogRow
     , nacDebugWorkflowPath :: Maybe Text
     , nacPackageName :: Maybe Text
     , nacDisplayLabel :: Maybe Text
+    , nacFirebaseProjectId :: Maybe Text
     , nacEnabled :: Maybe Bool
     -- ^ Defaults to True if Nothing.
     }
@@ -56,6 +57,7 @@ data PatchAppCatalogRow = PatchAppCatalogRow
     { pacEnabled :: Maybe Bool
     , pacDisplayLabel :: Maybe Text
     , pacPackageName :: Maybe Text
+    , pacFirebaseProjectId :: Maybe Text
     , pacWorkflowPath :: Maybe Text
     , pacDebugWorkflowPath :: Maybe Text
     }
@@ -111,6 +113,7 @@ insertAppCatalog NewAppCatalogRow{..} = withDb $ \db -> do
                             , acDebugWorkflowPath = val_ nacDebugWorkflowPath
                             , acPackageName = val_ nacPackageName
                             , acDisplayLabel = val_ nacDisplayLabel
+                            , acFirebaseProjectId = val_ nacFirebaseProjectId
                             , acEnabled = val_ enabled'
                             , acCreatedAt = default_
                             }
@@ -146,6 +149,7 @@ updateAppCatalog aid PatchAppCatalogRow{..} = withDb $ \db ->
                                         [ fmap (\v -> acEnabled a <-. val_ v) pacEnabled
                                         , fmap (\v -> acDisplayLabel a <-. val_ (Just v)) pacDisplayLabel
                                         , fmap (\v -> acPackageName a <-. val_ (Just v)) pacPackageName
+                                        , fmap (\v -> acFirebaseProjectId a <-. val_ (Just v)) pacFirebaseProjectId
                                         , fmap (\v -> acWorkflowPath a <-. val_ v) pacWorkflowPath
                                         , fmap (\v -> acDebugWorkflowPath a <-. val_ (Just v)) pacDebugWorkflowPath
                                         ]
@@ -157,8 +161,8 @@ updateAppCatalog aid PatchAppCatalogRow{..} = withDb $ \db ->
                     (x : _) -> Just x
 
     isNoop =
-        case (pacEnabled, pacDisplayLabel, pacPackageName, pacWorkflowPath, pacDebugWorkflowPath) of
-            (Nothing, Nothing, Nothing, Nothing, Nothing) -> True
+        case (pacEnabled, pacDisplayLabel, pacPackageName, pacFirebaseProjectId, pacWorkflowPath, pacDebugWorkflowPath) of
+            (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) -> True
             _ -> False
 
     lookupCurrent :: Pg (Maybe AppCatalog)

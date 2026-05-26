@@ -74,6 +74,10 @@ library
       Products.Autopilot.Mobile.Versioning.Apple
       Products.Autopilot.Mobile.Github
       Products.Autopilot.Mobile.Github.Auth
+      Products.Autopilot.Mobile.Github.Compare
+      Products.Autopilot.Mobile.Changelog
+      Products.Autopilot.Mobile.StoreSync
+      Products.Autopilot.Mobile.Handlers.Revert
       Products.Autopilot.Mobile.Workflow
       Products.Autopilot.Queries.ProductService
       Products.Autopilot.Queries.ReleaseTracker

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X, SlidersHorizontal, Server, Smartphone, Layers, Undo2, Apple } from 'lucide-react';
 import { useReleases } from '../hooks';
 import { useRefreshAnimation } from '../../../shared/hooks';
@@ -111,9 +111,6 @@ const formatISODate = (isoString?: string) => {
 
 type CategoryFilter = 'all' | 'backend' | 'mobile';
 
-const isCategoryFilter = (v: string | null): v is CategoryFilter =>
-  v === 'all' || v === 'backend' || v === 'mobile';
-
 const ListRelease: React.FC = () => {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -129,26 +126,15 @@ const ListRelease: React.FC = () => {
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   const [sortField, setSortField] = useState<string>('date_created');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  // Bumped on manual refresh so NOW-relative ranges ("last 30 mins") recompute instead of
-  // staying frozen at the time the range was first selected.
   const [refreshTick, setRefreshTick] = useState(0);
   const datePickerRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
 
-  // ?category= drives both the API filter and the active chip. The
-  // ProductLayout also reads this to switch between Backend/Mobile tiles
-  // on the same `/releases` pathname, so updating the URL keeps the
-  // sidebar context in sync.
-  const rawCategory = searchParams.get('category');
-  const category: CategoryFilter = isCategoryFilter(rawCategory) ? rawCategory : 'all';
+  const defaultCategory: CategoryFilter = location.pathname.startsWith('/mobile') ? 'mobile' : 'backend';
+  const [category, setCategory] = useState<CategoryFilter>(defaultCategory);
+  useEffect(() => { setCategory(defaultCategory); }, [defaultCategory]);
   const apiCategory = category === 'all' ? undefined : category;
-  const setCategory = (next: CategoryFilter) => {
-    const sp = new URLSearchParams(searchParams);
-    if (next === 'all') sp.delete('category');
-    else sp.set('category', next);
-    setSearchParams(sp, { replace: true });
-  };
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 300);
@@ -178,7 +164,7 @@ const ListRelease: React.FC = () => {
   }, []);
 
   useEffect(() => { setCurrentPage(1); }, [debouncedSearch, statusFilter, productFilter, platformFilter, category]);
-  useEffect(() => { if (category !== 'mobile') setPlatformFilter(''); }, [category]);
+  useEffect(() => { if (category === 'backend') setPlatformFilter(''); }, [category]);
 
   const handleCustomRangeApply = () => {
     if (customFrom && customTo) {
@@ -254,6 +240,18 @@ const ListRelease: React.FC = () => {
     { key: 'mobile', label: 'Mobile', icon: <Smartphone className="w-3.5 h-3.5" /> },
   ];
 
+  const handleCategoryClick = (key: CategoryFilter) => {
+    if (key === 'all') {
+      setCategory('all');
+    } else if (key === defaultCategory) {
+      setCategory(key);
+    } else if (key === 'backend') {
+      navigate('/backend/releases', { replace: true });
+    } else {
+      navigate('/mobile/releases', { replace: true });
+    }
+  };
+
   return (
     <div className="flex flex-col flex-1 w-full">
       <div className="flex items-center gap-1.5 mb-4 sm:mb-5 flex-wrap" role="tablist" aria-label="Release category">
@@ -263,7 +261,7 @@ const ListRelease: React.FC = () => {
             type="button"
             role="tab"
             aria-selected={category === chip.key}
-            onClick={() => setCategory(chip.key)}
+            onClick={() => handleCategoryClick(chip.key)}
             className={cn(
               'inline-flex items-center gap-1.5 h-8 px-3 rounded-full text-xs font-medium border cursor-pointer transition-colors duration-150',
               category === chip.key
@@ -403,7 +401,7 @@ const ListRelease: React.FC = () => {
             </div>
           )}
           <PermissionGate product="autopilot" permission="RELEASE_CREATE">
-            <Link to="/releases/new" className="block">
+            <Link to={category === 'mobile' ? '/mobile/releases/new' : '/backend/releases/new'} className="block">
               <Button size="md" fullWidth>
                 <Plus className="w-4 h-4" /> Create Release
               </Button>
@@ -485,7 +483,7 @@ const ListRelease: React.FC = () => {
           </button>
 
           <PermissionGate product="autopilot" permission="RELEASE_CREATE">
-            <Link to={category == 'mobile' ? "/releases/mobile/new": "/releases/new"}>
+            <Link to={category === 'mobile' ? '/mobile/releases/new' : '/backend/releases/new'}>
               <Button size="sm"><Plus className="w-4 h-4" /> Create Release</Button>
             </Link>
           </PermissionGate>
@@ -524,13 +522,9 @@ const ListRelease: React.FC = () => {
                     // user-facing labels — matches what was inserted in
                     // insertMobileTracker (rtAppGroup=acName, rtService=acSurface,
                     // rtEnv=acPlatform).
-                    // Mobile rows pass `?category=mobile` so the ProductLayout
-                    // sidebar resolves to the Mobile Releases tile (otherwise
-                    // /releases/:id matches the longest backend route prefix and
-                    // shows the Backend sidebar).
                     const releaseHref = isMobile
-                      ? `/releases/${release.id}?category=mobile`
-                      : `/releases/${release.id}`;
+                      ? `/mobile/releases/${release.id}`
+                      : `/backend/releases/${release.id}`;
                     return (
                       <tr
                         key={release.id}
@@ -582,7 +576,7 @@ const ListRelease: React.FC = () => {
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    navigate(`/release-groups/${release.release_context!.release_group_id}`);
+                                    navigate(`/mobile/groups/${release.release_context!.release_group_id}`);
                                   }}
                                   className="p-1.5 rounded-lg text-zinc-400 hover:text-violet-700 hover:bg-violet-50 transition-colors duration-150 cursor-pointer"
                                   aria-label="Open release group"
@@ -605,7 +599,7 @@ const ListRelease: React.FC = () => {
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    navigate(`/releases/${release.id}/revert?category=mobile`);
+                                    navigate(`/mobile/releases/${release.id}/revert`);
                                   }}
                                   className="p-1.5 rounded-lg text-zinc-400 hover:text-violet-700 hover:bg-violet-50 transition-colors duration-150 cursor-pointer"
                                   aria-label="Revert release"
@@ -614,15 +608,17 @@ const ListRelease: React.FC = () => {
                                 </button>
                               </SimpleTooltip>
                             )}
-                            <SimpleTooltip content="Clone release">
-                              <button
-                                onClick={(e) => { e.stopPropagation(); navigate(`/releases/${release.id}/clone`); }}
-                                className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
-                                aria-label="Clone release"
-                              >
-                                <Copy className="w-3.5 h-3.5" />
-                              </button>
-                            </SimpleTooltip>
+                            {!isMobile && (
+                              <SimpleTooltip content="Clone release">
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); navigate(`/backend/releases/${release.id}/clone`); }}
+                                  className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
+                                  aria-label="Clone release"
+                                >
+                                  <Copy className="w-3.5 h-3.5" />
+                                </button>
+                              </SimpleTooltip>
+                            )}
                             <SimpleTooltip content="Copy release ID">
                               <button
                                 onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(release.id); toast.success('Release ID copied'); }}
@@ -654,11 +650,9 @@ const ListRelease: React.FC = () => {
                 const isRevert = release.release_context?.revert === 1 || !!release.revertsReleaseId;
                 const isMobile = release.tracker_type === 'MobileBuild';
                 const isDebugBuild = isMobile && (release.release_context?.destination === 'Firebase' || release.release_context?.destination === 'TestFlight');
-                // Same `?category=mobile` mechanism as the desktop table —
-                // keeps the sidebar tile correct after the click.
                 const releaseHref = isMobile
-                  ? `/releases/${release.id}?category=mobile`
-                  : `/releases/${release.id}`;
+                  ? `/mobile/releases/${release.id}`
+                  : `/backend/releases/${release.id}`;
                 return (
                   <div
                     key={release.id}
@@ -693,7 +687,7 @@ const ListRelease: React.FC = () => {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              navigate(`/release-groups/${release.release_context!.release_group_id}`);
+                              navigate(`/mobile/groups/${release.release_context!.release_group_id}`);
                             }}
                             className="w-9 h-9 rounded-lg flex items-center justify-center text-zinc-400 hover:text-violet-700 hover:bg-violet-50"
                             aria-label="Open release group"
@@ -701,13 +695,15 @@ const ListRelease: React.FC = () => {
                             <Layers className="w-4 h-4" />
                           </button>
                         )}
-                        <button
-                          onClick={(e) => { e.stopPropagation(); navigate(`/releases/${release.id}/clone`); }}
-                          className="w-9 h-9 rounded-lg flex items-center justify-center text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100"
-                          aria-label="Clone release"
-                        >
-                          <Copy className="w-4 h-4" />
-                        </button>
+                        {!isMobile && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); navigate(`/backend/releases/${release.id}/clone`); }}
+                            className="w-9 h-9 rounded-lg flex items-center justify-center text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100"
+                            aria-label="Clone release"
+                          >
+                            <Copy className="w-4 h-4" />
+                          </button>
+                        )}
                         <button
                           onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(release.id); toast.success('Release ID copied'); }}
                           className="w-9 h-9 rounded-lg flex items-center justify-center text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100"

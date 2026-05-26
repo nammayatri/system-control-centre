@@ -161,7 +161,7 @@ const ListVSEdit: React.FC = () => {
             </button>
 
             <PermissionGate product="autopilot" permission="RELEASE_CREATE">
-              <Link to="/vs-editor/new" className="flex-1 md:flex-none">
+              <Link to="/backend/vs-editor/new" className="flex-1 md:flex-none">
                 <Button size="md" fullWidth><Plus className="w-4 h-4" /> New VS Edit</Button>
               </Link>
             </PermissionGate>
@@ -192,7 +192,7 @@ const ListVSEdit: React.FC = () => {
                     <tr
                       key={edit.id}
                       className={cn('border-b border-zinc-100 hover:bg-zinc-100 cursor-pointer transition-colors duration-150', index % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}
-                      onClick={() => navigate(`/vs-editor/${edit.id}`)}
+                      onClick={() => navigate(`/backend/vs-editor/${edit.id}`)}
                     >
                       <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + index + 1}</td>
                       <td className="py-3 px-4 font-medium text-zinc-800">{edit.appGroup}</td>
@@ -219,7 +219,7 @@ const ListVSEdit: React.FC = () => {
               {paginatedEdits.map((edit: VSEditTracker) => (
                 <div
                   key={edit.id}
-                  onClick={() => navigate(`/vs-editor/${edit.id}`)}
+                  onClick={() => navigate(`/backend/vs-editor/${edit.id}`)}
                   className="p-4 cursor-pointer hover:bg-zinc-50 active:bg-zinc-100 transition-colors"
                 >
                   <div className="flex items-start justify-between gap-3 mb-2">

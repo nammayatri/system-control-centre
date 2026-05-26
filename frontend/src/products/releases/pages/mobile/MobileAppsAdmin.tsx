@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useQueryClient, useMutation } from '@tanstack/react-query';
 import { Apple, Package } from 'lucide-react';
 import { useMobileApps } from '../../hooks';
@@ -100,9 +100,6 @@ export default function MobileAppsAdmin() {
     [rawApps],
   );
 
-  // Track per-row in-flight state so multiple rapid toggles don't race; the
-  // server is the source of truth, we just optimistically reflect the new
-  // value while the patch is in flight.
   const [pendingId, setPendingId] = useState<number | null>(null);
 
   const patchMutation = useMutation({
@@ -159,51 +156,50 @@ export default function MobileAppsAdmin() {
                     <th className="py-3 px-4">Workflows</th>
                     <th className="py-3 px-4">Package</th>
                     <th className="py-3 px-4">Latest Release</th>
-                    <th className="py-3 px-4">Latest Debug</th>
                   </tr>
                 </thead>
                 <tbody className="text-sm">
                   {apps.map((app, i) => (
-                    <tr
-                      key={app.id}
-                      className={cn(
-                        'border-b border-zinc-100',
-                        !app.enabled && 'opacity-50',
-                        i % 2 === 1 ? 'bg-zinc-50' : 'bg-white',
-                      )}
-                    >
-                      <td className="py-3 px-4 text-center">
-                        <Toggle
-                          checked={app.enabled}
-                          onChange={() => onToggle(app)}
-                          disabled={pendingId === app.id}
-                        />
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="font-medium text-zinc-800">{app.displayLabel || app.name}</div>
-                        <div className="text-[11px] text-zinc-500 mt-0.5">{app.surface}</div>
-                      </td>
-                      <td className="py-3 px-4">
-                        <PlatformBadge platform={app.platform} />
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="space-y-0.5">
-                          <div className="font-mono text-[11px] text-zinc-600" title={app.workflowPath}>
-                            {wfShort(app.workflowPath)}
-                          </div>
-                          {app.debugWorkflowPath && (
-                            <div className="font-mono text-[11px] text-zinc-400" title={app.debugWorkflowPath}>
-                              {wfShort(app.debugWorkflowPath)}
+                    <React.Fragment key={app.id}>
+                      <tr
+                        className={cn(
+                          'border-b border-zinc-100',
+                          !app.enabled && 'opacity-50',
+                          i % 2 === 1 ? 'bg-zinc-50' : 'bg-white',
+                        )}
+                      >
+                        <td className="py-3 px-4 text-center">
+                          <Toggle
+                            checked={app.enabled}
+                            onChange={() => onToggle(app)}
+                            disabled={pendingId === app.id}
+                          />
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="font-medium text-zinc-800">{app.displayLabel || app.name}</div>
+                          <div className="text-[11px] text-zinc-500 mt-0.5">{app.surface}</div>
+                        </td>
+                        <td className="py-3 px-4">
+                          <PlatformBadge platform={app.platform} />
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="space-y-0.5">
+                            <div className="font-mono text-[11px] text-zinc-600" title={app.workflowPath}>
+                              {wfShort(app.workflowPath)}
                             </div>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 font-mono text-[11px] text-zinc-500 max-w-[140px] truncate" title={app.packageName ?? undefined}>
-                        {app.packageName ?? '—'}
-                      </td>
-                      <td className="py-3 px-4"><BuildCell build={app.latestReleaseBuild} label="release" /></td>
-                      <td className="py-3 px-4"><BuildCell build={app.latestDebugBuild} label="debug" /></td>
-                    </tr>
+                            {app.debugWorkflowPath && (
+                              <div className="font-mono text-[11px] text-zinc-400" title={app.debugWorkflowPath}>
+                                {wfShort(app.debugWorkflowPath)}
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 font-mono text-[11px] text-zinc-500 max-w-[140px] truncate" title={app.packageName ?? undefined}>
+                          {app.packageName ?? '—'}
+                        </td>
+                        <td className="py-3 px-4"><BuildCell build={app.latestReleaseBuild} label="release" /></td>
+                      </tr>
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>
