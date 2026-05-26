@@ -199,7 +199,7 @@ const EditVS: React.FC = () => {
       )}
 
       <div className="flex justify-end pt-5">
-        <Button variant="secondary" onClick={() => navigate('/vs-editor')}>Back to VS Edits</Button>
+        <Button variant="secondary" onClick={() => navigate('/backend/vs-editor')}>Back to VS Edits</Button>
       </div>
     </div>
   );

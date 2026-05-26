@@ -5,7 +5,7 @@
 | **Date** | 2026-05-18 (initial) — 2026-05-22 (latest) |
 | **Author** | shivendra02shah@gmail.com (with assistant) |
 | **Status** | Implemented |
-| **Scope** | All mobile release features built after the MVP (`2026-05-11-mobile-releases-design.md`). Covers: mobile revert, branch picker, debug/release build types, latest build enrichment, periodic store sync, store-sync revert integration, platform filter, apps admin redesign, dispatch from summary page. |
+| **Scope** | All mobile release features built after the MVP (`2026-05-11-mobile-releases-design.md`). Covers: mobile revert, branch picker, debug/release build types, latest build enrichment, periodic store sync, store-sync revert integration, platform filter, apps admin redesign, dispatch from summary page, Firebase Crashlytics deep-linking (in-app dashboards not possible — no public read REST API). |
 | **Base spec** | `docs/superpowers/specs/2026-05-11-mobile-releases-design.md` (untouched) |
 | **Source plan** | `docs/superpowers/plans/2026-05-18-mobile-releases-post-mvp.md` |
 
@@ -25,6 +25,7 @@
 10. [Platform Filter on Release List](#10-platform-filter-on-release-list)
 11. [Apps Admin Table Redesign](#11-apps-admin-table-redesign)
 12. [Dispatch Button on Release Summary](#12-dispatch-button-on-release-summary)
+13. [Post-Release Health Monitoring — Deep-Link to Firebase Crashlytics](#13-post-release-health-monitoring--deep-link-to-firebase-crashlytics)
 
 ---
 
@@ -479,6 +480,37 @@ New Dispatch button on `ReleaseSummary.tsx` when `status === 'CREATED' && isMobi
 
 ---
 
+## 13. Post-Release Health Monitoring — Deep-Link to Firebase Crashlytics
+
+In-app crash/perf dashboards cannot be built — Firebase Crashlytics has no public read REST API (only GDPR deletion). Instead, SCC deep-links operators directly into the Firebase Console.
+
+### What was implemented
+
+- **DB:** `firebase_project_id` column on `app_catalog` (migration `0017`). Each app stores its own Firebase project ID (e.g. `namma-yatri`, `movingtech-155ad`).
+- **Sidebar:** "Crashlytics" nav item in the Mobile Releases sidebar — opens Firebase Crashlytics in a new tab (generic `_` project placeholder).
+- **ReleaseSummary:** Per-release "Crashlytics" button (filled orange, Flame icon) visible only for mobile releases. Deep-links to the specific app's crash issues with filters:
+  - URL format: `https://console.firebase.google.com/project/{firebaseProjectId}/crashlytics/app/{platform}:{packageName}/issues?versions={version}%20({versionCode})&state=open&time=7d&types=crash&tag=all&sort=eventCount`
+  - Falls back to generic Crashlytics page if `packageName` or `firebaseProjectId` is not configured.
+- **Backend:** `firebaseProjectId` field added to `AppCatalogEntryResp`, `NewAppReq`, `PatchAppReq` — can be set via the PATCH `/mobile/apps/:id` endpoint.
+- **Frontend types:** `firebaseProjectId: string | null` on `AppCatalogEntry`.
+
+### Files changed
+
+| Layer | File | Change |
+|-------|------|--------|
+| Migration | `0017-app-catalog-firebase-project.sql` | `ALTER TABLE app_catalog ADD COLUMN firebase_project_id TEXT` + seed UPDATEs |
+| Backend | `Mobile/Types/Storage.hs` | `acFirebaseProjectId` field |
+| Backend | `Mobile/Queries/AppCatalog.hs` | Insert, update, isNoop for new field |
+| Backend | `Mobile/Handlers/AppCatalog.hs` | Resp/Req types + projections |
+| Frontend | `releases/types.ts` | `firebaseProjectId` on `AppCatalogEntry` |
+| Frontend | `releases/pages/ReleaseSummary.tsx` | Crashlytics deep-link button |
+| Frontend | `products/registry.ts` | Sidebar nav item (`external: true`) |
+| Frontend | `core/layout/ProductLayout.tsx` | External link rendering in sidebar |
+
+**Future alternative (Android):** Google Play Developer Reporting API (`playdeveloperreporting.googleapis.com`) — crash rate, ANR rate, startup time. Free, uses existing Play Console credentials.
+
+---
+
 ## Dependency chain
 
 ```
@@ -493,6 +525,9 @@ New Dispatch button on `ReleaseSummary.tsx` when `status === 'CREATED' && isMobi
 [Debug/Release Build Types] (independent)
 
 [Latest Build Enrichment] ---> [Periodic Store Sync] ---> [Revert Integration]
+
+[Firebase Observability] → Deep-link to Firebase Console (no in-app dashboards)
+     Requires: app_catalog.firebase_project_id + package_name
 
 [Platform Filter] (independent, frontend-only)
 [Apps Admin Redesign] (independent, frontend-only)

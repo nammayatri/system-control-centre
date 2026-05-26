@@ -7,7 +7,7 @@
 export interface ProductConfig {
   slug: string;           // matches sc_product.slug in DB
   label: string;          // display name
-  basePath: string;       // URL base path (e.g., '/releases')
+  basePath: string;       // URL base path (e.g., '/backend')
   icon: string;           // Lucide icon name
   navItems: NavItem[];    // sidebar navigation items
 }

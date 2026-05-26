@@ -51,7 +51,7 @@ by the stale rollback sweep.
 runnerLoop :: AppState -> IO ()
 runnerLoop st = do
     runnerStartupRecovery st
-    runFlow st $ forkFlow storeSyncLoop
+    _ <- runFlow st $ forkFlow storeSyncLoop
     runnerPollLoop st
 
 {- | Startup recovery. Must run BEFORE the HTTP port binds, or concurrent

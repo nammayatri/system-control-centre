@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useRefreshAnimation } from '../../../shared/hooks';
-import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../../core/auth/AuthContext';
 import {
@@ -23,7 +23,7 @@ import {
   Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap,
   Search, Trash2, ChevronRight as ChevronRightIcon, FastForward, RotateCw,
   ExternalLink, Network, BarChart3, Pencil, Lock, Save, Info,
-  Undo2, ArrowUpRight, Apple, GitBranch, Send,
+  Undo2, ArrowUpRight, Apple, GitBranch, Send, Flame,
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
@@ -829,29 +829,10 @@ const MobileReleaseDetailSection: React.FC<{
 const ReleaseSummary: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const location = useLocation();
   const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'env-diff' | 'json'>('summary');
 
   const { data: release, isLoading, isFetching, error, refetch } = useRelease(id);
 
-  // Self-correcting sidebar tile: when this page loads a MobileBuild
-  // release at the bare `/releases/:id` URL (no `?category=mobile`), the
-  // ProductLayout's longest-prefix match picks the Backend Releases tile
-  // and the sidebar shows Backend nav items. Once the data loads and we
-  // know it's actually a mobile release, rewrite the URL to add
-  // `?category=mobile` so findCurrentProduct switches to the Mobile tile.
-  // useNavigate's `replace: true` keeps the back-stack clean.
-  useEffect(() => {
-    if (!release) return;
-    if (release.tracker_type !== 'MobileBuild') return;
-    const params = new URLSearchParams(location.search);
-    if (params.get('category') === 'mobile') return;
-    params.set('category', 'mobile');
-    navigate(
-      { pathname: location.pathname, search: `?${params.toString()}`, hash: location.hash },
-      { replace: true },
-    );
-  }, [release, location.pathname, location.search, location.hash, navigate]);
   const { data: events = [] } = useReleaseEvents(id);
   const qc = useQueryClient();
   const { user: authUser } = useAuth();
@@ -887,6 +868,7 @@ const ReleaseSummary: React.FC = () => {
   const immRevertSyncMut = useImmediateRevertWithSync();
   const updateTrackerMut = useUpdateTracker();
   const dispatchMobileMut = useDispatchMobileReleases();
+  const { data: mobileApps = [] } = useMobileApps();
 
   const confirmAction = useConfirm();
 
@@ -974,6 +956,30 @@ const ReleaseSummary: React.FC = () => {
   // the other useState calls above so it lives ABOVE the !release
   // early-return (rules of hooks). These are pure reads of `release`.
   const isMobile = category === 'MobileBuild';
+
+  const matchedMobileApp = isMobile
+    ? mobileApps.find(
+        a => a.name === release.appGroup && a.surface === release.service && a.platform === release.env,
+      )
+    : undefined;
+  const crashlyticsUrl = (() => {
+    if (!isMobile) return '';
+    const fbProject = matchedMobileApp?.firebaseProjectId || '_';
+    const pkg = matchedMobileApp?.packageName;
+    const platform = release.env;
+    const version = release.new_version;
+    const versionCode = release.release_context?.version_code;
+    if (pkg && platform) {
+      const base = `https://console.firebase.google.com/project/${fbProject}/crashlytics/app/${platform}:${pkg}/issues`;
+      const params = new URLSearchParams({ state: 'open', time: '7d', types: 'crash', tag: 'all', sort: 'eventCount' });
+      if (version && versionCode) {
+        params.set('versions', `${version} (${versionCode})`);
+      }
+      return `${base}?${params.toString()}`;
+    }
+    return `https://console.firebase.google.com/project/${fbProject}/crashlytics`;
+  })();
+
   // Revert-chain banner data (mobile-only for now; backend revert uses
   // a different mechanism). `revertsReleaseId` = "this row IS a revert
   // of X"; `metadata.reverted_by` = "X has been reverted by this row".
@@ -983,15 +989,15 @@ const ReleaseSummary: React.FC = () => {
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
       <div className="flex items-center text-sm text-zinc-500 font-medium mb-3 sm:mb-4 flex-wrap gap-y-1">
-        <Link to="/releases" className="hover:text-zinc-700 transition-colors duration-150">Releases</Link>
+        <Link to={isMobile ? '/mobile/releases' : '/backend/releases'} className="hover:text-zinc-700 transition-colors duration-150">Releases</Link>
         <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300 shrink-0" />
         <span className="text-zinc-600">{release.release_context?.cluster || release.env || ''}</span>
         <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300 shrink-0" />
         <span className="font-mono text-xs text-zinc-800 truncate max-w-[150px] sm:max-w-[200px]">{release.release_tag || id}</span>
-        {(s === 'CREATED' || s === 'INPROGRESS' || s === 'PAUSED') && (
+        {!isMobile && (s === 'CREATED' || s === 'INPROGRESS' || s === 'PAUSED') && (
           <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
             <button
-              onClick={() => navigate(`/releases/${id}/edit`)}
+              onClick={() => navigate(`/backend/releases/${id}/edit`)}
               className="p-1 ml-1 rounded text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
               aria-label="Edit release"
             >
@@ -1010,7 +1016,7 @@ const ReleaseSummary: React.FC = () => {
           <span>
             This is a revert of release{' '}
             <Link
-              to={`/releases/${revertsTarget}?category=mobile`}
+              to={`/mobile/releases/${revertsTarget}`}
               className="font-mono font-medium hover:underline"
             >
               {revertsTarget.slice(0, 8)}
@@ -1030,7 +1036,7 @@ const ReleaseSummary: React.FC = () => {
           <span>
             This release was reverted by{' '}
             <Link
-              to={`/releases/${revertedByTarget}?category=mobile`}
+              to={`/mobile/releases/${revertedByTarget}`}
               className="font-mono font-medium hover:underline"
             >
               {revertedByTarget.slice(0, 8)}
@@ -1062,6 +1068,21 @@ const ReleaseSummary: React.FC = () => {
           {GRAFANA_URL && (
             <a href={GRAFANA_URL} target="_blank" rel="noopener" className="text-xs text-zinc-500 border border-zinc-200 rounded px-2 py-1 hover:bg-zinc-50 inline-flex items-center gap-1">
               <BarChart3 className="w-3 h-3" /> Metrics
+            </a>
+          )}
+          {isMobile && (
+            <a
+              href={crashlyticsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs font-medium text-white bg-orange-500 hover:bg-orange-600 rounded-md px-2.5 py-1 inline-flex items-center gap-1.5 transition-colors duration-150 shadow-sm"
+            >
+              <Flame className="w-3.5 h-3.5" />
+              Crashlytics
+              {matchedMobileApp?.packageName && (
+                <span className="opacity-80 font-normal">· {release.new_version || release.appGroup}</span>
+              )}
+              <ExternalLink className="w-3 h-3 opacity-70" />
             </a>
           )}
         </div>
@@ -1133,7 +1154,7 @@ const ReleaseSummary: React.FC = () => {
                 size="sm"
                 variant="outline"
                 className="border-violet-300 text-violet-700 hover:bg-violet-50"
-                onClick={() => navigate(`/releases/${id}/revert?category=mobile`)}
+                onClick={() => navigate(`/mobile/releases/${id}/revert`)}
               >
                 <Undo2 className="w-3.5 h-3.5" /> Revert
               </Button>
@@ -1147,9 +1168,9 @@ const ReleaseSummary: React.FC = () => {
 
           <div className="w-px h-6 bg-zinc-200 mx-1" />
           <PermissionGate product="autopilot" permission="RELEASE_DELETE">
-            <SimpleTooltip content="Delete"><Button size="icon" variant="ghost" className="text-red-500 hover:bg-red-50" loading={deleteMut.isPending} onClick={() => doAction('delete', async () => { await deleteMut.mutateAsync(id!); navigate('/releases'); }, true, 'Delete this release tracker permanently. This removes the audit trail and cannot be undone.')}><Trash2 className="w-4 h-4" /></Button></SimpleTooltip>
+            <SimpleTooltip content="Delete"><Button size="icon" variant="ghost" className="text-red-500 hover:bg-red-50" loading={deleteMut.isPending} onClick={() => doAction('delete', async () => { await deleteMut.mutateAsync(id!); navigate(isMobile ? '/mobile/releases' : '/backend/releases'); }, true, 'Delete this release tracker permanently. This removes the audit trail and cannot be undone.')}><Trash2 className="w-4 h-4" /></Button></SimpleTooltip>
           </PermissionGate>
-          <SimpleTooltip content="Clone"><Button size="icon" variant="ghost" onClick={() => navigate(`/releases/${id}/clone`)}><Copy className="w-4 h-4" /></Button></SimpleTooltip>
+          {!isMobile && <SimpleTooltip content="Clone"><Button size="icon" variant="ghost" onClick={() => navigate(`/backend/releases/${id}/clone`)}><Copy className="w-4 h-4" /></Button></SimpleTooltip>}
           <SimpleTooltip content="Refresh"><Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh"><RefreshCw className={`w-4 h-4 ${refreshSpinning ? 'animate-spin' : ''}`} /></Button></SimpleTooltip>
         </div>
       </div>
@@ -1296,7 +1317,7 @@ const ReleaseSummary: React.FC = () => {
       </div>
 
       <div className="flex justify-end pt-5">
-        <Button variant="secondary" onClick={() => navigate('/releases')}>Back to Releases</Button>
+        <Button variant="secondary" onClick={() => navigate(isMobile ? '/mobile/releases' : '/backend/releases')}>Back to Releases</Button>
       </div>
 
     </div>
