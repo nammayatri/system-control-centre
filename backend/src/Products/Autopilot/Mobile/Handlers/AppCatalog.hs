@@ -53,6 +53,7 @@ data AppCatalogEntryResp = AppCatalogEntryResp
     , debugWorkflowPath :: Maybe Text
     , packageName :: Maybe Text
     , displayLabel :: Maybe Text
+    , firebaseProjectId :: Maybe Text
     , enabled :: Bool
     , createdAt :: UTCTime
     , latestReleaseBuild :: Maybe LatestBuildResp
@@ -73,6 +74,7 @@ data NewAppReq = NewAppReq
     , debugWorkflowPath :: Maybe Text
     , packageName :: Maybe Text
     , displayLabel :: Maybe Text
+    , firebaseProjectId :: Maybe Text
     , enabled :: Maybe Bool
     }
     deriving (Generic, Show)
@@ -85,6 +87,7 @@ data PatchAppReq = PatchAppReq
     { enabled :: Maybe Bool
     , displayLabel :: Maybe Text
     , packageName :: Maybe Text
+    , firebaseProjectId :: Maybe Text
     , workflowPath :: Maybe Text
     , debugWorkflowPath :: Maybe Text
     }
@@ -119,6 +122,7 @@ toResp buildMap r =
         , debugWorkflowPath = acDebugWorkflowPath r
         , packageName = acPackageName r
         , displayLabel = acDisplayLabel r
+        , firebaseProjectId = acFirebaseProjectId r
         , enabled = acEnabled r
         , createdAt = acCreatedAt r
         , latestReleaseBuild = Map.lookup (acName r, acSurface r, acPlatform r, "release") buildMap
@@ -138,6 +142,7 @@ toRespNoBuild r =
         , debugWorkflowPath = acDebugWorkflowPath r
         , packageName = acPackageName r
         , displayLabel = acDisplayLabel r
+        , firebaseProjectId = acFirebaseProjectId r
         , enabled = acEnabled r
         , createdAt = acCreatedAt r
         , latestReleaseBuild = Nothing
@@ -155,7 +160,7 @@ listAppsH _ap = do
     pure (map (toResp buildMap) apps)
 
 createAppH :: AuthedPerson -> NewAppReq -> Flow AppCatalogEntryResp
-createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, workflowPath = w, debugWorkflowPath = dw, packageName = pkg, displayLabel = d, enabled = e} =
+createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, workflowPath = w, debugWorkflowPath = dw, packageName = pkg, displayLabel = d, firebaseProjectId = fbp, enabled = e} =
     let row =
             NewAppCatalogRow
                 { nacName = n
@@ -166,17 +171,19 @@ createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, wo
                 , nacDebugWorkflowPath = dw
                 , nacPackageName = pkg
                 , nacDisplayLabel = d
+                , nacFirebaseProjectId = fbp
                 , nacEnabled = e
                 }
      in toRespNoBuild <$> insertAppCatalog row
 
 patchAppH :: AuthedPerson -> Int32 -> PatchAppReq -> Flow AppCatalogEntryResp
-patchAppH _ap aid PatchAppReq{enabled = e, displayLabel = d, packageName = pkg, workflowPath = w, debugWorkflowPath = dw} = do
+patchAppH _ap aid PatchAppReq{enabled = e, displayLabel = d, packageName = pkg, firebaseProjectId = fbp, workflowPath = w, debugWorkflowPath = dw} = do
     let patch =
             PatchAppCatalogRow
                 { pacEnabled = e
                 , pacDisplayLabel = d
                 , pacPackageName = pkg
+                , pacFirebaseProjectId = fbp
                 , pacWorkflowPath = w
                 , pacDebugWorkflowPath = dw
                 }

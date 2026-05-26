@@ -79,7 +79,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
     },
     onSuccess: () => {
       toast.success(isUpdate ? 'ConfigMap updated' : 'ConfigMap created');
-      navigate('/configmap');
+      navigate('/backend/configmap');
     },
     onError: (err: any) => {
       const msg = err?.response?.data?.message || err.message || `Failed to ${isUpdate ? 'update' : 'create'} ConfigMap`;
@@ -158,7 +158,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
     }).catch((err: any) => {
       const msg = err?.response?.data?.message || err.message || 'Failed to load ConfigMap';
       toast.error(msg);
-      navigate('/configmap');
+      navigate('/backend/configmap');
     });
   }, [id, cloneId, isUpdate]);
 
@@ -264,7 +264,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
         </div>
 
         <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3 pt-2">
-          <Button type="button" variant="secondary" onClick={() => navigate('/configmap')}>Cancel</Button>
+          <Button type="button" variant="secondary" onClick={() => navigate('/backend/configmap')}>Cancel</Button>
           <PermissionGate product="autopilot" permission="CONFIG_CREATE">
             <Button type="submit" loading={createMut.isPending}>{createMut.isPending ? 'Saving...' : isUpdate ? 'Update' : 'Create ConfigMap'}</Button>
           </PermissionGate>

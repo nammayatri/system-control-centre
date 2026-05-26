@@ -183,7 +183,7 @@ export default function ReleaseGroupDetail() {
     <div className="flex flex-col flex-1 w-full pb-12">
       <div className="flex items-center gap-2 mb-4">
         <Link
-          to="/releases?category=mobile"
+          to="/mobile/releases"
           className="inline-flex items-center gap-1 text-sm text-zinc-600 hover:text-zinc-900"
         >
           <ArrowLeft className="w-4 h-4" /> Mobile releases
@@ -318,13 +318,7 @@ export default function ReleaseGroupDetail() {
                         </td>
                         <td className="py-3 px-4">
                           <button
-                            // `?category=mobile` keeps the sidebar on the
-                            // Mobile Releases tile when this opens the
-                            // individual release summary (without it the
-                            // shared /releases/:id route falls back to the
-                            // Backend Releases product — see ProductLayout's
-                            // findCurrentProduct).
-                            onClick={() => navigate(`/releases/${r.id}?category=mobile`)}
+                            onClick={() => navigate(`/mobile/releases/${r.id}`)}
                             className="text-xs text-zinc-600 hover:text-zinc-900 underline"
                           >
                             Open

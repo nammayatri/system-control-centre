@@ -22,6 +22,7 @@ export type AppCatalogEntry = {
   debugWorkflowPath: string | null;
   packageName: string | null;
   displayLabel: string | null;
+  firebaseProjectId: string | null;
   enabled: boolean;
   createdAt: string;
   latestReleaseBuild?: LatestBuild | null;

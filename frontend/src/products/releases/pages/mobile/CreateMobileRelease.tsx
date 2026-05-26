@@ -246,7 +246,7 @@ export default function CreateMobileRelease() {
       toast.success(
         `Created ${resp.releases.length} release${resp.releases.length === 1 ? '' : 's'}`,
       );
-      navigate(`/release-groups/${resp.releaseGroupId}`);
+      navigate(`/mobile/groups/${resp.releaseGroupId}`);
     } catch {
       // toast surfaced inside the hook — nothing else to do here.
     }
@@ -583,7 +583,7 @@ export default function CreateMobileRelease() {
           <Button
             type="button"
             variant="secondary"
-            onClick={() => navigate('/releases?category=mobile')}
+            onClick={() => navigate('/mobile/releases')}
           >
             Cancel
           </Button>
