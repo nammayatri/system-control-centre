@@ -979,6 +979,7 @@ export async function fetchConfigMapData(product: string, name: string): Promise
 import type {
     AppCatalogEntry,
     BranchInfo,
+    ChangelogPreviewResp,
     CreateMobileReleasesReq,
     CreateMobileReleasesResp,
     DispatchMobileReleasesResp,
@@ -1027,5 +1028,17 @@ export const mobileApi = {
         if (q) params.q = q;
         const { data } = await apiClient.get('/mobile/branches', { params });
         return data?.branches ?? [];
+    },
+
+    changelogPreview: async (
+        app: string,
+        surface: string,
+        platform: string,
+        branch: string,
+    ): Promise<ChangelogPreviewResp> => {
+        const { data } = await apiClient.get('/mobile/changelog-preview', {
+            params: { app, surface, platform, branch },
+        });
+        return data;
     },
 };

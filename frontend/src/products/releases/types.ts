@@ -109,6 +109,25 @@ export type VersionPreviewItem = {
   err?: string;
 };
 
+export type CommitInfo = {
+  ciSha: string;
+  ciShortSha: string;
+  ciMessage: string;
+  ciSubject: string;
+  ciAuthorLogin: string;
+  ciHtmlUrl: string;
+  ciPrNumber: number | null;
+};
+
+export type ChangelogPreviewResp = {
+  cpCommits: CommitInfo[];
+  cpAheadBy: number;
+  cpStatus: string;
+  cpBaseTag?: string | null;
+  cpBaseVersion?: string | null;
+  cpCompareUrl?: string | null;
+};
+
 export type LiveReleasesResp = {
   backend: {
     appGroup: string;

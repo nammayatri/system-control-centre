@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { useQuery, useQueries, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import {
   fetchAPReleases,
   fetchReleaseDetails,
@@ -360,5 +360,19 @@ export function useLiveReleases(category: 'all' | 'backend' | 'mobile' = 'all') 
     queryKey: ['releases', 'live', category],
     queryFn: () => mobileApi.liveReleases(category),
     refetchInterval: 10_000,
+  });
+}
+
+export type ChangelogApp = { name: string; surface: string; platform: string; label: string };
+
+export function useChangelogPreviews(apps: ChangelogApp[], branch: string | undefined) {
+  return useQueries({
+    queries: apps.map((app) => ({
+      queryKey: ['mobile', 'changelog-preview', app.name, app.surface, app.platform, branch],
+      queryFn: () => mobileApi.changelogPreview(app.name, app.surface, app.platform, branch!),
+      enabled: !!branch,
+      staleTime: 60_000,
+      placeholderData: keepPreviousData,
+    })),
   });
 }

@@ -8,7 +8,6 @@ import {
   ChevronRight as ChevronRightIcon,
   ArrowLeft,
   ExternalLink,
-  Copy as CopyIcon,
   Smartphone,
   Tag,
   GitCommit,
@@ -641,10 +640,7 @@ const MobileRevert: React.FC = () => {
               </div>
             )}
 
-            {/* Commits being rolled back. Structured cards beat raw
-                markdown for review: each commit links to GitHub, the
-                SHA is one-click copyable, and the PR badge surfaces
-                without parsing. */}
+            {/* Commits being rolled back */}
             <div>
               <div className="flex items-center justify-between mb-2">
                 <label className="block text-xs font-semibold text-zinc-700 uppercase tracking-wider">
@@ -672,60 +668,69 @@ const MobileRevert: React.FC = () => {
                   {draft.rdBadVersion}.
                 </div>
               ) : (
-                <ul className="divide-y divide-zinc-100 border border-zinc-200 rounded-md bg-white max-h-[24rem] overflow-y-auto">
-                  {draft.rdCommits.map((c) => (
-                    <li
-                      key={c.rcShortSha}
-                      className="flex items-start gap-3 px-3 py-2.5 hover:bg-zinc-50 transition-colors"
-                    >
-                      {/* Author avatar — GH provides one at this URL
-                          for any login. Falls back to initials on load
-                          failure. */}
-                      <img
-                        src={`https://github.com/${c.rcAuthorLogin}.png?size=40`}
-                        alt={c.rcAuthorLogin}
-                        className="w-6 h-6 rounded-full bg-zinc-200 shrink-0 mt-0.5"
-                        onError={(e) => {
-                          (e.target as HTMLImageElement).style.display = 'none';
-                        }}
-                      />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm text-zinc-800 leading-snug break-words">
+                <div className="border border-zinc-200 rounded-md bg-white">
+                  <div className="flex items-center justify-between text-[11px] text-zinc-400 px-3 py-1.5 border-b border-zinc-100">
+                    <span>Newest first</span>
+                    {draft.rdCommitCount > draft.rdCommits.length && (
+                      <span>Showing {draft.rdCommits.length} of {draft.rdCommitCount}</span>
+                    )}
+                  </div>
+                  <ul className="divide-y divide-zinc-100 max-h-80 overflow-y-auto">
+                    {[...draft.rdCommits].reverse().map((c, i) => (
+                      <li key={c.rcShortSha} className="flex items-center gap-2.5 px-3 py-2">
+                        <span className="text-[10px] text-zinc-300 w-4 text-right shrink-0 tabular-nums">{i + 1}</span>
+                        <img
+                          src={`https://github.com/${c.rcAuthorLogin}.png?size=40`}
+                          alt={c.rcAuthorLogin}
+                          className="w-5 h-5 rounded-full shrink-0 bg-zinc-100"
+                          loading="lazy"
+                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                        />
+                        <a
+                          href={c.rcHtmlUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-mono text-[11px] text-blue-600 hover:text-blue-800 hover:underline shrink-0"
+                        >
+                          {c.rcShortSha}
+                        </a>
+                        <span className="text-sm text-zinc-800 min-w-0 truncate flex-1">
                           {c.rcSubject}
-                        </div>
-                        <div className="flex items-center gap-2 mt-1 flex-wrap">
-                          <span className="text-[11px] text-zinc-500">@{c.rcAuthorLogin}</span>
-                          {c.rcPrNumber != null && (
-                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-100">
-                              #{c.rcPrNumber}
-                            </span>
-                          )}
+                        </span>
+                        {c.rcPrNumber != null && (
                           <a
-                            href={c.rcHtmlUrl}
+                            href={c.rcHtmlUrl.replace(/\/commit\/.*$/, `/pull/${c.rcPrNumber}`)}
                             target="_blank"
-                            rel="noopener"
-                            className="inline-flex items-center gap-1 text-[11px] font-mono text-zinc-500 hover:text-zinc-900 hover:underline"
-                            onClick={(e) => e.stopPropagation()}
+                            rel="noopener noreferrer"
+                            className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline shrink-0"
                           >
-                            {c.rcShortSha}
-                            <ExternalLink className="w-3 h-3" />
+                            #{c.rcPrNumber}
                           </a>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              navigator.clipboard.writeText(c.rcShortSha);
-                              toast.success(`Copied ${c.rcShortSha}`);
-                            }}
-                            className="inline-flex items-center text-zinc-400 hover:text-zinc-700 transition-colors"
-                            aria-label="Copy short SHA"
-                          >
-                            <CopyIcon className="w-3 h-3" />
-                          </button>
-                        </div>
+                        )}
+                        <span className="text-[11px] text-zinc-400 shrink-0 max-w-[100px] truncate text-right">{c.rcAuthorLogin}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  {(() => {
+                    const first = draft.rdCommits[0];
+                    if (!first) return null;
+                    const repoUrl = first.rcHtmlUrl.replace(/\/commit\/.*$/, '');
+                    const head = draft.rdCommits[draft.rdCommits.length - 1].rcShortSha;
+                    const compareUrl = `${repoUrl}/compare/${encodeURIComponent(draft.rdPrevGoodTag)}...${head}`;
+                    return (
+                      <div className="px-3 py-2 border-t border-zinc-100">
+                        <a
+                          href={compareUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                        >
+                          View full diff on GitHub <ExternalLink className="w-3 h-3" />
+                        </a>
                       </div>
-                    </li>
-                  ))}
-                </ul>
+                    );
+                  })()}
+                </div>
               )}
             </div>
 
