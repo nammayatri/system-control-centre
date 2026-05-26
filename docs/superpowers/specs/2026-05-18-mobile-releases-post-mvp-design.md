@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| **Date** | 2026-05-18 (initial) — 2026-05-22 (latest) |
+| **Date** | 2026-05-18 (initial) — 2026-05-26 (latest) |
 | **Author** | shivendra02shah@gmail.com (with assistant) |
-| **Status** | Implemented |
-| **Scope** | All mobile release features built after the MVP (`2026-05-11-mobile-releases-design.md`). Covers: mobile revert, branch picker, debug/release build types, latest build enrichment, periodic store sync, store-sync revert integration, platform filter, apps admin redesign, dispatch from summary page, Firebase Crashlytics deep-linking (in-app dashboards not possible — no public read REST API). |
+| **Status** | Implemented (all 14 sections) |
+| **Scope** | All mobile release features built after the MVP (`2026-05-11-mobile-releases-design.md`). Covers: mobile revert, branch picker, debug/release build types, latest build enrichment, periodic store sync, store-sync revert integration, platform filter, apps admin redesign, dispatch from summary page, Firebase Crashlytics deep-linking, changelog preview on create. |
 | **Base spec** | `docs/superpowers/specs/2026-05-11-mobile-releases-design.md` (untouched) |
 | **Source plan** | `docs/superpowers/plans/2026-05-18-mobile-releases-post-mvp.md` |
 
@@ -26,6 +26,7 @@
 11. [Apps Admin Table Redesign](#11-apps-admin-table-redesign)
 12. [Dispatch Button on Release Summary](#12-dispatch-button-on-release-summary)
 13. [Post-Release Health Monitoring — Deep-Link to Firebase Crashlytics](#13-post-release-health-monitoring--deep-link-to-firebase-crashlytics)
+14. [Changelog Preview on Create](#14-changelog-preview-on-create)
 
 ---
 
@@ -511,6 +512,123 @@ In-app crash/perf dashboards cannot be built — Firebase Crashlytics has no pub
 
 ---
 
+## 14. Changelog Preview on Create
+
+### Problem
+
+Operators creating a mobile release have no visibility into what commits will ship. They select a branch and apps, but must manually check GitHub to see what changed since the last release. This leads to vague changelogs and occasional surprise deployments of unintended changes.
+
+### Design decisions
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | When to show the preview? | **After the operator selects an app AND a branch.** The preview fires as a TanStack Query with `enabled` gated on both params. |
+| 2 | Base ref for comparison? | **Last completed release's `tag_pushed` (preferred) or `commit_sha` (fallback).** Found via `fetchLatestBuildsPerApp`. If no previous release exists, compare from the repo's default branch (first release scenario). |
+| 3 | Head ref for comparison? | **The selected branch name.** GitHub Compare API accepts branch names directly. |
+| 4 | Commit cap? | **50 commits.** GitHub Compare API returns up to 250. We cap at 50 client-side and show a "View full diff on GitHub" link for larger diffs. |
+| 5 | Multi-app selection? | **Per-app parallel queries with tabs.** Each selected app fires its own `GET /mobile/changelog-preview` via `useQueries`. When 2+ apps are selected, a tab bar shows each app's label with commit count badge. Tabs let the operator see that different apps may have different base tags (e.g. customer-android last released at v3.3.25, driver-android at v3.3.20). |
+| 6 | Auto-populate changelog? | **Not implemented in MVP.** Deferred — operators write changelogs manually. |
+| 7 | Performance? | **Non-blocking.** Compare API takes ~500ms. Preview loads in background with `staleTime: 60_000` and `placeholderData: keepPreviousData`. Form is fully usable while loading. |
+| 8 | Error handling? | **Graceful degradation.** GitHub API errors show "Couldn't load changelog" with retry button. The form remains submittable — the preview is informational only. |
+| 9 | Schema changes? | **None.** Reuses existing `compareRefs` and `fetchLatestBuildsPerApp`. |
+| 10 | Permission? | **`AP_RELEASE_CREATE`** — same as creating a release. |
+| 11 | Debug builds? | **Hidden.** Changelog panel gated behind `!isDebug`. Debug builds don't produce real tags (`tag_pushed = "debug-no-tag"`), so the comparison base would be misleading. |
+| 12 | Commit order? | **Newest first.** GitHub Compare API returns oldest-first; frontend reverses for developer convenience. Row numbers (1-indexed) added for easy reference. |
+| 13 | Commit row enrichment? | **GitHub avatars, clickable SHA links, clickable PR links, author on the right.** Avatars loaded via `github.com/{login}.png?size=40` (lazy, hidden on error). PR URLs derived from commit URL (`/commit/{sha}` → `/pull/{number}`). |
+| 14 | Revert page consistency? | **Revert commit list redesigned to match.** Same row layout, newest-first order, "View full diff on GitHub" link (compare URL from `prevGoodTag...lastCommitSha`). |
+
+### Endpoint
+
+```
+GET /mobile/changelog-preview
+    ?app=nammayatri
+    &surface=customer
+    &platform=android
+    &branch=feature/my-branch
+  -> ChangelogPreviewResp
+```
+
+Gated by `AP_RELEASE_CREATE`.
+
+### Response shape
+
+```haskell
+data ChangelogPreviewResp = ChangelogPreviewResp
+    { cpCommits     :: [CommitInfo]    -- reuses Compare.hs type, capped at 50
+    , cpAheadBy     :: Int             -- total commits ahead
+    , cpStatus      :: Text            -- "ahead", "behind", "identical", "diverged", "error"
+    , cpBaseTag     :: Maybe Text      -- tag of the last completed release
+    , cpBaseVersion :: Maybe Text      -- version string of the last completed release
+    , cpCompareUrl  :: Maybe Text      -- GitHub compare URL for "View all" link
+    } deriving (Generic, ToJSON)
+```
+
+### Data flow
+
+```
+User selects apps + branch
+  → Frontend: useChangelogPreviews(changelogApps, branch)
+      (fires N parallel queries via useQueries, one per selected app)
+  → GET /mobile/changelog-preview?app=...&surface=...&platform=...&branch=...  (×N)
+  → Handler (per app):
+      1. Look up app_catalog entry for (app, surface, platform)
+      2. fetchLatestBuildsPerApp → findLastReleaseBuild (filters buildType=="release", rejects "debug-no-tag")
+      3. Determine base ref: tag_pushed (preferred) || commit_sha (fallback)
+      4. compareRefs(creds, owner, repo, baseRef, branch)
+      5. Cap commits at 50, build GitHub compare URL
+  → Response: ChangelogPreviewResp (per app)
+  → Frontend: render tabbed commit list panel (tabs when 2+ apps, plain when 1)
+```
+
+### Frontend UI
+
+Always-visible panel below the branch picker on the Create Mobile Release form (hidden for debug builds):
+
+- **Tab bar** (when 2+ apps selected): Each app's label + commit count badge. Click switches to that app's changelog.
+- **Header**: "Commits since last release" with base tag/version → branch indicator and commit count
+- **Commit row**: `# | GitHub avatar | SHA link | subject | PR# link | author (right-aligned)`
+  - Newest-first order (reversed from API)
+  - Row numbers for easy reference
+  - GitHub avatars (20×20, lazy, hidden on error)
+  - Clickable SHA → commit on GitHub
+  - Clickable PR# → pull request on GitHub (derived from commit URL)
+  - Author name right-aligned, truncated at 100px
+- **Footer**: "View full diff on GitHub" link + "Showing N of M" when truncated
+- **States**: Loading skeleton | Empty ("No new commits" / "No previous release") | Error | Data
+
+### Revert page consistency
+
+The "Commits being rolled back" section in `MobileRevert.tsx` was redesigned to match the same commit row layout:
+- Newest-first order with row numbers
+- Same avatar + SHA link + subject + PR# link + author layout
+- "View full diff on GitHub" link at the bottom (compare URL from `prevGoodTag...lastCommitSha`, derived from commit URLs)
+
+### Files
+
+| Layer | File | Change |
+|-------|------|--------|
+| Backend | `Mobile/Handlers/Release.hs` | `ChangelogPreviewResp`, `changelogPreviewH`, `findLastReleaseBuild` |
+| Backend | `Mobile/Github/Compare.hs` | Added `ToJSON` instance for `CommitInfo` |
+| Backend | `Mobile/Queries/Tracker.hs` | Exported `appCatalogByKey` |
+| Backend | `Mobile/Routes.hs` | `GET /mobile/changelog-preview` route + handler binding |
+| Frontend | `releases/types.ts` | `CommitInfo`, `ChangelogPreviewResp` |
+| Frontend | `releases/api.ts` | `mobileApi.changelogPreview(app, surface, platform, branch)` |
+| Frontend | `releases/hooks.ts` | `useChangelogPreviews(apps, branch)` with `useQueries`, `ChangelogApp` type |
+| Frontend | `releases/pages/mobile/CreateMobileRelease.tsx` | Per-app tabbed changelog panel, debug exclusion gate |
+| Frontend | `releases/pages/mobile/MobileRevert.tsx` | Redesigned commit list (newest first, row layout, GitHub diff link) |
+
+### What this reuses (no new modules)
+
+| Existing code | From phase | Used for |
+|---|---|---|
+| `compareRefs` | Phase 1 (Mobile Revert) | GitHub Compare API call |
+| `CommitInfo` | Phase 1 | Commit data structure |
+| `fetchLatestBuildsPerApp` | Phase 4 (Latest Build Enrichment) | Find last completed release tag/SHA |
+| `loadGhCredsSafe` | Phase 1 | GitHub App credentials |
+| `findAppCatalogByKey` | Phase 4 | App catalog lookup |
+
+---
+
 ## Dependency chain
 
 ```
@@ -528,6 +646,9 @@ In-app crash/perf dashboards cannot be built — Firebase Crashlytics has no pub
 
 [Firebase Observability] → Deep-link to Firebase Console (no in-app dashboards)
      Requires: app_catalog.firebase_project_id + package_name
+
+[Changelog Preview on Create] ---> reuses compareRefs (Phase 1) + fetchLatestBuildsPerApp (Phase 4)
+     No schema changes. Independent of all other phases.
 
 [Platform Filter] (independent, frontend-only)
 [Apps Admin Redesign] (independent, frontend-only)

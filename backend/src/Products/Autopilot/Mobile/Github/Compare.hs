@@ -43,7 +43,7 @@ import Core.Http.Client (
     httpJson,
  )
 import Core.Types.Time (Seconds (..))
-import Data.Aeson (FromJSON (..), withObject, (.:), (.:?))
+import Data.Aeson (FromJSON (..), ToJSON (..), defaultOptions, genericToJSON, withObject, (.:), (.:?))
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
@@ -81,6 +81,9 @@ data CommitInfo = CommitInfo
     -- ^ Parsed from @(#NNN)@ in 'ciSubject' if present, else 'Nothing'.
     }
     deriving (Eq, Show, Generic)
+
+instance ToJSON CommitInfo where
+    toJSON = genericToJSON defaultOptions
 
 instance FromJSON CommitInfo where
     parseJSON = withObject "CommitInfo" $ \o -> do

@@ -76,6 +76,14 @@ type MobileAPI =
             :> Protected 'AP_RELEASE_CREATE
             :> QueryParam "q" Text
             :> Get '[JSON] BranchesResp
+        :<|> "mobile"
+            :> "changelog-preview"
+            :> Protected 'AP_RELEASE_CREATE
+            :> QueryParam' '[Required, Strict] "app" Text
+            :> QueryParam' '[Required, Strict] "surface" Text
+            :> QueryParam' '[Required, Strict] "platform" Text
+            :> QueryParam' '[Required, Strict] "branch" Text
+            :> Get '[JSON] ChangelogPreviewResp
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "mobile-revert"
@@ -106,6 +114,7 @@ mobileServer =
         :<|> dispatchMobileReleasesH
         :<|> liveReleasesH
         :<|> (\ap mq -> listBranchesH ap mq)
+        :<|> (\ap app surface platform branch -> changelogPreviewH ap app surface platform branch)
         :<|> (\rid ap -> mobileRevertDraftH ap rid)
         :<|> (\rid ap req -> mobileRevertCreateH ap rid req)
         :<|> (\rid ap sha -> verifyCommitH ap rid sha)

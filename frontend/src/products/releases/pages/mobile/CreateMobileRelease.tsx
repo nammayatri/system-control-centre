@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, Smartphone, Apple, Cpu, GitBranch, ChevronDown, Search } from 'lucide-react';
+import { AlertTriangle, Smartphone, Apple, Cpu, GitBranch, ChevronDown, Search, GitCommit, ExternalLink } from 'lucide-react';
 import {
   useMobileApps,
   useMobileBranches,
   usePreviewVersions,
   useCreateMobileReleases,
+  useChangelogPreviews,
 } from '../../hooks';
+import type { ChangelogApp } from '../../hooks';
 import type {
   AppCatalogEntry,
   BranchInfo,
@@ -27,6 +29,12 @@ import { toast } from 'sonner';
 type VersionEdit = { versionName: string; versionCode: string };
 
 const DEBOUNCE_MS = 500;
+
+const prUrlFromCommitUrl = (commitUrl: string, prNumber: number): string => {
+  const idx = commitUrl.indexOf('/commit/');
+  if (idx === -1) return commitUrl;
+  return commitUrl.slice(0, idx) + '/pull/' + prNumber;
+};
 
 const PlatformIcon = ({ platform }: { platform: string }) =>
   platform === 'ios'
@@ -188,6 +196,26 @@ export default function CreateMobileRelease() {
       [id]: { ...(prev[id] || { versionName: '', versionCode: '' }), [field]: value },
     }));
   };
+
+  const changelogApps: ChangelogApp[] = useMemo(
+    () =>
+      selectedIds
+        .map((id) => enabledApps.find((a) => a.id === id))
+        .filter((a): a is AppCatalogEntry => !!a)
+        .map((a) => ({
+          name: a.name,
+          surface: a.surface,
+          platform: a.platform,
+          label: a.displayLabel || `${a.name} (${a.surface} ${a.platform})`,
+        })),
+    [selectedIds, enabledApps],
+  );
+  const changelogQueries = useChangelogPreviews(
+    changelogApps,
+    sourceRef?.trim() || undefined,
+  );
+  const [changelogTab, setChangelogTab] = useState(0);
+  useEffect(() => { setChangelogTab(0); }, [selectedIds.join(',')]);
 
   const createMutation = useCreateMobileReleases();
 
@@ -439,6 +467,143 @@ export default function CreateMobileRelease() {
             )}
           </div>
         </section>
+
+        {/* ─── Changelog preview (per-app tabs, release builds only) ── */}
+        {!isDebug && changelogApps.length > 0 && sourceRef.trim() && (() => {
+          const safeTab = Math.min(changelogTab, changelogApps.length - 1);
+          const q = changelogQueries[safeTab];
+          const app = changelogApps[safeTab];
+          if (!q || !app) return null;
+          return (
+            <section className="bg-white rounded-xl border border-zinc-200">
+              <header className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-base sm:text-lg font-semibold text-zinc-900 flex items-center gap-2">
+                    <GitCommit className="w-4 h-4 text-zinc-500" />
+                    Commits since last release
+                  </h2>
+                  {q.isFetching && (
+                    <span className="text-xs text-zinc-400">Loading…</span>
+                  )}
+                </div>
+                {q.data?.cpBaseVersion && (
+                  <p className="text-xs text-zinc-500 mt-0.5">
+                    Base: <span className="font-mono text-zinc-700">
+                      {q.data.cpBaseTag || q.data.cpBaseVersion}
+                    </span>
+                    {' → '}
+                    <span className="font-mono text-zinc-700">{sourceRef}</span>
+                    {q.data.cpAheadBy > 0 && (
+                      <span className="ml-1.5 text-zinc-400">
+                        ({q.data.cpAheadBy} commit{q.data.cpAheadBy === 1 ? '' : 's'})
+                      </span>
+                    )}
+                  </p>
+                )}
+              </header>
+
+              {changelogApps.length > 1 && (
+                <div className="flex gap-0 border-b border-zinc-100 overflow-x-auto px-4 sm:px-6">
+                  {changelogApps.map((a, i) => (
+                    <button
+                      key={`${a.name}-${a.surface}-${a.platform}`}
+                      type="button"
+                      onClick={() => setChangelogTab(i)}
+                      className={cn(
+                        'px-3 py-2 text-xs font-medium whitespace-nowrap border-b-2 transition-colors',
+                        i === safeTab
+                          ? 'border-zinc-900 text-zinc-900'
+                          : 'border-transparent text-zinc-400 hover:text-zinc-600',
+                      )}
+                    >
+                      {a.label}
+                      {changelogQueries[i]?.data && (
+                        <span className="ml-1.5 text-[10px] text-zinc-400">
+                          {changelogQueries[i].data!.cpAheadBy}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div className="p-4 sm:p-6">
+                {q.isLoading ? (
+                  <div className="space-y-2">
+                    <Skeleton className="h-6 w-full" />
+                    <Skeleton className="h-6 w-3/4" />
+                    <Skeleton className="h-6 w-5/6" />
+                  </div>
+                ) : q.isError ? (
+                  <p className="text-sm text-red-600">Failed to load changelog preview.</p>
+                ) : !q.data || q.data.cpCommits.length === 0 ? (
+                  <p className="text-sm text-zinc-500">
+                    {q.data?.cpStatus === 'identical'
+                      ? 'Branch is identical to the last release — no new commits.'
+                      : 'No commits found (no previous release to compare against).'}
+                  </p>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-[11px] text-zinc-400 px-0.5">
+                      <span>Newest first</span>
+                      {q.data.cpAheadBy > 50 && (
+                        <span>Showing 50 of {q.data.cpAheadBy}</span>
+                      )}
+                    </div>
+                    <ul className="divide-y divide-zinc-100 max-h-80 overflow-y-auto">
+                      {[...q.data.cpCommits].reverse().map((c, i) => (
+                        <li key={c.ciSha} className="flex items-center gap-2.5 py-2">
+                          <span className="text-[10px] text-zinc-300 w-4 text-right shrink-0 tabular-nums">{i + 1}</span>
+                          <img
+                            src={`https://github.com/${c.ciAuthorLogin}.png?size=40`}
+                            alt={c.ciAuthorLogin}
+                            className="w-5 h-5 rounded-full shrink-0 bg-zinc-100"
+                            loading="lazy"
+                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                          />
+                          <a
+                            href={c.ciHtmlUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-[11px] text-blue-600 hover:text-blue-800 hover:underline shrink-0"
+                          >
+                            {c.ciShortSha}
+                          </a>
+                          <span className="text-sm text-zinc-800 min-w-0 truncate flex-1">
+                            {c.ciSubject}
+                          </span>
+                          {c.ciPrNumber != null && (
+                            <a
+                              href={prUrlFromCommitUrl(c.ciHtmlUrl, c.ciPrNumber)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline shrink-0"
+                            >
+                              #{c.ciPrNumber}
+                            </a>
+                          )}
+                          <span className="text-[11px] text-zinc-400 shrink-0 max-w-[100px] truncate text-right">{c.ciAuthorLogin}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    {q.data.cpCompareUrl && (
+                      <div className="pt-1 border-t border-zinc-100">
+                        <a
+                          href={q.data.cpCompareUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                        >
+                          View full diff on GitHub <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </section>
+          );
+        })()}
 
         {/* ─── Versions card (hidden for debug builds) ── */}
         {selectedIds.length > 0 && !isDebug && (

@@ -28,6 +28,7 @@
 | Phase 6 | Revert hardening (debug exclusion, revert-build exclusion, custom commit) | ✅ Done |
 | Phase 7 | UI polish (platform filter, apps admin redesign, dispatch button) | ✅ Done |
 | Phase 8 | Post-release health monitoring (crash, perf, alerts) | ⚠️ No in-app dashboards (Firebase Crashlytics has no public read REST API). Deep-link to Firebase Console implemented instead — sidebar link + per-release Crashlytics button with project/app/version context. |
+| Phase 9 | Changelog preview on create (commit diff between last release and selected branch) + revert commit list redesign | ✅ Done |
 
 ---
 
@@ -1621,6 +1622,101 @@ cd frontend && npx tsc --noEmit
 
 ---
 
+## Phase 9 — Changelog Preview on Create
+
+When creating a new mobile release, show the operator the commits between the last completed release and the selected branch HEAD. Reuses `compareRefs` (GitHub Compare API) and `fetchLatestBuildsPerApp` (latest build query) from earlier phases.
+
+### Task 9.1: Backend — Changelog preview endpoint
+
+**Files:**
+- Modify: `backend/src/Products/Autopilot/Mobile/Handlers/Release.hs`
+- Modify: `backend/src/Products/Autopilot/Mobile/Github/Compare.hs`
+- Modify: `backend/src/Products/Autopilot/Mobile/Queries/Tracker.hs`
+- Modify: `backend/src/Products/Autopilot/Mobile/Routes.hs`
+
+- [x] **Step 1: Add `ToJSON` instance for `CommitInfo`** (in `Compare.hs`)
+- [x] **Step 2: Export `appCatalogByKey`** (in `Tracker.hs`)
+- [x] **Step 3: Define `ChangelogPreviewResp` + implement `changelogPreviewH`** (in `Release.hs`)
+
+Handler flow: look up app catalog entry → `fetchLatestBuildsPerApp` → `findLastReleaseBuild` (filters to `buildType == "release"`, rejects `"debug-no-tag"` sentinel) → `compareRefs` between base tag and branch → cap at 50 commits → build GitHub compare URL.
+
+- [x] **Step 4: Wire route** (in `Routes.hs`)
+
+```haskell
+:<|> "mobile" :> "changelog-preview"
+      :> Protected 'AP_RELEASE_CREATE
+      :> QueryParam' '[Required, Strict] "app" Text
+      :> QueryParam' '[Required, Strict] "surface" Text
+      :> QueryParam' '[Required, Strict] "platform" Text
+      :> QueryParam' '[Required, Strict] "branch" Text
+      :> Get '[JSON] ChangelogPreviewResp
+```
+
+- [x] **Step 5: `sc-build` passes**
+
+---
+
+### Task 9.2: Frontend — API + hook
+
+**Files:**
+- Modify: `frontend/src/products/releases/types.ts`
+- Modify: `frontend/src/products/releases/api.ts`
+- Modify: `frontend/src/products/releases/hooks.ts`
+
+- [x] **Step 1: Types** — `CommitInfo` and `ChangelogPreviewResp` added to `types.ts`
+- [x] **Step 2: API wrapper** — `mobileApi.changelogPreview(app, surface, platform, branch)` in `api.ts`
+- [x] **Step 3: Multi-app hook** — `useChangelogPreviews(apps, branch)` using `useQueries` (not single `useQuery`). Fires one parallel query per selected app. Each app gets its own cache key and compare result. `ChangelogApp` type exported for consumers.
+
+---
+
+### Task 9.3: Frontend — Changelog panel on Create form + revert commit list redesign
+
+**Files:**
+- Modify: `frontend/src/products/releases/pages/mobile/CreateMobileRelease.tsx`
+- Modify: `frontend/src/products/releases/pages/mobile/MobileRevert.tsx`
+
+- [x] **Step 1: Per-app changelog with tabs on Create form**
+
+Derives `changelogApps` from selected IDs. When 2+ apps are selected, a tab bar appears showing each app's label with commit count badge. Each tab shows that app's own changelog (based on its own last release tag as base ref). Single app selection = no tabs. Tab auto-resets when selection changes.
+
+- [x] **Step 2: Enhanced commit row layout**
+
+Both Create form and Revert page share the same commit row style:
+- **Newest first** — commits reversed from GitHub API's chronological order
+- **Single-row layout**: `# | avatar | SHA link | subject | PR# link | author`
+- **GitHub avatars** — 20×20 rounded, lazy-loaded, hidden on error
+- **Clickable SHA** — blue link to commit on GitHub
+- **Clickable PR#** — blue link derived from commit URL (`/commit/{sha}` → `/pull/{number}`)
+- **Author on the right** — muted text, truncated at 100px
+- **Row numbers** — subtle counter for easy reference
+- **"Showing N of M"** — visible when commits are truncated
+- **"View full diff on GitHub"** — compare URL link at bottom
+
+- [x] **Step 3: Debug build exclusion** — changelog panel hidden when build type is "Debug" (`!isDebug` gate), since debug builds don't produce real tags and the comparison base would be misleading.
+
+- [x] **Step 4: Revert page commit list redesigned** — `MobileRevert.tsx` "Commits being rolled back" section updated to match the create form style. Added "View full diff on GitHub" link (compare URL constructed from `rdPrevGoodTag` and last commit SHA). Removed `CopyIcon` import (unused after redesign).
+
+- [x] **Step 5: `npx tsc --noEmit` passes**
+
+---
+
+### Task 9.4: Validate Phase 9
+
+- [x] **Step 1: `sc-build` passes.**
+- [x] **Step 2: `npx tsc --noEmit` passes.**
+- [ ] **Step 3: Select an app + branch on Create form → changelog panel shows commits.**
+- [ ] **Step 4: Click "View full diff on GitHub" → opens correct compare URL in new tab.**
+- [ ] **Step 5: Change branch → panel updates with new commits (debounced).**
+- [ ] **Step 6: Select multiple apps → tabs appear, each with own changelog.**
+- [ ] **Step 7: Switch to Debug build type → changelog panel hidden.**
+- [ ] **Step 8: Revert page → commits shown newest first with same row layout + "View full diff on GitHub".**
+
+**Risk:** Low — read-only feature, doesn't affect release creation. Compare API is slow (~500ms) but query is cached and non-blocking.
+
+**Rollback:** Revert Phase 9 commits. No schema changes.
+
+---
+
 ## Migration map
 
 ```
@@ -1640,7 +1736,7 @@ cd frontend && npx tsc --noEmit
 | `Mobile/StoreSync.hs` | Periodic store sync background job — `storeSyncLoop`, `runStoreSync` |
 | `Mobile/Github.hs` | `listBranches`, `searchBranches`, `createGitRef`, `getCommitInfo`, `CommitDetail` |
 | `Mobile/Workflow.hs` | `source_ref` dispatch, `commit_sha` capture, debug stage skipping, `markReleaseRevertedBy` in finalize |
-| `Mobile/Handlers/Release.hs` | `sourceRef` on create, `listBranchesH` with search, matrix job name suffix |
+| `Mobile/Handlers/Release.hs` | `sourceRef` on create, `listBranchesH` with search, matrix job name suffix, `changelogPreviewH` + `ChangelogPreviewResp` |
 | `Mobile/Handlers/AppCatalog.hs` | Latest build enrichment, `debugWorkflowPath` in response + PATCH |
 | `Mobile/Queries/Tracker.hs` | `findPreviousGoodMobileRelease`, `findPreviousGoodSCCRelease`, `firstNonDebug`, `isReverted`, `markReleaseRevertedBy` |
 | `Mobile/Queries/AppCatalog.hs` | `fetchLatestBuildsPerApp` — raw SQL with `ROW_NUMBER() OVER (PARTITION BY ...)` |
@@ -1650,14 +1746,14 @@ cd frontend && npx tsc --noEmit
 
 | File | Features |
 |------|----------|
-| `pages/mobile/MobileRevert.tsx` | Full revert page: draft preview, editable fields, source mode toggle (prev good / custom commit), store-sync banner, version validation |
-| `pages/mobile/CreateMobileRelease.tsx` | Branch combobox (debounced server search), build type toggle, `LatestBuildBadge` per app card, version fields |
+| `pages/mobile/MobileRevert.tsx` | Full revert page: draft preview, editable fields, source mode toggle (prev good / custom commit), store-sync banner, version validation, redesigned commit list (newest first, row layout, GitHub diff link) |
+| `pages/mobile/CreateMobileRelease.tsx` | Branch combobox (debounced server search), build type toggle, `LatestBuildBadge` per app card, version fields, per-app changelog preview with tabs |
 | `pages/mobile/MobileAppsAdmin.tsx` | Redesigned 7-column table: `PlatformBadge`, `wfShort`, `BuildCell`, enabled-first sort, 50% opacity disabled rows |
 | `pages/ListRelease.tsx` | Platform filter dropdown, revert button (with debug + revert-build exclusion), DEBUG badge, REVERT badge |
 | `pages/ReleaseSummary.tsx` | Dispatch button (CREATED + approved mobile), revert banners (reverted-by / reverts), source branch field, `PrevBuildBadge`, DEBUG/REVERT badges |
-| `hooks.ts` | `useMobileBranches(search?)` with `placeholderData: keepPreviousData`, `useDispatchMobileReleases` with toast + invalidation |
-| `api.ts` | `getMobileRevertDraft`, `createMobileRevert`, `verifyRevertCommit`, `listBranches(q?)`, `RevertDraft`, `VerifyCommitResp` |
-| `types.ts` | `LatestBuild`, `BranchInfo`, `BuildType`, `destinationFor`, `destinationsForPlatform`, `MobileDestination` (extended with iOS) |
+| `hooks.ts` | `useMobileBranches(search?)` with `placeholderData: keepPreviousData`, `useDispatchMobileReleases` with toast + invalidation, `useChangelogPreviews(apps, branch)` with `useQueries` |
+| `api.ts` | `getMobileRevertDraft`, `createMobileRevert`, `verifyRevertCommit`, `listBranches(q?)`, `changelogPreview(app, surface, platform, branch)`, `RevertDraft`, `VerifyCommitResp` |
+| `types.ts` | `LatestBuild`, `BranchInfo`, `BuildType`, `destinationFor`, `destinationsForPlatform`, `MobileDestination` (extended with iOS), `CommitInfo`, `ChangelogPreviewResp` |
 
 ## Ship order
 
@@ -1669,6 +1765,7 @@ cd frontend && npx tsc --noEmit
 - **Phase 6** — hardening (debug exclusion, revert-build exclusion, custom commit) layers on Phase 1's revert flow.
 - **Phase 7** — pure UI polish, no backend dependencies.
 - **Phase 8: Deep-link to Firebase Crashlytics** — no public read REST API, so in-app dashboards are not possible. Instead: added `firebase_project_id` column to `app_catalog` (migration 0017), Crashlytics sidebar link in Mobile Releases, and a per-release Crashlytics button on ReleaseSummary that deep-links with project + package name + version + version code.
+- **Phase 9** — independent of all other phases. Reuses `compareRefs` (Phase 1) and `fetchLatestBuildsPerApp` (Phase 4). No schema changes.
 
 ---
 

@@ -18,6 +18,7 @@ module Products.Autopilot.Mobile.Queries.Tracker (
     incrementResolveAttempts,
     appCatalogForRow,
     appCatalogForRowRaw,
+    appCatalogByKey,
     logEvent,
     gitOwner,
     gitRepo,

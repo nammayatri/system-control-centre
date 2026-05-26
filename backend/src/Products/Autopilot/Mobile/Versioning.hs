@@ -23,6 +23,7 @@ module Products.Autopilot.Mobile.Versioning (
     -- * Dispatcher
     VersionResolution (..),
     resolveNextVersion,
+    resolveNextVersionWithToken,
 
     -- * Re-exports from "Mobile.Versioning.Play"
     module Products.Autopilot.Mobile.Versioning.Play,
@@ -36,7 +37,7 @@ import Data.Int (Int32)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
-import Products.Autopilot.Mobile.Versioning.Apple hiding (resolve)
+import Products.Autopilot.Mobile.Versioning.Apple hiding (resolve, resolveWithToken)
 import qualified Products.Autopilot.Mobile.Versioning.Apple as A
 import Products.Autopilot.Mobile.Versioning.Play hiding (resolve)
 import qualified Products.Autopilot.Mobile.Versioning.Play as P
@@ -83,4 +84,28 @@ resolveNextVersion platform pkg =
         "ios" -> do
             res <- A.resolve pkg
             pure (fmap IosVersion res)
+        other -> pure (Left ("unsupported platform: " <> other))
+
+resolveNextVersionWithToken ::
+    (MonadFlow m) =>
+    -- | Pre-minted ASC bearer token (shared across a batch to avoid
+    --   Apple rejecting duplicate JWTs minted in the same second).
+    Maybe Text ->
+    -- | Platform — value of @app_catalog.platform@.
+    Text ->
+    -- | Package name or bundle id — value of @app_catalog.package_name@.
+    Text ->
+    m (Either Text VersionResolution)
+resolveNextVersionWithToken mAscToken platform pkg =
+    case platform of
+        "android" -> do
+            res <- P.resolve pkg
+            pure (fmap (\(n, c) -> AndroidVersion n c) res)
+        "ios" -> case mAscToken of
+            Just token -> do
+                res <- A.resolveWithToken token pkg
+                pure (fmap IosVersion res)
+            Nothing -> do
+                res <- A.resolve pkg
+                pure (fmap IosVersion res)
         other -> pure (Left ("unsupported platform: " <> other))
