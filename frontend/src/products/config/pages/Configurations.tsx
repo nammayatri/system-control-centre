@@ -5,6 +5,7 @@ import { apiClient } from '../../../lib/api-client';
 import { Button } from '../../../shared/ui/button';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
+import { useAuth } from '../../../core/auth/AuthContext';
 import { Badge } from '../../../shared/ui/badge';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { Save, X, RefreshCw, Search, ChevronDown, ChevronRight, Info } from 'lucide-react';
@@ -12,7 +13,7 @@ import { toast } from 'sonner';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { cn } from '../../../lib/utils';
 import { useRefreshAnimation } from '../../../shared/hooks';
-import { isMobileServerConfig } from '../../server-config-filter';
+import { isMobileServerConfig, isHiddenServerConfig, isReleaseOnlyServerConfig } from '../../server-config-filter';
 
 interface ConfigItem {
   key: string;
@@ -37,6 +38,10 @@ interface GroupedResponse {
 const Configurations: React.FC = () => {
   const queryClient = useQueryClient();
   const location = useLocation();
+  const { env } = useAuth();
+  // master = debug deployment; release-only configs (store sync, version
+  // preview) are no-ops here, so hide them.
+  const isDebugEnv = env === 'master';
   const filter: 'backend' | 'mobile' = location.pathname.startsWith('/mobile') ? 'mobile' : 'backend';
   const [search, setSearch] = useState('');
   const [selectedConfig, setSelectedConfig] = useState<ConfigItem | null>(null);
@@ -60,11 +65,13 @@ const Configurations: React.FC = () => {
       .map(g => ({
         ...g,
         configs: g.configs.filter(c =>
-          filter === 'mobile' ? isMobileServerConfig(c.key) : !isMobileServerConfig(c.key)
+          !isHiddenServerConfig(c.key) &&
+          !(isDebugEnv && isReleaseOnlyServerConfig(c.key)) &&
+          (filter === 'mobile' ? isMobileServerConfig(c.key) : !isMobileServerConfig(c.key))
         ),
       }))
       .filter(g => g.configs.length > 0);
-  }, [data, filter]);
+  }, [data, filter, isDebugEnv]);
 
   const saveMut = useMutation({
     mutationFn: async (params: { name: string; value: string; enabled: string }) => {

@@ -37,6 +37,7 @@ import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalogT (..))
+import Products.Autopilot.RuntimeConfig (isVersionPreviewEnabled)
 import Products.Autopilot.Mobile.Versioning (
     VersionResolution (..),
     loadAscCreds,
@@ -90,9 +91,13 @@ instance FromJSON PreviewVersionsResp
 
 previewVersionsH :: AuthedPerson -> PreviewVersionsReq -> Flow PreviewVersionsResp
 previewVersionsH _ap req = do
-    mAscToken <- mintAscTokenOnce
-    items <- mapM (previewOne mAscToken) (appCatalogIds req)
-    pure PreviewVersionsResp{previews = items}
+    enabled <- isVersionPreviewEnabled
+    if not enabled
+        then pure PreviewVersionsResp{previews = []}
+        else do
+            mAscToken <- mintAscTokenOnce
+            items <- mapM (previewOne mAscToken) (appCatalogIds req)
+            pure PreviewVersionsResp{previews = items}
 
 mintAscTokenOnce :: Flow (Maybe Text)
 mintAscTokenOnce = do

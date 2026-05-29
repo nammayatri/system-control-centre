@@ -73,7 +73,7 @@ import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
-    isDebugDestination,
+    isDebugBuildType,
  )
 import Products.Autopilot.Mobile.Types.Storage (AppCatalogT (..))
 import Products.Autopilot.Types.Storage.Schema (ReleaseTrackerT (..))
@@ -222,8 +222,8 @@ mobileRevertDraftH _ap releaseId' = do
                         <> "; only COMPLETED releases are revertable."
                     )
 
-    case badState >>= Just . mbcDestination . mbContext of
-        Just d | isDebugDestination d ->
+    case badState >>= Just . mbcBuildType . mbContext of
+        Just bt | isDebugBuildType bt ->
             throwM $
                 BadRequest "Debug builds (Firebase / TestFlight) cannot be reverted."
         _ -> pure ()
@@ -426,8 +426,8 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
         "COMPLETED" -> pure ()
         s -> throwM $ BadRequest ("Cannot revert release in status " <> s)
 
-    case badState >>= Just . mbcDestination . mbContext of
-        Just d | isDebugDestination d ->
+    case badState >>= Just . mbcBuildType . mbContext of
+        Just bt | isDebugBuildType bt ->
             throwM $ BadRequest "Debug builds cannot be reverted."
         _ -> pure ()
 
@@ -495,17 +495,17 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
     newId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
     ac <- appCatalogForRowRaw bad
-    destinationVal <- case (badState, prevState) of
-        (Just s, _) -> pure (mbcDestination (mbContext s))
-        (_, Just s) -> pure (mbcDestination (mbContext s))
+    buildTypeVal <- case (badState, prevState) of
+        (Just s, _) -> pure (mbcBuildType (mbContext s))
+        (_, Just s) -> pure (mbcBuildType (mbContext s))
         _ -> throwM $ BadRequest "Both bad and previous good releases have unparseable mobile state"
     let ctx =
             MobileBuildContext
                 { mbcVersionCode = rrNewVersionCode
                 , mbcChangeLog = rrChangelog
-                , mbcDestination = destinationVal
+                , mbcBuildType = buildTypeVal
                 , mbcReleaseGroupId = newId
-                , mbcMatrixJobName = acName ac <> if isDebugDestination destinationVal then "-Debug" else "-Release"
+                , mbcMatrixJobName = acName ac <> if isDebugBuildType buildTypeVal then "-Debug" else "-Release"
                 , mbcOtaNamespace = Nothing
                 , mbcTagPushed = Nothing
                 }

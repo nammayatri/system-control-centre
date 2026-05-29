@@ -168,17 +168,17 @@ Debug builds receive `debug-no-tag` as `tag_pushed` — no real Git tag. Using a
 ### Design
 
 1. **Backend guard**: Both draft and create handlers reject debug releases with a clear error message.
-2. **Query filtering**: `findPreviousGoodMobileRelease` and `findPreviousGoodSCCRelease` skip debug-destination rows. Queries fetch up to 20 candidates and filter in Haskell via `firstNonDebug` (parses target state JSONB, checks `isDebugDestination`).
-3. **Frontend**: Revert button hidden when `destination === 'Firebase' || 'TestFlight'` in both `ListRelease.tsx` and `ReleaseSummary.tsx`.
+2. **Query filtering**: `findPreviousGoodMobileRelease` and `findPreviousGoodSCCRelease` skip debug rows. Queries fetch up to 20 candidates and filter in Haskell via `firstNonDebug` (parses target state JSONB, checks `isDebugBuildType (mbcBuildType ...)`).
+3. **Frontend**: Revert button hidden when `release_context.build_type === 'debug'` in both `ListRelease.tsx` and `ReleaseSummary.tsx`.
 
 ### Files
 
 | File | Change |
 |------|--------|
-| `backend/src/Products/Autopilot/Mobile/Queries/Tracker.hs` | `firstNonDebug` filter, `isDebugDestination` import |
-| `backend/src/Products/Autopilot/Mobile/Handlers/Revert.hs` | Debug-build guard in draft + create |
+| `backend/src/Products/Autopilot/Mobile/Queries/Tracker.hs` | `firstNonDebug` filter, `isDebugBuildType` import |
+| `backend/src/Products/Autopilot/Mobile/Handlers/Revert.hs` | Debug-build guard in draft + create (via `mbcBuildType`) |
 | `frontend/src/products/releases/pages/ListRelease.tsx` | `!isDebugBuild` condition |
-| `frontend/src/products/releases/pages/ReleaseSummary.tsx` | Destination check |
+| `frontend/src/products/releases/pages/ReleaseSummary.tsx` | `build_type` check |
 
 ---
 
@@ -287,51 +287,60 @@ SCC's mobile workflow was built for production releases only. No way to trigger 
 
 ### Design
 
-Build type is determined from `MobileDestination`:
+Build type is a first-class field on the release context — `mbcBuildType :: Text` (`"debug"` or `"release"`) inside `MobileBuildContext`. The legacy `MobileDestination` ADT (and `mbcDestination`) was removed: the upload target (Firebase / TestFlight / Google Play / App Store) is fully derivable from build type + platform, so it's never stored.
 
 ```haskell
-data MobileDestination = MBGooglePlay | MBFirebase | MBTestFlight | MBAppStore
-
-isDebugDestination :: MobileDestination -> Bool
-isDebugDestination MBFirebase   = True
-isDebugDestination MBTestFlight = True
-isDebugDestination _            = False
+-- backend/src/Products/Autopilot/Mobile/Types.hs
+isDebugBuildType :: Text -> Bool
+isDebugBuildType = (== "debug")
 ```
 
-**`app_catalog.debug_workflow_path`** — nullable column. If NULL, falls back to `workflow_path`.
+The value is **set once at release creation** from the `mobile_build_type` server_config flag (see §7.1) and persisted on the context, so a release's build type reflects what it *was*, independent of the environment's current setting. Reads use `mbcBuildType`; the JSON key is `build_type`. `MobileBuildContext`'s `FromJSON` falls back to the old `destination` string (`Firebase`/`TestFlight` → `"debug"`) so rows written before the refactor still parse.
+
+Each environment (master / production) has its own `app_catalog` seed with the appropriate `workflow_path`. Debug and release builds are separated by deployment, not by a column on the app row.
+
+### 7.1 Build type is an environment invariant
+
+`mobile_build_type` (`server_config`, product `autopilot`, default `"release"`) is set **once per deployment** via migration `0020-mobile-build-type-config.sql`:
+
+| Environment | `SC_ENV` | `mobile_build_type` | Builds go to |
+|-------------|----------|---------------------|--------------|
+| master | `master` | `debug` | Firebase / TestFlight |
+| production | `production` | `release` | Google Play / App Store |
+
+It is **not** an editable runtime toggle: exposing it would let someone flip master to `"release"` and silently break the env-lock guarantee. It is therefore *not* registered in the config catalog (`Products/Autopilot/Config.hs`) and is hidden from the config UI (`isHiddenServerConfig` in `server-config-filter.ts`). It can only be changed via migration/DB. The create-release endpoint reads it server-side (`getMobileBuildType`) — the frontend never sends a build type or destination.
 
 ### Workflow stage differences
 
 | Stage | Release build | Debug build |
 |-------|--------------|-------------|
 | ResolveVersion | Queries Play Console / ASC | Skips entirely |
-| DispatchWorkflow | Full inputs to release workflow | Only `selected_apps` + `change_log` to debug workflow |
-| ResolveRunId | Polls on release workflow path | Polls on debug workflow path |
+| DispatchWorkflow | Full inputs (version + changelog) | Only `selected_apps` + `change_log` |
+| ResolveRunId | Polls on `workflow_path` | Polls on `workflow_path` |
 | MonitorMatrixJob | `{app}-Release` job name | `{app}-Debug` job name |
 | ConfirmTag | Polls for tag | Writes `debug-no-tag`, advances immediately |
 | Slack/complete | Normal | Normal |
 
 ### Frontend
 
-- Build Type toggle on Create form maps to destination via `destinationFor(buildType, platform)`
-- DEBUG badge (amber) on list rows and detail page header
-- Version fields hidden for debug builds on create form
+- Build type is fixed by the environment (read from `/auth/me` `config.env`, which comes from `SC_ENV`): master → debug, production → release. Shown as a static badge, not a toggle.
+- DEBUG badge (amber) on list rows and detail page header — driven by `release_context.build_type === 'debug'` (no longer by destination strings).
+- Version fields + version preview hidden for debug builds on create form.
 
 ### Files
 
 | File | Change |
 |------|--------|
-| `backend/src/Products/Autopilot/Mobile/Types.hs` | `isDebugDestination` |
-| `backend/src/Products/Autopilot/Mobile/Types/Storage.hs` | `acDebugWorkflowPath` |
-| `backend/src/Products/Autopilot/Mobile/Workflow.hs` | Debug early-returns in 5 stages |
-| `backend/src/Products/Autopilot/Mobile/Handlers/Release.hs` | Matrix job name suffix |
-| `backend/src/Products/Autopilot/Mobile/Handlers/Revert.hs` | Matrix job name suffix |
-| `backend/src/Products/Autopilot/Mobile/Handlers/AppCatalog.hs` | `debugWorkflowPath` in response + PATCH |
-| `backend/src/Products/Autopilot/Mobile/Queries/AppCatalog.hs` | `debugWorkflowPath` in INSERT/UPDATE |
-| `frontend/src/products/releases/types.ts` | `BuildType`, `destinationFor` |
-| `frontend/src/products/releases/pages/mobile/CreateMobileRelease.tsx` | Build type toggle |
-| `frontend/src/products/releases/pages/ListRelease.tsx` | DEBUG badge |
-| `frontend/src/products/releases/pages/ReleaseSummary.tsx` | DEBUG badge |
+| `backend/src/Products/Autopilot/Mobile/Types.hs` | `mbcBuildType :: Text`, `isDebugBuildType`; `MobileDestination`/`isDebugDestination` removed; `FromJSON` destination→build_type fallback |
+| `backend/src/Products/Autopilot/RuntimeConfig.hs` | `getMobileBuildType` (reads `mobile_build_type`) |
+| `backend/src/Products/Autopilot/Mobile/Workflow.hs` | Debug branches gate on `mbcBuildType == "debug"`, always uses `acWorkflowPath` |
+| `backend/src/Products/Autopilot/Mobile/Handlers/Release.hs` | Reads build type from config; stamps `mbcBuildType`; matrix job name suffix |
+| `backend/src/Products/Autopilot/Mobile/Handlers/Revert.hs` | Copies `mbcBuildType` from original; debug-revert guard on `isDebugBuildType` |
+| `backend/dev/migrations/system-control/0020-mobile-build-type-config.sql` | Seeds `mobile_build_type` |
+| `frontend/src/products/releases/types.ts` | `BuildType`; `MobileDestination`/`destinationFor` removed; `destination` dropped from request |
+| `frontend/src/products/releases/pages/mobile/CreateMobileRelease.tsx` | Env-locked build type, static badge |
+| `frontend/src/products/releases/pages/ListRelease.tsx` | DEBUG badge via `build_type` |
+| `frontend/src/products/releases/pages/ReleaseSummary.tsx` | DEBUG badge + revert gating via `build_type` |
 
 ---
 
@@ -351,8 +360,10 @@ Enrich `GET /mobile/apps` with the latest completed build per app, per build typ
 
 ```haskell
 data LatestBuildResp = LatestBuildResp
-    { version, versionCode, destination, tagPushed, commitSha, completedAt }
+    { version, versionCode, tagPushed, commitSha, completedAt }
 ```
+
+Build type per row comes from the SQL `COALESCE(mbContext ->> 'build_type', <legacy destination classification>)` — preferring the new `build_type` field, falling back to the old `destination` for pre-refactor rows. The unused `destination` field was dropped from the response.
 
 Added `latestReleaseBuild` and `latestDebugBuild` to `AppCatalogEntryResp`.
 
@@ -394,18 +405,30 @@ Apps released outside SCC (hotfixes, manual fastlane runs) make latest-build dat
 
 **Store API clients (reused):**
 
-| Platform | Source | Destination |
-|----------|--------|-------------|
-| Android release | `fetchPlayTracks` (production track) | `MBGooglePlay` |
-| iOS release | `fetchAscVersions` (TestFlight proxy) | `MBAppStore` |
+| Platform | Source | Build type stamped |
+|----------|--------|--------------------|
+| Android release | `fetchPlayTracks` (production track) | `"release"` |
+| iOS release | `fetchAscVersions` (TestFlight proxy) | `"release"` |
 | Android debug | Not synced (always via SCC) | — |
 | iOS debug | Not synced | — |
+
+Synthetic rows always carry `mbcBuildType = "release"` — store sync only ever observes production store releases.
 
 **Synthetic row:** `mode = 'STORE_SYNC'`, `created_by = 'store-sync'`, full `MobileBuildState` in `release_context`.
 
 **Android tag derivation:** `{normalizeAppSegment(name)}/prod/android/v{version}+{code}` — enables commit diffs on revert.
 
-**Configuration:** `store_sync_enabled` (default false) and `store_sync_interval_minutes` (default 30) in `server_config`.
+**Release-only:** the loop is a hard no-op in a debug deployment — it checks `getMobileBuildType` and skips when `isDebugBuildType` is true, **regardless of `store_sync_enabled`**. This prevents production store data from being pulled into a debug DB even if the flag is mistakenly on.
+
+**Configuration (all `server_config`, product `autopilot`):**
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `store_sync_enabled` | `false` | Master switch for the loop (only honored in a release env). |
+| `store_sync_interval_minutes` | `30` | Poll interval. |
+| `version_preview_enabled` | `true` (`false` in master, via `0019`) | Whether `POST /mobile/versions/preview` resolves next versions from Play Console / ASC. Returns empty when off. Inert in debug regardless (the create form skips preview for debug builds). |
+
+These three are release-only knobs: they're registered under the **Mobile** config group and the frontend hides them in the debug env (`env === 'master'`, via `isReleaseOnlyServerConfig`).
 
 **Error handling:** Per-app failures logged and skipped. Idempotent: same version = no insert.
 

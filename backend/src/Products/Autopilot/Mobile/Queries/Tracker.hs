@@ -49,7 +49,7 @@ import Data.Time.Clock (UTCTime)
 import Database.Beam
 import Products.Autopilot.Mobile.Types (
     MobileBuildTargetState (..),
-    isDebugDestination,
+    isDebugBuildType,
     MobileBuildContext (..),
  )
 import Products.Autopilot.Mobile.Types.Storage (
@@ -496,7 +496,7 @@ firstNonDebug (row : rest)
     | isReverted row = firstNonDebug rest
     | otherwise =
         case parseMobileTargetState (rtTargetState row) of
-            Just st | isDebugDestination (mbcDestination (mbContext st)) -> firstNonDebug rest
+            Just st | isDebugBuildType (mbcBuildType (mbContext st)) -> firstNonDebug rest
             parsed -> Just (row, parsed)
 
 isReverted :: ReleaseTrackerRow -> Bool

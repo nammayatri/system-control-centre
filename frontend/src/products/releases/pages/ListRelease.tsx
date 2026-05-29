@@ -514,7 +514,7 @@ const ListRelease: React.FC = () => {
                   paginatedReleases.map((release, index) => {
                     const isRevert = release.release_context?.revert === 1 || !!release.revertsReleaseId;
                     const isMobile = release.tracker_type === 'MobileBuild';
-                    const isDebugBuild = isMobile && (release.release_context?.destination === 'Firebase' || release.release_context?.destination === 'TestFlight');
+                    const isDebugBuild = isMobile && release.release_context?.build_type === 'debug';
                     const isMobileRevertBuild = isMobile && !!release.revertsReleaseId;
                     // Mobile rows reuse the underlying tracker columns with relabeled
                     // semantics (app/surface/platform). Backend rows render the
@@ -649,7 +649,7 @@ const ListRelease: React.FC = () => {
               {paginatedReleases.map((release) => {
                 const isRevert = release.release_context?.revert === 1 || !!release.revertsReleaseId;
                 const isMobile = release.tracker_type === 'MobileBuild';
-                const isDebugBuild = isMobile && (release.release_context?.destination === 'Firebase' || release.release_context?.destination === 'TestFlight');
+                const isDebugBuild = isMobile && release.release_context?.build_type === 'debug';
                 const releaseHref = isMobile
                   ? `/mobile/releases/${release.id}`
                   : `/backend/releases/${release.id}`;
