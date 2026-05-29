@@ -1051,7 +1051,7 @@ const ReleaseSummary: React.FC = () => {
           <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Release Summary</h1>
           <StatusBadge status={release.status} />
           {(release.release_context?.revert === 1 || revertsTarget) && <Badge variant="purple" dot>REVERT</Badge>}
-          {isMobile && (release.release_context?.destination === 'Firebase' || release.release_context?.destination === 'TestFlight') && (
+          {isMobile && release.release_context?.build_type === 'debug' && (
             <Badge variant="warning" dot>DEBUG</Badge>
           )}
           {release.ab_hs_status && release.ab_hs_status !== 'Uninitiated' && <Badge variant="info">AB: {release.ab_hs_status}</Badge>}
@@ -1147,8 +1147,7 @@ const ReleaseSummary: React.FC = () => {
               "Also revert in other cloud" controls don't apply. */}
           {s === 'COMPLETED' && isMobile && !revertedByTarget
             && !revertsTarget
-            && release.release_context?.destination !== 'Firebase'
-            && release.release_context?.destination !== 'TestFlight' && (
+            && release.release_context?.build_type !== 'debug' && (
             <PermissionGate product="autopilot" permission="RELEASE_REVERT">
               <Button
                 size="sm"

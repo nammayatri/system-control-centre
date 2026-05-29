@@ -274,4 +274,33 @@ autopilotConfigs =
         DeploymentGroup
         "BackendJob category: max wall-clock hours to wait for a Kubernetes Job to complete before aborting the release. Read by monitorJobStatus (polls = hours × 360)."
         (Just "autopilot")
+    , -- Mobile (React Native) release flags.
+      -- Note: mobile_build_type is intentionally NOT registered here. It's a
+      -- per-environment invariant (master = debug, prod = release) set once via
+      -- migration; exposing it as an editable runtime toggle would let someone
+      -- break the env-lock guarantee. It's hidden from the config UI too.
+      ConfigEntry
+        "version_preview_enabled"
+        (BoolConfig True)
+        MobileGroup
+        "Fetch next-version suggestions from Play Console / App Store Connect on the create-release form. Disable in debug-only envs."
+        (Just "autopilot")
+    , ConfigEntry
+        "store_sync_enabled"
+        (BoolConfig False)
+        MobileGroup
+        "Periodically poll production stores (Play Console / App Store Connect) and record live versions as synthetic COMPLETED releases."
+        (Just "autopilot")
+    , ConfigEntry
+        "store_sync_interval_minutes"
+        (IntConfig 30)
+        MobileGroup
+        "How often the store-sync background loop polls the stores (minutes)."
+        (Just "autopilot")
+    , ConfigEntry
+        "mobile_dispatch_enabled"
+        (BoolConfig False)
+        MobileGroup
+        "Master kill-switch for dispatching mobile release workflows to GitHub Actions. When off, releases can be drafted but not dispatched."
+        (Just "autopilot")
     ]

@@ -62,7 +62,7 @@ export interface ReleaseContext {
     version_code?: number;
     tag_pushed?: string | null;
     matrix_job_name?: string;
-    destination?: string;
+    build_type?: string;
     ota_namespace?: string | null;
     change_log?: string;
 }
@@ -349,7 +349,7 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         version_code:     (r.releaseContext as any)?.version_code,
         tag_pushed:       (r.releaseContext as any)?.tag_pushed,
         matrix_job_name:  (r.releaseContext as any)?.matrix_job_name,
-        destination:      (r.releaseContext as any)?.destination,
+        build_type:       (r.releaseContext as any)?.build_type,
         ota_namespace:    (r.releaseContext as any)?.ota_namespace,
         change_log:       (r.releaseContext as any)?.change_log,
     },

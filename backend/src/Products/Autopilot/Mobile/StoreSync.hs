@@ -48,7 +48,7 @@ import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
-    MobileDestination (..),
+    isDebugBuildType,
  )
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..))
 import Products.Autopilot.Mobile.Versioning.Apple (
@@ -64,7 +64,7 @@ import Products.Autopilot.Mobile.Versioning.Play (
     loadPlayCreds,
     renderPlayErr,
  )
-import Products.Autopilot.RuntimeConfig (isStoreSyncEnabled, getStoreSyncIntervalMinutes)
+import Products.Autopilot.RuntimeConfig (isStoreSyncEnabled, getStoreSyncIntervalMinutes, getMobileBuildType)
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Storage.Schema (ReleaseTrackerT (..))
 
@@ -77,10 +77,18 @@ storeSyncLoop = do
   where
     loop = do
         result <- MC.try @_ @SomeException $ do
+            -- Store sync polls PRODUCTION stores and records release builds, so
+            -- it only makes sense in a release env. In a debug env it's a no-op
+            -- regardless of store_sync_enabled — never pull production data into
+            -- a debug deployment.
+            buildType <- getMobileBuildType
             enabled <- isStoreSyncEnabled
-            if enabled
-                then runStoreSync
-                else logInfo "[STORE_SYNC] Disabled via server_config, skipping"
+            if isDebugBuildType buildType
+                then logInfo "[STORE_SYNC] Debug build env, skipping (release-only)"
+                else
+                    if enabled
+                        then runStoreSync
+                        else logInfo "[STORE_SYNC] Disabled via server_config, skipping"
             interval <- getStoreSyncIntervalMinutes
             threadDelaySec (interval * 60)
         case result of
@@ -152,7 +160,7 @@ syncAndroid creds ac existing = do
                                 <> tiName production
                                 <> "+"
                                 <> T.pack (show (tiCode production))
-                        insertSyntheticRelease ac (tiName production) (Just (tiCode production)) MBGooglePlay
+                        insertSyntheticRelease ac (tiName production) (Just (tiCode production))
   where
     when True a = a
     when False _ = pure ()
@@ -184,7 +192,7 @@ syncIos creds ac existing = do
                                 <> acName ac
                                 <> ": "
                                 <> ver
-                        insertSyntheticRelease ac ver Nothing MBAppStore
+                        insertSyntheticRelease ac ver Nothing
   where
     when' True a = a
     when' False _ = pure ()
@@ -199,14 +207,15 @@ isNewerIos :: Text -> Maybe LatestBuildRow -> Bool
 isNewerIos _ Nothing = True
 isNewerIos ver (Just lb) = ver /= lbrVersion lb
 
+-- Store sync only ever observes production store releases, so synthetic
+-- rows are always "release" build type.
 insertSyntheticRelease ::
     (MonadFlow m) =>
     AppCatalog ->
     Text ->
     Maybe Int32 ->
-    MobileDestination ->
     m ()
-insertSyntheticRelease ac version mCode dest = do
+insertSyntheticRelease ac version mCode = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
@@ -219,7 +228,7 @@ insertSyntheticRelease ac version mCode dest = do
             MobileBuildContext
                 { mbcVersionCode = mCode
                 , mbcChangeLog = "Synced from store"
-                , mbcDestination = dest
+                , mbcBuildType = "release"
                 , mbcReleaseGroupId = groupId
                 , mbcMatrixJobName = acName ac <> "-Release"
                 , mbcOtaNamespace = Nothing
@@ -283,7 +292,7 @@ insertSyntheticRelease ac version mCode dest = do
             , "platform" .= acPlatform ac
             , "version" .= version
             , "version_code" .= mCode
-            , "destination" .= show dest
+            , "build_type" .= ("release" :: Text)
             ]
     logInfo $
         "[STORE_SYNC] Inserted synthetic release "

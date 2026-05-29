@@ -44,7 +44,6 @@ data NewAppCatalogRow = NewAppCatalogRow
     , nacPlatform :: Text
     , nacGithubRepo :: Text
     , nacWorkflowPath :: Text
-    , nacDebugWorkflowPath :: Maybe Text
     , nacPackageName :: Maybe Text
     , nacDisplayLabel :: Maybe Text
     , nacFirebaseProjectId :: Maybe Text
@@ -59,7 +58,6 @@ data PatchAppCatalogRow = PatchAppCatalogRow
     , pacPackageName :: Maybe Text
     , pacFirebaseProjectId :: Maybe Text
     , pacWorkflowPath :: Maybe Text
-    , pacDebugWorkflowPath :: Maybe Text
     }
 
 -- | All rows.
@@ -110,7 +108,6 @@ insertAppCatalog NewAppCatalogRow{..} = withDb $ \db -> do
                             , acPlatform = val_ nacPlatform
                             , acGithubRepo = val_ nacGithubRepo
                             , acWorkflowPath = val_ nacWorkflowPath
-                            , acDebugWorkflowPath = val_ nacDebugWorkflowPath
                             , acPackageName = val_ nacPackageName
                             , acDisplayLabel = val_ nacDisplayLabel
                             , acFirebaseProjectId = val_ nacFirebaseProjectId
@@ -151,7 +148,6 @@ updateAppCatalog aid PatchAppCatalogRow{..} = withDb $ \db ->
                                         , fmap (\v -> acPackageName a <-. val_ (Just v)) pacPackageName
                                         , fmap (\v -> acFirebaseProjectId a <-. val_ (Just v)) pacFirebaseProjectId
                                         , fmap (\v -> acWorkflowPath a <-. val_ v) pacWorkflowPath
-                                        , fmap (\v -> acDebugWorkflowPath a <-. val_ (Just v)) pacDebugWorkflowPath
                                         ]
                             )
                             (\a -> acId a ==. val_ aid)
@@ -161,8 +157,8 @@ updateAppCatalog aid PatchAppCatalogRow{..} = withDb $ \db ->
                     (x : _) -> Just x
 
     isNoop =
-        case (pacEnabled, pacDisplayLabel, pacPackageName, pacFirebaseProjectId, pacWorkflowPath, pacDebugWorkflowPath) of
-            (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) -> True
+        case (pacEnabled, pacDisplayLabel, pacPackageName, pacFirebaseProjectId, pacWorkflowPath) of
+            (Nothing, Nothing, Nothing, Nothing, Nothing) -> True
             _ -> False
 
     lookupCurrent :: Pg (Maybe AppCatalog)
@@ -189,7 +185,6 @@ data LatestBuildRow = LatestBuildRow
     , lbrBuildType :: Text -- ^ @"debug"@ or @"release"@
     , lbrVersion :: Text
     , lbrVersionCode :: Maybe Int32
-    , lbrDestination :: Maybe Text
     , lbrTagPushed :: Maybe Text
     , lbrCommitSha :: Maybe Text
     , lbrCompletedAt :: UTCTime
@@ -199,8 +194,9 @@ data LatestBuildRow = LatestBuildRow
 in @release_tracker@ where @category = 'MobileBuild'@ and
 @status = 'COMPLETED'@, return the single most recent row.
 
-Build type is inferred from the @destination@ field inside
-@release_context.contents.mbContext@:
+Build type is read from the @build_type@ field inside
+@release_context.contents.mbContext@. Rows persisted before that field
+existed fall back to the legacy @destination@ classification:
 
 * Debug: destination ∈ {Firebase, TestFlight}
 * Release: destination ∈ {GooglePlay, AppStore}
@@ -215,19 +211,24 @@ fetchLatestBuildsPerApp = withDb $ \db ->
         rows <-
             query_ conn
                 "SELECT app_group, service, env, \
-                \  CASE WHEN (release_context::jsonb -> 'contents' -> 'mbContext' ->> 'destination') IN ('Firebase', 'TestFlight') \
-                \       THEN 'debug' ELSE 'release' END AS build_type, \
+                \  COALESCE( \
+                \    release_context::jsonb -> 'contents' -> 'mbContext' ->> 'build_type', \
+                \    CASE WHEN (release_context::jsonb -> 'contents' -> 'mbContext' ->> 'destination') IN ('Firebase', 'TestFlight') \
+                \         THEN 'debug' ELSE 'release' END \
+                \  ) AS build_type, \
                 \  new_version, \
                 \  (release_context::jsonb -> 'contents' -> 'mbContext' ->> 'version_code')::int AS version_code, \
-                \  release_context::jsonb -> 'contents' -> 'mbContext' ->> 'destination' AS destination, \
                 \  release_context::jsonb -> 'contents' -> 'mbContext' ->> 'tag_pushed' AS tag_pushed, \
                 \  commit_sha, \
                 \  date_created \
                 \FROM ( \
                 \  SELECT *, ROW_NUMBER() OVER ( \
                 \    PARTITION BY app_group, service, env, \
-                \      CASE WHEN (release_context::jsonb -> 'contents' -> 'mbContext' ->> 'destination') IN ('Firebase', 'TestFlight') \
-                \           THEN 'debug' ELSE 'release' END \
+                \      COALESCE( \
+                \        release_context::jsonb -> 'contents' -> 'mbContext' ->> 'build_type', \
+                \        CASE WHEN (release_context::jsonb -> 'contents' -> 'mbContext' ->> 'destination') IN ('Firebase', 'TestFlight') \
+                \             THEN 'debug' ELSE 'release' END \
+                \      ) \
                 \    ORDER BY date_created DESC \
                 \  ) AS rn \
                 \  FROM release_tracker \
@@ -236,6 +237,6 @@ fetchLatestBuildsPerApp = withDb $ \db ->
                 \) sub WHERE rn = 1"
         pure (map toLatestBuildRow rows)
 
-toLatestBuildRow :: (Text, Text, Text, Text, Text, Maybe Int32, Maybe Text, Maybe Text, Maybe Text, UTCTime) -> LatestBuildRow
-toLatestBuildRow (ag, suf, plt, bt, ver, vc, dest, tag, sha, ca) =
-    LatestBuildRow ag suf plt bt ver vc dest tag sha ca
+toLatestBuildRow :: (Text, Text, Text, Text, Text, Maybe Int32, Maybe Text, Maybe Text, UTCTime) -> LatestBuildRow
+toLatestBuildRow (ag, suf, plt, bt, ver, vc, tag, sha, ca) =
+    LatestBuildRow ag suf plt bt ver vc tag sha ca

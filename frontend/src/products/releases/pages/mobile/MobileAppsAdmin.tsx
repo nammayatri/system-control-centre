@@ -183,15 +183,8 @@ export default function MobileAppsAdmin() {
                           <PlatformBadge platform={app.platform} />
                         </td>
                         <td className="py-3 px-4">
-                          <div className="space-y-0.5">
-                            <div className="font-mono text-[11px] text-zinc-600" title={app.workflowPath}>
-                              {wfShort(app.workflowPath)}
-                            </div>
-                            {app.debugWorkflowPath && (
-                              <div className="font-mono text-[11px] text-zinc-400" title={app.debugWorkflowPath}>
-                                {wfShort(app.debugWorkflowPath)}
-                              </div>
-                            )}
+                          <div className="font-mono text-[11px] text-zinc-600" title={app.workflowPath}>
+                            {wfShort(app.workflowPath)}
                           </div>
                         </td>
                         <td className="py-3 px-4 font-mono text-[11px] text-zinc-500 max-w-[140px] truncate" title={app.packageName ?? undefined}>

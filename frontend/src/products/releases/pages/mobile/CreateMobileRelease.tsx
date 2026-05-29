@@ -18,7 +18,7 @@ import type {
   LatestBuild,
   VersionPreviewItem,
 } from '../../types';
-import { destinationFor } from '../../types';
+import { useAuth } from '../../../../core/auth/AuthContext';
 import { Button } from '../../../../shared/ui/button';
 import { Textarea } from '../../../../shared/ui/input';
 import { Skeleton } from '../../../../shared/ui/skeleton';
@@ -69,6 +69,7 @@ const LatestBuildBadge = ({ build, label }: { build: LatestBuild; label: string 
 
 export default function CreateMobileRelease() {
   const navigate = useNavigate();
+  const { env } = useAuth();
   const { data: apps, isLoading: appsLoading, error: appsError } = useMobileApps();
 
   // Filter to enabled apps only — disabled apps live in the catalog but
@@ -121,12 +122,18 @@ export default function CreateMobileRelease() {
     return () => clearTimeout(t);
   }, [selectedIds]);
 
-  const previewQuery = usePreviewVersions(debouncedIds);
-  const previews: VersionPreviewItem[] = previewQuery.data?.previews ?? [];
-
   const [versionEdits, setVersionEdits] = useState<Record<number, VersionEdit>>({});
   const [changeLog, setChangeLog] = useState('');
-  const [buildType, setBuildType] = useState<BuildType>('release');
+  const envBuildType: BuildType | null =
+    env === 'master' ? 'debug' : env === 'production' ? 'release' : null;
+  const [buildType, setBuildType] = useState<BuildType>(envBuildType ?? 'release');
+
+  useEffect(() => {
+    if (envBuildType) setBuildType(envBuildType);
+  }, [envBuildType]);
+
+  const previewQuery = usePreviewVersions(buildType === 'debug' ? [] : debouncedIds);
+  const previews: VersionPreviewItem[] = previewQuery.data?.previews ?? [];
 
   // Lookup helper used by every per-row branch below: given an app catalog id,
   // tell us if it's an iOS row. iOS rows render a single "Version Number"
@@ -145,16 +152,13 @@ export default function CreateMobileRelease() {
     return s;
   }, [selectedIds, enabledApps]);
 
-  // Derive the destination per-platform from the build type. For mixed
-  // selections (android + ios), each row gets its own destination at
-  // submit time — the API field uses the first selected platform's value
-  // as the top-level destination (per-row destination is what matters for
-  // workflow path resolution on the backend).
+  // Primary platform drives the "uploaded to …" hint in the Build type
+  // card. Build type/destination are decided by the backend (env-locked),
+  // so nothing is sent from here.
   const primaryPlatform: 'android' | 'ios' =
     selectedPlatforms.has('ios') && !selectedPlatforms.has('android')
       ? 'ios'
       : 'android';
-  const destination = destinationFor(buildType, primaryPlatform);
 
   // When a fresh preview lands, prefill any unedited rows with the suggested
   // version. Don't clobber values the user has already typed. Per-platform:
@@ -265,7 +269,6 @@ export default function CreateMobileRelease() {
     });
     const req: CreateMobileReleasesReq = {
       changeLog: changeLog.trim(),
-      destination,
       sourceRef: sourceRef && sourceRef !== 'main' ? sourceRef : null,
       items,
     };
@@ -710,7 +713,7 @@ export default function CreateMobileRelease() {
           </div>
         </section>
 
-        {/* ─── Build Type ──────────────────────────── */}
+        {/* ─── Build Type (env-locked) ────────────── */}
         <section className="bg-white rounded-xl border border-zinc-200">
           <header className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
             <h2 className="text-base sm:text-lg font-semibold text-zinc-900">
@@ -718,23 +721,14 @@ export default function CreateMobileRelease() {
             </h2>
           </header>
           <div className="p-4 sm:p-6">
-            <div className="inline-flex rounded-lg border border-zinc-200 overflow-hidden">
-              {(['release', 'debug'] as const).map((bt) => (
-                <button
-                  key={bt}
-                  type="button"
-                  onClick={() => setBuildType(bt)}
-                  className={cn(
-                    'px-5 py-2 text-sm font-medium transition-colors',
-                    buildType === bt
-                      ? 'bg-zinc-900 text-white'
-                      : 'bg-white text-zinc-600 hover:bg-zinc-50',
-                  )}
-                >
-                  {bt === 'release' ? 'Release' : 'Debug'}
-                </button>
-              ))}
-            </div>
+            <span className={cn(
+              'inline-flex items-center px-3 py-1.5 rounded-md text-sm font-medium',
+              buildType === 'debug'
+                ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                : 'bg-emerald-50 text-emerald-700 border border-emerald-200',
+            )}>
+              {buildType === 'debug' ? 'Debug' : 'Release'}
+            </span>
             <p className="mt-2.5 text-xs text-zinc-500">
               {buildType === 'debug'
                 ? `Builds will be uploaded to ${primaryPlatform === 'ios' ? 'TestFlight' : 'Firebase App Distribution'}.`

@@ -928,7 +928,7 @@ testMobileBuildContextJsonRoundTrip = do
             MobileBuildContext
                 { mbcVersionCode = Just 12345
                 , mbcChangeLog = "hello"
-                , mbcDestination = MBGooglePlay
+                , mbcBuildType = "release"
                 , mbcReleaseGroupId = "rg_abc"
                 , mbcMatrixJobName = "NammaYatri-Release"
                 , mbcOtaNamespace = Just "nammayatriv2"
