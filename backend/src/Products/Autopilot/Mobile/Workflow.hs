@@ -93,9 +93,8 @@ import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
-    MobileDestination (..),
     isMBTerminal,
-    isDebugDestination,
+    isDebugBuildType,
  )
 import Products.Autopilot.Mobile.Types.Storage (AppCatalogT (..))
 import Products.Autopilot.Mobile.Versioning (
@@ -316,7 +315,7 @@ execResolveVersion = mobileStage "ResolveVersion" $ do
     rs <- gets id
     let rt = releaseTracker rs
         isDebug = case mobileTarget rs of
-            Just target -> isDebugDestination (mbcDestination (mbContext target))
+            Just target -> isDebugBuildType (mbcBuildType (mbContext target))
             Nothing -> False
     if isDebug
         then do
@@ -511,10 +510,10 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
     -- by a workflow are silently ignored by GitHub, but we keep the maps
     -- tight so the dispatch payload is honest about what each platform
     -- actually consumes.
-    let dest = mbcDestination (mbContext target)
+    let isDebug = isDebugBuildType (mbcBuildType (mbContext target))
         changeLogVal = mbcChangeLog (mbContext target)
         inputs =
-            if isDebugDestination dest
+            if isDebug
                 then
                     KM.fromList
                         [ ("selected_apps", Aeson.String selectedApps)
@@ -540,10 +539,7 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                 { wdrRef = ref
                 , wdrInputs = inputs
                 }
-        wfPath =
-            if isDebugDestination dest
-                then fromMaybe (acWorkflowPath ac) (acDebugWorkflowPath ac)
-                else acWorkflowPath ac
+        wfPath = acWorkflowPath ac
     res <-
         dispatchWorkflow
             creds
@@ -638,11 +634,7 @@ execResolveRunId = do
                         , "reason" .= ("ResolveRunId exceeded 10 attempts" :: Text)
                         ]
                 abort "ResolveRunId: max attempts exceeded"
-            let dest = mbcDestination (mbContext target)
-                wfPath =
-                    if isDebugDestination dest
-                        then fromMaybe (acWorkflowPath ac) (acDebugWorkflowPath ac)
-                        else acWorkflowPath ac
+            let wfPath = acWorkflowPath ac
             res <-
                 listWorkflowRuns
                     creds
@@ -838,7 +830,7 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
     target <- case mobileTarget rs of
         Just t -> pure t
         Nothing -> abort "MobileBuildState missing at ConfirmTag"
-    let isDebug = isDebugDestination (mbcDestination (mbContext target))
+    let isDebug = isDebugBuildType (mbcBuildType (mbContext target))
     if isDebug
         then do
             logInfoIO $
@@ -1090,12 +1082,12 @@ applyMobileTarget rs f =
                             , -- Fallback when 'targetState' is missing entirely (no
                               -- MobileBuildState present). The relevant abort fires
                               -- upstream — but if we reach here, default to
-                              -- 'MBGooglePlay' (the production destination per
-                              -- spec). Originally this was 'error "..."' which would
-                              -- crash the worker thread; defaulting to a safe value
-                              -- keeps the placeholder usable while the real abort
+                              -- "release" (the production build type per spec).
+                              -- Originally this was 'error "..."' which would crash
+                              -- the worker thread; defaulting to a safe value keeps
+                              -- the placeholder usable while the real abort
                               -- propagates from the caller.
-                              mbcDestination = MBGooglePlay
+                              mbcBuildType = "release"
                             , mbcReleaseGroupId = ""
                             , mbcMatrixJobName = ""
                             , mbcOtaNamespace = Nothing

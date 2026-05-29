@@ -18,6 +18,8 @@ module Products.Autopilot.RuntimeConfig (
     isMultiReleasePerProduct,
     isStoreSyncEnabled,
     getStoreSyncIntervalMinutes,
+    isVersionPreviewEnabled,
+    getMobileBuildType,
     isUnderMaintenance,
     -- Delays / numeric (MonadFlow versions)
     getReleaseWatchDelay,
@@ -212,6 +214,16 @@ isStoreSyncEnabled = getConfigBoolForProduct "store_sync_enabled" (Just "autopil
 
 getStoreSyncIntervalMinutes :: (MonadFlow m) => m Int
 getStoreSyncIntervalMinutes = getConfigIntForProduct "store_sync_interval_minutes" (Just "autopilot") 30
+
+isVersionPreviewEnabled :: (MonadFlow m) => m Bool
+isVersionPreviewEnabled = getConfigBoolForProduct "version_preview_enabled" (Just "autopilot") True
+
+{- | Build type for this deployment: "debug" (master env → Firebase/TestFlight)
+or "release" (production env → Google Play/App Store). One value per
+environment; stamped onto each release at creation time.
+-}
+getMobileBuildType :: (MonadFlow m) => m Text
+getMobileBuildType = getConfigTextForProduct "mobile_build_type" (Just "autopilot") "release"
 
 -- | Reads @ap_under_maintenance@ from server_config ({"ap_under_maintenance":bool}).
 isUnderMaintenance :: (MonadFlow m) => m Bool

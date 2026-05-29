@@ -191,15 +191,10 @@ body =
         }
 ```
 
-- [x] **Step 2: Select workflow path based on destination**
-
-Debug builds use a different YAML file:
+- [x] **Step 2: Select workflow path**
 
 ```haskell
-wfPath =
-    if isDebugDestination dest
-        then fromMaybe (acWorkflowPath ac) (acDebugWorkflowPath ac)
-        else acWorkflowPath ac
+wfPath = acWorkflowPath ac
 ```
 
 - [x] **Step 3: Log the chosen ref**
@@ -849,6 +844,15 @@ Results are `BranchRefItem` (refs format) converted to `BranchInfo` by stripping
 
 ## Phase 3 — Debug & Release Build Types
 
+> **⚠️ Superseded — build type model refactored.** The `MobileDestination` ADT
+> below (and the per-context `mbcDestination` field) was **removed**. Build type
+> is now a plain `mbcBuildType :: Text` (`"debug"`/`"release"`) on the context,
+> set server-side from the `mobile_build_type` env-invariant config flag; the
+> upload destination is derived from build type + platform, never stored. Debug
+> branching uses `isDebugBuildType`. Store sync is gated release-only and the
+> create form sends no destination. The steps below are kept for history — see
+> the design spec **§7 Debug & Release Build Types** for the current model.
+
 ### Task 3.1: Destination ADT extension
 
 **Files:**
@@ -887,31 +891,7 @@ export const destinationFor = (
 
 ---
 
-### Task 3.2: App catalog `debug_workflow_path`
-
-**Files:**
-- Create: `backend/dev/migrations/system-control/0014-app-catalog-debug-workflow.sql`
-- Modify: `backend/src/Products/Autopilot/Mobile/Types/Storage.hs`
-
-- [x] **Step 1: Migration**
-
-```sql
-ALTER TABLE app_catalog ADD COLUMN IF NOT EXISTS debug_workflow_path TEXT;
-```
-
-- [x] **Step 2: Beam field**
-
-```haskell
-, acDebugWorkflowPath :: Columnar f (Maybe Text)
-```
-
-- [x] **Step 3: PATCH support in `Handlers/AppCatalog.hs`**
-
-Added to both `PatchAppReq` and `AppCatalogEntryResp`.
-
----
-
-### Task 3.3: Workflow stage changes for debug builds
+### Task 3.2: Workflow stage changes for debug builds
 
 **Files:**
 - Modify: `backend/src/Products/Autopilot/Mobile/Workflow.hs`
@@ -919,8 +899,8 @@ Added to both `PatchAppReq` and `AppCatalogEntryResp`.
 Six stages affected:
 
 - [x] **ResolveVersion**: Skip for debug — log `VERSION_RESOLVED` with `source = "debug_skip"`, bump to `MBVersionResolved`
-- [x] **DispatchWorkflow**: Only send `selected_apps` + `change_log` (no version inputs) to `debug_workflow_path`
-- [x] **ResolveRunId**: Poll on correct workflow path (debug or release)
+- [x] **DispatchWorkflow**: Only send `selected_apps` + `change_log` (no version inputs) for debug destinations
+- [x] **ResolveRunId**: Poll on `workflow_path`
 - [x] **MonitorMatrixJob**: Look for `{app}-Debug` instead of `{app}-Release`
 
 ```haskell
@@ -1168,7 +1148,12 @@ runnerLoop st = do
 ```haskell
 isStoreSyncEnabled :: (MonadFlow m) => m Bool
 getStoreSyncIntervalMinutes :: (MonadFlow m) => m Int
+getMobileBuildType :: (MonadFlow m) => m Text   -- "debug" | "release"
 ```
+
+> **Note (post-refactor):** `storeSyncLoop` now also reads `getMobileBuildType`
+> and is a **no-op in a debug env** (`isDebugBuildType`), regardless of
+> `store_sync_enabled` — store sync only ever records production store releases.
 
 - [x] **Step 3: Migration**
 
@@ -1179,6 +1164,14 @@ INSERT INTO server_config (type, name, value, product, enabled, last_updated) VA
   ('flag', 'store_sync_interval_minutes',  '30',    'autopilot', 1, now())
 ON CONFLICT DO NOTHING;
 ```
+
+> **Later migrations:** `0019-version-preview-config.sql` adds
+> `version_preview_enabled` (gates `POST /mobile/versions/preview`);
+> `0020-mobile-build-type-config.sql` adds `mobile_build_type` (env invariant:
+> master=`debug`, prod=`release`). These three mobile flags are registered under
+> the **Mobile** config group; `version_preview_enabled` + `store_sync_*` are
+> hidden in the debug env UI (release-only), and `mobile_build_type` is hidden
+> everywhere (set via migration only, never an editable toggle).
 
 ---
 
@@ -1722,8 +1715,9 @@ Both Create form and Revert page share the same commit row style:
 ```
 0012-mobile-revert.sql                    commit_sha, source_ref, reverts_release_id + indexes
 0013-local-mobile-revert-test-data.sql    test data for revert dev (local only)
-0014-app-catalog-debug-workflow.sql       debug_workflow_path on app_catalog
 0015-store-sync-config.sql                store_sync_enabled, store_sync_interval_minutes
+0019-version-preview-config.sql           version_preview_enabled (gates /mobile/versions/preview)
+0020-mobile-build-type-config.sql         mobile_build_type (env invariant: master=debug, prod=release)
 ```
 
 ## Key modules added/modified
@@ -1737,7 +1731,7 @@ Both Create form and Revert page share the same commit row style:
 | `Mobile/Github.hs` | `listBranches`, `searchBranches`, `createGitRef`, `getCommitInfo`, `CommitDetail` |
 | `Mobile/Workflow.hs` | `source_ref` dispatch, `commit_sha` capture, debug stage skipping, `markReleaseRevertedBy` in finalize |
 | `Mobile/Handlers/Release.hs` | `sourceRef` on create, `listBranchesH` with search, matrix job name suffix, `changelogPreviewH` + `ChangelogPreviewResp` |
-| `Mobile/Handlers/AppCatalog.hs` | Latest build enrichment, `debugWorkflowPath` in response + PATCH |
+| `Mobile/Handlers/AppCatalog.hs` | Latest build enrichment |
 | `Mobile/Queries/Tracker.hs` | `findPreviousGoodMobileRelease`, `findPreviousGoodSCCRelease`, `firstNonDebug`, `isReverted`, `markReleaseRevertedBy` |
 | `Mobile/Queries/AppCatalog.hs` | `fetchLatestBuildsPerApp` — raw SQL with `ROW_NUMBER() OVER (PARTITION BY ...)` |
 | `RuntimeConfig.hs` | `isStoreSyncEnabled`, `getStoreSyncIntervalMinutes` |

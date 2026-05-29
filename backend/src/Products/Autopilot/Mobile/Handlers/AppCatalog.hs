@@ -32,7 +32,6 @@ import Products.Autopilot.Mobile.Types.Storage
 data LatestBuildResp = LatestBuildResp
     { version :: Text
     , versionCode :: Maybe Int32
-    , destination :: Maybe Text
     , tagPushed :: Maybe Text
     , commitSha :: Maybe Text
     , completedAt :: UTCTime
@@ -50,7 +49,6 @@ data AppCatalogEntryResp = AppCatalogEntryResp
     , platform :: Text
     , githubRepo :: Text
     , workflowPath :: Text
-    , debugWorkflowPath :: Maybe Text
     , packageName :: Maybe Text
     , displayLabel :: Maybe Text
     , firebaseProjectId :: Maybe Text
@@ -71,7 +69,6 @@ data NewAppReq = NewAppReq
     , platform :: Text
     , githubRepo :: Text
     , workflowPath :: Text
-    , debugWorkflowPath :: Maybe Text
     , packageName :: Maybe Text
     , displayLabel :: Maybe Text
     , firebaseProjectId :: Maybe Text
@@ -89,7 +86,6 @@ data PatchAppReq = PatchAppReq
     , packageName :: Maybe Text
     , firebaseProjectId :: Maybe Text
     , workflowPath :: Maybe Text
-    , debugWorkflowPath :: Maybe Text
     }
     deriving (Generic, Show)
 
@@ -103,7 +99,6 @@ toBuildResp b =
     LatestBuildResp
         { version = lbrVersion b
         , versionCode = lbrVersionCode b
-        , destination = lbrDestination b
         , tagPushed = lbrTagPushed b
         , commitSha = lbrCommitSha b
         , completedAt = lbrCompletedAt b
@@ -119,7 +114,6 @@ toResp buildMap r =
         , platform = acPlatform r
         , githubRepo = acGithubRepo r
         , workflowPath = acWorkflowPath r
-        , debugWorkflowPath = acDebugWorkflowPath r
         , packageName = acPackageName r
         , displayLabel = acDisplayLabel r
         , firebaseProjectId = acFirebaseProjectId r
@@ -139,7 +133,6 @@ toRespNoBuild r =
         , platform = acPlatform r
         , githubRepo = acGithubRepo r
         , workflowPath = acWorkflowPath r
-        , debugWorkflowPath = acDebugWorkflowPath r
         , packageName = acPackageName r
         , displayLabel = acDisplayLabel r
         , firebaseProjectId = acFirebaseProjectId r
@@ -160,7 +153,7 @@ listAppsH _ap = do
     pure (map (toResp buildMap) apps)
 
 createAppH :: AuthedPerson -> NewAppReq -> Flow AppCatalogEntryResp
-createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, workflowPath = w, debugWorkflowPath = dw, packageName = pkg, displayLabel = d, firebaseProjectId = fbp, enabled = e} =
+createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, workflowPath = w, packageName = pkg, displayLabel = d, firebaseProjectId = fbp, enabled = e} =
     let row =
             NewAppCatalogRow
                 { nacName = n
@@ -168,7 +161,6 @@ createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, wo
                 , nacPlatform = p
                 , nacGithubRepo = g
                 , nacWorkflowPath = w
-                , nacDebugWorkflowPath = dw
                 , nacPackageName = pkg
                 , nacDisplayLabel = d
                 , nacFirebaseProjectId = fbp
@@ -177,7 +169,7 @@ createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, wo
      in toRespNoBuild <$> insertAppCatalog row
 
 patchAppH :: AuthedPerson -> Int32 -> PatchAppReq -> Flow AppCatalogEntryResp
-patchAppH _ap aid PatchAppReq{enabled = e, displayLabel = d, packageName = pkg, firebaseProjectId = fbp, workflowPath = w, debugWorkflowPath = dw} = do
+patchAppH _ap aid PatchAppReq{enabled = e, displayLabel = d, packageName = pkg, firebaseProjectId = fbp, workflowPath = w} = do
     let patch =
             PatchAppCatalogRow
                 { pacEnabled = e
@@ -185,7 +177,6 @@ patchAppH _ap aid PatchAppReq{enabled = e, displayLabel = d, packageName = pkg, 
                 , pacPackageName = pkg
                 , pacFirebaseProjectId = fbp
                 , pacWorkflowPath = w
-                , pacDebugWorkflowPath = dw
                 }
     mResult <- updateAppCatalog aid patch
     case mResult of

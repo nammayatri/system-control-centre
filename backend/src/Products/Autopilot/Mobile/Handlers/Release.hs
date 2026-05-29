@@ -74,9 +74,9 @@ import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
-    MobileDestination,
-    isDebugDestination,
+    isDebugBuildType,
  )
+import Products.Autopilot.RuntimeConfig (getMobileBuildType)
 import Products.Autopilot.Mobile.Types.Storage (
     AppCatalog,
     AppCatalogT (..),
@@ -111,7 +111,6 @@ instance FromJSON CreateMobileReleasesItem
 data CreateMobileReleasesReq = CreateMobileReleasesReq
     { releaseGroupLabel :: Maybe Text
     , changeLog :: Text
-    , destination :: MobileDestination
     , sourceRef :: Maybe Text
     , items :: [CreateMobileReleasesItem]
     }
@@ -147,9 +146,12 @@ createMobileReleasesH ap CreateMobileReleasesReq{..} = do
     case items of
         [] -> throwM $ BadRequest "items must be non-empty"
         _ -> pure ()
+    -- Build type is fixed per deployment env (master = debug, prod = release)
+    -- via the mobile_build_type config flag — not chosen by the caller.
+    buildType <- getMobileBuildType
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
-    summaries <- mapM (createOne ap groupId changeLog destination sourceRef now) items
+    summaries <- mapM (createOne ap groupId changeLog buildType sourceRef now) items
     pure
         CreateMobileReleasesResp
             { releaseGroupId = groupId
@@ -161,12 +163,12 @@ createOne ::
     AuthedPerson ->
     Text ->
     Text ->
-    MobileDestination ->
+    Text ->
     Maybe Text ->
     UTCTime ->
     CreateMobileReleasesItem ->
     Flow CreatedReleaseSummary
-createOne ap groupId changeLog_ dest mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode} = do
+createOne ap groupId changeLog_ buildType mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode} = do
     mApp <- findAppCatalogById aid
     case mApp of
         Nothing ->
@@ -178,9 +180,9 @@ createOne ap groupId changeLog_ dest mSourceRef now CreateMobileReleasesItem{app
                     MobileBuildContext
                         { mbcVersionCode = mCode
                         , mbcChangeLog = changeLog_
-                        , mbcDestination = dest
+                        , mbcBuildType = buildType
                         , mbcReleaseGroupId = groupId
-                        , mbcMatrixJobName = acName app_ <> if isDebugDestination dest then "-Debug" else "-Release"
+                        , mbcMatrixJobName = acName app_ <> if isDebugBuildType buildType then "-Debug" else "-Release"
                         , mbcOtaNamespace = Nothing
                         , mbcTagPushed = Nothing
                         }

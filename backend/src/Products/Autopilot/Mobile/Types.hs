@@ -7,55 +7,36 @@ and fine-grained workflow status used by the MobileBuild release category.
 -}
 module Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
-    MobileDestination (..),
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
-    isDebugDestination,
+    isDebugBuildType,
     validMBTransition,
     isMBTerminal,
 ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
-import qualified Data.Aeson as Aeson
 import Data.Int (Int32)
 import Data.Text (Text)
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
--- | Where a release row is targeted. Controls which GitHub Actions workflow
--- file is dispatched: debug destinations (Firebase, TestFlight) use the
--- debug workflow YAMLs; production destinations (GooglePlay, AppStore) use
--- the production ones. See 'resolveWorkflowPath'.
-data MobileDestination
-    = MBGooglePlay -- ^ Android: Google Play production track.
-    | MBFirebase -- ^ Android: Firebase App Distribution.
-    | MBTestFlight -- ^ iOS: TestFlight beta channel.
-    | MBAppStore -- ^ iOS: App Store (production).
-    deriving (Eq, Show, Read, Generic)
-
-instance ToJSON MobileDestination where
-    toJSON MBGooglePlay = "GooglePlay"
-    toJSON MBFirebase = "Firebase"
-    toJSON MBTestFlight = "TestFlight"
-    toJSON MBAppStore = "AppStore"
-
-instance FromJSON MobileDestination where
-    parseJSON = Aeson.withText "MobileDestination" $ \case
-        "GooglePlay" -> pure MBGooglePlay
-        "Firebase" -> pure MBFirebase
-        "TestFlight" -> pure MBTestFlight
-        "AppStore" -> pure MBAppStore
-        other -> fail $ "unknown destination: " <> show other
-
-isDebugDestination :: MobileDestination -> Bool
-isDebugDestination MBFirebase = True
-isDebugDestination MBTestFlight = True
-isDebugDestination _ = False
+{- | True for debug build types. Debug builds (Firebase / TestFlight) skip
+store version resolution and tag confirmation; release builds (Google Play
+/ App Store) run the full pipeline. The build type is fixed per deployment
+environment (master = debug, production = release) via the
+@mobile_build_type@ server_config flag and stamped onto each release at
+creation time.
+-}
+isDebugBuildType :: Text -> Bool
+isDebugBuildType = (== "debug")
 
 data MobileBuildContext = MobileBuildContext
     { mbcVersionCode :: Maybe Int32
     , mbcChangeLog :: Text
-    , mbcDestination :: MobileDestination
+    , mbcBuildType :: Text
+    -- ^ "debug" or "release" — set from the @mobile_build_type@ config at
+    -- release creation and persisted so the release's build type reflects
+    -- what it WAS, independent of the environment's current setting.
     , mbcReleaseGroupId :: Text
     , mbcMatrixJobName :: Text
     , mbcOtaNamespace :: Maybe Text
@@ -69,7 +50,7 @@ instance ToJSON MobileBuildContext where
             [ "kind" .= ("mobile_build" :: Text)
             , "version_code" .= mbcVersionCode c
             , "change_log" .= mbcChangeLog c
-            , "destination" .= mbcDestination c
+            , "build_type" .= mbcBuildType c
             , "release_group_id" .= mbcReleaseGroupId c
             , "matrix_job_name" .= mbcMatrixJobName c
             , "ota_namespace" .= mbcOtaNamespace c
@@ -77,11 +58,20 @@ instance ToJSON MobileBuildContext where
             ]
 
 instance FromJSON MobileBuildContext where
-    parseJSON = withObject "MobileBuildContext" $ \o ->
+    parseJSON = withObject "MobileBuildContext" $ \o -> do
+        -- Backward-compat: rows persisted before the build_type field used a
+        -- "destination" string. Map the two debug destinations to "debug",
+        -- everything else (incl. absent) to "release".
+        mBuildType <- o .:? "build_type"
+        mDest <- o .:? "destination"
+        let buildType = case (mBuildType :: Maybe Text, mDest :: Maybe Text) of
+                (Just bt, _) -> bt
+                (Nothing, Just d) | d == "Firebase" || d == "TestFlight" -> "debug"
+                _ -> "release"
         MobileBuildContext
             <$> o .:? "version_code"
             <*> o .: "change_log"
-            <*> o .: "destination"
+            <*> pure buildType
             <*> o .: "release_group_id"
             <*> o .: "matrix_job_name"
             <*> o .:? "ota_namespace"

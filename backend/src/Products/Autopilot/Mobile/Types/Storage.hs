@@ -26,7 +26,6 @@ data AppCatalogT f = AppCatalog
     , acPlatform :: Columnar f Text
     , acGithubRepo :: Columnar f Text
     , acWorkflowPath :: Columnar f Text
-    , acDebugWorkflowPath :: Columnar f (Maybe Text)
     , acPackageName :: Columnar f (Maybe Text)
     , acDisplayLabel :: Columnar f (Maybe Text)
     , acFirebaseProjectId :: Columnar f (Maybe Text)
@@ -57,7 +56,6 @@ appCatalog =
                 , acPlatform = fieldNamed "platform"
                 , acGithubRepo = fieldNamed "github_repo"
                 , acWorkflowPath = fieldNamed "workflow_path"
-                , acDebugWorkflowPath = fieldNamed "debug_workflow_path"
                 , acPackageName = fieldNamed "package_name"
                 , acDisplayLabel = fieldNamed "display_label"
                 , acFirebaseProjectId = fieldNamed "firebase_project_id"
