@@ -29,8 +29,13 @@ import Data.List (sort)
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Time.Clock (addUTCTime, getCurrentTime)
 import Products.Autopilot.Config (autopilotConfigs)
 import Products.Autopilot.K8s.Execute (shellQuote)
+import Products.Autopilot.Mobile.Changelog (
+    bumpPatch,
+    renderRevertChangelog,
+ )
 import Products.Autopilot.Mobile.Github (
     Job (..),
     JobsResp (..),
@@ -43,15 +48,18 @@ import Products.Autopilot.Mobile.Github.Compare (
     extractPrNumber,
     shortSha,
  )
-import Products.Autopilot.Mobile.Changelog (
-    bumpPatch,
-    renderRevertChangelog,
+import Products.Autopilot.Mobile.RevertResolver (
+    RevertCand (..),
+    RollbackPlan (..),
+    parseSemver,
+    resolveRollback,
  )
-import qualified Products.Autopilot.Types.Target
 import Products.Autopilot.Mobile.Types
 import Products.Autopilot.Mobile.Versioning (TrackInfo (..), computeNextVersion)
+import Products.Autopilot.Mobile.Workflow (tagConfirmTimedOut)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
+import qualified Products.Autopilot.Types.Target
 import Products.Autopilot.Types.Workflow (ReleaseCategory (..), getDefaultDeploymentTarget)
 import Products.ConfigCatalog (allConfigEntries, findConfigEntry)
 import Products.Types
@@ -122,6 +130,9 @@ main = do
     section "[25] bumpPatch semver rule" testBumpPatch
     section "[26] renderRevertChangelog" testRenderRevertChangelog
     section "[27] Decode 0013 seed JSON (regression guard)" testDecodeSeedJson
+    section "[28] MobileBuildContext legacy destination fallback" testMobileBuildContextDestinationFallback
+    section "[29] ConfirmTag wall-clock timeout predicate" testTagConfirmTimedOut
+    section "[30] Rollback target resolver (version-order, not time-order)" testResolveRollback
 
     putStrLn ""
     putStrLn "==========================================="
@@ -937,6 +948,136 @@ testMobileBuildContextJsonRoundTrip = do
     let encoded = Aeson.encode ctx
     let decoded = Aeson.decode encoded :: Maybe MobileBuildContext
     assertEqual "round-trip equals original" (Just ctx) decoded
+
+{- | Legacy rows persisted before the @build_type@ field used a
+@destination@ string. 'MobileBuildContext' 'FromJSON' must map those to a
+build type — Firebase/TestFlight → "debug", everything else → "release",
+and an explicit @build_type@ always wins. 'fetchLatestBuildsPerApp'
+relies on this to classify old completed builds.
+-}
+testMobileBuildContextDestinationFallback :: IO ()
+testMobileBuildContextDestinationFallback = do
+    putStrLn "MobileBuildContext: legacy destination → build_type fallback"
+    -- required fields the decoder demands, regardless of build-type source
+    let base = "\"change_log\":\"x\",\"release_group_id\":\"g\",\"matrix_job_name\":\"j\""
+        decodeBT s = mbcBuildType <$> (Aeson.decode s :: Maybe MobileBuildContext)
+    assertEqual
+        "Firebase → debug"
+        (Just "debug")
+        (decodeBT ("{\"destination\":\"Firebase\"," <> base <> "}"))
+    assertEqual
+        "TestFlight → debug"
+        (Just "debug")
+        (decodeBT ("{\"destination\":\"TestFlight\"," <> base <> "}"))
+    assertEqual
+        "GooglePlay → release"
+        (Just "release")
+        (decodeBT ("{\"destination\":\"GooglePlay\"," <> base <> "}"))
+    assertEqual
+        "explicit build_type wins over destination"
+        (Just "debug")
+        (decodeBT ("{\"build_type\":\"debug\",\"destination\":\"GooglePlay\"," <> base <> "}"))
+    assertEqual
+        "neither field → release default"
+        (Just "release")
+        (decodeBT ("{" <> base <> "}"))
+    -- malformed JSON must decode to Nothing (so fetchLatestBuildsPerApp drops it)
+    assertBool
+        "malformed context → Nothing (row dropped)"
+        (isNothing (Aeson.decode "this is not json {{{" :: Maybe MobileBuildContext))
+
+{- | B3: ConfirmTag's wall-clock guard. Anchors on build-completion, falls back
+to build-start, and reports "not timed out" when neither timestamp exists (so a
+release is never failed spuriously while we can't measure elapsed time).
+-}
+testTagConfirmTimedOut :: IO ()
+testTagConfirmTimedOut = do
+    putStrLn "ConfirmTag: wall-clock timeout predicate"
+    now <- getCurrentTime
+    let minsAgo m = addUTCTime (fromIntegral (negate (m * 60 :: Int))) now
+        budget = 60 :: Int
+    assertBool
+        "completed 10m ago, budget 60m → not timed out"
+        (not (tagConfirmTimedOut now (Just (minsAgo 10)) Nothing budget))
+    assertBool
+        "completed 61m ago, budget 60m → timed out"
+        (tagConfirmTimedOut now (Just (minsAgo 61)) Nothing budget)
+    assertBool
+        "no completed time, started 61m ago → timed out (start fallback)"
+        (tagConfirmTimedOut now Nothing (Just (minsAgo 61)) budget)
+    assertBool
+        "neither timestamp → not timed out (cannot measure)"
+        (not (tagConfirmTimedOut now Nothing Nothing budget))
+    assertBool
+        "completed 5m ago wins over started 100m ago → not timed out"
+        (not (tagConfirmTimedOut now (Just (minsAgo 5)) (Just (minsAgo 100)) budget))
+
+{- | The rollback resolver. Orders candidates by the store's sequence key
+(version_code, then semver, then created_at) — NOT by creation time, which
+store-sync rows break. Also exercises the target-vs-source split: when the
+version users were on has no SCC artifact, the resolver surfaces a
+rebuild-lower or manual-source plan instead of guessing.
+-}
+testResolveRollback :: IO ()
+testResolveRollback = do
+    putStrLn "Rollback resolver: version order + target/source split"
+    now <- getCurrentTime
+    let minsAgo m = addUTCTime (fromIntegral (negate (m * 60 :: Int))) now
+        cand i ver code tag ago =
+            RevertCand
+                { rcId = i
+                , rcVersionName = ver
+                , rcVersionCode = code
+                , rcTag = tag
+                , rcCommitSha = Just (i <> "sha")
+                , rcCreatedAt = minsAgo ago
+                }
+
+    -- parseSemver compares as integers, not lexically.
+    assertBool "3.3.9 < 3.3.10 by semver" (parseSemver "3.3.9" < parseSemver "3.3.10")
+    assertEqual "parseSemver 3.3.17" [3, 3, 17] (parseSemver "3.3.17")
+
+    -- The screenshot case: bad 3.3.17 (real, tagged); the only candidate is a
+    -- store-sync 3.3.16 created LATER in time but LOWER in version, with no
+    -- tag. Time-order said "nothing before" → blocked. Version-order finds
+    -- 3.3.16 as the target, but it has no artifact → manual source required.
+    let bad17 = cand "r17" "3.3.17" (Just 417) (Just "v3.3.17") 30
+        sync16 = cand "r16" "3.3.16" (Just 416) Nothing 10
+    case resolveRollback bad17 [sync16] of
+        NeedsManualSource t -> assertEqual "manual target is 3.3.16" "3.3.16" (rcVersionName t)
+        other -> assertBool ("expected NeedsManualSource, got " <> show other) False
+
+    -- Add a lower real SCC build 3.3.15 (tagged): target stays 3.3.16 (highest
+    -- below), but source falls to 3.3.15 (nearest buildable) → RebuildLower.
+    let scc15 = cand "r15" "3.3.15" (Just 415) (Just "v3.3.15") 60
+    case resolveRollback bad17 [sync16, scc15] of
+        RebuildLower t s -> do
+            assertEqual "rebuild target is 3.3.16" "3.3.16" (rcVersionName t)
+            assertEqual "rebuild source is 3.3.15" "3.3.15" (rcVersionName s)
+        other -> assertBool ("expected RebuildLower, got " <> show other) False
+
+    -- Clean rollback: the target itself is tagged → Rollback, source == target.
+    let good16 = cand "r16b" "3.3.16" (Just 416) (Just "v3.3.16") 10
+    case resolveRollback bad17 [good16] of
+        Rollback t s -> do
+            assertEqual "rollback target 3.3.16" "3.3.16" (rcVersionName t)
+            assertEqual "rollback source == target" (rcId t) (rcId s)
+        other -> assertBool ("expected Rollback, got " <> show other) False
+
+    -- Version-order beats time-order: a higher version created EARLIER still
+    -- wins over a lower version created later.
+    let older18 = cand "r18" "3.3.18" (Just 418) (Just "v3.3.18") 200
+        newer14 = cand "r14" "3.3.14" (Just 414) (Just "v3.3.14") 1
+        bad19 = cand "r19" "3.3.19" (Just 419) (Just "v3.3.19") 5
+    case resolveRollback bad19 [newer14, older18] of
+        Rollback t _ -> assertEqual "highest-below 3.3.18 wins over newer 3.3.14" "3.3.18" (rcVersionName t)
+        other -> assertBool ("expected Rollback to 3.3.18, got " <> show other) False
+
+    -- Nothing below the bad version → NoPriorRelease.
+    let lone = cand "r1" "1.0.0" (Just 100) (Just "v1.0.0") 5
+    case resolveRollback lone [] of
+        NoPriorRelease -> pure ()
+        other -> assertBool ("expected NoPriorRelease, got " <> show other) False
 
 -- ============================================================================
 -- [20] Mobile Version Bump (mirrors fastlane-android.yaml lines 124-189)

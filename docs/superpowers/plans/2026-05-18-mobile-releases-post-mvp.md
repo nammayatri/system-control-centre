@@ -2,13 +2,27 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement all mobile release features after the MVP. Covers: mobile revert (full flow + store-sync integration + debug exclusion + revert-build exclusion + custom commit source), branch picker + server-side search, debug/release build types, latest build enrichment, periodic store sync, platform filter, apps admin redesign, dispatch from summary, Firebase observability (Crashlytics + Performance Monitoring + Alerts).
+**Goal:** Implement all mobile release features after the MVP. Covers: mobile revert (full flow + store-sync integration + debug exclusion + version-ordered rollback resolution / revert-of-a-revert [B6] + custom commit source), branch picker + server-side search, debug/release build types, latest build enrichment, periodic store sync, platform filter, apps admin redesign, dispatch from summary, Firebase observability (Crashlytics + Performance Monitoring + Alerts).
 
 **Architecture:** Three new nullable columns on `release_tracker` (`commit_sha`, `source_ref`, `reverts_release_id`). New module tree: `Mobile/Github/Compare.hs`, `Mobile/Changelog.hs`, `Mobile/Handlers/Revert.hs`, `Mobile/StoreSync.hs`. Extend `Mobile/Github.hs` with branch listing, commit verification, and tag creation. Frontend: new `MobileRevert.tsx` page, branch combobox on create form, build-type toggle, platform filter, apps admin redesign, dispatch button on summary.
 
 **Tech Stack:** Haskell (Servant + Beam ORM + ReaderT Flow), PostgreSQL, React + TypeScript + Vite + Tailwind. No new dependencies on either side.
 
 **Source spec:** `docs/superpowers/specs/2026-05-18-mobile-releases-post-mvp-design.md`
+
+> **⚠️ Post-MVP hardening (2026-05-29).** An edge-case audit reworked several
+> paths described below. The `[x] Done` steps record the *original*
+> implementation; these supersede them:
+> - **Create** is now validate-first + atomic (`insertReleaseTrackerRowsBatch`),
+>   not a per-item `createOne` insert loop (**B1**).
+> - **`fetchLatestBuildsPerApp`** parses in Haskell, not raw-SQL `ROW_NUMBER`
+>   (**B2**); a scoped `fetchLatestBuildsForApp` serves single-app callers (**P2**).
+> - **ConfirmTag** has a wall-clock timeout (`mobile_tag_confirm_timeout_minutes`)
+>   (**B3**); store sync dedups via a partial unique index, migration `0021` (**B4**);
+>   dispatch batches its lookups (**P4**).
+>
+> See §15 of the design spec
+> (`2026-05-18-mobile-releases-post-mvp-design.md`) — the full audit record.
 
 **Base (untouched):** `docs/superpowers/plans/2026-05-11-mobile-releases.md`, `docs/superpowers/specs/2026-05-11-mobile-releases-design.md`
 
@@ -25,7 +39,7 @@
 | Phase 3 | Debug/Release build types | ✅ Done |
 | Phase 4 | Latest build enrichment + periodic store sync | ✅ Done |
 | Phase 5 | Store-sync revert integration | ✅ Done |
-| Phase 6 | Revert hardening (debug exclusion, revert-build exclusion, custom commit) | ✅ Done |
+| Phase 6 | Revert hardening (debug exclusion, revert-of-a-revert + already-reverted guard, custom commit) | ✅ Done |
 | Phase 7 | UI polish (platform filter, apps admin redesign, dispatch button) | ✅ Done |
 | Phase 8 | Post-release health monitoring (crash, perf, alerts) | ⚠️ No in-app dashboards (Firebase Crashlytics has no public read REST API). Deep-link to Firebase Console implemented instead — sidebar link + per-release Crashlytics button with project/app/version context. |
 | Phase 9 | Changelog preview on create (commit diff between last release and selected branch) + revert commit list redesign | ✅ Done |
@@ -69,6 +83,14 @@ CREATE INDEX IF NOT EXISTS idx_rt_commit_sha
   ON release_tracker(commit_sha);
 CREATE INDEX IF NOT EXISTS idx_rt_reverts_release_id
   ON release_tracker(reverts_release_id);
+
+-- At most one ACTIVE revert per bad release (B6, 2026-06-01) — prevents
+-- two operators / a double-submit creating duplicate rollbacks. Terminal
+-- statuses free it again (allows revert-of-a-revert + retry-after-failure).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_release_tracker_revert_inflight
+  ON release_tracker (reverts_release_id)
+  WHERE reverts_release_id IS NOT NULL
+    AND status IN ('CREATED','INPROGRESS','PAUSED','ABORTING','REVERTING','RESTARTING','PREPARING');
 ```
 
 - [x] **Step 2: Reset and re-init dev DB**
@@ -339,55 +361,61 @@ assertEqual "bumpPatch empty" "0.0.1" (bumpPatch "")
 
 ---
 
-### Task 1.7: Previous-good-release query
+### Task 1.7: Rollback candidate fetch + version-ordered resolver
+
+> **Reworked 2026-06-01 (B6).** Originally `findPreviousGoodMobileRelease` chose
+> the previous good release by **`created_at`** (a `< beforeDate` cutoff). Store-sync
+> writes older versions at later times, so creation time mis-sequences releases.
+> Replaced by a bounded **candidate fetch** + a **pure, version-ordered resolver**.
 
 **Files:**
 - Modify: `backend/src/Products/Autopilot/Mobile/Queries/Tracker.hs`
+- Create: `backend/src/Products/Autopilot/Mobile/RevertResolver.hs`
 
-**Why:** The handler needs to find the most recent COMPLETED release for the same app, older than the bad release. Must skip debug rows and reverted rows.
+**Why:** The handler needs the correct rollback target for the same app — the
+highest *good* version strictly **below** the bad one (by version, not time),
+skipping debug and reverted rows. Splitting the DB fetch from the pure ranking
+keeps the ranking unit-testable.
 
-- [x] **Step 1: Add `findPreviousGoodMobileRelease`**
+- [x] **Step 1: Add `fetchRevertCandidates` (bounded window, no time cutoff)**
 
-Fetches up to 20 COMPLETED candidates for the same (appGroup, service, env) before the bad release date, then filters in Haskell via `firstNonDebug`:
+Fetches the most recent 50 COMPLETED candidates for the same (appGroup, service, env), excluding the bad release itself; store-sync rows are **kept** (valid targets). Debug / reverted rows are dropped in Haskell; each surviving row becomes a `RevertCand`:
 
 ```haskell
-findPreviousGoodMobileRelease ::
-    (MonadFlow m) => Text -> Text -> Text -> UTCTime
-    -> m (Maybe (ReleaseTrackerRow, Maybe MobileBuildTargetState))
-findPreviousGoodMobileRelease appGroup service env beforeDate = do
-    rows <- withDb $ \db -> runDB db $ runSelectReturningList $
-        select $ limit_ 20 $ orderBy_ (\rt -> desc_ (rtDateCreated rt)) $ do
+fetchRevertCandidates ::
+    (MonadFlow m) => Text -> Text -> Text -> Text -> m [RevertCand]
+fetchRevertCandidates appGroup service env excludeId = withDb $ \db -> do
+    rows <- runDB db $ runSelectReturningList $
+        select $ limit_ 50 $ orderBy_ (desc_ . rtCreatedAt) $ do
             rt <- all_ (releaseTrackers autopilotDb)
+            guard_ (rtCategory rt ==. val_ "MobileBuild")
             guard_ (rtAppGroup rt ==. val_ appGroup)
             guard_ (rtService rt ==. val_ service)
             guard_ (rtEnv rt ==. val_ env)
             guard_ (rtStatus rt ==. val_ "COMPLETED")
-            guard_ (rtCategory rt ==. val_ "MobileBuild")
-            guard_ (rtDateCreated rt <. val_ beforeDate)
+            guard_ (rtId rt /=. val_ excludeId)
             pure rt
-    pure (firstNonDebug rows)
+    pure (mapMaybe toCand rows)   -- drops debug + reverted, builds RevertCand
 ```
 
-- [x] **Step 2: Implement `firstNonDebug` helper**
+- [x] **Step 2: Pure resolver `resolveRollback` (version order, target/source split)**
 
-Parses each row's `release_context` JSONB to check `isDebugDestination` and `isReverted`:
+`Mobile/RevertResolver.hs` ranks candidates by the store's sequence key `(version_code, semver(version_name), created_at)` and returns one of four plans — `Rollback` / `RebuildLower` / `NeedsManualSource` / `NoPriorRelease` (see design §1 "Rollback target resolution"). Pure, no Beam/JSON:
 
 ```haskell
-firstNonDebug :: [ReleaseTrackerRow]
-    -> Maybe (ReleaseTrackerRow, Maybe MobileBuildTargetState)
-firstNonDebug [] = Nothing
-firstNonDebug (r:rs) =
-    let mState = parseMobileTargetState r
-        isDebug = case mState of
-            Just s -> isDebugDestination (mbcDestination (mbContext s))
-            Nothing -> False
-        reverted = isReverted r
-    in if isDebug || reverted
-        then firstNonDebug rs
-        else Just (r, mState)
+resolveRollback :: RevertCand -> [RevertCand] -> RollbackPlan
+resolveRollback bad cands =
+    case sortBy (\x y -> compareSeq (seqKey y) (seqKey x))
+              (filter (\c -> compareSeq (seqKey c) (seqKey bad) == LT) cands) of
+        []        -> NoPriorRelease
+        (tgt:_)
+          | hasTag tgt -> Rollback tgt tgt
+          | otherwise  -> case filter hasTag ordered of
+                            (src:_) -> RebuildLower tgt src
+                            []      -> NeedsManualSource tgt
 ```
 
-- [x] **Step 3: Implement `isReverted` helper**
+- [x] **Step 3: `isReverted` helper (exported)** — used both to drop reverted candidates and to guard re-reverting an already-reverted release:
 
 ```haskell
 isReverted :: ReleaseTrackerRow -> Bool
@@ -397,6 +425,8 @@ isReverted row = case rtMetadata row of
         Just (Aeson.Object obj) -> KM.member (AK.fromText "reverted_by") obj
         _ -> False
 ```
+
+`findPreviousGoodSCCRelease` (re-assert path, §Phase 5) keeps `firstNonDebug` and is unchanged.
 
 ---
 
@@ -454,30 +484,36 @@ data RevertReq = RevertReq
 mobileRevertDraftH :: AuthedPerson -> Text -> Flow RevertDraft
 mobileRevertDraftH _ releaseId = do
     bad <- findMobileReleaseById releaseId
-    -- Guards: must be COMPLETED, must be MobileBuild, must NOT be debug, must NOT be a revert build
+    -- Guards: must be COMPLETED, must be MobileBuild, must NOT be debug,
+    -- must NOT be already reverted (revert-of-a-revert IS allowed; see Task 6.2)
     guardCompleted bad
     guardNotDebug bad
-    guardNotRevertBuild bad
-    -- Branch: store-sync vs SCC release
+    when' (isReverted bad) $ BadRequest "This release has already been reverted."
+    -- Branch: store-sync (re-assert) vs SCC release (version-ordered rollback)
     let isStoreSync = rtMode bad == Just "STORE_SYNC"
     if isStoreSync
         then draftForStoreSyncRevert bad
         else draftForSCCRevert bad
 ```
 
-`draftForSCCRevert` finds the previous good release, calls GitHub Compare API between the two tags, generates the changelog, and computes version suggestions:
+`draftForSCCRevert` resolves the rollback target by version (Task 1.7), calls the GitHub Compare API between the build-source tag and the bad tag, generates the changelog, and computes version suggestions. The plan returns the *target* (display) and *build source* (rebuild from); for `manual_required` it skips the diff and asks for a source commit:
 
 ```haskell
 draftForSCCRevert :: ReleaseTrackerRow -> Flow RevertDraft
 draftForSCCRevert bad = do
-    (prevGood, _) <- findPreviousGoodMobileRelease ... `orThrow` ...
-    let prevTag = tagPushed prevGood `orFail` "no tag"
-        badTag  = tagPushed bad `orFail` "no tag"
+    cands <- fetchRevertCandidates appGroup service env (rtId bad)
+    (target, mSource, srcKind, warnings) <- case resolveRollback (mkBadCand bad) cands of
+        Rollback t s        -> pure (t, Just s, "tag", [])
+        RebuildLower t s    -> pure (t, Just s, "rebuild_lower", ["target_has_no_artifact"])
+        NeedsManualSource t -> pure (t, Nothing, "manual_required", ["manual_source_required"])
+        NoPriorRelease      -> throwM $ BadRequest "nothing to roll back to"
     creds <- loadGhCredsSafe
     ac    <- appCatalogForRow bad
-    commitsRes <- compareRefs creds (gitOwner ac) (gitRepo ac) prevTag badTag
-    -- Fetch store version for smarter code suggestion
-    builds <- fetchLatestBuildsPerApp
+    -- Compare only when both a source tag and the bad tag exist:
+    commitsRes <- traverse (\srcTag -> compareRefs creds (gitOwner ac) (gitRepo ac) srcTag badTag)
+                           (mSource >>= rcTag)
+    -- Store version floor for the code suggestion:
+    builds <- fetchLatestBuildsForApp appGroup service env
     let storeCode = lookupStoreCode builds bad
         suggestedCode = max (versionCode bad) (fromMaybe 0 storeCode) + 1
     ...
@@ -493,11 +529,16 @@ mobileRevertCreateH auth releaseId req = do
     bad <- findMobileReleaseById releaseId
     guardCompleted bad
     guardNotDebug bad
-    guardNotRevertBuild bad
-    prevGood <- findPreviousGood ...
-    -- Version invariant
-    when (rrNewVersionCode req <= badVersionCode) $
-        throwM (BusinessError "new version_code must be > bad release's code")
+    when' (isReverted bad) $ BadRequest "This release has already been reverted."
+    -- Re-resolve the build source (don't trust the draft): store-sync re-asserts
+    -- the latest SCC build; rollback resolves by version (Task 1.7). manual_required
+    -- demands a source commit.
+    (prevId, prevTag, manualNeeded) <- resolveBuildSource bad
+    when' (manualNeeded && noCommit req) $
+        BadRequest "Target version has no SCC artifact; provide a source commit."
+    -- Version invariant: code must clear max(bad, live store) floor
+    when (rrNewVersionCode req <= floorCode) $
+        throwM (BusinessError "new version_code must be > the store/bad floor")
     -- Determine source ref
     sourceRef <- case rrSourceCommit req of
         Just sha -> do
@@ -658,7 +699,8 @@ If `release.revertsReleaseId` (from `reverts_release_id` column) is set:
 
 - [x] **Step 3: Revert button on completed mobile rows in list**
 
-Condition: `status === 'COMPLETED' && isMobile && !isDebugBuild && !isMobileRevertBuild`
+Condition: `status === 'COMPLETED' && isMobile && !isDebugBuild && !release.metadata?.reverted_by`
+(the `!isMobileRevertBuild` gate was **removed in B6** — a revert build is itself revertable; only an already-reverted release is hidden; see Task 6.2.)
 
 - [x] **Step 4: REVERT badge on list and detail**
 
@@ -1190,8 +1232,8 @@ findPreviousGoodSCCRelease :: (MonadFlow m)
     -> m (Maybe (ReleaseTrackerRow, Maybe MobileBuildTargetState))
 ```
 
-Like `findPreviousGoodMobileRelease` but:
-- No cutoff timestamp (finds the latest SCC release regardless of when the store-sync row was created)
+This is the **re-assert** target query (distinct from the rollback resolver in Task 1.7):
+- No cutoff and no version ordering — finds the *latest* SCC release regardless of when the store-sync row was created
 - Excludes `mode = 'STORE_SYNC'` rows
 - Still uses `firstNonDebug` to skip debug + reverted rows
 
@@ -1282,7 +1324,7 @@ guardNotDebug row = case parseMobileTargetState row of
 
 - [x] **Step 2: Query filtering**
 
-`findPreviousGoodMobileRelease` and `findPreviousGoodSCCRelease` fetch 20 candidates, then `firstNonDebug` skips rows where `isDebugDestination` is true. Since `destination` lives inside `release_context` JSONB (not a top-level column), filtering happens in Haskell.
+`fetchRevertCandidates` (rollback) and `findPreviousGoodSCCRelease` (re-assert) fetch a bounded window, then drop rows where `isDebugBuildType (mbcBuildType ...)` is true. Since the build type lives inside `release_context` JSONB (not a top-level column), filtering happens in Haskell.
 
 - [x] **Step 3: Frontend — hide revert button**
 
@@ -1296,34 +1338,45 @@ const isDebugBuild = dest === 'Firebase' || dest === 'TestFlight';
 
 ---
 
-### Task 6.2: Revert-build exclusion
+### Task 6.2: Revert-of-a-revert & already-reverted guard
+
+> **Reworked 2026-06-01 (B6).** Originally this *blocked* reverting any revert
+> build (`guardNotRevertBuild`). That was over-conservative — a revert is a real
+> shipped build and must be revertable if it breaks. The block is removed; the
+> version-ordered resolver naturally skips the already-reverted original, and the
+> `version_code` floor prevents loops. What we now guard is *double-reverting one
+> release*.
 
 **Files:**
 - Modify: `backend/src/Products/Autopilot/Mobile/Handlers/Revert.hs`
 - Modify: `backend/src/Products/Autopilot/Mobile/Workflow.hs`
 - Modify: `backend/src/Products/Autopilot/Mobile/Queries/Tracker.hs`
+- Modify: `backend/dev/migrations/system-control/0012-mobile-revert.sql`
 - Modify: `frontend/src/products/releases/pages/ListRelease.tsx`
 - Modify: `frontend/src/products/releases/pages/ReleaseSummary.tsx`
 
-**Why:** Without this, reverting a revert build picks the original bad release as "previous good."
+**Why:** Reverting a revert must roll back to the correct *previous* version (not
+the original bad one); and two rollbacks of the *same* release must be prevented.
 
-- [x] **Step 1: Backend guard**
+- [x] **Step 1: Allow revert-of-a-revert; guard already-reverted instead**
 
 ```haskell
-guardNotRevertBuild :: ReleaseTrackerRow -> Flow ()
-guardNotRevertBuild row = case rtRevertsReleaseId row of
-    Just _ -> throwM $ BusinessError
-        "This release was created by a revert and cannot be reverted further."
-    Nothing -> pure ()
+-- No rtRevertsReleaseId block. Block only an already-reverted release:
+when' (isReverted bad) $
+    BadRequest "This release has already been reverted. Create a new release instead."
 ```
 
-- [x] **Step 2: Query filtering — `isReverted` helper**
+- [x] **Step 2: Candidate filtering — `isReverted`**
 
-Added to `firstNonDebug`: also skip rows where `metadata` contains `"reverted_by"` key.
+`fetchRevertCandidates` drops rows whose `metadata` contains `"reverted_by"`, so the resolver never picks an already-reverted (e.g. the original bad) release.
 
-- [x] **Step 3: Move `markReleaseRevertedBy` to workflow finalize**
+- [x] **Step 3: Concurrency — inflight-revert unique index**
 
-Previously called at revert-create time. Now only called when revert reaches COMPLETED:
+`uq_release_tracker_revert_inflight` (migration `0012`) → at most one active revert per bad release.
+
+- [x] **Step 4: Move `markReleaseRevertedBy` to workflow finalize**
+
+Called only when the revert reaches COMPLETED (an aborted revert leaves the bad release revertable again):
 
 ```haskell
 -- Workflow.hs :: execFinalize
@@ -1333,14 +1386,15 @@ when (newStatus == "COMPLETED") $
         Nothing    -> pure ()
 ```
 
-- [x] **Step 4: Frontend — hide revert button for revert builds**
+- [x] **Step 5: Frontend — revert-of-revert reachable; hide only already-reverted**
 
 ```tsx
-const isMobileRevertBuild = !!release.revertsReleaseId;
-{!isMobileRevertBuild && <RevertButton ... />}
+// dropped the isMobileRevertBuild gate; hide only once already reverted
+{release.status === 'COMPLETED' && !isDebugBuild && !release.metadata?.reverted_by
+  && <RevertButton ... />}
 ```
 
-- [x] **Step 5: REVERT badge**
+- [x] **Step 6: REVERT badge**
 
 ```tsx
 const isRevert = !!release.release_context?.revert || !!release.revertsReleaseId;
@@ -1399,14 +1453,21 @@ verifyCommitH _ releaseId sha = do
         Left e -> pure $ VerifyCommitResp { ..., vcValid = False, vcError = Just e }
 ```
 
-Route:
+Routes:
 
 ```haskell
 :<|> "releases" :> Capture "releaseId" Text :> "mobile-revert" :> "verify-commit"
               :> Protected 'AP_RELEASE_REVERT
               :> QueryParam' '[Required, Strict] "sha" Text
               :> Get '[JSON] VerifyCommitResp
+-- Live "commits being rolled back" for the selected source (commit/branch/tag):
+:<|> "releases" :> Capture "releaseId" Text :> "mobile-revert" :> "diff"
+              :> Protected 'AP_RELEASE_REVERT
+              :> QueryParam' '[Required, Strict] "source" Text
+              :> Get '[JSON] RevertDiffResp
 ```
+
+- [x] **Step 2b: Live diff handler (`mobileRevertDiffH`)** — runs GitHub Compare between the chosen `source` and the bad release's tag (or `commit_sha`); returns the commits in the bad release not reachable from `source` (`RevertDiffResp { rdfCommits, rdfCommitCount, rdfBaseRef, rdfHeadRef, rdfStatus }`). The FE calls this on every source change so "Commits being rolled back" stays in sync with the selection (not the static draft default).
 
 - [x] **Step 3: Create handler — custom commit path**
 
@@ -1687,7 +1748,7 @@ Both Create form and Revert page share the same commit row style:
 
 - [x] **Step 3: Debug build exclusion** — changelog panel hidden when build type is "Debug" (`!isDebug` gate), since debug builds don't produce real tags and the comparison base would be misleading.
 
-- [x] **Step 4: Revert page commit list redesigned** — `MobileRevert.tsx` "Commits being rolled back" section updated to match the create form style. Added "View full diff on GitHub" link (compare URL constructed from `rdPrevGoodTag` and last commit SHA). Removed `CopyIcon` import (unused after redesign).
+- [x] **Step 4: Revert page commit list redesigned + made source-reactive** — `MobileRevert.tsx` "Commits being rolled back" section matches the create form style. Originally the list was frozen at the draft's previous-good diff, so selecting a custom commit/branch didn't change it (and a store-synced previous-good with no real diff showed empty). Now it is driven by a live `['mobile-revert-diff', id, effectiveSourceRef]` query against the new `GET …/mobile-revert/diff?source=` endpoint, recomputed whenever the source changes; loading / unverified / empty / error states handled. "View full diff on GitHub" link uses the diff's `rdfBaseRef`/`rdfHeadRef`.
 
 - [x] **Step 5: `npx tsc --noEmit` passes**
 
@@ -1713,11 +1774,12 @@ Both Create form and Revert page share the same commit row style:
 ## Migration map
 
 ```
-0012-mobile-revert.sql                    commit_sha, source_ref, reverts_release_id + indexes
+0012-mobile-revert.sql                    commit_sha, source_ref, reverts_release_id + indexes + uq_release_tracker_revert_inflight (B6)
 0013-local-mobile-revert-test-data.sql    test data for revert dev (local only)
 0015-store-sync-config.sql                store_sync_enabled, store_sync_interval_minutes
 0019-version-preview-config.sql           version_preview_enabled (gates /mobile/versions/preview)
 0020-mobile-build-type-config.sql         mobile_build_type (env invariant: master=debug, prod=release)
+0021-store-sync-dedup.sql                 partial unique index uq_release_tracker_store_sync (dedup synthetic rows)
 ```
 
 ## Key modules added/modified
@@ -1726,13 +1788,14 @@ Both Create form and Revert page share the same commit row style:
 |--------|---------|
 | `Mobile/Github/Compare.hs` | GitHub Compare API client — `compareRefs`, `CommitInfo`, `CompareResult` |
 | `Mobile/Changelog.hs` | Revert changelog renderer (`renderRevertChangelog`) + `bumpPatch` |
-| `Mobile/Handlers/Revert.hs` | Draft + create + verify-commit handlers with store-sync aware branching |
+| `Mobile/Handlers/Revert.hs` | Draft + create + verify-commit + live-diff (`mobileRevertDiffH`) handlers; version-ordered rollback (B6), store-sync re-assert branch |
 | `Mobile/StoreSync.hs` | Periodic store sync background job — `storeSyncLoop`, `runStoreSync` |
 | `Mobile/Github.hs` | `listBranches`, `searchBranches`, `createGitRef`, `getCommitInfo`, `CommitDetail` |
 | `Mobile/Workflow.hs` | `source_ref` dispatch, `commit_sha` capture, debug stage skipping, `markReleaseRevertedBy` in finalize |
 | `Mobile/Handlers/Release.hs` | `sourceRef` on create, `listBranchesH` with search, matrix job name suffix, `changelogPreviewH` + `ChangelogPreviewResp` |
 | `Mobile/Handlers/AppCatalog.hs` | Latest build enrichment |
-| `Mobile/Queries/Tracker.hs` | `findPreviousGoodMobileRelease`, `findPreviousGoodSCCRelease`, `firstNonDebug`, `isReverted`, `markReleaseRevertedBy` |
+| `Mobile/RevertResolver.hs` | Pure rollback resolver (B6) — `seqKey`/`compareSeq`/`parseSemver`/`resolveRollback`, target-vs-source split |
+| `Mobile/Queries/Tracker.hs` | `fetchRevertCandidates` (B6, replaced `findPreviousGoodMobileRelease`), `findPreviousGoodSCCRelease`, `firstNonDebug`, `isReverted`, `markReleaseRevertedBy` |
 | `Mobile/Queries/AppCatalog.hs` | `fetchLatestBuildsPerApp` — raw SQL with `ROW_NUMBER() OVER (PARTITION BY ...)` |
 | `RuntimeConfig.hs` | `isStoreSyncEnabled`, `getStoreSyncIntervalMinutes` |
 
@@ -1740,10 +1803,10 @@ Both Create form and Revert page share the same commit row style:
 
 | File | Features |
 |------|----------|
-| `pages/mobile/MobileRevert.tsx` | Full revert page: draft preview, editable fields, source mode toggle (prev good / custom commit), store-sync banner, version validation, redesigned commit list (newest first, row layout, GitHub diff link) |
+| `pages/mobile/MobileRevert.tsx` | Full revert page: draft preview, editable fields, source mode toggle (prev good / custom commit), store-sync banner, version validation, **source-reactive** "commits being rolled back" (live `/mobile-revert/diff` query, newest first, row layout, GitHub diff link) |
 | `pages/mobile/CreateMobileRelease.tsx` | Branch combobox (debounced server search), build type toggle, `LatestBuildBadge` per app card, version fields, per-app changelog preview with tabs |
 | `pages/mobile/MobileAppsAdmin.tsx` | Redesigned 7-column table: `PlatformBadge`, `wfShort`, `BuildCell`, enabled-first sort, 50% opacity disabled rows |
-| `pages/ListRelease.tsx` | Platform filter dropdown, revert button (with debug + revert-build exclusion), DEBUG badge, REVERT badge |
+| `pages/ListRelease.tsx` | Platform filter dropdown, revert button (debug excluded; revert-of-revert reachable; hidden once already reverted), DEBUG badge, REVERT badge |
 | `pages/ReleaseSummary.tsx` | Dispatch button (CREATED + approved mobile), revert banners (reverted-by / reverts), source branch field, `PrevBuildBadge`, DEBUG/REVERT badges |
 | `hooks.ts` | `useMobileBranches(search?)` with `placeholderData: keepPreviousData`, `useDispatchMobileReleases` with toast + invalidation, `useChangelogPreviews(apps, branch)` with `useQueries` |
 | `api.ts` | `getMobileRevertDraft`, `createMobileRevert`, `verifyRevertCommit`, `listBranches(q?)`, `changelogPreview(app, surface, platform, branch)`, `RevertDraft`, `VerifyCommitResp` |
@@ -1756,7 +1819,7 @@ Both Create form and Revert page share the same commit row style:
 - **Phase 3** — debug builds are independent but affect Phase 6's exclusion logic.
 - **Phase 4** — latest build enrichment feeds into Phase 5's version suggestions.
 - **Phase 5** — store-sync revert depends on Phase 4's store sync module.
-- **Phase 6** — hardening (debug exclusion, revert-build exclusion, custom commit) layers on Phase 1's revert flow.
+- **Phase 6** — hardening (debug exclusion, revert-of-a-revert + already-reverted guard, custom commit) layers on Phase 1's revert flow.
 - **Phase 7** — pure UI polish, no backend dependencies.
 - **Phase 8: Deep-link to Firebase Crashlytics** — no public read REST API, so in-app dashboards are not possible. Instead: added `firebase_project_id` column to `app_catalog` (migration 0017), Crashlytics sidebar link in Mobile Releases, and a per-release Crashlytics button on ReleaseSummary that deep-links with project + package name + version + version code.
 - **Phase 9** — independent of all other phases. Reuses `compareRefs` (Phase 1) and `fetchLatestBuildsPerApp` (Phase 4). No schema changes.

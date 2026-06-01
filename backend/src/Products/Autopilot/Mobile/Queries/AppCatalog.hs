@@ -8,12 +8,14 @@ module Products.Autopilot.Mobile.Queries.AppCatalog (
     listAppCatalog,
     listEnabledAppCatalog,
     findAppCatalogById,
+    findAppCatalogByIds,
     insertAppCatalog,
     updateAppCatalog,
     NewAppCatalogRow (..),
     PatchAppCatalogRow (..),
     LatestBuildRow (..),
     fetchLatestBuildsPerApp,
+    fetchLatestBuildsForApp,
 ) where
 
 import Control.Monad.Catch (throwM)
@@ -21,7 +23,8 @@ import Core.AppError (DBError (..))
 import Core.DB.Connection (runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
 import Data.Int (Int32)
-import Data.Maybe (catMaybes, fromMaybe)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import Database.Beam
@@ -33,7 +36,9 @@ import Database.Beam.Postgres.Full (
     runPgUpdateReturningList,
     updateReturning,
  )
-import Database.PostgreSQL.Simple (query_)
+import Database.PostgreSQL.Simple (query, query_)
+import Products.Autopilot.Mobile.Queries.Tracker (parseMobileTargetState)
+import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..))
 import Products.Autopilot.Mobile.Types.Storage
 import Products.Autopilot.Types.Storage.Schema (AutopilotDb (..), autopilotDb)
 
@@ -90,6 +95,21 @@ findAppCatalogById aid = withDb $ \db -> do
     pure $ case rows of
         [] -> Nothing
         (x : _) -> Just x
+
+{- | Batch lookup by id. Used by the mobile create handler to validate every
+requested @appCatalogId@ in one round-trip before inserting any release row
+(see 'Handlers.Release.createMobileReleasesH'). Returns only the rows that
+exist; the caller diffs against the requested ids to report unknown ones.
+-}
+findAppCatalogByIds :: (MonadFlow m) => [Int32] -> m [AppCatalog]
+findAppCatalogByIds [] = pure []
+findAppCatalogByIds aids = withDb $ \db ->
+    runDB db $
+        runSelectReturningList $
+            select $ do
+                a <- all_ (appCatalogs autopilotDb)
+                guard_ (acId a `in_` map val_ aids)
+                pure a
 
 -- | Insert a row, returning the freshly-created row (with DB-assigned id + created_at).
 insertAppCatalog :: (MonadFlow m) => NewAppCatalogRow -> m AppCatalog
@@ -182,7 +202,8 @@ data LatestBuildRow = LatestBuildRow
     { lbrAppGroup :: Text
     , lbrSurface :: Text
     , lbrPlatform :: Text
-    , lbrBuildType :: Text -- ^ @"debug"@ or @"release"@
+    , lbrBuildType :: Text
+    -- ^ @"debug"@ or @"release"@
     , lbrVersion :: Text
     , lbrVersionCode :: Maybe Int32
     , lbrTagPushed :: Maybe Text
@@ -194,49 +215,87 @@ data LatestBuildRow = LatestBuildRow
 in @release_tracker@ where @category = 'MobileBuild'@ and
 @status = 'COMPLETED'@, return the single most recent row.
 
-Build type is read from the @build_type@ field inside
-@release_context.contents.mbContext@. Rows persisted before that field
-existed fall back to the legacy @destination@ classification:
+Build type, version code, and pushed tag come from the parsed
+@MobileBuildContext@ (the @mbContext@ inside @release_context@). Parsing
+is done in Haskell via the domain 'parseMobileTargetState' /
+'MobileBuildContext' 'FromJSON' decoder — the single source of truth for
+the JSON shape, including the legacy @destination@→@build_type@ fallback
+(@Firebase@/@TestFlight@ → @"debug"@). Doing the decode here rather than
+in SQL keeps that classification in one place and avoids a DB-side JSON
+cast that would abort the whole query on a single malformed row.
 
-* Debug: destination ∈ {Firebase, TestFlight}
-* Release: destination ∈ {GooglePlay, AppStore}
-
-Uses a raw SQL query (via @withConn@) because the window function
-(@ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)@) is beyond what
-Beam's DSL can express cleanly.
+SQL pulls the COMPLETED MobileBuild rows newest-first; Haskell drops any
+row whose context won't parse (so a corrupt row can't mask the latest
+*valid* build), then keeps the first (newest) row seen per
+(app, surface, platform, build_type). Mobile-release volume is low, so
+in-memory grouping is cheap; @idx_rt_status@ + @idx_rt_created_at@ back
+the scan.
 -}
 fetchLatestBuildsPerApp :: (MonadFlow m) => m [LatestBuildRow]
 fetchLatestBuildsPerApp = withDb $ \db ->
     withConn db $ \conn -> do
         rows <-
-            query_ conn
-                "SELECT app_group, service, env, \
-                \  COALESCE( \
-                \    release_context::jsonb -> 'contents' -> 'mbContext' ->> 'build_type', \
-                \    CASE WHEN (release_context::jsonb -> 'contents' -> 'mbContext' ->> 'destination') IN ('Firebase', 'TestFlight') \
-                \         THEN 'debug' ELSE 'release' END \
-                \  ) AS build_type, \
-                \  new_version, \
-                \  (release_context::jsonb -> 'contents' -> 'mbContext' ->> 'version_code')::int AS version_code, \
-                \  release_context::jsonb -> 'contents' -> 'mbContext' ->> 'tag_pushed' AS tag_pushed, \
-                \  commit_sha, \
-                \  date_created \
-                \FROM ( \
-                \  SELECT *, ROW_NUMBER() OVER ( \
-                \    PARTITION BY app_group, service, env, \
-                \      COALESCE( \
-                \        release_context::jsonb -> 'contents' -> 'mbContext' ->> 'build_type', \
-                \        CASE WHEN (release_context::jsonb -> 'contents' -> 'mbContext' ->> 'destination') IN ('Firebase', 'TestFlight') \
-                \             THEN 'debug' ELSE 'release' END \
-                \      ) \
-                \    ORDER BY date_created DESC \
-                \  ) AS rn \
-                \  FROM release_tracker \
-                \  WHERE category = 'MobileBuild' AND status = 'COMPLETED' \
-                \    AND release_context IS NOT NULL \
-                \) sub WHERE rn = 1"
-        pure (map toLatestBuildRow rows)
+            query_
+                conn
+                "SELECT app_group, service, env, new_version, commit_sha, \
+                \  date_created, release_context \
+                \FROM release_tracker \
+                \WHERE category = 'MobileBuild' AND status = 'COMPLETED' \
+                \  AND release_context IS NOT NULL \
+                \ORDER BY date_created DESC"
+        pure (latestBuildsFromRows rows)
 
-toLatestBuildRow :: (Text, Text, Text, Text, Text, Maybe Int32, Maybe Text, Maybe Text, UTCTime) -> LatestBuildRow
-toLatestBuildRow (ag, suf, plt, bt, ver, vc, tag, sha, ca) =
-    LatestBuildRow ag suf plt bt ver vc tag sha ca
+{- | Scoped variant: the latest completed build per build_type for a SINGLE
+@(app_group, surface, platform)@. Used by revert and changelog-preview, which
+need only one app's builds — filtering in SQL avoids the full-table scan
+'fetchLatestBuildsPerApp' does (which only @listAppsH@ genuinely needs).
+-}
+fetchLatestBuildsForApp :: (MonadFlow m) => Text -> Text -> Text -> m [LatestBuildRow]
+fetchLatestBuildsForApp appGroup surface platform = withDb $ \db ->
+    withConn db $ \conn -> do
+        rows <-
+            query
+                conn
+                "SELECT app_group, service, env, new_version, commit_sha, \
+                \  date_created, release_context \
+                \FROM release_tracker \
+                \WHERE category = 'MobileBuild' AND status = 'COMPLETED' \
+                \  AND release_context IS NOT NULL \
+                \  AND app_group = ? AND service = ? AND env = ? \
+                \ORDER BY date_created DESC"
+                (appGroup, surface, platform)
+        pure (latestBuildsFromRows rows)
+
+{- | Shared reducer for both latest-build queries: parse each raw row (dropping
+unparseable ones, per B2) and keep the newest per
+(app, surface, platform, build_type). Input must be newest-first.
+-}
+latestBuildsFromRows :: [(Text, Text, Text, Text, Maybe Text, UTCTime, Text)] -> [LatestBuildRow]
+latestBuildsFromRows rows =
+    let parsed = mapMaybe toLatestBuildRow rows
+        keyOf r = (lbrAppGroup r, lbrSurface r, lbrPlatform r, lbrBuildType r)
+        -- newest-first input ⇒ keep the first row seen per key (the existing
+        -- value in the map), so insertWith returns the existing one.
+        latest = Map.fromListWith (\_incoming existing -> existing) [(keyOf r, r) | r <- parsed]
+     in Map.elems latest
+
+{- | Parse one raw row into a 'LatestBuildRow'. Returns 'Nothing' when the
+@release_context@ can't be decoded to a 'MobileBuildTargetState' — such rows
+are skipped rather than blanking the result.
+-}
+toLatestBuildRow :: (Text, Text, Text, Text, Maybe Text, UTCTime, Text) -> Maybe LatestBuildRow
+toLatestBuildRow (ag, suf, plt, ver, sha, ca, ctxText) = do
+    mbts <- parseMobileTargetState (Just ctxText)
+    let ctx = mbContext mbts
+    pure
+        LatestBuildRow
+            { lbrAppGroup = ag
+            , lbrSurface = suf
+            , lbrPlatform = plt
+            , lbrBuildType = mbcBuildType ctx
+            , lbrVersion = ver
+            , lbrVersionCode = mbcVersionCode ctx
+            , lbrTagPushed = mbcTagPushed ctx
+            , lbrCommitSha = sha
+            , lbrCompletedAt = ca
+            }

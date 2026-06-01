@@ -25,10 +25,10 @@ import Control.Monad.IO.Class (liftIO)
 import Core.Environment (Flow, MonadFlow, forkFlow, logError, logInfo, logWarning)
 import Core.Types.Time (threadDelaySec)
 import Data.Aeson (object, (.=))
+import Data.Char (isAlphaNum)
 import Data.Int (Int32)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
-import Data.Char (isAlphaNum)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
@@ -38,11 +38,6 @@ import Products.Autopilot.Mobile.Queries.AppCatalog (
     LatestBuildRow (..),
     fetchLatestBuildsPerApp,
     listEnabledAppCatalog,
- )
-import Products.Autopilot.Queries.ReleaseTracker (
-    encodeJsonText,
-    insertReleaseEvent,
-    insertReleaseTrackerRow,
  )
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
@@ -64,9 +59,14 @@ import Products.Autopilot.Mobile.Versioning.Play (
     loadPlayCreds,
     renderPlayErr,
  )
-import Products.Autopilot.RuntimeConfig (isStoreSyncEnabled, getStoreSyncIntervalMinutes, getMobileBuildType)
-import Products.Autopilot.Types.Target (TargetState (..))
+import Products.Autopilot.Queries.ReleaseTracker (
+    encodeJsonText,
+    insertReleaseEvent,
+    insertReleaseTrackerRowIfAbsent,
+ )
+import Products.Autopilot.RuntimeConfig (getMobileBuildType, getStoreSyncIntervalMinutes, isStoreSyncEnabled)
 import Products.Autopilot.Types.Storage.Schema (ReleaseTrackerT (..))
+import Products.Autopilot.Types.Target (TargetState (..))
 
 type BuildMap = Map.Map (Text, Text, Text) LatestBuildRow
 
@@ -103,10 +103,11 @@ runStoreSync = do
     logInfo "[STORE_SYNC] Starting store sync"
     apps <- listEnabledAppCatalog
     builds <- fetchLatestBuildsPerApp
-    let buildMap = Map.fromList
-            [ ((lbrAppGroup b, lbrSurface b, lbrPlatform b), b)
-            | b <- builds
-            ]
+    let buildMap =
+            Map.fromList
+                [ ((lbrAppGroup b, lbrSurface b, lbrPlatform b), b)
+                | b <- builds
+                ]
     mPlayCreds <- loadPlayCreds
     mAscCreds <- loadAscCreds
     mapM_ (syncApp mPlayCreds mAscCreds buildMap) apps
@@ -285,23 +286,34 @@ insertSyntheticRelease ac version mCode = do
                 , rtCreatedAt = now
                 , rtUpdatedAt = now
                 }
-    insertReleaseTrackerRow row
-    insertReleaseEvent rid "BUSINESS" "STORE_SYNC" $
-        object
-            [ "app" .= acName ac
-            , "platform" .= acPlatform ac
-            , "version" .= version
-            , "version_code" .= mCode
-            , "build_type" .= ("release" :: Text)
-            ]
-    logInfo $
-        "[STORE_SYNC] Inserted synthetic release "
-            <> rid
-            <> " for "
-            <> acName ac
-            <> " v"
-            <> version
-            <> maybe "" (\t -> " (tag: " <> t <> ")") derivedTag
+    -- ON CONFLICT DO NOTHING against uq_release_tracker_store_sync: if a
+    -- concurrent pass / replica already recorded this app+version, skip cleanly.
+    inserted <- insertReleaseTrackerRowIfAbsent row
+    if not inserted
+        then
+            logInfo $
+                "[STORE_SYNC] Skipped duplicate synthetic release for "
+                    <> acName ac
+                    <> " v"
+                    <> version
+                    <> " (already recorded)"
+        else do
+            insertReleaseEvent rid "BUSINESS" "STORE_SYNC" $
+                object
+                    [ "app" .= acName ac
+                    , "platform" .= acPlatform ac
+                    , "version" .= version
+                    , "version_code" .= mCode
+                    , "build_type" .= ("release" :: Text)
+                    ]
+            logInfo $
+                "[STORE_SYNC] Inserted synthetic release "
+                    <> rid
+                    <> " for "
+                    <> acName ac
+                    <> " v"
+                    <> version
+                    <> maybe "" (\t -> " (tag: " <> t <> ")") derivedTag
 
 normalizeAppSegment :: Text -> Text
 normalizeAppSegment = collapseDashes . T.map step . T.toLower

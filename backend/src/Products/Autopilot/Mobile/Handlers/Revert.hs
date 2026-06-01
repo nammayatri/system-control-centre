@@ -5,33 +5,45 @@
 
 {- | HTTP handlers for mobile release revert.
 
-Two endpoints:
+Four endpoints, all gated by @'AP_RELEASE_REVERT@:
 
 * @GET  \/releases\/:id\/mobile-revert\/draft@ — preview what the revert
-  would look like (previous good version, suggested version-name and
-  version-code, auto-generated changelog, count of commits being
-  rolled back). Read-only; nothing is persisted.
+  would look like. The rollback target is resolved by /version order/
+  (not creation time) via "Products.Autopilot.Mobile.RevertResolver", and
+  is split into a display /target/ and a buildable /source/ (a target with
+  no SCC artifact yields a @rebuild_lower@ or @manual_required@ plan). The
+  draft carries suggested version-name\/code, an auto-generated changelog,
+  and the commits being rolled back. Read-only; nothing is persisted.
 
-* @POST \/releases\/:id\/mobile-revert@ — actually create the revert
-  release row. Validates that the operator-supplied version-name and
-  version-code are strictly greater than the bad release's. Inserts a
-  new @release_tracker@ row with @source_ref@ pointing at the previous
-  good tag and @reverts_release_id@ linking back to the bad release.
-  The new row enters the standard CREATED → approval → dispatch
-  lifecycle from there.
+* @POST \/releases\/:id\/mobile-revert@ — create the revert release row.
+  Re-resolves the source (never trusts the draft), enforces a
+  @version_code@ floor of @max(bad, live store) + 1@, and — when the target
+  has no artifact — requires an operator-supplied @source_commit@. Inserts
+  a new @release_tracker@ row with @source_ref@ and @reverts_release_id@,
+  entering the standard CREATED → approval → dispatch lifecycle. A
+  release created by a revert IS revertable; only an already-reverted
+  release is blocked.
 
-Both endpoints are gated by @'AP_RELEASE_REVERT@.
+* @GET  \/releases\/:id\/mobile-revert\/verify-commit?sha=@ — resolve and
+  validate a custom commit SHA or branch as a build source.
+
+* @GET  \/releases\/:id\/mobile-revert\/diff?source=@ — live "commits being
+  rolled back" between an arbitrary source (previous-good tag, custom SHA,
+  or branch) and the bad release. The FE re-queries this on every source
+  change so the list reflects the actual selection.
 -}
 module Products.Autopilot.Mobile.Handlers.Revert (
     -- * Types
     RevertDraft (..),
     RevertReq (..),
     RevertResp (..),
+    RevertDiffResp (..),
     VerifyCommitResp (..),
 
     -- * Handlers
     mobileRevertDraftH,
     mobileRevertCreateH,
+    mobileRevertDiffH,
     verifyCommitH,
 ) where
 
@@ -54,20 +66,26 @@ import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Changelog (bumpPatch, renderRevertChangelog)
 import Products.Autopilot.Mobile.Github (CommitDetail (..), createGitRef, getCommitInfo)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
-import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), compareRefs, crCommits, shortSha)
+import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), compareRefs, crCommits, crStatus, crTotalCommits, shortSha)
 import Products.Autopilot.Mobile.Queries.AppCatalog (
     LatestBuildRow (..),
-    fetchLatestBuildsPerApp,
+    fetchLatestBuildsForApp,
  )
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
+    fetchRevertCandidates,
     findMobileReleaseById,
-    findPreviousGoodMobileRelease,
     findPreviousGoodSCCRelease,
     gitOwner,
     gitRepo,
     insertMobileRevertTracker,
+    isReverted,
     logEvent,
+ )
+import Products.Autopilot.Mobile.RevertResolver (
+    RevertCand (..),
+    RollbackPlan (..),
+    resolveRollback,
  )
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
@@ -83,6 +101,7 @@ import Products.Autopilot.Types.Storage.Schema (ReleaseTrackerT (..))
 {- | Read-only preview of what a revert would do. Returned by the
 draft endpoint; the FE renders a confirmation modal from this.
 -}
+
 {- | One commit being rolled back, as exposed to the FE. Mirrors
 the upstream 'CommitInfo' from "Mobile.Github.Compare" but with a
 narrower projection: the FE doesn't need 'ciMessage' (full body)
@@ -122,14 +141,30 @@ data RevertDraft = RevertDraft
     -- ^ Current live store version for this app (from latest build data).
     , rdStoreVersionCode :: Maybe Int32
     -- ^ Current live store version code (Android only).
+    , rdTargetReleaseId :: Text
+    -- ^ Release whose version users roll back TO (chosen by version order,
+    -- not creation time). May differ from the build source below when that
+    -- version has no SCC artifact.
+    , rdTargetVersion :: Text
+    -- ^ Version users roll back to (display). For a clean rollback this
+    -- equals 'rdPrevGoodVersion'; for a rebuild-lower it is the higher,
+    -- unbuildable version while 'rdPrevGoodVersion' is what we rebuild from.
+    , rdBuildSourceKind :: Text
+    -- ^ How the build source was resolved: @"tag"@ (target itself is
+    -- buildable), @"rebuild_lower"@ (nearest lower version with a tag), or
+    -- @"manual_required"@ (operator must supply a source commit).
+    , rdWarnings :: [Text]
+    -- ^ Operator-facing flags, e.g. @"target_has_no_artifact"@,
+    -- @"manual_source_required"@.
     }
     deriving (Eq, Show, Generic)
 
 instance ToJSON RevertDraft
 instance FromJSON RevertDraft
 
--- | Project a raw 'CommitInfo' (from the GH Compare client) to the
--- FE-facing 'RevertCommit' shape. Drops fields the UI doesn't render.
+{- | Project a raw 'CommitInfo' (from the GH Compare client) to the
+FE-facing 'RevertCommit' shape. Drops fields the UI doesn't render.
+-}
 toRevertCommit :: CommitInfo -> RevertCommit
 toRevertCommit ci =
     RevertCommit
@@ -176,6 +211,29 @@ data VerifyCommitResp = VerifyCommitResp
 
 instance ToJSON VerifyCommitResp
 
+{- | Live commit diff between an arbitrary build source (the previous-good
+tag, a custom commit SHA, or a branch) and the bad release. Powers the
+"Commits being rolled back" list, which must react to the source the
+operator actually selects — not just the draft's previous-good default.
+
+@rdfCommits@ are the commits present in the bad release but NOT reachable
+from the chosen source, i.e. the commits a rebuild from that source would
+drop. Newest-first ordering is applied by the FE.
+-}
+data RevertDiffResp = RevertDiffResp
+    { rdfCommits :: [RevertCommit]
+    , rdfCommitCount :: Int
+    , rdfBaseRef :: Text
+    -- ^ The source we rebuild from (echoed back).
+    , rdfHeadRef :: Text
+    -- ^ The bad release ref we diff against (tag or commit SHA).
+    , rdfStatus :: Text
+    -- ^ GitHub compare status: @ahead@ / @behind@ / @identical@ / @diverged@.
+    }
+    deriving (Eq, Show, Generic)
+
+instance ToJSON RevertDiffResp
+
 -- ─── Verify commit handler ───────────────────────────────────────────
 
 verifyCommitH :: AuthedPerson -> Text -> Text -> Flow VerifyCommitResp
@@ -201,6 +259,51 @@ verifyCommitH _ap releaseId' sha = do
             throwM $
                 BadRequest ("Commit not found: " <> e)
 
+-- ─── Diff handler ────────────────────────────────────────────────────
+
+{- | Compute the commits being rolled back for a given build @source@
+(previous-good tag, custom SHA, or branch) against the bad release. The
+FE calls this whenever the operator changes the source, so the diff stays
+in sync with the actual selection.
+-}
+mobileRevertDiffH :: AuthedPerson -> Text -> Text -> Flow RevertDiffResp
+mobileRevertDiffH _ap releaseId' source = do
+    let src = T.strip source
+    when' (T.null src) $ BadRequest "source ref is required"
+
+    mBad <- findMobileReleaseById releaseId'
+    (bad, badState) <- case mBad of
+        Just x -> pure x
+        Nothing -> throwM $ BadRequest ("Mobile release not found: " <> releaseId')
+
+    -- Diff against the bad release's tag if it has one, else its commit SHA.
+    headRef <- case (badState >>= mbcTagPushed . mbContext, rtCommitSha bad) of
+        (Just t, _) | not (T.null t) -> pure t
+        (_, Just s) | not (T.null s) -> pure s
+        _ -> throwM $ BadRequest "Bad release has no tag or commit to diff against."
+
+    ac <- appCatalogForRowRaw bad
+    creds <- loadGhCreds
+    res <- compareRefs creds (gitOwner ac) (gitRepo ac) src headRef
+    case res of
+        Left e ->
+            throwM $
+                BadRequest
+                    ( "GitHub compare failed for source "
+                        <> src
+                        <> ": "
+                        <> e
+                    )
+        Right cr ->
+            pure
+                RevertDiffResp
+                    { rdfCommits = map toRevertCommit (crCommits cr)
+                    , rdfCommitCount = crTotalCommits cr
+                    , rdfBaseRef = src
+                    , rdfHeadRef = headRef
+                    , rdfStatus = crStatus cr
+                    }
+
 -- ─── Draft handler ─────────────────────────────────────────────────
 
 mobileRevertDraftH :: AuthedPerson -> Text -> Flow RevertDraft
@@ -223,18 +326,20 @@ mobileRevertDraftH _ap releaseId' = do
                     )
 
     case badState >>= Just . mbcBuildType . mbContext of
-        Just bt | isDebugBuildType bt ->
-            throwM $
-                BadRequest "Debug builds (Firebase / TestFlight) cannot be reverted."
+        Just bt
+            | isDebugBuildType bt ->
+                throwM $
+                    BadRequest "Debug builds (Firebase / TestFlight) cannot be reverted."
         _ -> pure ()
 
-    case rtRevertsReleaseId bad of
-        Just _ ->
-            throwM $
-                BadRequest "This release was created by a revert and cannot be reverted further. Create a new release instead."
-        Nothing -> pure ()
+    -- A release created by a revert IS revertable (it is a real shipped
+    -- build; the version-code floor prevents loops). What we block is
+    -- reverting a release that has ALREADY been reverted, to avoid
+    -- duplicate rollbacks of the same release.
+    when' (isReverted bad) $
+        BadRequest "This release has already been reverted. Create a new release instead."
 
-    builds <- fetchLatestBuildsPerApp
+    builds <- fetchLatestBuildsForApp (rtAppGroup bad) (rtService bad) (rtEnv bad)
     let buildMap =
             Map.fromList
                 [ ((lbrAppGroup b, lbrSurface b, lbrPlatform b, lbrBuildType b), b)
@@ -258,65 +363,76 @@ draftForSCCRevert ::
     Maybe Int32 ->
     Flow RevertDraft
 draftForSCCRevert bad badState storeVersion storeVersionCode = do
-    mPrev <-
-        findPreviousGoodMobileRelease
-            (rtAppGroup bad)
-            (rtService bad)
-            (rtEnv bad)
-            (rtCreatedAt bad)
-    (prev, prevState) <- case mPrev of
-        Just x -> pure x
-        Nothing ->
-            throwM $
-                BadRequest
-                    "No previous good release found for this app — cannot revert."
-
-    let prevTagFromState = prevState >>= mbcTagPushed . mbContext
-        badTagFromState = badState >>= mbcTagPushed . mbContext
-    prevTag <- case prevTagFromState of
-        Just t | not (T.null t) -> pure t
-        _ -> throwM $ BadRequest "Previous good release has no pushed tag — cannot revert."
-    badTag <- case badTagFromState of
-        Just t | not (T.null t) -> pure t
-        _ -> throwM $ BadRequest "Bad release has no pushed tag — cannot revert."
+    cands <- fetchRevertCandidates (rtAppGroup bad) (rtService bad) (rtEnv bad) (rtId bad)
+    (target, mSource, srcKind, warnings) <-
+        case resolveRollback (mkBadCand bad badState) cands of
+            Rollback t s -> pure (t, Just s, "tag" :: Text, [] :: [Text])
+            RebuildLower t s -> pure (t, Just s, "rebuild_lower", ["target_has_no_artifact"])
+            NeedsManualSource t -> pure (t, Nothing, "manual_required", ["manual_source_required"])
+            NoPriorRelease ->
+                throwM $
+                    BadRequest
+                        "No previous release found for this app — there is nothing to roll back to. \
+                        \Create a new release (optionally from a specific commit) instead."
 
     let badCode = badState >>= mbcVersionCode . mbContext
+        badTagFromState = badState >>= mbcTagPushed . mbContext
         effectiveCode = maxCode badCode storeVersionCode
         suggestedCode = fmap (+ 1) effectiveCode
         suggestedVer = bumpPatch (rtNewVersion bad)
-        prevCommitShort = shortSha (fromMaybe "" (rtCommitSha prev))
+        mSrcTag = mSource >>= rcTag
+        srcShort = shortSha (fromMaybe "" (mSource >>= rcCommitSha))
 
-    ac <- appCatalogForRowRaw bad
-    creds <- loadGhCreds
-    compareRes <- compareRefs creds (gitOwner ac) (gitRepo ac) prevTag badTag
-    commits <- case compareRes of
-        Right cr -> pure (crCommits cr)
-        Left e ->
-            throwM $
-                BadRequest
-                    ( "GitHub compare failed: "
-                        <> e
-                        <> ". If the previous tag has been deleted, try a manual release instead."
-                    )
-
-    let changelog =
-            renderRevertChangelog
-                (rtNewVersion bad)
-                (rtNewVersion prev)
-                prevCommitShort
-                suggestedVer
-                (fmap fromIntegral suggestedCode)
-                commits
+    -- A commit diff is only computable when we have both a buildable source
+    -- tag and the bad release's tag. For a manual-source rollback (target has
+    -- no artifact) we skip it and emit a templated note instead.
+    (commits, changelog) <- case (mSrcTag, badTagFromState) of
+        (Just srcTag, Just badTag)
+            | not (T.null srcTag) && not (T.null badTag) -> do
+                ac <- appCatalogForRowRaw bad
+                creds <- loadGhCreds
+                compareRes <- compareRefs creds (gitOwner ac) (gitRepo ac) srcTag badTag
+                case compareRes of
+                    Right cr ->
+                        let cs = crCommits cr
+                            cl =
+                                renderRevertChangelog
+                                    (rtNewVersion bad)
+                                    (rcVersionName target)
+                                    srcShort
+                                    suggestedVer
+                                    (fmap fromIntegral suggestedCode)
+                                    cs
+                         in pure (cs, cl)
+                    Left e ->
+                        throwM $
+                            BadRequest
+                                ( "GitHub compare failed: "
+                                    <> e
+                                    <> ". If the previous tag has been deleted, supply a source commit instead."
+                                )
+        _ ->
+            pure
+                ( []
+                , "Roll back v"
+                    <> rtNewVersion bad
+                    <> " to v"
+                    <> rcVersionName target
+                    <> ( if srcKind == "manual_required"
+                            then " — this version has no SCC build artifact; provide a source commit to rebuild from."
+                            else ""
+                       )
+                )
 
     pure
         RevertDraft
             { rdBadReleaseId = rtId bad
             , rdBadVersion = rtNewVersion bad
             , rdBadVersionCode = badCode
-            , rdPrevGoodReleaseId = rtId prev
-            , rdPrevGoodVersion = rtNewVersion prev
-            , rdPrevGoodShortSha = prevCommitShort
-            , rdPrevGoodTag = prevTag
+            , rdPrevGoodReleaseId = maybe (rcId target) rcId mSource
+            , rdPrevGoodVersion = maybe (rcVersionName target) rcVersionName mSource
+            , rdPrevGoodShortSha = srcShort
+            , rdPrevGoodTag = fromMaybe "" mSrcTag
             , rdSuggestedVersion = suggestedVer
             , rdSuggestedCode = suggestedCode
             , rdChangelog = changelog
@@ -326,7 +442,23 @@ draftForSCCRevert bad badState storeVersion storeVersionCode = do
             , rdIsStoreSyncRevert = False
             , rdStoreVersion = storeVersion
             , rdStoreVersionCode = storeVersionCode
+            , rdTargetReleaseId = rcId target
+            , rdTargetVersion = rcVersionName target
+            , rdBuildSourceKind = srcKind
+            , rdWarnings = warnings
             }
+
+-- | Build the resolver's view of the bad release from its row + parsed state.
+mkBadCand :: ReleaseTrackerT Identity -> Maybe MobileBuildTargetState -> RevertCand
+mkBadCand bad badState =
+    RevertCand
+        { rcId = rtId bad
+        , rcVersionName = rtNewVersion bad
+        , rcVersionCode = badState >>= mbcVersionCode . mbContext
+        , rcTag = badState >>= mbcTagPushed . mbContext
+        , rcCommitSha = rtCommitSha bad
+        , rcCreatedAt = rtCreatedAt bad
+        }
 
 draftForStoreSyncRevert ::
     ReleaseTrackerT Identity ->
@@ -406,6 +538,12 @@ draftForStoreSyncRevert bad badState storeVersion storeVersionCode = do
             , rdIsStoreSyncRevert = True
             , rdStoreVersion = storeVersion
             , rdStoreVersionCode = storeVersionCode
+            , -- Store-sync re-assert rebuilds the previous SCC release directly,
+              -- so target == source and the build is always tag-backed.
+              rdTargetReleaseId = rtId prev
+            , rdTargetVersion = rtNewVersion prev
+            , rdBuildSourceKind = "tag"
+            , rdWarnings = []
             }
 
 maxCode :: Maybe Int32 -> Maybe Int32 -> Maybe Int32
@@ -427,48 +565,52 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
         s -> throwM $ BadRequest ("Cannot revert release in status " <> s)
 
     case badState >>= Just . mbcBuildType . mbContext of
-        Just bt | isDebugBuildType bt ->
-            throwM $ BadRequest "Debug builds cannot be reverted."
+        Just bt
+            | isDebugBuildType bt ->
+                throwM $ BadRequest "Debug builds cannot be reverted."
         _ -> pure ()
 
-    case rtRevertsReleaseId bad of
-        Just _ ->
-            throwM $ BadRequest "This release was created by a revert and cannot be reverted further."
-        Nothing -> pure ()
+    -- Revert-of-a-revert is allowed (a revert is a real shipped build); we
+    -- only block re-reverting a release that has already been reverted.
+    when' (isReverted bad) $
+        BadRequest "This release has already been reverted. Create a new release instead."
 
     let isStoreSync = rtMode bad == Just "STORE_SYNC"
 
-    (prev, prevState) <-
+    -- Resolve the build source. Store-sync re-asserts the latest SCC build;
+    -- a normal rollback resolves by VERSION order (not creation time) and may
+    -- need an operator-supplied commit when the target version was never
+    -- built by SCC. We re-resolve here rather than trust the draft.
+    (prevId, prevTag, manualNeeded) <-
         if isStoreSync
             then do
-                mPrev <-
-                    findPreviousGoodSCCRelease
-                        (rtAppGroup bad)
-                        (rtService bad)
-                        (rtEnv bad)
-                case mPrev of
+                mPrev <- findPreviousGoodSCCRelease (rtAppGroup bad) (rtService bad) (rtEnv bad)
+                (prev, prevState) <- case mPrev of
                     Just x -> pure x
                     Nothing -> throwM $ BadRequest "No previous SCC-dispatched release found"
+                case prevState >>= mbcTagPushed . mbContext of
+                    Just t | not (T.null t) -> pure (rtId prev, t, False)
+                    _ -> throwM $ BadRequest "Previous SCC release has no pushed tag"
             else do
-                mPrev <-
-                    findPreviousGoodMobileRelease
-                        (rtAppGroup bad)
-                        (rtService bad)
-                        (rtEnv bad)
-                        (rtCreatedAt bad)
-                case mPrev of
-                    Just x -> pure x
-                    Nothing -> throwM $ BadRequest "No previous good release found"
+                cands <- fetchRevertCandidates (rtAppGroup bad) (rtService bad) (rtEnv bad) (rtId bad)
+                case resolveRollback (mkBadCand bad badState) cands of
+                    Rollback _ s -> pure (rcId s, fromMaybe "" (rcTag s), False)
+                    RebuildLower _ s -> pure (rcId s, fromMaybe "" (rcTag s), False)
+                    NeedsManualSource t -> pure (rcId t, "", True)
+                    NoPriorRelease ->
+                        throwM $
+                            BadRequest "No previous release found for this app — there is nothing to roll back to."
 
-    let prevTagFromState = prevState >>= mbcTagPushed . mbContext
-    prevTag <- case prevTagFromState of
-        Just t | not (T.null t) -> pure t
-        _ -> throwM $ BadRequest "Previous good release has no pushed tag"
+    -- When the rollback target has no SCC artifact, the operator MUST supply
+    -- a source commit to rebuild from (resolved into sourceRefStr below).
+    when' (manualNeeded && maybe True T.null rrSourceCommit) $
+        BadRequest
+            "This rollback target has no SCC build artifact; provide a source commit to rebuild from."
 
     when' (rrNewVersionName == rtNewVersion bad) $
         BadRequest "new version name must differ from bad release's"
 
-    builds <- fetchLatestBuildsPerApp
+    builds <- fetchLatestBuildsForApp (rtAppGroup bad) (rtService bad) (rtEnv bad)
     let buildMap =
             Map.fromList
                 [ ((lbrAppGroup b, lbrSurface b, lbrPlatform b, lbrBuildType b), b)
@@ -495,10 +637,9 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
     newId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
     ac <- appCatalogForRowRaw bad
-    buildTypeVal <- case (badState, prevState) of
-        (Just s, _) -> pure (mbcBuildType (mbContext s))
-        (_, Just s) -> pure (mbcBuildType (mbContext s))
-        _ -> throwM $ BadRequest "Both bad and previous good releases have unparseable mobile state"
+    -- The revert build inherits the bad release's build type (debug already
+    -- excluded above); default to release if its state is somehow unparseable.
+    let buildTypeVal = maybe "release" (mbcBuildType . mbContext) badState
     let ctx =
             MobileBuildContext
                 { mbcVersionCode = rrNewVersionCode
@@ -552,7 +693,7 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
         "REVERT_CREATED"
         ( object
             [ "reverts" .= rtId bad
-            , "prev_good" .= rtId prev
+            , "prev_good" .= prevId
             , "prev_tag" .= prevTag
             , "new_version" .= rrNewVersionName
             , "new_version_code" .= rrNewVersionCode
