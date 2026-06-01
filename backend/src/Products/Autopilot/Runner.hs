@@ -21,7 +21,7 @@ import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
 import Products.Autopilot.EventLog (logStatusUpdated, logTrafficUpdatedWithMessage)
 import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getDeploymentReplicaStatus)
-import Products.Autopilot.K8s.Execute (runCmd)
+import Products.Autopilot.K8s.Execute (isNotFoundError, runCmd)
 import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
@@ -905,6 +905,24 @@ scaleDownLeakedNewDeployment cfg (rt, mts) = case mts of
                 _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns leakedHpaName)
                 result <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns depName 0)
                 case result of
+                    Left err | isNotFoundError err -> do
+                        -- Deployment already gone — treat as success, no retry needed.
+                        logInfo $
+                            "[scaleDownLeakedNewDeployment] Deployment "
+                                <> depName
+                                <> " not found in k8s — already cleaned up, marking SCALE_DOWN_COMPLETED"
+                        freshM <- findReleaseTracker (releaseId rt)
+                        case freshM of
+                            Just (freshRT, Just (K8sState freshK8s)) -> do
+                                let doneCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_COMPLETED"}
+                                    doneMts = Just (K8sState freshK8s{context = doneCtx})
+                                _ <- conditionalUpdateTracker freshRT doneMts (releaseStatusToText (NT.status freshRT))
+                                insertReleaseEvent
+                                    (releaseId rt)
+                                    "BUSINESS"
+                                    "LEAKED_DEPLOYMENT_SCALED_DOWN"
+                                    (object ["deployment" .= depName, "namespace" .= (ns :: T.Text), "note" .= ("already absent" :: T.Text)])
+                            _ -> pure ()
                     Left err -> do
                         maxRetries <- getMaxCleanupRetries
                         logWarning $

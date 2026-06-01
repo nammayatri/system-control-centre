@@ -50,17 +50,18 @@ FROM --platform=linux/amd64 debian:bookworm-slim AS runtime
 
 # Runtime libs + tools:
 #   - kubectl (release operations)
+#   - jq (JSON processing in clone/patch k8s deployment commands)
 #   - dhall-to-json (loadLoggerConfigFromDhall calls this as a subprocess)
 #   - tini (proper PID 1 + signal handling)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl tini bzip2 \
+      ca-certificates curl tini bzip2 jq \
       libpq5 libpcre3 libssl3 zlib1g libzstd1 libgmp10 libffi8 libnuma1 \
     && curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
        -o /usr/local/bin/kubectl \
     && chmod +x /usr/local/bin/kubectl \
     && curl -fsSL "https://github.com/dhall-lang/dhall-haskell/releases/download/1.42.2/dhall-json-1.7.12-x86_64-linux.tar.bz2" \
        -o /tmp/dhall-json.tar.bz2 \
-    && tar -xjf /tmp/dhall-json.tar.bz2 -C /usr/local --strip-components=1 \
+    && tar -xjf /tmp/dhall-json.tar.bz2 -C /usr/local \
     && rm /tmp/dhall-json.tar.bz2 \
     && /usr/local/bin/dhall-to-json --version \
     && rm -rf /var/lib/apt/lists/*

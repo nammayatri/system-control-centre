@@ -8,6 +8,7 @@ module Products.Autopilot.K8s.Execute (
     executeWithRetry,
     isIdempotentSuccess,
     isConflictError,
+    isNotFoundError,
     shellQuote,
     jsonToText,
     withKubectx,
@@ -76,3 +77,10 @@ isConflictError :: K8sError -> Bool
 isConflictError (K8sError e) =
     let low = T.toLower e
      in any (`T.isInfixOf` low) ["conflict", "the object has been modified", "please apply your changes to the latest version"]
+
+-- | Detect K8s 404 Not Found — deployment/resource already absent.
+-- Treat as a success in cleanup paths (nothing to scale down or delete).
+isNotFoundError :: K8sError -> Bool
+isNotFoundError (K8sError e) =
+    let low = T.toLower e
+     in any (`T.isInfixOf` low) ["notfound", "not found", "(not found)"]
