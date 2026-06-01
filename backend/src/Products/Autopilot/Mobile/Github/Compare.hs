@@ -149,14 +149,14 @@ rate-limit / decode failure / network error.
 compareRefs ::
     (MonadFlow m) =>
     GhAppCreds ->
+    -- | owner
     Text ->
-    -- ^ owner
+    -- | repo
     Text ->
-    -- ^ repo
+    -- | base ref (branch, tag, or sha)
     Text ->
-    -- ^ base ref (branch, tag, or sha)
+    -- | head ref (branch, tag, or sha)
     Text ->
-    -- ^ head ref (branch, tag, or sha)
     m (Either Text CompareResult)
 compareRefs creds owner repo base headRef = do
     token <- getInstallationToken creds

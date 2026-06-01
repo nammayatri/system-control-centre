@@ -28,7 +28,9 @@ import { CardSkeleton } from '../../../../shared/ui/skeleton';
 import {
   createMobileRevert,
   getMobileRevertDraft,
+  getRevertDiff,
   verifyRevertCommit,
+  type RevertCommit,
   type RevertDraft,
   type VerifyCommitResp,
 } from '../../api';
@@ -133,6 +135,38 @@ const MobileRevert: React.FC = () => {
     setVersionCode(draft.rdSuggestedCode != null ? String(draft.rdSuggestedCode) : '');
     setChangelog(draft.rdChangelog);
   }, [draft]);
+
+  // ── Live "commits being rolled back" ─────────────────────────────
+  // The rolled-back commits depend on which source we rebuild from, so they
+  // must track the operator's selection — not stay frozen at the draft's
+  // previous-good default. We re-query the diff whenever the effective source
+  // ref changes: the previous-good tag, or the verified custom SHA/branch.
+  const effectiveSourceRef =
+    sourceMode === 'prevGood'
+      ? (draft?.rdPrevGoodTag?.trim() ?? '')
+      : (verifiedCommit?.vcFullSha?.trim() ?? '');
+
+  const diffQuery = useQuery({
+    queryKey: ['mobile-revert-diff', id, effectiveSourceRef],
+    queryFn: () => getRevertDiff(id!, effectiveSourceRef),
+    enabled: !!id && !!effectiveSourceRef,
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  // When we have a source ref, the live diff is authoritative; otherwise
+  // (custom source not yet verified) fall back to the draft's commits.
+  const usingLiveDiff = !!effectiveSourceRef;
+  const displayCommits: RevertCommit[] = usingLiveDiff
+    ? (diffQuery.data?.rdfCommits ?? [])
+    : (draft?.rdCommits ?? []);
+  const displayCommitCount = usingLiveDiff
+    ? (diffQuery.data?.rdfCommitCount ?? 0)
+    : (draft?.rdCommitCount ?? 0);
+  const diffSourceLabel =
+    sourceMode === 'prevGood'
+      ? `v${draft?.rdPrevGoodVersion ?? ''}`
+      : (verifiedCommit?.vcShortSha ?? 'the selected commit');
 
   const isAndroid = draft?.rdPlatform === 'android';
   const badCode = draft?.rdBadVersionCode ?? null;
@@ -640,20 +674,33 @@ const MobileRevert: React.FC = () => {
               </div>
             )}
 
-            {/* Commits being rolled back */}
+            {/* Commits being rolled back — recomputed live against the selected source */}
             <div>
               <div className="flex items-center justify-between mb-2">
                 <label className="block text-xs font-semibold text-zinc-700 uppercase tracking-wider">
-                  {draft.rdIsStoreSyncRevert && draft.rdCommits.length === 0 ? 'Build source' : 'Commits being rolled back'}
+                  Commits being rolled back
                 </label>
-                {draft.rdCommits.length > 0 && (
+                {displayCommits.length > 0 && (
                   <span className="text-[11px] text-zinc-500">
-                    {draft.rdCommitCount} from v{draft.rdBadVersion}
+                    {displayCommitCount} from v{draft.rdBadVersion} · vs {diffSourceLabel}
                   </span>
                 )}
               </div>
 
-              {draft.rdIsStoreSyncRevert && draft.rdCommits.length === 0 ? (
+              {sourceMode === 'customCommit' && !effectiveSourceRef ? (
+                <div className="rounded-md border border-zinc-200 bg-zinc-50 px-4 py-6 text-center text-xs text-zinc-500 italic">
+                  Verify a commit or branch above to preview the commits being rolled back.
+                </div>
+              ) : usingLiveDiff && (diffQuery.isLoading || diffQuery.isFetching) ? (
+                <div className="rounded-md border border-zinc-200 bg-zinc-50 px-4 py-6 flex items-center justify-center gap-2 text-xs text-zinc-500">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Computing diff against {diffSourceLabel}…
+                </div>
+              ) : usingLiveDiff && diffQuery.isError ? (
+                <div className="rounded-md border border-red-100 bg-red-50 px-4 py-4 text-xs text-red-800">
+                  Couldn't compute the commit diff for {diffSourceLabel}.{' '}
+                  {(diffQuery.error as any)?.response?.data?.message || 'The ref may not exist in the repo.'}
+                </div>
+              ) : draft.rdIsStoreSyncRevert && sourceMode === 'prevGood' && displayCommits.length === 0 ? (
                 <div className="rounded-md border border-amber-100 bg-amber-50 px-4 py-4 text-xs text-amber-900">
                   <p className="font-medium">This release was synced from the store API.</p>
                   <p className="mt-1 text-amber-800">
@@ -662,21 +709,20 @@ const MobileRevert: React.FC = () => {
                     (tag: <code className="font-mono text-[11px]">{draft.rdPrevGoodTag}</code>).
                   </p>
                 </div>
-              ) : draft.rdCommits.length === 0 ? (
+              ) : displayCommits.length === 0 ? (
                 <div className="rounded-md border border-zinc-200 bg-zinc-50 px-4 py-6 text-center text-xs text-zinc-500 italic">
-                  No commit differences detected between v{draft.rdPrevGoodVersion} and v
-                  {draft.rdBadVersion}.
+                  No commit differences detected between {diffSourceLabel} and v{draft.rdBadVersion}.
                 </div>
               ) : (
                 <div className="border border-zinc-200 rounded-md bg-white">
                   <div className="flex items-center justify-between text-[11px] text-zinc-400 px-3 py-1.5 border-b border-zinc-100">
                     <span>Newest first</span>
-                    {draft.rdCommitCount > draft.rdCommits.length && (
-                      <span>Showing {draft.rdCommits.length} of {draft.rdCommitCount}</span>
+                    {displayCommitCount > displayCommits.length && (
+                      <span>Showing {displayCommits.length} of {displayCommitCount}</span>
                     )}
                   </div>
                   <ul className="divide-y divide-zinc-100 max-h-80 overflow-y-auto">
-                    {[...draft.rdCommits].reverse().map((c, i) => (
+                    {[...displayCommits].reverse().map((c, i) => (
                       <li key={c.rcShortSha} className="flex items-center gap-2.5 px-3 py-2">
                         <span className="text-[10px] text-zinc-300 w-4 text-right shrink-0 tabular-nums">{i + 1}</span>
                         <img
@@ -712,11 +758,15 @@ const MobileRevert: React.FC = () => {
                     ))}
                   </ul>
                   {(() => {
-                    const first = draft.rdCommits[0];
+                    const first = displayCommits[0];
                     if (!first) return null;
                     const repoUrl = first.rcHtmlUrl.replace(/\/commit\/.*$/, '');
-                    const head = draft.rdCommits[draft.rdCommits.length - 1].rcShortSha;
-                    const compareUrl = `${repoUrl}/compare/${encodeURIComponent(draft.rdPrevGoodTag)}...${head}`;
+                    // Live diff knows the exact base/head refs; fall back to the
+                    // previous-good tag + last commit for the draft case.
+                    const base = diffQuery.data?.rdfBaseRef ?? draft.rdPrevGoodTag;
+                    const head =
+                      diffQuery.data?.rdfHeadRef ?? displayCommits[displayCommits.length - 1].rcShortSha;
+                    const compareUrl = `${repoUrl}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`;
                     return (
                       <div className="px-3 py-2 border-t border-zinc-100">
                         <a

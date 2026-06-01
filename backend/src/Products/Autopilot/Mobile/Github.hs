@@ -116,10 +116,10 @@ data WorkflowRun = WorkflowRun
     , wrHtmlUrl :: Text
     , wrName :: Text
     , wrDisplayTitle :: Maybe Text
-    , -- | SHA of HEAD at dispatch time. Returned by GH on every run.
-      -- Captured into 'release_tracker.commit_sha' so revert flows can
-      -- look up exactly which commit a release built from.
-      wrHeadSha :: Text
+    , wrHeadSha :: Text
+    -- ^ SHA of HEAD at dispatch time. Returned by GH on every run.
+    -- Captured into 'release_tracker.commit_sha' so revert flows can
+    -- look up exactly which commit a release built from.
     }
     deriving (Show, Generic)
 
@@ -443,10 +443,12 @@ createGitRef ::
 createGitRef creds owner repo tagName sha = do
     token <- getInstallationToken creds
     let url = apiBase owner repo <> "/git/refs"
-        body = encode $ object
-            [ "ref" .= ("refs/tags/" <> tagName :: Text)
-            , "sha" .= sha
-            ]
+        body =
+            encode $
+                object
+                    [ "ref" .= ("refs/tags/" <> tagName :: Text)
+                    , "sha" .= sha
+                    ]
         req =
             (defaultReq url)
                 { reqMethod = POST
@@ -488,12 +490,13 @@ instance FromJSON CommitDetail where
         login <- case authorObj of
             Just ao -> withObject "author" (\a -> a .:? "login") ao
             Nothing -> pure Nothing
-        pure CommitDetail
-            { cdSha = sha
-            , cdMessage = T.takeWhile (/= '\n') message
-            , cdAuthorLogin = fromMaybe "unknown" login
-            , cdHtmlUrl = htmlUrl
-            }
+        pure
+            CommitDetail
+                { cdSha = sha
+                , cdMessage = T.takeWhile (/= '\n') message
+                , cdAuthorLogin = fromMaybe "unknown" login
+                , cdHtmlUrl = htmlUrl
+                }
 
 getCommitInfo ::
     (MonadFlow m) =>

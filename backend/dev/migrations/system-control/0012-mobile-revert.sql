@@ -24,3 +24,19 @@ CREATE INDEX IF NOT EXISTS idx_rt_commit_sha
 
 CREATE INDEX IF NOT EXISTS idx_rt_reverts_release_id
   ON release_tracker(reverts_release_id);
+
+-- At most one ACTIVE (non-terminal) revert per bad release.
+--
+-- Two operators (or a double-submitted form) could otherwise create two
+-- revert rows pointing at the same `reverts_release_id`, producing duplicate
+-- rollbacks. This partial unique index makes the second insert fail loudly
+-- instead. Mirrors the uq_release_tracker_service_inflight pattern
+-- (0002-add-indexes.sql): the predicate uses the same in-flight status set,
+-- so once a revert reaches a terminal state (COMPLETED / FAILED / DISCARDED /
+-- ABORTED) a fresh revert is permitted again — consistent with allowing
+-- revert-of-a-revert and retry-after-failure. Scoped to rows that ARE reverts
+-- (reverts_release_id IS NOT NULL); normal releases are unaffected.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_release_tracker_revert_inflight
+  ON release_tracker (reverts_release_id)
+  WHERE reverts_release_id IS NOT NULL
+    AND status IN ('CREATED','INPROGRESS','PAUSED','ABORTING','REVERTING','RESTARTING','PREPARING');

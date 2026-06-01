@@ -70,6 +70,10 @@ loginH body = do
                             insertToken (personId person) tok expiresAt
                             -- Get product access with permissions
                             products <- findAllProductsForPerson person
+                            -- Same deployment env the frontend needs at /auth/me, returned
+                            -- here too so the SPA has it immediately after login without a
+                            -- second round-trip. Read from SC_ENV at runtime (see meH).
+                            envVal <- liftIO (fromMaybe "UAT" <$> lookupEnv "SC_ENV")
                             pure $
                                 object
                                     [ "token" .= tok
@@ -91,6 +95,10 @@ loginH body = do
                                                     ]
                                             )
                                             products
+                                    , "config"
+                                        .= object
+                                            [ "env" .= T.pack envVal
+                                            ]
                                     ]
 
 -- | POST /auth/logout

@@ -23,13 +23,15 @@ module Products.Autopilot.Mobile.Queries.Tracker (
     gitOwner,
     gitRepo,
     insertMobileTracker,
+    mkMobileTrackerRow,
     -- Revert helpers
-    findPreviousGoodMobileRelease,
+    fetchRevertCandidates,
     findPreviousGoodSCCRelease,
     findMobileReleaseById,
     parseMobileTargetState,
     insertMobileRevertTracker,
     markReleaseRevertedBy,
+    isReverted,
     ReleaseTrackerRow,
 ) where
 
@@ -39,18 +41,19 @@ import Core.DB.Connection (runDB)
 import Core.Environment (MonadFlow, withDb)
 import Data.Aeson (Value)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as AK
-import Data.Maybe (fromMaybe)
+import qualified Data.Aeson.KeyMap as KM
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (UTCTime)
 import Database.Beam
+import Products.Autopilot.Mobile.RevertResolver (RevertCand (..))
 import Products.Autopilot.Mobile.Types (
+    MobileBuildContext (..),
     MobileBuildTargetState (..),
     isDebugBuildType,
-    MobileBuildContext (..),
  )
 import Products.Autopilot.Mobile.Types.Storage (
     AppCatalog,
@@ -283,7 +286,23 @@ insertMobileTracker ::
     UTCTime ->
     m ()
 insertMobileTracker rid ac targetState mVersionName mSourceRef createdBy_ createdAt =
-    insertReleaseTrackerRow row
+    insertReleaseTrackerRow (mkMobileTrackerRow rid ac targetState mVersionName mSourceRef createdBy_ createdAt)
+
+{- | Pure builder for a fresh MobileBuild @release_tracker@ row (status CREATED,
+mode MANUAL, unapproved). Extracted from 'insertMobileTracker' so the create
+handler can build N rows and insert them in one transaction via
+'insertReleaseTrackerRowsBatch'.
+-}
+mkMobileTrackerRow ::
+    Text ->
+    AppCatalog ->
+    MobileBuildTargetState ->
+    Maybe Text ->
+    Maybe Text ->
+    Text ->
+    UTCTime ->
+    ReleaseTrackerRow
+mkMobileTrackerRow rid ac targetState mVersionName mSourceRef createdBy_ createdAt = row
   where
     versionName = fromMaybe "" mVersionName
     encodedCtx = encodeJsonText (MobileBuildState targetState)
@@ -431,31 +450,40 @@ findMobileReleaseById releaseId' = withDb $ \db -> do
         (row : _) -> Just (row, parseMobileTargetState (rtTargetState row))
         [] -> Nothing
 
-{- | Find the most recent COMPLETED *release* (non-debug) mobile release
-for the same app (matching @(app_group, service, env)@) strictly older
-than the given cutoff. Debug builds (Firebase / TestFlight) are excluded
-because they have no real Git tag and cannot be used as revert targets.
+{- | Fetch the window of rollback candidates for an app: COMPLETED,
+non-debug, non-reverted mobile releases for the same
+@(app_group, service, env)@, excluding the bad release itself. Store-sync
+rows are __included__ — they record real versions users were on, so they
+are valid rollback targets (the resolver handles the case where such a
+target has no SCC build artifact).
 
-Fetches up to 20 candidates and filters in Haskell because the
-destination lives inside the @target_state@ JSONB column.
+The window is bounded (most recent 50 by @created_at@) purely to cap the
+row set; the actual rollback target is then chosen by /version order/, not
+creation time — see "Products.Autopilot.Mobile.RevertResolver". The B4
+store-sync dedup index keeps this window from filling with duplicates. If
+an app ever outgrows 50, promote @version_code@ to an indexed column and
+resolve with a single ordered @LIMIT 1@ (see post-MVP design §15).
+
+Filtering of debug / reverted rows happens in Haskell because that state
+lives inside the @target_state@ / @metadata@ JSON columns.
 -}
-findPreviousGoodMobileRelease ::
+fetchRevertCandidates ::
     (MonadFlow m) =>
+    -- | app_group (app name, e.g. "NammaYatri")
     Text ->
-    -- ^ app_group (app name, e.g. "NammaYatri")
+    -- | service (surface, e.g. "customer")
     Text ->
-    -- ^ service (surface, e.g. "customer")
+    -- | env (platform, e.g. "android")
     Text ->
-    -- ^ env (platform, e.g. "android")
-    UTCTime ->
-    -- ^ cutoff: rows strictly older than this
-    m (Maybe (ReleaseTrackerRow, Maybe MobileBuildTargetState))
-findPreviousGoodMobileRelease appGroup' service' env' cutoff = withDb $ \db -> do
+    -- | id of the bad release, excluded from the window
+    Text ->
+    m [RevertCand]
+fetchRevertCandidates appGroup' service' env' excludeId = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $
-                    limit_ 20 $
+                    limit_ 50 $
                         orderBy_ (desc_ . rtCreatedAt) $ do
                             rt <- all_ (releaseTrackers autopilotDb)
                             guard_ (rtCategory rt ==. val_ "MobileBuild")
@@ -463,9 +491,26 @@ findPreviousGoodMobileRelease appGroup' service' env' cutoff = withDb $ \db -> d
                             guard_ (rtService rt ==. val_ service')
                             guard_ (rtEnv rt ==. val_ env')
                             guard_ (rtStatus rt ==. val_ "COMPLETED")
-                            guard_ (rtCreatedAt rt <. val_ cutoff)
+                            guard_ (rtId rt /=. val_ excludeId)
                             pure rt
-    pure (firstNonDebug rows)
+    pure (mapMaybe toCand rows)
+  where
+    toCand row
+        | isReverted row = Nothing
+        | otherwise =
+            let mState = parseMobileTargetState (rtTargetState row)
+             in case mState of
+                    Just st | isDebugBuildType (mbcBuildType (mbContext st)) -> Nothing
+                    _ ->
+                        Just
+                            RevertCand
+                                { rcId = rtId row
+                                , rcVersionName = rtNewVersion row
+                                , rcVersionCode = mState >>= mbcVersionCode . mbContext
+                                , rcTag = mState >>= mbcTagPushed . mbContext
+                                , rcCommitSha = rtCommitSha row
+                                , rcCreatedAt = rtCreatedAt row
+                                }
 
 findPreviousGoodSCCRelease ::
     (MonadFlow m) =>
@@ -525,22 +570,22 @@ existing dispatch endpoint once the revert is approved).
 -}
 insertMobileRevertTracker ::
     (MonadFlow m) =>
+    -- | new release id (UUID)
     Text ->
-    -- ^ new release id (UUID)
+    -- | app catalog row matching the bad release
     AppCatalog ->
-    -- ^ app catalog row matching the bad release
+    -- | initial target state (mbContext.versionCode = bad+1, etc.)
     MobileBuildTargetState ->
-    -- ^ initial target state (mbContext.versionCode = bad+1, etc.)
+    -- | new version name (e.g. "1.2.4")
     Text ->
-    -- ^ new version name (e.g. "1.2.4")
+    -- | change log (auto-generated; operator may have edited)
     Text ->
-    -- ^ change log (auto-generated; operator may have edited)
+    -- | source_ref (e.g. "refs/tags/nammayatri/prod/android/v1.2.2+450")
     Text ->
-    -- ^ source_ref (e.g. "refs/tags/nammayatri/prod/android/v1.2.2+450")
+    -- | reverts_release_id (the bad release's id)
     Text ->
-    -- ^ reverts_release_id (the bad release's id)
+    -- | created_by (operator email from AuthedPerson)
     Text ->
-    -- ^ created_by (operator email from AuthedPerson)
     UTCTime ->
     m ()
 insertMobileRevertTracker rid ac targetState versionName changeLog_ sourceRef_ revertsId createdBy_ createdAt =
@@ -596,10 +641,10 @@ set the @reverted_by@ key, write it back. Single UPDATE.
 -}
 markReleaseRevertedBy ::
     (MonadFlow m) =>
+    -- | bad release id
     Text ->
-    -- ^ bad release id
+    -- | revert release id
     Text ->
-    -- ^ revert release id
     m ()
 markReleaseRevertedBy badId revertId = withDb $ \db -> do
     -- Read existing metadata.

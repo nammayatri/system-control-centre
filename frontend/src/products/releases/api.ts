@@ -713,6 +713,27 @@ export async function verifyRevertCommit(
     return data;
 }
 
+// Live "commits being rolled back" for whatever source the operator selects
+// (previous-good tag, a custom SHA, or a branch) vs the bad release.
+export interface RevertDiffResp {
+    rdfCommits: RevertCommit[];
+    rdfCommitCount: number;
+    rdfBaseRef: string;
+    rdfHeadRef: string;
+    rdfStatus: string;
+}
+
+export async function getRevertDiff(
+    releaseId: string,
+    source: string,
+): Promise<RevertDiffResp> {
+    const { data } = await apiClient.get(
+        `/releases/${encodeURIComponent(releaseId)}/mobile-revert/diff`,
+        { params: { source } },
+    );
+    return data;
+}
+
 // ── Release Diff ──────────────────────────────────────────────────
 
 export interface ReleaseDiff {

@@ -515,7 +515,6 @@ const ListRelease: React.FC = () => {
                     const isRevert = release.release_context?.revert === 1 || !!release.revertsReleaseId;
                     const isMobile = release.tracker_type === 'MobileBuild';
                     const isDebugBuild = isMobile && release.release_context?.build_type === 'debug';
-                    const isMobileRevertBuild = isMobile && !!release.revertsReleaseId;
                     // Mobile rows reuse the underlying tracker columns with relabeled
                     // semantics (app/surface/platform). Backend rows render the
                     // historical (app_group/service/env) layout. Same data, different
@@ -585,14 +584,15 @@ const ListRelease: React.FC = () => {
                                 </button>
                               </SimpleTooltip>
                             )}
-                            {/* Revert action for completed mobile releases. Hidden
-                                if the release was already reverted (drives the
-                                "Reverted by X" banner on detail page) to prevent
-                                double-reverts. Click navigates to the full revert
-                                page; permission gating mirrors the detail page. */}
+                            {/* Revert action for completed mobile releases. A
+                                release created by a revert IS revertable (it's a
+                                real shipped build); we only hide the action once a
+                                release has ALREADY been reverted (drives the
+                                "Reverted by X" banner) to prevent double-reverts.
+                                Click navigates to the full revert page; permission
+                                gating mirrors the detail page. */}
                             {isMobile
                               && !isDebugBuild
-                              && !isMobileRevertBuild
                               && release.status === 'COMPLETED'
                               && !release.metadata?.reverted_by && (
                               <SimpleTooltip content="Revert this release">
