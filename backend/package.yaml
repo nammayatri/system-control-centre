@@ -150,6 +150,7 @@ library:
     - Products.Autopilot.Mobile.Github.Auth
     - Products.Autopilot.Mobile.Github.Compare
     - Products.Autopilot.Mobile.Changelog
+    - Products.Autopilot.Mobile.RevertResolver
     - Products.Autopilot.Mobile.StoreSync
     - Products.Autopilot.Mobile.Handlers.Revert
     - Products.Autopilot.Mobile.Workflow

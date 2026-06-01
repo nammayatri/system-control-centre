@@ -37,13 +37,13 @@ import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalogT (..))
-import Products.Autopilot.RuntimeConfig (isVersionPreviewEnabled)
 import Products.Autopilot.Mobile.Versioning (
     VersionResolution (..),
     loadAscCreds,
     mintAscToken,
     resolveNextVersionWithToken,
  )
+import Products.Autopilot.RuntimeConfig (isVersionPreviewEnabled)
 
 -- ─── Request / response types ──────────────────────────────────────
 
@@ -55,15 +55,16 @@ newtype PreviewVersionsReq = PreviewVersionsReq
 instance ToJSON PreviewVersionsReq
 instance FromJSON PreviewVersionsReq
 
--- | Per-app response row.
---
--- Discriminated by which fields are set:
---
--- * Android success: @nextVersionName@ + @nextVersionCode@ + @source = "play_console"@.
--- * iOS success: @nextVersionNumber@ + @source = "app_store_connect"@.
--- * Error: @err@ holds the stable tag from the dispatcher.
---
--- Unrelated fields are omitted from JSON via 'omitNothingFields'.
+{- | Per-app response row.
+
+Discriminated by which fields are set:
+
+* Android success: @nextVersionName@ + @nextVersionCode@ + @source = "play_console"@.
+* iOS success: @nextVersionNumber@ + @source = "app_store_connect"@.
+* Error: @err@ holds the stable tag from the dispatcher.
+
+Unrelated fields are omitted from JSON via 'omitNothingFields'.
+-}
 data VersionPreviewItem = VersionPreviewItem
     { appCatalogId :: Int32
     , nextVersionName :: Maybe Text

@@ -37,11 +37,12 @@ Two known limitations are documented inline:
 -}
 module Products.Autopilot.Mobile.Workflow (
     mobileBuildSpec,
+    tagConfirmTimedOut,
 ) where
 
 import Control.Exception (Exception, SomeException, fromException, throwIO, try)
-import qualified Control.Monad.Catch as MC
 import Control.Monad (when)
+import qualified Control.Monad.Catch as MC
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
@@ -65,7 +66,7 @@ import Data.Ord (Down (..))
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Time.Clock (addUTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Database.PostgreSQL.Simple (Only (..), query)
@@ -93,14 +94,15 @@ import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
-    isMBTerminal,
     isDebugBuildType,
+    isMBTerminal,
  )
 import Products.Autopilot.Mobile.Types.Storage (AppCatalogT (..))
 import Products.Autopilot.Mobile.Versioning (
     VersionResolution (..),
     resolveNextVersion,
  )
+import Products.Autopilot.RuntimeConfig (getMobileTagConfirmTimeoutMinutes)
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
     ReleaseTracker (..),
@@ -482,7 +484,8 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
     target <- case mobileTarget rs of
         Just t -> pure t
         Nothing -> abort "MobileBuildState missing at DispatchWorkflow stage"
-    let -- selected_apps is the comma-separated list of catalyst app NAMES
+    let
+        -- selected_apps is the comma-separated list of catalyst app NAMES
         -- (e.g. "NammaYatri,KeralaSavaari"), not surfaces. The workflow
         -- passes this to `catalyst -extract <platform>_prod --apps` which
         -- matches on the top-level keys of catalyst.yaml. Same shape on
@@ -823,6 +826,20 @@ We list refs at @refs\/tags\/{prefix}@ and pick the first one — the GHA
 workflow only pushes a single tag per build, so there's nothing to
 disambiguate. If no tag yet, return Waiting.
 -}
+
+{- | Pure predicate for the ConfirmTag wall-clock guard. Has the stage waited
+past @timeoutMin@ for the build's tag? Anchors on build-completion, falling back
+to build-start. If neither timestamp is set we can't measure elapsed time, so we
+report 'False' (keep polling) rather than fail spuriously.
+-}
+tagConfirmTimedOut :: UTCTime -> Maybe UTCTime -> Maybe UTCTime -> Int -> Bool
+tagConfirmTimedOut now mCompletedAt mStartedAt timeoutMin =
+    case mCompletedAt of
+        Just c -> overBudget c
+        Nothing -> maybe False overBudget mStartedAt
+  where
+    overBudget anchor = diffUTCTime now anchor > fromIntegral (timeoutMin * 60)
+
 execConfirmTag :: forall m. (StageM ReleaseState m) => m StageOutcome
 execConfirmTag = mobileStage "ConfirmTag" $ do
     rs <- gets id
@@ -864,12 +881,43 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                 Left e -> retry ("listTags failed: " <> e)
             case refs of
                 [] -> do
-                    logInfoIO $
-                        "[ConfirmTag] "
-                            <> releaseId rt
-                            <> " no tags yet for prefix="
-                            <> prefix
-                    pure StageWaiting
+                    -- Wall-clock guard (mirrors max_job_completion_hours for backend
+                    -- jobs): if the tag hasn't appeared within the budget since the
+                    -- build completed, fail rather than poll forever. Anchor on
+                    -- build-completed → build-started → now (last ⇒ no anchor, so we
+                    -- don't time out this tick).
+                    now <- liftIO getCurrentTime
+                    timeoutMin <- getMobileTagConfirmTimeoutMinutes
+                    if tagConfirmTimedOut now (mbBuildCompletedAt target) (mbBuildStartedAt target) timeoutMin
+                        then do
+                            modify $ \s ->
+                                s
+                                    { targetState =
+                                        Just $
+                                            MobileBuildState
+                                                ( applyMobileTarget s $ \mt ->
+                                                    mt{mbWfStatus = MBFailed "tag_timeout"}
+                                                )
+                                    }
+                            logEvent (releaseId rt) "STATUS_UPDATED" $
+                                object
+                                    [ "mb_wf_status" .= ("MBFailed: tag_timeout" :: Text)
+                                    , "reason"
+                                        .= ( "ConfirmTag exceeded "
+                                                <> T.pack (show timeoutMin)
+                                                <> "m waiting for tag (prefix="
+                                                <> prefix
+                                                <> ")"
+                                           )
+                                    ]
+                            abort "ConfirmTag: tag confirmation timed out"
+                        else do
+                            logInfoIO $
+                                "[ConfirmTag] "
+                                    <> releaseId rt
+                                    <> " no tags yet for prefix="
+                                    <> prefix
+                            pure StageWaiting
                 (r : _) -> do
                     let tagName = stripRefsTags r
                     modify $ \s ->
@@ -1035,10 +1083,11 @@ retry msg = liftIO (throwIO (MobileRetry msg))
 logInfoIO :: Text -> StateFlow ()
 logInfoIO = liftIO . logInfoG
 
--- | 'loadGhCreds' variant for post-dispatch polling stages. If the token
--- refresh fails (clock drift, transient 401, etc.) we retry on the next
--- tick instead of killing the release — the creds already worked for
--- dispatch, so the failure is transient.
+{- | 'loadGhCreds' variant for post-dispatch polling stages. If the token
+refresh fails (clock drift, transient 401, etc.) we retry on the next
+tick instead of killing the release — the creds already worked for
+dispatch, so the failure is transient.
+-}
 loadGhCredsSafe :: StateFlow GhAppCreds
 loadGhCredsSafe = do
     eCreds <- MC.try @_ @SomeException loadGhCreds

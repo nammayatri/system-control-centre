@@ -146,10 +146,11 @@ listAppsH :: AuthedPerson -> Flow [AppCatalogEntryResp]
 listAppsH _ap = do
     apps <- listAppCatalog
     builds <- fetchLatestBuildsPerApp
-    let buildMap = Map.fromList
-            [ ((lbrAppGroup b, lbrSurface b, lbrPlatform b, lbrBuildType b), toBuildResp b)
-            | b <- builds
-            ]
+    let buildMap =
+            Map.fromList
+                [ ((lbrAppGroup b, lbrSurface b, lbrPlatform b, lbrBuildType b), toBuildResp b)
+                | b <- builds
+                ]
     pure (map (toResp buildMap) apps)
 
 createAppH :: AuthedPerson -> NewAppReq -> Flow AppCatalogEntryResp

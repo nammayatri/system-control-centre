@@ -303,4 +303,10 @@ autopilotConfigs =
         MobileGroup
         "Master kill-switch for dispatching mobile release workflows to GitHub Actions. When off, releases can be drafted but not dispatched."
         (Just "autopilot")
+    , ConfigEntry
+        "mobile_tag_confirm_timeout_minutes"
+        (IntConfig 60)
+        MobileGroup
+        "Minutes the ConfirmTag stage waits for the build's Git tag before failing the release (tag_timeout → ABORTED). Release builds only."
+        (Just "autopilot")
     ]

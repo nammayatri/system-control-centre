@@ -43,7 +43,7 @@ module Products.Autopilot.Mobile.Handlers.Release (
     changelogPreviewH,
 ) where
 
-import Control.Monad (unless)
+import Control.Monad (unless, when)
 import Control.Monad.Catch (throwM)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..))
@@ -51,7 +51,7 @@ import Core.DB.Connection (runDB)
 import Core.Environment (Flow, withDb)
 import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericToJSON, object, (.=))
 import Data.Int (Int32)
-import Data.List (partition, sortOn)
+import Data.List (nub, partition, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -62,13 +62,14 @@ import Database.Beam
 import Products.Autopilot.Mobile.Github (BranchInfo (..), listBranches, searchBranches)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
 import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), CompareResult (..), compareRefs)
-import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), fetchLatestBuildsPerApp, findAppCatalogById, listEnabledAppCatalog)
+import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), fetchLatestBuildsForApp, findAppCatalogByIds, listAppCatalog, listEnabledAppCatalog)
 import Products.Autopilot.Mobile.Queries.Tracker (
+    ReleaseTrackerRow,
     appCatalogByKey,
     gitOwner,
     gitRepo,
-    insertMobileTracker,
     logEvent,
+    mkMobileTrackerRow,
  )
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
@@ -76,12 +77,12 @@ import Products.Autopilot.Mobile.Types (
     MobileBuildWFStatus (..),
     isDebugBuildType,
  )
-import Products.Autopilot.RuntimeConfig (getMobileBuildType)
 import Products.Autopilot.Mobile.Types.Storage (
     AppCatalog,
     AppCatalogT (..),
  )
-import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker)
+import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch)
+import Products.Autopilot.RuntimeConfig (getMobileBuildType)
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
     ReleaseTracker (..),
@@ -141,68 +142,96 @@ instance FromJSON CreateMobileReleasesResp
 
 -- ─── Create handler ───────────────────────────────────────────────
 
+{- | Draft N mobile release rows (one per selected app) under one
+@release_group_id@.
+
+Validate-before-write (mirrors the backend @createReleaseH@ guard chain): the
+request is fully checked — non-empty items, non-empty changelog, no duplicate
+@appCatalogId@, and every id exists — BEFORE any row is written. The N inserts
+then commit in a single transaction ('insertReleaseTrackerRowsBatch'), so a
+create is all-or-nothing: a bad request leaves zero rows, never a partial group.
+
+Note: version fields aren't validated here — for release builds the workflow's
+ResolveVersion stage resolves @version_name@/@version_code@ from the store
+(authoritative), and debug builds carry no version. The create-time values are
+preview suggestions only.
+-}
 createMobileReleasesH :: AuthedPerson -> CreateMobileReleasesReq -> Flow CreateMobileReleasesResp
 createMobileReleasesH ap CreateMobileReleasesReq{..} = do
-    case items of
-        [] -> throwM $ BadRequest "items must be non-empty"
-        _ -> pure ()
+    -- ── Validate everything up front (no partial writes) ──
+    when (null items) $ throwM $ BadRequest "items must be non-empty"
+    when (T.null (T.strip changeLog)) $ throwM $ BadRequest "changeLog must not be empty"
+    let aids = [a | CreateMobileReleasesItem{appCatalogId = a} <- items]
+    when (length (nub aids) /= length aids) $
+        throwM $
+            BadRequest "items contains duplicate appCatalogId"
+    apps <- findAppCatalogByIds aids
+    let appById = Map.fromList [(acId a, a) | a <- apps]
+        missing = [a | a <- aids, not (Map.member a appById)]
+    unless (null missing) $
+        throwM $
+            BadRequest ("unknown app_catalog_id(s): " <> T.intercalate ", " (map (T.pack . show) missing))
+    -- ── Build all rows, then insert atomically ──
     -- Build type is fixed per deployment env (master = debug, prod = release)
     -- via the mobile_build_type config flag — not chosen by the caller.
     buildType <- getMobileBuildType
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
-    summaries <- mapM (createOne ap groupId changeLog buildType sourceRef now) items
+    built <- mapM (buildRow ap appById groupId changeLog buildType sourceRef now) items
+    insertReleaseTrackerRowsBatch (map fst built)
     pure
         CreateMobileReleasesResp
             { releaseGroupId = groupId
-            , releases = summaries
+            , releases = map snd built
             }
 
--- | Look up the app, draft a tracker row, and return the summary.
-createOne ::
+{- | Build one tracker row + its response summary. The app is looked up from the
+pre-validated map ('createMobileReleasesH' has already proved every id exists),
+so this performs no DB read — only a fresh release-id mint.
+-}
+buildRow ::
     AuthedPerson ->
+    Map.Map Int32 AppCatalog ->
     Text ->
     Text ->
     Text ->
     Maybe Text ->
     UTCTime ->
     CreateMobileReleasesItem ->
-    Flow CreatedReleaseSummary
-createOne ap groupId changeLog_ buildType mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode} = do
-    mApp <- findAppCatalogById aid
-    case mApp of
-        Nothing ->
-            throwM $
-                BadRequest ("unknown app_catalog_id: " <> T.pack (show aid))
-        Just app_ -> do
-            rid <- liftIO (UUID.toText <$> UUID.nextRandom)
-            let ctx =
-                    MobileBuildContext
-                        { mbcVersionCode = mCode
-                        , mbcChangeLog = changeLog_
-                        , mbcBuildType = buildType
-                        , mbcReleaseGroupId = groupId
-                        , mbcMatrixJobName = acName app_ <> if isDebugBuildType buildType then "-Debug" else "-Release"
-                        , mbcOtaNamespace = Nothing
-                        , mbcTagPushed = Nothing
-                        }
-                target =
-                    MobileBuildTargetState
-                        { mbWfStatus = MBInit
-                        , mbContext = ctx
-                        , mbExternalRunId = Nothing
-                        , mbMatrixJobStatus = Nothing
-                        , mbBuildStartedAt = Nothing
-                        , mbBuildCompletedAt = Nothing
-                        , mbResolveAttempts = Nothing
-                        }
-            insertMobileTracker rid app_ target mVer mSourceRef (apEmail ap) now
-            pure
-                CreatedReleaseSummary
-                    { id = rid
-                    , appCatalogId = aid
-                    , status = "CREATED"
-                    }
+    Flow (ReleaseTrackerRow, CreatedReleaseSummary)
+buildRow ap appById groupId changeLog_ buildType mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode} = do
+    rid <- liftIO (UUID.toText <$> UUID.nextRandom)
+    -- safe: createMobileReleasesH validated that every id is present in appById
+    let app_ = appById Map.! aid
+        ctx =
+            MobileBuildContext
+                { mbcVersionCode = mCode
+                , mbcChangeLog = changeLog_
+                , mbcBuildType = buildType
+                , mbcReleaseGroupId = groupId
+                , mbcMatrixJobName = acName app_ <> if isDebugBuildType buildType then "-Debug" else "-Release"
+                , mbcOtaNamespace = Nothing
+                , mbcTagPushed = Nothing
+                }
+        target =
+            MobileBuildTargetState
+                { mbWfStatus = MBInit
+                , mbContext = ctx
+                , mbExternalRunId = Nothing
+                , mbMatrixJobStatus = Nothing
+                , mbBuildStartedAt = Nothing
+                , mbBuildCompletedAt = Nothing
+                , mbResolveAttempts = Nothing
+                }
+        row = mkMobileTrackerRow rid app_ target mVer mSourceRef (apEmail ap) now
+    pure
+        ( row
+        , CreatedReleaseSummary
+            { id = rid
+            , appCatalogId = aid
+            , status = "CREATED"
+            }
+        )
 
 -- ─── Dispatch: request / response types ───────────────────────────
 
@@ -256,7 +285,16 @@ dispatchMobileReleasesH _ap DispatchMobileReleasesReq{releaseIds = rids} = do
     case rids of
         [] -> throwM $ BadRequest "releaseIds must be non-empty"
         _ -> pure ()
-    loaded <- mapM loadAndValidate rids
+    -- Batch both lookups up front (was an N+1: findReleaseTracker +
+    -- loadAppCatalogFor per release). One tracker query + one catalog read,
+    -- then pure per-release validation against the maps.
+    trackerById <-
+        Map.fromList . map (\twt@(rt, _) -> (releaseId rt, twt))
+            <$> findReleaseTrackersByIds rids
+    acByKey <-
+        Map.fromList . map (\a -> ((acName a, acSurface a, acPlatform a), a))
+            <$> listAppCatalog
+    loaded <- mapM (validateForDispatch trackerById acByKey) rids
     -- Group by (github_repo, workflow_path, surface, platform). Each
     -- group maps to one workflow_dispatch — siblings in a group are
     -- tied to the same dispatch_id so the workflow can run them as one
@@ -272,19 +310,22 @@ type GroupKey = (Text, Text, Text, Text)
 groupKey :: AppCatalog -> GroupKey
 groupKey ac = (acGithubRepo ac, acWorkflowPath ac, acSurface ac, acPlatform ac)
 
-{- | Load a release row and verify it is in a state where dispatch is
-allowed: status=CREATED, is_approved=True, target state is MobileBuild.
-Throws 'BadRequest' (with the failing release id in the message) on any
-violation.
+{- | Verify a release is in a state where dispatch is allowed: status=CREATED,
+is_approved=True, target state is MobileBuild, and a matching @app_catalog@ row
+exists. Throws 'BadRequest' (with the failing release id) on any violation.
 
-The 'Maybe TargetState' is carried along so we can read the
-release_group_id out of the MobileBuild context when emitting events
-(the domain 'ReleaseTracker' record only surfaces the K8s context).
+Pure over pre-fetched maps (tracker-by-id, app-catalog-by-(name,surface,platform))
+— the dispatch handler batches both lookups, so this performs no DB read. The
+'Maybe TargetState' is carried along so 'logDispatchEvent' can read the
+release_group_id out of the MobileBuild context.
 -}
-loadAndValidate :: Text -> Flow (ReleaseTracker, AppCatalog, Maybe TargetState)
-loadAndValidate rid = do
-    mPair <- findReleaseTracker rid
-    case mPair of
+validateForDispatch ::
+    Map.Map Text TrackerWithTarget ->
+    Map.Map (Text, Text, Text) AppCatalog ->
+    Text ->
+    Flow (ReleaseTracker, AppCatalog, Maybe TargetState)
+validateForDispatch trackerById acByKey rid =
+    case Map.lookup rid trackerById of
         Nothing -> throwM $ BadRequest ("release not found: " <> rid)
         Just (rt, mTs) -> do
             case mTs of
@@ -303,41 +344,24 @@ loadAndValidate rid = do
                                 <> T.pack (show s)
                                 <> ")"
                             )
-            if not (RT.isApproved rt)
-                then
+            unless (RT.isApproved rt) $
+                throwM $
+                    BadRequest ("release " <> rid <> " is not approved; cannot dispatch")
+            case Map.lookup (appGroup rt, service rt, env rt) acByKey of
+                Just ac -> pure (rt, ac, mTs)
+                Nothing ->
                     throwM $
-                        BadRequest ("release " <> rid <> " is not approved; cannot dispatch")
-                else pure ()
-            ac <- loadAppCatalogFor rt rid
-            pure (rt, ac, mTs)
-
--- | Look up the AppCatalog row matching a tracker's (app_group, surface, platform).
-loadAppCatalogFor :: ReleaseTracker -> Text -> Flow AppCatalog
-loadAppCatalogFor rt rid = do
-    rows <- withDb $ \db ->
-        runDB db $
-            runSelectReturningList $
-                select $ do
-                    ac <- all_ (appCatalogs autopilotDb)
-                    guard_ (acName ac ==. val_ (appGroup rt))
-                    guard_ (acSurface ac ==. val_ (service rt))
-                    guard_ (acPlatform ac ==. val_ (env rt))
-                    pure ac
-    case rows of
-        (x : _) -> pure x
-        [] ->
-            throwM $
-                BadRequest
-                    ( "release "
-                        <> rid
-                        <> " has no matching app_catalog row for ("
-                        <> appGroup rt
-                        <> ", "
-                        <> service rt
-                        <> ", "
-                        <> env rt
-                        <> ")"
-                    )
+                        BadRequest
+                            ( "release "
+                                <> rid
+                                <> " has no matching app_catalog row for ("
+                                <> appGroup rt
+                                <> ", "
+                                <> service rt
+                                <> ", "
+                                <> env rt
+                                <> ")"
+                            )
 
 {- | Mint a dispatch_id, atomically tag every row in the group with that
 dispatch_id, and append a per-row DISPATCH_REQUESTED event. Returns a
@@ -455,7 +479,7 @@ changelogPreviewH _ap appName surface platform branch = do
     creds <- loadGhCreds
     let owner = gitOwner ac
         repo = gitRepo ac
-    builds <- fetchLatestBuildsPerApp
+    builds <- fetchLatestBuildsForApp appName surface platform
     let lastRelease = findLastReleaseBuild builds appName surface platform
     case lastRelease of
         Nothing ->

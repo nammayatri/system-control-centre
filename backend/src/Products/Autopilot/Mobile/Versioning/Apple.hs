@@ -333,9 +333,10 @@ parseEcP256PrivateKey pem = do
     mapLeft f (Left a) = Left (f a)
     mapLeft _ (Right c) = Right c
 
--- | Strip `-----BEGIN ... -----` / `-----END ... -----` lines and any
--- whitespace from a PEM blob, returning just the inner base64 body.
--- Tolerant of CRLF and trailing whitespace.
+{- | Strip `-----BEGIN ... -----` / `-----END ... -----` lines and any
+whitespace from a PEM blob, returning just the inner base64 body.
+Tolerant of CRLF and trailing whitespace.
+-}
 stripPemHeaders :: BS.ByteString -> Either String BS.ByteString
 stripPemHeaders raw =
     let ls = BC.split '\n' raw
@@ -381,8 +382,9 @@ extractScalar asn1 = do
     mapLeft f (Left a) = Left (f a)
     mapLeft _ (Right c) = Right c
 
--- | Walk the outer PrivateKeyInfo SEQUENCE; return the raw OCTET STRING
--- bytes that wrap the ECPrivateKey.
+{- | Walk the outer PrivateKeyInfo SEQUENCE; return the raw OCTET STRING
+bytes that wrap the ECPrivateKey.
+-}
 findInnerOctetString :: [ASN1] -> Either String BS.ByteString
 findInnerOctetString =
     -- The PKCS#8 OCTET STRING appears as an 'Other'-class primitive in
@@ -414,10 +416,11 @@ findInnerOctetString =
         Left ("expected OCTET STRING after AlgorithmIdentifier, got: " <> take 80 (show x))
     takeOctet [] = Left "PKCS#8 PrivateKey field missing"
 
--- | Inside the ECPrivateKey SEQUENCE, the scalar is the second element
--- (after `INTEGER 1` version), encoded as an OCTET STRING. Convert its
--- raw bytes (big-endian) to an Integer. We also accept the 'Other'
--- primitive form for the same reason as in 'findInnerOctetString'.
+{- | Inside the ECPrivateKey SEQUENCE, the scalar is the second element
+(after `INTEGER 1` version), encoded as an OCTET STRING. Convert its
+raw bytes (big-endian) to an Integer. We also accept the 'Other'
+primitive form for the same reason as in 'findInnerOctetString'.
+-}
 findScalarInECPrivateKey :: [ASN1] -> Either String Integer
 findScalarInECPrivateKey =
     \case
@@ -505,9 +508,10 @@ newtype AppsListResp = AppsListResp [AppRef]
 instance FromJSON AppsListResp where
     parseJSON = withObject "AppsListResp" $ \o -> AppsListResp <$> o .: "data"
 
--- | One element of @included[]@ from a /v1/builds response with
--- @include=preReleaseVersion@. We only care about
--- @type == "preReleaseVersions"@ and its @attributes.version@.
+{- | One element of @included[]@ from a /v1/builds response with
+@include=preReleaseVersion@. We only care about
+@type == "preReleaseVersions"@ and its @attributes.version@.
+-}
 data IncludedItem = IncludedItem
     { iiType :: Text
     , iiAttrs :: Maybe IncludedAttrs

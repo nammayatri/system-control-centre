@@ -8,6 +8,12 @@
 | **Scope (MVP)** | ✅ Customer Android — `fastlane-android.yaml`, 10 apps. **(shipped on `feat/mobile-releases`)** |
 | **Scope (Phase 2)** | 🆕 iOS surfaces (customer + provider) — `fastlane.yaml` (consumer) / `provider-prod-ios-gen.yaml` (driver). New `Mobile/Versioning/Apple.hs` for ASC version resolution. No new destinations, no new statuses, no new columns — strict Android-flow mirror. |
 
+> **⚠️ MVP-era doc.** This describes the original Android MVP. The flow has since
+> evolved — notably the `MobileDestination` ADT was replaced by an env-driven
+> **build type**, and an edge-case audit hardened create / store-sync / ConfirmTag
+> / latest-build queries. Current design: `2026-05-18-mobile-releases-post-mvp-design.md`
+> (esp. §7 build types, §15 hardening — which records the full edge-case audit).
+
 ## 1. Problem
 
 The System Control Centre (SCC) today orchestrates backend microservice deploys onto Kubernetes via the Autopilot product: tracker rows, RBAC, immutable audit log, resumable workflow engine, runtime feature flags, Slack notifications.

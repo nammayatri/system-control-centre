@@ -4,6 +4,12 @@
 
 **Goal:** Add a `MobileBuild` release category to the existing `autopilot` product so React Native app releases (consumer-android only for MVP) can be created, approved, dispatched to GitHub Actions, and tracked alongside backend releases through the same lifecycle, RBAC, audit log, and UI.
 
+> **⚠️ MVP-era plan.** Steps here describe the original build. Several paths named
+> below (`createOne`, `loadAndValidate`, `ConfirmTag`, `insertMobileTracker`) were
+> later reworked — build type replaced `MobileDestination`, and an edge-case audit
+> hardened create / store-sync / ConfirmTag / latest-build queries. See
+> `2026-05-18-mobile-releases-post-mvp-design.md` §15 (records the full audit).
+
 **Architecture:** Extend `release_tracker` with two nullable columns + a new `app_catalog` auxiliary table. Add `MobileBuild` to `ReleaseCategory` ADT and a new `MobileBuildState` variant to `TargetState`. New module tree under `Products/Autopilot/Mobile/` for category-specific code: GitHub App client, Play Console version client, workflow spec (7 stages reusing `Core/Workflow/Engine.hs`), HTTP handlers. Frontend: extend `releases/` product with new pages; two `PRODUCT_REGISTRY` entries (Backend / Mobile) sharing the `autopilot` slug to render two dashboard tiles.
 
 **Tech Stack:** Haskell (Servant + Beam ORM + ReaderT Flow monad), PostgreSQL, React + TypeScript + Vite, Tailwind UI components. Tests use hand-rolled assertions in `backend/test/Main.hs` (no hspec/tasty); integration tests via `scripts/test-api.sh`.

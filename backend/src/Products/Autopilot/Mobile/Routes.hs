@@ -20,11 +20,13 @@ import Products.Autopilot.Mobile.Handlers.AppCatalog
 import Products.Autopilot.Mobile.Handlers.Live
 import Products.Autopilot.Mobile.Handlers.Release
 import Products.Autopilot.Mobile.Handlers.Revert (
+    RevertDiffResp,
     RevertDraft,
     RevertReq,
     RevertResp,
     VerifyCommitResp,
     mobileRevertCreateH,
+    mobileRevertDiffH,
     mobileRevertDraftH,
     verifyCommitH,
  )
@@ -103,6 +105,13 @@ type MobileAPI =
             :> Protected 'AP_RELEASE_REVERT
             :> QueryParam' '[Required, Strict] "sha" Text
             :> Get '[JSON] VerifyCommitResp
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "mobile-revert"
+            :> "diff"
+            :> Protected 'AP_RELEASE_REVERT
+            :> QueryParam' '[Required, Strict] "source" Text
+            :> Get '[JSON] RevertDiffResp
 
 mobileServer :: ServerT MobileAPI Flow
 mobileServer =
@@ -118,3 +127,4 @@ mobileServer =
         :<|> (\rid ap -> mobileRevertDraftH ap rid)
         :<|> (\rid ap req -> mobileRevertCreateH ap rid req)
         :<|> (\rid ap sha -> verifyCommitH ap rid sha)
+        :<|> (\rid ap source -> mobileRevertDiffH ap rid source)
