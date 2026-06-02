@@ -56,7 +56,7 @@ import Products.Autopilot.Mobile.RevertResolver (
  )
 import Products.Autopilot.Mobile.Types
 import Products.Autopilot.Mobile.Versioning (TrackInfo (..), computeNextVersion)
-import Products.Autopilot.Mobile.Workflow (tagConfirmTimedOut)
+import Products.Autopilot.Mobile.Workflow (selectBuildTag, tagConfirmTimedOut)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
 import qualified Products.Autopilot.Types.Target
@@ -133,6 +133,7 @@ main = do
     section "[28] MobileBuildContext legacy destination fallback" testMobileBuildContextDestinationFallback
     section "[29] ConfirmTag wall-clock timeout predicate" testTagConfirmTimedOut
     section "[30] Rollback target resolver (version-order, not time-order)" testResolveRollback
+    section "[31] ConfirmTag selects the build's exact tag (not lexical-first)" testSelectBuildTag
 
     putStrLn ""
     putStrLn "==========================================="
@@ -1078,6 +1079,43 @@ testResolveRollback = do
     case resolveRollback lone [] of
         NoPriorRelease -> pure ()
         other -> assertBool ("expected NoPriorRelease, got " <> show other) False
+
+{- | ConfirmTag must bind the tag THIS build pushed, not the lexically-first ref
+under the broad app prefix. The fastlane workflow tags deterministically as
+@{prefix}{version}+{code}@ and SCC supplies that version/code on dispatch, so we
+match it exactly. GitHub returns matching-refs in ascending order, so "first"
+would be the oldest version — the bug this guards against.
+-}
+testSelectBuildTag :: IO ()
+testSelectBuildTag = do
+    putStrLn "ConfirmTag: exact tag selection"
+    let prefix = "odishayatri/prod/android/v"
+        ref n = "refs/tags/" <> n
+        -- Two versions share the prefix; GitHub returns them ascending (oldest first).
+        refs =
+            [ ref "odishayatri/prod/android/v3.3.15+421"
+            , ref "odishayatri/prod/android/v3.3.17+460"
+            ]
+    assertEqual
+        "picks this build's v3.3.17+460, not lexical-first v3.3.15+421"
+        (Just "odishayatri/prod/android/v3.3.17+460")
+        (selectBuildTag prefix "3.3.17" (Just 460) refs)
+    assertEqual
+        "the lexical-first tag is NOT chosen for a different version"
+        (Just "odishayatri/prod/android/v3.3.15+421")
+        (selectBuildTag prefix "3.3.15" (Just 421) refs)
+    assertEqual
+        "exact tag absent (code mismatch) -> Nothing (caller waits/timeouts)"
+        Nothing
+        (selectBuildTag prefix "3.3.17" (Just 999) refs)
+    assertEqual
+        "empty ref list -> Nothing"
+        Nothing
+        (selectBuildTag prefix "3.3.17" (Just 460) [])
+    assertEqual
+        "no version code (iOS-style) -> matches bare v{version}"
+        (Just "odishayatri/prod/ios/v3.3.17")
+        (selectBuildTag "odishayatri/prod/ios/v" "3.3.17" Nothing [ref "odishayatri/prod/ios/v3.3.17"])
 
 -- ============================================================================
 -- [20] Mobile Version Bump (mirrors fastlane-android.yaml lines 124-189)

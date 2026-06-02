@@ -38,6 +38,7 @@ Two known limitations are documented inline:
 module Products.Autopilot.Mobile.Workflow (
     mobileBuildSpec,
     tagConfirmTimedOut,
+    selectBuildTag,
 ) where
 
 import Control.Exception (Exception, SomeException, fromException, throwIO, try)
@@ -60,6 +61,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum)
+import Data.Int (Int32)
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe)
 import Data.Ord (Down (..))
@@ -812,20 +814,41 @@ execPollMatrixJobs = mobileStage "PollMatrixJobs" $ do
                     pure StageWaiting
                 _ -> pure StageWaiting
 
-{- | Stage 6: List refs/tags whose name begins with the per-app prefix
-and pick the first match.
+{- | Stage 6: confirm the annotated tag THIS build pushed.
 
-Tag prefix shape (matches the existing @nammayatri/ny-react-native@
-workflows): @${app-segment}/prod/${platform}/v...@ where:
+The @ny-react-native@ fastlane workflows tag deterministically (see
+@fastlane-android.yaml@ / @fastlane.yaml@ "Create and push annotated release
+tag"):
 
-* @app-segment@ is @AppCatalog.name@ normalised (lowercase, non-alnum
-  → @-@). Example: @NammaYatri@ → @nammayatri@.
-* @platform@ is @AppCatalog.platform@ ("android" / "ios").
+> TAG = {normalize(app)}/prod/{platform}/v{version_name}+{version_code}
 
-We list refs at @refs\/tags\/{prefix}@ and pick the first one — the GHA
-workflow only pushes a single tag per build, so there's nothing to
-disambiguate. If no tag yet, return Waiting.
+and SCC's DispatchWorkflow passes @version_name@ + @version_code@ as inputs, so
+the workflow's auto-detect is skipped and it tags with /exactly/ the version SCC
+resolved. The tag is therefore fully reconstructible from the release row.
+
+We must select that exact tag — NOT "the first ref under a broad prefix". GitHub's
+@matching-refs@ API returns refs in ascending lexicographic order, so the first
+is the /oldest/ version (e.g. @v3.3.15+421@ when this build pushed @v3.3.17+460@).
+Once a repo has more than one version under the prefix, "first" is wrong. See
+'selectBuildTag'.
 -}
+
+{- | Select the tag this build pushed from the refs returned by @listTags@.
+
+Matches the build's resolved identity exactly:
+@{prefix}{version_name}+{version_code}@ (the @+{code}@ is omitted only when the
+release has no version code). Returns 'Nothing' when that exact tag isn't present
+yet, so the caller falls through to the wall-clock wait/timeout — i.e. "the build
+hasn't pushed it yet", never "use some other tag".
+
+@prefix@ already ends in @.../v@ (built in 'execConfirmTag'); @refs@ are full
+@refs\/tags\/...@ strings.
+-}
+selectBuildTag :: Text -> Text -> Maybe Int32 -> [Text] -> Maybe Text
+selectBuildTag prefix version mCode refs =
+    let names = map stripRefsTags refs
+        expected = prefix <> version <> maybe "" (\c -> "+" <> T.pack (show c)) mCode
+     in if expected `elem` names then Just expected else Nothing
 
 {- | Pure predicate for the ConfirmTag wall-clock guard. Has the stage waited
 past @timeoutMin@ for the build's tag? Anchors on build-completion, falling back
@@ -879,13 +902,19 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
             refs <- case res of
                 Right xs -> pure xs
                 Left e -> retry ("listTags failed: " <> e)
-            case refs of
-                [] -> do
-                    -- Wall-clock guard (mirrors max_job_completion_hours for backend
-                    -- jobs): if the tag hasn't appeared within the budget since the
-                    -- build completed, fail rather than poll forever. Anchor on
-                    -- build-completed → build-started → now (last ⇒ no anchor, so we
-                    -- don't time out this tick).
+            -- The build tags deterministically as {prefix}{version}+{code}, and SCC
+            -- supplied that version/code on dispatch — so confirm THAT exact tag,
+            -- never the lexically-first ref under the broad prefix.
+            let version = newVersion rt
+                mCode = mbcVersionCode (mbContext target)
+                expectedTag = prefix <> version <> maybe "" (\c -> "+" <> T.pack (show c)) mCode
+            case selectBuildTag prefix version mCode refs of
+                Nothing -> do
+                    -- Tag not pushed yet. Wall-clock guard (mirrors
+                    -- max_job_completion_hours for backend jobs): if the expected tag
+                    -- hasn't appeared within the budget since the build completed, fail
+                    -- rather than poll forever. Anchor on build-completed → build-started
+                    -- → now (last ⇒ no anchor, so we don't time out this tick).
                     now <- liftIO getCurrentTime
                     timeoutMin <- getMobileTagConfirmTimeoutMinutes
                     if tagConfirmTimedOut now (mbBuildCompletedAt target) (mbBuildStartedAt target) timeoutMin
@@ -905,8 +934,8 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                                     , "reason"
                                         .= ( "ConfirmTag exceeded "
                                                 <> T.pack (show timeoutMin)
-                                                <> "m waiting for tag (prefix="
-                                                <> prefix
+                                                <> "m waiting for tag (expected="
+                                                <> expectedTag
                                                 <> ")"
                                            )
                                     ]
@@ -915,11 +944,10 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                             logInfoIO $
                                 "[ConfirmTag] "
                                     <> releaseId rt
-                                    <> " no tags yet for prefix="
-                                    <> prefix
+                                    <> " expected tag not present yet: "
+                                    <> expectedTag
                             pure StageWaiting
-                (r : _) -> do
-                    let tagName = stripRefsTags r
+                Just tagName -> do
                     modify $ \s ->
                         s
                             { targetState =
@@ -933,7 +961,7 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                                         )
                             }
                     logEvent (releaseId rt) "TAG_OBSERVED" $
-                        object ["tag" .= tagName, "ref" .= r, "prefix" .= prefix]
+                        object ["tag" .= tagName, "expected" .= expectedTag, "prefix" .= prefix]
                     logInfoIO $
                         "[ConfirmTag] "
                             <> releaseId rt
@@ -1173,11 +1201,20 @@ Rules (matching the @nammayatri/ny-react-native@ workflow):
 Example: @"NammaYatri"@ → @"nammayatri"@; @"Beckn Driver"@ →
 @"beckn-driver"@.
 -}
+
+{- | Normalise an app name to its tag segment. Must match the shell
+@normalize_segment@ in the fastlane workflows
+(@sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//'@): lowercase, keep
+@a-z0-9._-@, replace any other run with a single @-@, trim leading\/trailing
+@-@. Preserving @. _ -@ is what keeps SCC's expected tag equal to the tag the
+build actually pushes for app names that contain those characters.
+-}
 normalizeAppSegment :: Text -> Text
 normalizeAppSegment = collapseDashes . T.map step . T.toLower
   where
     step c
         | isAlphaNum c = c
+        | c == '.' || c == '_' || c == '-' = c
         | otherwise = '-'
     collapseDashes :: Text -> Text
     collapseDashes t =
