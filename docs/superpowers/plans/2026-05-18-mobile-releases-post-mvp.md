@@ -1219,6 +1219,14 @@ ON CONFLICT DO NOTHING;
 
 ## Phase 5 — Store-Sync Revert Integration
 
+> **Superseded 2026-06-02 — store-sync "re-assert" removed.** This phase built a
+> separate store-sync revert that re-pushed the *latest* SCC build (possibly a
+> *higher* version). That's not a revert. Store-sync rows now go through the same
+> version-ordered rollback (Phase 1 Task 1.7 / design §1): target must be a
+> strictly-lower good version, else the revert is refused. `findPreviousGoodSCCRelease`,
+> `firstNonDebug`, and `draftForStoreSyncRevert` were deleted; both draft and create
+> call `resolveRollback`. The Task 5.1/5.2 steps below are kept for history.
+
 ### Task 5.1: SCC-only previous-good query
 
 **Files:**
@@ -1788,14 +1796,14 @@ Both Create form and Revert page share the same commit row style:
 |--------|---------|
 | `Mobile/Github/Compare.hs` | GitHub Compare API client — `compareRefs`, `CommitInfo`, `CompareResult` |
 | `Mobile/Changelog.hs` | Revert changelog renderer (`renderRevertChangelog`) + `bumpPatch` |
-| `Mobile/Handlers/Revert.hs` | Draft + create + verify-commit + live-diff (`mobileRevertDiffH`) handlers; version-ordered rollback (B6), store-sync re-assert branch |
+| `Mobile/Handlers/Revert.hs` | Draft + create + verify-commit + live-diff (`mobileRevertDiffH`) handlers; version-ordered rollback (B6); store-sync rows revert via the same resolver (re-assert removed) |
 | `Mobile/StoreSync.hs` | Periodic store sync background job — `storeSyncLoop`, `runStoreSync` |
 | `Mobile/Github.hs` | `listBranches`, `searchBranches`, `createGitRef`, `getCommitInfo`, `CommitDetail` |
 | `Mobile/Workflow.hs` | `source_ref` dispatch, `commit_sha` capture, debug stage skipping, `markReleaseRevertedBy` in finalize |
 | `Mobile/Handlers/Release.hs` | `sourceRef` on create, `listBranchesH` with search, matrix job name suffix, `changelogPreviewH` + `ChangelogPreviewResp` |
 | `Mobile/Handlers/AppCatalog.hs` | Latest build enrichment |
 | `Mobile/RevertResolver.hs` | Pure rollback resolver (B6) — `seqKey`/`compareSeq`/`parseSemver`/`resolveRollback`, target-vs-source split |
-| `Mobile/Queries/Tracker.hs` | `fetchRevertCandidates` (B6, replaced `findPreviousGoodMobileRelease`), `findPreviousGoodSCCRelease`, `firstNonDebug`, `isReverted`, `markReleaseRevertedBy` |
+| `Mobile/Queries/Tracker.hs` | `fetchRevertCandidates` (B6, replaced `findPreviousGoodMobileRelease`/`findPreviousGoodSCCRelease`), `isReverted`, `markReleaseRevertedBy` |
 | `Mobile/Queries/AppCatalog.hs` | `fetchLatestBuildsPerApp` — raw SQL with `ROW_NUMBER() OVER (PARTITION BY ...)` |
 | `RuntimeConfig.hs` | `isStoreSyncEnabled`, `getStoreSyncIntervalMinutes` |
 

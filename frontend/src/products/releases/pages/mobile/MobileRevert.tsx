@@ -323,8 +323,9 @@ const MobileRevert: React.FC = () => {
             <div className="flex-1">
               <div className="font-semibold text-amber-900">Reverting a store-synced release</div>
               <p className="mt-1 text-amber-800 text-xs leading-relaxed">
-                This release was imported from the store API (not dispatched through SCC). The
-                revert will build from the most recent SCC-dispatched release's tag.
+                This release was imported from the store API (not dispatched through SCC). It is
+                rolled back to the highest good version <strong>below</strong> v{draft.rdBadVersion}
+                {' '}(v{draft.rdPrevGoodVersion}), the same as any other release.
                 {draft.rdCommits.length === 0
                   ? ' No commit diff is available since the store release has no associated Git tag.'
                   : ` ${draft.rdCommitCount} commits detected between the two releases.`}

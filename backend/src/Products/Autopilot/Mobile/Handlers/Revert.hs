@@ -75,7 +75,6 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
     fetchRevertCandidates,
     findMobileReleaseById,
-    findPreviousGoodSCCRelease,
     gitOwner,
     gitRepo,
     insertMobileRevertTracker,
@@ -350,11 +349,11 @@ mobileRevertDraftH _ap releaseId' = do
         storeVersion = fmap lbrVersion mStoreBuild
         storeVersionCode = mStoreBuild >>= lbrVersionCode
 
-    let isStoreSync = rtMode bad == Just "STORE_SYNC"
-
-    if isStoreSync
-        then draftForStoreSyncRevert bad badState storeVersion storeVersionCode
-        else draftForSCCRevert bad badState storeVersion storeVersionCode
+    -- Revert ALWAYS rolls back to a strictly-lower good version (resolved by
+    -- version order). Store-sync rows are reverted the same way — there is no
+    -- "re-assert the latest build" path: if nothing below the bad version exists,
+    -- the resolver returns NoPriorRelease and the revert is refused.
+    draftForSCCRevert bad badState storeVersion storeVersionCode
 
 draftForSCCRevert ::
     ReleaseTrackerT Identity ->
@@ -372,8 +371,11 @@ draftForSCCRevert bad badState storeVersion storeVersionCode = do
             NoPriorRelease ->
                 throwM $
                     BadRequest
-                        "No previous release found for this app — there is nothing to roll back to. \
-                        \Create a new release (optionally from a specific commit) instead."
+                        ( "No good release below v"
+                            <> rtNewVersion bad
+                            <> " for this app — revert needs a lower version to roll back to. "
+                            <> "Create a new release (optionally from a specific commit) instead."
+                        )
 
     let badCode = badState >>= mbcVersionCode . mbContext
         badTagFromState = badState >>= mbcTagPushed . mbContext
@@ -439,7 +441,7 @@ draftForSCCRevert bad badState storeVersion storeVersionCode = do
             , rdCommits = map toRevertCommit commits
             , rdCommitCount = length commits
             , rdPlatform = rtEnv bad
-            , rdIsStoreSyncRevert = False
+            , rdIsStoreSyncRevert = rtMode bad == Just "STORE_SYNC"
             , rdStoreVersion = storeVersion
             , rdStoreVersionCode = storeVersionCode
             , rdTargetReleaseId = rcId target
@@ -459,92 +461,6 @@ mkBadCand bad badState =
         , rcCommitSha = rtCommitSha bad
         , rcCreatedAt = rtCreatedAt bad
         }
-
-draftForStoreSyncRevert ::
-    ReleaseTrackerT Identity ->
-    Maybe MobileBuildTargetState ->
-    Maybe Text ->
-    Maybe Int32 ->
-    Flow RevertDraft
-draftForStoreSyncRevert bad badState storeVersion storeVersionCode = do
-    mPrev <-
-        findPreviousGoodSCCRelease
-            (rtAppGroup bad)
-            (rtService bad)
-            (rtEnv bad)
-    (prev, prevState) <- case mPrev of
-        Just x -> pure x
-        Nothing ->
-            throwM $
-                BadRequest
-                    "No previous SCC-dispatched release found for this app — cannot revert a store-synced release without a prior build to dispatch from."
-
-    let prevTagFromState = prevState >>= mbcTagPushed . mbContext
-    prevTag <- case prevTagFromState of
-        Just t | not (T.null t) -> pure t
-        _ -> throwM $ BadRequest "Previous SCC release has no pushed tag — cannot revert."
-
-    let badCode = badState >>= mbcVersionCode . mbContext
-        badTagFromState = badState >>= mbcTagPushed . mbContext
-        effectiveCode = maxCode badCode storeVersionCode
-        suggestedCode = fmap (+ 1) effectiveCode
-        suggestedVer = bumpPatch (rtNewVersion bad)
-        prevCommitShort = shortSha (fromMaybe "" (rtCommitSha prev))
-
-    (commits, hasCommitDiff) <- case badTagFromState of
-        Just badTag | not (T.null badTag) -> do
-            ac <- appCatalogForRowRaw bad
-            creds <- loadGhCreds
-            compareRes <- compareRefs creds (gitOwner ac) (gitRepo ac) prevTag badTag
-            case compareRes of
-                Right cr -> pure (crCommits cr, True)
-                Left _ -> pure ([], False)
-        _ -> pure ([], False)
-
-    let changelog =
-            if hasCommitDiff
-                then
-                    renderRevertChangelog
-                        (rtNewVersion bad)
-                        (rtNewVersion prev)
-                        prevCommitShort
-                        suggestedVer
-                        (fmap fromIntegral suggestedCode)
-                        commits
-                else
-                    "Revert store version v"
-                        <> rtNewVersion bad
-                        <> " — rebuilding from SCC release v"
-                        <> rtNewVersion prev
-                        <> " ("
-                        <> prevCommitShort
-                        <> ")"
-
-    pure
-        RevertDraft
-            { rdBadReleaseId = rtId bad
-            , rdBadVersion = rtNewVersion bad
-            , rdBadVersionCode = badCode
-            , rdPrevGoodReleaseId = rtId prev
-            , rdPrevGoodVersion = rtNewVersion prev
-            , rdPrevGoodShortSha = prevCommitShort
-            , rdPrevGoodTag = prevTag
-            , rdSuggestedVersion = suggestedVer
-            , rdSuggestedCode = suggestedCode
-            , rdChangelog = changelog
-            , rdCommits = map toRevertCommit commits
-            , rdCommitCount = length commits
-            , rdPlatform = rtEnv bad
-            , rdIsStoreSyncRevert = True
-            , rdStoreVersion = storeVersion
-            , rdStoreVersionCode = storeVersionCode
-            , -- Store-sync re-assert rebuilds the previous SCC release directly,
-              -- so target == source and the build is always tag-backed.
-              rdTargetReleaseId = rtId prev
-            , rdTargetVersion = rtNewVersion prev
-            , rdBuildSourceKind = "tag"
-            , rdWarnings = []
-            }
 
 maxCode :: Maybe Int32 -> Maybe Int32 -> Maybe Int32
 maxCode Nothing Nothing = Nothing
@@ -575,31 +491,25 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
     when' (isReverted bad) $
         BadRequest "This release has already been reverted. Create a new release instead."
 
-    let isStoreSync = rtMode bad == Just "STORE_SYNC"
-
-    -- Resolve the build source. Store-sync re-asserts the latest SCC build;
-    -- a normal rollback resolves by VERSION order (not creation time) and may
-    -- need an operator-supplied commit when the target version was never
-    -- built by SCC. We re-resolve here rather than trust the draft.
+    -- Resolve the build source by VERSION order (not creation time). The target
+    -- is the highest good version STRICTLY BELOW the bad release — store-sync
+    -- rows are reverted the same way (no "re-assert the latest build" path). If
+    -- nothing lower exists, the revert is refused. May need an operator-supplied
+    -- commit when the target version was never built by SCC. Re-resolved here
+    -- rather than trusting the draft.
+    cands <- fetchRevertCandidates (rtAppGroup bad) (rtService bad) (rtEnv bad) (rtId bad)
     (prevId, prevTag, manualNeeded) <-
-        if isStoreSync
-            then do
-                mPrev <- findPreviousGoodSCCRelease (rtAppGroup bad) (rtService bad) (rtEnv bad)
-                (prev, prevState) <- case mPrev of
-                    Just x -> pure x
-                    Nothing -> throwM $ BadRequest "No previous SCC-dispatched release found"
-                case prevState >>= mbcTagPushed . mbContext of
-                    Just t | not (T.null t) -> pure (rtId prev, t, False)
-                    _ -> throwM $ BadRequest "Previous SCC release has no pushed tag"
-            else do
-                cands <- fetchRevertCandidates (rtAppGroup bad) (rtService bad) (rtEnv bad) (rtId bad)
-                case resolveRollback (mkBadCand bad badState) cands of
-                    Rollback _ s -> pure (rcId s, fromMaybe "" (rcTag s), False)
-                    RebuildLower _ s -> pure (rcId s, fromMaybe "" (rcTag s), False)
-                    NeedsManualSource t -> pure (rcId t, "", True)
-                    NoPriorRelease ->
-                        throwM $
-                            BadRequest "No previous release found for this app — there is nothing to roll back to."
+        case resolveRollback (mkBadCand bad badState) cands of
+            Rollback _ s -> pure (rcId s, fromMaybe "" (rcTag s), False)
+            RebuildLower _ s -> pure (rcId s, fromMaybe "" (rcTag s), False)
+            NeedsManualSource t -> pure (rcId t, "", True)
+            NoPriorRelease ->
+                throwM $
+                    BadRequest
+                        ( "No good release below v"
+                            <> rtNewVersion bad
+                            <> " for this app — revert needs a lower version to roll back to."
+                        )
 
     -- When the rollback target has no SCC artifact, the operator MUST supply
     -- a source commit to rebuild from (resolved into sourceRefStr below).
@@ -699,7 +609,7 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
             , "new_version_code" .= rrNewVersionCode
             , "source_ref" .= sourceRefStr
             , "source_commit" .= rrSourceCommit
-            , "is_store_sync_revert" .= isStoreSync
+            , "is_store_sync_revert" .= (rtMode bad == Just "STORE_SYNC")
             ]
         )
 

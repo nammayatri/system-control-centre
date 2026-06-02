@@ -26,7 +26,6 @@ module Products.Autopilot.Mobile.Queries.Tracker (
     mkMobileTrackerRow,
     -- Revert helpers
     fetchRevertCandidates,
-    findPreviousGoodSCCRelease,
     findMobileReleaseById,
     parseMobileTargetState,
     insertMobileRevertTracker,
@@ -511,38 +510,6 @@ fetchRevertCandidates appGroup' service' env' excludeId = withDb $ \db -> do
                                 , rcCommitSha = rtCommitSha row
                                 , rcCreatedAt = rtCreatedAt row
                                 }
-
-findPreviousGoodSCCRelease ::
-    (MonadFlow m) =>
-    Text ->
-    Text ->
-    Text ->
-    m (Maybe (ReleaseTrackerRow, Maybe MobileBuildTargetState))
-findPreviousGoodSCCRelease appGroup' service' env' = withDb $ \db -> do
-    rows <-
-        runDB db $
-            runSelectReturningList $
-                select $
-                    limit_ 20 $
-                        orderBy_ (desc_ . rtCreatedAt) $ do
-                            rt <- all_ (releaseTrackers autopilotDb)
-                            guard_ (rtCategory rt ==. val_ "MobileBuild")
-                            guard_ (rtAppGroup rt ==. val_ appGroup')
-                            guard_ (rtService rt ==. val_ service')
-                            guard_ (rtEnv rt ==. val_ env')
-                            guard_ (rtStatus rt ==. val_ "COMPLETED")
-                            guard_ (rtMode rt /=. val_ (Just "STORE_SYNC"))
-                            pure rt
-    pure (firstNonDebug rows)
-
-firstNonDebug :: [ReleaseTrackerRow] -> Maybe (ReleaseTrackerRow, Maybe MobileBuildTargetState)
-firstNonDebug [] = Nothing
-firstNonDebug (row : rest)
-    | isReverted row = firstNonDebug rest
-    | otherwise =
-        case parseMobileTargetState (rtTargetState row) of
-            Just st | isDebugBuildType (mbcBuildType (mbContext st)) -> firstNonDebug rest
-            parsed -> Just (row, parsed)
 
 isReverted :: ReleaseTrackerRow -> Bool
 isReverted row = case rtMetadata row of
