@@ -5,7 +5,7 @@ import { PRODUCT_REGISTRY } from '../../products/registry';
 import { motion } from 'framer-motion';
 import {
   Rocket, FileText, Settings, Shield, LogOut, Package,
-  ChevronRight, Globe, Layers,
+  ChevronRight, Globe, Layers, Server, Smartphone,
 } from 'lucide-react';
 
 const iconMap: Record<string, React.ReactNode> = {
@@ -15,6 +15,8 @@ const iconMap: Record<string, React.ReactNode> = {
   Package: <Package className="w-6 h-6" />,
   Globe: <Globe className="w-6 h-6" />,
   Layers: <Layers className="w-6 h-6" />,
+  Server: <Server className="w-6 h-6" />,
+  Smartphone: <Smartphone className="w-6 h-6" />,
 };
 
 export default function LauncherPage() {

@@ -225,6 +225,11 @@ data ReleaseTracker = ReleaseTracker
     , envOverrideData :: Maybe Text
     , slackThreadTs :: Maybe Text
     , releaseContext :: Maybe Value
+    , sourceRef :: Maybe Text
+    , commitSha :: Maybe Text
+    -- ^ SHA captured from the GH run's @head_sha@ when ResolveRunId
+    -- binds the external_run_id. @Nothing@ until the run resolves.
+    , revertsReleaseId :: Maybe Text
     }
     deriving (Eq, Show, Generic)
 

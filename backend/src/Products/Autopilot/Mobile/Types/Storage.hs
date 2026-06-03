@@ -28,6 +28,7 @@ data AppCatalogT f = AppCatalog
     , acWorkflowPath :: Columnar f Text
     , acPackageName :: Columnar f (Maybe Text)
     , acDisplayLabel :: Columnar f (Maybe Text)
+    , acFirebaseProjectId :: Columnar f (Maybe Text)
     , acEnabled :: Columnar f Bool
     , acCreatedAt :: Columnar f UTCTime
     }
@@ -57,6 +58,7 @@ appCatalog =
                 , acWorkflowPath = fieldNamed "workflow_path"
                 , acPackageName = fieldNamed "package_name"
                 , acDisplayLabel = fieldNamed "display_label"
+                , acFirebaseProjectId = fieldNamed "firebase_project_id"
                 , acEnabled = fieldNamed "enabled"
                 , acCreatedAt = fieldNamed "created_at"
                 }

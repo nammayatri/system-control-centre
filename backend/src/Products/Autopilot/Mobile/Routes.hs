@@ -19,6 +19,17 @@ import Data.Text (Text)
 import Products.Autopilot.Mobile.Handlers.AppCatalog
 import Products.Autopilot.Mobile.Handlers.Live
 import Products.Autopilot.Mobile.Handlers.Release
+import Products.Autopilot.Mobile.Handlers.Revert (
+    RevertDiffResp,
+    RevertDraft,
+    RevertReq,
+    RevertResp,
+    VerifyCommitResp,
+    mobileRevertCreateH,
+    mobileRevertDiffH,
+    mobileRevertDraftH,
+    verifyCommitH,
+ )
 import Products.Autopilot.Mobile.Handlers.Versions
 import Products.Autopilot.Types.Permission (AutopilotPermission (..))
 import Servant
@@ -62,6 +73,45 @@ type MobileAPI =
             :> Protected 'AP_RELEASE_VIEW
             :> QueryParam "category" Text
             :> Get '[JSON] LiveReleasesResp
+        :<|> "mobile"
+            :> "branches"
+            :> Protected 'AP_RELEASE_CREATE
+            :> QueryParam "q" Text
+            :> Get '[JSON] BranchesResp
+        :<|> "mobile"
+            :> "changelog-preview"
+            :> Protected 'AP_RELEASE_CREATE
+            :> QueryParam' '[Required, Strict] "app" Text
+            :> QueryParam' '[Required, Strict] "surface" Text
+            :> QueryParam' '[Required, Strict] "platform" Text
+            :> QueryParam' '[Required, Strict] "branch" Text
+            :> Get '[JSON] ChangelogPreviewResp
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "mobile-revert"
+            :> "draft"
+            :> Protected 'AP_RELEASE_REVERT
+            :> Get '[JSON] RevertDraft
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "mobile-revert"
+            :> Protected 'AP_RELEASE_REVERT
+            :> ReqBody '[JSON] RevertReq
+            :> Post '[JSON] RevertResp
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "mobile-revert"
+            :> "verify-commit"
+            :> Protected 'AP_RELEASE_REVERT
+            :> QueryParam' '[Required, Strict] "sha" Text
+            :> Get '[JSON] VerifyCommitResp
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "mobile-revert"
+            :> "diff"
+            :> Protected 'AP_RELEASE_REVERT
+            :> QueryParam' '[Required, Strict] "source" Text
+            :> Get '[JSON] RevertDiffResp
 
 mobileServer :: ServerT MobileAPI Flow
 mobileServer =
@@ -72,3 +122,9 @@ mobileServer =
         :<|> createMobileReleasesH
         :<|> dispatchMobileReleasesH
         :<|> liveReleasesH
+        :<|> (\ap mq -> listBranchesH ap mq)
+        :<|> (\ap app surface platform branch -> changelogPreviewH ap app surface platform branch)
+        :<|> (\rid ap -> mobileRevertDraftH ap rid)
+        :<|> (\rid ap req -> mobileRevertCreateH ap rid req)
+        :<|> (\rid ap sha -> verifyCommitH ap rid sha)
+        :<|> (\rid ap source -> mobileRevertDiffH ap rid source)

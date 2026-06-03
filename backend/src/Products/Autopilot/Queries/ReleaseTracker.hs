@@ -7,9 +7,12 @@ module Products.Autopilot.Queries.ReleaseTracker (
     conditionalUpdateApprove,
     conditionalUpdateTrackerRow,
     insertReleaseTrackerRow,
+    insertReleaseTrackerRowsBatch,
+    insertReleaseTrackerRowIfAbsent,
 
     -- * Queries
     findReleaseTracker,
+    findReleaseTrackersByIds,
     listReleaseEvents,
     listReleaseEventsByCategory,
     listReleaseTrackers,
@@ -80,6 +83,7 @@ import qualified Data.Text.Lazy as LT
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Database.Beam
 import Database.Beam.Postgres ()
+import Database.Beam.Postgres.Full (anyConflict, insertReturning, onConflict, onConflictDoNothing, runPgInsertReturningList)
 import Database.PostgreSQL.Simple (Only (..), execute, execute_, query, withTransaction)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
 import qualified Debug.Trace as DT
@@ -282,6 +286,22 @@ findReleaseTracker rid = withDb $ \db -> do
                         guard_ (rtId rt ==. val_ rid)
                         pure rt
     pure $ fmap fromRow (safeHead rows)
+
+{- | Batch variant of 'findReleaseTracker': fetch many trackers by id in one
+query. Used by the mobile dispatch handler to avoid an N+1 over releaseIds.
+Returns only the ids that exist; the caller diffs to report missing ones.
+-}
+findReleaseTrackersByIds :: (MonadFlow m) => [Text] -> m [TrackerWithTarget]
+findReleaseTrackersByIds [] = pure []
+findReleaseTrackersByIds rids = withDb $ \db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $ do
+                    rt <- all_ (releaseTrackers autopilotDb)
+                    guard_ (rtId rt `in_` map val_ rids)
+                    pure rt
+    pure (map fromRow rows)
 
 listReleaseEvents :: (MonadFlow m) => Text -> m [ReleaseEvent]
 listReleaseEvents rid = withDb $ \db ->
@@ -643,6 +663,9 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
         , rtSlackThreadTs = slackThreadTs
         , rtDispatchId = Nothing
         , rtExternalRunId = Nothing
+        , rtCommitSha = commitSha
+        , rtSourceRef = sourceRef
+        , rtRevertsReleaseId = revertsReleaseId
         , rtCreatedAt = createdAt
         , rtUpdatedAt = updatedAt
         }
@@ -696,6 +719,9 @@ fromRow ReleaseTrackerT{..} =
                 , envOverrideData = rtEnvOverrideData
                 , slackThreadTs = rtSlackThreadTs
                 , releaseContext = mReleaseContext
+                , sourceRef = rtSourceRef
+                , commitSha = rtCommitSha
+                , revertsReleaseId = rtRevertsReleaseId
                 }
      in
         (tracker, mTargetState)
@@ -882,6 +908,47 @@ insertReleaseTrackerRow row = withDb $ \db ->
                 mergedRow = row{rtSlackThreadTs = preservedTs}
             _ <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (rtId row))
             runBeamLogged conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
+
+{- | Insert several tracker rows in a SINGLE transaction — either all rows
+commit or none do. Used by the mobile create endpoint so a batch of N release
+rows (one per selected app, sharing a @release_group_id@) is all-or-nothing.
+
+Unlike 'insertReleaseTrackerRow' this does no per-row DELETE / slack_thread_ts
+preservation: callers use it only for freshly-minted ids (no existing row to
+merge). Empty input is a no-op.
+-}
+insertReleaseTrackerRowsBatch :: (MonadFlow m) => [ReleaseTrackerRow] -> m ()
+insertReleaseTrackerRowsBatch [] = pure ()
+insertReleaseTrackerRowsBatch rows = withDb $ \db ->
+    withConn db $ \conn ->
+        withTransaction conn $
+            runBeamLogged conn $
+                runInsert $
+                    insert (releaseTrackers autopilotDb) $
+                        insertValues rows
+
+{- | Insert a tracker row unless it violates a unique constraint
+(@INSERT … ON CONFLICT DO NOTHING@). Returns 'True' if a row was inserted,
+'False' if a conflicting row already existed.
+
+Used by store sync so two concurrent passes / SCC replicas can't create
+duplicate synthetic rows for the same app + version — guarded by the
+@uq_release_tracker_store_sync@ partial index (migration 0021). Unlike
+'insertReleaseTrackerRow' it does no DELETE-by-id (callers use fresh ids).
+-}
+insertReleaseTrackerRowIfAbsent :: (MonadFlow m) => ReleaseTrackerRow -> m Bool
+insertReleaseTrackerRowIfAbsent row = withDb $ \db ->
+    withConn db $ \conn ->
+        withTransaction conn $ do
+            inserted <-
+                runBeamLogged conn $
+                    runPgInsertReturningList $
+                        insertReturning
+                            (releaseTrackers autopilotDb)
+                            (insertValues [row])
+                            (onConflict anyConflict onConflictDoNothing)
+                            (Just rtId)
+            pure (not (null inserted))
 
 -- | Non-terminal trackers with sync enabled + global_id; used by SyncWatcher.
 findActiveSyncTrackers :: (MonadFlow m) => m [ReleaseTracker]

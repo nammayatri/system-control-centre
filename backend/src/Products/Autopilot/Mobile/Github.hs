@@ -38,7 +38,20 @@ module Products.Autopilot.Mobile.Github (
     listWorkflowRuns,
     listJobs,
     listTags,
+    listBranches,
     cancelRun,
+    createGitRef,
+    getCommitInfo,
+    searchBranches,
+    CommitDetail (..),
+
+    -- * Branch response type
+    BranchInfo (..),
+
+    -- * Shared HTTP helpers (re-used by sibling clients)
+    apiBase,
+    ghHeaders,
+    renderHttpError,
 ) where
 
 import Control.Monad.IO.Class (liftIO)
@@ -66,6 +79,7 @@ import Data.Aeson (
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -102,6 +116,10 @@ data WorkflowRun = WorkflowRun
     , wrHtmlUrl :: Text
     , wrName :: Text
     , wrDisplayTitle :: Maybe Text
+    , wrHeadSha :: Text
+    -- ^ SHA of HEAD at dispatch time. Returned by GH on every run.
+    -- Captured into 'release_tracker.commit_sha' so revert flows can
+    -- look up exactly which commit a release built from.
     }
     deriving (Show, Generic)
 
@@ -116,6 +134,7 @@ instance FromJSON WorkflowRun where
             <*> o .: "html_url"
             <*> o .: "name"
             <*> o .:? "display_title"
+            <*> o .: "head_sha"
 
 newtype WorkflowRunsResp = WorkflowRunsResp {wrrRuns :: [WorkflowRun]}
     deriving (Show)
@@ -303,6 +322,73 @@ listTags creds owner repo prefix = do
         Right xs -> Right (map riRef xs)
         Left e -> Left ("listTags: " <> renderHttpError e)
 
+-- | One entry from @\/repos\/{owner}\/{repo}\/branches@.
+data BranchInfo = BranchInfo
+    { biName :: Text
+    , biSha :: Text
+    }
+    deriving (Show, Generic)
+
+instance FromJSON BranchInfo where
+    parseJSON = withObject "BranchInfo" $ \o -> do
+        name <- o .: "name"
+        commit <- o .: "commit"
+        sha <- withObject "BranchCommit" (\c -> c .: "sha") commit
+        pure BranchInfo{biName = name, biSha = sha}
+
+instance ToJSON BranchInfo where
+    toJSON BranchInfo{..} =
+        object
+            [ "name" .= biName
+            , "sha" .= biSha
+            ]
+
+{- | List up to 100 branches sorted by most-recently-committed.
+Used by the branch-picker on the Create Release form.
+-}
+listBranches ::
+    (MonadFlow m) =>
+    GhAppCreds ->
+    Text -> -- owner
+    Text -> -- repo
+    m (Either Text [BranchInfo])
+listBranches creds owner repo = do
+    token <- getInstallationToken creds
+    let url = apiBase owner repo <> "/branches?per_page=100&sort=updated&direction=desc"
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = ghHeaders token
+                , reqTimeout = Seconds 30
+                , reqLogTag = "gh-branches"
+                }
+    resp <- liftIO (httpJson @[BranchInfo] req)
+    pure $ case resp of
+        Right xs -> Right xs
+        Left e -> Left ("listBranches: " <> renderHttpError e)
+
+searchBranches ::
+    (MonadFlow m) =>
+    GhAppCreds ->
+    Text -> -- owner
+    Text -> -- repo
+    Text -> -- query (prefix to match)
+    m (Either Text [BranchInfo])
+searchBranches creds owner repo query = do
+    token <- getInstallationToken creds
+    let url = apiBase owner repo <> "/git/matching-refs/heads/" <> query
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = ghHeaders token
+                , reqTimeout = Seconds 30
+                , reqLogTag = "gh-search-branches"
+                }
+    resp <- liftIO (httpJson @[BranchRefItem] req)
+    pure $ case resp of
+        Right xs -> Right (map branchRefToBranchInfo xs)
+        Left e -> Left ("searchBranches: " <> renderHttpError e)
+
 {- | Cancel an in-flight run. GitHub returns HTTP 202 with a small JSON
 body; we treat any 2xx as success.
 -}
@@ -338,6 +424,102 @@ cancelRun creds owner repo runId = do
                     )
         Left e -> Left ("cancelRun: " <> renderHttpError e)
 
+{- | Create a Git reference (lightweight tag). Used by the revert flow
+to create a temporary tag at a user-specified commit SHA so
+@workflow_dispatch@ can target it (the API requires a branch or tag
+name, not a raw SHA).
+
+@tagName@ should be the bare name (e.g. @"scc-revert/abc123"@); this
+function prepends @refs\/tags\/@.
+-}
+createGitRef ::
+    (MonadFlow m) =>
+    GhAppCreds ->
+    Text -> -- owner
+    Text -> -- repo
+    Text -> -- tagName (bare, no refs/tags/ prefix)
+    Text -> -- sha (full 40-char commit SHA)
+    m (Either Text ())
+createGitRef creds owner repo tagName sha = do
+    token <- getInstallationToken creds
+    let url = apiBase owner repo <> "/git/refs"
+        body =
+            encode $
+                object
+                    [ "ref" .= ("refs/tags/" <> tagName :: Text)
+                    , "sha" .= sha
+                    ]
+        req =
+            (defaultReq url)
+                { reqMethod = POST
+                , reqHeaders = ghHeaders token <> [("Content-Type", "application/json")]
+                , reqBody = Just body
+                , reqTimeout = Seconds 30
+                , reqLogTag = "gh-create-ref"
+                , reqRetries = 1
+                }
+    resp <- liftIO (httpRaw req)
+    pure $ case resp of
+        Right HttpResponse{respStatus = s, respBody = b}
+            | s == 201 -> Right ()
+            | otherwise ->
+                Left
+                    ( "createGitRef failed: HTTP "
+                        <> T.pack (show s)
+                        <> ": "
+                        <> TE.decodeUtf8 (LBS.toStrict b)
+                    )
+        Left e -> Left ("createGitRef: " <> renderHttpError e)
+
+data CommitDetail = CommitDetail
+    { cdSha :: Text
+    , cdMessage :: Text
+    , cdAuthorLogin :: Text
+    , cdHtmlUrl :: Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON CommitDetail
+instance FromJSON CommitDetail where
+    parseJSON = withObject "CommitDetail" $ \o -> do
+        sha <- o .: "sha"
+        htmlUrl <- o .: "html_url"
+        commit <- o .: "commit"
+        message <- withObject "commit" (.: "message") commit
+        authorObj <- o .:? "author"
+        login <- case authorObj of
+            Just ao -> withObject "author" (\a -> a .:? "login") ao
+            Nothing -> pure Nothing
+        pure
+            CommitDetail
+                { cdSha = sha
+                , cdMessage = T.takeWhile (/= '\n') message
+                , cdAuthorLogin = fromMaybe "unknown" login
+                , cdHtmlUrl = htmlUrl
+                }
+
+getCommitInfo ::
+    (MonadFlow m) =>
+    GhAppCreds ->
+    Text -> -- owner
+    Text -> -- repo
+    Text -> -- sha (short or full)
+    m (Either Text CommitDetail)
+getCommitInfo creds owner repo sha = do
+    token <- getInstallationToken creds
+    let url = apiBase owner repo <> "/commits/" <> sha
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = ghHeaders token
+                , reqTimeout = Seconds 30
+                , reqLogTag = "gh-commit"
+                }
+    resp <- liftIO (httpJson @CommitDetail req)
+    pure $ case resp of
+        Right c -> Right c
+        Left e -> Left ("getCommitInfo: " <> renderHttpError e)
+
 -- ─── Internal helpers ──────────────────────────────────────────────
 
 -- | One entry from @\/git\/matching-refs\/tags\/{prefix}@.
@@ -346,3 +528,23 @@ newtype RefItem = RefItem {riRef :: Text}
 
 instance FromJSON RefItem where
     parseJSON = withObject "RefItem" $ \o -> RefItem <$> o .: "ref"
+
+data BranchRefItem = BranchRefItem
+    { briRef :: Text
+    , briSha :: Text
+    }
+    deriving (Show)
+
+instance FromJSON BranchRefItem where
+    parseJSON = withObject "BranchRefItem" $ \o -> do
+        ref <- o .: "ref"
+        obj <- o .: "object"
+        sha <- withObject "object" (.: "sha") obj
+        pure BranchRefItem{briRef = ref, briSha = sha}
+
+branchRefToBranchInfo :: BranchRefItem -> BranchInfo
+branchRefToBranchInfo BranchRefItem{..} =
+    BranchInfo
+        { biName = T.replace "refs/heads/" "" briRef
+        , biSha = briSha
+        }

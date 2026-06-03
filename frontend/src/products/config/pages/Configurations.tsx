@@ -1,9 +1,11 @@
 import React, { useState, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '../../../lib/api-client';
 import { Button } from '../../../shared/ui/button';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
+import { useAuth } from '../../../core/auth/AuthContext';
 import { Badge } from '../../../shared/ui/badge';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { Save, X, RefreshCw, Search, ChevronDown, ChevronRight, Info } from 'lucide-react';
@@ -11,6 +13,7 @@ import { toast } from 'sonner';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { cn } from '../../../lib/utils';
 import { useRefreshAnimation } from '../../../shared/hooks';
+import { isMobileServerConfig, isHiddenServerConfig, isReleaseOnlyServerConfig } from '../../server-config-filter';
 
 interface ConfigItem {
   key: string;
@@ -34,6 +37,12 @@ interface GroupedResponse {
 
 const Configurations: React.FC = () => {
   const queryClient = useQueryClient();
+  const location = useLocation();
+  const { buildType } = useAuth();
+  // Debug deployment (mobile_build_type='debug'); release-only configs (store
+  // sync, version preview) are no-ops here, so hide them.
+  const debugEnv = buildType === 'debug';
+  const filter: 'backend' | 'mobile' = location.pathname.startsWith('/mobile') ? 'mobile' : 'backend';
   const [search, setSearch] = useState('');
   const [selectedConfig, setSelectedConfig] = useState<ConfigItem | null>(null);
   const [modalValue, setModalValue] = useState('');
@@ -50,7 +59,26 @@ const Configurations: React.FC = () => {
   });
   const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, refetch);
 
-  const groups = data?.groups ?? [];
+  const groups = useMemo(() => {
+    const raw = data?.groups ?? [];
+    const filtered = raw
+      .map(g => ({
+        ...g,
+        configs: g.configs.filter(c =>
+          !isHiddenServerConfig(c.key) &&
+          !(debugEnv && isReleaseOnlyServerConfig(c.key)) &&
+          (filter === 'mobile' ? isMobileServerConfig(c.key) : !isMobileServerConfig(c.key))
+        ),
+      }))
+      .filter(g => g.configs.length > 0);
+
+    // Mobile tab: collapse all sub-groups into one "Mobile" group (single section).
+    if (filter === 'mobile') {
+      const configs = filtered.flatMap(g => g.configs);
+      return configs.length > 0 ? [{ name: 'Mobile', configs }] : [];
+    }
+    return filtered;
+  }, [data, filter, debugEnv]);
 
   const saveMut = useMutation({
     mutationFn: async (params: { name: string; value: string; enabled: string }) => {
@@ -211,7 +239,9 @@ const Configurations: React.FC = () => {
   return (
     <div className="flex flex-col w-full pb-12">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 sm:mb-5">
-        <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Server Configurations</h1>
+        <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">
+          {filter === 'mobile' ? 'Mobile Server Config' : 'Backend Server Config'}
+        </h1>
         <div className="flex items-center gap-2 sm:gap-3">
           <div className="relative flex-1 sm:flex-none">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />

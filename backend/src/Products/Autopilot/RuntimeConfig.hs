@@ -16,6 +16,11 @@ module Products.Autopilot.RuntimeConfig (
     getABHSAllowedTimeDiffMins,
     isSyncClusterEnabled,
     isMultiReleasePerProduct,
+    isStoreSyncEnabled,
+    getStoreSyncIntervalMinutes,
+    isVersionPreviewEnabled,
+    getMobileBuildType,
+    getMobileTagConfirmTimeoutMinutes,
     isUnderMaintenance,
     -- Delays / numeric (MonadFlow versions)
     getReleaseWatchDelay,
@@ -204,6 +209,30 @@ always blocked regardless.
 -}
 isMultiReleasePerProduct :: (MonadFlow m) => m Bool
 isMultiReleasePerProduct = getConfigBoolForProduct "multi_release_per_product" (Just "autopilot") False
+
+isStoreSyncEnabled :: (MonadFlow m) => m Bool
+isStoreSyncEnabled = getConfigBoolForProduct "store_sync_enabled" (Just "autopilot") False
+
+getStoreSyncIntervalMinutes :: (MonadFlow m) => m Int
+getStoreSyncIntervalMinutes = getConfigIntForProduct "store_sync_interval_minutes" (Just "autopilot") 30
+
+isVersionPreviewEnabled :: (MonadFlow m) => m Bool
+isVersionPreviewEnabled = getConfigBoolForProduct "version_preview_enabled" (Just "autopilot") True
+
+{- | Build type for this deployment: "debug" (master env → Firebase/TestFlight)
+or "release" (production env → Google Play/App Store). One value per
+environment; stamped onto each release at creation time.
+-}
+getMobileBuildType :: (MonadFlow m) => m Text
+getMobileBuildType = getConfigTextForProduct "mobile_build_type" (Just "autopilot") "release"
+
+{- | Minutes the mobile ConfirmTag stage waits for the build's Git tag to appear
+before giving up (→ @MBFailed "tag_timeout"@ → ABORTED). Anchored on build
+completion; mirrors @max_job_completion_hours@ for backend jobs. Release builds
+only — debug builds skip tag confirmation entirely.
+-}
+getMobileTagConfirmTimeoutMinutes :: (MonadFlow m) => m Int
+getMobileTagConfirmTimeoutMinutes = getConfigIntForProduct "mobile_tag_confirm_timeout_minutes" (Just "autopilot") 60
 
 -- | Reads @ap_under_maintenance@ from server_config ({"ap_under_maintenance":bool}).
 isUnderMaintenance :: (MonadFlow m) => m Bool

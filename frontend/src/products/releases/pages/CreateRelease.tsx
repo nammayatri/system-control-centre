@@ -424,7 +424,7 @@ const CreateRelease: React.FC = () => {
           return;
         }
       }
-      navigate('/releases');
+      navigate('/backend/releases');
     } catch (err: any) {
       setError(err?.response?.data?.message || err.message || 'Failed to create release');
     }
@@ -797,7 +797,7 @@ const CreateRelease: React.FC = () => {
         )}
 
         <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3 pt-2">
-          <Button type="button" variant="secondary" onClick={() => isUpdate ? navigate(`/releases/${id}`) : navigate('/releases')}>Cancel</Button>
+          <Button type="button" variant="secondary" onClick={() => isUpdate ? navigate(`/backend/releases/${id}`) : navigate('/backend/releases')}>Cancel</Button>
           <Button type="submit" loading={isSubmitting}>{submitLabel}</Button>
         </div>
       </form>

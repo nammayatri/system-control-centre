@@ -29,18 +29,37 @@ import Data.List (sort)
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Time.Clock (addUTCTime, getCurrentTime)
 import Products.Autopilot.Config (autopilotConfigs)
 import Products.Autopilot.K8s.Execute (shellQuote)
+import Products.Autopilot.Mobile.Changelog (
+    bumpPatch,
+    renderRevertChangelog,
+ )
 import Products.Autopilot.Mobile.Github (
     Job (..),
     JobsResp (..),
     WorkflowRun (..),
     WorkflowRunsResp (..),
  )
+import Products.Autopilot.Mobile.Github.Compare (
+    CommitInfo (..),
+    CompareResult (..),
+    extractPrNumber,
+    shortSha,
+ )
+import Products.Autopilot.Mobile.RevertResolver (
+    RevertCand (..),
+    RollbackPlan (..),
+    parseSemver,
+    resolveRollback,
+ )
 import Products.Autopilot.Mobile.Types
 import Products.Autopilot.Mobile.Versioning (TrackInfo (..), computeNextVersion)
+import Products.Autopilot.Mobile.Workflow (selectBuildTag, tagConfirmTimedOut)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
+import qualified Products.Autopilot.Types.Target
 import Products.Autopilot.Types.Workflow (ReleaseCategory (..), getDefaultDeploymentTarget)
 import Products.ConfigCatalog (allConfigEntries, findConfigEntry)
 import Products.Types
@@ -106,6 +125,15 @@ main = do
     section "[20] Mobile Version Bump (Play Console algorithm)" testVersionBumpLogic
     section "[21] GitHub Workflow Runs JSON Parser" testGithubRunsParser
     section "[22] GitHub Jobs JSON Parser" testGithubJobsParser
+    section "[23] GitHub Compare API JSON Parser" testGithubCompareParser
+    section "[24] PR-number extractor + shortSha" testExtractPrNumber
+    section "[25] bumpPatch semver rule" testBumpPatch
+    section "[26] renderRevertChangelog" testRenderRevertChangelog
+    section "[27] Decode 0013 seed JSON (regression guard)" testDecodeSeedJson
+    section "[28] MobileBuildContext legacy destination fallback" testMobileBuildContextDestinationFallback
+    section "[29] ConfirmTag wall-clock timeout predicate" testTagConfirmTimedOut
+    section "[30] Rollback target resolver (version-order, not time-order)" testResolveRollback
+    section "[31] ConfirmTag selects the build's exact tag (not lexical-first)" testSelectBuildTag
 
     putStrLn ""
     putStrLn "==========================================="
@@ -912,7 +940,7 @@ testMobileBuildContextJsonRoundTrip = do
             MobileBuildContext
                 { mbcVersionCode = Just 12345
                 , mbcChangeLog = "hello"
-                , mbcDestination = MBGooglePlay
+                , mbcBuildType = "release"
                 , mbcReleaseGroupId = "rg_abc"
                 , mbcMatrixJobName = "NammaYatri-Release"
                 , mbcOtaNamespace = Just "nammayatriv2"
@@ -921,6 +949,173 @@ testMobileBuildContextJsonRoundTrip = do
     let encoded = Aeson.encode ctx
     let decoded = Aeson.decode encoded :: Maybe MobileBuildContext
     assertEqual "round-trip equals original" (Just ctx) decoded
+
+{- | Legacy rows persisted before the @build_type@ field used a
+@destination@ string. 'MobileBuildContext' 'FromJSON' must map those to a
+build type — Firebase/TestFlight → "debug", everything else → "release",
+and an explicit @build_type@ always wins. 'fetchLatestBuildsPerApp'
+relies on this to classify old completed builds.
+-}
+testMobileBuildContextDestinationFallback :: IO ()
+testMobileBuildContextDestinationFallback = do
+    putStrLn "MobileBuildContext: legacy destination → build_type fallback"
+    -- required fields the decoder demands, regardless of build-type source
+    let base = "\"change_log\":\"x\",\"release_group_id\":\"g\",\"matrix_job_name\":\"j\""
+        decodeBT s = mbcBuildType <$> (Aeson.decode s :: Maybe MobileBuildContext)
+    assertEqual
+        "Firebase → debug"
+        (Just "debug")
+        (decodeBT ("{\"destination\":\"Firebase\"," <> base <> "}"))
+    assertEqual
+        "TestFlight → debug"
+        (Just "debug")
+        (decodeBT ("{\"destination\":\"TestFlight\"," <> base <> "}"))
+    assertEqual
+        "GooglePlay → release"
+        (Just "release")
+        (decodeBT ("{\"destination\":\"GooglePlay\"," <> base <> "}"))
+    assertEqual
+        "explicit build_type wins over destination"
+        (Just "debug")
+        (decodeBT ("{\"build_type\":\"debug\",\"destination\":\"GooglePlay\"," <> base <> "}"))
+    assertEqual
+        "neither field → release default"
+        (Just "release")
+        (decodeBT ("{" <> base <> "}"))
+    -- malformed JSON must decode to Nothing (so fetchLatestBuildsPerApp drops it)
+    assertBool
+        "malformed context → Nothing (row dropped)"
+        (isNothing (Aeson.decode "this is not json {{{" :: Maybe MobileBuildContext))
+
+{- | B3: ConfirmTag's wall-clock guard. Anchors on build-completion, falls back
+to build-start, and reports "not timed out" when neither timestamp exists (so a
+release is never failed spuriously while we can't measure elapsed time).
+-}
+testTagConfirmTimedOut :: IO ()
+testTagConfirmTimedOut = do
+    putStrLn "ConfirmTag: wall-clock timeout predicate"
+    now <- getCurrentTime
+    let minsAgo m = addUTCTime (fromIntegral (negate (m * 60 :: Int))) now
+        budget = 60 :: Int
+    assertBool
+        "completed 10m ago, budget 60m → not timed out"
+        (not (tagConfirmTimedOut now (Just (minsAgo 10)) Nothing budget))
+    assertBool
+        "completed 61m ago, budget 60m → timed out"
+        (tagConfirmTimedOut now (Just (minsAgo 61)) Nothing budget)
+    assertBool
+        "no completed time, started 61m ago → timed out (start fallback)"
+        (tagConfirmTimedOut now Nothing (Just (minsAgo 61)) budget)
+    assertBool
+        "neither timestamp → not timed out (cannot measure)"
+        (not (tagConfirmTimedOut now Nothing Nothing budget))
+    assertBool
+        "completed 5m ago wins over started 100m ago → not timed out"
+        (not (tagConfirmTimedOut now (Just (minsAgo 5)) (Just (minsAgo 100)) budget))
+
+{- | The rollback resolver. Orders candidates by the store's sequence key
+(version_code, then semver, then created_at) — NOT by creation time, which
+store-sync rows break. Also exercises the target-vs-source split: when the
+version users were on has no SCC artifact, the resolver surfaces a
+rebuild-lower or manual-source plan instead of guessing.
+-}
+testResolveRollback :: IO ()
+testResolveRollback = do
+    putStrLn "Rollback resolver: version order + target/source split"
+    now <- getCurrentTime
+    let minsAgo m = addUTCTime (fromIntegral (negate (m * 60 :: Int))) now
+        cand i ver code tag ago =
+            RevertCand
+                { rcId = i
+                , rcVersionName = ver
+                , rcVersionCode = code
+                , rcTag = tag
+                , rcCommitSha = Just (i <> "sha")
+                , rcCreatedAt = minsAgo ago
+                }
+
+    -- parseSemver compares as integers, not lexically.
+    assertBool "3.3.9 < 3.3.10 by semver" (parseSemver "3.3.9" < parseSemver "3.3.10")
+    assertEqual "parseSemver 3.3.17" [3, 3, 17] (parseSemver "3.3.17")
+
+    -- The screenshot case: bad 3.3.17 (real, tagged); the only candidate is a
+    -- store-sync 3.3.16 created LATER in time but LOWER in version, with no
+    -- tag. Time-order said "nothing before" → blocked. Version-order finds
+    -- 3.3.16 as the target, but it has no artifact → manual source required.
+    let bad17 = cand "r17" "3.3.17" (Just 417) (Just "v3.3.17") 30
+        sync16 = cand "r16" "3.3.16" (Just 416) Nothing 10
+    case resolveRollback bad17 [sync16] of
+        NeedsManualSource t -> assertEqual "manual target is 3.3.16" "3.3.16" (rcVersionName t)
+        other -> assertBool ("expected NeedsManualSource, got " <> show other) False
+
+    -- Add a lower real SCC build 3.3.15 (tagged): target stays 3.3.16 (highest
+    -- below), but source falls to 3.3.15 (nearest buildable) → RebuildLower.
+    let scc15 = cand "r15" "3.3.15" (Just 415) (Just "v3.3.15") 60
+    case resolveRollback bad17 [sync16, scc15] of
+        RebuildLower t s -> do
+            assertEqual "rebuild target is 3.3.16" "3.3.16" (rcVersionName t)
+            assertEqual "rebuild source is 3.3.15" "3.3.15" (rcVersionName s)
+        other -> assertBool ("expected RebuildLower, got " <> show other) False
+
+    -- Clean rollback: the target itself is tagged → Rollback, source == target.
+    let good16 = cand "r16b" "3.3.16" (Just 416) (Just "v3.3.16") 10
+    case resolveRollback bad17 [good16] of
+        Rollback t s -> do
+            assertEqual "rollback target 3.3.16" "3.3.16" (rcVersionName t)
+            assertEqual "rollback source == target" (rcId t) (rcId s)
+        other -> assertBool ("expected Rollback, got " <> show other) False
+
+    -- Version-order beats time-order: a higher version created EARLIER still
+    -- wins over a lower version created later.
+    let older18 = cand "r18" "3.3.18" (Just 418) (Just "v3.3.18") 200
+        newer14 = cand "r14" "3.3.14" (Just 414) (Just "v3.3.14") 1
+        bad19 = cand "r19" "3.3.19" (Just 419) (Just "v3.3.19") 5
+    case resolveRollback bad19 [newer14, older18] of
+        Rollback t _ -> assertEqual "highest-below 3.3.18 wins over newer 3.3.14" "3.3.18" (rcVersionName t)
+        other -> assertBool ("expected Rollback to 3.3.18, got " <> show other) False
+
+    -- Nothing below the bad version → NoPriorRelease.
+    let lone = cand "r1" "1.0.0" (Just 100) (Just "v1.0.0") 5
+    case resolveRollback lone [] of
+        NoPriorRelease -> pure ()
+        other -> assertBool ("expected NoPriorRelease, got " <> show other) False
+
+{- | ConfirmTag must bind the tag THIS build pushed, not the lexically-first ref
+under the broad app prefix. The fastlane workflow tags deterministically as
+@{prefix}{version}+{code}@ and SCC supplies that version/code on dispatch, so we
+match it exactly. GitHub returns matching-refs in ascending order, so "first"
+would be the oldest version — the bug this guards against.
+-}
+testSelectBuildTag :: IO ()
+testSelectBuildTag = do
+    putStrLn "ConfirmTag: exact tag selection"
+    let prefix = "odishayatri/prod/android/v"
+        ref n = "refs/tags/" <> n
+        -- Two versions share the prefix; GitHub returns them ascending (oldest first).
+        refs =
+            [ ref "odishayatri/prod/android/v3.3.15+421"
+            , ref "odishayatri/prod/android/v3.3.17+460"
+            ]
+    assertEqual
+        "picks this build's v3.3.17+460, not lexical-first v3.3.15+421"
+        (Just "odishayatri/prod/android/v3.3.17+460")
+        (selectBuildTag prefix "3.3.17" (Just 460) refs)
+    assertEqual
+        "the lexical-first tag is NOT chosen for a different version"
+        (Just "odishayatri/prod/android/v3.3.15+421")
+        (selectBuildTag prefix "3.3.15" (Just 421) refs)
+    assertEqual
+        "exact tag absent (code mismatch) -> Nothing (caller waits/timeouts)"
+        Nothing
+        (selectBuildTag prefix "3.3.17" (Just 999) refs)
+    assertEqual
+        "empty ref list -> Nothing"
+        Nothing
+        (selectBuildTag prefix "3.3.17" (Just 460) [])
+    assertEqual
+        "no version code (iOS-style) -> matches bare v{version}"
+        (Just "odishayatri/prod/ios/v3.3.17")
+        (selectBuildTag "odishayatri/prod/ios/v" "3.3.17" Nothing [ref "odishayatri/prod/ios/v3.3.17"])
 
 -- ============================================================================
 -- [20] Mobile Version Bump (mirrors fastlane-android.yaml lines 124-189)
@@ -958,7 +1153,7 @@ testGithubRunsParser :: IO ()
 testGithubRunsParser = do
     putStrLn "GitHub runs JSON parser"
     let body =
-            "{\"workflow_runs\":[{\"id\":42,\"event\":\"workflow_dispatch\",\"status\":\"queued\",\"conclusion\":null,\"created_at\":\"2026-05-11T10:00:00Z\",\"head_branch\":\"master\",\"html_url\":\"https://github.com/foo/bar/actions/runs/42\",\"name\":\"x\",\"display_title\":\"y\"}]}"
+            "{\"workflow_runs\":[{\"id\":42,\"event\":\"workflow_dispatch\",\"status\":\"queued\",\"conclusion\":null,\"created_at\":\"2026-05-11T10:00:00Z\",\"head_branch\":\"master\",\"head_sha\":\"abc1234deadbeef\",\"html_url\":\"https://github.com/foo/bar/actions/runs/42\",\"name\":\"x\",\"display_title\":\"y\"}]}"
     case Aeson.eitherDecode body :: Either String WorkflowRunsResp of
         Right resp -> do
             assertEqual "parsed run id" 42 (wrId (head (wrrRuns resp)))
@@ -966,6 +1161,7 @@ testGithubRunsParser = do
             assertEqual "parsed run status" "queued" (wrStatus (head (wrrRuns resp)))
             assertEqual "null conclusion -> Nothing" Nothing (wrConclusion (head (wrrRuns resp)))
             assertEqual "parsed display_title" (Just "y") (wrDisplayTitle (head (wrrRuns resp)))
+            assertEqual "parsed head_sha" "abc1234deadbeef" (wrHeadSha (head (wrrRuns resp)))
         Left e -> fail ("parse failed: " <> e)
 
 -- ============================================================================
@@ -984,3 +1180,157 @@ testGithubJobsParser = do
             assertEqual "null conclusion -> Nothing" Nothing (jConclusion (head (jrJobs resp)))
             assertEqual "null completed_at -> Nothing" Nothing (jCompletedAt (head (jrJobs resp)))
         Left e -> fail ("parse failed: " <> e)
+
+-- ============================================================================
+-- [23] GitHub Compare API JSON Parser
+-- ============================================================================
+
+testGithubCompareParser :: IO ()
+testGithubCompareParser = do
+    putStrLn "GitHub compare JSON parser"
+    let body =
+            "{\"status\":\"ahead\",\"ahead_by\":2,\"behind_by\":0,\"total_commits\":2,\"commits\":\
+            \[{\"sha\":\"abc1234deadbeefcafef00d1234567890abcdef\",\
+            \  \"commit\":{\"message\":\"feat: add foo (#123)\\n\\nlonger body\"},\
+            \  \"author\":{\"login\":\"alice\"},\
+            \  \"html_url\":\"https://github.com/foo/bar/commit/abc1234\"},\
+            \ {\"sha\":\"def5678cafef00ddeadbeef1234567890abcdef\",\
+            \  \"commit\":{\"message\":\"chore: bump deps\"},\
+            \  \"author\":null,\
+            \  \"html_url\":\"https://github.com/foo/bar/commit/def5678\"}]}"
+    case Aeson.eitherDecode body :: Either String CompareResult of
+        Right cr -> do
+            assertEqual "parsed status" "ahead" (crStatus cr)
+            assertEqual "parsed ahead_by" 2 (crAheadBy cr)
+            assertEqual "parsed total_commits" 2 (crTotalCommits cr)
+            case crCommits cr of
+                [c1, c2] -> do
+                    assertEqual "c1 short sha" "abc1234" (ciShortSha c1)
+                    assertEqual "c1 subject (first line)" "feat: add foo (#123)" (ciSubject c1)
+                    assertEqual "c1 PR number extracted" (Just 123) (ciPrNumber c1)
+                    assertEqual "c1 author login" "alice" (ciAuthorLogin c1)
+                    assertEqual "c2 short sha" "def5678" (ciShortSha c2)
+                    assertEqual "c2 no PR number" Nothing (ciPrNumber c2)
+                    -- Null GH author falls back to "unknown" (commits
+                    -- without an associated GH account, e.g.
+                    -- email-only contributors).
+                    assertEqual "c2 null author -> unknown" "unknown" (ciAuthorLogin c2)
+                other -> fail ("expected exactly 2 commits, got " <> show (length other))
+        Left e -> fail ("parse failed: " <> e)
+
+-- ============================================================================
+-- [24] PR-number extractor + shortSha
+-- ============================================================================
+
+testExtractPrNumber :: IO ()
+testExtractPrNumber = do
+    putStrLn "extractPrNumber edge cases"
+    assertEqual "simple trailing PR" (Just 123) (extractPrNumber "fix: foo (#123)")
+    assertEqual "PR mid-subject" (Just 45) (extractPrNumber "fix (#45): regression")
+    assertEqual "no PR" Nothing (extractPrNumber "chore: bump deps")
+    -- Bare "#NN" without parens (merge-commit style) is NOT extracted —
+    -- only the squash-merge "(#NN)" convention. Documented behaviour.
+    assertEqual "merge-commit form is ignored" Nothing (extractPrNumber "Merge pull request #99 from foo/bar")
+    -- First match wins.
+    assertEqual "first match wins" (Just 12) (extractPrNumber "fix (#12) and revert (#34)")
+    -- Empty parens / non-numeric are dropped cleanly.
+    assertEqual "empty paren" Nothing (extractPrNumber "fix (#) typo")
+    assertEqual "non-numeric paren" Nothing (extractPrNumber "fix (#abc) typo")
+
+    putStrLn "shortSha"
+    assertEqual "7-char truncation" "abc1234" (shortSha "abc1234deadbeef")
+    assertEqual "exactly 7 stays" "abc1234" (shortSha "abc1234")
+    assertEqual "shorter than 7 stays" "abc" (shortSha "abc")
+    assertEqual "empty stays empty" "" (shortSha "")
+
+-- ============================================================================
+-- [25] bumpPatch semver rule
+-- ============================================================================
+
+testBumpPatch :: IO ()
+testBumpPatch = do
+    putStrLn "bumpPatch defaults"
+    assertEqual "1.2.3 -> 1.2.4" "1.2.4" (bumpPatch "1.2.3")
+    assertEqual "0.9.9 -> 0.9.10" "0.9.10" (bumpPatch "0.9.9")
+    -- Two-segment versions get a third segment so the result is always
+    -- comparable as semver-ish.
+    assertEqual "1.2 -> 1.2.1" "1.2.1" (bumpPatch "1.2")
+    -- Single-segment versions zero-pad before bumping.
+    assertEqual "5 -> 5.0.1" "5.0.1" (bumpPatch "5")
+    -- Non-numeric patch component falls back to appending ".1".
+    assertEqual "1.2.beta -> 1.2.beta.1" "1.2.beta.1" (bumpPatch "1.2.beta")
+    -- Empty input gets a sensible starting point.
+    assertEqual "empty -> 0.0.1" "0.0.1" (bumpPatch "")
+    -- 4-segment versions get ".1" appended (no opinion on which segment
+    -- to bump — operator overrides in the UI if they care).
+    assertEqual "1.2.3.4 -> 1.2.3.4.1" "1.2.3.4.1" (bumpPatch "1.2.3.4")
+
+-- ============================================================================
+-- [26] renderRevertChangelog
+-- ============================================================================
+
+testRenderRevertChangelog :: IO ()
+testRenderRevertChangelog = do
+    putStrLn "renderRevertChangelog (fixed short label)"
+    let c1 =
+            CommitInfo
+                { ciSha = "abc1234deadbeef"
+                , ciShortSha = "abc1234"
+                , ciMessage = "feat: add foo (#123)\n\nbody"
+                , ciSubject = "feat: add foo (#123)"
+                , ciAuthorLogin = "alice"
+                , ciHtmlUrl = "https://github.com/x/y/commit/abc1234"
+                , ciPrNumber = Just 123
+                }
+        c2 =
+            CommitInfo
+                { ciSha = "def5678cafef00d"
+                , ciShortSha = "def5678"
+                , ciMessage = "chore: bump deps"
+                , ciSubject = "chore: bump deps"
+                , ciAuthorLogin = "unknown"
+                , ciHtmlUrl = "https://github.com/x/y/commit/def5678"
+                , ciPrNumber = Nothing
+                }
+
+    -- Always emits the same shape regardless of commit count: just
+    -- "Revert v{badVer}". The structured commit cards on the FE carry
+    -- the actual detail.
+    assertEqual
+        "two commits → label only"
+        "Revert v1.2.3"
+        (renderRevertChangelog "1.2.3" "1.2.2" "abc1234" "1.2.4" (Just 457) [c1, c2])
+    assertEqual
+        "one commit → label only"
+        "Revert v2.0.0"
+        (renderRevertChangelog "2.0.0" "1.9.8" "feedf00" "2.0.1" Nothing [c1])
+    assertEqual
+        "no commits → label only"
+        "Revert v1.0.1"
+        (renderRevertChangelog "1.0.1" "1.0.0" "deadbee" "1.0.2" (Just 11) [])
+
+    -- Negative guards: nothing from older drafts leaks in.
+    let out = renderRevertChangelog "1.2.3" "1.2.2" "abc1234" "1.2.4" (Just 457) [c1, c2]
+    assertBool "no newlines" $ not (T.isInfixOf "\n" out)
+    assertBool "no commit SHAs" $ not (T.isInfixOf "abc1234" out || T.isInfixOf "def5678" out)
+    assertBool "no commit subjects" $ not (T.isInfixOf "feat:" out)
+    assertBool "no @author chips" $ not (T.isInfixOf "@alice" out)
+    assertBool "no headings" $ not (T.isInfixOf "# " out)
+
+-- ============================================================================
+-- [27] DIAGNOSTIC: decode the exact JSON shape used by migration
+--      0013-local-mobile-revert-test-data.sql. If this test fails, the
+--      seed file's release_context JSON doesn't match what TargetState's
+--      FromJSON expects — fix the seed, not the type.
+-- ============================================================================
+
+testDecodeSeedJson :: IO ()
+testDecodeSeedJson = do
+    putStrLn "Decode seed-file JSON into TargetState"
+    let raw =
+            "{\n  \"tag\": \"MobileBuildState\",\n  \"contents\": {\n    \"mbWfStatus\": {\"tag\": \"MBCompleted\"},\n    \"mbContext\": {\n      \"kind\": \"mobile_build\",\n      \"version_code\": null,\n      \"change_log\": \"v3.3.130 \\u2014 TestFlight release\",\n      \"destination\": \"TestFlight\",\n      \"release_group_id\": \"test-revert-ios-bad-001\",\n      \"matrix_job_name\": \"NammaYatri-Release\",\n      \"ota_namespace\": null,\n      \"tag_pushed\": \"nammayatri/prod/ios/v3.3.130+1\"\n    },\n    \"mbExternalRunId\": null,\n    \"mbMatrixJobStatus\": null,\n    \"mbBuildStartedAt\": null,\n    \"mbBuildCompletedAt\": null,\n    \"mbResolveAttempts\": null\n  }\n}"
+    case Aeson.eitherDecode raw :: Either String Products.Autopilot.Types.Target.TargetState of
+        Right (Products.Autopilot.Types.Target.MobileBuildState _) ->
+            putStrLn "  PASS: decoded as MobileBuildState"
+        Right _ -> fail "  FAIL: decoded as wrong variant"
+        Left e -> fail ("  FAIL: decode error: " <> e)

@@ -29,6 +29,7 @@ data ConfigGroup
     | ScalingGroup
     | NotificationGroup
     | ABTestingGroup
+    | MobileGroup
     deriving (Show, Eq, Ord, Enum, Bounded)
 
 configGroupToText :: ConfigGroup -> Text
@@ -39,6 +40,7 @@ configGroupToText MonitoringGroup = "MONITORING"
 configGroupToText ScalingGroup = "Scaling"
 configGroupToText NotificationGroup = "Notification"
 configGroupToText ABTestingGroup = "A/B Testing"
+configGroupToText MobileGroup = "Mobile"
 
 data ConfigEntry = ConfigEntry
     { ceKey :: Text

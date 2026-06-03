@@ -27,6 +27,7 @@ module Products.Autopilot.Mobile.Handlers.Versions (
     previewVersionsH,
 ) where
 
+import Control.Monad.IO.Class (liftIO)
 import Core.Auth.Protected (AuthedPerson)
 import Core.Environment (Flow)
 import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericToJSON)
@@ -38,8 +39,11 @@ import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalogT (..))
 import Products.Autopilot.Mobile.Versioning (
     VersionResolution (..),
-    resolveNextVersion,
+    loadAscCreds,
+    mintAscToken,
+    resolveNextVersionWithToken,
  )
+import Products.Autopilot.RuntimeConfig (isVersionPreviewEnabled)
 
 -- ─── Request / response types ──────────────────────────────────────
 
@@ -51,15 +55,16 @@ newtype PreviewVersionsReq = PreviewVersionsReq
 instance ToJSON PreviewVersionsReq
 instance FromJSON PreviewVersionsReq
 
--- | Per-app response row.
---
--- Discriminated by which fields are set:
---
--- * Android success: @nextVersionName@ + @nextVersionCode@ + @source = "play_console"@.
--- * iOS success: @nextVersionNumber@ + @source = "app_store_connect"@.
--- * Error: @err@ holds the stable tag from the dispatcher.
---
--- Unrelated fields are omitted from JSON via 'omitNothingFields'.
+{- | Per-app response row.
+
+Discriminated by which fields are set:
+
+* Android success: @nextVersionName@ + @nextVersionCode@ + @source = "play_console"@.
+* iOS success: @nextVersionNumber@ + @source = "app_store_connect"@.
+* Error: @err@ holds the stable tag from the dispatcher.
+
+Unrelated fields are omitted from JSON via 'omitNothingFields'.
+-}
 data VersionPreviewItem = VersionPreviewItem
     { appCatalogId :: Int32
     , nextVersionName :: Maybe Text
@@ -87,14 +92,32 @@ instance FromJSON PreviewVersionsResp
 
 previewVersionsH :: AuthedPerson -> PreviewVersionsReq -> Flow PreviewVersionsResp
 previewVersionsH _ap req = do
-    items <- mapM previewOne (appCatalogIds req)
-    pure PreviewVersionsResp{previews = items}
+    enabled <- isVersionPreviewEnabled
+    if not enabled
+        then pure PreviewVersionsResp{previews = []}
+        else do
+            mAscToken <- mintAscTokenOnce
+            items <- mapM (previewOne mAscToken) (appCatalogIds req)
+            pure PreviewVersionsResp{previews = items}
+
+mintAscTokenOnce :: Flow (Maybe Text)
+mintAscTokenOnce = do
+    mCreds <- loadAscCreds
+    case mCreds of
+        Nothing -> pure Nothing
+        Just creds -> do
+            eToken <- liftIO (mintAscToken creds)
+            case eToken of
+                Left _ -> pure Nothing
+                Right token -> pure (Just token)
 
 {- | Per-app preview. Catches every recoverable failure into 'err' so
-one bad app never poisons the whole batch.
+one bad app never poisons the whole batch. Uses a shared ASC token for
+all iOS apps to avoid Apple rejecting duplicate JWTs minted in the
+same second.
 -}
-previewOne :: Int32 -> Flow VersionPreviewItem
-previewOne aid = do
+previewOne :: Maybe Text -> Int32 -> Flow VersionPreviewItem
+previewOne mAscToken aid = do
     mApp <- findAppCatalogById aid
     case mApp of
         Nothing -> pure (errorItem aid "app_not_found")
@@ -102,7 +125,7 @@ previewOne aid = do
             Nothing -> pure (errorItem aid "no_package_name")
             Just "" -> pure (errorItem aid "no_package_name")
             Just pkg -> do
-                res <- resolveNextVersion (acPlatform app_) pkg
+                res <- resolveNextVersionWithToken mAscToken (acPlatform app_) pkg
                 pure $ case res of
                     Left e -> errorItem aid e
                     Right (AndroidVersion name code) ->

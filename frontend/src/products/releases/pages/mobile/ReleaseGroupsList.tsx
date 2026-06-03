@@ -9,7 +9,7 @@ import type { APRelease } from '../../api';
 
 /**
  * All Release Groups — the listing page sibling to
- * `/release-groups/:groupId` (the detail page). Aggregates every mobile
+ * `/mobile/groups/:groupId` (the detail page). Aggregates every mobile
  * release in the configured time window by its `release_group_id` and
  * renders one row per group.
  *
@@ -139,7 +139,7 @@ export default function ReleaseGroupsList() {
             dispatched together share the same group id and matrix run.
           </p>
         </div>
-        <Link to="/releases/mobile/new">
+        <Link to="/mobile/releases/new">
           <Button>New Mobile Release</Button>
         </Link>
       </header>
@@ -183,12 +183,12 @@ export default function ReleaseGroupsList() {
                     // Navigate by full row click. Each anchor inside the
                     // cells uses Link so middle-click / cmd-click still
                     // opens in a new tab.
-                    window.location.assign(`/release-groups/${g.groupId}`);
+                    window.location.assign(`/mobile/groups/${g.groupId}`);
                   }}
                 >
                   <td className="py-3 px-4 font-mono text-xs">
                     <Link
-                      to={`/release-groups/${g.groupId}`}
+                      to={`/mobile/groups/${g.groupId}`}
                       onClick={(e) => e.stopPropagation()}
                       className="inline-flex items-center gap-1.5 text-blue-700 hover:underline"
                     >

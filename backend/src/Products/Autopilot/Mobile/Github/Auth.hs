@@ -50,6 +50,7 @@ import Core.Http.Client (
     defaultReq,
     httpJson,
  )
+import Core.Secrets (lookupEnvSecret, lookupEnvSecretB64)
 import Core.Types.Time (Seconds (..))
 import Data.Aeson (FromJSON (..), withObject, (.:))
 import qualified Data.ByteString.Lazy as LBS
@@ -59,15 +60,14 @@ import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import GHC.Generics (Generic)
-import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 import System.IO.Unsafe (unsafePerformIO)
 import qualified Web.JWT as JWT
 
 -- ─── Types ─────────────────────────────────────────────────────────
 
 {- | GitHub App credentials needed to mint a JWT and exchange it for
-an installation token. All three are pulled from @server_config@
-(type=secret, product=autopilot).
+an installation token. All three are read from the process environment
+(@SC_GITHUB_APP_*@) via 'loadGhCreds' — never from the database.
 -}
 data GhAppCreds = GhAppCreds
     { gacAppId :: Text
@@ -124,15 +124,20 @@ getInstallationToken creds = do
 clearTokenCache :: (MonadFlow m) => m ()
 clearTokenCache = liftIO (modifyMVar_ tokenCache (\_ -> pure Nothing))
 
-{- | Read the three GitHub-App secrets from @server_config@. Throws
-'InternalError' if any of them is missing or empty — callers should
-treat this as a hard configuration error.
+{- | Read the three GitHub-App secrets from the process __environment__
+(injected from a k8s Secret in prod; from @local-mobile-secrets.env@ in dev) —
+never from the database. Throws 'InternalError' if any is missing/empty;
+callers treat this as a hard configuration error.
+
+* @SC_GITHUB_APP_ID@
+* @SC_GITHUB_APP_INSTALLATION_ID@
+* @SC_GITHUB_APP_PRIVATE_KEY_B64@ — the PEM, base64-encoded (single line).
 -}
 loadGhCreds :: (MonadFlow m) => m GhAppCreds
 loadGhCreds = do
-    mAppId <- getEnabledServerConfigValueForProduct "github_app_id" (Just "autopilot")
-    mKey <- getEnabledServerConfigValueForProduct "github_app_private_key" (Just "autopilot")
-    mInstallId <- getEnabledServerConfigValueForProduct "github_app_installation_id" (Just "autopilot")
+    mAppId <- lookupEnvSecret "SC_GITHUB_APP_ID"
+    mKey <- lookupEnvSecretB64 "SC_GITHUB_APP_PRIVATE_KEY_B64"
+    mInstallId <- lookupEnvSecret "SC_GITHUB_APP_INSTALLATION_ID"
     case (mAppId, mKey, mInstallId) of
         (Just appId, Just key, Just instId)
             | not (T.null appId)
@@ -145,7 +150,7 @@ loadGhCreds = do
                         , gacInstallationId = instId
                         }
         _ -> do
-            logError "[github-auth] missing GitHub App secrets in server_config"
+            logError "[github-auth] missing GitHub App secrets in env (SC_GITHUB_APP_ID / SC_GITHUB_APP_INSTALLATION_ID / SC_GITHUB_APP_PRIVATE_KEY_B64)"
             throwM (InternalError "GitHub App credentials are not configured")
 
 -- ─── Refresh: mint JWT + exchange for installation token ───────────
@@ -157,13 +162,13 @@ refresh creds = do
     liftIO (modifyMVar_ tokenCache (\_ -> pure (Just new)))
     pure (itToken new)
 
-{- | Mint a 10-minute RS256 JWT using the GitHub App's private key.
+{- | Mint a short-lived RS256 JWT using the GitHub App's private key.
 
 Claims:
 
 * @iss@ = numeric App ID
-* @iat@ = now (seconds since epoch)
-* @exp@ = now + 600
+* @iat@ = now − 60 s (backdated per GitHub's recommendation to tolerate clock drift)
+* @exp@ = now + 540 s (9 min 0 s — safely under GitHub's 10-min ceiling)
 -}
 mintAppJwt :: (MonadFlow m) => GhAppCreds -> m Text
 mintAppJwt GhAppCreds{..} = do
@@ -174,8 +179,8 @@ mintAppJwt GhAppCreds{..} = do
             throwM (InternalError "GitHub App private key is not a valid RSA PEM")
         Just rsa -> do
             let signer = JWT.EncodeRSAPrivateKey rsa
-                iat = JWT.numericDate (fromInteger nowSec)
-                expAt = JWT.numericDate (fromInteger (nowSec + 600))
+                iat = JWT.numericDate (fromInteger (nowSec - 60))
+                expAt = JWT.numericDate (fromInteger (nowSec + 540))
                 claims =
                     mempty
                         { JWT.iss = JWT.stringOrURI gacAppId

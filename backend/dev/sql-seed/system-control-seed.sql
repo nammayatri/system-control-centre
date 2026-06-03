@@ -215,28 +215,18 @@ ON CONFLICT (person_id, product_slug) DO NOTHING;
 -- → moved to migrations/system-control/0011-mobile-releases.sql because the
 --   seed runs before migrations, so app_catalog doesn't exist at seed time.
 
--- Section 2: server_config flags + secret placeholders
+-- Section 2: server_config flags
+-- (mobile_run_poll_seconds removed — it was never read; the runner poll cadence
+--  comes from release_watch_delay, store sync from store_sync_interval_minutes.)
 INSERT INTO server_config (type, name, value, product, enabled, last_updated) VALUES
-  ('flag', 'mobile_dispatch_enabled',  'false', 'autopilot', 0, now()),
-  ('flag', 'mobile_run_poll_seconds',  '30',    'autopilot', 1, now())
+  ('flag', 'mobile_dispatch_enabled',  'false', 'autopilot', 0, now())
 ON CONFLICT DO NOTHING;
 
-INSERT INTO server_config (type, name, value, product, enabled, last_updated) VALUES
-  ('secret', 'github_app_id',                     '', 'autopilot', 0, now()),
-  ('secret', 'github_app_private_key',            '', 'autopilot', 0, now()),
-  ('secret', 'github_app_installation_id',        '', 'autopilot', 0, now()),
-  ('secret', 'play_console_service_account_json', '', 'autopilot', 0, now())
-ON CONFLICT DO NOTHING;
-
--- App Store Connect API credentials for iOS version resolution (added 2026-05-14).
--- One org-wide key; if the key's Apple team doesn't have access to a particular
--- app, that row's version resolution falls back to the workflow's per-team
--- auto-detect (`fastlane.yaml:261-346`). See spec §iOS-1.
-INSERT INTO server_config (type, name, value, product, enabled, last_updated) VALUES
-  ('secret', 'app_store_connect_issuer_id',      '', 'autopilot', 0, now()),
-  ('secret', 'app_store_connect_key_id',         '', 'autopilot', 0, now()),
-  ('secret', 'app_store_connect_private_key_p8', '', 'autopilot', 0, now())
-ON CONFLICT DO NOTHING;
+-- NOTE: mobile secrets (GitHub App key, Play service-account JSON, App Store
+-- Connect .p8 + ids) are NOT stored in the DB. They are read from the process
+-- environment (k8s Secret in prod; backend/dev/local-mobile-secrets.env in dev)
+-- by Core.Secrets — see loadGhCreds / loadPlayCreds / loadAscCreds. Keeping them
+-- out of server_config keeps them off the /server-config API and the frontend.
 
 -- Section 3: Grant new perms on existing system roles
 UPDATE sc_role
