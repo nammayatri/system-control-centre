@@ -26,6 +26,7 @@ import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Servant hiding (Unauthorized)
 import Shared.API.Response (APIResponse (..))
+import Shared.Config.Runtime (getConfigTextForProduct)
 import System.Environment (lookupEnv)
 
 -- | Auth API type
@@ -68,10 +69,9 @@ loginH body = do
                             insertToken (personId person) tok expiresAt
                             -- Get product access with permissions
                             products <- findAllProductsForPerson person
-                            -- Same deployment env the frontend needs at /auth/me, returned
-                            -- here too so the SPA has it immediately after login without a
-                            -- second round-trip. Read from SC_ENV at runtime (see meH).
-                            envVal <- liftIO (fromMaybe "UAT" <$> lookupEnv "SC_ENV")
+                            -- Same deployment descriptor the frontend gets at /auth/me,
+                            -- returned here too so the SPA has it immediately after login.
+                            cfg <- resolveDeploymentConfig
                             pure $
                                 object
                                     [ "token" .= tok
@@ -93,11 +93,24 @@ loginH body = do
                                                     ]
                                             )
                                             products
-                                    , "config"
-                                        .= object
-                                            [ "env" .= T.pack envVal
-                                            ]
+                                    , "config" .= cfg
                                     ]
+
+{- | The deployment descriptor returned in the @config@ block of @\/auth\/login@
+and @\/auth\/me@. Frontend behaviour keys off @buildType@ (a runtime
+@server_config@ value — @mobile_build_type@, default @"release"@), NOT the
+@env@ label. So flipping a deployment debug↔release is a config update, no
+code change or redeploy; @env@ is kept only as a cosmetic label.
+-}
+resolveDeploymentConfig :: Flow Value
+resolveDeploymentConfig = do
+    envVal <- liftIO (fromMaybe "UAT" <$> lookupEnv "SC_ENV")
+    buildType <- getConfigTextForProduct "mobile_build_type" (Just "autopilot") "release"
+    pure $
+        object
+            [ "env" .= T.pack envVal
+            , "buildType" .= buildType
+            ]
 
 -- | POST /auth/logout
 logoutH :: Maybe Text -> Flow APIResponse
@@ -130,10 +143,7 @@ meH mAuth = do
                                         throwM $ Unauthorized "Account deactivated"
                                 Just person -> do
                                     products <- findAllProductsForPerson person
-                                    -- Single deployment env (one SCC instance serves one env).
-                                    -- Read from SC_ENV at runtime so k8s env vars control it
-                                    -- without rebuilding the frontend or backend images.
-                                    envVal <- liftIO (fromMaybe "UAT" <$> lookupEnv "SC_ENV")
+                                    cfg <- resolveDeploymentConfig
                                     pure $
                                         object
                                             [ "person"
@@ -154,10 +164,7 @@ meH mAuth = do
                                                             ]
                                                     )
                                                     products
-                                            , "config"
-                                                .= object
-                                                    [ "env" .= T.pack envVal
-                                                    ]
+                                            , "config" .= cfg
                                             ]
 
 -- | POST /auth/verify

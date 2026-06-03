@@ -1070,7 +1070,9 @@ const ReleaseSummary: React.FC = () => {
               <BarChart3 className="w-3 h-3" /> Metrics
             </a>
           )}
-          {isMobile && (
+          {/* Crashlytics is production telemetry — only meaningful for release
+              builds. Debug (Firebase/TestFlight) builds don't report to it. */}
+          {isMobile && release.release_context?.build_type !== 'debug' && (
             <a
               href={crashlyticsUrl}
               target="_blank"

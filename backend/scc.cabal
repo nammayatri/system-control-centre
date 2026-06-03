@@ -34,6 +34,7 @@ library
       Core.Auth.Types
       Core.AppError
       Core.Config
+      Core.Secrets
       Core.Http.Client
       Core.Logging
       Core.Types.Id

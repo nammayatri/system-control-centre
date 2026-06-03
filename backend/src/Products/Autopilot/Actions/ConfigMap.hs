@@ -122,6 +122,11 @@ createConfigMapH _ap body = do
                         , -- ConfigMap releases carry no K8s context, but the record
                           -- field must be initialised or access crashes at runtime.
                           releaseContext = Nothing
+                        , -- Mobile/revert-only fields — not applicable to a configmap
+                          -- release. Must be set or the record is partial and crashes.
+                          sourceRef = Nothing
+                        , commitSha = Nothing
+                        , revertsReleaseId = Nothing
                         }
                 targetState = ConfigState emptyConfigState
             insertReleaseTracker tracker (Just targetState)

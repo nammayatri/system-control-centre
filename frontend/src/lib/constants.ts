@@ -18,9 +18,10 @@ export const TOKEN_KEY = 'sc_token';
 export const USER_KEY = 'sc_user';
 export const PRODUCTS_KEY = 'sc_products';
 
-// Env is now sourced from the backend via /auth/me (AuthContext.env).
-// One SCC instance serves one env — value is set by SC_ENV on the backend
-// deployment. Components that need it call useAuth().env.
+// Deployment behaviour is keyed off useAuth().buildType ('debug' | 'release'),
+// sourced from the mobile_build_type server_config (NOT the env label). The
+// env label (useAuth().env) is cosmetic only — never branch on it. Changing a
+// deployment's build type is a config update, no redeploy.
 
 // Mirror of backend's Products.Autopilot.Types.Workflow.ReleaseCategory ADT.
 // These strings are persisted in deployment_config.product_type and are the

@@ -7,10 +7,13 @@ interface AuthContextType {
   user: AuthUser | null;
   token: string | null;
   products: ProductAccess[];
-  // Deployment env label (e.g. "UAT", "PROD"). Single value — one SCC instance
-  // serves one env, set via SC_ENV on the backend deployment. Defaults to "UAT"
-  // if the backend hasn't responded yet or didn't send the field.
+  // Cosmetic deployment env label from SC_ENV (display only — do NOT branch on it).
   env: string;
+  // Deployment build type — 'debug' or 'release'. Sourced from the
+  // mobile_build_type server_config (not the env label), so it's runtime-
+  // configurable without a redeploy. This is the single knob the UI keys off for
+  // debug vs release. Defaults to 'release'.
+  buildType: 'debug' | 'release';
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
@@ -22,21 +25,26 @@ const AuthContext = createContext<AuthContextType>({
   token: null,
   products: [],
   env: 'UAT',
+  buildType: 'release',
   login: async () => {},
   logout: () => {},
   isAuthenticated: false,
   loading: true,
 });
 
+type BuildType = 'debug' | 'release';
+const asBuildType = (v: unknown): BuildType => (v === 'debug' ? 'debug' : 'release');
+
 // Hydrate from localStorage so the app paints an authed UI before the profile request returns.
-function loadCached(): { user: AuthUser | null; products: ProductAccess[]; env: string } {
+function loadCached(): { user: AuthUser | null; products: ProductAccess[]; env: string; buildType: BuildType } {
   try {
     const user = JSON.parse(localStorage.getItem('auth_user') || 'null');
     const products = JSON.parse(localStorage.getItem('auth_products') || '[]');
     const env = localStorage.getItem('auth_env') || 'UAT';
-    return { user, products, env };
+    const buildType = asBuildType(localStorage.getItem('auth_build_type'));
+    return { user, products, env, buildType };
   } catch {
-    return { user: null, products: [], env: 'UAT' };
+    return { user: null, products: [], env: 'UAT', buildType: 'release' };
   }
 }
 
@@ -47,6 +55,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [token, setToken] = useState<string | null>(storedToken);
   const [products, setProducts] = useState<ProductAccess[]>(storedToken ? cached.products : []);
   const [env, setEnv] = useState<string>(cached.env);
+  const [buildType, setBuildType] = useState<BuildType>(cached.buildType);
   const [loading, setLoading] = useState(!cached.user && !!storedToken);
 
   const clearAuth = useCallback(() => {
@@ -57,6 +66,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem('auth_user');
     localStorage.removeItem('auth_products');
     localStorage.removeItem('auth_env');
+    localStorage.removeItem('auth_build_type');
   }, []);
 
   // Validate token on mount — only logout on 401, not network errors
@@ -72,10 +82,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setProducts(data.products || []);
         setToken(storedToken);
         const newEnv = data.config?.env || 'UAT';
+        const newBuildType = asBuildType(data.config?.buildType);
         setEnv(newEnv);
+        setBuildType(newBuildType);
         localStorage.setItem('auth_user', JSON.stringify(data.person));
         localStorage.setItem('auth_products', JSON.stringify(data.products || []));
         localStorage.setItem('auth_env', newEnv);
+        localStorage.setItem('auth_build_type', newBuildType);
       })
       .catch((err) => {
         // Only 401 clears auth — network errors keep the cached user so a transient
@@ -93,11 +106,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setToken(data.token);
     setProducts(data.products || []);
     const newEnv = data.config?.env || 'UAT';
+    const newBuildType = asBuildType(data.config?.buildType);
     setEnv(newEnv);
+    setBuildType(newBuildType);
     localStorage.setItem('sc_token', data.token);
     localStorage.setItem('auth_user', JSON.stringify(data.person));
     localStorage.setItem('auth_products', JSON.stringify(data.products || []));
     localStorage.setItem('auth_env', newEnv);
+    localStorage.setItem('auth_build_type', newBuildType);
   }, []);
 
   const logout = useCallback(() => {
@@ -113,6 +129,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         token,
         products,
         env,
+        buildType,
         login,
         logout,
         isAuthenticated: !!token && !!user,

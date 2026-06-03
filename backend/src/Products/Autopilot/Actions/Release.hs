@@ -684,6 +684,12 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{
                   -- 'releaseContext' crashes at runtime with "Missing field in
                   -- record construction" (caught by -Wmissing-fields).
                   releaseContext = Just (toJSON derivedContext)
+                , -- Mobile/revert-only fields — not applicable to a freshly
+                  -- created backend (k8s) release. Must be set explicitly or the
+                  -- record is partial and crashes at runtime when forced.
+                  sourceRef = Nothing
+                , commitSha = Nothing
+                , revertsReleaseId = Nothing
                 }
         targetState =
             K8sState $
