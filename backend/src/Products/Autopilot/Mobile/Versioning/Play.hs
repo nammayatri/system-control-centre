@@ -45,6 +45,7 @@ import Core.Http.Client (
     httpJson,
     httpRaw,
  )
+import Core.Secrets (lookupEnvSecretB64)
 import Core.Types.Time (Seconds (..))
 import Data.Aeson (
     FromJSON (..),
@@ -67,7 +68,6 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import GHC.Generics (Generic)
-import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 import qualified Web.JWT as JWT
 
 -- ─── Pure algorithm ────────────────────────────────────────────────
@@ -381,17 +381,13 @@ pickRelease (TrackBody rels) =
 
 -- ─── Server-config helper ──────────────────────────────────────────
 
-{- | Read @play_console_service_account_json@ (autopilot-scoped) from
-@server_config@. Returns 'Nothing' if not configured — caller should
-surface a clear error to the user.
+{- | Read the Play Console service-account JSON from the process
+__environment__ — @SC_PLAY_SA_JSON_B64@ (the JSON, base64-encoded). Injected
+from a k8s Secret in prod; from @local-mobile-secrets.env@ in dev. Returns
+'Nothing' if not configured — caller surfaces a clear error to the user.
 -}
 loadPlayCreds :: (MonadFlow m) => m (Maybe PlayCreds)
-loadPlayCreds = do
-    mVal <-
-        getEnabledServerConfigValueForProduct
-            "play_console_service_account_json"
-            (Just "autopilot")
-    pure (fmap PlayCreds mVal)
+loadPlayCreds = fmap (fmap PlayCreds) (lookupEnvSecretB64 "SC_PLAY_SA_JSON_B64")
 
 -- ─── Dispatcher entry point ────────────────────────────────────────
 
@@ -420,7 +416,7 @@ resolve packageName = do
     mCreds <- loadPlayCreds
     case mCreds of
         Nothing ->
-            pure (Left "play_console_service_account_json not configured in server_config")
+            pure (Left "Play service-account JSON not configured (set SC_PLAY_SA_JSON_B64)")
         Just creds -> do
             res <- fetchPlayTracks creds packageName
             case res of

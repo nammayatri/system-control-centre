@@ -54,7 +54,7 @@
 - Don't add hspec/tasty. Use the existing `assertEqual` / `assertBool` helpers in `backend/test/Main.hs`.
 - Don't add new dependencies on either side.
 - Don't change the GH Actions workflow YAML.
-- Don't write secrets into the repo. GH App creds are already in `server_config` from the mobile MVP work.
+- Don't write secrets into the repo. (Secrets later moved out of `server_config` to the **environment** — `Core.Secrets`, see design §15/B9; in dev they live in the git-ignored `local-mobile-secrets.env`.)
 
 ---
 

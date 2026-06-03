@@ -59,6 +59,7 @@ import Core.Http.Client (
     httpJson,
     httpRaw,
  )
+import Core.Secrets (lookupEnvSecret, lookupEnvSecretB64)
 import Core.Types.Time (Seconds (..))
 import Crypto.Hash.Algorithms (SHA256 (..))
 import qualified Crypto.PubKey.ECC.ECDSA as ECDSA
@@ -92,7 +93,6 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
-import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 
 -- ─── Pure algorithm ────────────────────────────────────────────────
 
@@ -129,11 +129,12 @@ bumpPatch ver =
 
 -- ─── ASC credentials + errors ──────────────────────────────────────
 
-{- | App Store Connect API key, loaded from three @server_config@ rows:
+{- | App Store Connect API key, read from the process environment via
+'loadAscCreds' (never the DB):
 
-* @app_store_connect_issuer_id@   — UUID from "Users and Access → Integrations".
-* @app_store_connect_key_id@      — 10-char string next to the generated key.
-* @app_store_connect_private_key_p8@ — full PEM body of the @.p8@ file.
+* @SC_ASC_ISSUER_ID@   — UUID from "Users and Access → Integrations".
+* @SC_ASC_KEY_ID@      — 10-char string next to the generated key.
+* @SC_ASC_PRIVATE_KEY_P8_B64@ — the @.p8@ PEM, base64-encoded.
 -}
 data AscCreds = AscCreds
     { acIssuerId :: Text
@@ -546,15 +547,19 @@ instance FromJSON BuildsResp where
 
 -- ─── Server-config helper ──────────────────────────────────────────
 
-{- | Read the three @app_store_connect_*@ rows from @server_config@.
-Returns 'Nothing' if ANY of the three is empty / disabled — caller
-should surface a clear error.
+{- | Read the three App Store Connect secrets from the process __environment__
+(k8s Secret in prod; @local-mobile-secrets.env@ in dev) — never from the DB.
+Returns 'Nothing' if any is empty — caller surfaces a clear error.
+
+* @SC_ASC_ISSUER_ID@
+* @SC_ASC_KEY_ID@
+* @SC_ASC_PRIVATE_KEY_P8_B64@ — the @.p8@ PEM, base64-encoded (single line).
 -}
 loadAscCreds :: (MonadFlow m) => m (Maybe AscCreds)
 loadAscCreds = do
-    mIssuer <- getEnabledServerConfigValueForProduct "app_store_connect_issuer_id" (Just "autopilot")
-    mKeyId <- getEnabledServerConfigValueForProduct "app_store_connect_key_id" (Just "autopilot")
-    mP8 <- getEnabledServerConfigValueForProduct "app_store_connect_private_key_p8" (Just "autopilot")
+    mIssuer <- lookupEnvSecret "SC_ASC_ISSUER_ID"
+    mKeyId <- lookupEnvSecret "SC_ASC_KEY_ID"
+    mP8 <- lookupEnvSecretB64 "SC_ASC_PRIVATE_KEY_P8_B64"
     pure $ case (mIssuer, mKeyId, mP8) of
         (Just iss, Just kid, Just p8)
             | not (T.null iss) && not (T.null kid) && not (T.null p8) ->
