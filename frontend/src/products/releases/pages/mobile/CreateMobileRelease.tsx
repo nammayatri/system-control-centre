@@ -69,7 +69,7 @@ const LatestBuildBadge = ({ build, label }: { build: LatestBuild; label: string 
 
 export default function CreateMobileRelease() {
   const navigate = useNavigate();
-  const { env } = useAuth();
+  const { buildType: deployBuildType } = useAuth();
   const { data: apps, isLoading: appsLoading, error: appsError } = useMobileApps();
 
   // Filter to enabled apps only — disabled apps live in the catalog but
@@ -124,13 +124,13 @@ export default function CreateMobileRelease() {
 
   const [versionEdits, setVersionEdits] = useState<Record<number, VersionEdit>>({});
   const [changeLog, setChangeLog] = useState('');
-  const envBuildType: BuildType | null =
-    env === 'master' ? 'debug' : env === 'production' ? 'release' : null;
-  const [buildType, setBuildType] = useState<BuildType>(envBuildType ?? 'release');
+  // Build type is fixed by the deployment (mobile_build_type config), surfaced
+  // via auth as config.buildType — not chosen on the form.
+  const [buildType, setBuildType] = useState<BuildType>(deployBuildType);
 
   useEffect(() => {
-    if (envBuildType) setBuildType(envBuildType);
-  }, [envBuildType]);
+    setBuildType(deployBuildType);
+  }, [deployBuildType]);
 
   const previewQuery = usePreviewVersions(buildType === 'debug' ? [] : debouncedIds);
   const previews: VersionPreviewItem[] = previewQuery.data?.previews ?? [];

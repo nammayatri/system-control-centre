@@ -38,10 +38,10 @@ interface GroupedResponse {
 const Configurations: React.FC = () => {
   const queryClient = useQueryClient();
   const location = useLocation();
-  const { env } = useAuth();
-  // master = debug deployment; release-only configs (store sync, version
-  // preview) are no-ops here, so hide them.
-  const isDebugEnv = env === 'master';
+  const { buildType } = useAuth();
+  // Debug deployment (mobile_build_type='debug'); release-only configs (store
+  // sync, version preview) are no-ops here, so hide them.
+  const debugEnv = buildType === 'debug';
   const filter: 'backend' | 'mobile' = location.pathname.startsWith('/mobile') ? 'mobile' : 'backend';
   const [search, setSearch] = useState('');
   const [selectedConfig, setSelectedConfig] = useState<ConfigItem | null>(null);
@@ -61,17 +61,24 @@ const Configurations: React.FC = () => {
 
   const groups = useMemo(() => {
     const raw = data?.groups ?? [];
-    return raw
+    const filtered = raw
       .map(g => ({
         ...g,
         configs: g.configs.filter(c =>
           !isHiddenServerConfig(c.key) &&
-          !(isDebugEnv && isReleaseOnlyServerConfig(c.key)) &&
+          !(debugEnv && isReleaseOnlyServerConfig(c.key)) &&
           (filter === 'mobile' ? isMobileServerConfig(c.key) : !isMobileServerConfig(c.key))
         ),
       }))
       .filter(g => g.configs.length > 0);
-  }, [data, filter, isDebugEnv]);
+
+    // Mobile tab: collapse all sub-groups into one "Mobile" group (single section).
+    if (filter === 'mobile') {
+      const configs = filtered.flatMap(g => g.configs);
+      return configs.length > 0 ? [{ name: 'Mobile', configs }] : [];
+    }
+    return filtered;
+  }, [data, filter, debugEnv]);
 
   const saveMut = useMutation({
     mutationFn: async (params: { name: string; value: string; enabled: string }) => {
