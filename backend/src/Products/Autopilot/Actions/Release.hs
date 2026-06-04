@@ -245,7 +245,8 @@ listReleasesH _ap mFrom mTo = do
             <|> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q%Z" (T.unpack t)
 
 createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
-createReleaseH _ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
+createReleaseH ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
+    let req' = req{createdBy = apEmail ap}
     case globalId of
         Just gid | not (T.null gid) -> do
             existing <- findReleaseTrackerByGlobalId gid
@@ -253,10 +254,10 @@ createReleaseH _ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = 
                 Just (existingTracker, _) -> do
                     logInfo $ "Idempotent receive: tracker already exists for global_id=" <> gid
                     pure $ APIResponse "SUCCESS" ("Tracker already exists: " <> NT.releaseId existingTracker)
-                Nothing -> normalCreatePath
-        _ -> normalCreatePath
+                Nothing -> normalCreatePath req'
+        _ -> normalCreatePath req'
   where
-    normalCreatePath = createReleaseHBody mXForwardedEmail mXPomeriumJwt req
+    normalCreatePath r = createReleaseHBody mXForwardedEmail mXPomeriumJwt r
 
 createReleaseHBody :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseHBody mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} = do

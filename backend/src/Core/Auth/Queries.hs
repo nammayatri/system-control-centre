@@ -11,6 +11,7 @@ module Core.Auth.Queries (
     findProductAccessForPerson,
     computeEffectivePermissions,
     findAllProductsForPerson,
+    resetPasswordByEmail,
     TokenRow (..),
 )
 where
@@ -21,10 +22,11 @@ import Core.DB.Connection (runDB, withConn)
 import Core.Environment (DBEnv (..), MonadFlow, withDb)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
+import Data.Int (Int64)
 import Data.UUID (UUID)
 import Database.Beam
 import Database.Beam.Postgres ()
-import Database.PostgreSQL.Simple (Only (..), query)
+import Database.PostgreSQL.Simple (Only (..), execute, query)
 import Database.PostgreSQL.Simple.FromRow (FromRow (..), field)
 import Database.PostgreSQL.Simple.Types (PGArray (..))
 import Products.Types (allPermissionsText, defaultPermissionsText)
@@ -262,3 +264,14 @@ findAllProductsForPerson person = withDb $ \db -> do
             pure $ PersonProductPerms (paProductSlug pa) (paRoleName pa) perms
         )
         accesses
+
+-- ── Password Reset ─────────────────────────────────────────────────
+
+resetPasswordByEmail :: (MonadFlow m) => Text -> Text -> m Bool
+resetPasswordByEmail email newPassword = withDb $ \db -> withConn db $ \conn -> do
+    n <-
+        execute
+            conn
+            "UPDATE sc_person SET password_hash = ?, updated_at = now() WHERE email = ? AND is_active = true"
+            (newPassword, email)
+    pure (n > 0)

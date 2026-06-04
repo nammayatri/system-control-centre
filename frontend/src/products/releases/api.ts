@@ -103,6 +103,7 @@ export interface APRelease {
     last_updated: string;
     end_time: string;
     release_manager: string;
+    approved_by?: string | null;
     env: string;
     priority: number;
     schedule_time: string;
@@ -275,6 +276,7 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     tracker_type: (r as any).category || r.trackerType || 'BackendService',
     mode: (r.mode || 'AUTO').toUpperCase(),
     release_manager: r.createdBy || '',
+    approved_by: r.approvedBy || null,
     is_approved: r.isApproved ? 1 : 0,
     is_infra_approved: r.isInfraApproved ? 1 : 0,
     release_tag: r.releaseTag || '',

@@ -850,7 +850,7 @@ const ReleaseSummary: React.FC = () => {
                     { label: 'Env', value: release.env },
                     { label: 'Mode', value: release.mode },
                     { label: 'Approved', value: release.is_approved ? 'Yes' : 'No' },
-                    { label: 'Approved By', value: release.is_approved ? (release.release_manager || '-') : '-' },
+                    { label: 'Approved By', value: release.is_approved ? (release.approved_by || release.release_manager || '-') : '-' },
                     { label: 'Info', value: release.info },
                   ],
                 },

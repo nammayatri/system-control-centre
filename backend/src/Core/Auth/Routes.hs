@@ -34,6 +34,7 @@ type AuthAPI =
         :<|> "logout" :> Header "Authorization" Text :> Post '[JSON] APIResponse
         :<|> "me" :> Header "Authorization" Text :> Get '[JSON] Value
         :<|> "verify" :> ReqBody '[JSON] Value :> Post '[JSON] Value
+        :<|> "reset-password" :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
 
 authServer :: ServerT AuthAPI Flow
 authServer =
@@ -41,6 +42,7 @@ authServer =
         :<|> logoutH
         :<|> meH
         :<|> verifyH
+        :<|> resetPasswordH
 
 -- | POST /auth/login
 loginH :: Value -> Flow Value
@@ -224,6 +226,27 @@ parseVerifyBody (Object obj) =
         (Just (String t), Just (String p), Just (String perm)) -> Just (t, p, perm)
         _ -> Nothing
 parseVerifyBody _ = Nothing
+
+-- | POST /auth/reset-password
+resetPasswordH :: Value -> Flow APIResponse
+resetPasswordH body = do
+    case parseResetPasswordBody body of
+        Nothing -> throwM $ BadRequest "Email and newPassword are required"
+        Just (email, newPassword) -> do
+            if T.length newPassword < 6
+                then throwM $ BadRequest "Password must be at least 6 characters"
+                else do
+                    updated <- resetPasswordByEmail email newPassword
+                    if updated
+                        then pure $ APIResponse "SUCCESS" "Password reset successfully"
+                        else throwM $ NotFound "No active account found with that email"
+
+parseResetPasswordBody :: Value -> Maybe (Text, Text)
+parseResetPasswordBody (Object obj) =
+    case (KM.lookup (K.fromText "email") obj, KM.lookup (K.fromText "newPassword") obj) of
+        (Just (String e), Just (String p)) -> Just (e, p)
+        _ -> Nothing
+parseResetPasswordBody _ = Nothing
 
 {- | Simple password verification.
 Compares against the stored hash. In production use bcrypt.

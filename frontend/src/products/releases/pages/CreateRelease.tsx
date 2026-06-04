@@ -31,7 +31,7 @@ const CreateRelease: React.FC = () => {
   const location = useLocation();
   const { id } = useParams<{ id?: string }>();
   const isClone = location.pathname.endsWith('/clone') && !!id;
-  const { env: deploymentEnv } = useAuth();
+  const { env: deploymentEnv, user } = useAuth();
   const isUpdate = !!id && location.pathname.endsWith('/edit');
 
   const { data: productConfigs = [] } = useProductConfigs();
@@ -404,7 +404,7 @@ const CreateRelease: React.FC = () => {
       isReleaseSync,
       syncClusterEnvOverrideData: isReleaseSync && isSecondaryEnvSwitch ? secondaryEnvData : null,
       syncClusterRolloutStrategy: isReleaseSync ? secondaryStages.map(s => ({ rolloutPercent: s.rollout, cooloffMinutes: s.cooloff, podCount: s.pods })) : null,
-      release_manager: "local_admin", release_tag: generateReleaseTag(svc), trackerType,
+      release_manager: user?.email || 'local_admin', release_tag: generateReleaseTag(svc), trackerType,
     });
 
     try {
