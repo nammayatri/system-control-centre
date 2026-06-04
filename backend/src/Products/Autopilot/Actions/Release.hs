@@ -246,7 +246,7 @@ listReleasesH _ap mFrom mTo = do
 
 createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseH ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
-    let req' = req{createdBy = apEmail ap}
+    let req' = req{createdBy = apEmail ap} :: K8sCreateReleaseReq
     case globalId of
         Just gid | not (T.null gid) -> do
             existing <- findReleaseTrackerByGlobalId gid

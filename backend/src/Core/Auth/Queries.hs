@@ -22,7 +22,6 @@ import Core.DB.Connection (runDB, withConn)
 import Core.Environment (DBEnv (..), MonadFlow, withDb)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
-import Data.Int (Int64)
 import Data.UUID (UUID)
 import Database.Beam
 import Database.Beam.Postgres ()

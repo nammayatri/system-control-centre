@@ -42,8 +42,9 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cabal \
     --mount=type=cache,target=/root/.ghc \
     cabal build exe:scc -j4 && \
-    cp "$(cabal list-bin exe:scc)" /usr/local/bin/scc && \
-    strip /usr/local/bin/scc || true
+    find dist-newstyle -type f -name scc -path "*/build/scc/scc" | head -1 | xargs -I{} cp {} /usr/local/bin/scc && \
+    test -f /usr/local/bin/scc
+RUN strip /usr/local/bin/scc || true
 
 # ── Runtime stage ──────────────────────────────────────────────────
 FROM --platform=linux/amd64 debian:bookworm-slim AS runtime
