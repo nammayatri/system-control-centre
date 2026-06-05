@@ -159,7 +159,7 @@ const ListConfigMap: React.FC = () => {
           <div className="hidden md:block flex-1" />
           <div className="flex items-center gap-2">
             <button onClick={handleRefresh} aria-label="Refresh" className="h-10 w-10 sm:h-9 sm:w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150"><RefreshCw className={`h-4 w-4 ${refreshSpinning ? 'animate-spin' : ''}`} /></button>
-            <PermissionGate product="autopilot" permission="CONFIG_CREATE">
+            <PermissionGate product="autopilot" permission="RELEASE_CREATE">
               <Link to="/backend/configmap/new" className="flex-1 md:flex-none">
                 <Button size="md" fullWidth><Plus className="w-4 h-4" /> Create ConfigMap</Button>
               </Link>

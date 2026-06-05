@@ -1,3 +1,4 @@
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Backend scheduler workflow (K8s pod-count based deployment)
@@ -25,7 +26,7 @@ import Core.Types.Time (threadDelaySec)
 import Core.Workflow.Spec (WorkflowSpec (..))
 import Core.Workflow.Stage (Stage)
 import Data.Aeson (object, toJSON, (.=))
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import Products.Autopilot.K8s.Deployment
   ( buildCloneDeploymentCommand,
@@ -34,8 +35,9 @@ import Products.Autopilot.K8s.Deployment
     buildScaleNamedDeploymentCommand,
     deploymentExists,
     getDeploymentReplicaStatus,
+    getRunningSchedulerVersion,
   )
-import Products.Autopilot.K8s.Execute (K8sError (..), executeWithRetry, runCmd)
+import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildDeleteHpaCommand, getHpaMinMax, hpaExists)
 import Products.Autopilot.Notifications
   ( notifyPodsScaledDown,
@@ -241,30 +243,107 @@ prepareK8sResources = do
   -- message instead of letting jq/kubectl emit a confusing NotFound error.
   updateK8sStatus BSCreateDeployment
   newDepExists <- liftIO $ deploymentExists cfg (namespace ctx) (deploymentName ctx)
-  if newDepExists
-    then do
-      logInfoS "  Deployment already exists, ensuring at least 1 replica for readiness check"
-      _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
-      pure ()
-    else do
-      oldDepExists <- liftIO $ deploymentExists cfg (namespace ctx) oldDepName
-      if not oldDepExists
-        then
-          liftIO $
-            throwIO $
-              WorkflowError "prepare" $
-                "Old deployment '"
-                  <> oldDepName
-                  <> "' not found in namespace '"
-                  <> namespace ctx
-                  <> "'. "
-                  <> "Could not detect the running version automatically — "
-                  <> "please specify old_version explicitly when creating the release."
-        else do
-          logInfoS $ "  Cloning deployment to " <> deploymentName ctx <> " with 1 pod for verification"
-          _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg ctx)
-          _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
-          pure ()
+  -- When the new deployment already exists AND the old source deployment is still
+  -- present, it means a previous release attempt left a stale deployment —
+  -- potentially with the wrong image (e.g. from the pre-fix jq bug). Delete it
+  -- and re-clone so the image is always correct.
+  -- When the old source is gone (cleaned up after a previous successful release),
+  -- the existing new deployment is canonical — just scale it.
+  effectivelyNeedsClone <-
+    if newDepExists
+      then do
+        logInfoS "  Deployment already exists — ensuring replicas >= 1"
+        _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
+        pure False
+      else pure True
+  resolvedSrcCtx <-
+    if not effectivelyNeedsClone
+      then pure ctx
+      else do
+        oldDepExists <- liftIO $ deploymentExists cfg (namespace ctx) oldDepName
+        srcCtx <-
+          if oldDepExists
+            then pure ctx
+            else do
+              discovered <- liftIO $ getRunningSchedulerVersion cfg (namespace ctx) (serviceName ctx)
+              case discovered of
+                Right (Just liveVer) -> do
+                  let liveDepName = serviceName ctx <> "-" <> liveVer
+                  liveExists <- liftIO $ deploymentExists cfg (namespace ctx) liveDepName
+                  if liveExists
+                    then do
+                      logInfoS $
+                        "  Stored old version '"
+                          <> oldVersion ctx
+                          <> "' not found; using live version '"
+                          <> liveVer
+                          <> "'"
+                      pure ctx {oldVersion = liveVer}
+                    else
+                      liftIO $
+                        throwIO $
+                          WorkflowError "prepare" $
+                            "Old deployment '"
+                              <> oldDepName
+                              <> "' not found and live discovery yielded '"
+                              <> liveDepName
+                              <> "' which also does not exist in namespace '"
+                              <> namespace ctx
+                              <> "'."
+                _ ->
+                  liftIO $
+                    throwIO $
+                      WorkflowError "prepare" $
+                        "Old deployment '"
+                          <> oldDepName
+                          <> "' not found in namespace '"
+                          <> namespace ctx
+                          <> "'. "
+                          <> "Could not detect the running version automatically — "
+                          <> "please specify old_version explicitly when creating the release."
+        logInfoS $ "  Cloning deployment to " <> deploymentName ctx <> " with 1 pod for verification"
+        logInfoS $
+          "  [clone] container="
+            <> containerName ctx
+            <> " dockerImage="
+            <> maybe "(none)" id (dockerImage ctx)
+            <> " oldVersion="
+            <> oldVersion srcCtx
+            <> " newVersion="
+            <> newVersion ctx
+        _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg srcCtx)
+        _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
+        -- Verify the cloned deployment has the expected image.
+        -- This catches jq/container-name mismatches immediately as a visible event.
+        let verifyCmd =
+              unwords
+                [ kubectlBin cfg,
+                  "-n",
+                  shellQuote (namespace ctx),
+                  "get deploy",
+                  shellQuote (deploymentName ctx),
+                  "-o",
+                  "jsonpath={range .spec.template.spec.containers[*]}{.name}={.image}{\"\\n\"}{end}"
+                ]
+        rt' <- getRT
+        verifyResult <- liftIO $ runCmd verifyCmd
+        case verifyResult of
+          Right (K8sResult out) -> do
+            logInfoS $ "  [clone] container images after apply:\n" <> out
+            insertReleaseEvent
+              (releaseId rt')
+              "BUSINESS"
+              "CLONE_IMAGE_VERIFY"
+              (object ["containers" .= out, "expected_version" .= newVersion ctx])
+            let expectedTag = newVersion ctx
+            when (not (T.isInfixOf expectedTag out)) $
+              logErrorS $
+                "  [clone] WARNING: new version '"
+                  <> expectedTag
+                  <> "' not found in deployed images. Image may be wrong."
+          Left (K8sError err) ->
+            logWarningS $ "  [clone] Could not verify image: " <> err
+        pure srcCtx
   updateK8sField (\k8s -> k8s {deploymentCreated = True})
 
   -- 3. HPA: preserve existing / clone from old (no template branch).
@@ -279,7 +358,7 @@ prepareK8sResources = do
   -- No Branch 3 (template create) — schedulers without an old HPA simply
   -- run without one.
   let newHpaName = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
-      oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
+      oldHpaName = serviceName ctx <> "-" <> oldVersion resolvedSrcCtx <> "-hpa"
   newHpaFound <- liftIO $ hpaExists cfg (namespace ctx) newHpaName
   if newHpaFound
     then do
@@ -547,9 +626,11 @@ checkDeploymentHealth cfg ctx = do
 --
 -- @maxAttempts@ × @pollSeconds@ = total wait budget. Defaults to 30 × 10 = 5min.
 waitForSchedulerPodReady :: Config -> K8sReleaseContext -> Int -> Int -> StateFlow ()
-waitForSchedulerPodReady cfg ctx maxAttempts pollSeconds = go 0
+waitForSchedulerPodReady cfg ctx maxAttempts pollSeconds = do
+  rt <- getRT
+  go (releaseId rt) 0
   where
-    go attempt
+    go rid attempt
       | attempt >= maxAttempts = do
           let msg =
                 "Scheduler pod readiness timeout after "
@@ -558,6 +639,7 @@ waitForSchedulerPodReady cfg ctx maxAttempts pollSeconds = go 0
                   <> T.pack (show pollSeconds)
                   <> "s"
           logErrorS $ "    " <> msg
+          fetchAndLogPodLogs cfg ctx rid
           liftIO $ throwIO $ WorkflowError "scheduler-readiness" msg
       | otherwise = do
           liftIO $ threadDelaySec pollSeconds
@@ -575,7 +657,76 @@ waitForSchedulerPodReady cfg ctx maxAttempts pollSeconds = go 0
               <> T.pack (show desired)
           if ready >= desired && desired > 0
             then logInfoS "    Verification pod is Ready"
-            else go (attempt + 1)
+            else go rid (attempt + 1)
+
+fetchAndLogPodLogs :: Config -> K8sReleaseContext -> T.Text -> StateFlow ()
+fetchAndLogPodLogs cfg ctx rid = do
+  let ns = namespace ctx
+      dep = deploymentName ctx
+      svc = serviceName ctx
+      ver = newVersion ctx
+      selector = "app=" <> T.unpack svc <> ",version=" <> T.unpack ver
+      podNameCmd =
+        unwords
+          [ kubectlBin cfg,
+            "-n",
+            shellQuote ns,
+            "get pods",
+            "--selector=" <> selector,
+            "--sort-by=.metadata.creationTimestamp",
+            "-o",
+            "jsonpath={.items[-1:].metadata.name}"
+          ]
+      logCmd podName =
+        unwords
+          [ kubectlBin cfg,
+            "-n",
+            shellQuote ns,
+            "logs",
+            shellQuote podName,
+            "--tail=100",
+            "--previous",
+            "2>/dev/null",
+            "||",
+            kubectlBin cfg,
+            "-n",
+            shellQuote ns,
+            "logs",
+            shellQuote podName,
+            "--tail=100"
+          ]
+  logInfoS $ "  Fetching pod logs for " <> dep <> " (last 100 lines)"
+  podResult <- liftIO $ runCmd podNameCmd
+  case podResult of
+    Left (K8sError err) ->
+      insertReleaseEvent
+        rid
+        "BUSINESS"
+        "POD_LOGS_FAILED"
+        (object ["error" .= ("Could not list pods: " <> err)])
+    Right (K8sResult podName)
+      | T.null (T.strip podName) ->
+          insertReleaseEvent
+            rid
+            "BUSINESS"
+            "POD_LOGS_FAILED"
+            (object ["error" .= ("No pods found for deployment " <> dep)])
+    Right (K8sResult podName) -> do
+      let pn = T.strip podName
+      logsResult <- liftIO $ runCmd (logCmd pn)
+      case logsResult of
+        Left (K8sError err) ->
+          insertReleaseEvent
+            rid
+            "BUSINESS"
+            "POD_LOGS_FAILED"
+            (object ["pod" .= pn, "error" .= err])
+        Right (K8sResult logs) ->
+          insertReleaseEvent
+            rid
+            "BUSINESS"
+            "POD_LOGS"
+            (object ["pod" .= pn, "deployment" .= dep, "logs" .= logs])
 
 -- | Monitor health: poll replica status for stabilisation period
 monitorHealth :: StateFlow ()
