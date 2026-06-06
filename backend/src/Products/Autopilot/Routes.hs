@@ -10,6 +10,7 @@ import Core.Environment (Flow)
 import Data.Aeson (Value)
 import Data.Text (Text)
 import GHC.Int (Int32)
+import Products.Autopilot.Actions.ABValidation as ABValidation
 import Products.Autopilot.Actions.Config as Config
 import Products.Autopilot.Actions.ConfigMap as ConfigMap
 import Products.Autopilot.Actions.K8sResource as K8sResource
@@ -90,6 +91,13 @@ type CoreAPI =
         -- Decision-engine post-monitoring webhook. UNAUTHENTICATED — trusts
         -- the run_id (releaseId-post) as the auth token; caller is the AB engine.
         :<|> "decision" :> "webhook" :> Capture "runId" Text :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
+        -- Stagger info — called by AB engine to learn current traffic % on version B.
+        -- UNAUTHENTICATED: the AB engine has no SCC credentials.
+        :<|> "release" :> "staggerInfo" :> Capture "releaseId" Text :> Get '[JSON] Value
+        -- AB validation (static path first so it doesn't conflict with release captures)
+        :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> "abstatus" :> QueryParam "from" Text :> QueryParam "to" Text :> QueryParam "product" Text :> Get '[JSON] Value
+        :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "ab" :> Get '[JSON] Value
+        :<|> "releases" :> Protected 'AP_AB_VALIDATION_EDIT :> Capture "releaseId" Text :> "ab" :> ReqBody '[JSON] Value :> Put '[JSON] APIResponse
         -- Mobile releases: app catalog CRUD (suffix mount per unified-product principle)
         :<|> MobileAPI
 
@@ -162,5 +170,11 @@ coreServer =
         :<|> ConfigMap.fetchSecondaryConfigMapH
         -- Post-monitoring webhook receiver
         :<|> Release.decisionWebhookH
+        -- Stagger info for AB engine
+        :<|> Release.staggerInfoH
+        -- AB validation
+        :<|> ABValidation.getABMetricsH
+        :<|> ABValidation.getValidABStatusesH
+        :<|> ABValidation.updateABValidationH
         -- Mobile releases (suffix mount of MobileAPI)
         :<|> mobileServer

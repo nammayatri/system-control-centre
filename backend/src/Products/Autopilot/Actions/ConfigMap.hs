@@ -135,6 +135,8 @@ createConfigMapH ap body = do
                 sourceRef = Nothing,
                 commitSha = Nothing,
                 revertsReleaseId = Nothing,
+                abValidationStatus = Nothing,
+                abValidation = Nothing,
                 syncEnabled = if isSync then Just "true" else Nothing
               }
           targetState = ConfigState emptyConfigState

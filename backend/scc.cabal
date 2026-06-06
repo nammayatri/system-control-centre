@@ -84,6 +84,7 @@ library
       Products.Autopilot.Queries.ProductService
       Products.Autopilot.Queries.ReleaseTracker
       Products.Autopilot.Queries.VsEditTracker
+      Products.Autopilot.Actions.ABValidation
       Products.Autopilot.Actions.Config
       Products.Autopilot.Actions.ConfigMap
       Products.Autopilot.Actions.K8sResource
@@ -96,6 +97,7 @@ library
       Products.Autopilot.SyncWatcher
       Products.Autopilot.Types
       Products.Autopilot.Types.API
+      Products.Autopilot.Types.ABValidation
       Products.Autopilot.Types.Permission
       Products.Autopilot.Types.Release
       Products.Autopilot.Types.Storage.Schema

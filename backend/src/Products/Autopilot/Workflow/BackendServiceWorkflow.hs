@@ -921,7 +921,8 @@ progressiveRollout = do
               let currentIndex = length existingHistory
               logInfoS $ "  Resuming rollout from step " <> T.pack (show currentIndex) <> "/" <> T.pack (show totalSteps)
               loopStart <- liftIO getCurrentTime
-              rolloutLoop wfCfg cfg ctx currentIndex totalSteps loopStart 0 loopStart
+              let resumeStepStart = maybe loopStart historyStartedAt (snd <$> unsnocList existingHistory)
+              rolloutLoop wfCfg cfg ctx currentIndex totalSteps resumeStepStart 0 loopStart
             else do
               let (firstStep : _) = strategy
                   firstNewW = rolloutPercent firstStep
@@ -1086,84 +1087,90 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                       pure True
                     AUTO -> do
                       logInfoS "  [rolloutLoop] AUTO mode: checking health before advancing"
-                      checkDeploymentHealth cfg ctx
+                      let fastForwarded = any historyManualOverride (rolloutHistory freshRT)
+                      if fastForwarded
+                        then do
+                          logInfoS "  [rolloutLoop] Fast-forward active: bypassing AB/HS decision, advancing"
+                          pure True
+                        else do
+                          checkDeploymentHealth cfg ctx
 
-                      mSvcConfig <- findServiceByProductAndName (appGroup freshRT) (service freshRT)
-                      let mDecisionConfig = mSvcConfig >>= S.dcDecisionConfig
-                      promResult <- checkPromQueries cfg freshRT mDecisionConfig
-                      case promResult of
-                        PromAbort reason -> do
-                          logErrorS $ "[DECISION] Prometheus ABORT: " <> reason
-                          logStatusUpdated freshRT ("ABORTING the release because prom query checks failing: " <> reason)
-                          lift $ notifyGenericThreadMessage freshRT ("Prometheus check ABORT: " <> reason)
-                          updateRT $ \r -> r {status = ABORTING}
-                          currentRT' <- getRT
-                          currentTS' <- gets targetState
-                          casUpdateOrBail "rolloutLoop/promAbort" currentRT' currentTS' freshStatus
-                          liftIO $ throwIO $ WorkflowError "decision" ("Prometheus ABORT: " <> reason)
-                        PromWarn reason -> do
-                          logWarningS $ "[DECISION] Prometheus WARN: " <> reason
-                          lift $ notifyGenericThreadMessage freshRT ("Prometheus warning: " <> reason)
-                        PromOK -> pure ()
+                          mSvcConfig <- findServiceByProductAndName (appGroup freshRT) (service freshRT)
+                          let mDecisionConfig = mSvcConfig >>= S.dcDecisionConfig
+                          promResult <- checkPromQueries cfg freshRT mDecisionConfig
+                          case promResult of
+                            PromAbort reason -> do
+                              logErrorS $ "[DECISION] Prometheus ABORT: " <> reason
+                              logStatusUpdated freshRT ("ABORTING the release because prom query checks failing: " <> reason)
+                              lift $ notifyGenericThreadMessage freshRT ("Prometheus check ABORT: " <> reason)
+                              updateRT $ \r -> r {status = ABORTING}
+                              currentRT' <- getRT
+                              currentTS' <- gets targetState
+                              casUpdateOrBail "rolloutLoop/promAbort" currentRT' currentTS' freshStatus
+                              liftIO $ throwIO $ WorkflowError "decision" ("Prometheus ABORT: " <> reason)
+                            PromWarn reason -> do
+                              logWarningS $ "[DECISION] Prometheus WARN: " <> reason
+                              lift $ notifyGenericThreadMessage freshRT ("Prometheus warning: " <> reason)
+                            PromOK -> pure ()
 
-                      -- AB + HS decisions, per-(product,service) gated.
-                      perServiceEnabled <-
-                        isABHSDecisionEnabledForAppGroupService
-                          (appGroup freshRT)
-                          (service freshRT)
-                      (abDecision, hsDecision) <-
-                        if perServiceEnabled
-                          then do
-                            ab <- getABDecision cfg freshRT
-                            hs <- getHSDecision cfg freshRT False
-                            pure (ab, hs)
-                          else
-                            pure
-                              ( DecisionResult Continue Nothing "AB_ENGINE",
-                                DecisionResult Continue Nothing "HEALTH_SCORE"
-                              )
+                          -- AB + HS decisions, per-(product,service) gated.
+                          perServiceEnabled <-
+                            isABHSDecisionEnabledForAppGroupService
+                              (appGroup freshRT)
+                              (service freshRT)
+                          (abDecision, hsDecision) <-
+                            if perServiceEnabled
+                              then do
+                                ab <- getABDecision cfg freshRT
+                                hs <- getHSDecision cfg freshRT False
+                                pure (ab, hs)
+                              else
+                                pure
+                                  ( DecisionResult Continue Nothing "AB_ENGINE",
+                                    DecisionResult Continue Nothing "HEALTH_SCORE"
+                                  )
 
-                      let combinedDecision = getCombinedDecision abDecision hsDecision
-                          abReasonText = maybe "" id (drReason abDecision)
-                          hsReasonText = maybe "" id (drReason hsDecision)
-                          combinedReasons = filter (not . T.null) [abReasonText, hsReasonText]
-                          combinedResultText =
-                            "AB="
-                              <> T.pack (show (drDecision abDecision))
-                              <> " HS="
-                              <> T.pack (show (drDecision hsDecision))
+                          let combinedDecision = getCombinedDecision abDecision hsDecision
+                              abReasonText = maybe "" id (drReason abDecision)
+                              hsReasonText = maybe "" id (drReason hsDecision)
+                              combinedReasons = filter (not . T.null) [abReasonText, hsReasonText]
+                              combinedResultText =
+                                "AB="
+                                  <> T.pack (show (drDecision abDecision))
+                                  <> " HS="
+                                  <> T.pack (show (drDecision hsDecision))
 
-                      -- Write decision into last history entry BEFORE the
-                      -- DECISION_RESULT event so its embedded history includes it.
-                      case unsnocList (rolloutHistory freshRT) of
-                        Nothing -> pure ()
-                        Just _ -> do
-                          updateLastHistoryEntry $ \lastHDR ->
-                            lastHDR
-                              { historyDecision = Just combinedDecision,
-                                historyDecisionReason = Just combinedResultText,
-                                historyDecisionHs = Just (drDecision hsDecision),
-                                historyDecisionHsReason = drReason hsDecision
-                              }
-                          currentRTDR <- getRT
-                          currentTSDR <- gets targetState
-                          casUpdateOrBail "rolloutLoop/decisionHist" currentRTDR currentTSDR freshStatus
+                          -- Write decision into last history entry BEFORE the
+                          -- DECISION_RESULT event so its embedded history includes it.
+                          case unsnocList (rolloutHistory freshRT) of
+                            Nothing -> pure ()
+                            Just _ -> do
+                              updateLastHistoryEntry $ \lastHDR ->
+                                lastHDR
+                                  { historyDecision = Just combinedDecision,
+                                    historyDecisionReason = Just combinedResultText,
+                                    historyDecisionHs = Just (drDecision hsDecision),
+                                    historyDecisionHsReason = drReason hsDecision
+                                  }
+                              currentRTDR <- getRT
+                              currentTSDR <- gets targetState
+                              casUpdateOrBail "rolloutLoop/decisionHist" currentRTDR currentTSDR freshStatus
 
-                      rtForEvent <- getRT
-                      logDecisionResult rtForEvent combinedDecision combinedResultText combinedReasons
+                          rtForEvent <- getRT
+                          logDecisionResult rtForEvent combinedDecision combinedResultText combinedReasons
 
-                      case combinedDecision of
-                        Continue -> pure True
-                        Wait -> pure False
-                        WaitForMoreIteration -> pure False
-                        Abort -> do
-                          logStatusUpdated rtForEvent "ABORTING the release because of the Decision Engine"
-                          updateRT $ \r -> r {status = ABORTING}
-                          currentRT' <- getRT
-                          currentTS' <- gets targetState
-                          casUpdateOrBail "rolloutLoop/decisionAbort" currentRT' currentTS' freshStatus
-                          logStatusUpdated currentRT' ("Rolling back the traffic to version " <> oldVersion ctx)
-                          liftIO $ throwIO $ WorkflowError "decision" "Decision engine: ABORT"
+                          case combinedDecision of
+                            Continue -> pure True
+                            Wait -> pure False
+                            WaitForMoreIteration -> pure False
+                            Abort -> do
+                              logStatusUpdated rtForEvent "ABORTING the release because of the Decision Engine"
+                              updateRT $ \r -> r {status = ABORTING}
+                              currentRT' <- getRT
+                              currentTS' <- gets targetState
+                              casUpdateOrBail "rolloutLoop/decisionAbort" currentRT' currentTS' freshStatus
+                              logStatusUpdated currentRT' ("Rolling back the traffic to version " <> oldVersion ctx)
+                              liftIO $ throwIO $ WorkflowError "decision" "Decision engine: ABORT"
 
                   if shouldAdvance
                     then do

@@ -11,8 +11,10 @@ import {
   useReleaseDiff, usePodHealth, useResources, useUpdateTracker,
   useMobileApps, useDispatchMobileReleases,
 } from '../hooks';
-import type { RolloutHistoryEvent, RolloutEvent, RolloutStrategyEvent, PodInfo } from '../api';
+import type { RolloutHistoryEvent, RolloutEvent, RolloutStrategyEvent, PodInfo, ABValidationStatus } from '../api';
+import { AB_STATUS_LABELS, AB_STATUS_COLORS } from '../api';
 import type { LatestBuild } from '../types';
+import { ABValidationModal } from '../components/ABValidationModal';
 import { Badge } from '../../../shared/ui/badge';
 import { StatusBadge } from '../components/StatusBadge';
 import { Button } from '../../../shared/ui/button';
@@ -830,6 +832,7 @@ const ReleaseSummary: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'env-diff' | 'json'>('summary');
+  const [showABModal, setShowABModal] = useState(false);
 
   const { data: release, isLoading, isFetching, error, refetch } = useRelease(id);
 
@@ -1055,6 +1058,19 @@ const ReleaseSummary: React.FC = () => {
             <Badge variant="warning" dot>DEBUG</Badge>
           )}
           {release.ab_hs_status && release.ab_hs_status !== 'Uninitiated' && <Badge variant="info">AB: {release.ab_hs_status}</Badge>}
+          {release.abValidationStatus && release.abValidationStatus !== 'UNASSIGNED' && (
+            <span className={cn('px-2 py-0.5 rounded text-xs font-medium', AB_STATUS_COLORS[release.abValidationStatus as ABValidationStatus])}>
+              {AB_STATUS_LABELS[release.abValidationStatus as ABValidationStatus] ?? release.abValidationStatus}
+            </span>
+          )}
+          <PermissionGate product="autopilot" permission="AB_VALIDATION_EDIT">
+            <button
+              onClick={() => setShowABModal(true)}
+              className="text-xs text-zinc-500 border border-zinc-200 rounded px-2 py-1 hover:bg-zinc-50"
+            >
+              AB Validate
+            </button>
+          </PermissionGate>
           {KIBANA_URL && (
             <a href={KIBANA_URL} target="_blank" rel="noopener" className="text-xs text-zinc-500 border border-zinc-200 rounded px-2 py-1 hover:bg-zinc-50 inline-flex items-center gap-1">
               <ExternalLink className="w-3 h-3" /> Logs
@@ -1321,6 +1337,14 @@ const ReleaseSummary: React.FC = () => {
         <Button variant="secondary" onClick={() => navigate(isMobile ? '/mobile/releases' : '/backend/releases')}>Back to Releases</Button>
       </div>
 
+      {showABModal && release && (
+        <ABValidationModal
+          releaseId={release.id}
+          currentStatus={release.abValidationStatus ?? null}
+          abValidation={release.abValidation ?? null}
+          onClose={() => setShowABModal(false)}
+        />
+      )}
     </div>
   );
 };
