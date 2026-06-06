@@ -29,6 +29,7 @@ module Products.Autopilot.Actions.Release
     listEventsH,
     logsLinkH,
     decisionWebhookH,
+    staggerInfoH,
 
     -- * Product/Service Handlers (used in Routes wiring)
     listProductsH,
@@ -683,7 +684,9 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq 
             -- record is partial and crashes at runtime when forced.
             sourceRef = Nothing,
             commitSha = Nothing,
-            revertsReleaseId = Nothing
+            revertsReleaseId = Nothing,
+            abValidationStatus = Nothing,
+            abValidation = Nothing
           }
       targetState =
         K8sState $
@@ -2095,6 +2098,30 @@ isValidK8sVersion ver
           startsOk = case chars of (c : _) -> isAlnumLower c; [] -> False
           endsOk = case chars of [] -> False; _ -> isAlnumLower (Prelude.last chars)
        in all isValidChar chars && startsOk && endsOk
+
+-- | GET /release/staggerInfo/{releaseId}
+-- Called by the external AB engine (ab-system-v2) during a live rollout to
+-- determine the current traffic percentage on version B.  Returns the
+-- ab-core StaggerInfo wire format: {"percentage": <double>, "time": "<ISO>"}
+-- where percentage is 0-100 (current Istio weight on the new version) and
+-- time is the release start time.  Falls back to 0 / epoch on missing data.
+staggerInfoH :: Text -> Flow Value
+staggerInfoH rid = do
+    m <- findReleaseTracker rid
+    case m of
+        Nothing -> pure $ object ["percentage" .= (0.0 :: Double), "time" .= ("1970-01-01T00:00:00Z" :: Text)]
+        Just (rt, mts) -> do
+            let pct :: Double
+                pct = case mts of
+                    Just ts -> case A.fromJSON (toJSON ts) of
+                        A.Success (Object o) ->
+                            case KM.lookup (K.fromText "trafficPercentage") o of
+                                Just (Number n) -> realToFrac n
+                                _ -> 0
+                        _ -> 0
+                    Nothing -> 0
+                startIso = maybe "1970-01-01T00:00:00Z" (T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ") (NT.startTime rt)
+            pure $ object ["percentage" .= pct, "time" .= startIso]
 
 -- | Extract just the data section from a K8s ConfigMap YAML as JSON.
 -- Input: full K8s YAML like "apiVersion: v1\ndata:\n  app.conf: |-\n    ...\nkind: ..."

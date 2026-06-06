@@ -139,6 +139,64 @@ export interface APRelease {
     // `metadata.reverted_by` is set on a bad release once its revert
     // row has been created. Drives the "Reverted by" banner.
     metadata?: { reverted_by?: string;[k: string]: any } | null;
+    // AB validation fields — null on pre-migration rows.
+    abValidationStatus?: ABValidationStatus | null;
+    abValidation?: ABValidation | null;
+}
+
+// ── AB Validation types ────────────────────────────────────────────
+
+export type ABValidationStatus =
+    | 'UNASSIGNED'
+    | 'VERIFIED'
+    | 'MISSED_ABORT'
+    | 'FALSE_ABORT'
+    | 'TRUE_ABORT'
+    | 'INVALID';
+
+export interface ABValidationEntry {
+    abveStatus: ABValidationStatus;
+    abveChangedBy: string;
+    abveIsApproved: boolean;
+    abveRcaDesc?: string | null;
+    abveUpdatedAt: string;
+}
+
+export interface ABValidation {
+    abvStatus: ABValidationStatus;
+    abvIsApproved: boolean;
+    abvRcaDesc?: string | null;
+    abvHistory: ABValidationEntry[];
+}
+
+export const AB_STATUS_LABELS: Record<ABValidationStatus, string> = {
+    UNASSIGNED: 'Unassigned',
+    VERIFIED: 'Verified',
+    MISSED_ABORT: 'Missed Abort',
+    FALSE_ABORT: 'False Abort',
+    TRUE_ABORT: 'True Abort',
+    INVALID: 'Invalid',
+};
+
+export const AB_STATUS_COLORS: Record<ABValidationStatus, string> = {
+    UNASSIGNED: 'bg-gray-400 text-white',
+    VERIFIED: 'bg-green-600 text-white',
+    MISSED_ABORT: 'bg-orange-500 text-white',
+    FALSE_ABORT: 'bg-yellow-500 text-white',
+    TRUE_ABORT: 'bg-red-600 text-white',
+    INVALID: 'bg-gray-600 text-white',
+};
+
+export interface ABMetricItem {
+    status: ABValidationStatus;
+    count: number;
+    percentage: number;
+    ab_success_rate?: number;
+}
+
+export interface ABMetrics {
+    total_releases: number;
+    list: ABMetricItem[];
 }
 
 // ── ConfigMap type ─────────────────────────────────────────────────
@@ -381,6 +439,8 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     commitSha: (r as any).commitSha ?? null,
     revertsReleaseId: (r as any).revertsReleaseId ?? null,
     metadata: (r as any).metadata ?? null,
+    abValidationStatus: (r as any).abValidationStatus ?? null,
+    abValidation: (r as any).abValidation ?? null,
 });
 
 export function statusColor(status: ReleaseStatus | string): string {
@@ -988,6 +1048,34 @@ export async function fetchConfigMapNames(product: string): Promise<string[]> {
 export async function fetchConfigMapData(product: string, name: string): Promise<string> {
     const { data } = await apiClient.get('/configmap', { params: { PRODUCT: product, NAME: name } });
     return data.configMap || '';
+}
+
+// ── AB Validation API ─────────────────────────────────────────────
+
+export async function fetchValidABStatuses(releaseId: string): Promise<{
+    statusList: ABValidationStatus[];
+    currentStatus: ABValidationStatus;
+    isApproved: boolean;
+}> {
+    const { data } = await apiClient.get(`/releases/${releaseId}/ab`);
+    return data;
+}
+
+export async function updateABValidation(
+    releaseId: string,
+    payload: { status: ABValidationStatus; is_approved: boolean; rca_description?: string }
+): Promise<{ status: string; message: string }> {
+    const { data } = await apiClient.put(`/releases/${releaseId}/ab`, payload);
+    return data;
+}
+
+export async function fetchABMetrics(params?: {
+    from?: string;
+    to?: string;
+    product?: string;
+}): Promise<ABMetrics> {
+    const { data } = await apiClient.get('/releases/abstatus', { params });
+    return data;
 }
 
 // ── Mobile Releases API ───────────────────────────────────────────
