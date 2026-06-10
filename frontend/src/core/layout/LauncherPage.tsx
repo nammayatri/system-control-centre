@@ -85,9 +85,12 @@ export default function LauncherPage() {
           )}
 
           {/* Product cards */}
+          {/* Two registry entries may share `slug` (e.g. Backend Releases +
+              Mobile Releases both back the `autopilot` product), so the
+              react key must combine slug + label to stay unique. */}
           {accessibleProducts.map((product, i) => (
             <motion.button
-              key={product.slug}
+              key={`${product.slug}:${product.label}`}
               initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.2, ease: 'easeOut', delay: (isAdmin ? i + 1 : i) * 0.05 }}

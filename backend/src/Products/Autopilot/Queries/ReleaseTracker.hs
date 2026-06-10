@@ -14,6 +14,7 @@ module Products.Autopilot.Queries.ReleaseTracker (
     listReleaseEventsByCategory,
     listReleaseTrackers,
     listReleaseTrackersByDateRange,
+    listReleaseTrackersByDateRangeAndCategory,
     findRunnableReleaseTrackers,
     findActiveTrackersForService,
     findInProgressReleaseTrackers,
@@ -65,6 +66,7 @@ module Products.Autopilot.Queries.ReleaseTracker (
 )
 where
 
+import Control.Applicative ((<|>))
 import Core.DB.Connection (runBeamLogged, runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
 import Data.Aeson (FromJSON, ToJSON, Value, fromJSON, toJSON)
@@ -81,6 +83,7 @@ import Database.Beam.Postgres ()
 import Database.PostgreSQL.Simple (Only (..), execute, execute_, query, withTransaction)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
 import qualified Debug.Trace as DT
+import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..), MobileBuildWFStatus (..))
 import Products.Autopilot.Types
 import qualified Products.Autopilot.Types as NT
 import Products.Autopilot.Types.Storage.Schema
@@ -167,18 +170,17 @@ conditionalUpdateTracker rt mts expectedStatus = withDb $ \db -> do
         row = toRow created now rt mts
     withConn db $ \conn ->
         withTransaction conn $ do
-            -- Preserve slack_thread_ts: the in-memory `rt` may have been
-            -- snapshotted before notifyReleaseCreated's side-effect UPDATE,
-            -- so read the live value inside the txn before DELETE+INSERT.
-            existingTs <-
+            -- Preserve slack_thread_ts, dispatch_id, external_run_id: the
+            -- in-memory `rt` doesn't carry these (mobile workflow reads them
+            -- via raw SQL, not through the domain type), so read live values
+            -- inside the txn before DELETE+INSERT wipes them.
+            preserved <-
                 query
                     conn
-                    "SELECT slack_thread_ts FROM release_tracker WHERE id = ?"
+                    "SELECT slack_thread_ts, dispatch_id, external_run_id \
+                    \  FROM release_tracker WHERE id = ?"
                     (Only (releaseId rt))
-            let preservedTs = case existingTs of
-                    [Only (Just ts)] -> Just ts
-                    _ -> rtSlackThreadTs row
-                mergedRow = row{rtSlackThreadTs = preservedTs}
+            let mergedRow = applyPreservedFields row preserved
             rowsDeleted <-
                 execute
                     conn
@@ -200,16 +202,15 @@ conditionalUpdateApprove rt mts = withDb $ \db -> do
         row = toRow created now rt mts
     withConn db $ \conn ->
         withTransaction conn $ do
-            -- Preserve slack_thread_ts; see conditionalUpdateTracker.
-            existingTs <-
+            -- Preserve slack_thread_ts, dispatch_id, external_run_id;
+            -- see conditionalUpdateTracker.
+            preserved <-
                 query
                     conn
-                    "SELECT slack_thread_ts FROM release_tracker WHERE id = ?"
+                    "SELECT slack_thread_ts, dispatch_id, external_run_id \
+                    \  FROM release_tracker WHERE id = ?"
                     (Only (releaseId rt))
-            let preservedTs = case existingTs of
-                    [Only (Just ts)] -> Just ts
-                    _ -> rtSlackThreadTs row
-                mergedRow = row{rtSlackThreadTs = preservedTs}
+            let mergedRow = applyPreservedFields row preserved
             rowsDeleted <-
                 execute
                     conn
@@ -228,16 +229,15 @@ conditionalUpdateTrackerRow :: (MonadFlow m) => ReleaseTrackerRow -> Text -> m B
 conditionalUpdateTrackerRow row expectedStatus = withDb $ \db ->
     withConn db $ \conn ->
         withTransaction conn $ do
-            -- Preserve slack_thread_ts; see conditionalUpdateTracker.
-            existingTs <-
+            -- Preserve slack_thread_ts, dispatch_id, external_run_id;
+            -- see conditionalUpdateTracker.
+            preserved <-
                 query
                     conn
-                    "SELECT slack_thread_ts FROM release_tracker WHERE id = ?"
+                    "SELECT slack_thread_ts, dispatch_id, external_run_id \
+                    \  FROM release_tracker WHERE id = ?"
                     (Only (rtId row))
-            let preservedTs = case existingTs of
-                    [Only (Just ts)] -> Just ts
-                    _ -> rtSlackThreadTs row
-                mergedRow = row{rtSlackThreadTs = preservedTs}
+            let mergedRow = applyPreservedFields row preserved
             rowsDeleted <-
                 execute
                     conn
@@ -248,6 +248,28 @@ conditionalUpdateTrackerRow row expectedStatus = withDb $ \db ->
                 else do
                     runBeamLogged conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
                     pure True
+
+{- | Merge live DB values for fields that the in-memory row doesn't carry,
+preserving them across DELETE+INSERT. Called inside the read-then-write
+txn used by conditionalUpdate*. The query argument must be exactly:
+
+> SELECT slack_thread_ts, dispatch_id, external_run_id FROM release_tracker WHERE id = ?
+
+Returns @row@ patched with whichever fields were present in the DB row.
+If the query returned no rows (id not found), returns @row@ unchanged.
+-}
+applyPreservedFields ::
+    ReleaseTrackerRow ->
+    [(Maybe Text, Maybe Text, Maybe Text)] ->
+    ReleaseTrackerRow
+applyPreservedFields row preserved = case preserved of
+    [(mSlack, mDispatch, mExtRun)] ->
+        row
+            { rtSlackThreadTs = mSlack <|> rtSlackThreadTs row
+            , rtDispatchId = mDispatch <|> rtDispatchId row
+            , rtExternalRunId = mExtRun <|> rtExternalRunId row
+            }
+    _ -> row
 
 findReleaseTracker :: (MonadFlow m) => Text -> m (Maybe TrackerWithTarget)
 findReleaseTracker rid = withDb $ \db -> do
@@ -293,7 +315,19 @@ listReleaseTrackers = withDb $ \db -> do
     pure (map fromRow rows)
 
 listReleaseTrackersByDateRange :: (MonadFlow m) => UTCTime -> UTCTime -> m [TrackerWithTarget]
-listReleaseTrackersByDateRange fromTime toTime = withDb $ \db -> do
+listReleaseTrackersByDateRange fromTime toTime =
+    listReleaseTrackersByDateRangeAndCategory fromTime toTime Nothing
+
+{- | Like 'listReleaseTrackersByDateRange' but optionally restricts to a
+specific set of categories. When 'mCategoryWhitelist' is 'Nothing' the
+default UI exclusions apply (VSEdit + BackendConfig are hidden — they
+have their own sections). When a whitelist is provided, ONLY those
+categories are returned and the default exclusions are bypassed (so a
+caller can explicitly request BackendConfig if needed).
+-}
+listReleaseTrackersByDateRangeAndCategory ::
+    (MonadFlow m) => UTCTime -> UTCTime -> Maybe [Text] -> m [TrackerWithTarget]
+listReleaseTrackersByDateRangeAndCategory fromTime toTime mCategoryWhitelist = withDb $ \db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -302,14 +336,36 @@ listReleaseTrackersByDateRange fromTime toTime = withDb $ \db -> do
                         rt <- all_ (releaseTrackers autopilotDb)
                         guard_ (rtCreatedAt rt >=. val_ fromTime)
                         guard_ (rtCreatedAt rt <=. val_ toTime)
-                        -- VS edits and ConfigMap changes have their own sections in the UI.
-                        guard_ (rtCategory rt /=. val_ "VSEdit")
-                        guard_ (rtCategory rt /=. val_ "BackendConfig")
+                        case mCategoryWhitelist of
+                            Just cats ->
+                                guard_ (rtCategory rt `in_` map val_ cats)
+                            Nothing -> do
+                                -- VS edits and ConfigMap changes have their
+                                -- own sections in the UI.
+                                guard_ (rtCategory rt /=. val_ "VSEdit")
+                                guard_ (rtCategory rt /=. val_ "BackendConfig")
                         pure rt
     pure (map fromRow rows)
 
-{- | Find approved CREATED releases ready to be dispatched. INPROGRESS
-releases are recovered via a separate rollback path, not re-dispatched here.
+{- | Find approved CREATED releases ready to be dispatched.
+
+  Backend categories: only CREATED+approved rows. INPROGRESS rows are
+  recovered via a separate rollback path; the workflow runs to completion
+  in one runner tick and never needs re-driving.
+
+  MobileBuild category: ALSO returns INPROGRESS rows whose mobile workflow
+  is not yet terminal. The mobile spec is poll-driven (StageWaiting on
+  ResolveRunId / PollMatrixJobs / ConfirmTag and on stage 2 advisory-lock
+  contention) — the runner must keep re-driving the workflow on every
+  tick until the stages reach a terminal MobileBuildWFStatus. The
+  terminal-mb-status filter is done in Haskell after parsing the
+  @target_state@ JSON (the column is plain TEXT, not jsonb, so SQL-side
+  JSON filtering would need a LIKE-on-substring hack). Trackers that
+  have reached terminal mobile states (MBCompleted / MBAborted /
+  MBFailed) are skipped — the runner's success / abort branches will
+  have flipped @release_tracker.status@ to a terminal value already, so
+  the lifecycle status guard below covers them in the common case; this
+  filter is a defensive safety net for partial-write scenarios.
 -}
 findRunnableReleaseTrackers :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
 findRunnableReleaseTrackers now = withDb $ \db -> do
@@ -319,11 +375,43 @@ findRunnableReleaseTrackers now = withDb $ \db -> do
                 select $
                     orderBy_ (asc_ . rtCreatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
-                        guard_ (rtStatus rt ==. val_ "CREATED")
+                        guard_
+                            ( rtStatus rt
+                                ==. val_ "CREATED"
+                                ||. ( rtStatus rt
+                                        ==. val_ "INPROGRESS"
+                                        &&. rtCategory rt
+                                            ==. val_ "MobileBuild"
+                                    )
+                            )
                         guard_ (rtIsApproved rt ==. val_ (Just True))
+                        -- Mobile rows need an explicit dispatch action before the runner
+                        -- picks them up. Backend rows have no such field and are eligible
+                        -- as soon as approved.
+                        guard_
+                            ( rtCategory rt
+                                /=. val_ "MobileBuild"
+                                ||. isJust_ (rtDispatchId rt)
+                            )
                         guard_ (isNothing_ (rtScheduleTime rt) ||. rtScheduleTime rt <=. just_ (val_ now))
                         pure rt
-    pure (map fromRow rows)
+    -- Final filter in Haskell: drop INPROGRESS mobile rows whose
+    -- mb_wf_status is already terminal (defensive — these rows should
+    -- have had their status flipped to a terminal lifecycle value
+    -- already, but we don't trust that without the per-row check).
+    let parsed = map fromRow rows
+        notTerminalMobile (rt, mts) = case (NT.category rt, mts) of
+            (MobileBuild, Just (MobileBuildState s)) -> not (mbStatusIsTerminal s)
+            (MobileBuild, _) -> True
+            _ -> True
+    pure (filter notTerminalMobile parsed)
+  where
+    mbStatusIsTerminal :: MobileBuildTargetState -> Bool
+    mbStatusIsTerminal s = case mbWfStatus s of
+        MBCompleted -> True
+        MBAborted -> True
+        MBFailed _ -> True
+        _ -> False
 
 {- | Find any non-terminal tracker for (app_group, service). Used by the
 same-service concurrency guard at create time. Excludes terminal states
@@ -553,6 +641,8 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
         , rtSyncEnabled = syncEnabled
         , rtEnvOverrideData = envOverrideData
         , rtSlackThreadTs = slackThreadTs
+        , rtDispatchId = Nothing
+        , rtExternalRunId = Nothing
         , rtCreatedAt = createdAt
         , rtUpdatedAt = updatedAt
         }
@@ -565,10 +655,12 @@ fromRow ReleaseTrackerT{..} =
             Just v -> case fromJSON v :: Aeson.Result TargetState of
                 Aeson.Success ts -> Just ts
                 Aeson.Error _ -> Nothing
-        -- K8s context surfaced as JSON so the frontend can render cluster /
-        -- namespace / scale-down status without reparsing the whole state.
+        -- Target context surfaced as JSON so the frontend can render cluster /
+        -- namespace / scale-down status (K8s) or filter by release_group_id
+        -- (mobile) without reparsing the whole target state.
         mReleaseContext = case mTargetState of
             Just (K8sState k8s) -> Just (toJSON (context k8s))
+            Just (MobileBuildState mb) -> Just (toJSON (mbContext mb))
             _ -> Nothing
         tracker =
             ReleaseTracker
@@ -615,6 +707,7 @@ parseReleaseCategory t =
         "BACKENDSCHEDULER" -> BackendScheduler
         "BACKENDCONFIG" -> BackendConfig
         "VSEDIT" -> VSEdit
+        "MOBILEBUILD" -> MobileBuild
         -- Unknown values (including legacy categories) log a warning instead
         -- of being silently swallowed.
         _ ->

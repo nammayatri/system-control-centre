@@ -48,10 +48,14 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle, onItemClick, for
   // When inside the mobile drawer, always behave as expanded.
   const effectiveCollapsed = forceExpanded ? false : collapsed;
 
+  // Sidebar section key — slug + basePath alone collides when two tiles share
+  // both (Backend Releases / Mobile Releases). Include `label` for uniqueness.
+  const sectionKey = (p: ProductDefinition) => `${p.slug}:${p.label}:${p.basePath}`;
+
   const [openSections, setOpenSections] = useState<Record<string, boolean>>(() => {
     const initial: Record<string, boolean> = {};
     PRODUCT_REGISTRY.forEach((p) => {
-      initial[p.slug + p.basePath] = location.pathname.startsWith(p.basePath);
+      initial[sectionKey(p)] = location.pathname.startsWith(p.basePath);
     });
     initial['admin'] = location.pathname.startsWith('/admin');
     return initial;
@@ -69,7 +73,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle, onItemClick, for
   );
 
   const renderProductSection = (product: ProductDefinition) => {
-    const key = product.slug + product.basePath;
+    const key = sectionKey(product);
     const isOpen = openSections[key] ?? false;
 
     return (

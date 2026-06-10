@@ -172,6 +172,8 @@ mkVsEditRow tid product' service' env' vsName' createdBy' status' now =
         , rtSyncEnabled = Nothing
         , rtEnvOverrideData = Nothing
         , rtSlackThreadTs = Nothing
+        , rtDispatchId = Nothing
+        , rtExternalRunId = Nothing
         , rtCreatedAt = now
         , rtUpdatedAt = now
         }

@@ -26,6 +26,7 @@ logs/
 result
 
 # ── Backend (Haskell / Cabal) ──
+dist-newstyle/
 backend/dist-newstyle/
 backend/.cabal-dir/
 backend/.cabal-home/
@@ -34,6 +35,7 @@ backend/.ghc.environment.*
 backend/.hie/
 backend/cabal.project.local
 backend/dhall-configs/secrets.dhall
+backend/dev/local-mobile-secrets.env
 
 # ── Frontend (Node / Vite) ──
 frontend/node_modules/
@@ -46,7 +48,12 @@ frontend/.vite/
 *.pem
 *.key
 *.log
-
+# Google service-account JSON keys (downloaded as <project>-<hash>.json)
+*-service-account*.json
+*service_account*.json
+namma-yatri-*.json
+# App Store Connect API keys (Apple distributes as AuthKey_<KEY_ID>.p8)
+*.p8
 # ── Context (not for git) ──
 CONTEXT.md
 backend/CONTEXT.md

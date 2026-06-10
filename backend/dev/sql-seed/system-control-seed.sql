@@ -206,3 +206,45 @@ SELECT p.id, 'config-manager', r.id
 FROM sc_person p, sc_role r
 WHERE p.email = 'admin@juspay.in' AND r.product_slug = 'config-manager' AND r.name = 'Admin'
 ON CONFLICT (person_id, product_slug) DO NOTHING;
+
+-- ---------------------------------------------------------------
+-- Mobile releases (added 2026-05-11)
+-- ---------------------------------------------------------------
+
+-- Section 1: 10 customer Android apps in app_catalog
+-- → moved to migrations/system-control/0011-mobile-releases.sql because the
+--   seed runs before migrations, so app_catalog doesn't exist at seed time.
+
+-- Section 2: server_config flags + secret placeholders
+INSERT INTO server_config (type, name, value, product, enabled, last_updated) VALUES
+  ('flag', 'mobile_dispatch_enabled',  'false', 'autopilot', 0, now()),
+  ('flag', 'mobile_run_poll_seconds',  '30',    'autopilot', 1, now())
+ON CONFLICT DO NOTHING;
+
+INSERT INTO server_config (type, name, value, product, enabled, last_updated) VALUES
+  ('secret', 'github_app_id',                     '', 'autopilot', 0, now()),
+  ('secret', 'github_app_private_key',            '', 'autopilot', 0, now()),
+  ('secret', 'github_app_installation_id',        '', 'autopilot', 0, now()),
+  ('secret', 'play_console_service_account_json', '', 'autopilot', 0, now())
+ON CONFLICT DO NOTHING;
+
+-- App Store Connect API credentials for iOS version resolution (added 2026-05-14).
+-- One org-wide key; if the key's Apple team doesn't have access to a particular
+-- app, that row's version resolution falls back to the workflow's per-team
+-- auto-detect (`fastlane.yaml:261-346`). See spec §iOS-1.
+INSERT INTO server_config (type, name, value, product, enabled, last_updated) VALUES
+  ('secret', 'app_store_connect_issuer_id',      '', 'autopilot', 0, now()),
+  ('secret', 'app_store_connect_key_id',         '', 'autopilot', 0, now()),
+  ('secret', 'app_store_connect_private_key_p8', '', 'autopilot', 0, now())
+ON CONFLICT DO NOTHING;
+
+-- Section 3: Grant new perms on existing system roles
+UPDATE sc_role
+   SET permissions = array_append(permissions, 'MOBILE_DISPATCH')
+ WHERE product_slug = 'autopilot' AND name IN ('Admin','Manager')
+   AND NOT ('MOBILE_DISPATCH' = ANY(permissions));
+
+UPDATE sc_role
+   SET permissions = array_append(permissions, 'MOBILE_APP_MANAGE')
+ WHERE product_slug = 'autopilot' AND name = 'Admin'
+   AND NOT ('MOBILE_APP_MANAGE' = ANY(permissions));
