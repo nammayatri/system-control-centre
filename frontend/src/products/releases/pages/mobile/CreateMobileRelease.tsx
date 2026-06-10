@@ -16,12 +16,15 @@ import type {
   CreateMobileReleasesItem,
   CreateMobileReleasesReq,
   LatestBuild,
+  MobileDestination,
   VersionPreviewItem,
 } from '../../types';
 import { useAuth } from '../../../../core/auth/AuthContext';
 import { Button } from '../../../../shared/ui/button';
 import { Textarea } from '../../../../shared/ui/input';
+import { MobileChangelogAiSummary } from '../../components/MobileChangelogAiSummary';
 import { Skeleton } from '../../../../shared/ui/skeleton';
+import { CollapsibleGroup, groupAppsBySurface, useGroupCollapse } from '../../components/appGroups';
 import { cn } from '../../../../lib/utils';
 import { toast } from 'sonner';
 
@@ -35,11 +38,6 @@ const prUrlFromCommitUrl = (commitUrl: string, prNumber: number): string => {
   if (idx === -1) return commitUrl;
   return commitUrl.slice(0, idx) + '/pull/' + prNumber;
 };
-
-const PlatformIcon = ({ platform }: { platform: string }) =>
-  platform === 'ios'
-    ? <Apple className="w-4 h-4 text-zinc-500" />
-    : <Cpu className="w-4 h-4 text-emerald-600" />;
 
 const formatShort = (d: string) => {
   const date = new Date(d);
@@ -78,6 +76,9 @@ export default function CreateMobileRelease() {
     () => (apps || []).filter((a) => a.enabled),
     [apps],
   );
+  // Consumer/Provider collapsible groups for the picker below.
+  const appGroups = useMemo(() => groupAppsBySurface(enabledApps), [enabledApps]);
+  const { isOpen, toggle } = useGroupCollapse();
 
   const [sourceRef, setSourceRef] = useState<string>('main');
   const [branchSearch, setBranchSearch] = useState('main');
@@ -132,6 +133,11 @@ export default function CreateMobileRelease() {
     setBuildType(deployBuildType);
   }, [deployBuildType]);
 
+  // Provider (driver) PROD Android builds dispatch to provider-prod-apk-gen.yaml,
+  // which requires a `destination` (Play Store vs Firebase App Distribution).
+  // Default GooglePlay; surfaced as a picker only when such an app is selected.
+  const [destination, setDestination] = useState<MobileDestination>('GooglePlay');
+
   const previewQuery = usePreviewVersions(buildType === 'debug' ? [] : debouncedIds);
   const previews: VersionPreviewItem[] = previewQuery.data?.previews ?? [];
 
@@ -159,6 +165,19 @@ export default function CreateMobileRelease() {
     selectedPlatforms.has('ios') && !selectedPlatforms.has('android')
       ? 'ios'
       : 'android';
+
+  // The destination picker is relevant only to provider-prod-apk-gen.yaml, so
+  // show it iff a provider (driver) Android app is selected on a release build —
+  // the one workflow that declares the `destination` input.
+  const hasProviderAndroid = useMemo(
+    () =>
+      selectedIds.some((id) => {
+        const a = enabledApps.find((x) => x.id === id);
+        return a?.surface === 'driver' && a?.platform === 'android';
+      }),
+    [selectedIds, enabledApps],
+  );
+  const showDestination = buildType === 'release' && hasProviderAndroid;
 
   // When a fresh preview lands, prefill any unedited rows with the suggested
   // version. Don't clobber values the user has already typed. Per-platform:
@@ -207,6 +226,7 @@ export default function CreateMobileRelease() {
         .map((id) => enabledApps.find((a) => a.id === id))
         .filter((a): a is AppCatalogEntry => !!a)
         .map((a) => ({
+          id: a.id,
           name: a.name,
           surface: a.surface,
           platform: a.platform,
@@ -220,6 +240,10 @@ export default function CreateMobileRelease() {
   );
   const [changelogTab, setChangelogTab] = useState(0);
   useEffect(() => { setChangelogTab(0); }, [selectedIds.join(',')]);
+  // Free-text filter over the active tab's commit list. Reset whenever the
+  // visible tab changes so a stale query doesn't carry across apps.
+  const [commitSearch, setCommitSearch] = useState('');
+  useEffect(() => { setCommitSearch(''); }, [changelogTab]);
 
   const createMutation = useCreateMobileReleases();
 
@@ -271,6 +295,7 @@ export default function CreateMobileRelease() {
       changeLog: changeLog.trim(),
       sourceRef: sourceRef && sourceRef !== 'main' ? sourceRef : null,
       items,
+      destination: showDestination ? destination : null,
     };
     try {
       const resp = await createMutation.mutateAsync(req);
@@ -321,49 +346,133 @@ export default function CreateMobileRelease() {
                 .
               </div>
             ) : (
-              <ul className="space-y-2">
-                {enabledApps.map((app) => {
-                  const checked = selectedIds.includes(app.id);
+              <div className="space-y-2.5">
+                {appGroups.map((g) => {
+                  const groupSel = g.apps.filter((a) => selectedIds.includes(a.id)).length;
                   return (
-                    <li key={app.id}>
-                      <label
-                        className={cn(
-                          'flex items-center gap-3 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors',
-                          checked
-                            ? 'border-zinc-900 bg-zinc-50'
-                            : 'border-zinc-200 hover:bg-zinc-50',
-                        )}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleApp(app.id)}
-                          className="rounded border-zinc-300 accent-zinc-900"
-                        />
-                        <PlatformIcon platform={app.platform} />
-                        <div className="min-w-0 flex-1">
-                          <div className="text-sm font-medium text-zinc-900 truncate">
-                            {app.displayLabel || app.name}
-                          </div>
-                          <div className="text-xs text-zinc-500 truncate">
-                            {app.surface} · {app.platform}
-                          </div>
-                          {(app.latestReleaseBuild || app.latestDebugBuild) && (
-                            <div className="flex flex-wrap gap-1 mt-1">
-                              {app.latestReleaseBuild && (
-                                <LatestBuildBadge build={app.latestReleaseBuild} label="release" />
-                              )}
-                              {app.latestDebugBuild && (
-                                <LatestBuildBadge build={app.latestDebugBuild} label="debug" />
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </label>
-                    </li>
+                    <CollapsibleGroup
+                      key={g.key}
+                      label={g.label}
+                      count={g.apps.length}
+                      open={isOpen(g.key)}
+                      onToggle={() => toggle(g.key)}
+                      badge={
+                        groupSel > 0 ? (
+                          <span className="text-[11px] font-medium text-zinc-900">
+                            {groupSel} selected
+                          </span>
+                        ) : null
+                      }
+                    >
+                      {(() => {
+                        // Merge the surface's per-platform rows into ONE tile per
+                        // app (keyed by the catalyst `name`), showing Android +
+                        // iOS side by side. Each platform is still independently
+                        // selectable (its own appCatalogId). Android-only apps
+                        // (no iOS row) just leave the iOS cell empty.
+                        const order: string[] = [];
+                        const byName = new Map<
+                          string,
+                          { label: string; byPlat: Record<string, (typeof g.apps)[number]> }
+                        >();
+                        for (const app of g.apps) {
+                          if (!byName.has(app.name)) {
+                            order.push(app.name);
+                            byName.set(app.name, {
+                              // Strip the trailing platform word so the tile title
+                              // reads "Odisha Yatri (Driver)" not "(Driver Android)".
+                              label: (app.displayLabel || app.name).replace(/ (Android|iOS)\)$/i, ')'),
+                              byPlat: {},
+                            });
+                          }
+                          byName.get(app.name)!.byPlat[app.platform] = app;
+                        }
+                        return (
+                          <ul className="space-y-2">
+                            {order.map((name) => {
+                              const { label, byPlat } = byName.get(name)!;
+                              const entries = Object.values(byPlat);
+                              const anySel = entries.some((a) => selectedIds.includes(a.id));
+                              return (
+                                <li key={name}>
+                                  <div
+                                    className={cn(
+                                      'rounded-lg border px-3 py-2.5 transition-colors',
+                                      anySel ? 'border-zinc-900 bg-zinc-50/60' : 'border-zinc-200 hover:border-zinc-300',
+                                    )}
+                                  >
+                                    <div className="flex items-center justify-between gap-3">
+                                      <div className="text-sm font-medium text-zinc-900 truncate">
+                                        {label}
+                                      </div>
+                                      <div className="flex items-center gap-1.5 shrink-0">
+                                        {(['android', 'ios'] as const).map((plat) => {
+                                          const app = byPlat[plat];
+                                          if (!app) return null;
+                                          const sel = selectedIds.includes(app.id);
+                                          return (
+                                            <label
+                                              key={plat}
+                                              title={`${app.displayLabel || app.name}`}
+                                              className={cn(
+                                                // `relative` is REQUIRED: the child <input> uses `sr-only`
+                                                // (position:absolute). Without a positioned ancestor its
+                                                // containing block becomes <html>, so it escapes <main>'s
+                                                // overflow-y-auto and stretches the document — a stray blank
+                                                // band below the page. Containing it here keeps it clipped.
+                                                'relative inline-flex items-center gap-1.5 h-7 pl-2 pr-2.5 rounded-full border cursor-pointer text-xs font-medium select-none transition-colors',
+                                                sel
+                                                  ? 'border-zinc-900 bg-zinc-900 text-white'
+                                                  : 'border-zinc-200 text-zinc-600 hover:border-zinc-300 hover:bg-white',
+                                              )}
+                                            >
+                                              <input
+                                                type="checkbox"
+                                                checked={sel}
+                                                onChange={() => toggleApp(app.id)}
+                                                className="sr-only"
+                                              />
+                                              {plat === 'ios' ? (
+                                                <Apple className={cn('w-3.5 h-3.5', sel ? 'text-white' : 'text-zinc-400')} />
+                                              ) : (
+                                                <Cpu className={cn('w-3.5 h-3.5', sel ? 'text-white' : 'text-emerald-600')} />
+                                              )}
+                                              {plat === 'ios' ? 'iOS' : 'Android'}
+                                            </label>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                    {entries.some((a) => a.latestReleaseBuild || a.latestDebugBuild) && (
+                                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-2">
+                                        {entries.map((a) =>
+                                          a.latestReleaseBuild || a.latestDebugBuild ? (
+                                            <div key={a.id} className="inline-flex items-center gap-1">
+                                              <span className="text-[10px] uppercase tracking-wide text-zinc-400">
+                                                {a.platform === 'ios' ? 'iOS' : 'And'}
+                                              </span>
+                                              {a.latestReleaseBuild && (
+                                                <LatestBuildBadge build={a.latestReleaseBuild} label="release" />
+                                              )}
+                                              {a.latestDebugBuild && (
+                                                <LatestBuildBadge build={a.latestDebugBuild} label="debug" />
+                                              )}
+                                            </div>
+                                          ) : null,
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        );
+                      })()}
+                    </CollapsibleGroup>
                   );
                 })}
-              </ul>
+              </div>
             )}
           </div>
         </section>
@@ -531,6 +640,16 @@ export default function CreateMobileRelease() {
               )}
 
               <div className="p-4 sm:p-6">
+                {q.data && q.data.cpCommits.length > 0 && (
+                  <MobileChangelogAiSummary
+                    app={app.name}
+                    surface={app.surface}
+                    platform={app.platform}
+                    branch={sourceRef}
+                    versionName={versionEdits[app.id]?.versionName || ''}
+                    versionCode={versionEdits[app.id]?.versionCode || ''}
+                  />
+                )}
                 {q.isLoading ? (
                   <div className="space-y-2">
                     <Skeleton className="h-6 w-full" />
@@ -545,64 +664,96 @@ export default function CreateMobileRelease() {
                       ? 'Branch is identical to the last release — no new commits.'
                       : 'No commits found (no previous release to compare against).'}
                   </p>
-                ) : (
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between text-[11px] text-zinc-400 px-0.5">
-                      <span>Newest first</span>
-                      {q.data.cpAheadBy > 50 && (
-                        <span>Showing 50 of {q.data.cpAheadBy}</span>
-                      )}
-                    </div>
-                    <ul className="divide-y divide-zinc-100 max-h-80 overflow-y-auto">
-                      {[...q.data.cpCommits].reverse().map((c, i) => (
-                        <li key={c.ciSha} className="flex items-center gap-2.5 py-2">
-                          <span className="text-[10px] text-zinc-300 w-4 text-right shrink-0 tabular-nums">{i + 1}</span>
-                          <img
-                            src={`https://github.com/${c.ciAuthorLogin}.png?size=40`}
-                            alt={c.ciAuthorLogin}
-                            className="w-5 h-5 rounded-full shrink-0 bg-zinc-100"
-                            loading="lazy"
-                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                ) : (() => {
+                  // Backend returns cpCommits newest-first; filter client-side.
+                  const commits = q.data.cpCommits;
+                  const term = commitSearch.trim().toLowerCase();
+                  const filtered = term
+                    ? commits.filter((c) =>
+                        c.ciSubject.toLowerCase().includes(term) ||
+                        c.ciAuthorLogin.toLowerCase().includes(term) ||
+                        c.ciShortSha.toLowerCase().includes(term) ||
+                        (c.ciPrNumber != null && String(c.ciPrNumber).includes(term)))
+                    : commits;
+                  return (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <div className="relative flex-1">
+                          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400 pointer-events-none" />
+                          <input
+                            type="text"
+                            value={commitSearch}
+                            onChange={(e) => setCommitSearch(e.target.value)}
+                            placeholder="Search commits — message, author, sha, PR#…"
+                            className="w-full h-8 pl-8 pr-3 text-xs border border-zinc-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-zinc-400"
                           />
+                        </div>
+                        <span className="text-[11px] text-zinc-400 whitespace-nowrap tabular-nums">
+                          {term ? `${filtered.length} / ${commits.length}` : `${commits.length} commit${commits.length === 1 ? '' : 's'}`}
+                          {q.data.cpAheadBy > commits.length ? ` of ${q.data.cpAheadBy}` : ''}
+                        </span>
+                      </div>
+                      <ul className="divide-y divide-zinc-100 max-h-96 overflow-y-auto rounded-md border border-zinc-100">
+                        {filtered.length === 0 ? (
+                          <li className="px-3 py-6 text-center text-xs text-zinc-400">
+                            No commits match “{commitSearch.trim()}”.
+                          </li>
+                        ) : (
+                          filtered.map((c, i) => (
+                            <li
+                              key={c.ciSha}
+                              className="flex items-center gap-2.5 py-2 px-2"
+                              style={{ contentVisibility: 'auto', containIntrinsicSize: '0 36px' }}
+                            >
+                              <span className="text-[10px] text-zinc-300 w-7 text-right shrink-0 tabular-nums">{i + 1}</span>
+                              <img
+                                src={`https://github.com/${c.ciAuthorLogin}.png?size=40`}
+                                alt={c.ciAuthorLogin}
+                                className="w-5 h-5 rounded-full shrink-0 bg-zinc-100"
+                                loading="lazy"
+                                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                              />
+                              <a
+                                href={c.ciHtmlUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="font-mono text-[11px] text-blue-600 hover:text-blue-800 hover:underline shrink-0"
+                              >
+                                {c.ciShortSha}
+                              </a>
+                              <span className="text-sm text-zinc-800 min-w-0 truncate flex-1">
+                                {c.ciSubject}
+                              </span>
+                              {c.ciPrNumber != null && (
+                                <a
+                                  href={prUrlFromCommitUrl(c.ciHtmlUrl, c.ciPrNumber)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline shrink-0"
+                                >
+                                  #{c.ciPrNumber}
+                                </a>
+                              )}
+                              <span className="text-[11px] text-zinc-400 shrink-0 max-w-[100px] truncate text-right">{c.ciAuthorLogin}</span>
+                            </li>
+                          ))
+                        )}
+                      </ul>
+                      {q.data.cpCompareUrl && (
+                        <div className="pt-1">
                           <a
-                            href={c.ciHtmlUrl}
+                            href={q.data.cpCompareUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="font-mono text-[11px] text-blue-600 hover:text-blue-800 hover:underline shrink-0"
+                            className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 hover:underline"
                           >
-                            {c.ciShortSha}
+                            View full diff on GitHub <ExternalLink className="w-3 h-3" />
                           </a>
-                          <span className="text-sm text-zinc-800 min-w-0 truncate flex-1">
-                            {c.ciSubject}
-                          </span>
-                          {c.ciPrNumber != null && (
-                            <a
-                              href={prUrlFromCommitUrl(c.ciHtmlUrl, c.ciPrNumber)}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline shrink-0"
-                            >
-                              #{c.ciPrNumber}
-                            </a>
-                          )}
-                          <span className="text-[11px] text-zinc-400 shrink-0 max-w-[100px] truncate text-right">{c.ciAuthorLogin}</span>
-                        </li>
-                      ))}
-                    </ul>
-                    {q.data.cpCompareUrl && (
-                      <div className="pt-1 border-t border-zinc-100">
-                        <a
-                          href={q.data.cpCompareUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 hover:underline"
-                        >
-                          View full diff on GitHub <ExternalLink className="w-3 h-3" />
-                        </a>
-                      </div>
-                    )}
-                  </div>
-                )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             </section>
           );
@@ -734,6 +885,29 @@ export default function CreateMobileRelease() {
                 ? `Builds will be uploaded to ${primaryPlatform === 'ios' ? 'TestFlight' : 'Firebase App Distribution'}.`
                 : `Builds will be uploaded to ${primaryPlatform === 'ios' ? 'App Store' : 'Google Play'}.`}
             </p>
+
+            {showDestination && (
+              <div className="mt-4 pt-4 border-t border-zinc-100">
+                <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">
+                  Provider Android destination
+                </label>
+                <div className="relative max-w-xs">
+                  <select
+                    value={destination}
+                    onChange={(e) => setDestination(e.target.value as MobileDestination)}
+                    className="w-full h-10 sm:h-9 appearance-none border border-zinc-300 rounded-lg pl-3 pr-9 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-zinc-400"
+                  >
+                    <option value="GooglePlay">Google Play</option>
+                    <option value="Firebase">Firebase App Distribution</option>
+                  </select>
+                  <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 pointer-events-none" />
+                </div>
+                <p className="mt-1.5 text-[11px] text-zinc-500">
+                  Where the provider (driver) Android prod build is published. iOS
+                  and consumer apps in this release ignore it.
+                </p>
+              </div>
+            )}
           </div>
         </section>
 

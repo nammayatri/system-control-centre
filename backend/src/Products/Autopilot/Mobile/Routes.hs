@@ -86,6 +86,16 @@ type MobileAPI =
             :> QueryParam' '[Required, Strict] "platform" Text
             :> QueryParam' '[Required, Strict] "branch" Text
             :> Get '[JSON] ChangelogPreviewResp
+        :<|> "mobile"
+            :> "changelog-ai-summary"
+            :> Protected 'AP_AI_SUMMARIZE
+            :> QueryParam' '[Required, Strict] "app" Text
+            :> QueryParam' '[Required, Strict] "surface" Text
+            :> QueryParam' '[Required, Strict] "platform" Text
+            :> QueryParam' '[Required, Strict] "branch" Text
+            :> QueryParam "versionName" Text
+            :> QueryParam "versionCode" Text
+            :> Get '[JSON] AiSummaryResp
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "mobile-revert"
@@ -124,6 +134,7 @@ mobileServer =
         :<|> liveReleasesH
         :<|> (\ap mq -> listBranchesH ap mq)
         :<|> (\ap app surface platform branch -> changelogPreviewH ap app surface platform branch)
+        :<|> (\ap app surface platform branch vName vCode -> changelogAiSummaryH ap app surface platform branch vName vCode)
         :<|> (\rid ap -> mobileRevertDraftH ap rid)
         :<|> (\rid ap req -> mobileRevertCreateH ap rid req)
         :<|> (\rid ap sha -> verifyCommitH ap rid sha)

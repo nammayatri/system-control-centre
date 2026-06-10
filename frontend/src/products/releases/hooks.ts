@@ -22,8 +22,36 @@ import {
   fetchResources,
   TERMINAL_STATUSES,
   mobileApi,
+  releaseAiSummary,
+  releaseAiRisk,
+  releaseAiAsk,
 } from './api';
 import { toast } from 'sonner';
+
+// ─── AI (Grid) ───────────────────────────────────────────────
+const aiError = (verb: string) => (err: any) =>
+  toast.error(err?.response?.data?.message || err?.message || `AI ${verb} failed`);
+
+export function useReleaseAiSummary(id: string) {
+  return useMutation({
+    mutationFn: (force: boolean = false) => releaseAiSummary(id, force),
+    onError: aiError('summary'),
+  });
+}
+
+export function useReleaseAiRisk(id: string) {
+  return useMutation({
+    mutationFn: (force: boolean = false) => releaseAiRisk(id, force),
+    onError: aiError('risk assessment'),
+  });
+}
+
+export function useReleaseAiAsk(id: string) {
+  return useMutation({
+    mutationFn: (question: string) => releaseAiAsk(id, question),
+    onError: aiError('question'),
+  });
+}
 
 export function useReleases(
   from: string,
@@ -363,7 +391,7 @@ export function useLiveReleases(category: 'all' | 'backend' | 'mobile' = 'all') 
   });
 }
 
-export type ChangelogApp = { name: string; surface: string; platform: string; label: string };
+export type ChangelogApp = { id: number; name: string; surface: string; platform: string; label: string };
 
 export function useChangelogPreviews(apps: ChangelogApp[], branch: string | undefined) {
   return useQueries({

@@ -41,6 +41,14 @@ data MobileBuildContext = MobileBuildContext
     , mbcMatrixJobName :: Text
     , mbcOtaNamespace :: Maybe Text
     , mbcTagPushed :: Maybe Text
+    , mbcDestination :: Maybe Text
+    -- ^ Play-store destination for provider PROD Android builds ONLY —
+    -- "GooglePlay" or "Firebase" — chosen by the operator on the create form
+    -- (mirrors provider-prod-apk-gen.yaml's required @destination@ input).
+    -- 'Nothing' for every other build (consumer, iOS, debug, and provider
+    -- rows created before this field existed); the dispatch falls back to
+    -- "GooglePlay" in that case. Consumed solely by the provider prod Android
+    -- @workflow_dispatch@ — ignored everywhere else.
     }
     deriving (Eq, Show, Generic)
 
@@ -55,13 +63,18 @@ instance ToJSON MobileBuildContext where
             , "matrix_job_name" .= mbcMatrixJobName c
             , "ota_namespace" .= mbcOtaNamespace c
             , "tag_pushed" .= mbcTagPushed c
+            , "destination" .= mbcDestination c
             ]
 
 instance FromJSON MobileBuildContext where
     parseJSON = withObject "MobileBuildContext" $ \o -> do
         -- Backward-compat: rows persisted before the build_type field used a
         -- "destination" string. Map the two debug destinations to "debug",
-        -- everything else (incl. absent) to "release".
+        -- everything else (incl. absent) to "release". The same "destination"
+        -- key now also carries the provider-prod-Android store choice
+        -- ("GooglePlay"/"Firebase"); since new rows always set "build_type",
+        -- the first case below wins and this legacy inference only runs for
+        -- pre-build_type rows (which never had a provider destination).
         mBuildType <- o .:? "build_type"
         mDest <- o .:? "destination"
         let buildType = case (mBuildType :: Maybe Text, mDest :: Maybe Text) of
@@ -76,6 +89,7 @@ instance FromJSON MobileBuildContext where
             <*> o .: "matrix_job_name"
             <*> o .:? "ota_namespace"
             <*> o .:? "tag_pushed"
+            <*> pure mDest
 
 data MobileBuildWFStatus
     = MBInit

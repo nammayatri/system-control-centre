@@ -16,6 +16,7 @@ import Products.Autopilot.Actions.ConfigMap as ConfigMap
 import Products.Autopilot.Actions.K8sResource as K8sResource
 import Products.Autopilot.Actions.Release as Release
 import Products.Autopilot.Actions.VSEdit as VSEdit
+import Products.Autopilot.Handlers.Ai as Ai
 import Products.Autopilot.Mobile.Routes (MobileAPI, mobileServer)
 import Products.Autopilot.Types (ReleaseTracker)
 import Products.Autopilot.Types.API
@@ -98,6 +99,12 @@ type CoreAPI =
         :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> "abstatus" :> QueryParam "from" Text :> QueryParam "to" Text :> QueryParam "product" Text :> Get '[JSON] Value
         :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "ab" :> Get '[JSON] Value
         :<|> "releases" :> Protected 'AP_AB_VALIDATION_EDIT :> Capture "releaseId" Text :> "ab" :> ReqBody '[JSON] Value :> Put '[JSON] APIResponse
+        -- AI (detail page): summary / risk / freeform Q&A over a release's context
+        :<|> "releases" :> Protected 'AP_AI_SUMMARIZE :> Capture "releaseId" Text :> "ai" :> "summary" :> ReqBody '[JSON] AiActionReq :> Post '[JSON] AiResp
+        :<|> "releases" :> Protected 'AP_AI_ASSESS :> Capture "releaseId" Text :> "ai" :> "risk" :> ReqBody '[JSON] AiActionReq :> Post '[JSON] AiResp
+        :<|> "releases" :> Protected 'AP_AI_ASK :> Capture "releaseId" Text :> "ai" :> "ask" :> ReqBody '[JSON] AiAskReq :> Post '[JSON] AiResp
+        -- AI (config): models available to the configured Grid key (model picker)
+        :<|> "ai" :> Protected 'AP_AI_SUMMARIZE :> "models" :> Get '[JSON] AiModelsResp
         -- Mobile releases: app catalog CRUD (suffix mount per unified-product principle)
         :<|> MobileAPI
 
@@ -176,5 +183,11 @@ coreServer =
         :<|> ABValidation.getABMetricsH
         :<|> ABValidation.getValidABStatusesH
         :<|> ABValidation.updateABValidationH
+        -- AI (detail page)
+        :<|> Ai.summarizeReleaseH
+        :<|> Ai.assessReleaseH
+        :<|> Ai.askReleaseH
+        -- AI (config): model picker
+        :<|> Ai.listAiModelsH
         -- Mobile releases (suffix mount of MobileAPI)
         :<|> mobileServer

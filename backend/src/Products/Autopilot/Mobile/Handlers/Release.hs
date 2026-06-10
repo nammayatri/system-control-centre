@@ -41,18 +41,23 @@ module Products.Autopilot.Mobile.Handlers.Release (
     -- * Changelog preview
     ChangelogPreviewResp (..),
     changelogPreviewH,
+
+    -- * Create-time AI changelog summary
+    AiSummaryResp (..),
+    changelogAiSummaryH,
 ) where
 
-import Control.Monad (unless, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.Catch (throwM)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..))
 import Core.DB.Connection (runDB)
-import Core.Environment (Flow, withDb)
+import Core.Environment (Flow, forkFlow, withDb)
 import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericToJSON, object, (.=))
 import Data.Int (Int32)
 import Data.List (nub, partition, sortOn)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
@@ -61,7 +66,7 @@ import qualified Data.UUID.V4 as UUID
 import Database.Beam
 import Products.Autopilot.Mobile.Github (BranchInfo (..), listBranches, searchBranches)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
-import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), CompareResult (..), compareRefs)
+import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), CompareResult (..), compareAllCommits, compareRefs)
 import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), fetchLatestBuildsForApp, findAppCatalogByIds, listAppCatalog, listEnabledAppCatalog)
 import Products.Autopilot.Mobile.Queries.Tracker (
     ReleaseTrackerRow,
@@ -83,6 +88,10 @@ import Products.Autopilot.Mobile.Types.Storage (
  )
 import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch)
 import Products.Autopilot.RuntimeConfig (getMobileBuildType)
+import qualified Shared.AI.Changelog as CL
+import Shared.AI.Config (loadAiConfig)
+import Shared.AI.Queries (claimReleaseSummary, computePromptHash, lookupReleaseSummary, upsertReleaseSummary)
+import Shared.AI.ReleaseSummary (generateWithFallback)
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
     ReleaseTracker (..),
@@ -114,6 +123,11 @@ data CreateMobileReleasesReq = CreateMobileReleasesReq
     , changeLog :: Text
     , sourceRef :: Maybe Text
     , items :: [CreateMobileReleasesItem]
+    , destination :: Maybe Text
+    -- ^ Store destination ("GooglePlay" / "Firebase") for provider PROD
+    -- Android builds. Optional: only the provider-prod-Android dispatch reads
+    -- it; absent (older clients, or any non-provider-Android selection) means
+    -- the dispatch falls back to "GooglePlay".
     }
     deriving (Generic, Show)
 
@@ -177,7 +191,7 @@ createMobileReleasesH ap CreateMobileReleasesReq{..} = do
     buildType <- getMobileBuildType
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
-    built <- mapM (buildRow ap appById groupId changeLog buildType sourceRef now) items
+    built <- mapM (buildRow ap appById groupId changeLog buildType destination sourceRef now) items
     insertReleaseTrackerRowsBatch (map fst built)
     pure
         CreateMobileReleasesResp
@@ -196,13 +210,23 @@ buildRow ::
     Text ->
     Text ->
     Maybe Text ->
+    -- ^ destination (provider prod Android only)
+    Maybe Text ->
+    -- ^ source ref
     UTCTime ->
     CreateMobileReleasesItem ->
     Flow (ReleaseTrackerRow, CreatedReleaseSummary)
-buildRow ap appById groupId changeLog_ buildType mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode} = do
+buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode} = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     -- safe: createMobileReleasesH validated that every id is present in appById
     let app_ = appById Map.! aid
+        -- The destination input only exists on provider-prod-apk-gen.yaml, so
+        -- only stamp it on provider (driver) + Android + release rows. Everything
+        -- else stores Nothing (the dispatch ignores it for those builds anyway).
+        isProviderProdAndroid =
+            acSurface app_ == "driver"
+                && acPlatform app_ == "android"
+                && not (isDebugBuildType buildType)
         ctx =
             MobileBuildContext
                 { mbcVersionCode = mCode
@@ -212,6 +236,7 @@ buildRow ap appById groupId changeLog_ buildType mSourceRef now CreateMobileRele
                 , mbcMatrixJobName = acName app_ <> if isDebugBuildType buildType then "-Debug" else "-Release"
                 , mbcOtaNamespace = Nothing
                 , mbcTagPushed = Nothing
+                , mbcDestination = if isProviderProdAndroid then mDestination else Nothing
                 }
         target =
             MobileBuildTargetState
@@ -495,11 +520,26 @@ changelogPreviewH _ap appName surface platform branch = do
                 else do
                     result <- compareRefs creds owner repo baseRef branch
                     case result of
-                        Right cr ->
+                        Right cr -> do
+                            -- Compare returns at most 250 commits, oldest-first. If the
+                            -- release has more, fetch the full set newest-first via List
+                            -- Commits; otherwise just reverse the compare list
+                            -- (oldest-first → newest-first). Either way cpCommits is
+                            -- newest-first and the UI renders it verbatim.
+                            commits <-
+                                if crTotalCommits cr > length (crCommits cr)
+                                    then do
+                                        -- compareAllCommits paginates Compare and returns
+                                        -- oldest-first; reverse for newest-first display.
+                                        eAll <- compareAllCommits creds owner repo baseRef branch
+                                        pure $ case eAll of
+                                            Right cs -> reverse cs
+                                            Left _ -> reverse (crCommits cr)
+                                    else pure (reverse (crCommits cr))
                             pure
                                 ChangelogPreviewResp
-                                    { cpCommits = take 50 (crCommits cr)
-                                    , cpAheadBy = crAheadBy cr
+                                    { cpCommits = commits
+                                    , cpAheadBy = crTotalCommits cr
                                     , cpStatus = crStatus cr
                                     , cpBaseTag = lbrTagPushed lb
                                     , cpBaseVersion = Just (lbrVersion lb)
@@ -538,3 +578,136 @@ findLastReleaseBuild builds appName surface platform =
             && lbrSurface b == surface
             && lbrPlatform b == platform
             && lbrBuildType b == "release"
+
+-- ─── Create-time AI changelog summary ───────────────────────────
+--
+-- Summarise the commits being released BEFORE the release exists. Reuses the
+-- same commit-gathering as 'changelogPreviewH'; the cache subject is the commit
+-- RANGE (content-keyed), not a release id. Gated by 'AP_AI_SUMMARIZE'.
+
+data AiSummaryResp = AiSummaryResp
+    { available :: Bool
+    , status :: Text
+    -- ^ "ready" | "pending" | "failed" | "unavailable"
+    , reason :: Maybe Text
+    , summaryLong :: Maybe Text
+    -- ^ AI prose (chunked); deterministic fallback while pending/failed
+    , summaryShort :: Maybe Text
+    -- ^ AI 2-3 line synopsis (only when ready)
+    , model :: Maybe Text
+    }
+    deriving (Generic, Show)
+
+instance ToJSON AiSummaryResp where
+    toJSON = genericToJSON defaultOptions{omitNothingFields = True}
+
+aiUnavailable :: Text -> AiSummaryResp
+aiUnavailable r =
+    AiSummaryResp
+        { available = False
+        , status = "unavailable"
+        , reason = Just r
+        , summaryLong = Nothing
+        , summaryShort = Nothing
+        , model = Nothing
+        }
+
+renderCommitsForAi :: [CommitInfo] -> Text
+renderCommitsForAi cs =
+    T.unlines
+        ["- " <> ciShortSha c <> " " <> ciSubject c <> " (@" <> ciAuthorLogin c <> ")" | c <- cs]
+
+toCommitItem :: CommitInfo -> CL.CommitItem
+toCommitItem c = CL.CommitItem (ciShortSha c) (ciSubject c) (ciAuthorLogin c)
+
+{- | Build the response for a lifecycle state. @summaryLong@ always carries
+something to render — AI when @ready@, the deterministic changelog while
+@pending@ — so the UI never blanks. A non-empty @model@ ⇒ the UI badges it as AI;
+empty/absent ⇒ auto-generated.
+-}
+stateResp :: Text -> Text -> Text -> Maybe Text -> AiSummaryResp
+stateResp st longTxt shortTxt mModel =
+    AiSummaryResp
+        { available = True
+        , status = st
+        , reason = Nothing
+        , summaryLong = Just longTxt
+        , summaryShort = if T.null (T.strip shortTxt) then Nothing else Just shortTxt
+        , model = mModel
+        }
+
+changelogAiSummaryH :: AuthedPerson -> Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Flow AiSummaryResp
+changelogAiSummaryH ap appName surface platform branch mVersionName mVersionCode = do
+    ac <- appCatalogByKey appName surface platform
+    creds <- loadGhCreds
+    let owner = gitOwner ac
+        repo = gitRepo ac
+    builds <- fetchLatestBuildsForApp appName surface platform
+    case findLastReleaseBuild builds appName surface platform of
+        Nothing -> pure (aiUnavailable "no prior release build to compare against")
+        Just lb -> do
+            let baseRef = case lbrTagPushed lb of
+                    Just t | not (T.null t) && t /= "debug-no-tag" -> t
+                    _ -> case lbrCommitSha lb of
+                        Just s | not (T.null s) -> s
+                        _ -> ""
+            if T.null baseRef
+                then pure (aiUnavailable "no base ref to compare against")
+                else do
+                    result <- compareRefs creds owner repo baseRef branch
+                    case result of
+                        Left e -> pure (aiUnavailable ("changelog fetch failed: " <> e))
+                        Right cr -> do
+                            let commits = crCommits cr
+                                -- Scope to the selected app's surface (drop the
+                                -- other side's commits; keep this side + shared).
+                                items = CL.filterCommitsForSurface surface (map toCommitItem commits)
+                                detLong = CL.renderLongSummary items
+                                n = length items
+                                excluded = length commits - n
+                                vName = maybe "" T.strip mVersionName
+                                vCode = maybe "" T.strip mVersionCode
+                                versionStr
+                                    | T.null vName = ""
+                                    | T.null vCode = "v" <> vName
+                                    | otherwise = "v" <> vName <> "+" <> vCode
+                                appLabel = appName <> " (" <> CL.ownSideLabel surface <> ")"
+                                -- "rn4" = generation version. Bump it whenever the
+                                -- prompt/format changes so cached rows invalidate.
+                                contentKey =
+                                    computePromptHash $
+                                        T.intercalate "\US" ["rn4", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
+                            mRow <- lookupReleaseSummary contentKey
+                            case mRow of
+                                -- Done → return the AI (or cached deterministic) result.
+                                Just ("ready", mLong, mShort, mModel, _) ->
+                                    pure (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel)
+                                -- Not ready → ensure a DETACHED generation is running and return
+                                -- immediately. The work outlives this request and the browser tab.
+                                _ -> do
+                                    ecfg <- loadAiConfig
+                                    case ecfg of
+                                        Left _ -> do
+                                            -- AI off/unconfigured: the deterministic changelog IS the result.
+                                            upsertReleaseSummary contentKey detLong "" "" n
+                                            pure (stateResp "ready" detLong "" Nothing)
+                                        Right cfg -> do
+                                            -- One generator per content key; reclaims a failed row or a
+                                            -- pending row orphaned by a restart (see 'claimReleaseSummary').
+                                            claimed <- claimReleaseSummary contentKey detLong n
+                                            when claimed $
+                                                void $
+                                                    forkFlow $ do
+                                                        mRes <- generateWithFallback (apEmail ap) cfg appLabel versionStr excluded (CL.otherSideLabel surface) items
+                                                        case mRes of
+                                                            Just (lng, sht, usedModel) -> upsertReleaseSummary contentKey lng sht usedModel n
+                                                            -- Every model failed → store the deterministic
+                                                            -- changelog as the ready result (model="" ⇒ "auto").
+                                                            Nothing -> upsertReleaseSummary contentKey detLong "" "" n
+                                            -- A concurrent generation may have just finished; otherwise
+                                            -- report pending with the deterministic placeholder.
+                                            st <- lookupReleaseSummary contentKey
+                                            pure $ case st of
+                                                Just ("ready", mLong, mShort, mModel, _) ->
+                                                    stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel
+                                                _ -> stateResp "pending" detLong "" Nothing

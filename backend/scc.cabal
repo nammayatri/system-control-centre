@@ -90,6 +90,7 @@ library
       Products.Autopilot.Actions.K8sResource
       Products.Autopilot.Actions.Release
       Products.Autopilot.Actions.VSEdit
+      Products.Autopilot.Handlers.Ai
       Products.Autopilot.Routes
       Products.Autopilot.Runner
       Products.Autopilot.RuntimeConfig
@@ -123,6 +124,15 @@ library
       Shared.JSON
       Shared.Queries.ServerConfig
       Shared.Types.Storage.ServerConfig
+      Shared.AI.Types
+      Shared.AI.Prompts
+      Shared.AI.Changelog
+      Shared.AI.Provider
+      Shared.AI.Config
+      Shared.AI.Queries
+      Shared.AI.Service
+      Shared.AI.ReleaseSummary
+      Shared.Types.Storage.AiSchema
   other-modules:
       Paths_scc
   hs-source-dirs:
@@ -136,7 +146,7 @@ library
       OverloadedStrings
       RecordWildCards
       TypeOperators
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields -Werror=missing-fields
   build-depends:
       aeson
     , asn1-encoding
@@ -194,7 +204,7 @@ executable scc
       OverloadedStrings
       RecordWildCards
       TypeOperators
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields -threaded -rtsopts
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields -Werror=missing-fields -threaded -rtsopts
   build-depends:
       aeson
     , async
@@ -241,7 +251,7 @@ test-suite scc-test
       OverloadedStrings
       RecordWildCards
       TypeOperators
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields -Werror=missing-fields
   build-depends:
       aeson
     , async

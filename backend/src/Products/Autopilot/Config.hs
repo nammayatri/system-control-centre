@@ -309,4 +309,41 @@ autopilotConfigs =
         MobileGroup
         "Minutes the ConfirmTag stage waits for the build's Git tag before failing the release (tag_timeout → ABORTED). Release builds only."
         (Just "autopilot")
+    , -- AI (Grid / LiteLLM). The SC_AI_API_KEY secret is NOT here — it lives in env.
+      ConfigEntry
+        "ai_enabled"
+        (BoolConfig False)
+        MobileGroup
+        "Master switch for AI features (release changelog summary, risk assessment, Q&A). Off by default."
+        (Just "autopilot")
+    , ConfigEntry
+        "ai_base_url"
+        (TextConfig "https://grid.ai.juspay.net")
+        MobileGroup
+        "Grid (LiteLLM) gateway base URL. No trailing slash."
+        (Just "autopilot")
+    , ConfigEntry
+        "ai_model"
+        (TextConfig "claude-sonnet-4-6")
+        MobileGroup
+        "Model id — a Grid alias from GET /v1/models (e.g. claude-sonnet-4-6)."
+        (Just "autopilot")
+    , ConfigEntry
+        "ai_allowed_host_suffix"
+        (TextConfig "grid.ai.juspay.net")
+        MobileGroup
+        "SSRF allowlist: ai_base_url's host must end with this suffix."
+        (Just "autopilot")
+    , ConfigEntry
+        "ai_temperature"
+        (DoubleConfig 0.2)
+        MobileGroup
+        "Sampling temperature (low = more deterministic summaries)."
+        (Just "autopilot")
+    , ConfigEntry
+        "ai_cache_ttl_hours"
+        (IntConfig 168)
+        MobileGroup
+        "How long generated summaries are cached, in hours."
+        (Just "autopilot")
     ]

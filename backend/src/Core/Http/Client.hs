@@ -48,6 +48,7 @@ import Network.HTTP.Client (
     newManager,
     parseRequest,
     responseTimeoutMicro,
+    responseTimeoutNone,
  )
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
@@ -70,7 +71,11 @@ data HttpReq = HttpReq
     , reqHeaders :: [(Text, Text)]
     , reqBody :: Maybe LBS.ByteString
     , reqTimeout :: Seconds
-    -- ^ Total request timeout. Default: 30s.
+    -- ^ Total request timeout. Default: 30s. Ignored when 'reqNoTimeout' is True.
+    , reqNoTimeout :: Bool
+    -- ^ Disable the response timeout entirely (wait indefinitely). Default: False.
+    -- For long, legitimately-slow calls (e.g. an LLM generating a big output)
+    -- where a fixed limit would wrongly fail them.
     , reqRetries :: Int
     -- ^ Number of retries on failure (excluding the first attempt). Default: 1.
     , reqLogTag :: Text
@@ -86,6 +91,7 @@ defaultReq url =
         , reqHeaders = []
         , reqBody = Nothing
         , reqTimeout = Seconds 30
+        , reqNoTimeout = False
         , reqRetries = 1
         , reqLogTag = "http"
         }
@@ -156,7 +162,10 @@ doOne HttpReq{..} = do
                         , requestHeaders =
                             map (\(k, v) -> (mk (TE.encodeUtf8 k), TE.encodeUtf8 v)) reqHeaders
                         , requestBody = maybe (RequestBodyLBS "") RequestBodyLBS reqBody
-                        , responseTimeout = responseTimeoutMicro (toMicros reqTimeout)
+                        , responseTimeout =
+                            if reqNoTimeout
+                                then responseTimeoutNone
+                                else responseTimeoutMicro (toMicros reqTimeout)
                         }
             result <- try (httpLbs req mgr) :: IO (Either HttpException (Response LBS.ByteString))
             case result of

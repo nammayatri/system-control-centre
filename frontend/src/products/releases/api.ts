@@ -1096,6 +1096,47 @@ import type {
     LiveReleasesResp,
 } from './types';
 
+// ─── AI (Grid / LiteLLM) ─────────────────────────────────────────
+// Shared response shape for every AI endpoint. `available:false` (with a
+// `reason`) means AI is disabled / unconfigured / errored — render a notice,
+// not an error toast.
+export interface AiResp {
+    available: boolean;
+    reason?: string | null;
+    summary?: string | null;
+    model?: string | null;
+    cached?: boolean | null;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+}
+
+// Mobile changelog summary: long (AI prose, chunked; deterministic fallback) +
+// short (2-3 line AI synopsis). Generated async server-side; `status` drives
+// polling. `summaryLong` is present even while `pending`/`failed`.
+export interface ChangelogSummaryResp {
+    available: boolean;
+    status: 'ready' | 'pending' | 'failed' | 'unavailable';
+    reason?: string | null;
+    summaryLong?: string | null;
+    summaryShort?: string | null;
+    model?: string | null;
+}
+
+export async function releaseAiSummary(id: string, force = false): Promise<AiResp> {
+    const { data } = await apiClient.post(`/releases/${id}/ai/summary`, { force });
+    return data;
+}
+
+export async function releaseAiRisk(id: string, force = false): Promise<AiResp> {
+    const { data } = await apiClient.post(`/releases/${id}/ai/risk`, { force });
+    return data;
+}
+
+export async function releaseAiAsk(id: string, question: string): Promise<AiResp> {
+    const { data } = await apiClient.post(`/releases/${id}/ai/ask`, { question });
+    return data;
+}
+
 export const mobileApi = {
     listApps: async (): Promise<AppCatalogEntry[]> => {
         const { data } = await apiClient.get('/mobile/apps');
@@ -1148,6 +1189,23 @@ export const mobileApi = {
         const { data } = await apiClient.get('/mobile/changelog-preview', {
             params: { app, surface, platform, branch },
         });
+        return data;
+    },
+
+    // Create-time changelog summary of the commit range (before the release
+    // exists). Generated async server-side; poll while status === 'pending'.
+    changelogAiSummary: async (
+        app: string,
+        surface: string,
+        platform: string,
+        branch: string,
+        versionName = '',
+        versionCode = '',
+    ): Promise<ChangelogSummaryResp> => {
+        const params: Record<string, string> = { app, surface, platform, branch };
+        if (versionName) params.versionName = versionName;
+        if (versionCode) params.versionCode = versionCode;
+        const { data } = await apiClient.get('/mobile/changelog-ai-summary', { params });
         return data;
     },
 };

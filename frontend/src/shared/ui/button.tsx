@@ -27,9 +27,13 @@ const sizes: Record<string, string> = {
 };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant = 'primary', size = 'md', loading, disabled, fullWidth, children, ...props }, ref) => (
+  ({ className, variant = 'primary', size = 'md', loading, disabled, fullWidth, type = 'button', children, ...props }, ref) => (
     <button
       ref={ref}
+      // Default to type="button" so a Button placed inside a <form> never
+      // accidentally submits it (the native default is "submit"). Submit
+      // buttons opt in explicitly with type="submit".
+      type={type}
       className={cn(
         'inline-flex items-center justify-center rounded-lg font-medium cursor-pointer whitespace-nowrap',
         'transition-colors duration-150',

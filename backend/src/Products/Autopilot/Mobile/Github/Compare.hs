@@ -28,6 +28,7 @@ module Products.Autopilot.Mobile.Github.Compare (
 
     -- * Client
     compareRefs,
+    compareAllCommits,
 
     -- * Helpers (exposed for tests)
     extractPrNumber,
@@ -44,6 +45,8 @@ import Core.Http.Client (
  )
 import Core.Types.Time (Seconds (..))
 import Data.Aeson (FromJSON (..), ToJSON (..), defaultOptions, genericToJSON, withObject, (.:), (.:?))
+import Data.Function (on)
+import Data.List (nubBy)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
@@ -177,6 +180,69 @@ compareRefs creds owner repo base headRef = do
     pure $ case resp of
         Right r -> Right r
         Left e -> Left ("compareRefs: " <> renderHttpError e)
+
+{- | Fetch ALL commits between @base@ and @headRef@, OLDEST-first, by paginating
+the Compare endpoint.
+
+A single Compare response is capped at 250 commits and, for a large release, omits
+the newest ones. GitHub supports paginating the comparison's commit list with
+@per_page@ + @page@, which returns exactly the comparison's commits (unlike
+walking List Commits, whose date-ordering doesn't line up with the comparison when
+history has merges/rebases). We page at 100/commit until we have @total_commits@, a
+page comes back empty, or a safety bound; commits are de-duped by SHA so an
+unexpected page overlap can't inflate the count. Returns whatever was collected on
+a mid-pagination error rather than failing outright. Callers reverse for
+newest-first display.
+-}
+compareAllCommits ::
+    (MonadFlow m) =>
+    GhAppCreds ->
+    -- | owner
+    Text ->
+    -- | repo
+    Text ->
+    -- | base ref (branch, tag, or sha)
+    Text ->
+    -- | head ref (branch, tag, or sha)
+    Text ->
+    m (Either Text [CommitInfo])
+compareAllCommits creds owner repo base headRef = do
+    token <- getInstallationToken creds
+    let fetchPage page = do
+            let url =
+                    apiBase owner repo
+                        <> "/compare/"
+                        <> urlEncodePathSegment base
+                        <> "..."
+                        <> urlEncodePathSegment headRef
+                        <> "?per_page=100&page="
+                        <> T.pack (show page)
+                req =
+                    (defaultReq url)
+                        { reqMethod = GET
+                        , reqHeaders = ghHeaders token
+                        , reqTimeout = Seconds 30
+                        , reqLogTag = "gh-compare"
+                        }
+            resp <- liftIO (httpJson @CompareResult req)
+            pure $ either (Left . ("compareAllCommits: " <>) . renderHttpError) Right resp
+        maxPages = 12 :: Int
+        -- @acc@ is kept de-duped; stop once we have every commit, hit an empty
+        -- page (defensive), or reach the bound.
+        loop acc page total
+            | length acc >= total = pure acc
+            | page > maxPages = pure acc
+            | otherwise = do
+                ep <- fetchPage page
+                case ep of
+                    Left _ -> pure acc
+                    Right cr
+                        | null (crCommits cr) -> pure acc
+                        | otherwise -> loop (nubBy ((==) `on` ciSha) (acc <> crCommits cr)) (page + 1) total
+    e1 <- fetchPage 1
+    case e1 of
+        Left err -> pure (Left err)
+        Right cr1 -> Right <$> loop (crCommits cr1) 2 (crTotalCommits cr1)
 
 -- ─── Helpers ───────────────────────────────────────────────────────
 

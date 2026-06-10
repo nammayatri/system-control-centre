@@ -6,6 +6,14 @@ export const MOBILE_SERVER_CONFIG_NAMES = new Set([
   'store_sync_enabled',
   'store_sync_interval_minutes',
   'version_preview_enabled',
+  // AI (Grid). The SC_AI_API_KEY secret is NOT here — it lives in env, never
+  // server_config (like the other mobile secrets).
+  'ai_enabled',
+  'ai_base_url',
+  'ai_model',
+  'ai_allowed_host_suffix',
+  'ai_temperature',
+  'ai_cache_ttl_hours',
 ]);
 
 export const isMobileServerConfig = (name: string): boolean =>
