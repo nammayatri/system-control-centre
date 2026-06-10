@@ -38,11 +38,17 @@ export type CreateMobileReleasesItem = {
   versionCode: number | null;
 };
 
+// Store destination for provider (driver) PROD Android builds — mirrors the
+// `destination` choice on provider-prod-apk-gen.yaml. Only sent when a
+// provider + Android app is in a release build; ignored otherwise.
+export type MobileDestination = 'GooglePlay' | 'Firebase';
+
 export type CreateMobileReleasesReq = {
   releaseGroupLabel?: string;
   changeLog: string;
   sourceRef?: string | null;
   items: CreateMobileReleasesItem[];
+  destination?: MobileDestination | null;
 };
 
 export type BranchInfo = {

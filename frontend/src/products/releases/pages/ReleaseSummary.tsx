@@ -20,6 +20,7 @@ import { StatusBadge } from '../components/StatusBadge';
 import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
+import { AiReleasePanel } from '../components/AiReleasePanel';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import {
   Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap,
@@ -1057,20 +1058,27 @@ const ReleaseSummary: React.FC = () => {
           {isMobile && release.release_context?.build_type === 'debug' && (
             <Badge variant="warning" dot>DEBUG</Badge>
           )}
-          {release.ab_hs_status && release.ab_hs_status !== 'Uninitiated' && <Badge variant="info">AB: {release.ab_hs_status}</Badge>}
-          {release.abValidationStatus && release.abValidationStatus !== 'UNASSIGNED' && (
-            <span className={cn('px-2 py-0.5 rounded text-xs font-medium', AB_STATUS_COLORS[release.abValidationStatus as ABValidationStatus])}>
-              {AB_STATUS_LABELS[release.abValidationStatus as ABValidationStatus] ?? release.abValidationStatus}
-            </span>
+          {/* AB validation is a backend-release concept (canary / A-B rollout
+              health) — it does not apply to mobile builds, so hide the whole
+              block (status badges + the "AB Validate" action) when isMobile. */}
+          {!isMobile && (
+            <>
+              {release.ab_hs_status && release.ab_hs_status !== 'Uninitiated' && <Badge variant="info">AB: {release.ab_hs_status}</Badge>}
+              {release.abValidationStatus && release.abValidationStatus !== 'UNASSIGNED' && (
+                <span className={cn('px-2 py-0.5 rounded text-xs font-medium', AB_STATUS_COLORS[release.abValidationStatus as ABValidationStatus])}>
+                  {AB_STATUS_LABELS[release.abValidationStatus as ABValidationStatus] ?? release.abValidationStatus}
+                </span>
+              )}
+              <PermissionGate product="autopilot" permission="AB_VALIDATION_EDIT">
+                <button
+                  onClick={() => setShowABModal(true)}
+                  className="text-xs text-zinc-500 border border-zinc-200 rounded px-2 py-1 hover:bg-zinc-50"
+                >
+                  AB Validate
+                </button>
+              </PermissionGate>
+            </>
           )}
-          <PermissionGate product="autopilot" permission="AB_VALIDATION_EDIT">
-            <button
-              onClick={() => setShowABModal(true)}
-              className="text-xs text-zinc-500 border border-zinc-200 rounded px-2 py-1 hover:bg-zinc-50"
-            >
-              AB Validate
-            </button>
-          </PermissionGate>
           {KIBANA_URL && (
             <a href={KIBANA_URL} target="_blank" rel="noopener" className="text-xs text-zinc-500 border border-zinc-200 rounded px-2 py-1 hover:bg-zinc-50 inline-flex items-center gap-1">
               <ExternalLink className="w-3 h-3" /> Logs
@@ -1177,7 +1185,11 @@ const ReleaseSummary: React.FC = () => {
               </Button>
             </PermissionGate>
           )}
-          {(s === 'ABORTED' || s === 'USER_ABORTED' || s === 'GCLT_ABORTED' || s === 'REVERTED') && (
+          {/* Restart is backend-only: it restarts a k8s Deployment. Mobile builds
+              are GitHub Actions runs with no k8s deployment, so the endpoint fails
+              for them — hide it until a mobile restart (re-dispatch) is built.
+              See docs/MOBILE_RELEASE_FUTURE_SCOPE.md → "Mobile build restart". */}
+          {!isMobile && (s === 'ABORTED' || s === 'USER_ABORTED' || s === 'GCLT_ABORTED' || s === 'REVERTED') && (
             <PermissionGate product="autopilot" permission="RELEASE_CREATE">
               <Button size="sm" variant="outline" className="border-blue-300 text-blue-700 hover:bg-blue-50" loading={restartMut.isPending} onClick={() => doAction('restart', () => restartMut.mutateAsync(id!))}><RotateCw className="w-3.5 h-3.5" /> Restart</Button>
             </PermissionGate>
@@ -1204,6 +1216,13 @@ const ReleaseSummary: React.FC = () => {
 
         {activeTab === 'summary' && (
           <div className="p-4 sm:p-6">
+            {/* AI panel is a mobile PROD-build feature only — hidden for mobile
+                debug builds and for backend (non-mobile) releases. */}
+            {isMobile && release.release_context?.build_type !== 'debug' && (
+              <div className="mb-6">
+                <AiReleasePanel releaseId={id!} />
+              </div>
+            )}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 mb-6">
               {[
                 {

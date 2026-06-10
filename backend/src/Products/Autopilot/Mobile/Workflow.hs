@@ -60,7 +60,7 @@ import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (isAlphaNum)
+import Data.Char (digitToInt, isAlphaNum, isDigit)
 import Data.Int (Int32)
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe)
@@ -69,6 +69,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Database.PostgreSQL.Simple (Only (..), query)
@@ -517,27 +518,62 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
     -- actually consumes.
     let isDebug = isDebugBuildType (mbcBuildType (mbContext target))
         changeLogVal = mbcChangeLog (mbContext target)
-        inputs =
+        isProvider = acSurface ac == "driver"
+        -- Debug builds skip store version resolution, so newVersion is blank — but
+        -- the provider workflow REQUIRES a non-empty version_name. Use a date-based
+        -- (CalVer) version, e.g. "2026.6.8", for provider DEBUG builds; provider
+        -- prod uses the resolved version.
+        providerVersionName =
             if isDebug
-                then
+                then T.pack (formatTime defaultTimeLocale "%Y.%-m.%-d" dispatchedAt)
+                else versionName
+        inputs
+            -- Provider (driver) workflows — debug AND prod, Android AND iOS — all
+            -- declare the SAME base required inputs: selected_apps, version_name,
+            -- release_notes. This is a different schema from the customer
+            -- workflows (which use change_log / version_code), so a customer-shaped
+            -- payload omits the provider's required `version_name` → GitHub 422
+            -- and the release sticks at DISPATCH_REQUESTED. Branch on surface first.
+            --
+            -- provider-prod-apk-gen.yaml additionally declares a required
+            -- `destination` (choice GooglePlay|Firebase). Its implicit default is
+            -- Firebase App Distribution — NOT a store release — so we send
+            -- destination=GooglePlay explicitly for provider PROD Android to publish
+            -- to the Play Store. Debug builds and the iOS prod workflow don't
+            -- declare this input.
+            | isProvider =
+                let providerBase =
+                        [ ("selected_apps", Aeson.String selectedApps)
+                        , ("version_name", Aeson.String providerVersionName)
+                        , ("release_notes", Aeson.String changeLogVal)
+                        ]
+                    providerProdAndroid = not isDebug && acPlatform ac == "android"
+                    -- Operator's choice from the create form; falls back to
+                    -- GooglePlay when unset (older rows / API callers).
+                    destinationVal = fromMaybe "GooglePlay" (mbcDestination (mbContext target))
+                 in KM.fromList $
+                        if providerProdAndroid
+                            then providerBase <> [("destination", Aeson.String destinationVal)]
+                            else providerBase
+            | isDebug =
+                KM.fromList
+                    [ ("selected_apps", Aeson.String selectedApps)
+                    , ("change_log", Aeson.String changeLogVal)
+                    ]
+            | otherwise = case acPlatform ac of
+                "ios" ->
                     KM.fromList
                         [ ("selected_apps", Aeson.String selectedApps)
+                        , ("version_number", Aeson.String versionName)
                         , ("change_log", Aeson.String changeLogVal)
                         ]
-                else case acPlatform ac of
-                    "ios" ->
-                        KM.fromList
-                            [ ("selected_apps", Aeson.String selectedApps)
-                            , ("version_number", Aeson.String versionName)
-                            , ("change_log", Aeson.String changeLogVal)
-                            ]
-                    _ ->
-                        KM.fromList
-                            [ ("selected_apps", Aeson.String selectedApps)
-                            , ("version_name", Aeson.String versionName)
-                            , ("version_code", Aeson.String (T.pack (show versionCode)))
-                            , ("change_log", Aeson.String changeLogVal)
-                            ]
+                _ ->
+                    KM.fromList
+                        [ ("selected_apps", Aeson.String selectedApps)
+                        , ("version_name", Aeson.String versionName)
+                        , ("version_code", Aeson.String (T.pack (show versionCode)))
+                        , ("change_log", Aeson.String changeLogVal)
+                        ]
         ref = fromMaybe "main" (sourceRef rt)
         body =
             WorkflowDispatchReq
@@ -850,6 +886,36 @@ selectBuildTag prefix version mCode refs =
         expected = prefix <> version <> maybe "" (\c -> "+" <> T.pack (show c)) mCode
      in if expected `elem` names then Just expected else Nothing
 
+{- | Select the tag a PROVIDER prod build pushed. Provider workflows tag as
+@{acName}-v{version}-{code}@. We match the @{acName}-v{version}-@ prefix (numeric
+suffix) and prefer the exact @{code}@ SCC resolved at create time — version_name
+AND version_code are fetched from the store, the same values the consumer path
+matches on. The provider workflow assigns the code itself (SCC never sends
+@version_code@ to it), so on the off chance its code diverges from ours we fall
+back to the highest code for this version rather than time out. @verPrefix@ already
+ends in the trailing @-@. Returns 'Nothing' when no such tag is present yet, so the
+caller keeps polling — never "use some other tag".
+-}
+selectProviderBuildTag :: Text -> Maybe Int32 -> [Text] -> Maybe Text
+selectProviderBuildTag verPrefix mCode refs =
+    let names = map stripRefsTags refs
+        suffixOf n = T.drop (T.length verPrefix) n
+        isMatch n =
+            verPrefix `T.isPrefixOf` n
+                && not (T.null (suffixOf n))
+                && T.all isDigit (suffixOf n)
+        matches = filter isMatch names
+        codeOf n = T.foldl' (\acc c -> acc * 10 + digitToInt c) (0 :: Int) (suffixOf n)
+        exact = do
+            c <- mCode
+            let t = verPrefix <> T.pack (show c)
+            if t `elem` matches then Just t else Nothing
+     in case exact of
+            Just t -> Just t
+            Nothing -> case sortOn (Down . codeOf) matches of
+                (t : _) -> Just t
+                [] -> Nothing
+
 {- | Pure predicate for the ConfirmTag wall-clock guard. Has the stage waited
 past @timeoutMin@ for the build's tag? Anchors on build-completion, falling back
 to build-start. If neither timestamp is set we can't measure elapsed time, so we
@@ -895,20 +961,32 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
         else do
             ac <- appCatalogForRow rt
             creds <- loadGhCredsSafe
-            let segment = normalizeAppSegment (acName ac)
+            -- Tag scheme differs by surface:
+            --   consumer: {normalize(app)}/prod/{platform}/v{version}+{code} — exact match,
+            --             because SCC supplies version_code on dispatch.
+            --   provider: {acName}-v{version}-{code} — the provider workflow assigns the
+            --             version code itself (SCC never sends version_code to it), so we
+            --             match the {acName}-v{version}- prefix and read the code back.
+            --             See selectProviderBuildTag.
+            let isProvider = acSurface ac == "driver"
                 platform = acPlatform ac
-                prefix = segment <> "/prod/" <> platform <> "/v"
+                version = newVersion rt
+                mCode = mbcVersionCode (mbContext target)
+                prefix
+                    | isProvider = acName ac <> "-v"
+                    | otherwise = normalizeAppSegment (acName ac) <> "/prod/" <> platform <> "/v"
+                providerVerPrefix = acName ac <> "-v" <> version <> "-"
+                expectedTag
+                    | isProvider = providerVerPrefix <> maybe "<code>" (T.pack . show) mCode
+                    | otherwise = prefix <> version <> maybe "" (\c -> "+" <> T.pack (show c)) mCode
             res <- listTags creds (gitOwner ac) (gitRepo ac) prefix
             refs <- case res of
                 Right xs -> pure xs
                 Left e -> retry ("listTags failed: " <> e)
-            -- The build tags deterministically as {prefix}{version}+{code}, and SCC
-            -- supplied that version/code on dispatch — so confirm THAT exact tag,
-            -- never the lexically-first ref under the broad prefix.
-            let version = newVersion rt
-                mCode = mbcVersionCode (mbContext target)
-                expectedTag = prefix <> version <> maybe "" (\c -> "+" <> T.pack (show c)) mCode
-            case selectBuildTag prefix version mCode refs of
+            let mSelected
+                    | isProvider = selectProviderBuildTag providerVerPrefix mCode refs
+                    | otherwise = selectBuildTag prefix version mCode refs
+            case mSelected of
                 Nothing -> do
                     -- Tag not pushed yet. Wall-clock guard (mirrors
                     -- max_job_completion_hours for backend jobs): if the expected tag
@@ -1169,6 +1247,7 @@ applyMobileTarget rs f =
                             , mbcMatrixJobName = ""
                             , mbcOtaNamespace = Nothing
                             , mbcTagPushed = Nothing
+                            , mbcDestination = Nothing
                             }
                     , mbExternalRunId = Nothing
                     , mbMatrixJobStatus = Nothing

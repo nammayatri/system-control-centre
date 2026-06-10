@@ -179,6 +179,8 @@ mkVsEditRow tid product' service' env' vsName' createdBy' status' now =
           rtSourceRef = Nothing
         , rtCommitSha = Nothing
         , rtRevertsReleaseId = Nothing
+        , rtAbValidation = Nothing
+        , rtAbValidationStatus = Nothing
         , rtCreatedAt = now
         , rtUpdatedAt = now
         }

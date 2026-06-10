@@ -559,6 +559,9 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
                 , mbcMatrixJobName = acName ac <> if isDebugBuildType buildTypeVal then "-Debug" else "-Release"
                 , mbcOtaNamespace = Nothing
                 , mbcTagPushed = Nothing
+                , -- Inherit the bad release's store destination so a reverted
+                  -- provider prod Android build re-targets the same place.
+                  mbcDestination = badState >>= (mbcDestination . mbContext)
                 }
         targetState =
             MobileBuildTargetState

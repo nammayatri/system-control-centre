@@ -6,6 +6,7 @@ import { mobileApi } from '../../api';
 import type { AppCatalogEntry, LatestBuild } from '../../types';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { cn } from '../../../../lib/utils';
+import { groupAppsBySurface, useGroupCollapse, GroupChevron } from '../../components/appGroups';
 import { toast } from 'sonner';
 
 const AndroidIcon = ({ className }: { className?: string }) => (
@@ -100,6 +101,10 @@ export default function MobileAppsAdmin() {
     [rawApps],
   );
 
+  // Consumer/Provider collapsible groups (shared with the create-release picker).
+  const groups = useMemo(() => groupAppsBySurface(apps), [apps]);
+  const { isOpen, toggle } = useGroupCollapse();
+
   const [pendingId, setPendingId] = useState<number | null>(null);
 
   const patchMutation = useMutation({
@@ -159,74 +164,109 @@ export default function MobileAppsAdmin() {
                   </tr>
                 </thead>
                 <tbody className="text-sm">
-                  {apps.map((app, i) => (
-                    <React.Fragment key={app.id}>
+                  {groups.map((g) => (
+                    <React.Fragment key={g.key}>
                       <tr
-                        className={cn(
-                          'border-b border-zinc-100',
-                          !app.enabled && 'opacity-50',
-                          i % 2 === 1 ? 'bg-zinc-50' : 'bg-white',
-                        )}
+                        className="bg-zinc-100/70 border-y border-zinc-200 cursor-pointer hover:bg-zinc-100"
+                        onClick={() => toggle(g.key)}
                       >
-                        <td className="py-3 px-4 text-center">
-                          <Toggle
-                            checked={app.enabled}
-                            onChange={() => onToggle(app)}
-                            disabled={pendingId === app.id}
-                          />
-                        </td>
-                        <td className="py-3 px-4">
-                          <div className="font-medium text-zinc-800">{app.displayLabel || app.name}</div>
-                          <div className="text-[11px] text-zinc-500 mt-0.5">{app.surface}</div>
-                        </td>
-                        <td className="py-3 px-4">
-                          <PlatformBadge platform={app.platform} />
-                        </td>
-                        <td className="py-3 px-4">
-                          <div className="font-mono text-[11px] text-zinc-600" title={app.workflowPath}>
-                            {wfShort(app.workflowPath)}
+                        <td colSpan={6} className="py-2 px-4">
+                          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-600">
+                            <GroupChevron open={isOpen(g.key)} />
+                            {g.label}
+                            <span className="font-normal normal-case tracking-normal text-zinc-400">
+                              {g.apps.length} app{g.apps.length === 1 ? '' : 's'}
+                            </span>
                           </div>
                         </td>
-                        <td className="py-3 px-4 font-mono text-[11px] text-zinc-500 max-w-[140px] truncate" title={app.packageName ?? undefined}>
-                          {app.packageName ?? '—'}
-                        </td>
-                        <td className="py-3 px-4"><BuildCell build={app.latestReleaseBuild} label="release" /></td>
                       </tr>
+                      {isOpen(g.key) &&
+                        g.apps.map((app, i) => (
+                          <tr
+                            key={app.id}
+                            className={cn(
+                              'border-b border-zinc-100',
+                              !app.enabled && 'opacity-50',
+                              i % 2 === 1 ? 'bg-zinc-50' : 'bg-white',
+                            )}
+                          >
+                            <td className="py-3 px-4 text-center">
+                              <Toggle
+                                checked={app.enabled}
+                                onChange={() => onToggle(app)}
+                                disabled={pendingId === app.id}
+                              />
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="font-medium text-zinc-800">{app.displayLabel || app.name}</div>
+                              <div className="text-[11px] text-zinc-500 mt-0.5">{app.surface}</div>
+                            </td>
+                            <td className="py-3 px-4">
+                              <PlatformBadge platform={app.platform} />
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="font-mono text-[11px] text-zinc-600" title={app.workflowPath}>
+                                {wfShort(app.workflowPath)}
+                              </div>
+                            </td>
+                            <td className="py-3 px-4 font-mono text-[11px] text-zinc-500 max-w-[140px] truncate" title={app.packageName ?? undefined}>
+                              {app.packageName ?? '—'}
+                            </td>
+                            <td className="py-3 px-4"><BuildCell build={app.latestReleaseBuild} label="release" /></td>
+                          </tr>
+                        ))}
                     </React.Fragment>
                   ))}
                 </tbody>
               </table>
             </div>
 
-            <div className="md:hidden divide-y divide-zinc-100">
-              {apps.map((app) => (
-                <div key={app.id} className={cn('p-4 flex items-start justify-between gap-3', !app.enabled && 'opacity-50')}>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-zinc-900 truncate">
-                      {app.displayLabel || app.name}
+            <div className="md:hidden">
+              {groups.map((g) => (
+                <div key={g.key}>
+                  <button
+                    type="button"
+                    onClick={() => toggle(g.key)}
+                    className="w-full flex items-center gap-2 px-4 py-2 bg-zinc-100/70 border-y border-zinc-200"
+                  >
+                    <GroupChevron open={isOpen(g.key)} />
+                    <span className="text-xs font-semibold uppercase tracking-wider text-zinc-600">{g.label}</span>
+                    <span className="text-xs text-zinc-400">{g.apps.length}</span>
+                  </button>
+                  {isOpen(g.key) && (
+                    <div className="divide-y divide-zinc-100">
+                      {g.apps.map((app) => (
+                        <div key={app.id} className={cn('p-4 flex items-start justify-between gap-3', !app.enabled && 'opacity-50')}>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm font-medium text-zinc-900 truncate">
+                              {app.displayLabel || app.name}
+                            </div>
+                            <div className="text-xs text-zinc-500 mt-1 flex items-center gap-1.5 flex-wrap">
+                              <span>{app.surface}</span>
+                              <PlatformBadge platform={app.platform} />
+                            </div>
+                            <div className="text-[11px] font-mono text-zinc-400 mt-1 truncate" title={app.workflowPath}>
+                              {wfShort(app.workflowPath)}
+                            </div>
+                            {app.packageName && (
+                              <div className="text-[11px] font-mono text-zinc-400 truncate">{app.packageName}</div>
+                            )}
+                            {(app.latestReleaseBuild || app.latestDebugBuild) && (
+                              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                                {app.latestReleaseBuild && <BuildCell build={app.latestReleaseBuild} label="release" />}
+                                {app.latestDebugBuild && <BuildCell build={app.latestDebugBuild} label="debug" />}
+                              </div>
+                            )}
+                          </div>
+                          <Toggle
+                            checked={app.enabled}
+                            onChange={() => onToggle(app)}
+                            disabled={pendingId === app.id}
+                          />
+                        </div>
+                      ))}
                     </div>
-                    <div className="text-xs text-zinc-500 mt-1 flex items-center gap-1.5 flex-wrap">
-                      <span>{app.surface}</span>
-                      <PlatformBadge platform={app.platform} />
-                    </div>
-                    <div className="text-[11px] font-mono text-zinc-400 mt-1 truncate" title={app.workflowPath}>
-                      {wfShort(app.workflowPath)}
-                    </div>
-                    {app.packageName && (
-                      <div className="text-[11px] font-mono text-zinc-400 truncate">{app.packageName}</div>
-                    )}
-                    {(app.latestReleaseBuild || app.latestDebugBuild) && (
-                      <div className="flex flex-wrap gap-1.5 mt-1.5">
-                        {app.latestReleaseBuild && <BuildCell build={app.latestReleaseBuild} label="release" />}
-                        {app.latestDebugBuild && <BuildCell build={app.latestDebugBuild} label="debug" />}
-                      </div>
-                    )}
-                  </div>
-                  <Toggle
-                    checked={app.enabled}
-                    onChange={() => onToggle(app)}
-                    disabled={pendingId === app.id}
-                  />
+                  )}
                 </div>
               ))}
             </div>

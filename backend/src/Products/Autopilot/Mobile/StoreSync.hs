@@ -221,9 +221,15 @@ insertSyntheticRelease ac version mCode = do
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
     let segment = normalizeAppSegment (acName ac)
+        -- Match the surface's tag scheme (see Workflow.execConfirmTag):
+        --   consumer: {normalize(app)}/prod/{platform}/v{version}+{code}
+        --   provider: {acName}-v{version}-{code}
         derivedTag = case mCode of
-            Just code ->
-                Just (segment <> "/prod/" <> acPlatform ac <> "/v" <> version <> "+" <> T.pack (show code))
+            Just code
+                | acSurface ac == "driver" ->
+                    Just (acName ac <> "-v" <> version <> "-" <> T.pack (show code))
+                | otherwise ->
+                    Just (segment <> "/prod/" <> acPlatform ac <> "/v" <> version <> "+" <> T.pack (show code))
             Nothing -> Nothing
         ctx =
             MobileBuildContext
@@ -234,6 +240,7 @@ insertSyntheticRelease ac version mCode = do
                 , mbcMatrixJobName = acName ac <> "-Release"
                 , mbcOtaNamespace = Nothing
                 , mbcTagPushed = derivedTag
+                , mbcDestination = Nothing
                 }
         targetState =
             MobileBuildTargetState
@@ -283,6 +290,8 @@ insertSyntheticRelease ac version mCode = do
                 , rtCommitSha = Nothing
                 , rtSourceRef = Nothing
                 , rtRevertsReleaseId = Nothing
+                , rtAbValidation = Nothing
+                , rtAbValidationStatus = Nothing
                 , rtCreatedAt = now
                 , rtUpdatedAt = now
                 }
