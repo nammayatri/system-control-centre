@@ -38,6 +38,8 @@ Two known limitations are documented inline:
 module Products.Autopilot.Mobile.Workflow (
     mobileBuildSpec,
     tagConfirmTimedOut,
+    reviewPollTimedOut,
+    reviewPollDue,
     selectBuildTag,
 ) where
 
@@ -92,6 +94,7 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     logEvent,
     markReleaseRevertedBy,
     setExternalRunIdForDispatch,
+    setReviewDecided,
  )
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
@@ -105,7 +108,18 @@ import Products.Autopilot.Mobile.Versioning (
     VersionResolution (..),
     resolveNextVersion,
  )
-import Products.Autopilot.RuntimeConfig (getMobileTagConfirmTimeoutMinutes)
+import Products.Autopilot.Mobile.Versioning.Apple (
+    AscReviewState (..),
+    getAscReviewState,
+    loadAscCreds,
+    renderAscErr,
+ )
+import Products.Autopilot.RuntimeConfig (
+    getMobileTagConfirmTimeoutMinutes,
+    getReviewPollIntervalSeconds,
+    getReviewPollTimeoutDays,
+    isStagedRolloutEnabled,
+ )
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
     ReleaseTracker (..),
@@ -137,6 +151,7 @@ mobileBuildSpec =
             , stageResolveRunId
             , stagePollMatrixJobs
             , stageConfirmTag
+            , stagePollReview
             , stageFinalize
             ]
         , wsRollback = \_err -> pure ()
@@ -151,6 +166,7 @@ stageResolveVersion
     , stageResolveRunId
     , stagePollMatrixJobs
     , stageConfirmTag
+    , stagePollReview
     , stageFinalize ::
         Stage ReleaseState
 
@@ -193,11 +209,23 @@ stageConfirmTag =
         { stageGuard = hasTagPushed
         }
 
+-- | Stage 6.5 — bounded, throttled store-review poll (iOS; runs only at MBInReview).
+stagePollReview =
+    (mkStage "PollReview" execPollReview)
+        { stageGuard = notInReview
+        }
+
 -- | Stage 7 — map fine-grained @MobileBuildWFStatus@ to user-facing 'ReleaseStatus'.
 stageFinalize =
     (mkStage "Finalize" execFinalize)
         { stageGuard = trackerStatusTerminal
         }
+
+-- | Skip the review-poll stage unless the release is exactly in review.
+notInReview :: ReleaseState -> Bool
+notInReview rs = case mobileTarget rs of
+    Just s -> mbWfStatus s /= MBInReview
+    Nothing -> True
 
 -- ─── Skip predicates (pure on persisted state) ─────────────────────
 
@@ -289,9 +317,14 @@ mbStatusOrder = \case
     MBBuilding -> 4
     MBSubmittedToStore -> 5
     MBTagPushed -> 6
-    MBCompleted -> 7
-    MBAborting -> 8
-    MBAborted -> 9
+    MBSubmittingForReview -> 7
+    MBInReview -> 8
+    MBReviewApproved -> 9
+    MBRollingOut -> 10
+    MBCompleted -> 11
+    MBReviewRejected -> 12
+    MBAborting -> 13
+    MBAborted -> 14
     MBFailed _ -> 99
 
 -- ─── Stage executors ───────────────────────────────────────────────
@@ -929,6 +962,26 @@ tagConfirmTimedOut now mCompletedAt mStartedAt timeoutMin =
   where
     overBudget anchor = diffUTCTime now anchor > fromIntegral (timeoutMin * 60)
 
+{- | Pure SOFT-timeout predicate for the review poll: has review been pending past
+@timeoutDays@ since it was submitted? Used only to surface "review taking long" —
+a nudge, NOT a failure. 'Nothing' submitted-at ⇒ can't measure ⇒ 'False'.
+-}
+reviewPollTimedOut :: UTCTime -> Maybe UTCTime -> Int -> Bool
+reviewPollTimedOut now mSubmittedAt timeoutDays =
+    case mSubmittedAt of
+        Just t -> diffUTCTime now t > fromIntegral (timeoutDays * 86400)
+        Nothing -> False
+
+{- | Pure throttle predicate: should the review-poll stage hit the store this tick?
+'True' if at least @intervalSec@ has elapsed since the last poll (or it has never
+polled). Keeps the ~20s runner tick from hammering the store APIs.
+-}
+reviewPollDue :: UTCTime -> Maybe UTCTime -> Int -> Bool
+reviewPollDue now mLastPolled intervalSec =
+    case mLastPolled of
+        Nothing -> True
+        Just t -> diffUTCTime now t >= fromIntegral intervalSec
+
 execConfirmTag :: forall m. (StageM ReleaseState m) => m StageOutcome
 execConfirmTag = mobileStage "ConfirmTag" $ do
     rs <- gets id
@@ -1058,6 +1111,71 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
 * anything else               → no-op (engine should not have called
   Finalize before a terminal mb status; defensive).
 -}
+{- | Stage 6.5: bounded, throttled poll of the store review state. Runs only when
+@mbWfStatus == MBInReview@. iOS advances to MBReviewApproved / MBReviewRejected via
+'getAscReviewState'; Android review is opaque, so the stage waits for the operator's
+mark-* endpoint. Throttled to @review_poll_interval_sec@ (default 20 min); soft-bounded
+by @review_poll_timeout_days@ (a nudge, never a failure).
+-}
+execPollReview :: forall m. (StageM ReleaseState m) => m StageOutcome
+execPollReview = mobileStage "PollReview" $ do
+    rs <- gets id
+    let rt = releaseTracker rs
+    target <- case mobileTarget rs of
+        Just t -> pure t
+        Nothing -> abort "MobileBuildState missing at PollReview"
+    ac <- appCatalogForRow rt
+    if acPlatform ac /= "ios"
+        then do
+            -- Android review is opaque (no API signal) — the operator records the
+            -- outcome via the Phase-6 mark-* endpoint. Nothing to poll here.
+            logInfoIO $ "[PollReview] " <> releaseId rt <> " android review is opaque; awaiting operator mark"
+            pure StageWaiting
+        else do
+            now <- liftIO getCurrentTime
+            intervalSec <- getReviewPollIntervalSeconds
+            if not (reviewPollDue now (mbReviewLastPolledAt target) intervalSec)
+                then pure StageWaiting -- throttled: not time to hit the store yet
+                else do
+                    timeoutDays <- getReviewPollTimeoutDays
+                    when (reviewPollTimedOut now (mbReviewSubmittedAt target) timeoutDays) $
+                        logEvent (releaseId rt) "REVIEW_SLOW" $
+                            object
+                                [ "message" .= ("App Store review pending beyond the soft timeout — check App Store Connect" :: Text)
+                                , "timeout_days" .= timeoutDays
+                                ]
+                    mCreds <- loadAscCreds
+                    case mCreds of
+                        Nothing -> do
+                            logInfoIO $ "[PollReview] " <> releaseId rt <> " ASC creds missing; will retry"
+                            stampPolled now
+                            pure StageWaiting
+                        Just creds -> do
+                            res <- getAscReviewState creds (fromMaybe "" (acPackageName ac)) (newVersion rt)
+                            stampPolled now
+                            case res of
+                                Left e -> do
+                                    logInfoIO $ "[PollReview] " <> releaseId rt <> " poll error (retry): " <> renderAscErr e
+                                    pure StageWaiting
+                                Right AscApproved -> do
+                                    setReviewDecided (releaseId rt) "approved" now Nothing
+                                    advanceTo now MBReviewApproved
+                                    logEvent (releaseId rt) "REVIEW_APPROVED" $ object ["store" .= ("asc" :: Text)]
+                                    pure StageSuccess
+                                Right (AscRejected reason) -> do
+                                    setReviewDecided (releaseId rt) "rejected" now (Just reason)
+                                    advanceTo now MBReviewRejected
+                                    logEvent (releaseId rt) "REVIEW_REJECTED" $ object ["reason" .= reason]
+                                    pure StageSuccess
+                                Right _ -> pure StageWaiting -- still in review (prepare / waiting / in-review / other)
+  where
+    stampPolled now =
+        modify $ \s ->
+            s{targetState = Just $ MobileBuildState (applyMobileTarget s (\mt -> mt{mbReviewLastPolledAt = Just now}))}
+    advanceTo now st =
+        modify $ \s ->
+            s{targetState = Just $ MobileBuildState (applyMobileTarget s (\mt -> mt{mbWfStatus = bumpStatus (mbWfStatus mt) st, mbReviewLastPolledAt = Just now}))}
+
 execFinalize :: forall m. (StageM ReleaseState m) => m StageOutcome
 execFinalize = mobileStage "Finalize" $ do
     rs <- gets id
@@ -1065,10 +1183,18 @@ execFinalize = mobileStage "Finalize" $ do
     target <- case mobileTarget rs of
         Just t -> pure t
         Nothing -> abort "MobileBuildState missing at Finalize"
-    let mb = mbWfStatus target
+    staged <- isStagedRolloutEnabled
+    let isDebug = isDebugBuildType (mbcBuildType (mbContext target))
+        mb = mbWfStatus target
         mNew = case mb of
             MBCompleted -> Just COMPLETED
-            MBTagPushed -> Just COMPLETED
+            -- Staged rollout: a RELEASE build HOLDS (stays INPROGRESS) at tag-push,
+            -- awaiting the operator's "Promote to Review". Debug builds — and
+            -- everything when the flag is off — complete at tag-push as before.
+            MBTagPushed
+                | staged && not isDebug -> Nothing
+                | otherwise -> Just COMPLETED
+            MBReviewRejected -> Just ABORTED
             MBFailed _ -> Just ABORTED
             MBAborted -> Just USER_ABORTED
             _ -> Nothing
@@ -1254,6 +1380,8 @@ applyMobileTarget rs f =
                     , mbBuildStartedAt = Nothing
                     , mbBuildCompletedAt = Nothing
                     , mbResolveAttempts = Nothing
+                    , mbReviewSubmittedAt = Nothing
+                    , mbReviewLastPolledAt = Nothing
                     }
 
 {- | Status bump that respects ordering: never regresses to an earlier

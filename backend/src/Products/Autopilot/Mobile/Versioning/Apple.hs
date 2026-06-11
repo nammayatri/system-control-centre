@@ -42,12 +42,30 @@ module Products.Autopilot.Mobile.Versioning.Apple (
     mintAscToken,
     renderAscErr,
 
+    -- * Staged review + rollout (submit → poll → release → phased)
+    AscReviewState (..),
+    AscPhasedState (..),
+    AscVersion (..),
+    appStoreStateToReview,
+    applePhasedPercent,
+    parseAscVersion,
+    getAscReviewState,
+    submitVersionForReview,
+    releaseApprovedVersion,
+    getBuildProcessingState,
+    enablePhasedRelease,
+    pausePhasedRelease,
+    resumePhasedRelease,
+    completePhasedRelease,
+    getPhasedReleaseState,
+
     -- * Dispatcher entry points
     resolve,
     resolveWithToken,
 ) where
 
 import Control.Exception (Exception)
+import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Core.Environment (MonadFlow)
 import Core.Http.Client (
@@ -153,6 +171,10 @@ data AscError
       AscAppNotFound Text
     | -- | API auth failed (401/403).
       AscUnauthorized
+    | -- | No App Store version matched the requested versionString.
+      AscVersionNotFound Text
+    | -- | The attached build is not done processing (not VALID) — can't submit yet.
+      AscBuildNotReady Text
     | -- | Any other HTTP error.
       AscHttpError Int Text
     deriving (Show)
@@ -545,6 +567,360 @@ instance FromJSON BuildsResp where
                     items
         pure (BuildsResp (listToMaybe versions))
 
+-- ─── Staged review + rollout ───────────────────────────────────────
+
+-- | IO-Either bind: short-circuit on the first 'Left'. ExceptT-lite, no transformer.
+(>>?) :: IO (Either e a) -> (a -> IO (Either e b)) -> IO (Either e b)
+m >>? f = m >>= either (pure . Left) f
+infixl 1 >>?
+
+-- | App Store review state, derived from a version's @appStoreState@.
+data AscReviewState
+    = AscPrepareForSubmission
+    | -- | submitted, queued
+      AscWaitingForReview
+    | AscInReview
+    | -- | PENDING_DEVELOPER_RELEASE (held) or READY_FOR_SALE (live)
+      AscApproved
+    | -- | REJECTED / METADATA_REJECTED / DEVELOPER_REJECTED (raw state as reason)
+      AscRejected Text
+    | -- | any other raw appStoreState
+      AscOther Text
+    deriving (Eq, Show)
+
+-- | Map a raw @appStoreState@ to an 'AscReviewState'. Pure; unit-tested.
+appStoreStateToReview :: Text -> AscReviewState
+appStoreStateToReview = \case
+    "PREPARE_FOR_SUBMISSION" -> AscPrepareForSubmission
+    "WAITING_FOR_REVIEW" -> AscWaitingForReview
+    "IN_REVIEW" -> AscInReview
+    "PENDING_DEVELOPER_RELEASE" -> AscApproved
+    "READY_FOR_SALE" -> AscApproved
+    "REJECTED" -> AscRejected "REJECTED"
+    "METADATA_REJECTED" -> AscRejected "METADATA_REJECTED"
+    "DEVELOPER_REJECTED" -> AscRejected "DEVELOPER_REJECTED"
+    other -> AscOther other
+
+-- | Apple's fixed 7-day phased-release schedule: day 0–6 → cumulative %.
+applePhasedPercent :: Int -> Double
+applePhasedPercent d = case d of
+    0 -> 1
+    1 -> 2
+    2 -> 5
+    3 -> 10
+    4 -> 20
+    5 -> 50
+    _ -> 100
+
+-- | Phased-release snapshot.
+data AscPhasedState = AscPhasedState
+    { apsState :: Text
+    -- ^ INACTIVE | ACTIVE | PAUSED | COMPLETE
+    , apsCurrentDay :: Maybe Int
+    -- ^ currentDayNumber (0–6)
+    }
+    deriving (Eq, Show)
+
+-- | A located App Store version: its id + raw @appStoreState@.
+data AscVersion = AscVersion
+    { avId :: Text
+    , avState :: Text
+    }
+    deriving (Eq, Show)
+
+-- ── response parsers (JSON:API) ──
+
+newtype AscVersionsResp = AscVersionsResp [AscVersion]
+
+instance FromJSON AscVersionsResp where
+    parseJSON = withObject "AscVersionsResp" $ \o ->
+        AscVersionsResp <$> (o .: "data" >>= mapM pv)
+      where
+        pv = withObject "version" $ \d ->
+            AscVersion <$> d .: "id" <*> (d .: "attributes" >>= withObject "attrs" (.: "appStoreState"))
+
+-- | Parse an @appStoreVersions@ list → first version {id, appStoreState}. Pure; tested.
+parseAscVersion :: LBS.ByteString -> Maybe AscVersion
+parseAscVersion bs = decode bs >>= \(AscVersionsResp vs) -> listToMaybe vs
+
+newtype CreatedId = CreatedId Text
+
+instance FromJSON CreatedId where
+    parseJSON = withObject "CreatedId" $ \o -> CreatedId <$> (o .: "data" >>= withObject "data" (.: "id"))
+
+parseCreatedId :: LBS.ByteString -> Maybe Text
+parseCreatedId bs = (\(CreatedId i) -> i) <$> decode bs
+
+-- @data.id@ of a single-resource relationship (@.:?@ treats null/absent as Nothing).
+newtype RelData = RelData (Maybe Text)
+
+instance FromJSON RelData where
+    parseJSON = withObject "RelData" $ \o ->
+        RelData <$> (o .:? "data" >>= traverse (withObject "rel" (.: "id")))
+
+parseRelId :: LBS.ByteString -> Maybe Text
+parseRelId bs = decode bs >>= \(RelData m) -> m
+
+newtype LocIds = LocIds [Text]
+
+instance FromJSON LocIds where
+    parseJSON = withObject "LocIds" $ \o -> LocIds <$> (o .: "data" >>= mapM (withObject "loc" (.: "id")))
+
+parseLocIds :: LBS.ByteString -> [Text]
+parseLocIds bs = maybe [] (\(LocIds xs) -> xs) (decode bs)
+
+newtype ProcState = ProcState Text
+
+instance FromJSON ProcState where
+    parseJSON = withObject "ProcState" $ \o ->
+        ProcState <$> (o .: "data" >>= withObject "d" (\d -> d .: "attributes" >>= withObject "a" (.: "processingState")))
+
+data PhasedAttrs = PhasedAttrs Text (Maybe Int)
+
+instance FromJSON PhasedAttrs where
+    parseJSON = withObject "PhasedAttrs" $ \o ->
+        o .: "data" >>= withObject "d" (\d -> d .: "attributes" >>= withObject "a" (\a -> PhasedAttrs <$> a .: "phasedReleaseState" <*> a .:? "currentDayNumber"))
+
+-- ── HTTP helpers ──
+
+-- | A JSON:API resource-identifier object: @{data:{type,id}}@.
+relRef :: Text -> Text -> Value
+relRef ty i = object ["data" .= object ["type" .= ty, "id" .= i]]
+
+-- | POST/PATCH a JSON body; return the response body on 2xx (for id extraction).
+ascSend :: Method -> Text -> Text -> LBS.ByteString -> Text -> IO (Either AscError LBS.ByteString)
+ascSend method url token body logTag = do
+    let req =
+            (defaultReq url)
+                { reqMethod = method
+                , reqHeaders = [("Authorization", "Bearer " <> token), ("Content-Type", "application/json")]
+                , reqBody = Just body
+                , reqTimeout = Seconds 30
+                , reqLogTag = logTag
+                , reqRetries = 0
+                }
+    classifyBody <$> httpRaw req
+
+ascGet :: Text -> Text -> Text -> IO (Either AscError LBS.ByteString)
+ascGet url token logTag = do
+    let req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = [("Authorization", "Bearer " <> token)]
+                , reqTimeout = Seconds 30
+                , reqLogTag = logTag
+                }
+    classifyBody <$> httpRaw req
+
+classifyBody :: Either HttpError HttpResponse -> Either AscError LBS.ByteString
+classifyBody resp = case resp of
+    Right HttpResponse{respStatus = s, respBody = b}
+        | s >= 200 && s < 300 -> Right b
+        | s == 401 || s == 403 -> Left AscUnauthorized
+        | otherwise -> Left (AscHttpError s (TE.decodeUtf8 (LBS.toStrict b)))
+    Left e -> Left (AscHttpError 0 (T.pack (show e)))
+
+-- | Mint a token, then run @k token@.
+withAscToken :: AscCreds -> (Text -> IO (Either AscError a)) -> IO (Either AscError a)
+withAscToken creds k = mintAscToken creds >>= either (pure . Left) k
+
+-- | Mint a token, resolve the numeric app id, then run @k token appId@.
+withAscApp :: AscCreds -> Text -> (Text -> Text -> IO (Either AscError a)) -> IO (Either AscError a)
+withAscApp creds bundleId k =
+    mintAscToken creds >>? \token ->
+        lookupAppByBundleId token bundleId >>? \appId -> k token appId
+
+-- | GET the IOS @appStoreVersion@ for @versionString@ → {id, appStoreState}.
+getAppStoreVersion :: Text -> Text -> Text -> IO (Either AscError AscVersion)
+getAppStoreVersion token appId versionString = do
+    let url =
+            ascBase
+                <> "/apps/"
+                <> appId
+                <> "/appStoreVersions?filter%5BversionString%5D="
+                <> versionString
+                <> "&filter%5Bplatform%5D=IOS&limit=1"
+    ascGet url token "asc-version-lookup" >>? \b ->
+        pure (maybe (Left (AscVersionNotFound versionString)) Right (parseAscVersion b))
+
+-- ── Public operations ──
+
+-- | Poll the App Store review state of a version (maps @appStoreState@).
+getAscReviewState :: (MonadFlow m) => AscCreds -> Text -> Text -> m (Either AscError AscReviewState)
+getAscReviewState creds bundleId versionString = liftIO $ withAscApp creds bundleId $ \token appId ->
+    fmap (fmap (appStoreStateToReview . avState)) (getAppStoreVersion token appId versionString)
+
+-- | Read the processing state of the build attached to a version (@""@ if none).
+getBuildProcessingState :: (MonadFlow m) => AscCreds -> Text -> Text -> m (Either AscError Text)
+getBuildProcessingState creds bundleId versionString = liftIO $ withAscApp creds bundleId $ \token appId ->
+    getAppStoreVersion token appId versionString >>? \ver -> buildProcessingStateIO token (avId ver)
+
+buildProcessingStateIO :: Text -> Text -> IO (Either AscError Text)
+buildProcessingStateIO token vid =
+    ascGet (ascBase <> "/appStoreVersions/" <> vid <> "/build") token "asc-version-build" >>? \b ->
+        case parseRelId b of
+            Nothing -> pure (Right "") -- no build attached → can't gate, proceed
+            Just buildId ->
+                ascGet (ascBase <> "/builds/" <> buildId) token "asc-build" >>? \bb ->
+                    pure (Right (maybe "" (\(ProcState s) -> s) (decode bb)))
+
+{- | Fill What's New (every listed locale gets the same changelog), set release
+type to MANUAL (so it won't auto-release), then submit via the modern
+@reviewSubmissions@ flow (create → add item → mark submitted). Blocks if the
+attached build is still processing.
+-}
+submitVersionForReview :: (MonadFlow m) => AscCreds -> Text -> Text -> Text -> m (Either AscError ())
+submitVersionForReview creds bundleId versionString whatsNew = liftIO $ withAscApp creds bundleId $ \token appId ->
+    getAppStoreVersion token appId versionString >>? \ver ->
+        buildProcessingStateIO token (avId ver) >>? \pstate ->
+            if pstate /= "" && pstate /= "VALID"
+                then pure (Left (AscBuildNotReady pstate))
+                else
+                    setWhatsNewAllLocales token (avId ver) whatsNew >>? \_ ->
+                        setReleaseTypeManual token (avId ver) >>? \_ ->
+                            createReviewSubmission token appId >>? \subId ->
+                                addReviewSubmissionItem token subId (avId ver) >>? \_ ->
+                                    submitReviewSubmission token subId
+
+setReleaseTypeManual :: Text -> Text -> IO (Either AscError ())
+setReleaseTypeManual token vid =
+    let body =
+            encode $
+                object
+                    [ "data"
+                        .= object
+                            [ "type" .= ("appStoreVersions" :: Text)
+                            , "id" .= vid
+                            , "attributes" .= object ["releaseType" .= ("MANUAL" :: Text)]
+                            ]
+                    ]
+     in void <$> ascSend PATCH (ascBase <> "/appStoreVersions/" <> vid) token body "asc-set-manual"
+
+setWhatsNewAllLocales :: Text -> Text -> Text -> IO (Either AscError ())
+setWhatsNewAllLocales token vid txt =
+    ascGet (ascBase <> "/appStoreVersions/" <> vid <> "/appStoreVersionLocalizations") token "asc-locs" >>? \b ->
+        go (parseLocIds b)
+  where
+    go [] = pure (Right ())
+    go (lid : rest) =
+        let body =
+                encode $
+                    object
+                        [ "data"
+                            .= object
+                                [ "type" .= ("appStoreVersionLocalizations" :: Text)
+                                , "id" .= lid
+                                , "attributes" .= object ["whatsNew" .= txt]
+                                ]
+                        ]
+         in (void <$> ascSend PATCH (ascBase <> "/appStoreVersionLocalizations/" <> lid) token body "asc-whatsnew") >>? \_ -> go rest
+
+createReviewSubmission :: Text -> Text -> IO (Either AscError Text)
+createReviewSubmission token appId =
+    let body =
+            encode $
+                object
+                    [ "data"
+                        .= object
+                            [ "type" .= ("reviewSubmissions" :: Text)
+                            , "attributes" .= object ["platform" .= ("IOS" :: Text)]
+                            , "relationships" .= object ["app" .= relRef "apps" appId]
+                            ]
+                    ]
+     in ascSend POST (ascBase <> "/reviewSubmissions") token body "asc-review-create" >>? \b ->
+            pure (maybe (Left (AscHttpError 0 "could not read reviewSubmission id")) Right (parseCreatedId b))
+
+addReviewSubmissionItem :: Text -> Text -> Text -> IO (Either AscError ())
+addReviewSubmissionItem token subId vid =
+    let body =
+            encode $
+                object
+                    [ "data"
+                        .= object
+                            [ "type" .= ("reviewSubmissionItems" :: Text)
+                            , "relationships"
+                                .= object
+                                    [ "reviewSubmission" .= relRef "reviewSubmissions" subId
+                                    , "appStoreVersion" .= relRef "appStoreVersions" vid
+                                    ]
+                            ]
+                    ]
+     in void <$> ascSend POST (ascBase <> "/reviewSubmissionItems") token body "asc-review-item"
+
+submitReviewSubmission :: Text -> Text -> IO (Either AscError ())
+submitReviewSubmission token subId =
+    let body =
+            encode $
+                object
+                    [ "data"
+                        .= object
+                            [ "type" .= ("reviewSubmissions" :: Text)
+                            , "id" .= subId
+                            , "attributes" .= object ["submitted" .= True]
+                            ]
+                    ]
+     in void <$> ascSend PATCH (ascBase <> "/reviewSubmissions/" <> subId) token body "asc-review-submit"
+
+-- | Release an approved (held) version — the iOS "Release" button.
+releaseApprovedVersion :: (MonadFlow m) => AscCreds -> Text -> Text -> m (Either AscError ())
+releaseApprovedVersion creds bundleId versionString = liftIO $ withAscApp creds bundleId $ \token appId ->
+    getAppStoreVersion token appId versionString >>? \ver ->
+        let body =
+                encode $
+                    object
+                        [ "data"
+                            .= object
+                                [ "type" .= ("appStoreVersionReleaseRequests" :: Text)
+                                , "relationships" .= object ["appStoreVersion" .= relRef "appStoreVersions" (avId ver)]
+                                ]
+                        ]
+         in void <$> ascSend POST (ascBase <> "/appStoreVersionReleaseRequests") token body "asc-release-request"
+
+-- | Turn on phased release for an approved version; returns the phasedRelease id.
+enablePhasedRelease :: (MonadFlow m) => AscCreds -> Text -> Text -> m (Either AscError Text)
+enablePhasedRelease creds bundleId versionString = liftIO $ withAscApp creds bundleId $ \token appId ->
+    getAppStoreVersion token appId versionString >>? \ver ->
+        let body =
+                encode $
+                    object
+                        [ "data"
+                            .= object
+                                [ "type" .= ("appStoreVersionPhasedReleases" :: Text)
+                                , "attributes" .= object ["phasedReleaseState" .= ("ACTIVE" :: Text)]
+                                , "relationships" .= object ["appStoreVersion" .= relRef "appStoreVersions" (avId ver)]
+                                ]
+                        ]
+         in ascSend POST (ascBase <> "/appStoreVersionPhasedReleases") token body "asc-phased-create" >>? \b ->
+                pure (maybe (Left (AscHttpError 0 "could not read phasedRelease id")) Right (parseCreatedId b))
+
+-- | Pause / resume / complete a phased release (by its cached id).
+pausePhasedRelease, resumePhasedRelease, completePhasedRelease ::
+    (MonadFlow m) => AscCreds -> Text -> m (Either AscError ())
+pausePhasedRelease creds pid = liftIO $ withAscToken creds $ \token -> setPhasedState token pid "PAUSE"
+resumePhasedRelease creds pid = liftIO $ withAscToken creds $ \token -> setPhasedState token pid "ACTIVE"
+completePhasedRelease creds pid = liftIO $ withAscToken creds $ \token -> setPhasedState token pid "COMPLETE"
+
+setPhasedState :: Text -> Text -> Text -> IO (Either AscError ())
+setPhasedState token pid st =
+    let body =
+            encode $
+                object
+                    [ "data"
+                        .= object
+                            [ "type" .= ("appStoreVersionPhasedReleases" :: Text)
+                            , "id" .= pid
+                            , "attributes" .= object ["phasedReleaseState" .= st]
+                            ]
+                    ]
+     in void <$> ascSend PATCH (ascBase <> "/appStoreVersionPhasedReleases/" <> pid) token body "asc-phased-patch"
+
+-- | Read the phased-release state of a version (defaults to INACTIVE if none).
+getPhasedReleaseState :: (MonadFlow m) => AscCreds -> Text -> Text -> m (Either AscError AscPhasedState)
+getPhasedReleaseState creds bundleId versionString = liftIO $ withAscApp creds bundleId $ \token appId ->
+    getAppStoreVersion token appId versionString >>? \ver ->
+        ascGet (ascBase <> "/appStoreVersions/" <> avId ver <> "/appStoreVersionPhasedRelease") token "asc-phased-get" >>? \b ->
+            pure (Right (maybe (AscPhasedState "INACTIVE" Nothing) (\(PhasedAttrs s d) -> AscPhasedState s d) (decode b)))
+
 -- ─── Server-config helper ──────────────────────────────────────────
 
 {- | Read the three App Store Connect secrets from the process __environment__
@@ -576,6 +952,8 @@ renderAscErr AscCredsMissing = "asc_creds_missing"
 renderAscErr (AscJwtSigningFailed reason) = "asc_jwt_signing_failed:" <> reason
 renderAscErr (AscAppNotFound bundleId) = "asc_app_not_found:" <> bundleId
 renderAscErr AscUnauthorized = "asc_unauthorized"
+renderAscErr (AscVersionNotFound v) = "asc_version_not_found:" <> v
+renderAscErr (AscBuildNotReady st) = "asc_build_not_ready:" <> st
 renderAscErr (AscHttpError s body) =
     "asc_http_error:" <> T.pack (show s) <> ":" <> body
 

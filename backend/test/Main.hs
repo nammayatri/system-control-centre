@@ -56,7 +56,9 @@ import Products.Autopilot.Mobile.RevertResolver (
  )
 import Products.Autopilot.Mobile.Types
 import Products.Autopilot.Mobile.Versioning (TrackInfo (..), computeNextVersion)
-import Products.Autopilot.Mobile.Workflow (selectBuildTag, tagConfirmTimedOut)
+import Products.Autopilot.Mobile.Versioning.Apple (AscReviewState (..), AscVersion (..), appStoreStateToReview, applePhasedPercent, parseAscVersion)
+import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), parseRolloutState, userFractionInRange)
+import Products.Autopilot.Mobile.Workflow (reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
 import qualified Products.Autopilot.Types.Target
@@ -134,6 +136,9 @@ main = do
     section "[29] ConfirmTag wall-clock timeout predicate" testTagConfirmTimedOut
     section "[30] Rollback target resolver (version-order, not time-order)" testResolveRollback
     section "[31] ConfirmTag selects the build's exact tag (not lexical-first)" testSelectBuildTag
+    section "[32] Play staged rollout (% bounds + track parse)" testPlayStagedRollout
+    section "[33] ASC review state + phased schedule + version parse" testAscReviewAndPhased
+    section "[34] Review poll timing (soft-timeout + throttle)" testReviewPollTiming
 
     putStrLn ""
     putStrLn "==========================================="
@@ -945,6 +950,7 @@ testMobileBuildContextJsonRoundTrip = do
                 , mbcMatrixJobName = "NammaYatri-Release"
                 , mbcOtaNamespace = Just "nammayatriv2"
                 , mbcTagPushed = Nothing
+                , mbcDestination = Nothing
                 }
     let encoded = Aeson.encode ctx
     let decoded = Aeson.decode encoded :: Maybe MobileBuildContext
@@ -1120,6 +1126,72 @@ testSelectBuildTag = do
 -- ============================================================================
 -- [20] Mobile Version Bump (mirrors fastlane-android.yaml lines 124-189)
 -- ============================================================================
+
+testPlayStagedRollout :: IO ()
+testPlayStagedRollout = do
+    putStrLn "Play staged rollout: userFraction bounds + track parsing"
+    assertBool "fraction 0 rejected" (not (userFractionInRange 0))
+    assertBool "fraction 1.0 rejected" (not (userFractionInRange 1.0))
+    assertBool "fraction 1.5 rejected" (not (userFractionInRange 1.5))
+    assertBool "negative fraction rejected" (not (userFractionInRange (-0.1)))
+    assertBool "fraction 0.5 ok" (userFractionInRange 0.5)
+    assertBool "fraction 1e-9 (review ~0) ok" (userFractionInRange 1e-9)
+    assertBool "fraction 0.999 ok" (userFractionInRange 0.999)
+    assertEqual
+        "parse inProgress production track"
+        (Just (PlayRolloutState "inProgress" (Just 0.5) ["123"]))
+        (parseRolloutState "{\"releases\":[{\"name\":\"1.2.3\",\"status\":\"inProgress\",\"userFraction\":0.5,\"versionCodes\":[\"123\"]}]}")
+    assertEqual
+        "parse completed production track (no fraction)"
+        (Just (PlayRolloutState "completed" Nothing ["123"]))
+        (parseRolloutState "{\"releases\":[{\"name\":\"1.2.3\",\"status\":\"completed\",\"versionCodes\":[\"123\"]}]}")
+    assertEqual
+        "parse empty production track -> none"
+        (Just (PlayRolloutState "none" Nothing []))
+        (parseRolloutState "{\"releases\":[]}")
+    assertEqual
+        "parse prefers active staged release over a completed one"
+        (Just (PlayRolloutState "halted" (Just 0.25) ["200"]))
+        (parseRolloutState "{\"releases\":[{\"status\":\"completed\",\"versionCodes\":[\"100\"]},{\"status\":\"halted\",\"userFraction\":0.25,\"versionCodes\":[\"200\"]}]}")
+
+testAscReviewAndPhased :: IO ()
+testAscReviewAndPhased = do
+    putStrLn "ASC: appStoreState mapping + phased % + version parse"
+    assertEqual "PREPARE_FOR_SUBMISSION" AscPrepareForSubmission (appStoreStateToReview "PREPARE_FOR_SUBMISSION")
+    assertEqual "WAITING_FOR_REVIEW" AscWaitingForReview (appStoreStateToReview "WAITING_FOR_REVIEW")
+    assertEqual "IN_REVIEW" AscInReview (appStoreStateToReview "IN_REVIEW")
+    assertEqual "PENDING_DEVELOPER_RELEASE -> approved (held)" AscApproved (appStoreStateToReview "PENDING_DEVELOPER_RELEASE")
+    assertEqual "READY_FOR_SALE -> approved" AscApproved (appStoreStateToReview "READY_FOR_SALE")
+    assertEqual "REJECTED" (AscRejected "REJECTED") (appStoreStateToReview "REJECTED")
+    assertEqual "METADATA_REJECTED" (AscRejected "METADATA_REJECTED") (appStoreStateToReview "METADATA_REJECTED")
+    assertEqual "unknown -> other" (AscOther "PROCESSING_FOR_APP_STORE") (appStoreStateToReview "PROCESSING_FOR_APP_STORE")
+    assertEqual "phased day 0 = 1%" 1 (applePhasedPercent 0)
+    assertEqual "phased day 3 = 10%" 10 (applePhasedPercent 3)
+    assertEqual "phased day 6 = 100%" 100 (applePhasedPercent 6)
+    assertEqual "phased day >6 clamps to 100%" 100 (applePhasedPercent 9)
+    assertEqual
+        "parse appStoreVersions response -> first {id, state}"
+        (Just (AscVersion "12345" "PENDING_DEVELOPER_RELEASE"))
+        (parseAscVersion "{\"data\":[{\"id\":\"12345\",\"type\":\"appStoreVersions\",\"attributes\":{\"appStoreState\":\"PENDING_DEVELOPER_RELEASE\",\"versionString\":\"1.2.3\"}}]}")
+    assertEqual
+        "parse empty appStoreVersions -> Nothing"
+        Nothing
+        (parseAscVersion "{\"data\":[]}")
+
+testReviewPollTiming :: IO ()
+testReviewPollTiming = do
+    putStrLn "Review poll: soft-timeout (7d) + throttle (20m) predicates"
+    now <- getCurrentTime
+    let daysAgo d = addUTCTime (fromIntegral (negate (d * 86400 :: Int))) now
+        secsAgo s = addUTCTime (fromIntegral (negate (s :: Int))) now
+    -- soft timeout (default 7 days): nudge, not failure
+    assertBool "no submitted-at -> not timed out" (not (reviewPollTimedOut now Nothing 7))
+    assertBool "submitted 3d ago -> not timed out (7d)" (not (reviewPollTimedOut now (Just (daysAgo 3)) 7))
+    assertBool "submitted 8d ago -> timed out (7d)" (reviewPollTimedOut now (Just (daysAgo 8)) 7)
+    -- throttle (default 1200s = 20 min)
+    assertBool "never polled -> due" (reviewPollDue now Nothing 1200)
+    assertBool "polled 10m ago -> not due (20m interval)" (not (reviewPollDue now (Just (secsAgo 600)) 1200))
+    assertBool "polled 25m ago -> due (20m interval)" (reviewPollDue now (Just (secsAgo 1500)) 1200)
 
 testVersionBumpLogic :: IO ()
 testVersionBumpLogic = do

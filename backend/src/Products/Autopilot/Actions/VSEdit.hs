@@ -181,6 +181,15 @@ mkVsEditRow tid product' service' env' vsName' createdBy' status' now =
         , rtRevertsReleaseId = Nothing
         , rtAbValidation = Nothing
         , rtAbValidationStatus = Nothing
+        , rtReviewStatus = Nothing
+        , rtReviewSubmittedAt = Nothing
+        , rtReviewDecidedAt = Nothing
+        , rtReviewRejectReason = Nothing
+        , rtRolloutStatus = Nothing
+        , rtRolloutPercent = Nothing
+        , rtStoreRolloutHistory = Nothing
+        , rtAscVersionId = Nothing
+        , rtAscPhasedId = Nothing
         , rtCreatedAt = now
         , rtUpdatedAt = now
         }

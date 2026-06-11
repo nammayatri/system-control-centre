@@ -247,6 +247,8 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                 , mbBuildStartedAt = Nothing
                 , mbBuildCompletedAt = Nothing
                 , mbResolveAttempts = Nothing
+                , mbReviewSubmittedAt = Nothing
+                , mbReviewLastPolledAt = Nothing
                 }
         row = mkMobileTrackerRow rid app_ target mVer mSourceRef (apEmail ap) now
     pure
@@ -672,6 +674,9 @@ changelogAiSummaryH ap appName surface platform branch mVersionName mVersionCode
                                     | T.null vCode = "v" <> vName
                                     | otherwise = "v" <> vName <> "+" <> vCode
                                 appLabel = appName <> " (" <> CL.ownSideLabel surface <> ")"
+                                -- Generic one-liner for summary_short when AI is off or
+                                -- every model fails (no app name — usable as release notes).
+                                detShort = CL.renderShortSummary items
                                 -- "rn4" = generation version. Bump it whenever the
                                 -- prompt/format changes so cached rows invalidate.
                                 contentKey =
@@ -689,8 +694,8 @@ changelogAiSummaryH ap appName surface platform branch mVersionName mVersionCode
                                     case ecfg of
                                         Left _ -> do
                                             -- AI off/unconfigured: the deterministic changelog IS the result.
-                                            upsertReleaseSummary contentKey detLong "" "" n
-                                            pure (stateResp "ready" detLong "" Nothing)
+                                            upsertReleaseSummary contentKey detLong detShort "" n
+                                            pure (stateResp "ready" detLong detShort Nothing)
                                         Right cfg -> do
                                             -- One generator per content key; reclaims a failed row or a
                                             -- pending row orphaned by a restart (see 'claimReleaseSummary').
@@ -703,7 +708,7 @@ changelogAiSummaryH ap appName surface platform branch mVersionName mVersionCode
                                                             Just (lng, sht, usedModel) -> upsertReleaseSummary contentKey lng sht usedModel n
                                                             -- Every model failed → store the deterministic
                                                             -- changelog as the ready result (model="" ⇒ "auto").
-                                                            Nothing -> upsertReleaseSummary contentKey detLong "" "" n
+                                                            Nothing -> upsertReleaseSummary contentKey detLong detShort "" n
                                             -- A concurrent generation may have just finished; otherwise
                                             -- report pending with the deterministic placeholder.
                                             st <- lookupReleaseSummary contentKey

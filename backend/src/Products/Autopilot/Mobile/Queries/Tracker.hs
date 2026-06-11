@@ -15,6 +15,10 @@
 module Products.Autopilot.Mobile.Queries.Tracker
   ( findSiblingsByDispatchId,
     setExternalRunIdForDispatch,
+    setReviewDecided,
+    setReviewSubmitted,
+    setMobileWfStatus,
+    setRolloutState,
     incrementResolveAttempts,
     appCatalogForRow,
     appCatalogForRowRaw,
@@ -53,6 +57,7 @@ import Products.Autopilot.Mobile.RevertResolver (RevertCand (..))
 import Products.Autopilot.Mobile.Types
   ( MobileBuildContext (..),
     MobileBuildTargetState (..),
+    MobileBuildWFStatus (..),
     isDebugBuildType,
   )
 import Products.Autopilot.Mobile.Types.Storage
@@ -134,6 +139,98 @@ setExternalRunIdForDispatch dispatchId runId headSha = withDb $ \db ->
               ]
         )
         (\rt -> rtDispatchId rt ==. val_ (Just dispatchId))
+
+-- | Persist the review outcome to the @0027@ columns (called by the review-poll
+-- stage on approve/reject, and by the operator mark-* endpoints in Phase 6).
+setReviewDecided ::
+  (MonadFlow m) =>
+  Text ->
+  Text ->
+  UTCTime ->
+  Maybe Text ->
+  m ()
+setReviewDecided releaseId_ reviewStatus decidedAt mReason = withDb $ \db ->
+  runDB db $
+    runUpdate $
+      update
+        (releaseTrackers autopilotDb)
+        ( \rt ->
+            mconcat
+              [ rtReviewStatus rt <-. val_ (Just reviewStatus),
+                rtReviewDecidedAt rt <-. val_ (Just decidedAt),
+                rtReviewRejectReason rt <-. val_ mReason
+              ]
+        )
+        (\rt -> rtId rt ==. val_ releaseId_)
+
+-- | Promote → review: set @mb_wf_status = MBInReview@ + @mbReviewSubmittedAt@ in
+-- the target-state JSON, plus the @review_status@ / @review_submitted_at@ columns.
+-- Called by @POST /promote@ after a successful store submission.
+setReviewSubmitted :: (MonadFlow m) => Text -> Text -> UTCTime -> m ()
+setReviewSubmitted releaseId_ reviewStatus now = withDb $ \db -> do
+  mRow <-
+    runDB db $
+      runSelectReturningOne $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtId rt ==. val_ releaseId_)
+          pure rt
+  case mRow of
+    Nothing -> throwM $ DBError "setReviewSubmitted" ("release not found: " <> releaseId_)
+    Just row -> case parseMobileTargetState (rtTargetState row) of
+      Nothing -> throwM $ DBError "setReviewSubmitted" ("not a mobile release: " <> releaseId_)
+      Just s -> do
+        let encoded = encodeJsonText (MobileBuildState s {mbWfStatus = MBInReview, mbReviewSubmittedAt = Just now})
+        runDB db $
+          runUpdate $
+            update
+              (releaseTrackers autopilotDb)
+              ( \rt ->
+                  mconcat
+                    [ rtTargetState rt <-. val_ (Just encoded),
+                      rtReviewStatus rt <-. val_ (Just reviewStatus),
+                      rtReviewSubmittedAt rt <-. val_ (Just now)
+                    ]
+              )
+              (\rt -> rtId rt ==. val_ releaseId_)
+
+-- | Read-modify-write the target-state JSON to set @mb_wf_status@ (used by the
+-- rollout / mark-* transitions: MBReviewApproved, MBReviewRejected, MBRollingOut, MBCompleted).
+setMobileWfStatus :: (MonadFlow m) => Text -> MobileBuildWFStatus -> m ()
+setMobileWfStatus releaseId_ st = withDb $ \db -> do
+  mRow <-
+    runDB db $
+      runSelectReturningOne $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtId rt ==. val_ releaseId_)
+          pure rt
+  case mRow of
+    Nothing -> throwM $ DBError "setMobileWfStatus" ("release not found: " <> releaseId_)
+    Just row -> case parseMobileTargetState (rtTargetState row) of
+      Nothing -> throwM $ DBError "setMobileWfStatus" ("not a mobile release: " <> releaseId_)
+      Just s ->
+        runDB db $
+          runUpdate $
+            update
+              (releaseTrackers autopilotDb)
+              (\rt -> rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s {mbWfStatus = st}))))
+              (\rt -> rtId rt ==. val_ releaseId_)
+
+-- | Set the @rollout_status@ / @rollout_percent@ columns.
+setRolloutState :: (MonadFlow m) => Text -> Text -> Maybe Double -> m ()
+setRolloutState releaseId_ rolloutStatus mPercent = withDb $ \db ->
+  runDB db $
+    runUpdate $
+      update
+        (releaseTrackers autopilotDb)
+        ( \rt ->
+            mconcat
+              [ rtRolloutStatus rt <-. val_ (Just rolloutStatus),
+                rtRolloutPercent rt <-. val_ mPercent
+              ]
+        )
+        (\rt -> rtId rt ==. val_ releaseId_)
 
 -- | Bump the ResolveRunId attempt counter stored in the tracker's
 -- @release_context@ JSON (a @MobileBuildTargetState@ wrapped in
@@ -341,6 +438,15 @@ mkMobileTrackerRow rid ac targetState mVersionName mSourceRef createdBy_ created
           rtRevertsReleaseId = Nothing,
           rtAbValidationStatus = Nothing,
           rtAbValidation = Nothing,
+          rtReviewStatus = Nothing,
+          rtReviewSubmittedAt = Nothing,
+          rtReviewDecidedAt = Nothing,
+          rtReviewRejectReason = Nothing,
+          rtRolloutStatus = Nothing,
+          rtRolloutPercent = Nothing,
+          rtStoreRolloutHistory = Nothing,
+          rtAscVersionId = Nothing,
+          rtAscPhasedId = Nothing,
           rtCreatedAt = createdAt,
           rtUpdatedAt = createdAt
         }
@@ -591,6 +697,15 @@ insertMobileRevertTracker rid ac targetState versionName changeLog_ sourceRef_ r
           rtRevertsReleaseId = Just revertsId,
           rtAbValidationStatus = Nothing,
           rtAbValidation = Nothing,
+          rtReviewStatus = Nothing,
+          rtReviewSubmittedAt = Nothing,
+          rtReviewDecidedAt = Nothing,
+          rtReviewRejectReason = Nothing,
+          rtRolloutStatus = Nothing,
+          rtRolloutPercent = Nothing,
+          rtStoreRolloutHistory = Nothing,
+          rtAscVersionId = Nothing,
+          rtAscPhasedId = Nothing,
           rtCreatedAt = createdAt,
           rtUpdatedAt = createdAt
         }

@@ -251,6 +251,8 @@ insertSyntheticRelease ac version mCode = do
                 , mbBuildStartedAt = Just now
                 , mbBuildCompletedAt = Just now
                 , mbResolveAttempts = Nothing
+                , mbReviewSubmittedAt = Nothing
+                , mbReviewLastPolledAt = Nothing
                 }
         encodedCtx = encodeJsonText (MobileBuildState targetState)
         row =
@@ -292,6 +294,15 @@ insertSyntheticRelease ac version mCode = do
                 , rtRevertsReleaseId = Nothing
                 , rtAbValidation = Nothing
                 , rtAbValidationStatus = Nothing
+                , rtReviewStatus = Nothing
+                , rtReviewSubmittedAt = Nothing
+                , rtReviewDecidedAt = Nothing
+                , rtReviewRejectReason = Nothing
+                , rtRolloutStatus = Nothing
+                , rtRolloutPercent = Nothing
+                , rtStoreRolloutHistory = Nothing
+                , rtAscVersionId = Nothing
+                , rtAscPhasedId = Nothing
                 , rtCreatedAt = now
                 , rtUpdatedAt = now
                 }

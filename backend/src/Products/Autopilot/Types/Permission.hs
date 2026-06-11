@@ -45,6 +45,8 @@ data AutopilotPermission
     | AP_AI_ASSESS
     | AP_AI_ASK
     | AP_AI_AUDIT_VIEW
+  | AP_RELEASE_PROMOTE
+  | AP_RELEASE_ROLLOUT
   deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 autopilotPermissionToText :: AutopilotPermission -> Text
@@ -74,6 +76,8 @@ autopilotPermissionToText AP_AI_SUMMARIZE = "AI_SUMMARIZE"
 autopilotPermissionToText AP_AI_ASSESS = "AI_ASSESS"
 autopilotPermissionToText AP_AI_ASK = "AI_ASK"
 autopilotPermissionToText AP_AI_AUDIT_VIEW = "AI_AUDIT_VIEW"
+autopilotPermissionToText AP_RELEASE_PROMOTE = "RELEASE_PROMOTE"
+autopilotPermissionToText AP_RELEASE_ROLLOUT = "RELEASE_ROLLOUT"
 
 textToAutopilotPermission :: Text -> Maybe AutopilotPermission
 textToAutopilotPermission "RELEASE_VIEW" = Just AP_RELEASE_VIEW
@@ -102,6 +106,8 @@ textToAutopilotPermission "AI_SUMMARIZE" = Just AP_AI_SUMMARIZE
 textToAutopilotPermission "AI_ASSESS" = Just AP_AI_ASSESS
 textToAutopilotPermission "AI_ASK" = Just AP_AI_ASK
 textToAutopilotPermission "AI_AUDIT_VIEW" = Just AP_AI_AUDIT_VIEW
+textToAutopilotPermission "RELEASE_PROMOTE" = Just AP_RELEASE_PROMOTE
+textToAutopilotPermission "RELEASE_ROLLOUT" = Just AP_RELEASE_ROLLOUT
 textToAutopilotPermission _ = Nothing
 
 -- | Human-readable description (exhaustive, -Wall catches missing variants).
@@ -132,6 +138,8 @@ permissionDescription AP_AI_SUMMARIZE = "Generate AI summaries of releases"
 permissionDescription AP_AI_ASSESS = "Run AI risk assessment on releases"
 permissionDescription AP_AI_ASK = "Ask AI questions about release context"
 permissionDescription AP_AI_AUDIT_VIEW = "View the AI audit log"
+permissionDescription AP_RELEASE_PROMOTE = "Promote a built release to store review"
+permissionDescription AP_RELEASE_ROLLOUT = "Manage staged rollout (set %, halt, resume, release)"
 
 -- 'permissionName' MUST match 'autopilotPermissionToText' for the same
 -- constructor; the RBAC check compares this string against the DB.
@@ -239,3 +247,11 @@ instance KnownPermission 'AP_AI_ASK where
 instance KnownPermission 'AP_AI_AUDIT_VIEW where
     permissionProduct _ = "autopilot"
     permissionName _ = "AI_AUDIT_VIEW"
+
+instance KnownPermission 'AP_RELEASE_PROMOTE where
+    permissionProduct _ = "autopilot"
+    permissionName _ = "RELEASE_PROMOTE"
+
+instance KnownPermission 'AP_RELEASE_ROLLOUT where
+    permissionProduct _ = "autopilot"
+    permissionName _ = "RELEASE_ROLLOUT"

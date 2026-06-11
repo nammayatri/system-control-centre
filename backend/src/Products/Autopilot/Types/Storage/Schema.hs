@@ -88,6 +88,17 @@ data ReleaseTrackerT f = ReleaseTrackerT
     rtRevertsReleaseId :: Columnar f (Maybe Text),
     rtAbValidationStatus :: Columnar f (Maybe Text),
     rtAbValidation :: Columnar f (Maybe Text),
+    -- Store review + staged rollout (migration 0027). Mobile-only; defaulted to
+    -- Nothing for backend / configmap / VSEdit rows.
+    rtReviewStatus :: Columnar f (Maybe Text),
+    rtReviewSubmittedAt :: Columnar f (Maybe UTCTime),
+    rtReviewDecidedAt :: Columnar f (Maybe UTCTime),
+    rtReviewRejectReason :: Columnar f (Maybe Text),
+    rtRolloutStatus :: Columnar f (Maybe Text),
+    rtRolloutPercent :: Columnar f (Maybe Double),
+    rtStoreRolloutHistory :: Columnar f (Maybe Text),
+    rtAscVersionId :: Columnar f (Maybe Text),
+    rtAscPhasedId :: Columnar f (Maybe Text),
     rtCreatedAt :: Columnar f UTCTime,
     rtUpdatedAt :: Columnar f UTCTime
   }
@@ -196,6 +207,15 @@ autopilotDb =
                   rtRevertsReleaseId = fieldNamed "reverts_release_id",
                   rtAbValidationStatus = fieldNamed "ab_validation_status",
                   rtAbValidation = fieldNamed "ab_validation",
+                  rtReviewStatus = fieldNamed "review_status",
+                  rtReviewSubmittedAt = fieldNamed "review_submitted_at",
+                  rtReviewDecidedAt = fieldNamed "review_decided_at",
+                  rtReviewRejectReason = fieldNamed "review_reject_reason",
+                  rtRolloutStatus = fieldNamed "rollout_status",
+                  rtRolloutPercent = fieldNamed "rollout_percent",
+                  rtStoreRolloutHistory = fieldNamed "store_rollout_history",
+                  rtAscVersionId = fieldNamed "asc_version_id",
+                  rtAscPhasedId = fieldNamed "asc_phased_id",
                   rtCreatedAt = fieldNamed "date_created",
                   rtUpdatedAt = fieldNamed "last_updated"
                 },

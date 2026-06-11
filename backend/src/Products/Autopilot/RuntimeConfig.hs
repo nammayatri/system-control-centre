@@ -21,6 +21,9 @@ module Products.Autopilot.RuntimeConfig (
     isVersionPreviewEnabled,
     getMobileBuildType,
     getMobileTagConfirmTimeoutMinutes,
+    isStagedRolloutEnabled,
+    getReviewPollIntervalSeconds,
+    getReviewPollTimeoutDays,
     isUnderMaintenance,
     -- Delays / numeric (MonadFlow versions)
     getReleaseWatchDelay,
@@ -251,6 +254,21 @@ isUnderMaintenance = withDb $ \db -> do
 
 getReleaseWatchDelay :: (MonadFlow m) => m Int
 getReleaseWatchDelay = getConfigIntForProduct "release_watch_delay" (Just "autopilot") 20
+
+-- ── Staged rollout (Phase 5) ──
+
+-- | Master switch for the promote-to-review → staged-rollout lifecycle. Default
+-- FALSE so release builds keep completing at tag-push until ops opt in (Phase 6).
+isStagedRolloutEnabled :: (MonadFlow m) => m Bool
+isStagedRolloutEnabled = getConfigBoolForProduct "mobile_staged_rollout_enabled" (Just "autopilot") False
+
+-- | How often the review-poll stage actually hits the store, in seconds. Default 1200 (20 min).
+getReviewPollIntervalSeconds :: (MonadFlow m) => m Int
+getReviewPollIntervalSeconds = getConfigIntForProduct "review_poll_interval_sec" (Just "autopilot") 1200
+
+-- | Soft timeout (days) after which a still-pending review is flagged "taking long". Default 7.
+getReviewPollTimeoutDays :: (MonadFlow m) => m Int
+getReviewPollTimeoutDays = getConfigIntForProduct "review_poll_timeout_days" (Just "autopilot") 7
 
 getReleaseStartDelay :: (MonadFlow m) => m Int
 getReleaseStartDelay = getConfigIntForProduct "release_start_delay" (Just "autopilot") 2

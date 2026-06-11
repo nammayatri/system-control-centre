@@ -21,6 +21,7 @@ module Shared.AI.Changelog (
     renderChunkForAi,
     renderChunkDeterministic,
     renderLongSummary,
+    renderShortSummary,
     shortSynopsisInput,
 ) where
 
@@ -169,6 +170,28 @@ renderLongSummary cs =
         map
             (\(label, items) -> "## " <> label <> "\n" <> renderChunkDeterministic items)
             (groupByCategory cs)
+
+{- | Deterministic one-line synopsis (counts by category) for the @summary_short@
+slot when AI is off or every model fails — the instant floor. GENERIC (no app name,
+no totals) so it can also serve as store release notes; caps to the top categories so
+it stays one line.
+-}
+renderShortSummary :: [CommitItem] -> Text
+renderShortSummary [] = ""
+renderShortSummary cs =
+    let plainLabel = T.toLower . T.unwords . drop 1 . T.words -- "✨ Features" → "features"
+        phrase label items =
+            let l = plainLabel label
+                word
+                    | "feature" `T.isInfixOf` l = "new features"
+                    | "fix" `T.isInfixOf` l = "fixes"
+                    | "performance" `T.isInfixOf` l = "performance improvements"
+                    | otherwise = l
+             in T.pack (show (length items)) <> " " <> word
+        parts = [phrase label items | (label, items) <- groupByCategory cs, not (null items)]
+     in case take 3 parts of
+            [] -> "This release contains maintenance and internal changes."
+            ps -> "This release includes " <> T.intercalate ", " ps <> "."
 
 {- | Compact category DIGEST for the short AI synopsis — per category, the count
 plus the first few subjects (not the raw commits). Small input ⇒ fast call.

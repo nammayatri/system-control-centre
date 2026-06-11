@@ -172,10 +172,11 @@ export function MobileChangelogAiSummary({
                       AI summary is generating — showing the auto changelog meanwhile. It updates here even if you switch tabs.
                     </p>
                   )}
-                  {/* Short 2-3 line synopsis (AI, only when ready) */}
+                  {/* Short 1-2 line synopsis (AI, only when ready) — sits above the full changelog */}
                   {d.summaryShort && (
-                    <p className="rounded bg-white/70 p-2 text-xs font-medium leading-relaxed text-zinc-800">
-                      {d.summaryShort}
+                    <p className="flex gap-1.5 rounded bg-white/70 p-2 text-xs font-medium leading-relaxed text-zinc-800">
+                      <Sparkles size={13} className="mt-0.5 shrink-0 text-violet-500" />
+                      <span>{d.summaryShort}</span>
                     </p>
                   )}
                   {/* Full changelog: AI prose when ready, deterministic while pending.

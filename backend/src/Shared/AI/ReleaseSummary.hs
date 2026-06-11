@@ -25,7 +25,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import Shared.AI.Changelog (CommitItem (..))
-import Shared.AI.Prompts (chunkCategorizeSystem, fence)
+import Shared.AI.Prompts (chunkCategorizeSystem, fence, synopsisSystem)
 import Shared.AI.Provider (complete)
 import Shared.AI.Queries (computePromptHash, insertAiAuditLog)
 import Shared.AI.Types
@@ -133,17 +133,69 @@ genChunk createdBy cfg batch = go (2 :: Int)
             _ | n > 1 -> go (n - 1)
             _ -> pure fallback
 
-{- | @(long changelog, short)@. Chunks the commits, categorizes each slice, then
-assembles the full every-commit changelog. 'Nothing' only when there are no commits.
-Short is unused (the changelog carries its own "Top changes"); kept @""@.
+{- | @(long changelog, short)@. Chunks the commits, categorizes each slice, assembles
+the full every-commit changelog, then derives a 1–2 line synopsis for @summary_short@
+(see 'genShort'). 'Nothing' only when there are no commits.
 -}
 generateReleaseSummaries :: (MonadFlow m) => Text -> AiConfig -> Text -> Text -> Int -> Text -> [CommitItem] -> m (Maybe (Text, Text))
 generateReleaseSummaries createdBy cfg appLabel version excluded excludedSide commits = do
     grouped <- concat <$> mapM (genChunk createdBy cfg) (chunksOf chunkSize commits)
-    pure $
-        if null grouped
-            then Nothing
-            else Just (renderChangelog appLabel version (length commits) excluded excludedSide grouped, "")
+    if null grouped
+        then pure Nothing
+        else do
+            short <- genShort createdBy cfg grouped
+            pure $ Just (renderChangelog appLabel version (length commits) excluded excludedSide grouped, short)
+
+{- | A 1–2 sentence synopsis for the @summary_short@ slot. One small, fast AI call
+('synopsisSystem') over only the NOTABLE changes — a bounded input, so it stays quick
+even on a 200-commit release — with a deterministic counts fallback so the field is
+never empty when there are commits. Thinking is already disabled in 'Shared.AI.Provider'.
+-}
+genShort :: (MonadFlow m) => Text -> AiConfig -> [(Cat, Text)] -> m Text
+genShort createdBy cfg grouped = do
+    e <- aiComplete createdBy cfg "release_notes_short" synopsisSystem userMsg
+    pure $ case e of
+        Right t -> let s = cleanShort t in if T.null s then fallback else s
+        Left _ -> fallback
+  where
+    notable = [s | (c, s) <- grouped, isNotable c]
+    -- Headline changes are enough for a synopsis; cap the slice so a huge release
+    -- still makes one quick call. Fall back to the raw lines if nothing is notable.
+    -- Drop the "— @author" tail so the notes stay generic (no handles).
+    stripAuthor = T.strip . fst . T.breakOn " — @"
+    picked = map stripAuthor (take 40 (if null notable then map snd grouped else notable))
+    userMsg = fence "context" (T.unlines (map ("- " <>) picked))
+    fallback = deterministicShort grouped
+
+-- | Tidy the model's synopsis: drop leading bullet/markdown noise, collapse to one
+-- prose blob, and cap the length so the UI summary box stays small.
+cleanShort :: Text -> Text
+cleanShort t =
+    let s = T.strip . T.dropWhile (\c -> c `elem` ['-', '*', '\8226', ' ']) . T.unwords . T.words $ t
+     in if T.length s <= 320 then s else T.take 319 s <> "\8230"
+
+-- | Deterministic synopsis from the category counts — the floor when the synopsis AI
+-- call fails. Generic (no app name, no totals), so it too can serve as store release
+-- notes; never empty on a generated changelog.
+deterministicShort :: [(Cat, Text)] -> Text
+deterministicShort grouped =
+    let tshow = T.pack . show
+        n cat = length [() | (c, _) <- grouped, c == cat]
+        parts =
+            [ tshow k <> " " <> lbl
+            | (cat, lbl) <-
+                [ (CFeature, "new features")
+                , (CFix, "fixes")
+                , (CPerf, "performance improvements")
+                , (CBreaking, "breaking changes")
+                , (CAttention, "changes needing review")
+                ]
+            , let k = n cat
+            , k > 0
+            ]
+     in case parts of
+            [] -> "This release contains maintenance and internal changes."
+            ps -> "This release includes " <> T.intercalate ", " ps <> "."
 
 -- | Assemble grouped @(category, summary)@ lines into the Slack-mrkdwn changelog.
 renderChangelog :: Text -> Text -> Int -> Int -> Text -> [(Cat, Text)] -> Text

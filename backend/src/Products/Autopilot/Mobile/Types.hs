@@ -9,12 +9,20 @@ module Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
+    ReviewStatus (..),
+    RolloutStatus (..),
+    RolloutStage (..),
+    reviewStatusToText,
+    reviewStatusFromText,
+    rolloutStatusToText,
+    rolloutStatusFromText,
     isDebugBuildType,
     validMBTransition,
     isMBTerminal,
 ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericParseJSON, genericToJSON, object, withObject, (.:), (.:?), (.=))
+import Data.Char (toLower)
 import Data.Int (Int32)
 import Data.Text (Text)
 import Data.Time (UTCTime)
@@ -99,6 +107,11 @@ data MobileBuildWFStatus
     | MBBuilding
     | MBSubmittedToStore
     | MBTagPushed
+    | MBSubmittingForReview
+    | MBInReview
+    | MBReviewApproved
+    | MBReviewRejected
+    | MBRollingOut
     | MBCompleted
     | MBAborting
     | MBAborted
@@ -121,6 +134,12 @@ data MobileBuildTargetState = MobileBuildTargetState
     -- worker uses this to give up after N attempts. 'Nothing' is treated
     -- as zero by callers — backward-compatible with rows persisted before
     -- this field existed.
+    , mbReviewSubmittedAt :: Maybe UTCTime
+    -- ^ When the release was submitted to store review (set on entry to
+    -- MBInReview by the promote endpoint). Anchors the 7-day soft timeout.
+    , mbReviewLastPolledAt :: Maybe UTCTime
+    -- ^ When the review-poll stage last hit the store. Throttle anchor
+    -- (@review_poll_interval_sec@). Backward-compatible Maybe (old rows → Nothing).
     }
     deriving (Eq, Show, Generic)
 
@@ -131,6 +150,7 @@ isMBTerminal :: MobileBuildWFStatus -> Bool
 isMBTerminal = \case
     MBCompleted -> True
     MBAborted -> True
+    MBReviewRejected -> True
     MBFailed{} -> True
     _ -> False
 
@@ -151,6 +171,81 @@ validMBTransition from to
     allowedNonFail MBRunIdResolved = [MBBuilding]
     allowedNonFail MBBuilding = [MBSubmittedToStore, MBAborting]
     allowedNonFail MBSubmittedToStore = [MBTagPushed]
-    allowedNonFail MBTagPushed = [MBCompleted]
+    -- After the build's tag is confirmed: promote to store review (release builds)
+    -- or finish directly (debug builds, which skip review entirely).
+    allowedNonFail MBTagPushed = [MBSubmittingForReview, MBCompleted]
+    allowedNonFail MBSubmittingForReview = [MBInReview]
+    allowedNonFail MBInReview = [MBReviewApproved, MBReviewRejected]
+    allowedNonFail MBReviewApproved = [MBRollingOut, MBCompleted]
+    allowedNonFail MBRollingOut = [MBCompleted]
     allowedNonFail MBAborting = [MBAborted]
     allowedNonFail _ = []
+
+-- ─── Store review + staged rollout (migration 0027) ─────────────────────────
+
+{- | Store-review state of a promoted release. Persisted as text in
+@release_tracker.review_status@. iOS uses in_review / approved / rejected (from
+the store's @appStoreState@); Android — whose review is opaque — uses
+submitted / live.
+-}
+data ReviewStatus = RSSubmitted | RSInReview | RSApproved | RSRejected | RSLive
+    deriving (Eq, Show, Generic)
+
+reviewStatusToText :: ReviewStatus -> Text
+reviewStatusToText = \case
+    RSSubmitted -> "submitted"
+    RSInReview -> "in_review"
+    RSApproved -> "approved"
+    RSRejected -> "rejected"
+    RSLive -> "live"
+
+reviewStatusFromText :: Text -> Maybe ReviewStatus
+reviewStatusFromText = \case
+    "submitted" -> Just RSSubmitted
+    "in_review" -> Just RSInReview
+    "approved" -> Just RSApproved
+    "rejected" -> Just RSRejected
+    "live" -> Just RSLive
+    _ -> Nothing
+
+-- | Staged-rollout state. Persisted as text in @release_tracker.rollout_status@.
+data RolloutStatus = ROSRollingOut | ROSHalted | ROSCompleted
+    deriving (Eq, Show, Generic)
+
+rolloutStatusToText :: RolloutStatus -> Text
+rolloutStatusToText = \case
+    ROSRollingOut -> "rolling_out"
+    ROSHalted -> "halted"
+    ROSCompleted -> "completed"
+
+rolloutStatusFromText :: Text -> Maybe RolloutStatus
+rolloutStatusFromText = \case
+    "rolling_out" -> Just ROSRollingOut
+    "halted" -> Just ROSHalted
+    "completed" -> Just ROSCompleted
+    _ -> Nothing
+
+{- | One step in a release's rollout timeline; the list is persisted as JSON in
+@release_tracker.store_rollout_history@. JSON keys are camelCase (@percent@,
+@startedAt@, …) to match the frontend contract.
+-}
+data RolloutStage = RolloutStage
+    { rsPercent :: Double
+    , rsStartedAt :: UTCTime
+    , rsEndedAt :: Maybe UTCTime
+    , rsNotes :: Maybe Text
+    , rsActor :: Text
+    }
+    deriving (Eq, Show, Generic)
+
+rolloutStageOptions :: Options
+rolloutStageOptions = defaultOptions{fieldLabelModifier = lowerFirst . drop 2}
+  where
+    lowerFirst (c : cs) = toLower c : cs
+    lowerFirst [] = []
+
+instance ToJSON RolloutStage where
+    toJSON = genericToJSON rolloutStageOptions
+
+instance FromJSON RolloutStage where
+    parseJSON = genericParseJSON rolloutStageOptions

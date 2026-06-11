@@ -659,6 +659,15 @@ toRow createdAt updatedAt ReleaseTracker {..} mts =
       rtRevertsReleaseId = revertsReleaseId,
       rtAbValidationStatus = abValidationStatus,
       rtAbValidation = fmap encodeJsonText abValidation,
+      rtReviewStatus = Nothing,
+      rtReviewSubmittedAt = Nothing,
+      rtReviewDecidedAt = Nothing,
+      rtReviewRejectReason = Nothing,
+      rtRolloutStatus = Nothing,
+      rtRolloutPercent = Nothing,
+      rtStoreRolloutHistory = Nothing,
+      rtAscVersionId = Nothing,
+      rtAscPhasedId = Nothing,
       rtCreatedAt = createdAt,
       rtUpdatedAt = updatedAt
     }
