@@ -185,8 +185,12 @@ like Play Store has."*
 - Make the tiny value a **config flag** `android_review_rollout_fraction` (default
   `0.000000001`) so ops can tune it without a redeploy.
 - **Review is still opaque on Android** — there is no API field that says "approved" or
-  "rejected" the way iOS has `appStoreState`. So approval/rejection are confirmed by the
-  operator (Console/email), not auto-detected. See §12a for rejection handling.
+  "rejected" the way iOS has `appStoreState`. So the approve/reject **decision** is confirmed
+  by the operator (Console/email), not auto-detected. See §12a for rejection handling.
+  *(Update 2026-06-16: the decision stays operator-marked, but SCC now **detects out-of-band
+  submissions and rollouts** — a Console-started review surfaces as a "Pending review" row, and
+  a Console-set rollout % is adopted into SCC's lifecycle. See "Post-roadmap extensions (built
+  2026-06-16)".)*
 
 > ⚠️ **Verify in dev:** the docs say the *Play Console UI* range is 1%–100%; sub-1%
 > fractions like 1e-9 work via the **raw Android Publisher API** (which is what SCC calls),
@@ -280,7 +284,7 @@ it at submit time.
 | POST | `/releases/:id/rollout/resume` | `AP_RELEASE_ROLLOUT` | Resume a paused rollout |
 | POST | `/releases/:id/rollout/release-all` | `AP_RELEASE_ROLLOUT` | Jump to 100% (both platforms) |
 | POST | `/releases/:id/review/mark-rejected` | `AP_RELEASE_PROMOTE` | **Android** — operator records a store rejection + reason (review is opaque, can't auto-detect) |
-| POST | `/releases/:id/review/mark-approved` | `AP_RELEASE_PROMOTE` | **Android** — operator confirms it went live (optional; first rollout action implies this too) |
+| POST | `/releases/:id/review/mark-approved` | `AP_RELEASE_PROMOTE` | **Android** — operator confirms Google approved it. *(2026-06-16: now **required** before a rollout — the implicit "first rollout implies approval" shortcut was removed.)* |
 | ~~PUT~~ | ~~`/apps/:id/store-config`~~ | `AP_MOBILE_APP_MANAGE` | **Deferred to Phase 2** (§6a) — set per-app reviewer info / demo account |
 
 Two **new permissions** to add to the `AutopilotPermission` ADT:
@@ -469,14 +473,18 @@ rejection is low-stakes: fix and resubmit.
 | Situation | SCC behavior |
 |---|---|
 | After promote | `review_status = 'submitted'`, status shown as **"Submitted — review is opaque on Android."** Never fake an "Approved" badge. |
-| Approval (opaque) | Operator confirms live via Console/email → clicks **"Mark Approved"** (or just uses the roll-out button; the first rollout action implies approval). |
+| Approval (opaque) | Operator confirms live via Console/email → clicks **"Mark Approved"**. *(2026-06-16: a rollout now **requires** an explicit Mark Approved first — the old "first rollout implies approval" shortcut was removed, since the API can't confirm Google actually approved; and the approval now persists across reload instead of being re-inferred back to "in review".)* |
 | Rejection | Operator clicks **"Mark Review Rejected"** + pastes the reason → `MBReviewRejected` (terminal → `ABORTED`), reason saved, audit-logged. |
 | Taking too long | After `review_poll_timeout_days` (default 7) still un-rolled-out → surface **"Review pending too long — check Play Console."** A nudge, not a failure. |
 | Resubmit | Fix (new build/commit) → new release → promote again. Discard/clear any stuck pending change first, or the new edit can be blocked. |
 
-**Best-effort hint (optional):** read the production track and notice when our versionCode
-becomes the serving release — treat as a *hint* only, since the API can't cleanly tell
-"in review" from "approved & live."
+**Best-effort hint — BUILT (2026-06-16):** SCC reads the production track and surfaces an
+out-of-band submission as a "Pending review" `EXTERNAL_REVIEW` row (`inProgress` at the
+near-zero review fraction, versionCode above the live `completed` one), and **adopts** a
+Console-started rollout (fraction at/above the 1% rollout floor) into its lifecycle
+(`pendingPublishRelease` / `detectConsoleRollout`). Still a best-effort *hint* — the API
+can't cleanly tell "in review" from "approved & held", so the approve/reject decision stays
+operator-marked. See "Post-roadmap extensions (built 2026-06-16)".
 
 **iOS contrast:** iOS gives a clean `REJECTED` / `METADATA_REJECTED` via `appStoreState`, so
 iOS rejection is **auto-detected**; only Android needs the manual mark-rejected path above.
@@ -489,18 +497,64 @@ iOS rejection is **auto-detected**; only Android needs the manual mark-rejected 
 > Don't trust "it compiled" — verify against the running server (ghcid does NOT hot-reload
 > library code). Don't add new dependencies. No `Co-Authored-By` in commits.
 
-- [ ] **Phase 1 — Schema + types** (`0026` only — Beam columns, new statuses + types; `0027` config table deferred, see §6a)
-- [ ] **Phase 2 — Play client** (promote internal→production, set/halt/resume/complete %, read state) + unit tests on % bounds and track parsing
-- [ ] **Phase 3 — Apple client** (fill metadata, submit via `reviewSubmissions`, poll `appStoreState`, phased-release control, manual release, `processingState` gate)
+- [x] **Phase 1 — Schema + types** (`0027` migration — Beam columns, new statuses + types; per-app config table deferred, see §6a)
+- [x] **Phase 2 — Play client** (promote internal→production, set/halt/resume/complete %, read state) + unit tests on % bounds and track parsing
+- [x] **Phase 3 — Apple client** (fill metadata, submit via `reviewSubmissions`, poll `appStoreState`, phased-release control, manual release, `processingState` gate)
 - [ ] ~~**Phase 4 — Per-app store config**~~ — **DEFERRED** to a later Phase 2 (§6a); not part of the notes-only v1. v1 goes straight from the Apple client (Phase 3) to workflow stages (Phase 5).
-- [ ] **Phase 5 — Workflow stages** (operator-gated submit; bounded review poll)
-- [ ] **Phase 6 — Endpoints** (promote, release, rollout set/halt/resume/release-all, detail) + new permissions
-- [ ] **Phase 7 — Background reconciler** (extend `StoreSync` for active reviews + rollouts)
-- [ ] **Phase 8 — Frontend** (promote form, review panel, rollout controls, list badges)
-- [ ] **Phase 9 — End-to-end test + docs** (Android + consumer iOS happy paths, negative paths; update `DATABASE.md` and the future-scope doc)
-- [ ] **Phase 10 — Provider-iOS App Store path** (fast-follow — see §14)
+- [x] **Phase 5 — Workflow stages** (operator-gated submit; bounded review poll)
+- [x] **Phase 6 — Endpoints** (promote-form, promote, rollout detail, release, rollout set/halt/resume/release-all, review mark-approved/rejected) + `AP_RELEASE_PROMOTE` / `AP_RELEASE_ROLLOUT` permissions. All gated on `mobile_staged_rollout_enabled`; `Mobile/Handlers/Rollout.hs`. `GET /rollout` returns cached columns (live store reconcile is Phase 7); promote-form pre-fills the stored changelog (FE swaps in `summary_short`).
+- [x] **Phase 7 — Background reconciler** (extend `StoreSync` for active rollouts) — `reconcileActiveRollouts` runs in the store-sync loop (gated on `mobile_staged_rollout_enabled`): mirrors the live Play `userFraction` / Apple phased-ramp % into the cached columns, syncs external halt/resume, and completes a release at 100% (→ `MBCompleted`, runner finalizes). Reviews are not reconciled (iOS = Phase-5 poll, Android = operator marks). Phase-6 refinement: non-phased iOS `/release` now completes immediately instead of lingering in `rolling_out`.
+- [x] **Phase 8 — Frontend** — `MobileRolloutPanel.tsx` on the release detail page (mounted beside `AiReleasePanel`, release/non-debug only): full lifecycle UI — Promote-to-Review (inline notes form + iOS phased opt-in), Store Review panel (iOS auto / Android mark-approved-rejected), iOS Release button, Android % set + halt/resume + release-all, iOS phased pause/resume/release-all. Self-hides when staged rollout is off (`GET /rollout` 400s). Buttons gated on `RELEASE_PROMOTE` / `RELEASE_ROLLOUT`. **Done (2026-06-16):** the releases-**list** status badge — `mb_wf_status` is injected into the list serialization (`fromRow` → `release_context`), and `ReleaseStatusBadge` / `mobileDisplayStatus` derive the lifecycle stage ("Ready to promote" / "In review" / "Approved · held" / "Rolling out · N%" / "Released · 100%") for INPROGRESS mobile rows. The iOS Release button also now states **phased (7-day) vs release-to-all**.
+- [x] **Phase 9 — Tests + docs** — extracted the reconcile decision into pure classifiers (`androidReconcileAction` / `iosPhasedReconcileAction`) + test `[35]`; extended `[18]` to assert the full promote→review→rollout transition path + terminal `MBReviewRejected`. (True live-store E2E isn't CI-runnable; the store calls stay covered by the typed clients + these pure-logic tests.) Docs: `DATABASE.md` → "Staged-rollout columns"; `MOBILE_RELEASE_FUTURE_SCOPE.md` → moved staged rollout to **Shipped** with the open fast-follows listed.
+- [x] **Phase 10 — Provider-iOS App Store path** — chose §14 option 1 (no fastlane change): the iOS submit path is now **find-or-create** (`ensureAppStoreVersion` in `Versioning/Apple.hs`). Consumer iOS already has the version (fastlane `upload_to_app_store`) → plain lookup; provider iOS (TestFlight-only) → SCC creates the `appStoreVersions` row, attaches the latest TestFlight build (`getLatestBuildId` → `createAppStoreVersion` → `attachBuildToVersion`), then submits. Transparent — no promote-handler or UI change; provider iOS works through the same `/promote` endpoint.
 
 Phases 2 and 3 are independent and can be done in parallel.
+
+**Post-roadmap extensions (built 2026-06-12):**
+- **Store-track visibility + Option A snapshot promote** — the promote flow now also accepts a
+  store-sync **internal/TestFlight snapshot** (not just SCC releases held at tag-push); promoting
+  one flips the row `COMPLETED → INPROGRESS` so the runner/reconciler adopt it. Plus a
+  track-aware iOS version bump and track badges across the UI. Full record:
+  `2026-05-18-mobile-releases-post-mvp.md` → "Store-Track Visibility + Snapshot Promote".
+- The four staged-rollout configs were added to the **Mobile** config tab
+  (`server-config-filter.ts → MOBILE_SERVER_CONFIG_NAMES`).
+
+**Post-roadmap extensions (built 2026-06-16):**
+- **Out-of-band review/release detection (both platforms)** — store sync now surfaces and
+  adopts store activity done *outside* SCC, so SCC's view stops lagging the store:
+  - *iOS (authoritative):* `getInFlightReview` reads `appStoreState` and records a version
+    submitted from App Store Connect as an `EXTERNAL_REVIEW` row (in review → approved →
+    rejected, tracked). `READY_FOR_SALE` is split out as a distinct `AscLive` (was conflated
+    with `PENDING_DEVELOPER_RELEASE` — the root of "released shows as approved"), and
+    `detectIosRelease` adopts an ASC-released version into the rollout lifecycle (phased →
+    `rolling_out @ ramp%`, else `completed`), backfilling `asc_phased_id` so the Phase-7
+    reconciler tracks the ramp.
+  - *Android (inferred):* `pendingPublishRelease` infers a pending submission from the
+    production track (an `inProgress` release at the near-zero review fraction with a
+    versionCode above the live `completed` one) and surfaces it as a "Pending review"
+    `EXTERNAL_REVIEW` row; `detectConsoleRollout` adopts a Console-started rollout (fraction ≥
+    the 1% floor) into SCC's lifecycle. The approve/reject *decision* stays operator-marked
+    (the API can't report it). `Queries/Tracker.hs → findMobileAwaitingRollout`; `StoreSync.hs
+    → detectConsoleRollouts` / `detectIosReleases` / `adoptExternalRollout`; migration `0028`
+    (`EXTERNAL_REVIEW` dedup index).
+- **No duplicate rows** — `sccActiveReleaseExistsForVersion` now counts a *promoted* store-sync
+  row (`INPROGRESS` + `mode=STORE_SYNC`) as SCC-owned, so an SCC submission no longer spawns a
+  duplicate `EXTERNAL_REVIEW` row; and the releases list hides a redundant internal/TestFlight
+  snapshot when an `EXTERNAL_REVIEW` row already represents the same build (`keepSnapshot`).
+- **Android mark-approved hardening** — the inferred-review reconcile no longer downgrades an
+  operator's `approved`/`rejected` back to `in_review` (the approval persists across reload),
+  and `ensureAndroidRollable` requires an explicit Mark Approved before a rollout (the implicit
+  "first rollout implies approval" shortcut was removed).
+- **Phased-vs-all clarity** — the iOS Release button states whether it does a **7-day phased
+  release** or **release to all users**, driven by `rdPhasedId`; `rolloutDetailH` live-reads the
+  phased id when `asc_phased_id` is null (e.g. an externally-configured phased release) so the
+  label matches App Store Connect and what `/release` will actually do.
+- **UI** — the version shows the **build number** (`3.3.17 (460)`) everywhere it renders
+  (`versionWithBuild`); the releases list's **mobile status filter** uses lifecycle buckets
+  (Building / In review / Approved · held / Rolling out / Rejected / Completed / Aborted /
+  Reverted) instead of backend raw statuses, and "Groups" reads "Apps".
+- Tests `[40]`–`[44]` cover the pure decisions (external-review reconcile, pending-publish
+  pick, list dedup, console-rollout adoption, iOS-release adoption).
 
 ---
 
@@ -549,3 +603,125 @@ Phases 2 and 3 are independent and can be done in parallel.
 - Apple — App Store Version Release Requests (manual release): <https://developer.apple.com/documentation/appstoreconnectapi/app-store-version-release-requests>
 - Apple — POST appStoreVersionReleaseRequests: <https://developer.apple.com/documentation/appstoreconnectapi/post-v1-appstoreversionreleaserequests>
 - Apple — Select a version release option (manual + phased behaviour): <https://developer.apple.com/help/app-store-connect/manage-your-apps-availability/select-an-app-store-version-release-option/>
+
+---
+
+## 16. iOS Store-Sync Ref Capture (changelog baseline)
+
+> Consolidated here from the former standalone `2026-06-12-ios-store-sync-ref-capture.md`.
+> **Status:** R1+R2 built & green; R3+R4 pending. **Fixes:** empty "Commits since last release"
+> on the first SCC-built iOS release.
+
+### 16.1 The problem
+
+On the create-mobile-release page, the **"Commits since last release"** panel for an iOS app
+shows *"No commits found (no previous release to compare against)."* even though commits
+clearly exist. This is **not** "no changes" (that would read *"Branch is identical…"*, status
+`identical`) — it's **no baseline ref to diff against**.
+
+**Root cause** (`Handlers/Release.hs:514-521`): the changelog diffs the source branch against
+the previous release's git ref —
+```
+baseRef = previous release's  tag_pushed   (if present)
+       else previous release's commit_sha   (if present)
+       else ""   → emptyPreview  (status "unknown")
+```
+The previous iOS release is typically a **store-synced row**, and iOS store-sync records
+**neither a tag nor a commit**:
+
+`StoreSync.insertSyntheticRelease` derives the tag from the version *code*:
+```haskell
+derivedTag = case mCode of
+    Just code | surface=="driver" -> Just (acName <> "-v" <> version <> "-" <> show code)
+              | otherwise          -> Just (segment <> "/prod/" <> platform <> "/v" <> version <> "+" <> show code)
+    Nothing   -> Nothing            -- iOS passed Nothing → no tag
+-- and rtCommitSha = Nothing on every store-sync row
+```
+`syncIos` historically called `insertSyntheticRelease ac ver Nothing` — **no code → no tag**.
+Android works because `syncAndroid` passes `Just (tiCode production)`, so it derives
+`{app}/prod/android/v{version}+{code}` and the diff has a baseline. The iOS tag *scheme already
+exists* in `derivedTag`; it only yielded `Nothing` because the build number (the iOS equivalent
+of `versionCode` — CFBundleVersion) was never fetched.
+
+### 16.2 Goal
+
+iOS store-sync rows should carry a **comparable git ref** (a tag and, ideally, its resolved
+commit), so the changelog diff works on the **first SCC-built iOS release** for an app whose
+prior history is store-synced — exactly like Android. Best-effort and **never a regression**:
+if no ref can be found, behave as before (empty first preview).
+
+### 16.3 Approach
+
+**Core (mirror Android):** fetch the iOS **build number** from App Store Connect and pass it
+as `mCode` so the *existing* `derivedTag` template produces
+`{segment}/prod/ios/v{version}+{buildNumber}` (consumer) / `{acName}-v{version}-{buildNumber}`
+(provider). One value unlocks the whole thing.
+
+**Hardening (durability + resilience):**
+- **Verify + resolve commit** — after deriving the tag, best-effort look it up via the existing
+  `GET /git/matching-refs/tags/{prefix}` + `getCommitInfo`; if it resolves, also store
+  `commit_sha` (immutable — survives tag deletion/moves; also helps revert).
+- **Prefix fallback** — if the *exact* derived tag isn't found (build-number mismatch / different
+  suffix), search `matching-refs/tags/{segment}/prod/ios/v{version}` and take the best
+  (highest-suffix) match. Recovers the baseline without knowing the exact code.
+
+**Fallback of last resort:** no tag and no commit → store `NULL` (prior behavior).
+
+### 16.4 ⚠ The one thing to verify first
+
+**Confirm the iOS CI's actual tag scheme in `ny-react-native`.** This fix assumes the iOS lane
+pushes `{segment}/prod/ios/v{version}+{buildNumber}` (consumer) / `{acName}-v{version}-{buildNumber}`
+(provider) — the same convention `execConfirmTag` uses. If the iOS lane tags differently:
+adjust the template, rely on the **prefix fallback** (§16.3, matches by `v{version}` regardless of
+suffix), or make the template a config (`mobile_ios_store_sync_tag_template`).
+
+### 16.5 Backend changes
+
+| Module | New/extend | Responsibility |
+|---|---|---|
+| `Versioning/Apple.hs` | done (R1) | `BuildsResp` parses the **build number** — `data[0].attributes.version` from `/v1/builds` — alongside the marketing version; `fetchAscBuildInfo` returns `AscBuildInfo {abiVersion, abiBuildNumber}`. |
+| `Mobile/StoreSync.hs` | done (R2) | `syncIos` parses the build number to `Int32` and passes it as `mCode`; the existing `derivedTag` fires. (R3) resolve + store the tag's commit via the GitHub client. |
+| `Mobile/Github.hs` | reuse | existing `matching-refs/tags/{prefix}` + `getCommitInfo` for verify/resolve/fallback. |
+
+**Data captured on the iOS synthetic row** (no schema change):
+- `target_state.mbcTagPushed` ← derived iOS tag (the changelog's preferred `baseRef`).
+- `target_state.mbcVersionCode` ← the build number (CFBundleVersion; informative — iOS revert
+  orders by semver, so this doesn't disturb ordering).
+- `release_tracker.commit_sha` ← resolved commit (R3 hardening; durable fallback `baseRef`).
+
+The ASC build-number parser is **pure** → unit-tested (`[36]` in `test/Main.hs`).
+
+### 16.6 Backfill (existing rows)
+
+Existing iOS store-sync rows have `tag_pushed = NULL` / `commit_sha = NULL`. A one-off backfill
+resolves refs for them so apps benefit immediately: for each iOS `MobileBuild` row with
+`mode='STORE_SYNC'` and null tag, derive the prefix from `(app, version)`, search GitHub
+`matching-refs`, and `UPDATE` the row's `target_state.mbcTagPushed` (+ `commit_sha`). Ship as an
+idempotent script under `backend/scripts/` (pattern: `backfill-revert-data.sh`), dry-run first.
+
+### 16.7 Edge cases
+
+1. **Build number unavailable** → `Nothing` → prior behavior (no regression).
+2. **Tag doesn't exist in GitHub** → `compareRefs` already fails gracefully → `emptyPreview`; the prefix fallback (§16.3) tries to recover.
+3. **Provider iOS** (`surface='driver'`) → the existing `driver` template branch handles it once `mCode` is supplied.
+4. **Non-integer build number** → parse defensively; unparseable → prefix search (version-only), else `NULL`.
+5. **Multiple builds share a marketing version** → prefix search picks the highest suffix (the live build).
+6. **Tag later deleted/moved** → the resolved `commit_sha` survives as the durable `baseRef`.
+7. **Don't break Android** — change isolated to `syncIos`; `syncAndroid` untouched.
+
+### 16.8 Build order (roadmap)
+
+- [x] **R1 — ASC build number** — `BuildsResp` parses marketing version + build number; `fetchAscBuildInfo` → `AscBuildInfo`. Test `[36]`. `fetchAscVersions` kept as a thin `abiVersion` wrapper.
+- [x] **R2 — Derive the iOS tag** — `syncIos` passes the parsed build number as `mCode`; `derivedTag` fires (`{segment}/prod/ios/v{version}+{code}`); unparseable → `Nothing` (graceful). ⏳ Verify against a real app: does the changelog populate on the next iOS sync? (Depends on the iOS CI tag scheme — §16.4.)
+- [ ] **R3 — Verify + resolve commit** — best-effort `matching-refs`/`getCommitInfo`; store `commit_sha`; prefix fallback.
+- [ ] **R4 — Backfill** — idempotent script over existing NULL iOS store-sync rows.
+
+R1+R2 are the minimal fix (changelog works going forward). R3 adds durability; R4 fixes the back-catalog.
+
+### 16.9 Decisions & risks
+
+- **Reuse the existing tag scheme** — feed `derivedTag` the build number; minimal, symmetric with Android.
+- **Best-effort, never a regression** — every failure path lands on prior behavior (`NULL` ref → empty first preview).
+- **Risk:** the iOS CI tag scheme (§16.4) — verify in `ny-react-native`; the prefix fallback de-risks it.
+- **Store commit, not just tag** — durable baseline + helps the revert flow.
+- **iOS `version_code` now populated** for store-sync rows (the build number) — harmless: iOS ordering uses semver, not the code.

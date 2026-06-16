@@ -35,6 +35,8 @@ data LatestBuildResp = LatestBuildResp
     , tagPushed :: Maybe Text
     , commitSha :: Maybe Text
     , completedAt :: UTCTime
+    , track :: Maybe Text
+    -- ^ store track ("production" | "internal" | "testflight") for store-sync builds
     }
     deriving (Generic, Show)
 
@@ -56,6 +58,11 @@ data AppCatalogEntryResp = AppCatalogEntryResp
     , createdAt :: UTCTime
     , latestReleaseBuild :: Maybe LatestBuildResp
     , latestDebugBuild :: Maybe LatestBuildResp
+    , latestProdBuild :: Maybe LatestBuildResp
+    -- ^ latest production-track build (from the store-sync @metadata.tracks@);
+    -- the default changelog base.
+    , latestInternalBuild :: Maybe LatestBuildResp
+    -- ^ latest internal-track build (Android internal testing / iOS TestFlight).
     }
     deriving (Generic, Show)
 
@@ -102,26 +109,50 @@ toBuildResp b =
         , tagPushed = lbrTagPushed b
         , commitSha = lbrCommitSha b
         , completedAt = lbrCompletedAt b
+        , track = lbrStoreTrack b
         }
 
--- | Build-map-aware projection from DB row to API response.
-toResp :: Map.Map (Text, Text, Text, Text) LatestBuildResp -> AppCatalog -> AppCatalogEntryResp
-toResp buildMap r =
-    AppCatalogEntryResp
-        { id = acId r
-        , name = acName r
-        , surface = acSurface r
-        , platform = acPlatform r
-        , githubRepo = acGithubRepo r
-        , workflowPath = acWorkflowPath r
-        , packageName = acPackageName r
-        , displayLabel = acDisplayLabel r
-        , firebaseProjectId = acFirebaseProjectId r
-        , enabled = acEnabled r
-        , createdAt = acCreatedAt r
-        , latestReleaseBuild = Map.lookup (acName r, acSurface r, acPlatform r, "release") buildMap
-        , latestDebugBuild = Map.lookup (acName r, acSurface r, acPlatform r, "debug") buildMap
+-- | Project one @metadata.tracks@ snapshot into a build response. @completedAt@ is
+-- the leading store-sync row's timestamp (the snapshot has no own timestamp).
+toTrackResp :: UTCTime -> Text -> TrackSnapshot -> LatestBuildResp
+toTrackResp completed trk ts =
+    LatestBuildResp
+        { version = tsVersion ts
+        , versionCode = tsCode ts
+        , tagPushed = tsTag ts
+        , commitSha = Nothing
+        , completedAt = completed
+        , track = Just trk
         }
+
+-- | Build-map-aware projection from DB row to API response. The per-track
+-- (production / internal) builds are derived from the leading "release" row's
+-- @metadata.tracks@ snapshots.
+toResp :: Map.Map (Text, Text, Text, Text) LatestBuildRow -> AppCatalog -> AppCatalogEntryResp
+toResp buildMap r =
+    let releaseRow = Map.lookup (acName r, acSurface r, acPlatform r, "release") buildMap
+        debugRow = Map.lookup (acName r, acSurface r, acPlatform r, "debug") buildMap
+        trackBuild trk = do
+            rel <- releaseRow
+            ts <- Map.lookup trk (lbrTracks rel)
+            pure (toTrackResp (lbrCompletedAt rel) trk ts)
+     in AppCatalogEntryResp
+            { id = acId r
+            , name = acName r
+            , surface = acSurface r
+            , platform = acPlatform r
+            , githubRepo = acGithubRepo r
+            , workflowPath = acWorkflowPath r
+            , packageName = acPackageName r
+            , displayLabel = acDisplayLabel r
+            , firebaseProjectId = acFirebaseProjectId r
+            , enabled = acEnabled r
+            , createdAt = acCreatedAt r
+            , latestReleaseBuild = toBuildResp <$> releaseRow
+            , latestDebugBuild = toBuildResp <$> debugRow
+            , latestProdBuild = trackBuild "production"
+            , latestInternalBuild = trackBuild "internal"
+            }
 
 -- | Simple projection without build info (for create/patch responses).
 toRespNoBuild :: AppCatalog -> AppCatalogEntryResp
@@ -140,6 +171,8 @@ toRespNoBuild r =
         , createdAt = acCreatedAt r
         , latestReleaseBuild = Nothing
         , latestDebugBuild = Nothing
+        , latestProdBuild = Nothing
+        , latestInternalBuild = Nothing
         }
 
 listAppsH :: AuthedPerson -> Flow [AppCatalogEntryResp]
@@ -148,7 +181,7 @@ listAppsH _ap = do
     builds <- fetchLatestBuildsPerApp
     let buildMap =
             Map.fromList
-                [ ((lbrAppGroup b, lbrSurface b, lbrPlatform b, lbrBuildType b), toBuildResp b)
+                [ ((lbrAppGroup b, lbrSurface b, lbrPlatform b, lbrBuildType b), b)
                 | b <- builds
                 ]
     pure (map (toResp buildMap) apps)

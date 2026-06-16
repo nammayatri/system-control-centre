@@ -65,6 +65,10 @@ export interface ReleaseContext {
     build_type?: string;
     ota_namespace?: string | null;
     change_log?: string;
+    // Mobile build workflow status (e.g. MBTagPushed / MBInReview / MBRollingOut).
+    // Injected by the backend serializer from the MobileBuildState so the list +
+    // detail can derive the promote→rollout stage without a /rollout call.
+    mb_wf_status?: string;
 }
 
 // ── All statuses (UPPERCASE — canonical) ─────
@@ -410,6 +414,7 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         build_type:       (r.releaseContext as any)?.build_type,
         ota_namespace:    (r.releaseContext as any)?.ota_namespace,
         change_log:       (r.releaseContext as any)?.change_log,
+        mb_wf_status:     (r.releaseContext as any)?.mb_wf_status,
     },
 
     rollout_strategy: (r.rolloutStrategy || []).map(s => ({
@@ -1137,6 +1142,49 @@ export async function releaseAiAsk(id: string, question: string): Promise<AiResp
     return data;
 }
 
+// ── Promote-to-review + staged rollout (Phase 6/8) ──────────────────
+// Backend encodes Haskell record field names verbatim (pf*/rd* responses;
+// pr*/rs*/mr* requests). Every endpoint is gated on
+// `mobile_staged_rollout_enabled` — when the flag is off they 400, and the
+// rollout panel stays hidden (no behavior change until ops opt in).
+
+export interface PromoteForm {
+    pfReleaseId: string;
+    pfPlatform: string; // "android" | "ios"
+    pfAppLabel: string;
+    pfVersion: string;
+    pfReleaseNotes: string; // editable default: prod "What's New" if store-synced, else the changelog
+    pfReviewStatus: string | null;
+    pfLocked: boolean; // true once submitted (iOS notes can't change mid-review)
+    pfPhasedSupported: boolean; // iOS only
+    pfIsStoreSync: boolean; // store-synced → notes are the live prod notes; don't swap in AI
+}
+
+export interface RolloutDetail {
+    rdReleaseId: string;
+    rdPlatform: string; // "android" | "ios"
+    rdMbStatus: string; // MBTagPushed | MBInReview | MBReviewApproved | MBRollingOut | MBCompleted | MBReviewRejected | …
+    rdReviewStatus: string | null; // in_review | submitted | approved | rejected
+    rdReviewRejectReason: string | null;
+    rdReviewSubmittedAt: string | null;
+    rdReviewDecidedAt: string | null;
+    rdRolloutStatus: string | null; // rolling_out | halted | completed
+    rdRolloutPercent: number | null;
+    rdPhasedId: string | null; // iOS phased-release id (present ⇒ phased ramp on)
+    rdStoreTrack: string | null; // production | internal | testflight (store-sync rows)
+}
+
+export interface PromoteReq {
+    prReleaseNotes: string;
+    prEnablePhasedRelease?: boolean; // iOS only
+    prInitialRolloutPercent?: number; // Android only; omit → config fraction
+}
+
+export interface PromoteResp {
+    prResult: string;
+    prWarning?: string | null; // non-fatal warning, e.g. phased release couldn't be enabled
+}
+
 export const mobileApi = {
     listApps: async (): Promise<AppCatalogEntry[]> => {
         const { data } = await apiClient.get('/mobile/apps');
@@ -1185,10 +1233,11 @@ export const mobileApi = {
         surface: string,
         platform: string,
         branch: string,
+        base?: string,
     ): Promise<ChangelogPreviewResp> => {
-        const { data } = await apiClient.get('/mobile/changelog-preview', {
-            params: { app, surface, platform, branch },
-        });
+        const params: Record<string, string> = { app, surface, platform, branch };
+        if (base) params.base = base;
+        const { data } = await apiClient.get('/mobile/changelog-preview', { params });
         return data;
     },
 
@@ -1199,13 +1248,62 @@ export const mobileApi = {
         surface: string,
         platform: string,
         branch: string,
+        base = '',
         versionName = '',
         versionCode = '',
     ): Promise<ChangelogSummaryResp> => {
         const params: Record<string, string> = { app, surface, platform, branch };
+        if (base) params.base = base;
         if (versionName) params.versionName = versionName;
         if (versionCode) params.versionCode = versionCode;
         const { data } = await apiClient.get('/mobile/changelog-ai-summary', { params });
         return data;
+    },
+
+    // ── Promote-to-review + staged rollout ──
+    getPromoteForm: async (id: string): Promise<PromoteForm> => {
+        const { data } = await apiClient.get(`/releases/${encodeURIComponent(id)}/promote-form`);
+        return data;
+    },
+
+    getRolloutDetail: async (id: string): Promise<RolloutDetail> => {
+        const { data } = await apiClient.get(`/releases/${encodeURIComponent(id)}/rollout`);
+        return data;
+    },
+
+    promote: async (id: string, body: PromoteReq): Promise<PromoteResp> => {
+        const { data } = await apiClient.post(`/releases/${encodeURIComponent(id)}/promote`, body);
+        return data;
+    },
+
+    // iOS only — release an approved (held) version.
+    releaseApproved: async (id: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/release`, {});
+    },
+
+    // Android only — set staged rollout % in (0,100]; 100 finishes the release.
+    rolloutSet: async (id: string, percent: number): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/rollout/set`, { rsPercent: percent });
+    },
+
+    rolloutHalt: async (id: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/rollout/halt`, {});
+    },
+
+    rolloutResume: async (id: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/rollout/resume`, {});
+    },
+
+    rolloutReleaseAll: async (id: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/rollout/release-all`, {});
+    },
+
+    // Android only — record the opaque Play review outcome.
+    markApproved: async (id: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/review/mark-approved`, {});
+    },
+
+    markRejected: async (id: string, reason: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/review/mark-rejected`, { mrReason: reason });
     },
 };

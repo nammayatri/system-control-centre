@@ -30,9 +30,28 @@ import Products.Autopilot.Mobile.Handlers.Revert (
     mobileRevertDraftH,
     verifyCommitH,
  )
+import Products.Autopilot.Mobile.Handlers.Rollout (
+    MarkRejectedReq,
+    PromoteForm,
+    PromoteReq,
+    PromoteResp,
+    RolloutDetail,
+    RolloutSetReq,
+    markApprovedH,
+    markRejectedH,
+    promoteFormH,
+    promoteH,
+    releaseH,
+    rolloutDetailH,
+    rolloutHaltH,
+    rolloutReleaseAllH,
+    rolloutResumeH,
+    rolloutSetH,
+ )
 import Products.Autopilot.Mobile.Handlers.Versions
 import Products.Autopilot.Types.Permission (AutopilotPermission (..))
 import Servant
+import Shared.API.Response (APISuccess)
 
 type MobileAPI =
     "mobile"
@@ -85,6 +104,7 @@ type MobileAPI =
             :> QueryParam' '[Required, Strict] "surface" Text
             :> QueryParam' '[Required, Strict] "platform" Text
             :> QueryParam' '[Required, Strict] "branch" Text
+            :> QueryParam "base" Text
             :> Get '[JSON] ChangelogPreviewResp
         :<|> "mobile"
             :> "changelog-ai-summary"
@@ -93,6 +113,7 @@ type MobileAPI =
             :> QueryParam' '[Required, Strict] "surface" Text
             :> QueryParam' '[Required, Strict] "platform" Text
             :> QueryParam' '[Required, Strict] "branch" Text
+            :> QueryParam "base" Text
             :> QueryParam "versionName" Text
             :> QueryParam "versionCode" Text
             :> Get '[JSON] AiSummaryResp
@@ -122,6 +143,66 @@ type MobileAPI =
             :> Protected 'AP_RELEASE_REVERT
             :> QueryParam' '[Required, Strict] "source" Text
             :> Get '[JSON] RevertDiffResp
+        -- ── Promote-to-review + staged rollout (Phase 6) ──
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "promote-form"
+            :> Protected 'AP_RELEASE_VIEW
+            :> Get '[JSON] PromoteForm
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "promote"
+            :> Protected 'AP_RELEASE_PROMOTE
+            :> ReqBody '[JSON] PromoteReq
+            :> Post '[JSON] PromoteResp
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "rollout"
+            :> Protected 'AP_RELEASE_VIEW
+            :> Get '[JSON] RolloutDetail
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "release"
+            :> Protected 'AP_RELEASE_ROLLOUT
+            :> Post '[JSON] APISuccess
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "rollout"
+            :> "set"
+            :> Protected 'AP_RELEASE_ROLLOUT
+            :> ReqBody '[JSON] RolloutSetReq
+            :> Post '[JSON] APISuccess
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "rollout"
+            :> "halt"
+            :> Protected 'AP_RELEASE_ROLLOUT
+            :> Post '[JSON] APISuccess
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "rollout"
+            :> "resume"
+            :> Protected 'AP_RELEASE_ROLLOUT
+            :> Post '[JSON] APISuccess
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "rollout"
+            :> "release-all"
+            :> Protected 'AP_RELEASE_ROLLOUT
+            :> Post '[JSON] APISuccess
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "review"
+            :> "mark-approved"
+            :> Protected 'AP_RELEASE_PROMOTE
+            :> Post '[JSON] APISuccess
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "review"
+            :> "mark-rejected"
+            :> Protected 'AP_RELEASE_PROMOTE
+            :> ReqBody '[JSON] MarkRejectedReq
+            :> Post '[JSON] APISuccess
 
 mobileServer :: ServerT MobileAPI Flow
 mobileServer =
@@ -133,9 +214,20 @@ mobileServer =
         :<|> dispatchMobileReleasesH
         :<|> liveReleasesH
         :<|> (\ap mq -> listBranchesH ap mq)
-        :<|> (\ap app surface platform branch -> changelogPreviewH ap app surface platform branch)
-        :<|> (\ap app surface platform branch vName vCode -> changelogAiSummaryH ap app surface platform branch vName vCode)
+        :<|> (\ap app surface platform branch base -> changelogPreviewH ap app surface platform branch base)
+        :<|> (\ap app surface platform branch base vName vCode -> changelogAiSummaryH ap app surface platform branch base vName vCode)
         :<|> (\rid ap -> mobileRevertDraftH ap rid)
         :<|> (\rid ap req -> mobileRevertCreateH ap rid req)
         :<|> (\rid ap sha -> verifyCommitH ap rid sha)
         :<|> (\rid ap source -> mobileRevertDiffH ap rid source)
+        -- ── Promote-to-review + staged rollout (Phase 6) ──
+        :<|> (\rid ap -> promoteFormH ap rid)
+        :<|> (\rid ap req -> promoteH ap rid req)
+        :<|> (\rid ap -> rolloutDetailH ap rid)
+        :<|> (\rid ap -> releaseH ap rid)
+        :<|> (\rid ap req -> rolloutSetH ap rid req)
+        :<|> (\rid ap -> rolloutHaltH ap rid)
+        :<|> (\rid ap -> rolloutResumeH ap rid)
+        :<|> (\rid ap -> rolloutReleaseAllH ap rid)
+        :<|> (\rid ap -> markApprovedH ap rid)
+        :<|> (\rid ap req -> markRejectedH ap rid req)

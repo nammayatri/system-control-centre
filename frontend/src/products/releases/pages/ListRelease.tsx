@@ -3,14 +3,17 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X, SlidersHorizontal, Server, Smartphone, Layers, Undo2, Apple } from 'lucide-react';
 import { useReleases } from '../hooks';
 import { useRefreshAnimation } from '../../../shared/hooks';
-import { StatusBadge } from '../components/StatusBadge';
+import { ReleaseStatusBadge } from '../components/ReleaseStatusBadge';
+import { versionWithBuild } from '../versionLabel';
+import { stageOf, lifecycleFromRelease } from '../components/mobileStage';
+import { ABORTED_STATUSES } from '../api';
 import { Button } from '../../../shared/ui/button';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
-import type { ReleaseStatus } from '../api';
+import type { APRelease, ReleaseStatus } from '../api';
 
 const AndroidIcon = ({ className }: { className?: string }) => (
   <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
@@ -49,6 +52,52 @@ const PlatformBadge = ({ platform, isMobile }: { platform: string; isMobile: boo
   );
 };
 
+// The store track a mobile row lives on — surfaced as a badge. Derived, not stored:
+//   • store-sync rows reflect the LIVE store track SCC reads — Android = Play
+//     production (live); iOS = latest TestFlight build (App Store live not tracked).
+//   • SCC-built release rows reflect where the build is uploaded — Android = Play
+//     internal track; consumer iOS = App Store "Prepare for Submission"; provider
+//     iOS = TestFlight.
+// Debug builds and backend rows get no badge. Green = serving users; blue = staged.
+const mobileTrackBadge = (release: APRelease): { label: string; cls: string; title: string } | null => {
+  if (release.tracker_type !== 'MobileBuild') return null;
+  if (release.release_context?.build_type === 'debug') return null;
+  // External-review rows are a pending store submission, not "on a track". The
+  // EXTERNAL chip + the in-review status already say what they are; the
+  // store-sync track fallback below would mislabel them "Production"/"TestFlight"
+  // (implying live), so suppress the track chip here.
+  if ((release.metadata as { external?: boolean } | null | undefined)?.external) return null;
+  const live = 'bg-emerald-700 text-white';   // serving real users
+  const staged = 'bg-sky-600 text-white';     // built / uploaded, not live
+
+  // Store-sync rows carry the exact track they were read from (StoreSync writes
+  // metadata.store_track = production | internal | testflight). Prefer it.
+  const storeTrack = (release.metadata as { store_track?: string } | null | undefined)?.store_track;
+  if (storeTrack === 'production') return { label: 'Production', cls: live, title: 'Live on the production track' };
+  if (storeTrack === 'internal') return { label: 'Internal', cls: staged, title: 'Latest build on the Play internal-testing track (ahead of production, not live)' };
+  if (storeTrack === 'testflight') return { label: 'TestFlight', cls: staged, title: 'Latest TestFlight build — App Store live version is not tracked' };
+
+  // Fallback when metadata.store_track is absent:
+  //   • store-sync row pre-dating this change → its old single-track behavior
+  //     (Android = production live; iOS = TestFlight);
+  //   • SCC-built row → where the build lands (Android internal; consumer iOS
+  //     App Store "Prepare for Submission"; provider iOS TestFlight).
+  const isStoreSync = release.mode === 'STORE_SYNC' || release.release_manager === 'store-sync';
+  const isProvider = release.service === 'driver' || release.service === 'provider';
+  if (release.env === 'android') {
+    return isStoreSync
+      ? { label: 'Production', cls: live, title: 'Live on the Google Play production track' }
+      : { label: 'Internal', cls: staged, title: 'Uploaded to the Google Play internal track (not live)' };
+  }
+  if (release.env === 'ios') {
+    if (isStoreSync) return { label: 'TestFlight', cls: staged, title: 'Latest TestFlight build — App Store live version is not tracked' };
+    return isProvider
+      ? { label: 'TestFlight', cls: staged, title: 'Provider iOS ships to TestFlight only' }
+      : { label: 'App Store', cls: staged, title: 'App Store version in "Prepare for Submission" (not live)' };
+  }
+  return null;
+};
+
 type TimeRange = 'last_30_mins' | 'last_1_hour' | 'last_6_hours' | 'today' | 'yesterday' | 'last_2_days' | 'last_7_days' | 'last_30_days' | 'this_month' | 'last_month' | 'custom';
 
 const TIME_RANGE_OPTIONS = [
@@ -69,6 +118,37 @@ const STATUS_FILTER_OPTIONS: ReleaseStatus[] = [
   'CREATED', 'INPROGRESS', 'PAUSED', 'COMPLETED', 'ABORTED', 'USER_ABORTED',
   'GCLT_ABORTED', 'REVERTED', 'REVERTING', 'DISCARDED', 'DISCARDING', 'ABORTING', 'RESTARTING',
 ];
+
+// Mobile status filter: the lifecycle stages the user actually sees on the rows
+// (derived from mb_wf_status) PLUS the mobile-relevant terminal statuses. Backend
+// statuses like DISCARDING / GCLT_ABORTED / RESTARTING don't apply to mobile, and
+// raw INPROGRESS would lump in-review / approved / rolling-out together — so the
+// mobile dropdown uses these buckets instead, matched by `mobileStatusCategory`.
+const MOBILE_STATUS_OPTIONS: { value: string; label: string }[] = [
+  { value: 'building', label: 'Building' },
+  { value: 'promote', label: 'Ready to promote' },
+  { value: 'review', label: 'In review' },
+  { value: 'approved', label: 'Approved · held' },
+  { value: 'rollout', label: 'Rolling out' },
+  { value: 'rejected', label: 'Rejected' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'aborted', label: 'Aborted' },
+  { value: 'reverted', label: 'Reverted' },
+];
+
+// Which mobile bucket a release falls in: the derived lifecycle stage while it's
+// active (INPROGRESS), else the terminal raw status. Mirrors what the Status
+// column shows, so filtering by a value matches the visible badge.
+function mobileStatusCategory(r: APRelease): string {
+  if (r.status === 'INPROGRESS') {
+    const s = stageOf(lifecycleFromRelease(r));
+    return s === 'none' ? 'building' : s;
+  }
+  if (r.status === 'COMPLETED') return 'completed';
+  if (r.status === 'REVERTED') return 'reverted';
+  if (ABORTED_STATUSES.includes(r.status)) return 'aborted';
+  return r.status.toLowerCase();
+}
 
 const getDateRange = (range: TimeRange, customFrom: string, customTo: string): { from: Date; to: Date } => {
   const now = new Date();
@@ -164,7 +244,9 @@ const ListRelease: React.FC = () => {
   }, []);
 
   useEffect(() => { setCurrentPage(1); }, [debouncedSearch, statusFilter, productFilter, platformFilter, category]);
-  useEffect(() => { if (category === 'backend') setPlatformFilter(''); }, [category]);
+  // Status buckets differ by category (mobile stages vs backend raw statuses), so
+  // clear the status filter on a category switch to avoid a stale, no-match value.
+  useEffect(() => { setStatusFilter(''); if (category === 'backend') setPlatformFilter(''); }, [category]);
 
   const handleCustomRangeApply = () => {
     if (customFrom && customTo) {
@@ -191,11 +273,19 @@ const ListRelease: React.FC = () => {
 
   const productOptions = useMemo(() => [...new Set(releases.map(r => r.appGroup).filter(Boolean))], [releases]);
 
+  // Status dropdown options for the current category: mobile lifecycle buckets vs
+  // the raw backend statuses.
+  const statusOptions = category === 'mobile'
+    ? MOBILE_STATUS_OPTIONS
+    : STATUS_FILTER_OPTIONS.map(s => ({ value: s as string, label: s.replace(/_/g, ' ') }));
+
   const filteredReleases = useMemo(() => {
     let list = releases.filter(r => {
       const q = debouncedSearch.toLowerCase();
       const matchesSearch = !q || r.service?.toLowerCase().includes(q) || r.new_version?.toLowerCase().includes(q) || r.id?.toLowerCase().includes(q) || r.status?.toLowerCase().includes(q);
-      const matchesStatus = !statusFilter || r.status === statusFilter;
+      const matchesStatus =
+        !statusFilter ||
+        (category === 'mobile' ? mobileStatusCategory(r) === statusFilter : r.status === statusFilter);
       const matchesProduct = !productFilter || r.appGroup === productFilter;
       const matchesPlatform = !platformFilter || r.env === platformFilter;
       return matchesSearch && matchesStatus && matchesProduct && matchesPlatform;
@@ -209,7 +299,7 @@ const ListRelease: React.FC = () => {
     });
 
     return list;
-  }, [releases, debouncedSearch, statusFilter, productFilter, platformFilter, sortField, sortDir]);
+  }, [releases, debouncedSearch, statusFilter, productFilter, platformFilter, sortField, sortDir, category]);
 
   const totalPages = Math.ceil(filteredReleases.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
@@ -377,14 +467,14 @@ const ListRelease: React.FC = () => {
                 className="w-full border border-zinc-300 rounded-lg px-3 h-10 text-sm text-zinc-600 bg-white"
               >
                 <option value="">All Statuses</option>
-                {STATUS_FILTER_OPTIONS.map(s => <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
+                {statusOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
               <select
                 value={productFilter}
                 onChange={(e) => setProductFilter(e.target.value)}
                 className="w-full border border-zinc-300 rounded-lg px-3 h-10 text-sm text-zinc-600 bg-white"
               >
-                <option value="">All Groups</option>
+                <option value="">{category === 'mobile' ? 'All Apps' : 'All Groups'}</option>
                 {productOptions.map(p => <option key={p} value={p}>{p}</option>)}
               </select>
               {category === 'mobile' && (
@@ -460,11 +550,11 @@ const ListRelease: React.FC = () => {
 
           <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="border border-zinc-300 rounded-lg px-3 h-9 text-sm text-zinc-600 bg-white cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400">
             <option value="">All Statuses</option>
-            {STATUS_FILTER_OPTIONS.map(s => <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
+            {statusOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
 
           <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)} className="border border-zinc-300 rounded-lg px-3 h-9 text-sm text-zinc-600 bg-white cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400">
-            <option value="">All Groups</option>
+            <option value="">{category === 'mobile' ? 'All Apps' : 'All Groups'}</option>
             {productOptions.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
 
@@ -515,6 +605,7 @@ const ListRelease: React.FC = () => {
                     const isRevert = release.release_context?.revert === 1 || !!release.revertsReleaseId;
                     const isMobile = release.tracker_type === 'MobileBuild';
                     const isDebugBuild = isMobile && release.release_context?.build_type === 'debug';
+                    const track = mobileTrackBadge(release);
                     // Mobile rows reuse the underlying tracker columns with relabeled
                     // semantics (app/surface/platform). Backend rows render the
                     // historical (app_group/service/env) layout. Same data, different
@@ -542,12 +633,33 @@ const ListRelease: React.FC = () => {
                         </td>
                         <td className="py-3 px-4 text-xs text-zinc-600">{release.appGroup}</td>
                         <td className="py-3 px-4 font-medium text-zinc-800">{release.service}</td>
-                        <td className="py-3 px-4 font-mono text-xs text-zinc-600">{release.new_version}</td>
+                        <td className="py-3 px-4 font-mono text-xs text-zinc-600">{versionWithBuild(release)}</td>
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <StatusBadge status={release.status} />
+                            <ReleaseStatusBadge release={release} />
                             {release.env && (
                               <PlatformBadge platform={release.env} isMobile={isMobile} />
+                            )}
+                            {track && (
+                              <span
+                                title={track.title}
+                                className={cn('rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide', track.cls)}
+                              >
+                                {track.label}
+                              </span>
+                            )}
+                            {(release.metadata as { external?: boolean } | null | undefined)?.external && (
+                              <span
+                                title={
+                                  (release.metadata as { review_inferred?: boolean } | null | undefined)
+                                    ?.review_inferred
+                                    ? 'Pending review/publish on the store, submitted outside SCC. Android review state is inferred (Google does not expose it). You can still promote/release it from SCC.'
+                                    : 'In review on the store, submitted outside SCC. You can still promote/release it from SCC.'
+                                }
+                                className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-amber-100 text-amber-800 border border-amber-300"
+                              >
+                                EXTERNAL
+                              </span>
                             )}
                             {release.env_override_data && (
                               <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-blue-700 text-white">
@@ -714,7 +826,7 @@ const ListRelease: React.FC = () => {
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5 flex-wrap mb-2">
-                      <StatusBadge status={release.status} />
+                      <ReleaseStatusBadge release={release} />
                       {/* For mobile rows the platform is already shown inline above; skip the badge to avoid duplicating it. */}
                       {release.env && !isMobile && (
                         <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-sky-700 text-white">
@@ -738,7 +850,7 @@ const ListRelease: React.FC = () => {
                       )}
                     </div>
                     <div className="flex items-center gap-3 text-[11px] text-zinc-500 font-mono flex-wrap">
-                      <span>{release.new_version}</span>
+                      <span>{versionWithBuild(release)}</span>
                       <span>·</span>
                       <span>{formatISODate(release.date_created)}</span>
                     </div>

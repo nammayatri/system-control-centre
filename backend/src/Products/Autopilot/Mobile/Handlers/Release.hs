@@ -41,6 +41,7 @@ module Products.Autopilot.Mobile.Handlers.Release (
     -- * Changelog preview
     ChangelogPreviewResp (..),
     changelogPreviewH,
+    resolveBaseFromTracks,
 
     -- * Create-time AI changelog summary
     AiSummaryResp (..),
@@ -67,7 +68,7 @@ import Database.Beam
 import Products.Autopilot.Mobile.Github (BranchInfo (..), listBranches, searchBranches)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
 import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), CompareResult (..), compareAllCommits, compareRefs)
-import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), fetchLatestBuildsForApp, findAppCatalogByIds, listAppCatalog, listEnabledAppCatalog)
+import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), TrackSnapshot (..), fetchLatestBuildsForApp, findAppCatalogByIds, listAppCatalog, listEnabledAppCatalog)
 import Products.Autopilot.Mobile.Queries.Tracker (
     ReleaseTrackerRow,
     appCatalogByKey,
@@ -500,8 +501,8 @@ data ChangelogPreviewResp = ChangelogPreviewResp
 instance ToJSON ChangelogPreviewResp where
     toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
-changelogPreviewH :: AuthedPerson -> Text -> Text -> Text -> Text -> Flow ChangelogPreviewResp
-changelogPreviewH _ap appName surface platform branch = do
+changelogPreviewH :: AuthedPerson -> Text -> Text -> Text -> Text -> Maybe Text -> Flow ChangelogPreviewResp
+changelogPreviewH _ap appName surface platform branch mBase = do
     ac <- appCatalogByKey appName surface platform
     creds <- loadGhCreds
     let owner = gitOwner ac
@@ -512,11 +513,7 @@ changelogPreviewH _ap appName surface platform branch = do
         Nothing ->
             pure emptyPreview
         Just lb -> do
-            let baseRef = case lbrTagPushed lb of
-                    Just t | not (T.null t) && t /= "debug-no-tag" -> t
-                    _ -> case lbrCommitSha lb of
-                        Just s | not (T.null s) -> s
-                        _ -> ""
+            let (baseRef, baseTag, baseVersion) = resolveChangelogBase mBase lb
             if T.null baseRef
                 then pure emptyPreview
                 else do
@@ -543,8 +540,8 @@ changelogPreviewH _ap appName surface platform branch = do
                                     { cpCommits = commits
                                     , cpAheadBy = crTotalCommits cr
                                     , cpStatus = crStatus cr
-                                    , cpBaseTag = lbrTagPushed lb
-                                    , cpBaseVersion = Just (lbrVersion lb)
+                                    , cpBaseTag = baseTag
+                                    , cpBaseVersion = baseVersion
                                     , cpCompareUrl =
                                         Just $
                                             "https://github.com/"
@@ -580,6 +577,48 @@ findLastReleaseBuild builds appName surface platform =
             && lbrSurface b == surface
             && lbrPlatform b == platform
             && lbrBuildType b == "release"
+
+{- | Resolve the changelog base for the requested track ("production" |
+"internal"; default "production"), returning @(baseRef, baseTag, baseVersion)@.
+
+Prefers the chosen track's snapshot tag from @metadata.tracks@ (written by
+store-sync). Falls back to the leading store-sync row's own tag/commit when the
+track — or its tag — is absent: rows synced before this carried no tracks, and an
+iOS production version is recorded without a build code (so no tag). This keeps
+the preview working in every case, defaulting to a sensible (leading-track) diff.
+-}
+resolveChangelogBase :: Maybe Text -> LatestBuildRow -> (Text, Maybe Text, Maybe Text)
+resolveChangelogBase mBase lb =
+    resolveBaseFromTracks mBase (lbrTracks lb) (lbrTagPushed lb) (lbrCommitSha lb) (lbrVersion lb)
+
+{- | Pure core of 'resolveChangelogBase' (exported for testing). Given the
+requested track, the per-track snapshots, and the leading row's tag / commit /
+version, return @(baseRef, baseTag, baseVersion)@. Prefers the chosen track's
+snapshot tag; falls back to the leading tag/commit when the track or its tag is
+absent. An unrecognised track defaults to "production".
+-}
+resolveBaseFromTracks ::
+    Maybe Text ->
+    Map.Map Text TrackSnapshot ->
+    Maybe Text ->
+    Maybe Text ->
+    Text ->
+    (Text, Maybe Text, Maybe Text)
+resolveBaseFromTracks mBase tracks leadingTag leadingCommit leadingVersion =
+    case Map.lookup base tracks of
+        Just ts -> case tsTag ts of
+            Just t | not (T.null t) -> (t, Just t, Just (tsVersion ts))
+            -- Track known but no usable tag (e.g. iOS App Store version): label it
+            -- but diff against the leading ref.
+            _ -> (leadingRef, leadingTag, Just (tsVersion ts))
+        Nothing -> (leadingRef, leadingTag, Just leadingVersion)
+  where
+    base = case fmap T.toLower mBase of
+        Just "internal" -> "internal"
+        _ -> "production"
+    leadingRef = case leadingTag of
+        Just t | not (T.null t) && t /= "debug-no-tag" -> t
+        _ -> fromMaybe "" leadingCommit
 
 -- ─── Create-time AI changelog summary ───────────────────────────
 --
@@ -638,8 +677,8 @@ stateResp st longTxt shortTxt mModel =
         , model = mModel
         }
 
-changelogAiSummaryH :: AuthedPerson -> Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Flow AiSummaryResp
-changelogAiSummaryH ap appName surface platform branch mVersionName mVersionCode = do
+changelogAiSummaryH :: AuthedPerson -> Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Maybe Text -> Flow AiSummaryResp
+changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersionCode = do
     ac <- appCatalogByKey appName surface platform
     creds <- loadGhCreds
     let owner = gitOwner ac
@@ -648,11 +687,7 @@ changelogAiSummaryH ap appName surface platform branch mVersionName mVersionCode
     case findLastReleaseBuild builds appName surface platform of
         Nothing -> pure (aiUnavailable "no prior release build to compare against")
         Just lb -> do
-            let baseRef = case lbrTagPushed lb of
-                    Just t | not (T.null t) && t /= "debug-no-tag" -> t
-                    _ -> case lbrCommitSha lb of
-                        Just s | not (T.null s) -> s
-                        _ -> ""
+            let (baseRef, _, _) = resolveChangelogBase mBase lb
             if T.null baseRef
                 then pure (aiUnavailable "no base ref to compare against")
                 else do

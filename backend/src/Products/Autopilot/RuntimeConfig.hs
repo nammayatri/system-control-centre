@@ -24,6 +24,7 @@ module Products.Autopilot.RuntimeConfig (
     isStagedRolloutEnabled,
     getReviewPollIntervalSeconds,
     getReviewPollTimeoutDays,
+    getAndroidReviewRolloutFraction,
     isUnderMaintenance,
     -- Delays / numeric (MonadFlow versions)
     getReleaseWatchDelay,
@@ -269,6 +270,13 @@ getReviewPollIntervalSeconds = getConfigIntForProduct "review_poll_interval_sec"
 -- | Soft timeout (days) after which a still-pending review is flagged "taking long". Default 7.
 getReviewPollTimeoutDays :: (MonadFlow m) => m Int
 getReviewPollTimeoutDays = getConfigIntForProduct "review_poll_timeout_days" (Just "autopilot") 7
+
+-- | Effectively-zero Android rollout fraction used when promoting to the
+-- production track for review, so approval exposes ~0 users until the operator
+-- bumps it (the team's proven submit-at-~0% approach). Default 1e-9 (one in a
+-- billion). Must stay strictly in (0,1) — 'userFractionInRange' rejects 0/1.
+getAndroidReviewRolloutFraction :: (MonadFlow m) => m Double
+getAndroidReviewRolloutFraction = getConfigDoubleForProduct "android_review_rollout_fraction" (Just "autopilot") 1e-9
 
 getReleaseStartDelay :: (MonadFlow m) => m Int
 getReleaseStartDelay = getConfigIntForProduct "release_start_delay" (Just "autopilot") 2

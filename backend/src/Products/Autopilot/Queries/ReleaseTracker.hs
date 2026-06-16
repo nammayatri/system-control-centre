@@ -66,6 +66,7 @@ module Products.Autopilot.Queries.ReleaseTracker
 
     -- * Internal
     safeHead,
+    keepSnapshot,
     TrackerWithTarget,
   )
 where
@@ -73,8 +74,9 @@ where
 import Control.Applicative ((<|>))
 import Core.DB.Connection (runBeamLogged, runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
-import Data.Aeson (FromJSON, ToJSON, Value, fromJSON, toJSON)
+import Data.Aeson (FromJSON, ToJSON, Value (..), fromJSON, toJSON)
 import Data.Aeson qualified as Aeson
+import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Text qualified as AesonText
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -360,7 +362,46 @@ listReleaseTrackersByDateRangeAndCategory fromTime toTime mCategoryWhitelist = w
                 guard_ (rtCategory rt /=. val_ "VSEdit")
                 guard_ (rtCategory rt /=. val_ "BackendConfig")
             pure rt
-  pure (map fromRow rows)
+  pure (map fromRow (hideExternalReviewSnapshots rows))
+
+-- | UI-list dedup: drop a store-sync internal / TestFlight snapshot when an
+-- active EXTERNAL_REVIEW row already represents the same build (same app /
+-- surface / platform / version). Such a build is on a pre-prod track AND in
+-- review on production — store sync records both, but the in-review row is the
+-- one to surface, so the snapshot is the redundant "two rows for one build" the
+-- list was showing. The snapshot stays in the DB (store sync owns it; it
+-- reappears once the review clears) — this only filters the list view.
+hideExternalReviewSnapshots :: [ReleaseTrackerRow] -> [ReleaseTrackerRow]
+hideExternalReviewSnapshots rows =
+  filter (\r -> keepSnapshot inReviewKeys (rtMode r, storeTrackText (rtMetadata r), keyOf r)) rows
+  where
+    keyOf r = (rtAppGroup r, rtService r, rtEnv r, rtNewVersion r)
+    inReviewKeys =
+      [ keyOf r
+      | r <- rows,
+        rtMode r == Just "EXTERNAL_REVIEW",
+        rtStatus r == "INPROGRESS"
+      ]
+
+-- | Pure core of 'hideExternalReviewSnapshots': keep a row unless it is a
+-- store-sync internal/TestFlight snapshot whose build identity key already has an
+-- active external-review row. Exposed for unit testing.
+keepSnapshot :: (Eq k) => [k] -> (Maybe Text, Maybe Text, k) -> Bool
+keepSnapshot inReviewKeys (mode, track, k) =
+  not $
+    mode == Just "STORE_SYNC"
+      && track `elem` [Just "internal", Just "testflight"]
+      && k `elem` inReviewKeys
+
+-- | Best-effort @store_track@ from a row's metadata JSON. Local copy to avoid a
+-- circular import with the Mobile.Queries.AppCatalog version.
+storeTrackText :: Maybe Text -> Maybe Text
+storeTrackText Nothing = Nothing
+storeTrackText (Just t) = case Aeson.eitherDecodeStrict (TE.encodeUtf8 t) of
+  Right (Object o) -> case KM.lookup "store_track" o of
+    Just (String s) -> Just s
+    _ -> Nothing
+  _ -> Nothing
 
 -- | Find approved CREATED releases ready to be dispatched.
 --
@@ -684,7 +725,13 @@ fromRow ReleaseTrackerT {..} =
       -- (mobile) without reparsing the whole target state.
       mReleaseContext = case mTargetState of
         Just (K8sState k8s) -> Just (toJSON (context k8s))
-        Just (MobileBuildState mb) -> Just (toJSON (mbContext mb))
+        -- Surface mbContext for the FE, plus mb_wf_status — which lives one level
+        -- up in the MobileBuildState — so the releases list/detail can derive the
+        -- promote→rollout lifecycle stage (ready-to-promote / in-review /
+        -- rolling-out) without an extra /rollout call. The bare-tag rendering
+        -- matches the rollout endpoint's rdMbStatus (tshow (mbWfStatus …)).
+        Just (MobileBuildState mb) ->
+          Just (addMbStatus (T.pack (show (mbWfStatus mb))) (toJSON (mbContext mb)))
         _ -> Nothing
       tracker =
         ReleaseTracker
@@ -727,6 +774,12 @@ fromRow ReleaseTrackerT {..} =
             abValidation = parseJsonTextMaybe rtAbValidation
           }
    in (tracker, mTargetState)
+
+-- | Inject @mb_wf_status@ into the flattened mbContext JSON object so the FE can
+-- read the lifecycle stage off a list row. No-op if the value isn't an object.
+addMbStatus :: Text -> Value -> Value
+addMbStatus st (Object o) = Object (KM.insert "mb_wf_status" (toJSON st) o)
+addMbStatus _ v = v
 
 parseReleaseCategory :: Text -> ReleaseCategory
 parseReleaseCategory t =

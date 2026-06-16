@@ -19,6 +19,16 @@ module Products.Autopilot.Mobile.Queries.Tracker
     setReviewSubmitted,
     setMobileWfStatus,
     setRolloutState,
+    setAscIds,
+    markReleaseInProgress,
+    updateStoreSyncBuildCode,
+    setStoreSyncMetadata,
+    findExternalReviewRow,
+    sccActiveReleaseExistsForVersion,
+    setExternalReviewState,
+    completeExternalReviewRow,
+    findActiveRolloutReleases,
+    findMobileAwaitingRollout,
     incrementResolveAttempts,
     appCatalogForRow,
     appCatalogForRowRaw,
@@ -47,11 +57,12 @@ import Data.Aeson (Value)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AK
 import Data.Aeson.KeyMap qualified as KM
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time.Clock (UTCTime)
+import Data.Int (Int32)
 import Database.Beam
 import Products.Autopilot.Mobile.RevertResolver (RevertCand (..))
 import Products.Autopilot.Mobile.Types
@@ -231,6 +242,251 @@ setRolloutState releaseId_ rolloutStatus mPercent = withDb $ \db ->
               ]
         )
         (\rt -> rtId rt ==. val_ releaseId_)
+
+-- | Cache the iOS App Store version id and/or phased-release id returned by the
+-- store calls (@enablePhasedRelease@ → @asc_phased_id@), so later pause / resume /
+-- release-all can act on the phased id directly without re-resolving it. A no-op
+-- when both are 'Nothing' (avoids emitting a SET-less UPDATE).
+setAscIds :: (MonadFlow m) => Text -> Maybe Text -> Maybe Text -> m ()
+setAscIds _ Nothing Nothing = pure ()
+setAscIds releaseId_ mVersionId mPhasedId = withDb $ \db ->
+  runDB db $
+    runUpdate $
+      update
+        (releaseTrackers autopilotDb)
+        ( \rt ->
+            mconcat $
+              [rtAscVersionId rt <-. val_ mVersionId | Just _ <- [mVersionId]]
+                <> [rtAscPhasedId rt <-. val_ mPhasedId | Just _ <- [mPhasedId]]
+        )
+        (\rt -> rtId rt ==. val_ releaseId_)
+
+-- | Flip a release to INPROGRESS. Used when promoting a store-sync internal /
+-- TestFlight snapshot (a COMPLETED row): going INPROGRESS lets the runner + the
+-- reconciler adopt it into the review/rollout lifecycle (poll, finalize).
+markReleaseInProgress :: (MonadFlow m) => Text -> m ()
+markReleaseInProgress releaseId_ = withDb $ \db ->
+  runDB db $
+    runUpdate $
+      update
+        (releaseTrackers autopilotDb)
+        (\rt -> rtStatus rt <-. val_ "INPROGRESS")
+        (\rt -> rtId rt ==. val_ releaseId_)
+
+-- | Update a PRISTINE store-sync snapshot's build code + derived tag in place,
+-- for when a new build of the SAME version appears on the store (e.g. iOS
+-- 3.3.73(1) → (2)). The version-keyed store-sync dedup index blocks a re-insert,
+-- so the build number/tag would otherwise stay frozen. Only touches COMPLETED
+-- store-sync rows that were never promoted (review_status IS NULL) — never a
+-- promoted/active row.
+updateStoreSyncBuildCode :: (MonadFlow m) => AppCatalog -> Text -> Maybe Int32 -> Maybe Text -> m ()
+updateStoreSyncBuildCode ac version newCode newTag = withDb $ \db -> do
+  mRow <-
+    runDB db $
+      runSelectReturningOne $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtAppGroup rt ==. val_ (acName ac))
+          guard_ (rtService rt ==. val_ (acSurface ac))
+          guard_ (rtEnv rt ==. val_ (acPlatform ac))
+          guard_ (rtNewVersion rt ==. val_ version)
+          guard_ (rtMode rt ==. val_ (Just "STORE_SYNC"))
+          guard_ (rtStatus rt ==. val_ "COMPLETED")
+          guard_ (isNothing_ (rtReviewStatus rt))
+          pure rt
+  case mRow >>= \row -> (,) row <$> parseMobileTargetState (rtTargetState row) of
+    Nothing -> pure ()
+    Just (row, s) ->
+      let s' = s {mbContext = (mbContext s){mbcVersionCode = newCode, mbcTagPushed = newTag}}
+       in runDB db $
+            runUpdate $
+              update
+                (releaseTrackers autopilotDb)
+                (\rt -> rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s'))))
+                (\rt -> rtId rt ==. val_ (rtId row))
+
+-- | Overwrite the @metadata@ JSON of the leading store-sync row for an app
+-- (identified by version). Store-sync calls this each pass to keep the per-track
+-- snapshots (@metadata.tracks@) fresh — so e.g. the production version doesn't
+-- lag while the (leading) internal version stays put. Only touches COMPLETED,
+-- never-promoted store-sync rows; a no-op if no such row exists yet.
+setStoreSyncMetadata :: (MonadFlow m) => AppCatalog -> Text -> Text -> m ()
+setStoreSyncMetadata ac version metaJson = withDb $ \db ->
+  runDB db $
+    runUpdate $
+      update
+        (releaseTrackers autopilotDb)
+        (\rt -> rtMetadata rt <-. val_ (Just metaJson))
+        ( \rt ->
+            rtAppGroup rt ==. val_ (acName ac)
+              &&. rtService rt ==. val_ (acSurface ac)
+              &&. rtEnv rt ==. val_ (acPlatform ac)
+              &&. rtNewVersion rt ==. val_ version
+              &&. rtMode rt ==. val_ (Just "STORE_SYNC")
+              &&. rtStatus rt ==. val_ "COMPLETED"
+              &&. isNothing_ (rtReviewStatus rt)
+        )
+
+-- ─── Out-of-band (external) review snapshots ───────────────────────
+--
+-- When an App Store version is in review but was NOT submitted from SCC, store
+-- sync surfaces it as a synthetic INPROGRESS row tagged @mode = 'EXTERNAL_REVIEW'@
+-- (so it's outside the store-sync version dedup index, and — having no
+-- @dispatch_id@ / @rollout_status@ — invisible to the build runner and the
+-- rollout reconciler). store sync owns its whole lifecycle.
+
+-- | The current external-review row for an app that store sync still owns — i.e.
+-- still in the review phase. Once an operator releases it (rollout_status set),
+-- store sync hands off: the release/rollout handlers + the rollout reconciler
+-- drive it exactly like a normal SCC build, and store sync must NOT keep
+-- reconciling it (else it would complete the rollout the moment the version goes
+-- live). So this excludes rows that have entered rollout.
+findExternalReviewRow :: (MonadFlow m) => Text -> Text -> Text -> m (Maybe ReleaseTrackerRow)
+findExternalReviewRow appGroup surface platform = withDb $ \db ->
+  runDB db $
+    runSelectReturningOne $
+      select $
+        limit_ 1 $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtAppGroup rt ==. val_ appGroup)
+          guard_ (rtService rt ==. val_ surface)
+          guard_ (rtEnv rt ==. val_ platform)
+          guard_ (rtMode rt ==. val_ (Just "EXTERNAL_REVIEW"))
+          guard_ (rtStatus rt ==. val_ "INPROGRESS")
+          guard_ (isNothing_ (rtRolloutStatus rt))
+          pure rt
+
+-- | Does a real SCC release already own this version's review/rollout — i.e. is
+-- there an INPROGRESS MobileBuild row for it that ISN'T one of our own synthetic
+-- EXTERNAL_REVIEW rows? If so, SCC drives that review and store sync must NOT also
+-- surface a duplicate external row.
+--
+-- This INCLUDES a promoted store-sync snapshot. Promoting an internal / TestFlight
+-- snapshot to review (Option A) flips it to INPROGRESS but leaves mode = STORE_SYNC
+-- (see 'markReleaseInProgress'); excluding STORE_SYNC here would miss SCC's own
+-- submission and spawn a duplicate EXTERNAL_REVIEW row for the same version (the
+-- iOS/Android "two rows for one version" bug). A plain, un-promoted snapshot stays
+-- COMPLETED, so the INPROGRESS filter already excludes it.
+--
+-- It also INCLUDES an EXTERNAL_REVIEW row that's already ROLLING OUT (rollout_status
+-- set). Once an external row is released it leaves 'findExternalReviewRow' (the
+-- rollout_status-NULL guard) AND the dedup index — and with Managed Publishing on
+-- the live track still shows the build at the near-zero review fraction, so
+-- pendingPublishRelease re-detects the SAME version and a second external row gets
+-- spawned. Counting the rolling-out row as owning the version stops that. Only an
+-- IN-REVIEW external row (rollout_status NULL) is excluded — that's the one the
+-- external reconcile itself manages.
+sccActiveReleaseExistsForVersion :: (MonadFlow m) => Text -> Text -> Text -> Text -> m Bool
+sccActiveReleaseExistsForVersion appGroup surface platform version = withDb $ \db -> do
+  mRow <-
+    runDB db $
+      runSelectReturningOne $
+        select $
+          limit_ 1 $ do
+            rt <- all_ (releaseTrackers autopilotDb)
+            guard_ (rtAppGroup rt ==. val_ appGroup)
+            guard_ (rtService rt ==. val_ surface)
+            guard_ (rtEnv rt ==. val_ platform)
+            guard_ (rtNewVersion rt ==. val_ version)
+            guard_ (rtCategory rt ==. val_ "MobileBuild")
+            guard_ (rtStatus rt ==. val_ "INPROGRESS")
+            guard_ (rtMode rt /=. val_ (Just "EXTERNAL_REVIEW") ||. not_ (isNothing_ (rtRolloutStatus rt)))
+            pure (rtId rt)
+  pure (isJust mRow)
+
+-- | Update an external-review row's review status + workflow status in place.
+setExternalReviewState :: (MonadFlow m) => Text -> Text -> MobileBuildWFStatus -> m ()
+setExternalReviewState releaseId_ reviewStatus mbStatus = withDb $ \db -> do
+  mRow <-
+    runDB db $
+      runSelectReturningOne $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtId rt ==. val_ releaseId_)
+          pure rt
+  case mRow >>= \row -> (,) row <$> parseMobileTargetState (rtTargetState row) of
+    Nothing -> pure ()
+    Just (row, s) ->
+      let s' = s {mbWfStatus = mbStatus}
+       in runDB db $
+            runUpdate $
+              update
+                (releaseTrackers autopilotDb)
+                ( \rt ->
+                    mconcat
+                      [ rtReviewStatus rt <-. val_ (Just reviewStatus)
+                      , rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s')))
+                      ]
+                )
+                (\rt -> rtId rt ==. val_ (rtId row))
+
+-- | Mark an external-review row done (its version went live / left review).
+completeExternalReviewRow :: (MonadFlow m) => Text -> m ()
+completeExternalReviewRow releaseId_ = withDb $ \db -> do
+  mRow <-
+    runDB db $
+      runSelectReturningOne $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtId rt ==. val_ releaseId_)
+          pure rt
+  case mRow >>= \row -> (,) row <$> parseMobileTargetState (rtTargetState row) of
+    Nothing -> pure ()
+    Just (row, s) ->
+      let s' = s {mbWfStatus = MBCompleted}
+       in runDB db $
+            runUpdate $
+              update
+                (releaseTrackers autopilotDb)
+                ( \rt ->
+                    mconcat
+                      [ rtStatus rt <-. val_ "COMPLETED"
+                      , rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s')))
+                      ]
+                )
+                (\rt -> rtId rt ==. val_ (rtId row))
+
+-- | Mobile releases in an active staged rollout (@rollout_status@ 'rolling_out'
+-- or 'halted') that are still INPROGRESS — the rows the Phase-7 reconciler keeps
+-- in sync with the live store state. Reviews are deliberately excluded: iOS
+-- review advances via the Phase-5 poll stage and Android review is operator-
+-- marked, so neither needs store reconciliation here.
+findActiveRolloutReleases :: (MonadFlow m) => m [ReleaseTrackerRow]
+findActiveRolloutReleases = withDb $ \db ->
+  runDB db $
+    runSelectReturningList $
+      select $ do
+        rt <- all_ (releaseTrackers autopilotDb)
+        guard_ (rtCategory rt ==. val_ "MobileBuild")
+        guard_ (rtStatus rt ==. val_ "INPROGRESS")
+        guard_
+          ( rtRolloutStatus rt ==. val_ (Just "rolling_out")
+              ||. rtRolloutStatus rt ==. val_ (Just "halted")
+          )
+        pure rt
+
+-- | Mobile releases SCC has promoted (review submitted) but hasn't started rolling
+-- out itself — for the given platform: INPROGRESS, no @rollout_status@ yet, and
+-- past promote (@review_status@ set). The candidates for detecting a release /
+-- rollout started OUTSIDE SCC — Android via a Play Console rollout-% bump
+-- (@StoreSync.detectConsoleRollout@), iOS via an App Store Connect "Release"
+-- (@StoreSync.detectIosRelease@).
+findMobileAwaitingRollout :: (MonadFlow m) => Text -> m [ReleaseTrackerRow]
+findMobileAwaitingRollout platform = withDb $ \db ->
+  runDB db $
+    runSelectReturningList $
+      select $ do
+        rt <- all_ (releaseTrackers autopilotDb)
+        guard_ (rtCategory rt ==. val_ "MobileBuild")
+        guard_ (rtEnv rt ==. val_ platform)
+        guard_ (rtStatus rt ==. val_ "INPROGRESS")
+        guard_ (isNothing_ (rtRolloutStatus rt))
+        guard_
+          ( rtReviewStatus rt ==. val_ (Just "approved")
+              ||. rtReviewStatus rt ==. val_ (Just "submitted")
+              ||. rtReviewStatus rt ==. val_ (Just "in_review")
+          )
+        pure rt
 
 -- | Bump the ResolveRunId attempt counter stored in the tracker's
 -- @release_context@ JSON (a @MobileBuildTargetState@ wrapped in

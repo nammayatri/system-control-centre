@@ -16,12 +16,16 @@ module Products.Autopilot.Mobile.Queries.AppCatalog (
     LatestBuildRow (..),
     fetchLatestBuildsPerApp,
     fetchLatestBuildsForApp,
+    storeTrackOf,
+    TrackSnapshot (..),
+    tracksOf,
 ) where
 
 import Control.Monad.Catch (throwM)
 import Core.AppError (DBError (..))
 import Core.DB.Connection (runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
+import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
 import Data.Int (Int32)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
@@ -38,6 +42,7 @@ import Database.Beam.Postgres.Full (
  )
 import Database.PostgreSQL.Simple (query, query_)
 import Products.Autopilot.Mobile.Queries.Tracker (parseMobileTargetState)
+import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe)
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..))
 import Products.Autopilot.Mobile.Types.Storage
 import Products.Autopilot.Types.Storage.Schema (AutopilotDb (..), autopilotDb)
@@ -209,7 +214,54 @@ data LatestBuildRow = LatestBuildRow
     , lbrTagPushed :: Maybe Text
     , lbrCommitSha :: Maybe Text
     , lbrCompletedAt :: UTCTime
+    , lbrStoreTrack :: Maybe Text
+    -- ^ store track from @metadata.store_track@ ("production" | "internal" |
+    -- "testflight"), set on store-sync rows; 'Nothing' for SCC-built rows.
+    , lbrTracks :: Map.Map Text TrackSnapshot
+    -- ^ per-track latest-build snapshots from @metadata.tracks@ ("production" /
+    -- "internal"), recorded by store-sync so the create page can show — and diff
+    -- against — both tracks. Empty for SCC-built rows / rows synced before this.
     }
+
+-- | Tolerant extractor for @metadata.store_track@ (skips absent/malformed metadata).
+newtype StoreTrackMeta = StoreTrackMeta (Maybe Text)
+
+instance FromJSON StoreTrackMeta where
+    parseJSON = withObject "StoreTrackMeta" $ \o -> StoreTrackMeta <$> o .:? "store_track"
+
+storeTrackOf :: Maybe Text -> Maybe Text
+storeTrackOf mMeta = (parseJsonTextMaybe mMeta :: Maybe StoreTrackMeta) >>= \(StoreTrackMeta t) -> t
+
+{- | One store track's latest-build snapshot, written by store-sync into
+@metadata.tracks.{production,internal}@. Carries enough to label the build (the
+version + code) and to use it as a changelog base (the git @tag@). 'tsTag' may be
+'Nothing' when the build code is unknown (e.g. the live iOS App Store version),
+in which case it can label the track but not seed a commit diff.
+-}
+data TrackSnapshot = TrackSnapshot
+    { tsVersion :: Text
+    , tsCode :: Maybe Int32
+    , tsTag :: Maybe Text
+    }
+    deriving (Show, Eq)
+
+instance ToJSON TrackSnapshot where
+    toJSON ts = object ["version" .= tsVersion ts, "code" .= tsCode ts, "tag" .= tsTag ts]
+
+instance FromJSON TrackSnapshot where
+    parseJSON = withObject "TrackSnapshot" $ \o ->
+        TrackSnapshot <$> o .: "version" <*> o .:? "code" <*> o .:? "tag"
+
+-- | Tolerant extractor for the @metadata.tracks@ map (empty when absent/malformed).
+newtype TracksMeta = TracksMeta (Map.Map Text TrackSnapshot)
+
+instance FromJSON TracksMeta where
+    parseJSON = withObject "TracksMeta" $ \o -> TracksMeta . fromMaybe Map.empty <$> o .:? "tracks"
+
+tracksOf :: Maybe Text -> Map.Map Text TrackSnapshot
+tracksOf mMeta = case (parseJsonTextMaybe mMeta :: Maybe TracksMeta) of
+    Just (TracksMeta m) -> m
+    Nothing -> Map.empty
 
 {- | For every unique (app_group, service, env, build_type) combination
 in @release_tracker@ where @category = 'MobileBuild'@ and
@@ -238,7 +290,7 @@ fetchLatestBuildsPerApp = withDb $ \db ->
             query_
                 conn
                 "SELECT app_group, service, env, new_version, commit_sha, \
-                \  date_created, release_context \
+                \  date_created, release_context, metadata \
                 \FROM release_tracker \
                 \WHERE category = 'MobileBuild' AND status = 'COMPLETED' \
                 \  AND release_context IS NOT NULL \
@@ -257,7 +309,7 @@ fetchLatestBuildsForApp appGroup surface platform = withDb $ \db ->
             query
                 conn
                 "SELECT app_group, service, env, new_version, commit_sha, \
-                \  date_created, release_context \
+                \  date_created, release_context, metadata \
                 \FROM release_tracker \
                 \WHERE category = 'MobileBuild' AND status = 'COMPLETED' \
                 \  AND release_context IS NOT NULL \
@@ -270,7 +322,7 @@ fetchLatestBuildsForApp appGroup surface platform = withDb $ \db ->
 unparseable ones, per B2) and keep the newest per
 (app, surface, platform, build_type). Input must be newest-first.
 -}
-latestBuildsFromRows :: [(Text, Text, Text, Text, Maybe Text, UTCTime, Text)] -> [LatestBuildRow]
+latestBuildsFromRows :: [(Text, Text, Text, Text, Maybe Text, UTCTime, Text, Maybe Text)] -> [LatestBuildRow]
 latestBuildsFromRows rows =
     let parsed = mapMaybe toLatestBuildRow rows
         keyOf r = (lbrAppGroup r, lbrSurface r, lbrPlatform r, lbrBuildType r)
@@ -283,8 +335,8 @@ latestBuildsFromRows rows =
 @release_context@ can't be decoded to a 'MobileBuildTargetState' — such rows
 are skipped rather than blanking the result.
 -}
-toLatestBuildRow :: (Text, Text, Text, Text, Maybe Text, UTCTime, Text) -> Maybe LatestBuildRow
-toLatestBuildRow (ag, suf, plt, ver, sha, ca, ctxText) = do
+toLatestBuildRow :: (Text, Text, Text, Text, Maybe Text, UTCTime, Text, Maybe Text) -> Maybe LatestBuildRow
+toLatestBuildRow (ag, suf, plt, ver, sha, ca, ctxText, mMeta) = do
     mbts <- parseMobileTargetState (Just ctxText)
     let ctx = mbContext mbts
     pure
@@ -298,4 +350,6 @@ toLatestBuildRow (ag, suf, plt, ver, sha, ca, ctxText) = do
             , lbrTagPushed = mbcTagPushed ctx
             , lbrCommitSha = sha
             , lbrCompletedAt = ca
+            , lbrStoreTrack = storeTrackOf mMeta
+            , lbrTracks = tracksOf mMeta
             }

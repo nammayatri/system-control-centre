@@ -56,8 +56,13 @@ import Products.Autopilot.Mobile.RevertResolver (
  )
 import Products.Autopilot.Mobile.Types
 import Products.Autopilot.Mobile.Versioning (TrackInfo (..), computeNextVersion)
-import Products.Autopilot.Mobile.Versioning.Apple (AscReviewState (..), AscVersion (..), appStoreStateToReview, applePhasedPercent, parseAscVersion)
-import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), parseRolloutState, userFractionInRange)
+import Products.Autopilot.Mobile.StoreSync (ExternalReviewAction (..), ReconcileAction (..), androidReconcileAction, detectConsoleRollout, detectIosRelease, externalReviewAction, iosPhasedReconcileAction, pendingPublishRelease, reviewStateToStatus)
+import Products.Autopilot.Mobile.Handlers.Release (resolveBaseFromTracks)
+import Products.Autopilot.Mobile.Queries.AppCatalog (TrackSnapshot (..))
+import qualified Data.Map.Strict as Map
+import Products.Autopilot.Mobile.Versioning.Apple (AscPhasedState (..), AscReviewState (..), AscVersion (..), BuildsResp (..), appStoreStateToReview, applePhasedPercent, computeNextIosVersion, firstWhatsNew, parseAscVersion, parseVersionStates, selectInFlightReview)
+import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), ProdTrackRelease (..), parseProdReleaseNotes, parseProdTrackReleases, parseRolloutState, userFractionInRange)
+import Products.Autopilot.Queries.ReleaseTracker (keepSnapshot)
 import Products.Autopilot.Mobile.Workflow (reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
@@ -139,6 +144,16 @@ main = do
     section "[32] Play staged rollout (% bounds + track parse)" testPlayStagedRollout
     section "[33] ASC review state + phased schedule + version parse" testAscReviewAndPhased
     section "[34] Review poll timing (soft-timeout + throttle)" testReviewPollTiming
+    section "[35] Rollout reconcile classification (store state -> action)" testRolloutReconcileClassify
+    section "[36] ASC builds parse (marketing version + build number)" testAscBuildInfoParse
+    section "[37] iOS next-version rule (bump in sync / reuse when TF ahead)" testIosVersionBumpRule
+    section "[38] Changelog base resolution (prod default / internal / fallback)" testChangelogBaseResolution
+    section "[39] Store release-notes parsing (Play track + iOS whatsNew)" testStoreReleaseNotesParse
+    section "[40] Out-of-band review detection (in-flight select / map / reconcile)" testExternalReviewDetection
+    section "[41] Android pending-publish detection (track parse / pick rule)" testAndroidPendingPublish
+    section "[42] List dedup (hide store-sync snapshot when external review owns build)" testListDedup
+    section "[43] Console rollout detection (approved android adopts a Console-set %)" testConsoleRolloutDetect
+    section "[44] iOS release detection (adopt an out-of-band App Store Connect release)" testIosReleaseDetect
 
     putStrLn ""
     putStrLn "==========================================="
@@ -933,6 +948,43 @@ testMobileBuildWFStatusTransitions = do
     assertBool
         "MBInit -> MBBuilding NOT allowed"
         (not (validMBTransition MBInit MBBuilding))
+    -- Promote → review → staged-rollout path (migration 0027 statuses)
+    assertBool
+        "MBTagPushed -> MBSubmittingForReview"
+        (validMBTransition MBTagPushed MBSubmittingForReview)
+    assertBool
+        "MBSubmittingForReview -> MBInReview"
+        (validMBTransition MBSubmittingForReview MBInReview)
+    assertBool
+        "MBInReview -> MBReviewApproved"
+        (validMBTransition MBInReview MBReviewApproved)
+    assertBool
+        "MBInReview -> MBReviewRejected"
+        (validMBTransition MBInReview MBReviewRejected)
+    assertBool
+        "MBReviewApproved -> MBRollingOut"
+        (validMBTransition MBReviewApproved MBRollingOut)
+    assertBool
+        "MBRollingOut -> MBCompleted"
+        (validMBTransition MBRollingOut MBCompleted)
+    -- MBReviewApproved / MBRollingOut are NOT terminal (release still active)
+    assertBool
+        "MBReviewApproved -> MBFailed allowed (non-terminal)"
+        (validMBTransition MBReviewApproved (MBFailed "x"))
+    assertBool
+        "MBRollingOut -> MBFailed allowed (non-terminal)"
+        (validMBTransition MBRollingOut (MBFailed "x"))
+    -- MBReviewRejected IS terminal
+    assertBool
+        "MBReviewRejected -> MBRollingOut NOT allowed (terminal)"
+        (not (validMBTransition MBReviewRejected MBRollingOut))
+    assertBool
+        "MBReviewRejected -> MBFailed NOT allowed (terminal)"
+        (not (validMBTransition MBReviewRejected (MBFailed "x")))
+    -- Can't jump from build-complete straight into rollout
+    assertBool
+        "MBTagPushed -> MBRollingOut NOT allowed"
+        (not (validMBTransition MBTagPushed MBRollingOut))
 
 -- ============================================================================
 -- [19] MobileBuildContext JSON Round-Trip
@@ -1122,6 +1174,21 @@ testSelectBuildTag = do
         "no version code (iOS-style) -> matches bare v{version}"
         (Just "odishayatri/prod/ios/v3.3.17")
         (selectBuildTag "odishayatri/prod/ios/v" "3.3.17" Nothing [ref "odishayatri/prod/ios/v3.3.17"])
+    -- iOS: the workflow assigns the build number, so SCC has no code but the pushed
+    -- tag carries a +<buildNumber> suffix. Must match it (highest wins), not require a bare tag.
+    assertEqual
+        "iOS no code -> matches the +<buildNumber> tag the workflow pushed"
+        (Just "odishayatri/prod/ios/v3.3.73+2")
+        (selectBuildTag "odishayatri/prod/ios/v" "3.3.73" Nothing [ref "odishayatri/prod/ios/v3.3.73+2"])
+    assertEqual
+        "iOS no code, multiple builds of a version -> picks the highest build number"
+        (Just "odishayatri/prod/ios/v3.3.73+2")
+        ( selectBuildTag
+            "odishayatri/prod/ios/v"
+            "3.3.73"
+            Nothing
+            [ref "odishayatri/prod/ios/v3.3.73+1", ref "odishayatri/prod/ios/v3.3.73+2"]
+        )
 
 -- ============================================================================
 -- [20] Mobile Version Bump (mirrors fastlane-android.yaml lines 124-189)
@@ -1161,7 +1228,7 @@ testAscReviewAndPhased = do
     assertEqual "WAITING_FOR_REVIEW" AscWaitingForReview (appStoreStateToReview "WAITING_FOR_REVIEW")
     assertEqual "IN_REVIEW" AscInReview (appStoreStateToReview "IN_REVIEW")
     assertEqual "PENDING_DEVELOPER_RELEASE -> approved (held)" AscApproved (appStoreStateToReview "PENDING_DEVELOPER_RELEASE")
-    assertEqual "READY_FOR_SALE -> approved" AscApproved (appStoreStateToReview "READY_FOR_SALE")
+    assertEqual "READY_FOR_SALE -> live" AscLive (appStoreStateToReview "READY_FOR_SALE")
     assertEqual "REJECTED" (AscRejected "REJECTED") (appStoreStateToReview "REJECTED")
     assertEqual "METADATA_REJECTED" (AscRejected "METADATA_REJECTED") (appStoreStateToReview "METADATA_REJECTED")
     assertEqual "unknown -> other" (AscOther "PROCESSING_FOR_APP_STORE") (appStoreStateToReview "PROCESSING_FOR_APP_STORE")
@@ -1192,6 +1259,339 @@ testReviewPollTiming = do
     assertBool "never polled -> due" (reviewPollDue now Nothing 1200)
     assertBool "polled 10m ago -> not due (20m interval)" (not (reviewPollDue now (Just (secsAgo 600)) 1200))
     assertBool "polled 25m ago -> due (20m interval)" (reviewPollDue now (Just (secsAgo 1500)) 1200)
+
+-- ============================================================================
+-- [35] Rollout reconcile classification (Phase 7 — pure store-state → action)
+-- ============================================================================
+
+testRolloutReconcileClassify :: IO ()
+testRolloutReconcileClassify = do
+    putStrLn "Rollout reconcile: live store state -> action"
+    -- Android: production-track status → action; userFraction stored as percent.
+    -- Use exactly-representable fractions (0.5, 0.25) to avoid float-eq flakiness.
+    assertEqual
+        "android completed -> CompleteRollout"
+        CompleteRollout
+        (androidReconcileAction (PlayRolloutState "completed" Nothing ["123"]))
+    assertEqual
+        "android inProgress 0.5 -> rolling_out @ 50%"
+        (SetRollout "rolling_out" (Just 50))
+        (androidReconcileAction (PlayRolloutState "inProgress" (Just 0.5) ["123"]))
+    assertEqual
+        "android halted 0.25 -> halted @ 25%"
+        (SetRollout "halted" (Just 25))
+        (androidReconcileAction (PlayRolloutState "halted" (Just 0.25) ["123"]))
+    assertEqual
+        "android unknown status -> LeaveAsIs (echoes status)"
+        (LeaveAsIs "draft")
+        (androidReconcileAction (PlayRolloutState "draft" Nothing ["123"]))
+    -- iOS phased: state + ramp day → action; day maps via applePhasedPercent.
+    assertEqual
+        "ios COMPLETE -> CompleteRollout"
+        CompleteRollout
+        (iosPhasedReconcileAction (AscPhasedState "COMPLETE" (Just 6)))
+    assertEqual
+        "ios ACTIVE day0 -> rolling_out @ 1%"
+        (SetRollout "rolling_out" (Just 1))
+        (iosPhasedReconcileAction (AscPhasedState "ACTIVE" (Just 0)))
+    assertEqual
+        "ios ACTIVE day3 -> rolling_out @ 10%"
+        (SetRollout "rolling_out" (Just 10))
+        (iosPhasedReconcileAction (AscPhasedState "ACTIVE" (Just 3)))
+    assertEqual
+        "ios PAUSED day4 -> halted @ 20%"
+        (SetRollout "halted" (Just 20))
+        (iosPhasedReconcileAction (AscPhasedState "PAUSED" (Just 4)))
+    assertEqual
+        "ios INACTIVE (transient) -> LeaveAsIs"
+        (LeaveAsIs "INACTIVE")
+        (iosPhasedReconcileAction (AscPhasedState "INACTIVE" Nothing))
+
+-- ============================================================================
+-- [36] ASC /v1/builds parse — marketing version + build number (iOS ref capture)
+-- ============================================================================
+
+testAscBuildInfoParse :: IO ()
+testAscBuildInfoParse = do
+    putStrLn "ASC /v1/builds: marketing version (included) + build number (data[0])"
+    -- Real shape: data[0].attributes.version = CFBundleVersion (the iOS "code");
+    -- included[preReleaseVersions].attributes.version = marketing version.
+    case Aeson.eitherDecode
+        "{\"data\":[{\"type\":\"builds\",\"attributes\":{\"version\":\"458\"}}],\"included\":[{\"type\":\"preReleaseVersions\",\"attributes\":{\"version\":\"3.3.73\"}}]}" ::
+        Either String BuildsResp of
+        Right (BuildsResp v b) -> do
+            assertEqual "marketing version" (Just "3.3.73") v
+            assertEqual "build number (CFBundleVersion)" (Just "458") b
+        Left e -> fail ("  FAIL: decode error: " <> e)
+    -- No builds yet (first-ever release) → both Nothing → no derived tag (fallback).
+    case Aeson.eitherDecode "{\"data\":[],\"included\":[]}" :: Either String BuildsResp of
+        Right (BuildsResp v b) -> do
+            assertEqual "no builds -> no version" (Nothing :: Maybe Text) v
+            assertEqual "no builds -> no build number" (Nothing :: Maybe Text) b
+        Left e -> fail ("  FAIL: decode error: " <> e)
+
+-- ============================================================================
+-- [37] iOS next-version rule — track-aware (bump in sync / reuse when ahead)
+-- ============================================================================
+
+testIosVersionBumpRule :: IO ()
+testIosVersionBumpRule = do
+    putStrLn "iOS next-version: bump when TestFlight==prod, reuse when TestFlight ahead"
+    assertEqual "no TestFlight history -> 1.0.0" "1.0.0" (computeNextIosVersion Nothing Nothing)
+    assertEqual "no TestFlight, prod present -> 1.0.0" "1.0.0" (computeNextIosVersion Nothing (Just "3.3.10"))
+    assertEqual "TF == prod -> bump patch" "3.3.74" (computeNextIosVersion (Just "3.3.73") (Just "3.3.73"))
+    assertEqual "TF ahead of prod -> reuse TF verbatim" "3.3.73" (computeNextIosVersion (Just "3.3.73") (Just "3.3.70"))
+    assertEqual "TF present, no live prod yet -> reuse TF" "3.3.73" (computeNextIosVersion (Just "3.3.73") Nothing)
+
+-- | The base-track selection driving the create-page changelog: prefer the
+-- chosen track's snapshot tag, default to production, and fall back to the
+-- leading tag/commit when the track or its tag is absent.
+testChangelogBaseResolution :: IO ()
+testChangelogBaseResolution = do
+    putStrLn "changelog base: chosen track's tag, prod default, graceful fallbacks"
+    let prod = TrackSnapshot{tsVersion = "3.3.17", tsCode = Just 460, tsTag = Just "oy/prod/android/v3.3.17+460"}
+        internal = TrackSnapshot{tsVersion = "3.3.20", tsCode = Just 463, tsTag = Just "oy/prod/android/v3.3.20+463"}
+        tracks = Map.fromList [("production", prod), ("internal", internal)]
+        leadTag = Just "oy/prod/android/v3.3.20+463"
+        leadCommit = Just "deadbeef"
+        leadVer = "3.3.20"
+        refOf (r, _, _) = r
+        verOf (_, _, v) = v
+    -- default (Nothing) → production track
+    assertEqual "default base → prod tag" "oy/prod/android/v3.3.17+460" (refOf (resolveBaseFromTracks Nothing tracks leadTag leadCommit leadVer))
+    assertEqual "default base → prod version" (Just "3.3.17") (verOf (resolveBaseFromTracks Nothing tracks leadTag leadCommit leadVer))
+    -- explicit internal (case-insensitive) → internal track
+    assertEqual "base=Internal → internal tag" "oy/prod/android/v3.3.20+463" (refOf (resolveBaseFromTracks (Just "Internal") tracks leadTag leadCommit leadVer))
+    assertEqual "base=internal → internal version" (Just "3.3.20") (verOf (resolveBaseFromTracks (Just "internal") tracks leadTag leadCommit leadVer))
+    -- internal requested but absent → fall back to the leading ref
+    assertEqual "internal absent → leading ref" "oy/prod/android/v3.3.20+463" (refOf (resolveBaseFromTracks (Just "internal") (Map.fromList [("production", prod)]) leadTag leadCommit leadVer))
+    -- track present but no tag (iOS prod, version only) → leading ref, track version label
+    let iosTracks = Map.fromList [("production", TrackSnapshot{tsVersion = "3.3.9", tsCode = Nothing, tsTag = Nothing}), ("internal", internal)]
+    assertEqual "prod no-tag → leading ref" "oy/prod/android/v3.3.20+463" (refOf (resolveBaseFromTracks (Just "production") iosTracks leadTag leadCommit leadVer))
+    assertEqual "prod no-tag → prod version label" (Just "3.3.9") (verOf (resolveBaseFromTracks (Just "production") iosTracks leadTag leadCommit leadVer))
+    -- no tracks (legacy row) → leading tag + leading version
+    assertEqual "no tracks → leading tag" "oy/prod/android/v3.3.20+463" (refOf (resolveBaseFromTracks Nothing Map.empty leadTag leadCommit leadVer))
+    assertEqual "no tracks → leading version" (Just "3.3.20") (verOf (resolveBaseFromTracks Nothing Map.empty leadTag leadCommit leadVer))
+    -- no usable tag → commit fallback (and debug-no-tag is ignored)
+    assertEqual "no tag → commit fallback" "deadbeef" (refOf (resolveBaseFromTracks Nothing Map.empty Nothing leadCommit leadVer))
+    assertEqual "debug-no-tag → commit fallback" "deadbeef" (refOf (resolveBaseFromTracks Nothing Map.empty (Just "debug-no-tag") leadCommit leadVer))
+
+-- | Parsing the current production "What's New" used to pre-fill the promote
+-- dialog for store-synced releases: the Play production-track body and the iOS
+-- appStoreVersionLocalizations body.
+testStoreReleaseNotesParse :: IO ()
+testStoreReleaseNotesParse = do
+    putStrLn "store release notes: Play track + iOS whatsNew parsing"
+    -- Play: completed release with notes → first non-empty text
+    assertEqual
+        "play: completed release notes"
+        (Just "Bug fixes and improvements")
+        (parseProdReleaseNotes "{\"releases\":[{\"status\":\"completed\",\"versionCodes\":[\"460\"],\"releaseNotes\":[{\"language\":\"en-US\",\"text\":\"Bug fixes and improvements\"}]}]}")
+    -- Play: prefer the completed release over a draft
+    assertEqual
+        "play: prefers completed over draft"
+        (Just "Live notes")
+        (parseProdReleaseNotes "{\"releases\":[{\"status\":\"draft\",\"releaseNotes\":[{\"language\":\"en-US\",\"text\":\"Draft notes\"}]},{\"status\":\"completed\",\"releaseNotes\":[{\"language\":\"en-US\",\"text\":\"Live notes\"}]}]}")
+    -- Play: release without notes → Nothing
+    assertEqual
+        "play: no notes -> Nothing"
+        Nothing
+        (parseProdReleaseNotes "{\"releases\":[{\"status\":\"completed\",\"versionCodes\":[\"460\"]}]}")
+    -- Play: no releases → Nothing
+    assertEqual "play: no releases -> Nothing" Nothing (parseProdReleaseNotes "{\"releases\":[]}")
+    -- Play: skips empty/whitespace text → next non-empty locale
+    assertEqual
+        "play: skips blank text"
+        (Just "Real notes")
+        (parseProdReleaseNotes "{\"releases\":[{\"status\":\"completed\",\"releaseNotes\":[{\"language\":\"en-US\",\"text\":\"   \"},{\"language\":\"hi-IN\",\"text\":\"Real notes\"}]}]}")
+    -- iOS: first non-empty whatsNew across locales
+    assertEqual
+        "ios: first whatsNew"
+        (Just "What's new on iOS")
+        (firstWhatsNew "{\"data\":[{\"id\":\"1\",\"attributes\":{\"locale\":\"en-US\",\"whatsNew\":\"What's new on iOS\"}}]}")
+    -- iOS: skips empty whatsNew → next locale
+    assertEqual
+        "ios: skips empty whatsNew"
+        (Just "Hindi notes")
+        (firstWhatsNew "{\"data\":[{\"id\":\"1\",\"attributes\":{\"whatsNew\":\"\"}},{\"id\":\"2\",\"attributes\":{\"whatsNew\":\"Hindi notes\"}}]}")
+    -- iOS: no whatsNew anywhere → Nothing
+    assertEqual
+        "ios: no whatsNew -> Nothing"
+        Nothing
+        (firstWhatsNew "{\"data\":[{\"id\":\"1\",\"attributes\":{\"locale\":\"en-US\"}}]}")
+
+-- | Out-of-band (external) App Store review detection: selecting the in-flight
+-- version, parsing the versions list, mapping its state, and the pure reconcile
+-- decision store sync runs each pass.
+testExternalReviewDetection :: IO ()
+testExternalReviewDetection = do
+    putStrLn "external review: in-flight select / state map / reconcile decision"
+    -- selectInFlightReview: the in-review version is picked over the live one
+    assertEqual
+        "in-flight: in-review over live"
+        (Just ("3.4.0", AscInReview))
+        (selectInFlightReview [("3.4.0", "IN_REVIEW"), ("3.3.9", "READY_FOR_SALE")])
+    assertEqual "in-flight: only live → nothing" Nothing (selectInFlightReview [("3.3.9", "READY_FOR_SALE")])
+    assertEqual
+        "in-flight: skips a superseded version"
+        (Just ("3.4.1", AscWaitingForReview))
+        (selectInFlightReview [("3.4.0", "REPLACED_WITH_NEW_VERSION"), ("3.4.1", "WAITING_FOR_REVIEW")])
+    assertEqual
+        "in-flight: pending-developer-release → approved"
+        (Just ("3.4.0", AscApproved))
+        (selectInFlightReview [("3.4.0", "PENDING_DEVELOPER_RELEASE")])
+    -- parseVersionStates: the appStoreVersions list body
+    assertEqual
+        "parse versions list"
+        [("3.4.0", "IN_REVIEW"), ("3.3.9", "READY_FOR_SALE")]
+        (parseVersionStates "{\"data\":[{\"id\":\"1\",\"attributes\":{\"versionString\":\"3.4.0\",\"appStoreState\":\"IN_REVIEW\"}},{\"id\":\"2\",\"attributes\":{\"versionString\":\"3.3.9\",\"appStoreState\":\"READY_FOR_SALE\"}}]}")
+    -- reviewStateToStatus: which states surface, and how
+    assertEqual "map: in-review" (Just ("in_review", MBInReview)) (reviewStateToStatus AscInReview)
+    assertEqual "map: waiting-for-review" (Just ("in_review", MBInReview)) (reviewStateToStatus AscWaitingForReview)
+    assertEqual "map: approved" (Just ("approved", MBReviewApproved)) (reviewStateToStatus AscApproved)
+    assertEqual "map: rejected" (Just ("rejected", MBReviewRejected)) (reviewStateToStatus (AscRejected "REJECTED"))
+    assertEqual "map: prepare-for-submission not surfaced" Nothing (reviewStateToStatus AscPrepareForSubmission)
+    assertEqual "map: live (READY_FOR_SALE) not surfaced as review" Nothing (reviewStateToStatus AscLive)
+    -- externalReviewAction: the reconcile decision table (inferred, existing, proposed, sccOwns)
+    let inReview = Just ("3.4.0", "in_review", MBInReview)
+        existAt v = Just (v, "in_review")
+    assertEqual "decision: new → insert" (ExtInsert "3.4.0" "in_review" MBInReview) (externalReviewAction False Nothing inReview False)
+    assertEqual "decision: same version → update" (ExtUpdate "in_review" MBInReview) (externalReviewAction False (existAt "3.4.0") inReview False)
+    assertEqual "decision: different version → retire + insert" (ExtRetireAndInsert "3.4.0" "in_review" MBInReview) (externalReviewAction False (existAt "3.3.0") inReview False)
+    assertEqual "decision: scc owns + existing → complete" ExtComplete (externalReviewAction False (existAt "3.4.0") inReview True)
+    assertEqual "decision: scc owns + no existing → noop" ExtNoop (externalReviewAction False Nothing inReview True)
+    assertEqual "decision: no in-flight + existing → complete (went live)" ExtComplete (externalReviewAction False (existAt "3.4.0") Nothing False)
+    assertEqual "decision: no in-flight + no existing → noop" ExtNoop (externalReviewAction False Nothing Nothing False)
+    -- Android (inferred): an operator's approve/reject is NOT downgraded back to in_review (persistence fix)
+    assertEqual "decision: android approved not downgraded" ExtNoop (externalReviewAction True (Just ("3.4.0", "approved")) inReview False)
+    assertEqual "decision: android rejected not downgraded" ExtNoop (externalReviewAction True (Just ("3.4.0", "rejected")) inReview False)
+    -- ...but an approved build that left the track still completes, and a new version supersedes it
+    assertEqual "decision: android approved → went live completes" ExtComplete (externalReviewAction True (Just ("3.4.0", "approved")) Nothing False)
+    assertEqual "decision: android new version retires the approved one" (ExtRetireAndInsert "3.5.0" "in_review" MBInReview) (externalReviewAction True (Just ("3.4.0", "approved")) (Just ("3.5.0", "in_review", MBInReview)) False)
+    -- iOS (authoritative): a genuine resubmit (rejected → in_review) DOES update
+    assertEqual "decision: ios rejected→in_review updates" (ExtUpdate "in_review" MBInReview) (externalReviewAction False (Just ("3.4.0", "rejected")) inReview False)
+
+-- | Android out-of-band "pending review/publish" detection: parsing the
+-- production track, then the pure pick rule (an inProgress release parked at a
+-- near-zero userFraction with a code newer than the live completed version). The
+-- reconcile/dedup side is shared with iOS and covered by the [40] decision table
+-- (sccOwns ⇒ ExtComplete/ExtNoop, which is also how a promoted store-sync row
+-- suppresses a duplicate).
+testAndroidPendingPublish :: IO ()
+testAndroidPendingPublish = do
+    putStrLn "android pending-publish: track parse + pending pick rule"
+    -- parseProdTrackReleases: a pending submission sitting over the live build
+    assertEqual
+        "parse: pending inProgress + live completed"
+        [ ProdTrackRelease "3.4.0" 451 "inProgress" (Just 1.0e-6)
+        , ProdTrackRelease "3.3.9" 450 "completed" Nothing
+        ]
+        ( parseProdTrackReleases
+            "{\"releases\":[{\"name\":\"3.4.0\",\"status\":\"inProgress\",\"userFraction\":0.000001,\"versionCodes\":[\"451\"]},{\"name\":\"3.3.9\",\"status\":\"completed\",\"versionCodes\":[\"450\"]}]}"
+        )
+    assertEqual "parse: undecodable body → no releases" [] (parseProdTrackReleases "not json")
+    -- pendingPublishRelease decision table (threshold = 1%)
+    let thr = 0.01
+        live = ProdTrackRelease "3.3.9" 450 "completed" Nothing
+    assertEqual
+        "pending: inProgress @ ~0 over live → surfaced"
+        (Just ("3.4.0", 451))
+        (pendingPublishRelease thr [ProdTrackRelease "3.4.0" 451 "inProgress" (Just 1.0e-6), live])
+    assertEqual
+        "pending: only a live completed version → nothing"
+        Nothing
+        (pendingPublishRelease thr [live])
+    assertEqual
+        "pending: active rollout (fraction above threshold) → not pending"
+        Nothing
+        (pendingPublishRelease thr [ProdTrackRelease "3.4.0" 451 "inProgress" (Just 0.5), live])
+    assertEqual
+        "pending: inProgress not newer than live → nothing"
+        Nothing
+        (pendingPublishRelease thr [ProdTrackRelease "3.4.0" 449 "inProgress" (Just 1.0e-6), live])
+    assertEqual
+        "pending: first-ever submission (no live completed) → surfaced"
+        (Just ("1.0.0", 1))
+        (pendingPublishRelease thr [ProdTrackRelease "1.0.0" 1 "inProgress" (Just 1.0e-6)])
+    assertEqual
+        "pending: inProgress with no fraction (malformed) → nothing"
+        Nothing
+        (pendingPublishRelease thr [ProdTrackRelease "3.4.0" 451 "inProgress" Nothing, live])
+    assertEqual
+        "pending: halted (operator-paused) is not pending-publish"
+        Nothing
+        (pendingPublishRelease thr [ProdTrackRelease "3.4.0" 451 "halted" (Just 1.0e-6), live])
+    assertEqual
+        "pending: picks the highest-code pending release"
+        (Just ("3.4.1", 452))
+        ( pendingPublishRelease
+            thr
+            [ ProdTrackRelease "3.4.0" 451 "inProgress" (Just 1.0e-6)
+            , ProdTrackRelease "3.4.1" 452 "inProgress" (Just 1.0e-6)
+            , live
+            ]
+        )
+
+-- | The list-view dedup that hides a store-sync internal/TestFlight snapshot when
+-- an active EXTERNAL_REVIEW row already represents the same build (same identity
+-- key). Covers the "two rows for one version+build" the list was showing.
+testListDedup :: IO ()
+testListDedup = do
+    putStrLn "list dedup: hide store-sync snapshot when external review owns the build"
+    let inReview = ["3.3.17", "3.3.73"] :: [Text]
+    assertBool
+        "hide: internal snapshot whose build is in external review"
+        (not (keepSnapshot inReview (Just "STORE_SYNC", Just "internal", "3.3.17")))
+    assertBool
+        "hide: testflight snapshot whose build is in external review"
+        (not (keepSnapshot inReview (Just "STORE_SYNC", Just "testflight", "3.3.73")))
+    assertBool
+        "keep: the external-review row itself"
+        (keepSnapshot inReview (Just "EXTERNAL_REVIEW", Nothing, "3.3.17"))
+    assertBool
+        "keep: internal snapshot with no external review for its build"
+        (keepSnapshot ([] :: [Text]) (Just "STORE_SYNC", Just "internal", "3.3.17"))
+    assertBool
+        "keep: production snapshot even if a key matches (only pre-prod tracks hide)"
+        (keepSnapshot inReview (Just "STORE_SYNC", Just "production", "3.3.17"))
+    assertBool
+        "keep: internal snapshot whose version has no external review"
+        (keepSnapshot inReview (Just "STORE_SYNC", Just "internal", "9.9.9"))
+    assertBool
+        "keep: a normal SCC build (not a store-sync snapshot)"
+        (keepSnapshot inReview (Just "MANUAL", Nothing, "3.3.17"))
+
+-- | Detecting a rollout started in the Play Console on an Android release SCC
+-- still has as in-review / approved-held: a live production fraction at/above the
+-- rollout floor (vs the ~0 review fraction), with OUR version code, means it was
+-- approved AND ramped externally — SCC should adopt it.
+testConsoleRolloutDetect :: IO ()
+testConsoleRolloutDetect = do
+    putStrLn "console rollout detect: approved/in-review android adopts a Console-set %"
+    let thr = 0.01
+        ourCode = 460
+        st = PlayRolloutState
+    assertEqual "still at review fraction (~0) → leave as-is" Nothing (detectConsoleRollout thr ourCode (st "inProgress" (Just 1.0e-6) ["460"]))
+    assertEqual "below the rollout floor → not releasing yet" Nothing (detectConsoleRollout thr ourCode (st "inProgress" (Just 0.005) ["460"]))
+    assertEqual "console ramped to 10% → rolling_out" (Just (SetRollout "rolling_out" (Just 10))) (detectConsoleRollout thr ourCode (st "inProgress" (Just 0.1) ["460"]))
+    assertEqual "console halted at 10% → halted" (Just (SetRollout "halted" (Just 10))) (detectConsoleRollout thr ourCode (st "halted" (Just 0.1) ["460"]))
+    assertEqual "console fully released → complete" (Just CompleteRollout) (detectConsoleRollout thr ourCode (st "completed" Nothing ["460"]))
+    assertEqual "different version live (rejection-revert) → ignore" Nothing (detectConsoleRollout thr ourCode (st "completed" Nothing ["459"]))
+    assertEqual "different version rolling → ignore" Nothing (detectConsoleRollout thr ourCode (st "inProgress" (Just 0.2) ["999"]))
+
+-- | Adopting an out-of-band App Store Connect release on an iOS row SCC still has
+-- as in-review / approved-held: only READY_FOR_SALE (AscLive) is adopted — phased
+-- → rolling_out/halted/complete at the ramp %, non-phased (INACTIVE) → fully live
+-- (complete). Held / in-review states are left alone.
+testIosReleaseDetect :: IO ()
+testIosReleaseDetect = do
+    putStrLn "ios release detect: approved iOS adopts an out-of-band App Store Connect release"
+    assertEqual "held (PENDING_DEVELOPER_RELEASE) → no change" Nothing (detectIosRelease AscApproved (AscPhasedState "INACTIVE" Nothing))
+    assertEqual "still in review → no change" Nothing (detectIosRelease AscInReview (AscPhasedState "INACTIVE" Nothing))
+    assertEqual "live + phased ACTIVE day2 → rolling_out @ 5%" (Just (SetRollout "rolling_out" (Just 5))) (detectIosRelease AscLive (AscPhasedState "ACTIVE" (Just 2)))
+    assertEqual "live + phased PAUSED day3 → halted @ 10%" (Just (SetRollout "halted" (Just 10))) (detectIosRelease AscLive (AscPhasedState "PAUSED" (Just 3)))
+    assertEqual "live + phased COMPLETE → complete" (Just CompleteRollout) (detectIosRelease AscLive (AscPhasedState "COMPLETE" (Just 6)))
+    assertEqual "live + no phasing (INACTIVE) → complete" (Just CompleteRollout) (detectIosRelease AscLive (AscPhasedState "INACTIVE" Nothing))
 
 testVersionBumpLogic :: IO ()
 testVersionBumpLogic = do

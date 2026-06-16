@@ -9,6 +9,7 @@ export type LatestBuild = {
   tagPushed?: string;
   commitSha?: string;
   completedAt: string;
+  track?: string | null; // store track: production | internal | testflight (store-sync builds)
 };
 
 export type AppCatalogEntry = {
@@ -25,7 +26,16 @@ export type AppCatalogEntry = {
   createdAt: string;
   latestReleaseBuild?: LatestBuild | null;
   latestDebugBuild?: LatestBuild | null;
+  // Per-track latest builds (from store-sync metadata.tracks). Drive the
+  // create-page prod/internal badges + changelog base toggle. `track` on each
+  // is 'production' | 'internal' (iOS internal == TestFlight).
+  latestProdBuild?: LatestBuild | null;
+  latestInternalBuild?: LatestBuild | null;
 };
+
+// Changelog base track: which store build the new branch is diffed against.
+// Defaults to 'production'.
+export type ChangelogBase = 'production' | 'internal';
 
 // Build type is fixed per deployment env (master = debug, production =
 // release) via the backend's mobile_build_type config flag. The frontend

@@ -9,8 +9,10 @@ import {
   useImmediateRevert, useDeleteRelease, useRestartRelease,
   useFastForwardRelease, useImmediateRevertWithSync,
   useReleaseDiff, usePodHealth, useResources, useUpdateTracker,
-  useMobileApps, useDispatchMobileReleases,
+  useMobileApps, useDispatchMobileReleases, useMobileRollout,
 } from '../hooks';
+import { mobileDisplayStatus, lifecycleFromRollout } from '../components/mobileStage';
+import { versionWithBuild } from '../versionLabel';
 import type { RolloutHistoryEvent, RolloutEvent, RolloutStrategyEvent, PodInfo, ABValidationStatus } from '../api';
 import { AB_STATUS_LABELS, AB_STATUS_COLORS } from '../api';
 import type { LatestBuild } from '../types';
@@ -21,6 +23,7 @@ import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { AiReleasePanel } from '../components/AiReleasePanel';
+import { MobileRolloutPanel } from '../components/MobileRolloutPanel';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import {
   Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap,
@@ -633,25 +636,43 @@ const formatShortDate = (d: string) => {
   return date.toLocaleDateString('en-IN', { month: 'short', day: '2-digit' });
 };
 
-const PrevBuildBadge = ({ build, label }: { build: LatestBuild; label: string }) => (
-  <span
-    className={cn(
-      'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium',
-      label === 'debug'
-        ? 'bg-amber-50 text-amber-700 border border-amber-200'
-        : 'bg-emerald-50 text-emerald-700 border border-emerald-200',
-    )}
-  >
-    <span className="uppercase">{label}</span>
-    <span className="font-mono">v{build.version}</span>
-    {build.versionCode != null && (
-      <span className="text-[9px] opacity-70">+{build.versionCode}</span>
-    )}
-    {build.completedAt && (
-      <span className="opacity-60">{formatShortDate(build.completedAt)}</span>
-    )}
-  </span>
-);
+const PrevBuildBadge = ({ build, label, platform }: { build: LatestBuild; label: string; platform?: string }) => {
+  // Show the store track (prod / internal / testflight) over the generic "RELEASE"
+  // label. Pre-store_track rows fall back by platform: iOS = TestFlight, Android = prod.
+  const track =
+    build.track ?? (label === 'release' ? (platform === 'ios' ? 'testflight' : 'production') : null);
+  const trackLabel =
+    track === 'production'
+      ? 'prod'
+      : track === 'internal'
+        ? 'internal'
+        : track === 'testflight'
+          ? 'testflight'
+          : null;
+  const isLive = track === 'production';
+  const display = label === 'debug' ? label : trackLabel ?? label;
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium',
+        label === 'debug'
+          ? 'bg-amber-50 text-amber-700 border border-amber-200'
+          : trackLabel && !isLive
+            ? 'bg-sky-50 text-sky-700 border border-sky-200'
+            : 'bg-emerald-50 text-emerald-700 border border-emerald-200',
+      )}
+    >
+      <span className="uppercase">{display}</span>
+      <span className="font-mono">v{build.version}</span>
+      {build.versionCode != null && (
+        <span className="text-[9px] opacity-70">+{build.versionCode}</span>
+      )}
+      {build.completedAt && (
+        <span className="opacity-60">{formatShortDate(build.completedAt)}</span>
+      )}
+    </span>
+  );
+};
 
 const MobileReleaseDetailSection: React.FC<{
   release: any;
@@ -736,7 +757,7 @@ const MobileReleaseDetailSection: React.FC<{
         </div>
         <div>
           <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">Version</div>
-          <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm font-mono text-xs min-h-[38px] break-all">{release.new_version || '-'}</div>
+          <div className="border border-zinc-100 rounded-lg px-3 py-2 bg-zinc-50 text-sm font-mono text-xs min-h-[38px] break-all">{versionWithBuild(release) || '-'}</div>
         </div>
         <div>
           <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">Matrix Job Status</div>
@@ -793,10 +814,10 @@ const MobileReleaseDetailSection: React.FC<{
         <div className="flex items-center gap-2 flex-wrap mt-1 mb-3">
           <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">Latest builds:</span>
           {matchedApp.latestReleaseBuild && (
-            <PrevBuildBadge build={matchedApp.latestReleaseBuild} label="release" />
+            <PrevBuildBadge build={matchedApp.latestReleaseBuild} label="release" platform={matchedApp.platform} />
           )}
           {matchedApp.latestDebugBuild && (
-            <PrevBuildBadge build={matchedApp.latestDebugBuild} label="debug" />
+            <PrevBuildBadge build={matchedApp.latestDebugBuild} label="debug" platform={matchedApp.platform} />
           )}
         </div>
       )}
@@ -869,6 +890,11 @@ const ReleaseSummary: React.FC = () => {
   const deleteMut = useDeleteRelease();
   const restartMut = useRestartRelease();
   const fastForwardMut = useFastForwardRelease();
+  // Mobile promote→rollout detail, used to derive the top-level status badge +
+  // gate the rollout-runner action buttons. `enabled` is read off the (possibly
+  // still-loading) release so the hook stays above the early returns; it shares
+  // the ['mobile-rollout', id] cache with the rollout panel below (deduped).
+  const rolloutQ = useMobileRollout(id, release?.tracker_type === 'MobileBuild');
   const immRevertSyncMut = useImmediateRevertWithSync();
   const updateTrackerMut = useUpdateTracker();
   const dispatchMobileMut = useDispatchMobileReleases();
@@ -960,6 +986,25 @@ const ReleaseSummary: React.FC = () => {
   // the other useState calls above so it lives ABOVE the !release
   // early-return (rules of hooks). These are pure reads of `release`.
   const isMobile = category === 'MobileBuild';
+
+  // Operator-facing badge for a mobile release in the promote→rollout lifecycle.
+  // We override the raw engine status only when it's the misleading one —
+  // INPROGRESS (nothing's progressing — it's awaiting a human; and it is NOT a
+  // "pause") — or for a promotable store-sync snapshot (a COMPLETED row that can
+  // still be promoted). Terminal states (ABORTED/REVERTED/DISCARDED) and a
+  // genuinely-building release keep their truthful raw StatusBadge, so an aborted
+  // row left at MBTagPushed never reads "Ready to promote".
+  const rollout = isMobile ? rolloutQ.data : undefined;
+  const isPromotableSnapshot =
+    rollout?.rdStoreTrack === 'internal' || rollout?.rdStoreTrack === 'testflight';
+  const mobileStatus =
+    rollout && (s === 'INPROGRESS' || isPromotableSnapshot)
+      ? mobileDisplayStatus(lifecycleFromRollout(rollout))
+      : null;
+  // While the build sits in a lifecycle stage, the generic Pause / Fast-Forward
+  // (rollout-runner) controls don't apply — the real action is Promote/Rollout in
+  // the Store panel. Abort still applies (cancel the release).
+  const inMobileLifecycle = !!mobileStatus;
 
   const matchedMobileApp = isMobile
     ? mobileApps.find(
@@ -1053,7 +1098,11 @@ const ReleaseSummary: React.FC = () => {
       <div className="flex flex-col gap-3 mb-4 sm:mb-5">
         <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
           <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Release Summary</h1>
-          <StatusBadge status={release.status} />
+          {mobileStatus ? (
+            <Badge variant={mobileStatus.variant} dot>{mobileStatus.label}</Badge>
+          ) : (
+            <StatusBadge status={release.status} />
+          )}
           {(release.release_context?.revert === 1 || revertsTarget) && <Badge variant="purple" dot>REVERT</Badge>}
           {isMobile && release.release_context?.build_type === 'debug' && (
             <Badge variant="warning" dot>DEBUG</Badge>
@@ -1106,7 +1155,7 @@ const ReleaseSummary: React.FC = () => {
               <Flame className="w-3.5 h-3.5" />
               Crashlytics
               {matchedMobileApp?.packageName && (
-                <span className="opacity-80 font-normal">· {release.new_version || release.appGroup}</span>
+                <span className="opacity-80 font-normal">· {versionWithBuild(release) || release.appGroup}</span>
               )}
               <ExternalLink className="w-3 h-3 opacity-70" />
             </a>
@@ -1131,12 +1180,20 @@ const ReleaseSummary: React.FC = () => {
           {(s === 'INPROGRESS') && (
             <>
               <PermissionGate product="autopilot" permission="RELEASE_PAUSE">
-                <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
+                {/* Pause/Fast-Forward are rollout-runner controls. They don't apply
+                    to a mobile build held on the store awaiting Promote — the real
+                    action lives in the Store release panel below. Abort stays
+                    (cancel the release). */}
+                {!inMobileLifecycle && (
+                  <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
+                )}
                 <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
               </PermissionGate>
-              <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
-                <Button size="sm" variant="outline" className="border-amber-300 bg-amber-600 text-white hover:bg-amber-700" loading={fastForwardMut.isPending} onClick={() => doAction('fast forward', () => fastForwardMut.mutateAsync(id!), false, 'Skip the current cooloff and advance to the next rollout step. The runner will pick up the change on its next poll.')}><FastForward className="w-3.5 h-3.5" /> Fast Forward</Button>
-              </PermissionGate>
+              {!isMobile && (
+                <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+                  <Button size="sm" variant="outline" className="border-amber-300 bg-amber-600 text-white hover:bg-amber-700" loading={fastForwardMut.isPending} onClick={() => doAction('fast forward', () => fastForwardMut.mutateAsync(id!), false, 'Skip the current cooloff and advance to the next rollout step. The runner will pick up the change on its next poll.')}><FastForward className="w-3.5 h-3.5" /> Fast Forward</Button>
+                </PermissionGate>
+              )}
             </>
           )}
           {s === 'PAUSED' && (
@@ -1221,6 +1278,32 @@ const ReleaseSummary: React.FC = () => {
             {isMobile && release.release_context?.build_type !== 'debug' && (
               <div className="mb-6">
                 <AiReleasePanel releaseId={id!} />
+              </div>
+            )}
+            {/* Promote-to-review + staged-rollout controls. Self-hiding when
+                staged rollout is disabled or the build isn't done — release
+                (non-debug) mobile builds only. */}
+            {isMobile && release.release_context?.build_type !== 'debug' && (
+              <div className="mb-6">
+                <MobileRolloutPanel
+                  releaseId={id!}
+                  aiNotes={{
+                    app: release.appGroup,
+                    surface: release.service,
+                    platform: release.env,
+                    branch: release.sourceRef || 'main',
+                    versionName: release.new_version,
+                    // Match the create-time AI-summary cache key: iOS had no build
+                    // code yet (workflow assigns it), so its summary was keyed with
+                    // an empty code; Android used the entered code.
+                    versionCode:
+                      release.env === 'ios'
+                        ? ''
+                        : release.release_context?.version_code != null
+                          ? String(release.release_context.version_code)
+                          : '',
+                  }}
+                />
               </div>
             )}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 mb-6">
@@ -1318,7 +1401,7 @@ const ReleaseSummary: React.FC = () => {
                         )}
                       </div>
                     </div>
-                    <InfoField label="Version" value={release.new_version} mono />
+                    <InfoField label="Version" value={versionWithBuild(release)} mono />
                   </>
                 ) : (
                   <>

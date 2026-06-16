@@ -1,20 +1,37 @@
-// Config keys that belong to the Mobile tab. (Mobile secrets — GitHub App / Play /
-// App Store Connect — are NOT here: they live in env, never server_config.)
-export const MOBILE_SERVER_CONFIG_NAMES = new Set([
-  'mobile_dispatch_enabled',
-  'mobile_tag_confirm_timeout_minutes',
-  'store_sync_enabled',
-  'store_sync_interval_minutes',
-  'version_preview_enabled',
-  // AI (Grid). The SC_AI_API_KEY secret is NOT here — it lives in env, never
-  // server_config (like the other mobile secrets).
-  'ai_enabled',
-  'ai_base_url',
-  'ai_model',
-  'ai_allowed_host_suffix',
-  'ai_temperature',
-  'ai_cache_ttl_hours',
-]);
+// The Mobile tab's configs, split into display sub-categories. This is the single
+// source of truth — MOBILE_SERVER_CONFIG_NAMES is derived from it, so adding a key
+// here is enough. (Mobile secrets — GitHub App / Play / App Store Connect /
+// SC_AI_API_KEY — are NOT here: they live in env, never server_config.)
+export const MOBILE_CONFIG_CATEGORIES: { name: string; keys: string[] }[] = [
+  {
+    name: 'Build & Dispatch',
+    keys: ['mobile_dispatch_enabled', 'mobile_tag_confirm_timeout_minutes'],
+  },
+  {
+    name: 'Store Sync',
+    keys: ['store_sync_enabled', 'store_sync_interval_minutes', 'version_preview_enabled'],
+  },
+  {
+    // Promote-to-review + staged rollout (mobile_staged_rollout_enabled gates the feature).
+    name: 'Release Review & Rollout',
+    keys: [
+      'mobile_staged_rollout_enabled',
+      'review_poll_interval_sec',
+      'review_poll_timeout_days',
+      'android_review_rollout_fraction',
+    ],
+  },
+  {
+    // AI (Grid) changelog summaries.
+    name: 'AI Changelog',
+    keys: ['ai_enabled', 'ai_base_url', 'ai_model', 'ai_allowed_host_suffix', 'ai_temperature', 'ai_cache_ttl_hours'],
+  },
+];
+
+// Flat set of every config key on the Mobile tab (derived from the categories above).
+export const MOBILE_SERVER_CONFIG_NAMES = new Set<string>(
+  MOBILE_CONFIG_CATEGORIES.flatMap(c => c.keys),
+);
 
 export const isMobileServerConfig = (name: string): boolean =>
   MOBILE_SERVER_CONFIG_NAMES.has(name);

@@ -309,6 +309,33 @@ autopilotConfigs =
         MobileGroup
         "Minutes the ConfirmTag stage waits for the build's Git tag before failing the release (tag_timeout → ABORTED). Release builds only."
         (Just "autopilot")
+    , -- Staged store rollout + review polling. All gated behind
+      -- mobile_staged_rollout_enabled; when off, release builds keep
+      -- auto-completing at tag-push (legacy behavior, no review hold).
+      ConfigEntry
+        "mobile_staged_rollout_enabled"
+        (BoolConfig False)
+        MobileGroup
+        "Master switch for staged store rollout. When on, release builds hold at tag-push for an explicit promote-to-review action instead of auto-completing. Off keeps the legacy auto-complete behavior."
+        (Just "autopilot")
+    , ConfigEntry
+        "review_poll_interval_sec"
+        (IntConfig 1200)
+        MobileGroup
+        "How often the review-poll stage checks App Store Connect for the iOS review decision (seconds). Default 1200 = 20 min."
+        (Just "autopilot")
+    , ConfigEntry
+        "review_poll_timeout_days"
+        (IntConfig 7)
+        MobileGroup
+        "Days the review-poll stage waits for a store review decision before emitting a soft nudge. Does not abort the release."
+        (Just "autopilot")
+    , ConfigEntry
+        "android_review_rollout_fraction"
+        (DoubleConfig 0.000001)
+        MobileGroup
+        "Effectively-zero Play rollout fraction used when promoting to production for review, so approval exposes ~0 users until the operator rolls out. Must stay strictly in (0,1)."
+        (Just "autopilot")
     , -- AI (Grid / LiteLLM). The SC_AI_API_KEY secret is NOT here — it lives in env.
       ConfigEntry
         "ai_enabled"

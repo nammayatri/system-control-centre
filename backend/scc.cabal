@@ -68,6 +68,7 @@ library
       Products.Autopilot.Mobile.Handlers.AppCatalog
       Products.Autopilot.Mobile.Handlers.Live
       Products.Autopilot.Mobile.Handlers.Release
+      Products.Autopilot.Mobile.Handlers.Rollout
       Products.Autopilot.Mobile.Handlers.Versions
       Products.Autopilot.Mobile.Routes
       Products.Autopilot.Mobile.Versioning

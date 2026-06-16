@@ -13,6 +13,7 @@ import type {
   AppCatalogEntry,
   BranchInfo,
   BuildType,
+  ChangelogBase,
   CreateMobileReleasesItem,
   CreateMobileReleasesReq,
   LatestBuild,
@@ -45,25 +46,58 @@ const formatShort = (d: string) => {
   return date.toLocaleDateString('en-IN', { month: 'short', day: '2-digit' });
 };
 
-const LatestBuildBadge = ({ build, label }: { build: LatestBuild; label: string }) => (
-  <span
-    className={cn(
-      'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium',
-      label === 'debug'
-        ? 'bg-amber-50 text-amber-700 border border-amber-200'
-        : 'bg-emerald-50 text-emerald-700 border border-emerald-200',
-    )}
-  >
-    <span className="uppercase">{label}</span>
-    <span className="font-mono">v{build.version}</span>
-    {build.versionCode != null && (
-      <span className="text-[9px] opacity-70">+{build.versionCode}</span>
-    )}
-    {build.completedAt && (
-      <span className="opacity-60">{formatShort(build.completedAt)}</span>
-    )}
-  </span>
-);
+const LatestBuildBadge = ({ build, label, platform }: { build: LatestBuild; label: string; platform?: string }) => {
+  // Prefer the store track (prod / internal / testflight) over the generic
+  // "RELEASE" build-type label. When a row pre-dates store_track, infer from the
+  // platform: iOS store builds are TestFlight; Android store builds are production.
+  const track =
+    build.track ?? (label === 'release' ? (platform === 'ios' ? 'testflight' : 'production') : null);
+  const trackLabel =
+    track === 'production'
+      ? 'prod'
+      : track === 'internal'
+        ? // iOS "internal" distribution is TestFlight — label it as such.
+          platform === 'ios'
+          ? 'testflight'
+          : 'internal'
+        : track === 'testflight'
+          ? 'testflight'
+          : null;
+  const isLive = track === 'production';
+  const display = label === 'debug' ? label : trackLabel ?? label;
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium',
+        label === 'debug'
+          ? 'bg-amber-50 text-amber-700 border border-amber-200'
+          : trackLabel && !isLive
+            ? 'bg-sky-50 text-sky-700 border border-sky-200'
+            : 'bg-emerald-50 text-emerald-700 border border-emerald-200',
+      )}
+    >
+      <span className="uppercase">{display}</span>
+      <span className="font-mono">v{build.version}</span>
+      {build.versionCode != null && (
+        <span className="text-[9px] opacity-70">+{build.versionCode}</span>
+      )}
+      {build.completedAt && (
+        <span className="opacity-60">{formatShort(build.completedAt)}</span>
+      )}
+    </span>
+  );
+};
+
+// Store-track badges to show for an app: prefer the per-track (prod + internal)
+// builds from store-sync; fall back to the single leading "release" build for
+// rows synced before per-track snapshots existed.
+const storeBuildsForApp = (a: AppCatalogEntry): LatestBuild[] => {
+  const out: LatestBuild[] = [];
+  if (a.latestProdBuild) out.push(a.latestProdBuild);
+  if (a.latestInternalBuild) out.push(a.latestInternalBuild);
+  if (out.length === 0 && a.latestReleaseBuild) out.push(a.latestReleaseBuild);
+  return out;
+};
 
 export default function CreateMobileRelease() {
   const navigate = useNavigate();
@@ -234,9 +268,13 @@ export default function CreateMobileRelease() {
         })),
     [selectedIds, enabledApps],
   );
+  // Changelog base track: diff the new branch against the prod or the internal
+  // store build. Defaults to prod. Applies across all apps in the changelog.
+  const [changelogBase, setChangelogBase] = useState<ChangelogBase>('production');
   const changelogQueries = useChangelogPreviews(
     changelogApps,
     sourceRef?.trim() || undefined,
+    changelogBase,
   );
   const [changelogTab, setChangelogTab] = useState(0);
   useEffect(() => { setChangelogTab(0); }, [selectedIds.join(',')]);
@@ -443,23 +481,24 @@ export default function CreateMobileRelease() {
                                         })}
                                       </div>
                                     </div>
-                                    {entries.some((a) => a.latestReleaseBuild || a.latestDebugBuild) && (
+                                    {entries.some((a) => storeBuildsForApp(a).length || a.latestDebugBuild) && (
                                       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-2">
-                                        {entries.map((a) =>
-                                          a.latestReleaseBuild || a.latestDebugBuild ? (
+                                        {entries.map((a) => {
+                                          const stores = storeBuildsForApp(a);
+                                          return stores.length || a.latestDebugBuild ? (
                                             <div key={a.id} className="inline-flex items-center gap-1">
                                               <span className="text-[10px] uppercase tracking-wide text-zinc-400">
                                                 {a.platform === 'ios' ? 'iOS' : 'And'}
                                               </span>
-                                              {a.latestReleaseBuild && (
-                                                <LatestBuildBadge build={a.latestReleaseBuild} label="release" />
-                                              )}
+                                              {stores.map((b, i) => (
+                                                <LatestBuildBadge key={i} build={b} label="release" platform={a.platform} />
+                                              ))}
                                               {a.latestDebugBuild && (
-                                                <LatestBuildBadge build={a.latestDebugBuild} label="debug" />
+                                                <LatestBuildBadge build={a.latestDebugBuild} label="debug" platform={a.platform} />
                                               )}
                                             </div>
-                                          ) : null,
-                                        )}
+                                          ) : null;
+                                        })}
                                       </div>
                                     )}
                                   </div>
@@ -589,18 +628,41 @@ export default function CreateMobileRelease() {
           return (
             <section className="bg-white rounded-xl border border-zinc-200">
               <header className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-3">
                   <h2 className="text-base sm:text-lg font-semibold text-zinc-900 flex items-center gap-2">
                     <GitCommit className="w-4 h-4 text-zinc-500" />
                     Commits since last release
                   </h2>
-                  {q.isFetching && (
-                    <span className="text-xs text-zinc-400">Loading…</span>
-                  )}
+                  <div className="flex items-center gap-2 shrink-0">
+                    {q.isFetching && (
+                      <span className="text-xs text-zinc-400">Loading…</span>
+                    )}
+                    {/* Base-track toggle: diff against the prod or the internal store build. */}
+                    <div className="inline-flex rounded-md border border-zinc-200 overflow-hidden text-[11px] font-medium">
+                      {(['production', 'internal'] as const).map((b) => (
+                        <button
+                          key={b}
+                          type="button"
+                          onClick={() => setChangelogBase(b)}
+                          title={b === 'production' ? 'Diff against the live production build' : 'Diff against the latest internal / TestFlight build'}
+                          className={cn(
+                            'px-2.5 py-1 transition-colors',
+                            changelogBase === b
+                              ? 'bg-zinc-900 text-white'
+                              : 'bg-white text-zinc-500 hover:text-zinc-700',
+                          )}
+                        >
+                          {b === 'production' ? 'Prod' : 'Internal'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
                 {q.data?.cpBaseVersion && (
-                  <p className="text-xs text-zinc-500 mt-0.5">
-                    Base: <span className="font-mono text-zinc-700">
+                  <p className="text-xs text-zinc-500 mt-1">
+                    Base
+                    <span className="text-zinc-400"> ({changelogBase === 'production' ? 'prod' : 'internal'})</span>
+                    : <span className="font-mono text-zinc-700">
                       {q.data.cpBaseTag || q.data.cpBaseVersion}
                     </span>
                     {' → '}
@@ -646,6 +708,7 @@ export default function CreateMobileRelease() {
                     surface={app.surface}
                     platform={app.platform}
                     branch={sourceRef}
+                    base={changelogBase}
                     versionName={versionEdits[app.id]?.versionName || ''}
                     versionCode={versionEdits[app.id]?.versionCode || ''}
                   />

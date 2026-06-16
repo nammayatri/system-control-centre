@@ -64,6 +64,7 @@ export function MobileChangelogAiSummary({
   surface,
   platform,
   branch,
+  base = 'production',
   versionName = '',
   versionCode = '',
 }: {
@@ -71,13 +72,14 @@ export function MobileChangelogAiSummary({
   surface: string;
   platform: string;
   branch: string;
+  base?: string;
   versionName?: string;
   versionCode?: string;
 }) {
   const enabled = !!(app && surface && platform && branch);
   const q = useQuery({
-    queryKey: ['mobile-changelog-ai', app, surface, platform, branch, versionName, versionCode],
-    queryFn: () => mobileApi.changelogAiSummary(app, surface, platform, branch, versionName, versionCode),
+    queryKey: ['mobile-changelog-ai', app, surface, platform, branch, base, versionName, versionCode],
+    queryFn: () => mobileApi.changelogAiSummary(app, surface, platform, branch, base, versionName, versionCode),
     enabled,
     // Poll only while the detached generation is in flight; stop once ready/failed.
     refetchInterval: (query) => (query.state.data?.status === 'pending' ? 4000 : false),

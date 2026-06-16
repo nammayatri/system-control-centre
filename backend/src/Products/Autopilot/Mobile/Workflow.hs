@@ -198,9 +198,12 @@ stageResolveRunId =
         }
 
 -- | Stage 5 — poll @\/runs/:id\/jobs@; track this row's matrix job.
+-- Skip once the build is submitted (MBSubmittedToStore) — its job is done by then.
+-- Guarding on terminal alone would re-poll forever for a staged-rollout-held release
+-- (parked non-terminal at MBTagPushed), spamming MATRIX_JOB_UPDATED + GitHub calls.
 stagePollMatrixJobs =
     (mkStage "PollMatrixJobs" execPollMatrixJobs)
-        { stageGuard = mbStatusTerminal
+        { stageGuard = mbStatusReached MBSubmittedToStore
         }
 
 -- | Stage 6 — list refs/tags matching the per-app prefix; backfill context.
@@ -916,8 +919,23 @@ hasn't pushed it yet", never "use some other tag".
 selectBuildTag :: Text -> Text -> Maybe Int32 -> [Text] -> Maybe Text
 selectBuildTag prefix version mCode refs =
     let names = map stripRefsTags refs
-        expected = prefix <> version <> maybe "" (\c -> "+" <> T.pack (show c)) mCode
-     in if expected `elem` names then Just expected else Nothing
+        bare = prefix <> version -- "{prefix}{version}" (no +code)
+        plusPrefix = bare <> "+" -- "{prefix}{version}+"
+        suffixOf n = T.drop (T.length plusPrefix) n
+        isCoded n = plusPrefix `T.isPrefixOf` n && not (T.null (suffixOf n)) && T.all isDigit (suffixOf n)
+        coded = filter isCoded names
+        codeOf n = T.foldl' (\acc c -> acc * 10 + digitToInt c) (0 :: Int) (suffixOf n)
+     in case mCode of
+            -- Known code (Android consumer — SCC sends version_code on dispatch): exact match.
+            Just c ->
+                let t = plusPrefix <> T.pack (show c)
+                 in if t `elem` names then Just t else Nothing
+            -- Unknown code (iOS — the workflow assigns the build number): match the
+            -- {prefix}{version}+<digits> the build actually pushed (highest code wins),
+            -- falling back to a bare {prefix}{version} tag if that's the scheme.
+            Nothing -> case sortOn (Down . codeOf) coded of
+                (t : _) -> Just t
+                [] -> if bare `elem` names then Just bare else Nothing
 
 {- | Select the tag a PROVIDER prod build pushed. Provider workflows tag as
 @{acName}-v{version}-{code}@. We match the @{acName}-v{version}-@ prefix (numeric
@@ -1161,6 +1179,15 @@ execPollReview = mobileStage "PollReview" $ do
                                     setReviewDecided (releaseId rt) "approved" now Nothing
                                     advanceTo now MBReviewApproved
                                     logEvent (releaseId rt) "REVIEW_APPROVED" $ object ["store" .= ("asc" :: Text)]
+                                    pure StageSuccess
+                                Right AscLive -> do
+                                    -- Already live in the App Store (released outside SCC during
+                                    -- review). Record the approval + advance so the poll stops; the
+                                    -- Phase-7 rollout reconciler then adopts the live state
+                                    -- (rolling_out for a phased release, else completed).
+                                    setReviewDecided (releaseId rt) "approved" now Nothing
+                                    advanceTo now MBReviewApproved
+                                    logEvent (releaseId rt) "REVIEW_APPROVED" $ object ["store" .= ("asc" :: Text), "already_live" .= True]
                                     pure StageSuccess
                                 Right (AscRejected reason) -> do
                                     setReviewDecided (releaseId rt) "rejected" now (Just reason)

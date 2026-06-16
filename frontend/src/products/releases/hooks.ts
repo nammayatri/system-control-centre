@@ -383,6 +383,23 @@ export function useDispatchMobileReleases() {
   });
 }
 
+/**
+ * Read a mobile release's promote→rollout detail (`GET /releases/:id/rollout`).
+ * Shares the `['mobile-rollout', id]` cache with MobileRolloutPanel, so when both
+ * mount on the detail page react-query dedupes to a single request. `retry:false`
+ * because a 400 (staged rollout off / not a mobile release) is expected and must
+ * not retry-spam — the caller treats an error as "no derived status, use raw".
+ */
+export function useMobileRollout(releaseId: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: ['mobile-rollout', releaseId],
+    queryFn: () => mobileApi.getRolloutDetail(releaseId!),
+    enabled: !!releaseId && enabled,
+    retry: false,
+    staleTime: 5000,
+  });
+}
+
 export function useLiveReleases(category: 'all' | 'backend' | 'mobile' = 'all') {
   return useQuery({
     queryKey: ['releases', 'live', category],
@@ -393,11 +410,15 @@ export function useLiveReleases(category: 'all' | 'backend' | 'mobile' = 'all') 
 
 export type ChangelogApp = { id: number; name: string; surface: string; platform: string; label: string };
 
-export function useChangelogPreviews(apps: ChangelogApp[], branch: string | undefined) {
+export function useChangelogPreviews(
+  apps: ChangelogApp[],
+  branch: string | undefined,
+  base?: string,
+) {
   return useQueries({
     queries: apps.map((app) => ({
-      queryKey: ['mobile', 'changelog-preview', app.name, app.surface, app.platform, branch],
-      queryFn: () => mobileApi.changelogPreview(app.name, app.surface, app.platform, branch!),
+      queryKey: ['mobile', 'changelog-preview', app.name, app.surface, app.platform, branch, base ?? 'production'],
+      queryFn: () => mobileApi.changelogPreview(app.name, app.surface, app.platform, branch!, base),
       enabled: !!branch,
       staleTime: 60_000,
       placeholderData: keepPreviousData,

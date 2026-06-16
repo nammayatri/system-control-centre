@@ -13,7 +13,7 @@ import { toast } from 'sonner';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { cn } from '../../../lib/utils';
 import { useRefreshAnimation } from '../../../shared/hooks';
-import { isMobileServerConfig, isHiddenServerConfig, isReleaseOnlyServerConfig } from '../../server-config-filter';
+import { isMobileServerConfig, isHiddenServerConfig, isReleaseOnlyServerConfig, MOBILE_CONFIG_CATEGORIES } from '../../server-config-filter';
 
 interface ConfigItem {
   key: string;
@@ -72,10 +72,18 @@ const Configurations: React.FC = () => {
       }))
       .filter(g => g.configs.length > 0);
 
-    // Mobile tab: collapse all sub-groups into one "Mobile" group (single section).
+    // Mobile tab: regroup into display sub-categories (Build & Dispatch, Store Sync,
+    // Release Review & Rollout, AI Changelog), in category + key order.
     if (filter === 'mobile') {
-      const configs = filtered.flatMap(g => g.configs);
-      return configs.length > 0 ? [{ name: 'Mobile', configs }] : [];
+      const byKey = new Map(filtered.flatMap(g => g.configs).map(c => [c.key, c]));
+      const catGroups: ConfigGroup[] = MOBILE_CONFIG_CATEGORIES.map(({ name, keys }) => ({
+        name,
+        configs: keys.map(k => byKey.get(k)).filter((c): c is ConfigItem => !!c),
+      })).filter(g => g.configs.length > 0);
+      // Safety net: any mobile config not mapped to a category → trailing "Other".
+      const known = new Set(MOBILE_CONFIG_CATEGORIES.flatMap(c => c.keys));
+      const other = [...byKey.values()].filter(c => !known.has(c.key));
+      return other.length > 0 ? [...catGroups, { name: 'Other', configs: other }] : catGroups;
     }
     return filtered;
   }, [data, filter, debugEnv]);

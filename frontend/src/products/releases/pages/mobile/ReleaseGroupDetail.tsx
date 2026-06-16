@@ -4,7 +4,8 @@ import { ArrowLeft, CheckCircle2, Send, Smartphone, Apple, Cpu, Info } from 'luc
 import { useReleases, useDispatchMobileReleases } from '../../hooks';
 import { approveRelease } from '../../api';
 import { useAuth } from '../../../../core/auth/AuthContext';
-import { StatusBadge } from '../../components/StatusBadge';
+import { ReleaseStatusBadge } from '../../components/ReleaseStatusBadge';
+import { versionWithBuild } from '../../versionLabel';
 import { Button } from '../../../../shared/ui/button';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { cn } from '../../../../lib/utils';
@@ -305,10 +306,10 @@ export default function ReleaseGroupDetail() {
                             <PlatformIcon platform={r.env} /> {r.env}
                           </span>
                         </td>
-                        <td className="py-3 px-4 font-mono text-xs text-zinc-600">{r.new_version}</td>
+                        <td className="py-3 px-4 font-mono text-xs text-zinc-600">{versionWithBuild(r)}</td>
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <StatusBadge status={r.status} />
+                            <ReleaseStatusBadge release={r} />
                             {r.is_approved === 1 && (
                               <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-emerald-700 text-white">
                                 APPROVED
@@ -355,7 +356,7 @@ export default function ReleaseGroupDetail() {
                           </span>
                         </div>
                         <div className="flex items-center gap-1.5 flex-wrap mt-2">
-                          <StatusBadge status={r.status} />
+                          <ReleaseStatusBadge release={r} />
                           {r.is_approved === 1 && (
                             <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-emerald-700 text-white">
                               APPROVED
@@ -363,7 +364,7 @@ export default function ReleaseGroupDetail() {
                           )}
                         </div>
                         <div className="text-[11px] text-zinc-500 font-mono mt-2">
-                          {r.new_version}
+                          {versionWithBuild(r)}
                         </div>
                       </div>
                     </div>
