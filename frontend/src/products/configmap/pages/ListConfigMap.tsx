@@ -159,8 +159,8 @@ const ListConfigMap: React.FC = () => {
           <div className="hidden md:block flex-1" />
           <div className="flex items-center gap-2">
             <button onClick={handleRefresh} aria-label="Refresh" className="h-10 w-10 sm:h-9 sm:w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 text-zinc-500 cursor-pointer transition-colors duration-150"><RefreshCw className={`h-4 w-4 ${refreshSpinning ? 'animate-spin' : ''}`} /></button>
-            <PermissionGate product="autopilot" permission="CONFIG_CREATE">
-              <Link to="/configmap/new" className="flex-1 md:flex-none">
+            <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+              <Link to="/backend/configmap/new" className="flex-1 md:flex-none">
                 <Button size="md" fullWidth><Plus className="w-4 h-4" /> Create ConfigMap</Button>
               </Link>
             </PermissionGate>
@@ -190,7 +190,7 @@ const ListConfigMap: React.FC = () => {
                 ) : (
                   paginatedItems.map((cm, i) => (
                     <tr key={cm.id} className={cn('border-b border-zinc-100 hover:bg-zinc-100 cursor-pointer transition-colors duration-150', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}
-                      onClick={() => navigate(`/configmap/${encodeURIComponent(cm.cluster || '')}%26%26${encodeURIComponent(cm.id)}`)}>
+                      onClick={() => navigate(`/backend/configmap/${encodeURIComponent(cm.cluster || '')}%26%26${encodeURIComponent(cm.id)}`)}>
                       <td className="py-3 px-4 text-zinc-400 font-mono text-xs">{startIndex + i + 1}</td>
                       <td className="py-3 px-4 font-medium text-zinc-800">{cm.appGroup}</td>
                       <td className="py-3 px-4 font-mono text-xs text-zinc-500 max-w-xs truncate" title={cm.id}>{cm.id}</td>
@@ -200,7 +200,7 @@ const ListConfigMap: React.FC = () => {
                       <td className="py-3 px-4 font-mono text-xs text-zinc-500">{formatIST(cm.start_time)}</td>
                       <td className="py-3 px-4 text-center">
                         <SimpleTooltip content="Clone">
-                          <button onClick={e => { e.stopPropagation(); navigate(`/configmap/new?clone_id=${cm.id}`); }} className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer">
+                          <button onClick={e => { e.stopPropagation(); navigate(`/backend/configmap/new?clone_id=${cm.id}`); }} className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer">
                             <Copy className="w-3.5 h-3.5" />
                           </button>
                         </SimpleTooltip>
@@ -224,7 +224,7 @@ const ListConfigMap: React.FC = () => {
                 <div
                   key={cm.id}
                   className="p-4 cursor-pointer hover:bg-zinc-50 active:bg-zinc-100 transition-colors"
-                  onClick={() => navigate(`/configmap/${encodeURIComponent(cm.cluster || '')}%26%26${encodeURIComponent(cm.id)}`)}
+                  onClick={() => navigate(`/backend/configmap/${encodeURIComponent(cm.cluster || '')}%26%26${encodeURIComponent(cm.id)}`)}
                 >
                   <div className="flex items-start justify-between gap-3 mb-2">
                     <div className="min-w-0 flex-1">
@@ -232,7 +232,7 @@ const ListConfigMap: React.FC = () => {
                       <div className="text-xs text-zinc-500 mt-0.5 truncate">{cm.appGroup}</div>
                     </div>
                     <button
-                      onClick={(e) => { e.stopPropagation(); navigate(`/configmap/new?clone_id=${cm.id}`); }}
+                      onClick={(e) => { e.stopPropagation(); navigate(`/backend/configmap/new?clone_id=${cm.id}`); }}
                       className="w-9 h-9 shrink-0 rounded-lg flex items-center justify-center text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100"
                       aria-label="Clone"
                     >

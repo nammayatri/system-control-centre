@@ -37,11 +37,15 @@ Two known limitations are documented inline:
 -}
 module Products.Autopilot.Mobile.Workflow (
     mobileBuildSpec,
+    tagConfirmTimedOut,
+    reviewPollTimedOut,
+    reviewPollDue,
+    selectBuildTag,
 ) where
 
 import Control.Exception (Exception, SomeException, fromException, throwIO, try)
-import qualified Control.Monad.Catch as MC
 import Control.Monad (when)
+import qualified Control.Monad.Catch as MC
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
@@ -58,14 +62,16 @@ import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (isAlphaNum)
+import Data.Char (digitToInt, isAlphaNum, isDigit)
+import Data.Int (Int32)
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Time.Clock (addUTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Database.PostgreSQL.Simple (Only (..), query)
@@ -78,7 +84,7 @@ import Products.Autopilot.Mobile.Github (
     listTags,
     listWorkflowRuns,
  )
-import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
+import Products.Autopilot.Mobile.Github.Auth (GhAppCreds (..), loadGhCreds)
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRow,
     findSiblingsByDispatchId,
@@ -86,19 +92,33 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     gitRepo,
     incrementResolveAttempts,
     logEvent,
+    markReleaseRevertedBy,
     setExternalRunIdForDispatch,
+    setReviewDecided,
  )
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
-    MobileDestination (..),
+    isDebugBuildType,
     isMBTerminal,
  )
 import Products.Autopilot.Mobile.Types.Storage (AppCatalogT (..))
 import Products.Autopilot.Mobile.Versioning (
     VersionResolution (..),
     resolveNextVersion,
+ )
+import Products.Autopilot.Mobile.Versioning.Apple (
+    AscReviewState (..),
+    getAscReviewState,
+    loadAscCreds,
+    renderAscErr,
+ )
+import Products.Autopilot.RuntimeConfig (
+    getMobileTagConfirmTimeoutMinutes,
+    getReviewPollIntervalSeconds,
+    getReviewPollTimeoutDays,
+    isStagedRolloutEnabled,
  )
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
@@ -131,6 +151,7 @@ mobileBuildSpec =
             , stageResolveRunId
             , stagePollMatrixJobs
             , stageConfirmTag
+            , stagePollReview
             , stageFinalize
             ]
         , wsRollback = \_err -> pure ()
@@ -145,6 +166,7 @@ stageResolveVersion
     , stageResolveRunId
     , stagePollMatrixJobs
     , stageConfirmTag
+    , stagePollReview
     , stageFinalize ::
         Stage ReleaseState
 
@@ -176,9 +198,12 @@ stageResolveRunId =
         }
 
 -- | Stage 5 — poll @\/runs/:id\/jobs@; track this row's matrix job.
+-- Skip once the build is submitted (MBSubmittedToStore) — its job is done by then.
+-- Guarding on terminal alone would re-poll forever for a staged-rollout-held release
+-- (parked non-terminal at MBTagPushed), spamming MATRIX_JOB_UPDATED + GitHub calls.
 stagePollMatrixJobs =
     (mkStage "PollMatrixJobs" execPollMatrixJobs)
-        { stageGuard = mbStatusTerminal
+        { stageGuard = mbStatusReached MBSubmittedToStore
         }
 
 -- | Stage 6 — list refs/tags matching the per-app prefix; backfill context.
@@ -187,11 +212,23 @@ stageConfirmTag =
         { stageGuard = hasTagPushed
         }
 
+-- | Stage 6.5 — bounded, throttled store-review poll (iOS; runs only at MBInReview).
+stagePollReview =
+    (mkStage "PollReview" execPollReview)
+        { stageGuard = notInReview
+        }
+
 -- | Stage 7 — map fine-grained @MobileBuildWFStatus@ to user-facing 'ReleaseStatus'.
 stageFinalize =
     (mkStage "Finalize" execFinalize)
         { stageGuard = trackerStatusTerminal
         }
+
+-- | Skip the review-poll stage unless the release is exactly in review.
+notInReview :: ReleaseState -> Bool
+notInReview rs = case mobileTarget rs of
+    Just s -> mbWfStatus s /= MBInReview
+    Nothing -> True
 
 -- ─── Skip predicates (pure on persisted state) ─────────────────────
 
@@ -283,9 +320,14 @@ mbStatusOrder = \case
     MBBuilding -> 4
     MBSubmittedToStore -> 5
     MBTagPushed -> 6
-    MBCompleted -> 7
-    MBAborting -> 8
-    MBAborted -> 9
+    MBSubmittingForReview -> 7
+    MBInReview -> 8
+    MBReviewApproved -> 9
+    MBRollingOut -> 10
+    MBCompleted -> 11
+    MBReviewRejected -> 12
+    MBAborting -> 13
+    MBAborted -> 14
     MBFailed _ -> 99
 
 -- ─── Stage executors ───────────────────────────────────────────────
@@ -313,80 +355,83 @@ execResolveVersion :: forall m. (StageM ReleaseState m) => m StageOutcome
 execResolveVersion = mobileStage "ResolveVersion" $ do
     rs <- gets id
     let rt = releaseTracker rs
-    ac <- appCatalogForRow rt
-    pkgName <- case acPackageName ac of
-        Just p | not (T.null p) -> pure p
-        _ ->
-            abort $
-                "AppCatalog row for "
-                    <> appGroup rt
-                    <> " has no package_name; cannot resolve next version"
-    res <- resolveNextVersion (acPlatform ac) pkgName
-    case res of
-        Left err
-            -- Configuration errors are NOT retriable — the runner would
-            -- loop forever waiting for the operator to update server_config
-            -- without ever surfacing the problem on the release row.
-            -- Abort with the stable error tag so the row transitions to
-            -- MBFailed and the UI shows it as ABORTED with a clear cause.
-            -- Patterns matched here cover both Play and Apple variants:
-            --   - "<*>_not_configured", "<*>_creds_missing"
-            --   - "asc_app_not_found:..." / "play_package_not_found:..."
-            --   - "unsupported platform: ..."
-            -- API hiccups (asc_http_error, play_unauthorized, etc.) still
-            -- flow through retry so transient outages recover on their own.
-            | isConfigError err -> abort err
-            | otherwise -> retry err
-        Right (AndroidVersion nextName nextCode) -> do
+        isDebug = case mobileTarget rs of
+            Just target -> isDebugBuildType (mbcBuildType (mbContext target))
+            Nothing -> False
+    if isDebug
+        then do
             logInfoIO $
                 "[ResolveVersion] "
                     <> releaseId rt
-                    <> " resolved Android version "
-                    <> nextName
-                    <> " (code "
-                    <> T.pack (show nextCode)
-                    <> ")"
-            -- Both updates are idempotent: writing the same values again is a no-op.
+                    <> " debug destination, skipping store version resolution"
             modify $ \s ->
-                let rt' = (releaseTracker s){newVersion = nextName}
-                    ts' =
+                let ts' =
                         applyMobileTarget s $ \mt ->
-                            mt
-                                { mbContext = (mbContext mt){mbcVersionCode = Just nextCode}
-                                , mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
-                                }
-                 in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
+                            mt{mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved}
+                 in s{targetState = Just (MobileBuildState ts')}
             logEvent (releaseId rt) "VERSION_RESOLVED" $
-                object
-                    [ "version_name" .= nextName
-                    , "version_code" .= nextCode
-                    , "source" .= ("play_console" :: T.Text)
-                    ]
+                object ["source" .= ("debug_skip" :: T.Text)]
             pure StageSuccess
-        Right (IosVersion nextNumber) -> do
-            logInfoIO $
-                "[ResolveVersion] "
-                    <> releaseId rt
-                    <> " resolved iOS version_number "
-                    <> nextNumber
-                    <> " (build number computed by workflow)"
-            -- iOS rows: only newVersion is written. mbcVersionCode stays
-            -- Nothing — the workflow computes it via fastlane and we read
-            -- it later from the pushed tag in ConfirmTag.
-            modify $ \s ->
-                let rt' = (releaseTracker s){newVersion = nextNumber}
-                    ts' =
-                        applyMobileTarget s $ \mt ->
-                            mt
-                                { mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
-                                }
-                 in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
-            logEvent (releaseId rt) "VERSION_RESOLVED" $
-                object
-                    [ "version_number" .= nextNumber
-                    , "source" .= ("app_store_connect" :: T.Text)
-                    ]
-            pure StageSuccess
+        else do
+            ac <- appCatalogForRow rt
+            pkgName <- case acPackageName ac of
+                Just p | not (T.null p) -> pure p
+                _ ->
+                    abort $
+                        "AppCatalog row for "
+                            <> appGroup rt
+                            <> " has no package_name; cannot resolve next version"
+            res <- resolveNextVersion (acPlatform ac) pkgName
+            case res of
+                Left err
+                    | isConfigError err -> abort err
+                    | otherwise -> retry err
+                Right (AndroidVersion nextName nextCode) -> do
+                    logInfoIO $
+                        "[ResolveVersion] "
+                            <> releaseId rt
+                            <> " resolved Android version "
+                            <> nextName
+                            <> " (code "
+                            <> T.pack (show nextCode)
+                            <> ")"
+                    modify $ \s ->
+                        let rt' = (releaseTracker s){newVersion = nextName}
+                            ts' =
+                                applyMobileTarget s $ \mt ->
+                                    mt
+                                        { mbContext = (mbContext mt){mbcVersionCode = Just nextCode}
+                                        , mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
+                                        }
+                         in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
+                    logEvent (releaseId rt) "VERSION_RESOLVED" $
+                        object
+                            [ "version_name" .= nextName
+                            , "version_code" .= nextCode
+                            , "source" .= ("play_console" :: T.Text)
+                            ]
+                    pure StageSuccess
+                Right (IosVersion nextNumber) -> do
+                    logInfoIO $
+                        "[ResolveVersion] "
+                            <> releaseId rt
+                            <> " resolved iOS version_number "
+                            <> nextNumber
+                            <> " (build number computed by workflow)"
+                    modify $ \s ->
+                        let rt' = (releaseTracker s){newVersion = nextNumber}
+                            ts' =
+                                applyMobileTarget s $ \mt ->
+                                    mt
+                                        { mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
+                                        }
+                         in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
+                    logEvent (releaseId rt) "VERSION_RESOLVED" $
+                        object
+                            [ "version_number" .= nextNumber
+                            , "source" .= ("app_store_connect" :: T.Text)
+                            ]
+                    pure StageSuccess
 
 {- | Stage 2: Acquire the dispatch-group advisory lock.
 
@@ -478,7 +523,8 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
     target <- case mobileTarget rs of
         Just t -> pure t
         Nothing -> abort "MobileBuildState missing at DispatchWorkflow stage"
-    let -- selected_apps is the comma-separated list of catalyst app NAMES
+    let
+        -- selected_apps is the comma-separated list of catalyst app NAMES
         -- (e.g. "NammaYatri,KeralaSavaari"), not surfaces. The workflow
         -- passes this to `catalyst -extract <platform>_prod --apps` which
         -- matches on the top-level keys of catalyst.yaml. Same shape on
@@ -506,33 +552,77 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
     -- by a workflow are silently ignored by GitHub, but we keep the maps
     -- tight so the dispatch payload is honest about what each platform
     -- actually consumes.
-    let inputs =
-            case acPlatform ac of
+    let isDebug = isDebugBuildType (mbcBuildType (mbContext target))
+        changeLogVal = mbcChangeLog (mbContext target)
+        isProvider = acSurface ac == "driver"
+        -- Debug builds skip store version resolution, so newVersion is blank — but
+        -- the provider workflow REQUIRES a non-empty version_name. Use a date-based
+        -- (CalVer) version, e.g. "2026.6.8", for provider DEBUG builds; provider
+        -- prod uses the resolved version.
+        providerVersionName =
+            if isDebug
+                then T.pack (formatTime defaultTimeLocale "%Y.%-m.%-d" dispatchedAt)
+                else versionName
+        inputs
+            -- Provider (driver) workflows — debug AND prod, Android AND iOS — all
+            -- declare the SAME base required inputs: selected_apps, version_name,
+            -- release_notes. This is a different schema from the customer
+            -- workflows (which use change_log / version_code), so a customer-shaped
+            -- payload omits the provider's required `version_name` → GitHub 422
+            -- and the release sticks at DISPATCH_REQUESTED. Branch on surface first.
+            --
+            -- provider-prod-apk-gen.yaml additionally declares a required
+            -- `destination` (choice GooglePlay|Firebase). Its implicit default is
+            -- Firebase App Distribution — NOT a store release — so we send
+            -- destination=GooglePlay explicitly for provider PROD Android to publish
+            -- to the Play Store. Debug builds and the iOS prod workflow don't
+            -- declare this input.
+            | isProvider =
+                let providerBase =
+                        [ ("selected_apps", Aeson.String selectedApps)
+                        , ("version_name", Aeson.String providerVersionName)
+                        , ("release_notes", Aeson.String changeLogVal)
+                        ]
+                    providerProdAndroid = not isDebug && acPlatform ac == "android"
+                    -- Operator's choice from the create form; falls back to
+                    -- GooglePlay when unset (older rows / API callers).
+                    destinationVal = fromMaybe "GooglePlay" (mbcDestination (mbContext target))
+                 in KM.fromList $
+                        if providerProdAndroid
+                            then providerBase <> [("destination", Aeson.String destinationVal)]
+                            else providerBase
+            | isDebug =
+                KM.fromList
+                    [ ("selected_apps", Aeson.String selectedApps)
+                    , ("change_log", Aeson.String changeLogVal)
+                    ]
+            | otherwise = case acPlatform ac of
                 "ios" ->
                     KM.fromList
                         [ ("selected_apps", Aeson.String selectedApps)
                         , ("version_number", Aeson.String versionName)
-                        , ("change_log", Aeson.String (mbcChangeLog (mbContext target)))
+                        , ("change_log", Aeson.String changeLogVal)
                         ]
                 _ ->
-                    -- Android (default; "android" or anything legacy).
                     KM.fromList
                         [ ("selected_apps", Aeson.String selectedApps)
                         , ("version_name", Aeson.String versionName)
                         , ("version_code", Aeson.String (T.pack (show versionCode)))
-                        , ("change_log", Aeson.String (mbcChangeLog (mbContext target)))
+                        , ("change_log", Aeson.String changeLogVal)
                         ]
+        ref = fromMaybe "main" (sourceRef rt)
         body =
             WorkflowDispatchReq
-                { wdrRef = "main"
+                { wdrRef = ref
                 , wdrInputs = inputs
                 }
+        wfPath = acWorkflowPath ac
     res <-
         dispatchWorkflow
             creds
             (gitOwner ac)
             (gitRepo ac)
-            (acWorkflowPath ac)
+            wfPath
             body
     case res of
         Right () -> do
@@ -540,7 +630,9 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                 "[DispatchWorkflow] "
                     <> releaseId rt
                     <> " dispatched workflow="
-                    <> acWorkflowPath ac
+                    <> wfPath
+                    <> " ref="
+                    <> ref
                     <> " selected_apps=["
                     <> selectedApps
                     <> "]"
@@ -558,7 +650,8 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                     }
             logEvent (releaseId rt) "GH_DISPATCHED" $
                 object
-                    [ "workflow_path" .= acWorkflowPath ac
+                    [ "workflow_path" .= wfPath
+                    , "ref" .= ref
                     , "selected_apps" .= selectedApps
                     , "version_name" .= versionName
                     , "version_code" .= versionCode
@@ -596,7 +689,7 @@ execResolveRunId = do
                 Just t -> pure t
                 Nothing -> abort "MobileBuildState missing at ResolveRunId"
             ac <- appCatalogForRow rt
-            creds <- loadGhCreds
+            creds <- loadGhCredsSafe
             mDid <- findDispatchIdForRelease (releaseId rt)
             dispatchId <- case mDid of
                 Just d -> pure d
@@ -618,12 +711,13 @@ execResolveRunId = do
                         , "reason" .= ("ResolveRunId exceeded 10 attempts" :: Text)
                         ]
                 abort "ResolveRunId: max attempts exceeded"
+            let wfPath = acWorkflowPath ac
             res <-
                 listWorkflowRuns
                     creds
                     (gitOwner ac)
                     (gitRepo ac)
-                    (acWorkflowPath ac)
+                    wfPath
             allRuns <- case res of
                 Right xs -> pure xs
                 Left e -> retry ("listWorkflowRuns failed: " <> e)
@@ -639,7 +733,8 @@ execResolveRunId = do
             case candidates of
                 (r : _) -> do
                     let runIdT = T.pack (show (wrId r))
-                    setExternalRunIdForDispatch dispatchId runIdT
+                        headSha = wrHeadSha r
+                    setExternalRunIdForDispatch dispatchId runIdT headSha
                     modify $ \s ->
                         s
                             { targetState =
@@ -655,6 +750,7 @@ execResolveRunId = do
                     logEvent (releaseId rt) "GH_RUN_RESOLVED" $
                         object
                             [ "run_id" .= runIdT
+                            , "head_sha" .= headSha
                             , "html_url" .= wrHtmlUrl r
                             , "created_at" .= wrCreatedAt r
                             , "candidates" .= length candidates
@@ -664,6 +760,8 @@ execResolveRunId = do
                             <> releaseId rt
                             <> " bound to run_id="
                             <> runIdT
+                            <> " head_sha="
+                            <> headSha
                     pure StageSuccess
                 [] -> do
                     logInfoIO $
@@ -697,7 +795,7 @@ execPollMatrixJobs = mobileStage "PollMatrixJobs" $ do
         Just r | not (T.null r) -> pure r
         _ -> abort "external_run_id missing at PollMatrixJobs"
     ac <- appCatalogForRow rt
-    creds <- loadGhCreds
+    creds <- loadGhCredsSafe
     res <- listJobs creds (gitOwner ac) (gitRepo ac) runId
     jobs <- case res of
         Right xs -> pure xs
@@ -788,20 +886,120 @@ execPollMatrixJobs = mobileStage "PollMatrixJobs" $ do
                     pure StageWaiting
                 _ -> pure StageWaiting
 
-{- | Stage 6: List refs/tags whose name begins with the per-app prefix
-and pick the first match.
+{- | Stage 6: confirm the annotated tag THIS build pushed.
 
-Tag prefix shape (matches the existing @nammayatri/ny-react-native@
-workflows): @${app-segment}/prod/${platform}/v...@ where:
+The @ny-react-native@ fastlane workflows tag deterministically (see
+@fastlane-android.yaml@ / @fastlane.yaml@ "Create and push annotated release
+tag"):
 
-* @app-segment@ is @AppCatalog.name@ normalised (lowercase, non-alnum
-  → @-@). Example: @NammaYatri@ → @nammayatri@.
-* @platform@ is @AppCatalog.platform@ ("android" / "ios").
+> TAG = {normalize(app)}/prod/{platform}/v{version_name}+{version_code}
 
-We list refs at @refs\/tags\/{prefix}@ and pick the first one — the GHA
-workflow only pushes a single tag per build, so there's nothing to
-disambiguate. If no tag yet, return Waiting.
+and SCC's DispatchWorkflow passes @version_name@ + @version_code@ as inputs, so
+the workflow's auto-detect is skipped and it tags with /exactly/ the version SCC
+resolved. The tag is therefore fully reconstructible from the release row.
+
+We must select that exact tag — NOT "the first ref under a broad prefix". GitHub's
+@matching-refs@ API returns refs in ascending lexicographic order, so the first
+is the /oldest/ version (e.g. @v3.3.15+421@ when this build pushed @v3.3.17+460@).
+Once a repo has more than one version under the prefix, "first" is wrong. See
+'selectBuildTag'.
 -}
+
+{- | Select the tag this build pushed from the refs returned by @listTags@.
+
+Matches the build's resolved identity exactly:
+@{prefix}{version_name}+{version_code}@ (the @+{code}@ is omitted only when the
+release has no version code). Returns 'Nothing' when that exact tag isn't present
+yet, so the caller falls through to the wall-clock wait/timeout — i.e. "the build
+hasn't pushed it yet", never "use some other tag".
+
+@prefix@ already ends in @.../v@ (built in 'execConfirmTag'); @refs@ are full
+@refs\/tags\/...@ strings.
+-}
+selectBuildTag :: Text -> Text -> Maybe Int32 -> [Text] -> Maybe Text
+selectBuildTag prefix version mCode refs =
+    let names = map stripRefsTags refs
+        bare = prefix <> version -- "{prefix}{version}" (no +code)
+        plusPrefix = bare <> "+" -- "{prefix}{version}+"
+        suffixOf n = T.drop (T.length plusPrefix) n
+        isCoded n = plusPrefix `T.isPrefixOf` n && not (T.null (suffixOf n)) && T.all isDigit (suffixOf n)
+        coded = filter isCoded names
+        codeOf n = T.foldl' (\acc c -> acc * 10 + digitToInt c) (0 :: Int) (suffixOf n)
+     in case mCode of
+            -- Known code (Android consumer — SCC sends version_code on dispatch): exact match.
+            Just c ->
+                let t = plusPrefix <> T.pack (show c)
+                 in if t `elem` names then Just t else Nothing
+            -- Unknown code (iOS — the workflow assigns the build number): match the
+            -- {prefix}{version}+<digits> the build actually pushed (highest code wins),
+            -- falling back to a bare {prefix}{version} tag if that's the scheme.
+            Nothing -> case sortOn (Down . codeOf) coded of
+                (t : _) -> Just t
+                [] -> if bare `elem` names then Just bare else Nothing
+
+{- | Select the tag a PROVIDER prod build pushed. Provider workflows tag as
+@{acName}-v{version}-{code}@. We match the @{acName}-v{version}-@ prefix (numeric
+suffix) and prefer the exact @{code}@ SCC resolved at create time — version_name
+AND version_code are fetched from the store, the same values the consumer path
+matches on. The provider workflow assigns the code itself (SCC never sends
+@version_code@ to it), so on the off chance its code diverges from ours we fall
+back to the highest code for this version rather than time out. @verPrefix@ already
+ends in the trailing @-@. Returns 'Nothing' when no such tag is present yet, so the
+caller keeps polling — never "use some other tag".
+-}
+selectProviderBuildTag :: Text -> Maybe Int32 -> [Text] -> Maybe Text
+selectProviderBuildTag verPrefix mCode refs =
+    let names = map stripRefsTags refs
+        suffixOf n = T.drop (T.length verPrefix) n
+        isMatch n =
+            verPrefix `T.isPrefixOf` n
+                && not (T.null (suffixOf n))
+                && T.all isDigit (suffixOf n)
+        matches = filter isMatch names
+        codeOf n = T.foldl' (\acc c -> acc * 10 + digitToInt c) (0 :: Int) (suffixOf n)
+        exact = do
+            c <- mCode
+            let t = verPrefix <> T.pack (show c)
+            if t `elem` matches then Just t else Nothing
+     in case exact of
+            Just t -> Just t
+            Nothing -> case sortOn (Down . codeOf) matches of
+                (t : _) -> Just t
+                [] -> Nothing
+
+{- | Pure predicate for the ConfirmTag wall-clock guard. Has the stage waited
+past @timeoutMin@ for the build's tag? Anchors on build-completion, falling back
+to build-start. If neither timestamp is set we can't measure elapsed time, so we
+report 'False' (keep polling) rather than fail spuriously.
+-}
+tagConfirmTimedOut :: UTCTime -> Maybe UTCTime -> Maybe UTCTime -> Int -> Bool
+tagConfirmTimedOut now mCompletedAt mStartedAt timeoutMin =
+    case mCompletedAt of
+        Just c -> overBudget c
+        Nothing -> maybe False overBudget mStartedAt
+  where
+    overBudget anchor = diffUTCTime now anchor > fromIntegral (timeoutMin * 60)
+
+{- | Pure SOFT-timeout predicate for the review poll: has review been pending past
+@timeoutDays@ since it was submitted? Used only to surface "review taking long" —
+a nudge, NOT a failure. 'Nothing' submitted-at ⇒ can't measure ⇒ 'False'.
+-}
+reviewPollTimedOut :: UTCTime -> Maybe UTCTime -> Int -> Bool
+reviewPollTimedOut now mSubmittedAt timeoutDays =
+    case mSubmittedAt of
+        Just t -> diffUTCTime now t > fromIntegral (timeoutDays * 86400)
+        Nothing -> False
+
+{- | Pure throttle predicate: should the review-poll stage hit the store this tick?
+'True' if at least @intervalSec@ has elapsed since the last poll (or it has never
+polled). Keeps the ~20s runner tick from hammering the store APIs.
+-}
+reviewPollDue :: UTCTime -> Maybe UTCTime -> Int -> Bool
+reviewPollDue now mLastPolled intervalSec =
+    case mLastPolled of
+        Nothing -> True
+        Just t -> diffUTCTime now t >= fromIntegral intervalSec
+
 execConfirmTag :: forall m. (StageM ReleaseState m) => m StageOutcome
 execConfirmTag = mobileStage "ConfirmTag" $ do
     rs <- gets id
@@ -809,25 +1007,13 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
     target <- case mobileTarget rs of
         Just t -> pure t
         Nothing -> abort "MobileBuildState missing at ConfirmTag"
-    ac <- appCatalogForRow rt
-    creds <- loadGhCreds
-    let segment = normalizeAppSegment (acName ac)
-        platform = acPlatform ac
-        prefix = segment <> "/prod/" <> platform <> "/v"
-    res <- listTags creds (gitOwner ac) (gitRepo ac) prefix
-    refs <- case res of
-        Right xs -> pure xs
-        Left e -> retry ("listTags failed: " <> e)
-    case refs of
-        [] -> do
+    let isDebug = isDebugBuildType (mbcBuildType (mbContext target))
+    if isDebug
+        then do
             logInfoIO $
                 "[ConfirmTag] "
                     <> releaseId rt
-                    <> " no tags yet for prefix="
-                    <> prefix
-            pure StageWaiting
-        (r : _) -> do
-            let tagName = stripRefsTags r
+                    <> " debug destination, skipping tag confirmation"
             modify $ \s ->
                 s
                     { targetState =
@@ -835,19 +1021,102 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                             MobileBuildState
                                 ( applyMobileTarget s $ \mt ->
                                     mt
-                                        { mbContext = (mbContext target){mbcTagPushed = Just tagName}
+                                        { mbContext = (mbContext target){mbcTagPushed = Just "debug-no-tag"}
                                         , mbWfStatus = bumpStatus (mbWfStatus mt) MBTagPushed
                                         }
                                 )
                     }
             logEvent (releaseId rt) "TAG_OBSERVED" $
-                object ["tag" .= tagName, "ref" .= r, "prefix" .= prefix]
-            logInfoIO $
-                "[ConfirmTag] "
-                    <> releaseId rt
-                    <> " bound to tag="
-                    <> tagName
+                object ["tag" .= ("debug-no-tag" :: Text), "source" .= ("debug_skip" :: Text)]
             pure StageSuccess
+        else do
+            ac <- appCatalogForRow rt
+            creds <- loadGhCredsSafe
+            -- Tag scheme differs by surface:
+            --   consumer: {normalize(app)}/prod/{platform}/v{version}+{code} — exact match,
+            --             because SCC supplies version_code on dispatch.
+            --   provider: {acName}-v{version}-{code} — the provider workflow assigns the
+            --             version code itself (SCC never sends version_code to it), so we
+            --             match the {acName}-v{version}- prefix and read the code back.
+            --             See selectProviderBuildTag.
+            let isProvider = acSurface ac == "driver"
+                platform = acPlatform ac
+                version = newVersion rt
+                mCode = mbcVersionCode (mbContext target)
+                prefix
+                    | isProvider = acName ac <> "-v"
+                    | otherwise = normalizeAppSegment (acName ac) <> "/prod/" <> platform <> "/v"
+                providerVerPrefix = acName ac <> "-v" <> version <> "-"
+                expectedTag
+                    | isProvider = providerVerPrefix <> maybe "<code>" (T.pack . show) mCode
+                    | otherwise = prefix <> version <> maybe "" (\c -> "+" <> T.pack (show c)) mCode
+            res <- listTags creds (gitOwner ac) (gitRepo ac) prefix
+            refs <- case res of
+                Right xs -> pure xs
+                Left e -> retry ("listTags failed: " <> e)
+            let mSelected
+                    | isProvider = selectProviderBuildTag providerVerPrefix mCode refs
+                    | otherwise = selectBuildTag prefix version mCode refs
+            case mSelected of
+                Nothing -> do
+                    -- Tag not pushed yet. Wall-clock guard (mirrors
+                    -- max_job_completion_hours for backend jobs): if the expected tag
+                    -- hasn't appeared within the budget since the build completed, fail
+                    -- rather than poll forever. Anchor on build-completed → build-started
+                    -- → now (last ⇒ no anchor, so we don't time out this tick).
+                    now <- liftIO getCurrentTime
+                    timeoutMin <- getMobileTagConfirmTimeoutMinutes
+                    if tagConfirmTimedOut now (mbBuildCompletedAt target) (mbBuildStartedAt target) timeoutMin
+                        then do
+                            modify $ \s ->
+                                s
+                                    { targetState =
+                                        Just $
+                                            MobileBuildState
+                                                ( applyMobileTarget s $ \mt ->
+                                                    mt{mbWfStatus = MBFailed "tag_timeout"}
+                                                )
+                                    }
+                            logEvent (releaseId rt) "STATUS_UPDATED" $
+                                object
+                                    [ "mb_wf_status" .= ("MBFailed: tag_timeout" :: Text)
+                                    , "reason"
+                                        .= ( "ConfirmTag exceeded "
+                                                <> T.pack (show timeoutMin)
+                                                <> "m waiting for tag (expected="
+                                                <> expectedTag
+                                                <> ")"
+                                           )
+                                    ]
+                            abort "ConfirmTag: tag confirmation timed out"
+                        else do
+                            logInfoIO $
+                                "[ConfirmTag] "
+                                    <> releaseId rt
+                                    <> " expected tag not present yet: "
+                                    <> expectedTag
+                            pure StageWaiting
+                Just tagName -> do
+                    modify $ \s ->
+                        s
+                            { targetState =
+                                Just $
+                                    MobileBuildState
+                                        ( applyMobileTarget s $ \mt ->
+                                            mt
+                                                { mbContext = (mbContext target){mbcTagPushed = Just tagName}
+                                                , mbWfStatus = bumpStatus (mbWfStatus mt) MBTagPushed
+                                                }
+                                        )
+                            }
+                    logEvent (releaseId rt) "TAG_OBSERVED" $
+                        object ["tag" .= tagName, "expected" .= expectedTag, "prefix" .= prefix]
+                    logInfoIO $
+                        "[ConfirmTag] "
+                            <> releaseId rt
+                            <> " bound to tag="
+                            <> tagName
+                    pure StageSuccess
 
 {- | Stage 7: Map fine-grained @MobileBuildWFStatus@ to the user-facing
 'ReleaseStatus' that appears on the dashboard.
@@ -860,6 +1129,80 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
 * anything else               → no-op (engine should not have called
   Finalize before a terminal mb status; defensive).
 -}
+{- | Stage 6.5: bounded, throttled poll of the store review state. Runs only when
+@mbWfStatus == MBInReview@. iOS advances to MBReviewApproved / MBReviewRejected via
+'getAscReviewState'; Android review is opaque, so the stage waits for the operator's
+mark-* endpoint. Throttled to @review_poll_interval_sec@ (default 20 min); soft-bounded
+by @review_poll_timeout_days@ (a nudge, never a failure).
+-}
+execPollReview :: forall m. (StageM ReleaseState m) => m StageOutcome
+execPollReview = mobileStage "PollReview" $ do
+    rs <- gets id
+    let rt = releaseTracker rs
+    target <- case mobileTarget rs of
+        Just t -> pure t
+        Nothing -> abort "MobileBuildState missing at PollReview"
+    ac <- appCatalogForRow rt
+    if acPlatform ac /= "ios"
+        then do
+            -- Android review is opaque (no API signal) — the operator records the
+            -- outcome via the Phase-6 mark-* endpoint. Nothing to poll here.
+            logInfoIO $ "[PollReview] " <> releaseId rt <> " android review is opaque; awaiting operator mark"
+            pure StageWaiting
+        else do
+            now <- liftIO getCurrentTime
+            intervalSec <- getReviewPollIntervalSeconds
+            if not (reviewPollDue now (mbReviewLastPolledAt target) intervalSec)
+                then pure StageWaiting -- throttled: not time to hit the store yet
+                else do
+                    timeoutDays <- getReviewPollTimeoutDays
+                    when (reviewPollTimedOut now (mbReviewSubmittedAt target) timeoutDays) $
+                        logEvent (releaseId rt) "REVIEW_SLOW" $
+                            object
+                                [ "message" .= ("App Store review pending beyond the soft timeout — check App Store Connect" :: Text)
+                                , "timeout_days" .= timeoutDays
+                                ]
+                    mCreds <- loadAscCreds
+                    case mCreds of
+                        Nothing -> do
+                            logInfoIO $ "[PollReview] " <> releaseId rt <> " ASC creds missing; will retry"
+                            stampPolled now
+                            pure StageWaiting
+                        Just creds -> do
+                            res <- getAscReviewState creds (fromMaybe "" (acPackageName ac)) (newVersion rt)
+                            stampPolled now
+                            case res of
+                                Left e -> do
+                                    logInfoIO $ "[PollReview] " <> releaseId rt <> " poll error (retry): " <> renderAscErr e
+                                    pure StageWaiting
+                                Right AscApproved -> do
+                                    setReviewDecided (releaseId rt) "approved" now Nothing
+                                    advanceTo now MBReviewApproved
+                                    logEvent (releaseId rt) "REVIEW_APPROVED" $ object ["store" .= ("asc" :: Text)]
+                                    pure StageSuccess
+                                Right AscLive -> do
+                                    -- Already live in the App Store (released outside SCC during
+                                    -- review). Record the approval + advance so the poll stops; the
+                                    -- Phase-7 rollout reconciler then adopts the live state
+                                    -- (rolling_out for a phased release, else completed).
+                                    setReviewDecided (releaseId rt) "approved" now Nothing
+                                    advanceTo now MBReviewApproved
+                                    logEvent (releaseId rt) "REVIEW_APPROVED" $ object ["store" .= ("asc" :: Text), "already_live" .= True]
+                                    pure StageSuccess
+                                Right (AscRejected reason) -> do
+                                    setReviewDecided (releaseId rt) "rejected" now (Just reason)
+                                    advanceTo now MBReviewRejected
+                                    logEvent (releaseId rt) "REVIEW_REJECTED" $ object ["reason" .= reason]
+                                    pure StageSuccess
+                                Right _ -> pure StageWaiting -- still in review (prepare / waiting / in-review / other)
+  where
+    stampPolled now =
+        modify $ \s ->
+            s{targetState = Just $ MobileBuildState (applyMobileTarget s (\mt -> mt{mbReviewLastPolledAt = Just now}))}
+    advanceTo now st =
+        modify $ \s ->
+            s{targetState = Just $ MobileBuildState (applyMobileTarget s (\mt -> mt{mbWfStatus = bumpStatus (mbWfStatus mt) st, mbReviewLastPolledAt = Just now}))}
+
 execFinalize :: forall m. (StageM ReleaseState m) => m StageOutcome
 execFinalize = mobileStage "Finalize" $ do
     rs <- gets id
@@ -867,10 +1210,18 @@ execFinalize = mobileStage "Finalize" $ do
     target <- case mobileTarget rs of
         Just t -> pure t
         Nothing -> abort "MobileBuildState missing at Finalize"
-    let mb = mbWfStatus target
+    staged <- isStagedRolloutEnabled
+    let isDebug = isDebugBuildType (mbcBuildType (mbContext target))
+        mb = mbWfStatus target
         mNew = case mb of
             MBCompleted -> Just COMPLETED
-            MBTagPushed -> Just COMPLETED
+            -- Staged rollout: a RELEASE build HOLDS (stays INPROGRESS) at tag-push,
+            -- awaiting the operator's "Promote to Review". Debug builds — and
+            -- everything when the flag is off — complete at tag-push as before.
+            MBTagPushed
+                | staged && not isDebug -> Nothing
+                | otherwise -> Just COMPLETED
+            MBReviewRejected -> Just ABORTED
             MBFailed _ -> Just ABORTED
             MBAborted -> Just USER_ABORTED
             _ -> Nothing
@@ -904,6 +1255,10 @@ execFinalize = mobileStage "Finalize" $ do
                     , "new_status" .= newStatus
                     , "mb_wf_status" .= T.pack (show mb)
                     ]
+            case (newStatus, revertsReleaseId rt) of
+                (COMPLETED, Just badId) ->
+                    markReleaseRevertedBy badId (releaseId rt)
+                _ -> pure ()
             logInfoIO $
                 "[Finalize] "
                     <> releaseId rt
@@ -987,6 +1342,18 @@ retry msg = liftIO (throwIO (MobileRetry msg))
 logInfoIO :: Text -> StateFlow ()
 logInfoIO = liftIO . logInfoG
 
+{- | 'loadGhCreds' variant for post-dispatch polling stages. If the token
+refresh fails (clock drift, transient 401, etc.) we retry on the next
+tick instead of killing the release — the creds already worked for
+dispatch, so the failure is transient.
+-}
+loadGhCredsSafe :: StateFlow GhAppCreds
+loadGhCredsSafe = do
+    eCreds <- MC.try @_ @SomeException loadGhCreds
+    case eCreds of
+        Right c -> pure c
+        Left ex -> retry ("GH auth refresh failed (will retry): " <> T.pack (show ex))
+
 -- ─── Helpers on ReleaseState / TargetState ─────────────────────────
 
 -- | Project the 'MobileBuildTargetState' out of the wrapped 'TargetState'.
@@ -1023,22 +1390,25 @@ applyMobileTarget rs f =
                             , -- Fallback when 'targetState' is missing entirely (no
                               -- MobileBuildState present). The relevant abort fires
                               -- upstream — but if we reach here, default to
-                              -- 'MBGooglePlay' (the production destination per
-                              -- spec). Originally this was 'error "..."' which would
-                              -- crash the worker thread; defaulting to a safe value
-                              -- keeps the placeholder usable while the real abort
+                              -- "release" (the production build type per spec).
+                              -- Originally this was 'error "..."' which would crash
+                              -- the worker thread; defaulting to a safe value keeps
+                              -- the placeholder usable while the real abort
                               -- propagates from the caller.
-                              mbcDestination = MBGooglePlay
+                              mbcBuildType = "release"
                             , mbcReleaseGroupId = ""
                             , mbcMatrixJobName = ""
                             , mbcOtaNamespace = Nothing
                             , mbcTagPushed = Nothing
+                            , mbcDestination = Nothing
                             }
                     , mbExternalRunId = Nothing
                     , mbMatrixJobStatus = Nothing
                     , mbBuildStartedAt = Nothing
                     , mbBuildCompletedAt = Nothing
                     , mbResolveAttempts = Nothing
+                    , mbReviewSubmittedAt = Nothing
+                    , mbReviewLastPolledAt = Nothing
                     }
 
 {- | Status bump that respects ordering: never regresses to an earlier
@@ -1065,11 +1435,20 @@ Rules (matching the @nammayatri/ny-react-native@ workflow):
 Example: @"NammaYatri"@ → @"nammayatri"@; @"Beckn Driver"@ →
 @"beckn-driver"@.
 -}
+
+{- | Normalise an app name to its tag segment. Must match the shell
+@normalize_segment@ in the fastlane workflows
+(@sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//'@): lowercase, keep
+@a-z0-9._-@, replace any other run with a single @-@, trim leading\/trailing
+@-@. Preserving @. _ -@ is what keeps SCC's expected tag equal to the tag the
+build actually pushes for app names that contain those characters.
+-}
 normalizeAppSegment :: Text -> Text
 normalizeAppSegment = collapseDashes . T.map step . T.toLower
   where
     step c
         | isAlphaNum c = c
+        | c == '.' || c == '_' || c == '-' = c
         | otherwise = '-'
     collapseDashes :: Text -> Text
     collapseDashes t =

@@ -26,8 +26,31 @@ module Products.Autopilot.Mobile.Versioning.Play (
     PlayCreds (..),
     PlayApiError (..),
     fetchPlayTracks,
+    getProductionReleaseNotes,
     loadPlayCreds,
     renderPlayErr,
+
+    -- * Staged rollout (promote → set/halt/resume/complete → read)
+    PlayRolloutState (..),
+    promoteToProduction,
+    setTrackRollout,
+    haltTrackRollout,
+    resumeTrackRollout,
+    completeTrackRollout,
+    getTrackRolloutState,
+    userFractionInRange,
+    parseRolloutState,
+    parseProdReleaseNotes,
+
+    -- * Out-of-band pending-publish detection (production-track read)
+    ProdTrackRelease (..),
+    getProductionReleases,
+    parseProdTrackReleases,
+
+    -- * Per-track snapshots (App Release Monitoring)
+    StoreTrackSnapshot (..),
+    fetchTrackSnapshots,
+    parseTrackSnapshot,
 
     -- * Dispatcher entry point
     resolve,
@@ -45,6 +68,7 @@ import Core.Http.Client (
     httpJson,
     httpRaw,
  )
+import Core.Secrets (lookupEnvSecretB64)
 import Core.Types.Time (Seconds (..))
 import Data.Aeson (
     FromJSON (..),
@@ -52,22 +76,26 @@ import Data.Aeson (
     Value (..),
     decode,
     eitherDecode,
+    encode,
+    object,
     withObject,
+    (.!=),
     (.:),
     (.:?),
+    (.=),
  )
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int32)
+import Data.List (find)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import GHC.Generics (Generic)
-import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 import qualified Web.JWT as JWT
 
 -- ─── Pure algorithm ────────────────────────────────────────────────
@@ -130,6 +158,8 @@ data PlayApiError
       PlayUnauthorized
     | -- | The package name does not exist in this developer account.
       PlayPackageNotFound Text
+    | -- | A staged-rollout userFraction outside the open interval (0,1).
+      PlayInvalidFraction Double
     | -- | Any other HTTP error, with a human-readable message.
       PlayHttpError Int Text
     deriving (Show)
@@ -338,8 +368,17 @@ newtype TrackBody = TrackBody [Release]
 data Release = Release
     { rName :: Maybe Text
     , rStatus :: Maybe Text
+    , rUserFraction :: Maybe Double
     , rVersionCodes :: [Text]
+    , rReleaseNotes :: [Text]
+    -- ^ per-locale "What's New" texts (@releaseNotes[].text@), if any.
     }
+
+-- | One @releaseNotes[]@ entry — we only need its @text@.
+newtype RNote = RNote (Maybe Text)
+
+instance FromJSON RNote where
+    parseJSON = withObject "RNote" $ \o -> RNote <$> o .:? "text"
 
 instance FromJSON TrackBody where
     parseJSON = withObject "TrackBody" $ \o -> do
@@ -350,8 +389,10 @@ instance FromJSON Release where
     parseJSON = withObject "Release" $ \o -> do
         n <- o .:? "name"
         s <- o .:? "status"
+        uf <- o .:? "userFraction"
         codes <- o .:? "versionCodes"
-        pure (Release n s (fromMaybe [] (codes :: Maybe [Text])))
+        notes <- o .:? "releaseNotes" .!= []
+        pure (Release n s uf (fromMaybe [] (codes :: Maybe [Text])) (mapMaybe (\(RNote t) -> t) notes))
 
 {- | Pick the release used for the next-version computation:
 
@@ -370,28 +411,458 @@ pickRelease (TrackBody rels) =
             (r : _) -> r
             [] -> head rels
         name = fromMaybe "0.0.0" (rName chosen)
-        codes :: [Int32]
-        codes =
-            [ n | t <- rVersionCodes chosen, [(n, "")] <- [reads (T.unpack t) :: [(Int32, String)]]
+     in TrackInfo name (maxVersionCode (rVersionCodes chosen))
+
+{- | The highest parseable @versionCodes[]@ entry (Play lists multiple codes when
+a release ships several ABIs). 0 when none parse. Shared by the next-version
+read and the pending-publish detection. -}
+maxVersionCode :: [Text] -> Int32
+maxVersionCode codes =
+    case [n | t <- codes, [(n, "")] <- [reads (T.unpack t) :: [(Int32, String)]]] of
+        [] -> 0
+        xs -> maximum xs
+
+-- ─── Staged rollout: promote / set / halt / resume / complete / read ───────
+
+{- | Current production-track rollout snapshot, read from the active release in
+@releases[]@. @prsStatus@ is the raw Play status
+(@inProgress@ | @halted@ | @completed@ | @draft@), or @none@ when the track has
+no release yet.
+-}
+data PlayRolloutState = PlayRolloutState
+    { prsStatus :: Text
+    , prsUserFraction :: Maybe Double
+    , prsVersionCodes :: [Text]
+    }
+    deriving (Eq, Show, Generic)
+
+instance ToJSON PlayRolloutState
+instance FromJSON PlayRolloutState
+
+{- | Play accepts a staged-rollout @userFraction@ strictly between 0 and 1. 0, 1
+and out-of-range are rejected — for 100% use 'completeTrackRollout'
+(status=completed, no fraction), never @userFraction = 1.0@.
+-}
+userFractionInRange :: Double -> Bool
+userFractionInRange f = f > 0 && f < 1
+
+-- | The production-track release object we PUT (the sole entry in @releases[]@).
+data ProdRelease = ProdRelease
+    { prVersionCodes :: [Text]
+    , prStatus :: Text
+    , prUserFraction :: Maybe Double
+    , prReleaseNotes :: Maybe [(Text, Text)]
+    -- ^ (language, text); set only on promote.
+    }
+
+instance ToJSON ProdRelease where
+    toJSON pr =
+        object $
+            [ "versionCodes" .= prVersionCodes pr
+            , "status" .= prStatus pr
             ]
-        code = case codes of
-            [] -> 0
-            xs -> maximum xs
-     in TrackInfo name code
+                <> maybe [] (\f -> ["userFraction" .= f]) (prUserFraction pr)
+                <> maybe [] (\ns -> ["releaseNotes" .= map noteObj ns]) (prReleaseNotes pr)
+      where
+        noteObj (lang, txt) = object ["language" .= lang, "text" .= txt]
+
+{- | Promote the built (internal-track) build to the PRODUCTION track at an
+effectively-zero rollout and send it to review. The near-zero @userFraction@
+(config @android_review_rollout_fraction@, default 1e-9) means approval exposes
+no users — the operator later bumps it via 'setTrackRollout'. The commit does
+NOT pass @changesNotSentForReview@, so Google reviews it.
+-}
+promoteToProduction ::
+    (MonadFlow m) =>
+    PlayCreds ->
+    -- | package name
+    Text ->
+    -- | version code
+    Text ->
+    -- | initial (≈0) rollout fraction
+    Double ->
+    -- | release notes (language, text)
+    [(Text, Text)] ->
+    m (Either PlayApiError ())
+promoteToProduction creds pkg vc frac notes =
+    applyProductionRelease creds pkg (ProdRelease [vc] "inProgress" (Just frac) (Just notes))
+
+-- | Set the production rollout to @frac@ (0 < frac < 1); status stays inProgress.
+setTrackRollout :: (MonadFlow m) => PlayCreds -> Text -> Text -> Double -> m (Either PlayApiError ())
+setTrackRollout creds pkg vc frac =
+    applyProductionRelease creds pkg (ProdRelease [vc] "inProgress" (Just frac) Nothing)
+
+-- | Pause the rollout (status=halted) at its current fraction.
+haltTrackRollout :: (MonadFlow m) => PlayCreds -> Text -> Text -> Double -> m (Either PlayApiError ())
+haltTrackRollout creds pkg vc frac =
+    applyProductionRelease creds pkg (ProdRelease [vc] "halted" (Just frac) Nothing)
+
+-- | Resume a halted rollout (status=inProgress) at @frac@.
+resumeTrackRollout :: (MonadFlow m) => PlayCreds -> Text -> Text -> Double -> m (Either PlayApiError ())
+resumeTrackRollout creds pkg vc frac =
+    applyProductionRelease creds pkg (ProdRelease [vc] "inProgress" (Just frac) Nothing)
+
+-- | Finish the rollout — 100% of users (status=completed, no fraction).
+completeTrackRollout :: (MonadFlow m) => PlayCreds -> Text -> Text -> m (Either PlayApiError ())
+completeTrackRollout creds pkg vc =
+    applyProductionRelease creds pkg (ProdRelease [vc] "completed" Nothing Nothing)
+
+{- | create edit → PUT the production-track release → commit (→ review). A
+fraction outside (0,1) is rejected before any API call.
+-}
+applyProductionRelease ::
+    (MonadFlow m) => PlayCreds -> Text -> ProdRelease -> m (Either PlayApiError ())
+applyProductionRelease creds pkg pr
+    | Just f <- prUserFraction pr
+    , not (userFractionInRange f) =
+        pure (Left (PlayInvalidFraction f))
+    | otherwise = liftIO $ withPlayToken creds $ \token -> do
+        eEdit <- createEdit token pkg
+        case eEdit of
+            Left e -> pure (Left e)
+            Right editId -> do
+                ePut <- putProductionTrack token pkg editId pr
+                case ePut of
+                    Left e -> do
+                        _ <- try @SomeException (deleteEdit token pkg editId)
+                        pure (Left e)
+                    Right () -> commitEdit token pkg editId
+
+-- | Read the current production rollout state (status + fraction + version codes).
+getTrackRolloutState ::
+    (MonadFlow m) => PlayCreds -> Text -> m (Either PlayApiError PlayRolloutState)
+getTrackRolloutState creds pkg = liftIO $ withPlayToken creds $ \token -> do
+    eEdit <- createEdit token pkg
+    case eEdit of
+        Left e -> pure (Left e)
+        Right editId -> do
+            res <- getProductionTrack token pkg editId
+            _ <- try @SomeException (deleteEdit token pkg editId) -- read-only: discard edit
+            pure res
+
+{- | Read the current production-track "What's New" / release notes (first
+non-empty locale text of the live/last release). Used to pre-fill the promote
+dialog for a store-synced release, where SCC has no changelog of its own.
+'Nothing' when the track has no release with notes. Read-only: the throwaway
+edit is abandoned. -}
+getProductionReleaseNotes ::
+    (MonadFlow m) => PlayCreds -> Text -> m (Either PlayApiError (Maybe Text))
+getProductionReleaseNotes creds pkg = liftIO $ withPlayToken creds $ \token -> do
+    eEdit <- createEdit token pkg
+    case eEdit of
+        Left e -> pure (Left e)
+        Right editId -> do
+            res <- getProductionTrackNotes token pkg editId
+            _ <- try @SomeException (deleteEdit token pkg editId) -- read-only: discard edit
+            pure res
+
+-- | GET the production track and parse the first non-empty release-notes text.
+getProductionTrackNotes :: Text -> Text -> Text -> IO (Either PlayApiError (Maybe Text))
+getProductionTrackNotes token pkg editId = do
+    let url = playBase <> pkg <> "/edits/" <> editId <> "/tracks/production"
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = [("Authorization", "Bearer " <> token)]
+                , reqTimeout = Seconds 30
+                , reqLogTag = "play-track-notes"
+                }
+    resp <- httpRaw req
+    pure $ case resp of
+        Right HttpResponse{respStatus = s, respBody = b}
+            | s == 200 -> Right (parseProdReleaseNotes b)
+            | s == 401 || s == 403 -> Left PlayUnauthorized
+            | s == 404 -> Right Nothing
+            | otherwise -> Left (PlayHttpError s (TE.decodeUtf8 (LBS.toStrict b)))
+        Left e -> Left (PlayHttpError 0 (T.pack (show e)))
+
+-- | First non-empty release-notes text from a production-track GET body. Prefers
+-- the @completed@ release, else the first release. Exposed for unit testing.
+parseProdReleaseNotes :: LBS.ByteString -> Maybe Text
+parseProdReleaseNotes bs = do
+    TrackBody rels <- decode bs
+    chosen <- case filter (\r -> rStatus r == Just "completed") rels of
+        (r : _) -> Just r
+        [] -> listToMaybe rels
+    find (not . T.null . T.strip) (rReleaseNotes chosen)
+
+-- ─── Out-of-band pending-publish detection (production-track read) ──────────
+
+{- | One production-track release, flattened for pending-publish detection:
+its name, highest version code, raw Play @status@ (@inProgress@ | @halted@ |
+@completed@ | @draft@) and @userFraction@ (present only for a staged rollout).
+
+Unlike 'PlayRolloutState' (which collapses the track to a single chosen
+release), this keeps every release so the caller can compare an in-flight
+submission against the live (@completed@) one. -}
+data ProdTrackRelease = ProdTrackRelease
+    { ptrName :: Text
+    , ptrCode :: Int32
+    , ptrStatus :: Text
+    , ptrUserFraction :: Maybe Double
+    }
+    deriving (Eq, Show, Generic)
+
+instance ToJSON ProdTrackRelease
+instance FromJSON ProdTrackRelease
+
+{- | Read every release on the production track (name, code, status, fraction).
+Read-only: the throwaway edit is abandoned, like 'getProductionReleaseNotes'.
+404 (no production track yet) → an empty list. -}
+getProductionReleases ::
+    (MonadFlow m) => PlayCreds -> Text -> m (Either PlayApiError [ProdTrackRelease])
+getProductionReleases creds pkg = liftIO $ withPlayToken creds $ \token -> do
+    eEdit <- createEdit token pkg
+    case eEdit of
+        Left e -> pure (Left e)
+        Right editId -> do
+            res <- getProductionTrackReleases token pkg editId
+            _ <- try @SomeException (deleteEdit token pkg editId) -- read-only: discard edit
+            pure res
+
+-- | GET the production track and parse all of its releases.
+getProductionTrackReleases :: Text -> Text -> Text -> IO (Either PlayApiError [ProdTrackRelease])
+getProductionTrackReleases token pkg editId = do
+    let url = playBase <> pkg <> "/edits/" <> editId <> "/tracks/production"
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = [("Authorization", "Bearer " <> token)]
+                , reqTimeout = Seconds 30
+                , reqLogTag = "play-track-pending"
+                }
+    resp <- httpRaw req
+    pure $ case resp of
+        Right HttpResponse{respStatus = s, respBody = b}
+            | s == 200 -> Right (parseProdTrackReleases b)
+            | s == 401 || s == 403 -> Left PlayUnauthorized
+            | s == 404 -> Right []
+            | otherwise -> Left (PlayHttpError s (TE.decodeUtf8 (LBS.toStrict b)))
+        Left e -> Left (PlayHttpError 0 (T.pack (show e)))
+
+{- | Pure parse of a production-track GET body into every release it lists.
+Missing @name@ → "0.0.0"; missing @status@ → "draft". Exposed for unit testing.
+A body that doesn't decode → an empty list (no releases). -}
+parseProdTrackReleases :: LBS.ByteString -> [ProdTrackRelease]
+parseProdTrackReleases bs = case decode bs :: Maybe TrackBody of
+    Nothing -> []
+    Just (TrackBody rels) -> map toPTR rels
+  where
+    toPTR r =
+        ProdTrackRelease
+            { ptrName = fromMaybe "0.0.0" (rName r)
+            , ptrCode = maxVersionCode (rVersionCodes r)
+            , ptrStatus = fromMaybe "draft" (rStatus r)
+            , ptrUserFraction = rUserFraction r
+            }
+
+-- ─── Per-track snapshots (App Release Monitoring) ──────────────────────────
+
+{- | A single store track's current state for the release-monitoring dashboard:
+the leading release's version / code / status / staged-rollout fraction, plus the
+first non-empty "What's New" note. -}
+data StoreTrackSnapshot = StoreTrackSnapshot
+    { stsTrack :: Text
+    -- ^ "production" | "internal"
+    , stsVersion :: Text
+    , stsCode :: Maybe Int32
+    , stsStatus :: Text
+    -- ^ completed | inProgress | halted | draft | none
+    , stsFraction :: Maybe Double
+    -- ^ staged-rollout userFraction (production only)
+    , stsNotes :: Maybe Text
+    }
+    deriving (Eq, Show, Generic)
+
+instance ToJSON StoreTrackSnapshot
+instance FromJSON StoreTrackSnapshot
+
+{- | Fetch the production + internal track snapshots for a Play package in one edit
+round-trip (create edit → GET both tracks → discard edit). Read-only. -}
+fetchTrackSnapshots ::
+    (MonadFlow m) => PlayCreds -> Text -> m (Either PlayApiError [StoreTrackSnapshot])
+fetchTrackSnapshots (PlayCreds saJson) packageName =
+    case parseServiceAccount saJson of
+        Left e -> do
+            logError $ "[play-console] bad service-account JSON: " <> T.pack e
+            pure (Left PlayUnauthorized)
+        Right sa -> liftIO (runFetchSnapshots sa packageName)
+
+runFetchSnapshots :: ServiceAccount -> Text -> IO (Either PlayApiError [StoreTrackSnapshot])
+runFetchSnapshots sa packageName = do
+    eToken <- mintAndExchange sa
+    case eToken of
+        Left err -> pure (Left err)
+        Right token -> do
+            eEdit <- createEdit token packageName
+            case eEdit of
+                Left err -> pure (Left err)
+                Right editId -> do
+                    eInternal <- fetchTrackBody token packageName editId "internal"
+                    eProd <- fetchTrackBody token packageName editId "production"
+                    _ <- try @SomeException (deleteEdit token packageName editId)
+                    pure $
+                        (\i p -> [parseTrackSnapshot "internal" i, parseTrackSnapshot "production" p])
+                            <$> eInternal
+                            <*> eProd
+
+-- | GET a track and return the raw body (404 → "{}" so it parses to the "none"
+-- snapshot). Like 'fetchTrack', but defers parsing to 'parseTrackSnapshot'.
+fetchTrackBody :: Text -> Text -> Text -> Text -> IO (Either PlayApiError LBS.ByteString)
+fetchTrackBody token packageName editId trackName = do
+    let url = playBase <> packageName <> "/edits/" <> editId <> "/tracks/" <> trackName
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = [("Authorization", "Bearer " <> token)]
+                , reqTimeout = Seconds 30
+                , reqLogTag = "play-track-snapshot"
+                }
+    resp <- httpRaw req
+    pure $ case resp of
+        Right HttpResponse{respStatus = s, respBody = b}
+            | s == 200 -> Right b
+            | s == 401 || s == 403 -> Left PlayUnauthorized
+            | s == 404 -> Right "{}"
+            | otherwise -> Left (PlayHttpError s (TE.decodeUtf8 (LBS.toStrict b)))
+        Left e -> Left (PlayHttpError 0 (T.pack (show e)))
+
+{- | Parse a track GET body into a 'StoreTrackSnapshot' — the leading release
+(active staged rollout if any, else the latest) with its version / code / status /
+fraction / first non-empty note. Empty / undecodable → the "none" snapshot.
+Exposed for unit testing. -}
+parseTrackSnapshot :: Text -> LBS.ByteString -> StoreTrackSnapshot
+parseTrackSnapshot track bs = case decode bs :: Maybe TrackBody of
+    Just (TrackBody rels)
+        | Just r <- pickRolloutRelease rels ->
+            StoreTrackSnapshot
+                { stsTrack = track
+                , stsVersion = fromMaybe "0.0.0" (rName r)
+                , stsCode = case maxVersionCode (rVersionCodes r) of 0 -> Nothing; n -> Just n
+                , stsStatus = fromMaybe "draft" (rStatus r)
+                , stsFraction = rUserFraction r
+                , stsNotes = find (not . T.null . T.strip) (rReleaseNotes r)
+                }
+    _ -> StoreTrackSnapshot track "0.0.0" Nothing "none" Nothing Nothing
+
+-- ── IO helpers ──
+
+-- | Run an IO action with a fresh OAuth token minted from the creds.
+withPlayToken :: PlayCreds -> (Text -> IO (Either PlayApiError a)) -> IO (Either PlayApiError a)
+withPlayToken (PlayCreds saJson) k =
+    case parseServiceAccount saJson of
+        Left _ -> pure (Left PlayUnauthorized)
+        Right sa -> do
+            eTok <- mintAndExchange sa
+            case eTok of
+                Left e -> pure (Left e)
+                Right tok -> k tok
+
+putProductionTrack :: Text -> Text -> Text -> ProdRelease -> IO (Either PlayApiError ())
+putProductionTrack token pkg editId pr = do
+    let url = playBase <> pkg <> "/edits/" <> editId <> "/tracks/production"
+        payload = encode (object ["track" .= ("production" :: Text), "releases" .= [pr]])
+        req =
+            (defaultReq url)
+                { reqMethod = PUT
+                , reqHeaders =
+                    [ ("Authorization", "Bearer " <> token)
+                    , ("Content-Type", "application/json")
+                    ]
+                , reqBody = Just payload
+                , reqTimeout = Seconds 30
+                , reqLogTag = "play-track-put"
+                , reqRetries = 0
+                }
+    classifyEmpty pkg <$> httpRaw req
+
+{- | Commit the edit, sending it to review. Deliberately NO
+@changesNotSentForReview@ query param — that flag would hold it back from review.
+-}
+commitEdit :: Text -> Text -> Text -> IO (Either PlayApiError ())
+commitEdit token pkg editId = do
+    let url = playBase <> pkg <> "/edits/" <> editId <> ":commit"
+        req =
+            (defaultReq url)
+                { reqMethod = POST
+                , reqHeaders =
+                    [ ("Authorization", "Bearer " <> token)
+                    , ("Content-Type", "application/json")
+                    ]
+                , reqBody = Just "{}"
+                , reqTimeout = Seconds 60
+                , reqLogTag = "play-edits-commit"
+                , reqRetries = 0
+                }
+    classifyEmpty pkg <$> httpRaw req
+
+getProductionTrack :: Text -> Text -> Text -> IO (Either PlayApiError PlayRolloutState)
+getProductionTrack token pkg editId = do
+    let url = playBase <> pkg <> "/edits/" <> editId <> "/tracks/production"
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = [("Authorization", "Bearer " <> token)]
+                , reqTimeout = Seconds 30
+                , reqLogTag = "play-track-get"
+                }
+    resp <- httpRaw req
+    pure $ case resp of
+        Right HttpResponse{respStatus = s, respBody = b}
+            | s == 200 -> case parseRolloutState b of
+                Just st -> Right st
+                Nothing -> Left (PlayHttpError s "could not decode production track")
+            | s == 401 || s == 403 -> Left PlayUnauthorized
+            | s == 404 -> Right emptyRolloutState
+            | otherwise -> Left (PlayHttpError s (TE.decodeUtf8 (LBS.toStrict b)))
+        Left e -> Left (PlayHttpError 0 (T.pack (show e)))
+
+-- | Map an empty-body Play response to @()@ / a typed error.
+classifyEmpty :: Text -> Either HttpError HttpResponse -> Either PlayApiError ()
+classifyEmpty pkg resp = case resp of
+    Right HttpResponse{respStatus = s, respBody = b}
+        | s >= 200 && s < 300 -> Right ()
+        | s == 401 || s == 403 -> Left PlayUnauthorized
+        | s == 404 -> Left (PlayPackageNotFound pkg)
+        | otherwise -> Left (PlayHttpError s (TE.decodeUtf8 (LBS.toStrict b)))
+    Left e -> Left (PlayHttpError 0 (T.pack (show e)))
+
+emptyRolloutState :: PlayRolloutState
+emptyRolloutState = PlayRolloutState "none" Nothing []
+
+{- | Pure parse of a production-track GET body into a 'PlayRolloutState'. Picks
+the active staged release (status inProgress/halted), else the first release,
+else the empty/none state. Exposed for unit testing.
+-}
+parseRolloutState :: LBS.ByteString -> Maybe PlayRolloutState
+parseRolloutState bs = do
+    TrackBody rels <- decode bs
+    pure $ case pickRolloutRelease rels of
+        Nothing -> emptyRolloutState
+        Just r ->
+            PlayRolloutState
+                { prsStatus = fromMaybe "draft" (rStatus r)
+                , prsUserFraction = rUserFraction r
+                , prsVersionCodes = rVersionCodes r
+                }
+
+pickRolloutRelease :: [Release] -> Maybe Release
+pickRolloutRelease rels =
+    case filter (\r -> rStatus r `elem` [Just "inProgress", Just "halted"]) rels of
+        (r : _) -> Just r
+        [] -> case rels of
+            (r : _) -> Just r
+            [] -> Nothing
 
 -- ─── Server-config helper ──────────────────────────────────────────
 
-{- | Read @play_console_service_account_json@ (autopilot-scoped) from
-@server_config@. Returns 'Nothing' if not configured — caller should
-surface a clear error to the user.
+{- | Read the Play Console service-account JSON from the process
+__environment__ — @SC_PLAY_SA_JSON_B64@ (the JSON, base64-encoded). Injected
+from a k8s Secret in prod; from @local-mobile-secrets.env@ in dev. Returns
+'Nothing' if not configured — caller surfaces a clear error to the user.
 -}
 loadPlayCreds :: (MonadFlow m) => m (Maybe PlayCreds)
-loadPlayCreds = do
-    mVal <-
-        getEnabledServerConfigValueForProduct
-            "play_console_service_account_json"
-            (Just "autopilot")
-    pure (fmap PlayCreds mVal)
+loadPlayCreds = fmap (fmap PlayCreds) (lookupEnvSecretB64 "SC_PLAY_SA_JSON_B64")
 
 -- ─── Dispatcher entry point ────────────────────────────────────────
 
@@ -403,6 +874,7 @@ consistent error tags across platforms.)
 renderPlayErr :: PlayApiError -> Text
 renderPlayErr PlayUnauthorized = "play_unauthorized"
 renderPlayErr (PlayPackageNotFound pkg) = "play_package_not_found:" <> pkg
+renderPlayErr (PlayInvalidFraction f) = "play_invalid_fraction:" <> T.pack (show f)
 renderPlayErr (PlayHttpError s body) =
     "play_http_error:" <> T.pack (show s) <> ":" <> body
 
@@ -420,7 +892,7 @@ resolve packageName = do
     mCreds <- loadPlayCreds
     case mCreds of
         Nothing ->
-            pure (Left "play_console_service_account_json not configured in server_config")
+            pure (Left "Play service-account JSON not configured (set SC_PLAY_SA_JSON_B64)")
         Just creds -> do
             res <- fetchPlayTracks creds packageName
             case res of

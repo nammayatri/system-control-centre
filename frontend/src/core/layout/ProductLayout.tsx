@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
-import { PRODUCT_REGISTRY, type ProductDefinition } from '../../products/registry';
+import type { ProductDefinition } from '../../products/registry';
 import {
   Rocket, FileText, Settings, Package, Layers,
   Plus, List, ChevronLeft,
   PanelLeftClose, PanelLeft, X,
+  Activity, Flame, ExternalLink, Smartphone, Server, Gauge,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import TopBar from './TopBar';
@@ -17,106 +18,49 @@ const iconMap: Record<string, React.ReactNode> = {
   Layers: <Layers className="w-3.5 h-3.5" />,
   Plus: <Plus className="w-3.5 h-3.5" />,
   List: <List className="w-3.5 h-3.5" />,
+  Activity: <Activity className="w-3.5 h-3.5" />,
+  Flame: <Flame className="w-3.5 h-3.5" />,
+  Smartphone: <Smartphone className="w-4 h-4" />,
+  Server: <Server className="w-4 h-4" />,
+  Gauge: <Gauge className="w-3.5 h-3.5" />,
 };
 
-/**
- * Resolve the current product entry from the URL.
- *
- * Two registry entries may share the same `slug` (Backend Releases and
- * Mobile Releases both back the `autopilot` slug). The naive `.find()`
- * picks whichever was registered first, which routes mobile-only paths
- * like `/releases/mobile/new` or `/releases/live` into the backend tile
- * — wrong sidebar, wrong product name. Two-step resolution:
- *
- *   1. If `?category=` is present, prefer the registry entry whose
- *      `defaultCategoryFilter` matches it. This handles the
- *      `/releases?category=mobile` (and `=backend`) case the list page
- *      uses to switch tiles without changing pathname.
- *   2. Otherwise rank candidates whose routes match the pathname, and
- *      pick the one with the longest matching route base. A mobile
- *      route `/releases/mobile/new` (base `/releases/mobile/new`) wins
- *      over the backend route `/releases/:id` (base `/releases`) for
- *      `/releases/mobile/new` even though both technically match.
- */
-function findCurrentProduct(
-  pathname: string,
-  search: string,
-): ProductDefinition | undefined {
-  const params = new URLSearchParams(search);
-  const category = params.get('category');
-
-  const matchesPath = (p: ProductDefinition): { matched: boolean; bestLen: number } => {
-    let bestLen = -1;
-    for (const r of p.routes) {
-      const routeBase = r.path.split('/:')[0];
-      if (pathname === routeBase || pathname.startsWith(routeBase + '/')) {
-        if (routeBase.length > bestLen) bestLen = routeBase.length;
-      }
-    }
-    return { matched: bestLen >= 0, bestLen };
-  };
-
-  // 1. ?category= takes precedence when present. We accept either a route
-  //    match OR a basePath match — the mobile entry's "All Mobile Releases"
-  //    nav target is `/releases?category=mobile`, which lands on the
-  //    backend tile's `/releases` route. The category param is the
-  //    deliberate signal that the user wants the mobile tile.
-  if (category) {
-    const byCategory = PRODUCT_REGISTRY.find(
-      p =>
-        p.defaultCategoryFilter === category &&
-        (matchesPath(p).matched ||
-          pathname === p.basePath ||
-          pathname.startsWith(p.basePath + '/')),
-    );
-    if (byCategory) return byCategory;
-  }
-
-  // 2. Longest-prefix wins. Stable order preserves first-registered as tie-breaker.
-  let best: ProductDefinition | undefined;
-  let bestLen = -1;
-  for (const p of PRODUCT_REGISTRY) {
-    const { matched, bestLen: len } = matchesPath(p);
-    if (matched && len > bestLen) {
-      best = p;
-      bestLen = len;
-    }
-  }
-  return best;
-}
-
 interface SidebarBodyProps {
-  product: ProductDefinition | undefined;
+  product: ProductDefinition;
   collapsed: boolean;
   isActive: (path: string) => boolean;
   onItemClick?: () => void;
 }
 
-interface SidebarBodyPropsWithLocation extends SidebarBodyProps {
-  currentSearch: string;
-}
-
-const SidebarBody: React.FC<SidebarBodyPropsWithLocation> = ({ product, collapsed, isActive, currentSearch, onItemClick }) => (
+const SidebarBody: React.FC<SidebarBodyProps> = ({ product, collapsed, isActive, onItemClick }) => (
   <nav className="flex-1 overflow-y-auto py-3">
-    {product?.navItems.map((item) => {
-      // Split the nav item's path into pathname + query string. A nav item
-      // path like `/releases?category=mobile` must match BOTH the pathname
-      // and every query param it declares — otherwise the backend tile's
-      // `/releases` and the mobile tile's `/releases?category=mobile` would
-      // both light up on `/releases?category=mobile`.
-      const [itemPath, itemQuery] = item.path.split('?');
-      const queryMatches = (() => {
-        if (!itemQuery) return true;
-        const want = new URLSearchParams(itemQuery);
-        const have = new URLSearchParams(currentSearch);
-        for (const [k, v] of want) {
-          if (have.get(k) !== v) return false;
-        }
-        return true;
-      })();
-      const active =
-        (isActive(itemPath) && queryMatches) ||
-        (item.matchPaths?.some((p) => isActive(p)) ?? false);
+    {product.navItems.map((item) => {
+      if (item.external) {
+        return (
+          <a
+            key={item.path}
+            href={item.path}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={onItemClick}
+            className={cn(
+              'flex items-center gap-2.5 px-4 h-11 md:h-10 text-sm cursor-pointer transition-colors duration-150',
+              collapsed && 'md:justify-center md:px-0',
+              'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 border-l-2 border-transparent'
+            )}
+          >
+            <span className="shrink-0">{iconMap[item.icon] || null}</span>
+            {(!collapsed || onItemClick) && (
+              <span className="truncate flex items-center gap-1.5">
+                {item.label}
+                <ExternalLink className="w-3 h-3 opacity-50" />
+              </span>
+            )}
+          </a>
+        );
+      }
+
+      const active = isActive(item.path);
       return (
         <Link
           key={item.path}
@@ -138,21 +82,28 @@ const SidebarBody: React.FC<SidebarBodyPropsWithLocation> = ({ product, collapse
   </nav>
 );
 
-const ProductLayout: React.FC = () => {
+const ProductLayout: React.FC<{ product: ProductDefinition }> = ({ product }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
 
-  const currentProduct = findCurrentProduct(location.pathname, location.search);
-  const isActive = (path: string) => location.pathname === path || location.pathname.startsWith(path + '/');
+  const activeNavPath = (() => {
+    let best = '';
+    for (const item of product.navItems) {
+      if (item.external) continue;
+      if (location.pathname === item.path || location.pathname.startsWith(item.path + '/')) {
+        if (item.path.length > best.length) best = item.path;
+      }
+    }
+    return best;
+  })();
+  const isActive = (path: string) => path === activeNavPath;
 
-  // Close mobile drawer on route change
   useEffect(() => {
     setMobileOpen(false);
   }, [location.pathname]);
 
-  // Lock scroll when mobile drawer open
   useEffect(() => {
     if (mobileOpen) {
       document.body.style.overflow = 'hidden';
@@ -184,14 +135,14 @@ const ProductLayout: React.FC = () => {
           >
             <ChevronLeft className="w-4 h-4" />
           </button>
-          {!collapsed && currentProduct && (
+          {!collapsed && (
             <span className="text-sm font-semibold text-white tracking-tight truncate">
-              {currentProduct.label}
+              {product.label}
             </span>
           )}
         </div>
 
-        <SidebarBody product={currentProduct} collapsed={collapsed} isActive={isActive} currentSearch={location.search} />
+        <SidebarBody product={product} collapsed={collapsed} isActive={isActive} />
 
         <div className="shrink-0 border-t border-zinc-800">
           <button
@@ -229,11 +180,9 @@ const ProductLayout: React.FC = () => {
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
-            {currentProduct && (
-              <span className="text-sm font-semibold text-white tracking-tight truncate">
-                {currentProduct.label}
-              </span>
-            )}
+            <span className="text-sm font-semibold text-white tracking-tight truncate">
+              {product.label}
+            </span>
           </div>
           <button
             onClick={() => setMobileOpen(false)}
@@ -244,10 +193,9 @@ const ProductLayout: React.FC = () => {
           </button>
         </div>
         <SidebarBody
-          product={currentProduct}
+          product={product}
           collapsed={false}
           isActive={isActive}
-          currentSearch={location.search}
           onItemClick={() => setMobileOpen(false)}
         />
       </aside>
@@ -256,11 +204,6 @@ const ProductLayout: React.FC = () => {
       <div className="flex-1 flex flex-col h-screen overflow-hidden min-w-0">
         <TopBar onOpenMobileNav={() => setMobileOpen(true)} />
         <main className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">
-          {/* Outlet is rendered directly — wrapping it in AnimatePresence with
-              key={location.pathname} caused the destination page to mount
-              twice during a route transition (once in the exiting motion.div,
-              once in the entering one — both <Outlet /> resolve to the new
-              route), firing every page-level useQuery twice. */}
           <Outlet />
         </main>
       </div>

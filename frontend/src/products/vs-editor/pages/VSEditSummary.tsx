@@ -128,7 +128,7 @@ const VSEditSummary: React.FC = () => {
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
       <div className="flex items-center text-sm text-zinc-500 font-medium mb-3 sm:mb-4 flex-wrap gap-y-1">
-        <Link to="/vs-editor" className="hover:text-zinc-700 transition-colors duration-150">VS Edits</Link>
+        <Link to="/backend/vs-editor" className="hover:text-zinc-700 transition-colors duration-150">VS Edits</Link>
         <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300 shrink-0" />
         <span className="font-mono text-xs text-zinc-800 truncate max-w-[150px] sm:max-w-[200px]">{edit.id}</span>
       </div>
@@ -264,7 +264,7 @@ const VSEditSummary: React.FC = () => {
       </div>
 
       <div className="flex justify-end pt-5">
-        <Button variant="secondary" onClick={() => navigate('/vs-editor')}>Back to VS Edits</Button>
+        <Button variant="secondary" onClick={() => navigate('/backend/vs-editor')}>Back to VS Edits</Button>
       </div>
     </div>
   );

@@ -79,7 +79,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
     },
     onSuccess: () => {
       toast.success(isUpdate ? 'ConfigMap updated' : 'ConfigMap created');
-      navigate('/configmap');
+      navigate('/backend/configmap');
     },
     onError: (err: any) => {
       const msg = err?.response?.data?.message || err.message || `Failed to ${isUpdate ? 'update' : 'create'} ConfigMap`;
@@ -158,7 +158,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
     }).catch((err: any) => {
       const msg = err?.response?.data?.message || err.message || 'Failed to load ConfigMap';
       toast.error(msg);
-      navigate('/configmap');
+      navigate('/backend/configmap');
     });
   }, [id, cloneId, isUpdate]);
 
@@ -174,7 +174,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
       priority: Number(form.priority),
       file: yamlConfigToJson(fileContent || form.file),
       secondary_file: syncCluster ? yamlConfigToJson(secondaryContent) : undefined,
-      isSync: !!syncCluster,
+      isSync: true,
     };
     createMut.mutate(payload);
   };
@@ -197,7 +197,7 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
             <div className="space-y-4">
               <div><FieldLabel required>App Group</FieldLabel><select name="appGroup" value={form.appGroup} onChange={handleChange} required className={cn(inputClass, 'cursor-pointer')}><option value="">Select App Group</option>{products.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
               <div><FieldLabel>Description</FieldLabel><input name="description" value={form.description} onChange={handleChange} placeholder="Deploying Hotfix" className={inputClass} /></div>
-              <div><FieldLabel>Priority</FieldLabel><select name="priority" value={form.priority} onChange={handleChange} className={cn(inputClass, 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(n => <option key={n} value={n}>{n}</option>)}</select></div>
+              <div><FieldLabel>Priority</FieldLabel><select name="priority" value={form.priority} onChange={handleChange} className={cn(inputClass, 'cursor-pointer')}>{[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => <option key={n} value={n}>{n}</option>)}</select></div>
             </div>
             <div className="space-y-4">
               <div><FieldLabel required>Name</FieldLabel><select name="name" value={form.name} onChange={handleChange} required disabled={!form.appGroup || namesOptions.length === 0} className={cn(inputClass, (!form.appGroup || namesOptions.length === 0) ? 'bg-zinc-50 cursor-not-allowed' : 'cursor-pointer')}><option value="">Select Name</option>{namesOptions.map(n => <option key={n} value={n}>{n}</option>)}</select></div>
@@ -264,8 +264,8 @@ const CreateConfigMap: React.FC<CreateConfigMapProps> = ({ isUpdate = false, id 
         </div>
 
         <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3 pt-2">
-          <Button type="button" variant="secondary" onClick={() => navigate('/configmap')}>Cancel</Button>
-          <PermissionGate product="autopilot" permission="CONFIG_CREATE">
+          <Button type="button" variant="secondary" onClick={() => navigate('/backend/configmap')}>Cancel</Button>
+          <PermissionGate product="autopilot" permission="RELEASE_CREATE">
             <Button type="submit" loading={createMut.isPending}>{createMut.isPending ? 'Saving...' : isUpdate ? 'Update' : 'Create ConfigMap'}</Button>
           </PermissionGate>
         </div>

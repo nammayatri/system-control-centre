@@ -1,3 +1,4 @@
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Kubernetes Deployment operations: create, clone, scale, check existence.
@@ -25,11 +26,11 @@ where
 
 import Core.Config (Config (..))
 import Data.Aeson (Value (..))
-import qualified Data.Aeson as A
-import qualified Data.Aeson.Key as K
-import qualified Data.Aeson.KeyMap as KM
+import Data.Aeson qualified as A
+import Data.Aeson.Key qualified as K
+import Data.Aeson.KeyMap qualified as KM
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Products.Autopilot.K8s.Execute
 import Products.Autopilot.Types.Release (RolloutStep (..))
@@ -57,7 +58,7 @@ buildCloneDeploymentCommand cfg ctx =
       explicitDockerImage = maybe "" T.unpack (dockerImage ctx)
       -- Strip env vars whose fieldRef points at metadata.labels[...].
       stripUnsupportedEnvs = "(.spec.template.spec.containers[].env) |= [.[]? | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]"
-      patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[] | select(.name == $container) | .image) |= (if ($dockerImage != \"\") then (if (($dockerImage | test(\"/\")) or ($dockerImage | test(\":\"))) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | " <> stripUnsupportedEnvs <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
+      patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[0].image) |= (if ($dockerImage != \"\") then (if (($dockerImage | test(\"/\")) or ($dockerImage | test(\":\"))) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\":\" + $oldTag + \"$\") then sub(\":\" + $oldTag + \"$\"; \":\" + $newTag) elif test(\":\") then sub(\":[^:]+$\"; \":\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | " <> stripUnsupportedEnvs <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
    in unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "get deployment", shellQuote (T.pack sourceDep), "-o json | jq", "--arg targetDep", shellQuote (T.pack targetDep), "--arg container", shellQuote (containerName ctx), "--arg newTag", shellQuote (newVersion ctx), "--arg oldTag", shellQuote (oldVersion ctx), "--arg dockerImage", shellQuote (T.pack explicitDockerImage), "'" <> patchFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "apply -f -"]
 
 -- | Clone deployment, replacing containers[0].env with the supplied envs.
@@ -69,7 +70,7 @@ buildCloneDeploymentWithEnvsCommand cfg ctx envsJson =
       -- Strip env vars whose fieldRef points at metadata.labels[...] —
       -- these require a downward API rule and break kubectl patch.
       stripUnsupportedEnvs = "(.spec.template.spec.containers[].env) |= [.[]? | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]"
-      patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[] | select(.name == $container) | .image) |= (if ($dockerImage != \"\") then (if (($dockerImage | test(\"/\")) or ($dockerImage | test(\":\"))) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | (.spec.template.spec.containers[] | select(.name == $container) | .env) = ($envs | fromjson) | " <> stripUnsupportedEnvs <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
+      patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[0].image) |= (if ($dockerImage != \"\") then (if (($dockerImage | test(\"/\")) or ($dockerImage | test(\":\"))) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\":\" + $oldTag + \"$\") then sub(\":\" + $oldTag + \"$\"; \":\" + $newTag) elif test(\":\") then sub(\":[^:]+$\"; \":\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | (.spec.template.spec.containers[] | select(.name == $container) | .env) = ($envs | fromjson) | " <> stripUnsupportedEnvs <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
    in unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "get deployment", shellQuote (T.pack sourceDep), "-o json | jq", "--arg targetDep", shellQuote (T.pack targetDep), "--arg container", shellQuote (containerName ctx), "--arg newTag", shellQuote (newVersion ctx), "--arg oldTag", shellQuote (oldVersion ctx), "--arg dockerImage", shellQuote (T.pack explicitDockerImage), "--arg envs", shellQuote envsJson, "'" <> patchFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "apply -f -"]
 
 buildScaleDeploymentCommand :: Config -> K8sReleaseContext -> Int -> String
@@ -157,44 +158,44 @@ getDeploymentReplicaStatus cfg ns depName = do
 
 getRunningSchedulerVersion :: Config -> Text -> Text -> IO (Either Text (Maybe Text))
 getRunningSchedulerVersion cfg ns svcHost = do
-    res <-
-        runCmd
-            ( unwords
-                [ kubectlBin cfg
-                , "-n"
-                , shellQuote ns
-                , "get deployments"
-                , "-l"
-                , "app=" ++ T.unpack svcHost
-                , "-o"
-                , "json"
-                ]
-            )
-    case res of
-        Left (K8sError err) -> pure (Left err)
-        Right (K8sResult out) ->
-            case A.decodeStrict' (encodeUtf8 out) :: Maybe Value of
-                Nothing -> pure (Left "Failed to decode deployment list JSON")
-                Just v -> pure (Right (pickRunning v))
+  res <-
+    runCmd
+      ( unwords
+          [ kubectlBin cfg,
+            "-n",
+            shellQuote ns,
+            "get deployments",
+            "-l",
+            "app=" ++ T.unpack svcHost,
+            "-o",
+            "json"
+          ]
+      )
+  case res of
+    Left (K8sError err) -> pure (Left err)
+    Right (K8sResult out) ->
+      case A.decodeStrict' (encodeUtf8 out) :: Maybe Value of
+        Nothing -> pure (Left "Failed to decode deployment list JSON")
+        Just v -> pure (Right (pickRunning v))
   where
     pickRunning (Object root) = case KM.lookup (K.fromText "items") root of
-        Just (Array items) ->
-            case [(ver, ready) | item <- foldr (:) [] items, Just (ver, ready) <- [extract item], ready > 0] of
-                [] -> Nothing
-                xs -> Just (fst (foldr1 maxByReady xs))
-        _ -> Nothing
+      Just (Array items) ->
+        case [(ver, ready) | item <- foldr (:) [] items, Just (ver, ready) <- [extract item], ready > 0] of
+          [] -> Nothing
+          xs -> Just (fst (foldr1 maxByReady xs))
+      _ -> Nothing
     pickRunning _ = Nothing
     extract (Object item) = do
-        meta <- lookupObj "metadata" item
-        name <- lookupTxt "name" meta
-        -- Scheduler deployments are named "<svcHost>-<version>".
-        -- The 'version' metadata label is absent on deployments created by
-        -- ny-autopilot, so extract the version from the deployment name directly.
-        ver <- T.stripPrefix (svcHost <> "-") name
-        let ready = case lookupObj "status" item >>= KM.lookup (K.fromText "readyReplicas") of
-                Just (Number n) -> round n :: Int
-                _ -> 0
-        Just (ver, ready)
+      meta <- lookupObj "metadata" item
+      name <- lookupTxt "name" meta
+      -- Scheduler deployments are named "<svcHost>-<version>".
+      -- The 'version' metadata label is absent on deployments created by
+      -- ny-autopilot, so extract the version from the deployment name directly.
+      ver <- T.stripPrefix (svcHost <> "-") name
+      let ready = case lookupObj "status" item >>= KM.lookup (K.fromText "readyReplicas") of
+            Just (Number n) -> round n :: Int
+            _ -> 0
+      Just (ver, ready)
     extract _ = Nothing
     lookupObj key obj = case KM.lookup (K.fromText key) obj of Just (Object o) -> Just o; _ -> Nothing
     lookupTxt key obj = case KM.lookup (K.fromText key) obj of Just (String t) -> Just t; _ -> Nothing

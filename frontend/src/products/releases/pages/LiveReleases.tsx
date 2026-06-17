@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Server, Smartphone, Activity, ExternalLink, RefreshCw, Apple, Cpu } from 'lucide-react';
 import { useLiveReleases } from '../hooks';
 import { Button } from '../../../shared/ui/button';
@@ -46,8 +47,24 @@ const PlatformIcon = ({ platform }: { platform: string }) =>
     : <Cpu className="w-3.5 h-3.5 text-emerald-600" />;
 
 export default function LiveReleases() {
-  const [category, setCategory] = useState<Category>('all');
+  const location = useLocation();
+  const navigate = useNavigate();
+  const defaultCategory: Category = location.pathname.startsWith('/mobile') ? 'mobile' : 'backend';
+  const [category, setCategory] = useState<Category>(defaultCategory);
+  useEffect(() => { setCategory(defaultCategory); }, [defaultCategory]);
   const { data, isLoading, isFetching, refetch } = useLiveReleases(category);
+
+  const handleCategoryClick = (key: Category) => {
+    if (key === 'all') {
+      setCategory('all');
+    } else if (key === defaultCategory) {
+      setCategory(key);
+    } else if (key === 'backend') {
+      navigate('/backend/releases/live', { replace: true });
+    } else {
+      navigate('/mobile/releases/live', { replace: true });
+    }
+  };
 
   const backendRows = data?.backend ?? [];
   const mobileRows = data?.mobile ?? [];
@@ -65,7 +82,7 @@ export default function LiveReleases() {
               type="button"
               role="tab"
               aria-selected={category === chip.key}
-              onClick={() => setCategory(chip.key)}
+              onClick={() => handleCategoryClick(chip.key)}
               className={cn(
                 'inline-flex items-center gap-1.5 h-8 px-3 rounded-full text-xs font-medium border cursor-pointer transition-colors duration-150',
                 category === chip.key

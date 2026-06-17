@@ -4,6 +4,12 @@
 
 **Goal:** Add a `MobileBuild` release category to the existing `autopilot` product so React Native app releases (consumer-android only for MVP) can be created, approved, dispatched to GitHub Actions, and tracked alongside backend releases through the same lifecycle, RBAC, audit log, and UI.
 
+> **⚠️ MVP-era plan.** Steps here describe the original build. Several paths named
+> below (`createOne`, `loadAndValidate`, `ConfirmTag`, `insertMobileTracker`) were
+> later reworked — build type replaced `MobileDestination`, and an edge-case audit
+> hardened create / store-sync / ConfirmTag / latest-build queries. See
+> `2026-05-18-mobile-releases-post-mvp-design.md` §15 (records the full audit).
+
 **Architecture:** Extend `release_tracker` with two nullable columns + a new `app_catalog` auxiliary table. Add `MobileBuild` to `ReleaseCategory` ADT and a new `MobileBuildState` variant to `TargetState`. New module tree under `Products/Autopilot/Mobile/` for category-specific code: GitHub App client, Play Console version client, workflow spec (7 stages reusing `Core/Workflow/Engine.hs`), HTTP handlers. Frontend: extend `releases/` product with new pages; two `PRODUCT_REGISTRY` entries (Backend / Mobile) sharing the `autopilot` slug to render two dashboard tiles.
 
 **Tech Stack:** Haskell (Servant + Beam ORM + ReaderT Flow monad), PostgreSQL, React + TypeScript + Vite, Tailwind UI components. Tests use hand-rolled assertions in `backend/test/Main.hs` (no hspec/tasty); integration tests via `scripts/test-api.sh`.
@@ -3878,33 +3884,38 @@ The `inputs` shapes match the workflow contracts:
 
 ```haskell
 previewVersionsH _ req = do
-  let ids = ... -- existing
-  results <- forM ids $ \cid -> do
+  -- Mint the ASC JWT once so all iOS apps in the batch share it.
+  -- Avoids Apple rejecting duplicate JWTs minted in the same second
+  -- (identical iat/exp claims, different ECDSA signatures → intermittent 401).
+  mAscToken <- mintAscTokenOnce
+  results <- forM (appCatalogIds req) $ \cid -> do
     ac <- findAppCatalogById cid
-    res <- Versioning.resolveNextVersion ac
+    res <- Versioning.resolveNextVersionWithToken mAscToken (acPlatform ac) (acPackageName ac)
     pure $ case res of
       Right (AndroidVersion n c) ->
-        object [ "app_catalog_id"    .= cid
-               , "next_version_name" .= n
-               , "next_version_code" .= c
-               , "source"            .= ("play_console" :: Text)
-               ]
+        VersionPreviewItem cid (Just n) (Just c) Nothing (Just "play_console") Nothing
       Right (IosVersion n) ->
-        object [ "app_catalog_id"     .= cid
-               , "next_version_number" .= n          -- single field for iOS
-               , "source"              .= ("app_store_connect" :: Text)
-               ]
-      Left err -> object [ "app_catalog_id" .= cid, "error" .= err ]
-  pure $ object ["previews" .= results]
+        VersionPreviewItem cid Nothing Nothing (Just n) (Just "app_store_connect") Nothing
+      Left err ->
+        errorItem cid err
+  pure PreviewVersionsResp { previews = results }
+
+mintAscTokenOnce :: Flow (Maybe Text)
+mintAscTokenOnce = do
+  mCreds <- loadAscCreds
+  case mCreds of
+    Nothing -> pure Nothing
+    Just creds -> either (const Nothing) Just <$> liftIO (mintAscToken creds)
 ```
 
-Different response shape per platform. Frontend handles both.
+Different response shape per platform. Frontend handles both. The handler mints a single ASC JWT and reuses it for all iOS apps — Android apps are unaffected (Play's OAuth token exchange is stateless and immune to this issue).
 
 #### Step 4 — Tests
 
 - Stage 1: `platform="ios"` + ASC mock returning `IosVersion "2.5.1"` → tracker's `newVersion = "2.5.1"`.
 - Stage 3: `platform="ios"` row → POST body's `inputs.version_number` is set; `inputs.version_name` and `inputs.version_code` are absent. `platform="android"` (regression) → unchanged shape.
 - `previewVersionsH` mixed request → iOS rows have `next_version_number`, Android rows have `next_version_name`+`next_version_code`.
+- `previewVersionsH` batch with 2+ iOS apps → both resolve successfully (no `asc_unauthorized` from duplicate JWTs).
 
 > **Watch-out (no preemptive change):** `Mobile/Handlers/Release.hs:166` hardcodes `mbcMatrixJobName = acName app_ <> "-Release"`, which matches Android's `<name>-Release` job naming. iOS jobs are named `<target>-<release_type>` (`fastlane.yaml:143`) where `release_type` comes from Catalyst. **If Catalyst's `ios_prod` extraction yields `release_type=Release`, the existing equality match works for iOS too** and no change is needed. If it yields anything else (`AppStore`, `TestFlight`, `AdHoc`…) iOS rows will hang in `MBBuilding` because `execPollMatrixJobs` won't find the matching job. **Do not preemptively change this** — verify empirically during the E2E dogfood (Task 34); if it hangs, switch the matcher from equality to prefix-match (`T.isPrefixOf` on `<acName>-`). Documented as a known imprecision rather than a required step so we don't refactor on speculation.
 
@@ -4123,7 +4134,7 @@ Added 2026-05-13, revised 2026-05-14 after reading the real iOS workflow (`fastl
 **Known imprecisions in Phase 11** (called out at the relevant task):
 - Task 30 — the iOS buildNumber bump rule is **not** SCC's concern; the workflow's `fastlane fetch_build_number` computes it. SCC only resolves the `version_number` (semver string). The iOS workflow's own auto-version logic (lines 261–346 of `fastlane.yaml`) does a patch bump from the latest TestFlight build; SCC mirrors that pure logic in `Versioning/Apple.hs:computeNextIosVersion`.
 - Task 30 — extracting `Play.resolve` from the existing Play body so the dispatcher has symmetric branches is mechanical but touches the most-tested module. Land it in a separate commit ahead of the dispatcher itself.
-- Task 30 — JWT signing is inlined in `Versioning/Apple.hs` (matches Play's pattern). If iOS volume grows and ASC throttles, lift the signer into a separate file with IORef-backed caching — see `Mobile/Github/Auth.hs`.
+- Task 30 — JWT signing is inlined in `Versioning/Apple.hs` (matches Play's pattern). Batch callers (`previewVersionsH`) mint once via `mintAscTokenOnce` and pass the token to `resolveNextVersionWithToken` — this avoids Apple rejecting duplicate JWTs minted in the same second (identical `iat`/`exp`, different ECDSA signatures → intermittent 401). If iOS volume grows further and ASC throttles, lift the signer into a separate file with IORef-backed caching — see `Mobile/Github/Auth.hs`.
 - Task 30 — **ES256 implemented (2026-05-14).** Web.JWT only supports RS/HS algorithms, so the signer is built on `cryptonite`'s `Crypto.PubKey.ECC.ECDSA` (P-256 + SHA-256) with a hand-rolled PKCS#8 .p8 parser (`asn1-encoding`) and ASN.1→raw R‖S conversion (`ecdsaSigToRaw`, RFC 7515 §3.4). No new package added; `cryptonite`, `asn1-encoding`, `asn1-types`, `base64-bytestring`, `memory` were already in the nix env, declared explicitly in `package.yaml`/`scc.cabal` so the new module can import them.
 - Task 30 — `Versioning/Apple.hs` uses a single org-wide ASC API key from `server_config`. The iOS workflow uses per-app keys (Cumta and YatriSathi have their own, default for the rest — `fastlane.yaml:276-285`). If SCC's chosen key doesn't have access to an app's Apple team, version resolution fails for that app with `asc_app_not_found`; the fallback is to skip SCC-side resolution and let the workflow's per-team auto-detect take over (i.e. dispatch with `version_number` blank). Documented in Task 33's "Per-team ASC creds caveat".
 - Task 31 — the iOS `inputs` shape (`version_number` single field, no `version_name`/`version_code`) is the load-bearing difference between platforms; a build-time test that asserts the constructed JSON has the right keys for each platform is the most valuable regression coverage.

@@ -3,45 +3,51 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Autopilot permissions as a promoted ADT. Each constructor is also a
-type (DataKinds) consumed by the 'Protected' Servant combinator; the
-'KnownPermission' instances bridge each type back to its runtime
-@(product, action)@ pair used by the RBAC check.
--}
-module Products.Autopilot.Types.Permission (
-    AutopilotPermission (..),
+-- | Autopilot permissions as a promoted ADT. Each constructor is also a
+-- type (DataKinds) consumed by the 'Protected' Servant combinator; the
+-- 'KnownPermission' instances bridge each type back to its runtime
+-- @(product, action)@ pair used by the RBAC check.
+module Products.Autopilot.Types.Permission
+  ( AutopilotPermission (..),
     autopilotPermissionToText,
     textToAutopilotPermission,
     permissionDescription,
-)
+  )
 where
 
 import Core.Auth.Permission (KnownPermission (..))
 import Data.Text (Text)
 
 data AutopilotPermission
-    = AP_RELEASE_VIEW
-    | AP_RELEASE_CREATE
-    | AP_RELEASE_APPROVE
-    | AP_RELEASE_REVERT
-    | AP_RELEASE_DISCARD
-    | AP_RELEASE_PAUSE
-    | AP_RELEASE_RESUME
-    | AP_RELEASE_ABORT
-    | AP_RELEASE_UPDATE
-    | AP_RELEASE_DELETE
-    | AP_MANAGE_STAGGER
-    | AP_PRODUCT_CONFIG_VIEW
-    | AP_PRODUCT_CONFIG_EDIT
-    | AP_SERVICE_CONFIG_VIEW
-    | AP_SERVICE_CONFIG_EDIT
-    | AP_CONFIG_EDIT
-    | AP_CONFIG_DISCARD
-    | AP_CONFIG_REVERT
-    | AP_FORCE_UNLOCK
-    | AP_MOBILE_DISPATCH
-    | AP_MOBILE_APP_MANAGE
-    deriving (Show, Read, Eq, Ord, Enum, Bounded)
+  = AP_RELEASE_VIEW
+  | AP_RELEASE_CREATE
+  | AP_RELEASE_APPROVE
+  | AP_RELEASE_REVERT
+  | AP_RELEASE_DISCARD
+  | AP_RELEASE_PAUSE
+  | AP_RELEASE_RESUME
+  | AP_RELEASE_ABORT
+  | AP_RELEASE_UPDATE
+  | AP_RELEASE_DELETE
+  | AP_MANAGE_STAGGER
+  | AP_PRODUCT_CONFIG_VIEW
+  | AP_PRODUCT_CONFIG_EDIT
+  | AP_SERVICE_CONFIG_VIEW
+  | AP_SERVICE_CONFIG_EDIT
+  | AP_CONFIG_EDIT
+  | AP_CONFIG_DISCARD
+  | AP_CONFIG_REVERT
+  | AP_FORCE_UNLOCK
+  | AP_MOBILE_DISPATCH
+  | AP_MOBILE_APP_MANAGE
+  | AP_AB_VALIDATION_EDIT
+    | AP_AI_SUMMARIZE
+    | AP_AI_ASSESS
+    | AP_AI_ASK
+    | AP_AI_AUDIT_VIEW
+  | AP_RELEASE_PROMOTE
+  | AP_RELEASE_ROLLOUT
+  deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 autopilotPermissionToText :: AutopilotPermission -> Text
 autopilotPermissionToText AP_RELEASE_VIEW = "RELEASE_VIEW"
@@ -65,6 +71,13 @@ autopilotPermissionToText AP_CONFIG_REVERT = "CONFIG_REVERT"
 autopilotPermissionToText AP_FORCE_UNLOCK = "FORCE_UNLOCK"
 autopilotPermissionToText AP_MOBILE_DISPATCH = "MOBILE_DISPATCH"
 autopilotPermissionToText AP_MOBILE_APP_MANAGE = "MOBILE_APP_MANAGE"
+autopilotPermissionToText AP_AB_VALIDATION_EDIT = "AB_VALIDATION_EDIT"
+autopilotPermissionToText AP_AI_SUMMARIZE = "AI_SUMMARIZE"
+autopilotPermissionToText AP_AI_ASSESS = "AI_ASSESS"
+autopilotPermissionToText AP_AI_ASK = "AI_ASK"
+autopilotPermissionToText AP_AI_AUDIT_VIEW = "AI_AUDIT_VIEW"
+autopilotPermissionToText AP_RELEASE_PROMOTE = "RELEASE_PROMOTE"
+autopilotPermissionToText AP_RELEASE_ROLLOUT = "RELEASE_ROLLOUT"
 
 textToAutopilotPermission :: Text -> Maybe AutopilotPermission
 textToAutopilotPermission "RELEASE_VIEW" = Just AP_RELEASE_VIEW
@@ -88,6 +101,13 @@ textToAutopilotPermission "CONFIG_REVERT" = Just AP_CONFIG_REVERT
 textToAutopilotPermission "FORCE_UNLOCK" = Just AP_FORCE_UNLOCK
 textToAutopilotPermission "MOBILE_DISPATCH" = Just AP_MOBILE_DISPATCH
 textToAutopilotPermission "MOBILE_APP_MANAGE" = Just AP_MOBILE_APP_MANAGE
+textToAutopilotPermission "AB_VALIDATION_EDIT" = Just AP_AB_VALIDATION_EDIT
+textToAutopilotPermission "AI_SUMMARIZE" = Just AP_AI_SUMMARIZE
+textToAutopilotPermission "AI_ASSESS" = Just AP_AI_ASSESS
+textToAutopilotPermission "AI_ASK" = Just AP_AI_ASK
+textToAutopilotPermission "AI_AUDIT_VIEW" = Just AP_AI_AUDIT_VIEW
+textToAutopilotPermission "RELEASE_PROMOTE" = Just AP_RELEASE_PROMOTE
+textToAutopilotPermission "RELEASE_ROLLOUT" = Just AP_RELEASE_ROLLOUT
 textToAutopilotPermission _ = Nothing
 
 -- | Human-readable description (exhaustive, -Wall catches missing variants).
@@ -113,90 +133,125 @@ permissionDescription AP_CONFIG_REVERT = "Revert ConfigMap releases"
 permissionDescription AP_FORCE_UNLOCK = "Force-release a VS edit lock held by another user (operator recovery; superadmin only)"
 permissionDescription AP_MOBILE_DISPATCH = "Dispatch mobile release to GitHub Actions"
 permissionDescription AP_MOBILE_APP_MANAGE = "Manage mobile app catalog (admin)"
+permissionDescription AP_AB_VALIDATION_EDIT = "Set AB validation status on completed releases"
+permissionDescription AP_AI_SUMMARIZE = "Generate AI summaries of releases"
+permissionDescription AP_AI_ASSESS = "Run AI risk assessment on releases"
+permissionDescription AP_AI_ASK = "Ask AI questions about release context"
+permissionDescription AP_AI_AUDIT_VIEW = "View the AI audit log"
+permissionDescription AP_RELEASE_PROMOTE = "Promote a built release to store review"
+permissionDescription AP_RELEASE_ROLLOUT = "Manage staged rollout (set %, halt, resume, release)"
 
 -- 'permissionName' MUST match 'autopilotPermissionToText' for the same
 -- constructor; the RBAC check compares this string against the DB.
 
 instance KnownPermission 'AP_RELEASE_VIEW where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "RELEASE_VIEW"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_VIEW"
 
 instance KnownPermission 'AP_RELEASE_CREATE where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "RELEASE_CREATE"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_CREATE"
 
 instance KnownPermission 'AP_RELEASE_APPROVE where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "RELEASE_APPROVE"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_APPROVE"
 
 instance KnownPermission 'AP_RELEASE_REVERT where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "RELEASE_REVERT"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_REVERT"
 
 instance KnownPermission 'AP_RELEASE_DISCARD where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "RELEASE_DISCARD"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_DISCARD"
 
 instance KnownPermission 'AP_RELEASE_PAUSE where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "RELEASE_PAUSE"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_PAUSE"
 
 instance KnownPermission 'AP_RELEASE_RESUME where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "RELEASE_RESUME"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_RESUME"
 
 instance KnownPermission 'AP_RELEASE_ABORT where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "RELEASE_ABORT"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_ABORT"
 
 instance KnownPermission 'AP_RELEASE_UPDATE where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "RELEASE_UPDATE"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_UPDATE"
 
 instance KnownPermission 'AP_RELEASE_DELETE where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "RELEASE_DELETE"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_DELETE"
 
 instance KnownPermission 'AP_MANAGE_STAGGER where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "MANAGE_STAGGER"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "MANAGE_STAGGER"
 
 instance KnownPermission 'AP_PRODUCT_CONFIG_VIEW where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "PRODUCT_CONFIG_VIEW"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "PRODUCT_CONFIG_VIEW"
 
 instance KnownPermission 'AP_PRODUCT_CONFIG_EDIT where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "PRODUCT_CONFIG_EDIT"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "PRODUCT_CONFIG_EDIT"
 
 instance KnownPermission 'AP_SERVICE_CONFIG_VIEW where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "SERVICE_CONFIG_VIEW"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "SERVICE_CONFIG_VIEW"
 
 instance KnownPermission 'AP_SERVICE_CONFIG_EDIT where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "SERVICE_CONFIG_EDIT"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "SERVICE_CONFIG_EDIT"
 
 instance KnownPermission 'AP_CONFIG_EDIT where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "CONFIG_EDIT"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "CONFIG_EDIT"
 
 instance KnownPermission 'AP_CONFIG_DISCARD where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "CONFIG_DISCARD"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "CONFIG_DISCARD"
 
 instance KnownPermission 'AP_CONFIG_REVERT where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "CONFIG_REVERT"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "CONFIG_REVERT"
 
 instance KnownPermission 'AP_FORCE_UNLOCK where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "FORCE_UNLOCK"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "FORCE_UNLOCK"
 
 instance KnownPermission 'AP_MOBILE_DISPATCH where
-    permissionProduct _ = "autopilot"
-    permissionName _ = "MOBILE_DISPATCH"
+  permissionProduct _ = "autopilot"
+  permissionName _ = "MOBILE_DISPATCH"
 
 instance KnownPermission 'AP_MOBILE_APP_MANAGE where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "MOBILE_APP_MANAGE"
+
+instance KnownPermission 'AP_AB_VALIDATION_EDIT where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "AB_VALIDATION_EDIT"
+
+instance KnownPermission 'AP_AI_SUMMARIZE where
     permissionProduct _ = "autopilot"
-    permissionName _ = "MOBILE_APP_MANAGE"
+    permissionName _ = "AI_SUMMARIZE"
+
+instance KnownPermission 'AP_AI_ASSESS where
+    permissionProduct _ = "autopilot"
+    permissionName _ = "AI_ASSESS"
+
+instance KnownPermission 'AP_AI_ASK where
+    permissionProduct _ = "autopilot"
+    permissionName _ = "AI_ASK"
+
+instance KnownPermission 'AP_AI_AUDIT_VIEW where
+    permissionProduct _ = "autopilot"
+    permissionName _ = "AI_AUDIT_VIEW"
+
+instance KnownPermission 'AP_RELEASE_PROMOTE where
+    permissionProduct _ = "autopilot"
+    permissionName _ = "RELEASE_PROMOTE"
+
+instance KnownPermission 'AP_RELEASE_ROLLOUT where
+    permissionProduct _ = "autopilot"
+    permissionName _ = "RELEASE_ROLLOUT"

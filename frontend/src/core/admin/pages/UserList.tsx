@@ -15,7 +15,7 @@ import {
   DialogBody,
   DialogFooter,
 } from '../../../shared/ui/dialog';
-import { Search, Plus } from 'lucide-react';
+import { Search, Plus, Eye, EyeOff } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
 
@@ -31,6 +31,8 @@ const UserList: React.FC = () => {
   });
 
   // Add user form state
+  const [showPassword, setShowPassword] = useState(false);
+
   const [form, setForm] = useState({
     firstName: '',
     lastName: '',
@@ -45,6 +47,7 @@ const UserList: React.FC = () => {
       toast.success('User created successfully');
       queryClient.invalidateQueries({ queryKey: ['admin-users'] });
       setAddOpen(false);
+      setShowPassword(false);
       setForm({ firstName: '', lastName: '', email: '', password: '', isSuperadmin: false });
     },
     onError: (err: any) => {
@@ -242,14 +245,30 @@ const UserList: React.FC = () => {
                 onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
                 placeholder="john@example.com"
               />
-              <Input
-                label="Password"
-                type="password"
-                required
-                value={form.password}
-                onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
-                placeholder="Min 6 characters"
-              />
+              <div className="space-y-1.5">
+                <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider">
+                  Password <span className="text-red-500">*</span>
+                </label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    value={form.password}
+                    onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+                    placeholder="Min 6 characters"
+                    className="w-full h-10 border border-zinc-300 rounded-lg px-3 pr-10 text-sm text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((v) => !v)}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center text-zinc-400 hover:text-zinc-600 transition-colors duration-150 rounded cursor-pointer"
+                    tabIndex={-1}
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"

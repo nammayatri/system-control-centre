@@ -31,6 +31,11 @@ when:
       ghc-options:
         - -O2
 
+# -Werror=missing-fields: partial record construction (a field omitted from
+# `T { ... }`) otherwise compiles as a mere warning but throws "Missing field in
+# record construction" at runtime when the thunk is forced. Making ONLY this one
+# fatal stops a record-field addition from silently shipping a latent crash —
+# without turning all of -Wall into -Werror.
 ghc-options:
   - -Wall
   - -Wcompat
@@ -39,6 +44,7 @@ ghc-options:
   - -Wincomplete-record-updates
   - -Wpartial-fields
   - -Wunused-imports
+  - -Werror=missing-fields
   - -j4
 
 dependencies:
@@ -105,6 +111,7 @@ library:
     - Core.Auth.RouteCheck
     - Core.Auth.Routes
     - Core.Auth.Schema
+    - Core.Secrets
     - Core.Auth.Types
     - Core.AppError
     - Core.Config
@@ -148,6 +155,11 @@ library:
     - Products.Autopilot.Mobile.Versioning.Apple
     - Products.Autopilot.Mobile.Github
     - Products.Autopilot.Mobile.Github.Auth
+    - Products.Autopilot.Mobile.Github.Compare
+    - Products.Autopilot.Mobile.Changelog
+    - Products.Autopilot.Mobile.RevertResolver
+    - Products.Autopilot.Mobile.StoreSync
+    - Products.Autopilot.Mobile.Handlers.Revert
     - Products.Autopilot.Mobile.Workflow
     - Products.Autopilot.Queries.ProductService
     - Products.Autopilot.Queries.ReleaseTracker
@@ -157,6 +169,7 @@ library:
     - Products.Autopilot.Actions.K8sResource
     - Products.Autopilot.Actions.Release
     - Products.Autopilot.Actions.VSEdit
+    - Products.Autopilot.Handlers.Ai
     - Products.Autopilot.Routes
     - Products.Autopilot.Runner
     - Products.Autopilot.RuntimeConfig
@@ -189,6 +202,15 @@ library:
     - Shared.JSON
     - Shared.Queries.ServerConfig
     - Shared.Types.Storage.ServerConfig
+    - Shared.AI.Types
+    - Shared.AI.Prompts
+    - Shared.AI.Changelog
+    - Shared.AI.Provider
+    - Shared.AI.Config
+    - Shared.AI.Queries
+    - Shared.AI.Service
+    - Shared.AI.ReleaseSummary
+    - Shared.Types.Storage.AiSchema
 
 executables:
   scc:

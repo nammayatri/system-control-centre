@@ -33,40 +33,66 @@ module Products.Autopilot.Mobile.Handlers.Release (
     DispatchInfo (..),
     DispatchMobileReleasesResp (..),
     dispatchMobileReleasesH,
+
+    -- * Branches
+    BranchesResp (..),
+    listBranchesH,
+
+    -- * Changelog preview
+    ChangelogPreviewResp (..),
+    changelogPreviewH,
+    resolveBaseFromTracks,
+
+    -- * Create-time AI changelog summary
+    AiSummaryResp (..),
+    changelogAiSummaryH,
 ) where
 
-import Control.Monad (unless)
+import Control.Monad (unless, void, when)
 import Control.Monad.Catch (throwM)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..))
 import Core.DB.Connection (runDB)
-import Core.Environment (Flow, withDb)
+import Core.Environment (Flow, forkFlow, withDb)
 import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericToJSON, object, (.=))
 import Data.Int (Int32)
-import Data.List (sortOn)
+import Data.List (nub, partition, sortOn)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Database.Beam
-import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById)
+import Products.Autopilot.Mobile.Github (BranchInfo (..), listBranches, searchBranches)
+import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
+import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), CompareResult (..), compareAllCommits, compareRefs)
+import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), TrackSnapshot (..), fetchLatestBuildsForApp, findAppCatalogByIds, listAppCatalog, listEnabledAppCatalog)
 import Products.Autopilot.Mobile.Queries.Tracker (
-    insertMobileTracker,
+    ReleaseTrackerRow,
+    appCatalogByKey,
+    gitOwner,
+    gitRepo,
     logEvent,
+    mkMobileTrackerRow,
  )
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
-    MobileDestination,
+    isDebugBuildType,
  )
 import Products.Autopilot.Mobile.Types.Storage (
     AppCatalog,
     AppCatalogT (..),
  )
-import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker)
+import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch)
+import Products.Autopilot.RuntimeConfig (getMobileBuildType)
+import qualified Shared.AI.Changelog as CL
+import Shared.AI.Config (loadAiConfig)
+import Shared.AI.Queries (claimReleaseSummary, computePromptHash, lookupReleaseSummary, upsertReleaseSummary)
+import Shared.AI.ReleaseSummary (generateWithFallback)
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
     ReleaseTracker (..),
@@ -96,8 +122,13 @@ instance FromJSON CreateMobileReleasesItem
 data CreateMobileReleasesReq = CreateMobileReleasesReq
     { releaseGroupLabel :: Maybe Text
     , changeLog :: Text
-    , destination :: MobileDestination
+    , sourceRef :: Maybe Text
     , items :: [CreateMobileReleasesItem]
+    , destination :: Maybe Text
+    -- ^ Store destination ("GooglePlay" / "Firebase") for provider PROD
+    -- Android builds. Optional: only the provider-prod-Android dispatch reads
+    -- it; absent (older clients, or any non-provider-Android selection) means
+    -- the dispatch falls back to "GooglePlay".
     }
     deriving (Generic, Show)
 
@@ -126,64 +157,109 @@ instance FromJSON CreateMobileReleasesResp
 
 -- ─── Create handler ───────────────────────────────────────────────
 
+{- | Draft N mobile release rows (one per selected app) under one
+@release_group_id@.
+
+Validate-before-write (mirrors the backend @createReleaseH@ guard chain): the
+request is fully checked — non-empty items, non-empty changelog, no duplicate
+@appCatalogId@, and every id exists — BEFORE any row is written. The N inserts
+then commit in a single transaction ('insertReleaseTrackerRowsBatch'), so a
+create is all-or-nothing: a bad request leaves zero rows, never a partial group.
+
+Note: version fields aren't validated here — for release builds the workflow's
+ResolveVersion stage resolves @version_name@/@version_code@ from the store
+(authoritative), and debug builds carry no version. The create-time values are
+preview suggestions only.
+-}
 createMobileReleasesH :: AuthedPerson -> CreateMobileReleasesReq -> Flow CreateMobileReleasesResp
 createMobileReleasesH ap CreateMobileReleasesReq{..} = do
-    case items of
-        [] -> throwM $ BadRequest "items must be non-empty"
-        _ -> pure ()
+    -- ── Validate everything up front (no partial writes) ──
+    when (null items) $ throwM $ BadRequest "items must be non-empty"
+    when (T.null (T.strip changeLog)) $ throwM $ BadRequest "changeLog must not be empty"
+    let aids = [a | CreateMobileReleasesItem{appCatalogId = a} <- items]
+    when (length (nub aids) /= length aids) $
+        throwM $
+            BadRequest "items contains duplicate appCatalogId"
+    apps <- findAppCatalogByIds aids
+    let appById = Map.fromList [(acId a, a) | a <- apps]
+        missing = [a | a <- aids, not (Map.member a appById)]
+    unless (null missing) $
+        throwM $
+            BadRequest ("unknown app_catalog_id(s): " <> T.intercalate ", " (map (T.pack . show) missing))
+    -- ── Build all rows, then insert atomically ──
+    -- Build type is fixed per deployment env (master = debug, prod = release)
+    -- via the mobile_build_type config flag — not chosen by the caller.
+    buildType <- getMobileBuildType
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
-    summaries <- mapM (createOne ap groupId changeLog destination now) items
+    built <- mapM (buildRow ap appById groupId changeLog buildType destination sourceRef now) items
+    insertReleaseTrackerRowsBatch (map fst built)
     pure
         CreateMobileReleasesResp
             { releaseGroupId = groupId
-            , releases = summaries
+            , releases = map snd built
             }
 
--- | Look up the app, draft a tracker row, and return the summary.
-createOne ::
+{- | Build one tracker row + its response summary. The app is looked up from the
+pre-validated map ('createMobileReleasesH' has already proved every id exists),
+so this performs no DB read — only a fresh release-id mint.
+-}
+buildRow ::
     AuthedPerson ->
+    Map.Map Int32 AppCatalog ->
     Text ->
     Text ->
-    MobileDestination ->
+    Text ->
+    Maybe Text ->
+    -- ^ destination (provider prod Android only)
+    Maybe Text ->
+    -- ^ source ref
     UTCTime ->
     CreateMobileReleasesItem ->
-    Flow CreatedReleaseSummary
-createOne ap groupId changeLog_ dest now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode} = do
-    mApp <- findAppCatalogById aid
-    case mApp of
-        Nothing ->
-            throwM $
-                BadRequest ("unknown app_catalog_id: " <> T.pack (show aid))
-        Just app_ -> do
-            rid <- liftIO (UUID.toText <$> UUID.nextRandom)
-            let ctx =
-                    MobileBuildContext
-                        { mbcVersionCode = mCode
-                        , mbcChangeLog = changeLog_
-                        , mbcDestination = dest
-                        , mbcReleaseGroupId = groupId
-                        , mbcMatrixJobName = acName app_ <> "-Release"
-                        , mbcOtaNamespace = Nothing
-                        , mbcTagPushed = Nothing
-                        }
-                target =
-                    MobileBuildTargetState
-                        { mbWfStatus = MBInit
-                        , mbContext = ctx
-                        , mbExternalRunId = Nothing
-                        , mbMatrixJobStatus = Nothing
-                        , mbBuildStartedAt = Nothing
-                        , mbBuildCompletedAt = Nothing
-                        , mbResolveAttempts = Nothing
-                        }
-            insertMobileTracker rid app_ target mVer (apEmail ap) now
-            pure
-                CreatedReleaseSummary
-                    { id = rid
-                    , appCatalogId = aid
-                    , status = "CREATED"
-                    }
+    Flow (ReleaseTrackerRow, CreatedReleaseSummary)
+buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode} = do
+    rid <- liftIO (UUID.toText <$> UUID.nextRandom)
+    -- safe: createMobileReleasesH validated that every id is present in appById
+    let app_ = appById Map.! aid
+        -- The destination input only exists on provider-prod-apk-gen.yaml, so
+        -- only stamp it on provider (driver) + Android + release rows. Everything
+        -- else stores Nothing (the dispatch ignores it for those builds anyway).
+        isProviderProdAndroid =
+            acSurface app_ == "driver"
+                && acPlatform app_ == "android"
+                && not (isDebugBuildType buildType)
+        ctx =
+            MobileBuildContext
+                { mbcVersionCode = mCode
+                , mbcChangeLog = changeLog_
+                , mbcBuildType = buildType
+                , mbcReleaseGroupId = groupId
+                , mbcMatrixJobName = acName app_ <> if isDebugBuildType buildType then "-Debug" else "-Release"
+                , mbcOtaNamespace = Nothing
+                , mbcTagPushed = Nothing
+                , mbcDestination = if isProviderProdAndroid then mDestination else Nothing
+                }
+        target =
+            MobileBuildTargetState
+                { mbWfStatus = MBInit
+                , mbContext = ctx
+                , mbExternalRunId = Nothing
+                , mbMatrixJobStatus = Nothing
+                , mbBuildStartedAt = Nothing
+                , mbBuildCompletedAt = Nothing
+                , mbResolveAttempts = Nothing
+                , mbReviewSubmittedAt = Nothing
+                , mbReviewLastPolledAt = Nothing
+                }
+        row = mkMobileTrackerRow rid app_ target mVer mSourceRef (apEmail ap) now
+    pure
+        ( row
+        , CreatedReleaseSummary
+            { id = rid
+            , appCatalogId = aid
+            , status = "CREATED"
+            }
+        )
 
 -- ─── Dispatch: request / response types ───────────────────────────
 
@@ -237,7 +313,16 @@ dispatchMobileReleasesH _ap DispatchMobileReleasesReq{releaseIds = rids} = do
     case rids of
         [] -> throwM $ BadRequest "releaseIds must be non-empty"
         _ -> pure ()
-    loaded <- mapM loadAndValidate rids
+    -- Batch both lookups up front (was an N+1: findReleaseTracker +
+    -- loadAppCatalogFor per release). One tracker query + one catalog read,
+    -- then pure per-release validation against the maps.
+    trackerById <-
+        Map.fromList . map (\twt@(rt, _) -> (releaseId rt, twt))
+            <$> findReleaseTrackersByIds rids
+    acByKey <-
+        Map.fromList . map (\a -> ((acName a, acSurface a, acPlatform a), a))
+            <$> listAppCatalog
+    loaded <- mapM (validateForDispatch trackerById acByKey) rids
     -- Group by (github_repo, workflow_path, surface, platform). Each
     -- group maps to one workflow_dispatch — siblings in a group are
     -- tied to the same dispatch_id so the workflow can run them as one
@@ -253,19 +338,22 @@ type GroupKey = (Text, Text, Text, Text)
 groupKey :: AppCatalog -> GroupKey
 groupKey ac = (acGithubRepo ac, acWorkflowPath ac, acSurface ac, acPlatform ac)
 
-{- | Load a release row and verify it is in a state where dispatch is
-allowed: status=CREATED, is_approved=True, target state is MobileBuild.
-Throws 'BadRequest' (with the failing release id in the message) on any
-violation.
+{- | Verify a release is in a state where dispatch is allowed: status=CREATED,
+is_approved=True, target state is MobileBuild, and a matching @app_catalog@ row
+exists. Throws 'BadRequest' (with the failing release id) on any violation.
 
-The 'Maybe TargetState' is carried along so we can read the
-release_group_id out of the MobileBuild context when emitting events
-(the domain 'ReleaseTracker' record only surfaces the K8s context).
+Pure over pre-fetched maps (tracker-by-id, app-catalog-by-(name,surface,platform))
+— the dispatch handler batches both lookups, so this performs no DB read. The
+'Maybe TargetState' is carried along so 'logDispatchEvent' can read the
+release_group_id out of the MobileBuild context.
 -}
-loadAndValidate :: Text -> Flow (ReleaseTracker, AppCatalog, Maybe TargetState)
-loadAndValidate rid = do
-    mPair <- findReleaseTracker rid
-    case mPair of
+validateForDispatch ::
+    Map.Map Text TrackerWithTarget ->
+    Map.Map (Text, Text, Text) AppCatalog ->
+    Text ->
+    Flow (ReleaseTracker, AppCatalog, Maybe TargetState)
+validateForDispatch trackerById acByKey rid =
+    case Map.lookup rid trackerById of
         Nothing -> throwM $ BadRequest ("release not found: " <> rid)
         Just (rt, mTs) -> do
             case mTs of
@@ -284,41 +372,24 @@ loadAndValidate rid = do
                                 <> T.pack (show s)
                                 <> ")"
                             )
-            if not (RT.isApproved rt)
-                then
+            unless (RT.isApproved rt) $
+                throwM $
+                    BadRequest ("release " <> rid <> " is not approved; cannot dispatch")
+            case Map.lookup (appGroup rt, service rt, env rt) acByKey of
+                Just ac -> pure (rt, ac, mTs)
+                Nothing ->
                     throwM $
-                        BadRequest ("release " <> rid <> " is not approved; cannot dispatch")
-                else pure ()
-            ac <- loadAppCatalogFor rt rid
-            pure (rt, ac, mTs)
-
--- | Look up the AppCatalog row matching a tracker's (app_group, surface, platform).
-loadAppCatalogFor :: ReleaseTracker -> Text -> Flow AppCatalog
-loadAppCatalogFor rt rid = do
-    rows <- withDb $ \db ->
-        runDB db $
-            runSelectReturningList $
-                select $ do
-                    ac <- all_ (appCatalogs autopilotDb)
-                    guard_ (acName ac ==. val_ (appGroup rt))
-                    guard_ (acSurface ac ==. val_ (service rt))
-                    guard_ (acPlatform ac ==. val_ (env rt))
-                    pure ac
-    case rows of
-        (x : _) -> pure x
-        [] ->
-            throwM $
-                BadRequest
-                    ( "release "
-                        <> rid
-                        <> " has no matching app_catalog row for ("
-                        <> appGroup rt
-                        <> ", "
-                        <> service rt
-                        <> ", "
-                        <> env rt
-                        <> ")"
-                    )
+                        BadRequest
+                            ( "release "
+                                <> rid
+                                <> " has no matching app_catalog row for ("
+                                <> appGroup rt
+                                <> ", "
+                                <> service rt
+                                <> ", "
+                                <> env rt
+                                <> ")"
+                            )
 
 {- | Mint a dispatch_id, atomically tag every row in the group with that
 dispatch_id, and append a per-row DISPATCH_REQUESTED event. Returns a
@@ -381,3 +452,302 @@ logDispatchEvent did (rt, _ac, mTs) = do
             [ "release_group_id" .= groupId
             , "dispatch_id" .= did
             ]
+
+-- ─── Branches ────────────────────────────────────────────────────
+
+newtype BranchesResp = BranchesResp
+    { branches :: [BranchInfo]
+    }
+    deriving (Generic, Show)
+
+instance ToJSON BranchesResp
+instance FromJSON BranchesResp
+
+listBranchesH :: AuthedPerson -> Maybe Text -> Flow BranchesResp
+listBranchesH _ap mQuery = do
+    apps <- listEnabledAppCatalog
+    case apps of
+        [] -> throwM $ BadRequest "No enabled apps in catalog"
+        (ac : _) -> do
+            creds <- loadGhCreds
+            let owner = gitOwner ac
+                repo = gitRepo ac
+            result <- case mQuery of
+                Just q | not (T.null q) -> searchBranches creds owner repo q
+                _ -> do
+                    res <- listBranches creds owner repo
+                    pure $ fmap pinMain res
+            case result of
+                Left e -> throwM $ BadRequest ("GitHub API error: " <> e)
+                Right bs -> pure BranchesResp{branches = bs}
+  where
+    pinMain :: [BranchInfo] -> [BranchInfo]
+    pinMain bs =
+        let (mains, rest) = partition (\b -> biName b == "main" || biName b == "master") bs
+         in mains ++ rest
+
+-- ─── Changelog preview ──────────────────────────────────────────
+
+data ChangelogPreviewResp = ChangelogPreviewResp
+    { cpCommits :: [CommitInfo]
+    , cpAheadBy :: Int
+    , cpStatus :: Text
+    , cpBaseTag :: Maybe Text
+    , cpBaseVersion :: Maybe Text
+    , cpCompareUrl :: Maybe Text
+    }
+    deriving (Generic, Show)
+
+instance ToJSON ChangelogPreviewResp where
+    toJSON = genericToJSON defaultOptions{omitNothingFields = True}
+
+changelogPreviewH :: AuthedPerson -> Text -> Text -> Text -> Text -> Maybe Text -> Flow ChangelogPreviewResp
+changelogPreviewH _ap appName surface platform branch mBase = do
+    ac <- appCatalogByKey appName surface platform
+    creds <- loadGhCreds
+    let owner = gitOwner ac
+        repo = gitRepo ac
+    builds <- fetchLatestBuildsForApp appName surface platform
+    let lastRelease = findLastReleaseBuild builds appName surface platform
+    case lastRelease of
+        Nothing ->
+            pure emptyPreview
+        Just lb -> do
+            let (baseRef, baseTag, baseVersion) = resolveChangelogBase mBase lb
+            if T.null baseRef
+                then pure emptyPreview
+                else do
+                    result <- compareRefs creds owner repo baseRef branch
+                    case result of
+                        Right cr -> do
+                            -- Compare returns at most 250 commits, oldest-first. If the
+                            -- release has more, fetch the full set newest-first via List
+                            -- Commits; otherwise just reverse the compare list
+                            -- (oldest-first → newest-first). Either way cpCommits is
+                            -- newest-first and the UI renders it verbatim.
+                            commits <-
+                                if crTotalCommits cr > length (crCommits cr)
+                                    then do
+                                        -- compareAllCommits paginates Compare and returns
+                                        -- oldest-first; reverse for newest-first display.
+                                        eAll <- compareAllCommits creds owner repo baseRef branch
+                                        pure $ case eAll of
+                                            Right cs -> reverse cs
+                                            Left _ -> reverse (crCommits cr)
+                                    else pure (reverse (crCommits cr))
+                            pure
+                                ChangelogPreviewResp
+                                    { cpCommits = commits
+                                    , cpAheadBy = crTotalCommits cr
+                                    , cpStatus = crStatus cr
+                                    , cpBaseTag = baseTag
+                                    , cpBaseVersion = baseVersion
+                                    , cpCompareUrl =
+                                        Just $
+                                            "https://github.com/"
+                                                <> owner
+                                                <> "/"
+                                                <> repo
+                                                <> "/compare/"
+                                                <> baseRef
+                                                <> "..."
+                                                <> branch
+                                    }
+                        Left _ ->
+                            pure emptyPreview
+  where
+    emptyPreview =
+        ChangelogPreviewResp
+            { cpCommits = []
+            , cpAheadBy = 0
+            , cpStatus = "unknown"
+            , cpBaseTag = Nothing
+            , cpBaseVersion = Nothing
+            , cpCompareUrl = Nothing
+            }
+
+findLastReleaseBuild :: [LatestBuildRow] -> Text -> Text -> Text -> Maybe LatestBuildRow
+findLastReleaseBuild builds appName surface platform =
+    case filter matches builds of
+        (x : _) -> Just x
+        [] -> Nothing
+  where
+    matches b =
+        lbrAppGroup b == appName
+            && lbrSurface b == surface
+            && lbrPlatform b == platform
+            && lbrBuildType b == "release"
+
+{- | Resolve the changelog base for the requested track ("production" |
+"internal"; default "production"), returning @(baseRef, baseTag, baseVersion)@.
+
+Prefers the chosen track's snapshot tag from @metadata.tracks@ (written by
+store-sync). Falls back to the leading store-sync row's own tag/commit when the
+track — or its tag — is absent: rows synced before this carried no tracks, and an
+iOS production version is recorded without a build code (so no tag). This keeps
+the preview working in every case, defaulting to a sensible (leading-track) diff.
+-}
+resolveChangelogBase :: Maybe Text -> LatestBuildRow -> (Text, Maybe Text, Maybe Text)
+resolveChangelogBase mBase lb =
+    resolveBaseFromTracks mBase (lbrTracks lb) (lbrTagPushed lb) (lbrCommitSha lb) (lbrVersion lb)
+
+{- | Pure core of 'resolveChangelogBase' (exported for testing). Given the
+requested track, the per-track snapshots, and the leading row's tag / commit /
+version, return @(baseRef, baseTag, baseVersion)@. Prefers the chosen track's
+snapshot tag; falls back to the leading tag/commit when the track or its tag is
+absent. An unrecognised track defaults to "production".
+-}
+resolveBaseFromTracks ::
+    Maybe Text ->
+    Map.Map Text TrackSnapshot ->
+    Maybe Text ->
+    Maybe Text ->
+    Text ->
+    (Text, Maybe Text, Maybe Text)
+resolveBaseFromTracks mBase tracks leadingTag leadingCommit leadingVersion =
+    case Map.lookup base tracks of
+        Just ts -> case tsTag ts of
+            Just t | not (T.null t) -> (t, Just t, Just (tsVersion ts))
+            -- Track known but no usable tag (e.g. iOS App Store version): label it
+            -- but diff against the leading ref.
+            _ -> (leadingRef, leadingTag, Just (tsVersion ts))
+        Nothing -> (leadingRef, leadingTag, Just leadingVersion)
+  where
+    base = case fmap T.toLower mBase of
+        Just "internal" -> "internal"
+        _ -> "production"
+    leadingRef = case leadingTag of
+        Just t | not (T.null t) && t /= "debug-no-tag" -> t
+        _ -> fromMaybe "" leadingCommit
+
+-- ─── Create-time AI changelog summary ───────────────────────────
+--
+-- Summarise the commits being released BEFORE the release exists. Reuses the
+-- same commit-gathering as 'changelogPreviewH'; the cache subject is the commit
+-- RANGE (content-keyed), not a release id. Gated by 'AP_AI_SUMMARIZE'.
+
+data AiSummaryResp = AiSummaryResp
+    { available :: Bool
+    , status :: Text
+    -- ^ "ready" | "pending" | "failed" | "unavailable"
+    , reason :: Maybe Text
+    , summaryLong :: Maybe Text
+    -- ^ AI prose (chunked); deterministic fallback while pending/failed
+    , summaryShort :: Maybe Text
+    -- ^ AI 2-3 line synopsis (only when ready)
+    , model :: Maybe Text
+    }
+    deriving (Generic, Show)
+
+instance ToJSON AiSummaryResp where
+    toJSON = genericToJSON defaultOptions{omitNothingFields = True}
+
+aiUnavailable :: Text -> AiSummaryResp
+aiUnavailable r =
+    AiSummaryResp
+        { available = False
+        , status = "unavailable"
+        , reason = Just r
+        , summaryLong = Nothing
+        , summaryShort = Nothing
+        , model = Nothing
+        }
+
+renderCommitsForAi :: [CommitInfo] -> Text
+renderCommitsForAi cs =
+    T.unlines
+        ["- " <> ciShortSha c <> " " <> ciSubject c <> " (@" <> ciAuthorLogin c <> ")" | c <- cs]
+
+toCommitItem :: CommitInfo -> CL.CommitItem
+toCommitItem c = CL.CommitItem (ciShortSha c) (ciSubject c) (ciAuthorLogin c)
+
+{- | Build the response for a lifecycle state. @summaryLong@ always carries
+something to render — AI when @ready@, the deterministic changelog while
+@pending@ — so the UI never blanks. A non-empty @model@ ⇒ the UI badges it as AI;
+empty/absent ⇒ auto-generated.
+-}
+stateResp :: Text -> Text -> Text -> Maybe Text -> AiSummaryResp
+stateResp st longTxt shortTxt mModel =
+    AiSummaryResp
+        { available = True
+        , status = st
+        , reason = Nothing
+        , summaryLong = Just longTxt
+        , summaryShort = if T.null (T.strip shortTxt) then Nothing else Just shortTxt
+        , model = mModel
+        }
+
+changelogAiSummaryH :: AuthedPerson -> Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Maybe Text -> Flow AiSummaryResp
+changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersionCode = do
+    ac <- appCatalogByKey appName surface platform
+    creds <- loadGhCreds
+    let owner = gitOwner ac
+        repo = gitRepo ac
+    builds <- fetchLatestBuildsForApp appName surface platform
+    case findLastReleaseBuild builds appName surface platform of
+        Nothing -> pure (aiUnavailable "no prior release build to compare against")
+        Just lb -> do
+            let (baseRef, _, _) = resolveChangelogBase mBase lb
+            if T.null baseRef
+                then pure (aiUnavailable "no base ref to compare against")
+                else do
+                    result <- compareRefs creds owner repo baseRef branch
+                    case result of
+                        Left e -> pure (aiUnavailable ("changelog fetch failed: " <> e))
+                        Right cr -> do
+                            let commits = crCommits cr
+                                -- Scope to the selected app's surface (drop the
+                                -- other side's commits; keep this side + shared).
+                                items = CL.filterCommitsForSurface surface (map toCommitItem commits)
+                                detLong = CL.renderLongSummary items
+                                n = length items
+                                excluded = length commits - n
+                                vName = maybe "" T.strip mVersionName
+                                vCode = maybe "" T.strip mVersionCode
+                                versionStr
+                                    | T.null vName = ""
+                                    | T.null vCode = "v" <> vName
+                                    | otherwise = "v" <> vName <> "+" <> vCode
+                                appLabel = appName <> " (" <> CL.ownSideLabel surface <> ")"
+                                -- Generic one-liner for summary_short when AI is off or
+                                -- every model fails (no app name — usable as release notes).
+                                detShort = CL.renderShortSummary items
+                                -- "rn4" = generation version. Bump it whenever the
+                                -- prompt/format changes so cached rows invalidate.
+                                contentKey =
+                                    computePromptHash $
+                                        T.intercalate "\US" ["rn4", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
+                            mRow <- lookupReleaseSummary contentKey
+                            case mRow of
+                                -- Done → return the AI (or cached deterministic) result.
+                                Just ("ready", mLong, mShort, mModel, _) ->
+                                    pure (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel)
+                                -- Not ready → ensure a DETACHED generation is running and return
+                                -- immediately. The work outlives this request and the browser tab.
+                                _ -> do
+                                    ecfg <- loadAiConfig
+                                    case ecfg of
+                                        Left _ -> do
+                                            -- AI off/unconfigured: the deterministic changelog IS the result.
+                                            upsertReleaseSummary contentKey detLong detShort "" n
+                                            pure (stateResp "ready" detLong detShort Nothing)
+                                        Right cfg -> do
+                                            -- One generator per content key; reclaims a failed row or a
+                                            -- pending row orphaned by a restart (see 'claimReleaseSummary').
+                                            claimed <- claimReleaseSummary contentKey detLong n
+                                            when claimed $
+                                                void $
+                                                    forkFlow $ do
+                                                        mRes <- generateWithFallback (apEmail ap) cfg appLabel versionStr excluded (CL.otherSideLabel surface) items
+                                                        case mRes of
+                                                            Just (lng, sht, usedModel) -> upsertReleaseSummary contentKey lng sht usedModel n
+                                                            -- Every model failed → store the deterministic
+                                                            -- changelog as the ready result (model="" ⇒ "auto").
+                                                            Nothing -> upsertReleaseSummary contentKey detLong detShort "" n
+                                            -- A concurrent generation may have just finished; otherwise
+                                            -- report pending with the deterministic placeholder.
+                                            st <- lookupReleaseSummary contentKey
+                                            pure $ case st of
+                                                Just ("ready", mLong, mShort, mModel, _) ->
+                                                    stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel
+                                                _ -> stateResp "pending" detLong "" Nothing

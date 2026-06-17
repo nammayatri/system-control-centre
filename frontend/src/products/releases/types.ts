@@ -3,6 +3,15 @@
 // GitHub Actions). Backend release types still live in api.ts for
 // historical reasons; this file is the home for new mobile-only types.
 
+export type LatestBuild = {
+  version: string;
+  versionCode?: number;
+  tagPushed?: string;
+  commitSha?: string;
+  completedAt: string;
+  track?: string | null; // store track: production | internal | testflight (store-sync builds)
+};
+
 export type AppCatalogEntry = {
   id: number;
   name: string;
@@ -12,24 +21,26 @@ export type AppCatalogEntry = {
   workflowPath: string;
   packageName: string | null;
   displayLabel: string | null;
+  firebaseProjectId: string | null;
   enabled: boolean;
   createdAt: string;
+  latestReleaseBuild?: LatestBuild | null;
+  latestDebugBuild?: LatestBuild | null;
+  // Per-track latest builds (from store-sync metadata.tracks). Drive the
+  // create-page prod/internal badges + changelog base toggle. `track` on each
+  // is 'production' | 'internal' (iOS internal == TestFlight).
+  latestProdBuild?: LatestBuild | null;
+  latestInternalBuild?: LatestBuild | null;
 };
 
-// Mirror of the backend ADT. Android destinations on the left, iOS on the
-// right — must stay in sync with `MobileDestination` in
-// `backend/src/Products/Autopilot/Mobile/Types.hs`.
-export type MobileDestination =
-  | 'GooglePlay' // Android: Google Play production track.
-  | 'Firebase' // Android: Firebase App Distribution.
-  | 'TestFlight' // iOS: TestFlight beta channel.
-  | 'AppStore'; // iOS: App Store (production).
+// Changelog base track: which store build the new branch is diffed against.
+// Defaults to 'production'.
+export type ChangelogBase = 'production' | 'internal';
 
-/** UI helper: which destinations are valid for a given platform. */
-export const destinationsForPlatform = (
-  platform: 'android' | 'ios',
-): MobileDestination[] =>
-  platform === 'ios' ? ['TestFlight', 'AppStore'] : ['GooglePlay', 'Firebase'];
+// Build type is fixed per deployment env (master = debug, production =
+// release) via the backend's mobile_build_type config flag. The frontend
+// only reads it back for display (e.g. the DEBUG badge); it is never sent.
+export type BuildType = 'debug' | 'release';
 
 export type CreateMobileReleasesItem = {
   appCatalogId: number;
@@ -37,11 +48,22 @@ export type CreateMobileReleasesItem = {
   versionCode: number | null;
 };
 
+// Store destination for provider (driver) PROD Android builds — mirrors the
+// `destination` choice on provider-prod-apk-gen.yaml. Only sent when a
+// provider + Android app is in a release build; ignored otherwise.
+export type MobileDestination = 'GooglePlay' | 'Firebase';
+
 export type CreateMobileReleasesReq = {
   releaseGroupLabel?: string;
   changeLog: string;
-  destination: MobileDestination;
+  sourceRef?: string | null;
   items: CreateMobileReleasesItem[];
+  destination?: MobileDestination | null;
+};
+
+export type BranchInfo = {
+  name: string;
+  sha: string;
 };
 
 export type CreateMobileReleasesResp = {
@@ -77,6 +99,25 @@ export type VersionPreviewItem = {
   nextVersionNumber?: string;
   source?: string;
   err?: string;
+};
+
+export type CommitInfo = {
+  ciSha: string;
+  ciShortSha: string;
+  ciMessage: string;
+  ciSubject: string;
+  ciAuthorLogin: string;
+  ciHtmlUrl: string;
+  ciPrNumber: number | null;
+};
+
+export type ChangelogPreviewResp = {
+  cpCommits: CommitInfo[];
+  cpAheadBy: number;
+  cpStatus: string;
+  cpBaseTag?: string | null;
+  cpBaseVersion?: string | null;
+  cpCompareUrl?: string | null;
 };
 
 export type LiveReleasesResp = {

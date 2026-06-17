@@ -174,6 +174,22 @@ mkVsEditRow tid product' service' env' vsName' createdBy' status' now =
         , rtSlackThreadTs = Nothing
         , rtDispatchId = Nothing
         , rtExternalRunId = Nothing
+        , -- Mobile/revert-only columns — not applicable to a VS edit. Must be
+          -- set or the Beam row is partial and crashes on INSERT (-Wmissing-fields).
+          rtSourceRef = Nothing
+        , rtCommitSha = Nothing
+        , rtRevertsReleaseId = Nothing
+        , rtAbValidation = Nothing
+        , rtAbValidationStatus = Nothing
+        , rtReviewStatus = Nothing
+        , rtReviewSubmittedAt = Nothing
+        , rtReviewDecidedAt = Nothing
+        , rtReviewRejectReason = Nothing
+        , rtRolloutStatus = Nothing
+        , rtRolloutPercent = Nothing
+        , rtStoreRolloutHistory = Nothing
+        , rtAscVersionId = Nothing
+        , rtAscPhasedId = Nothing
         , rtCreatedAt = now
         , rtUpdatedAt = now
         }

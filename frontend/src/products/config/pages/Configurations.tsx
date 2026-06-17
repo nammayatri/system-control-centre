@@ -1,9 +1,11 @@
 import React, { useState, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '../../../lib/api-client';
 import { Button } from '../../../shared/ui/button';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
+import { useAuth } from '../../../core/auth/AuthContext';
 import { Badge } from '../../../shared/ui/badge';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { Save, X, RefreshCw, Search, ChevronDown, ChevronRight, Info } from 'lucide-react';
@@ -11,6 +13,7 @@ import { toast } from 'sonner';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { cn } from '../../../lib/utils';
 import { useRefreshAnimation } from '../../../shared/hooks';
+import { isMobileServerConfig, isHiddenServerConfig, isReleaseOnlyServerConfig, MOBILE_CONFIG_CATEGORIES } from '../../server-config-filter';
 
 interface ConfigItem {
   key: string;
@@ -34,6 +37,12 @@ interface GroupedResponse {
 
 const Configurations: React.FC = () => {
   const queryClient = useQueryClient();
+  const location = useLocation();
+  const { buildType } = useAuth();
+  // Debug deployment (mobile_build_type='debug'); release-only configs (store
+  // sync, version preview) are no-ops here, so hide them.
+  const debugEnv = buildType === 'debug';
+  const filter: 'backend' | 'mobile' = location.pathname.startsWith('/mobile') ? 'mobile' : 'backend';
   const [search, setSearch] = useState('');
   const [selectedConfig, setSelectedConfig] = useState<ConfigItem | null>(null);
   const [modalValue, setModalValue] = useState('');
@@ -50,7 +59,34 @@ const Configurations: React.FC = () => {
   });
   const { spinning: refreshSpinning, onRefresh: handleRefresh } = useRefreshAnimation(isFetching, refetch);
 
-  const groups = data?.groups ?? [];
+  const groups = useMemo(() => {
+    const raw = data?.groups ?? [];
+    const filtered = raw
+      .map(g => ({
+        ...g,
+        configs: g.configs.filter(c =>
+          !isHiddenServerConfig(c.key) &&
+          !(debugEnv && isReleaseOnlyServerConfig(c.key)) &&
+          (filter === 'mobile' ? isMobileServerConfig(c.key) : !isMobileServerConfig(c.key))
+        ),
+      }))
+      .filter(g => g.configs.length > 0);
+
+    // Mobile tab: regroup into display sub-categories (Build & Dispatch, Store Sync,
+    // Release Review & Rollout, AI Changelog), in category + key order.
+    if (filter === 'mobile') {
+      const byKey = new Map(filtered.flatMap(g => g.configs).map(c => [c.key, c]));
+      const catGroups: ConfigGroup[] = MOBILE_CONFIG_CATEGORIES.map(({ name, keys }) => ({
+        name,
+        configs: keys.map(k => byKey.get(k)).filter((c): c is ConfigItem => !!c),
+      })).filter(g => g.configs.length > 0);
+      // Safety net: any mobile config not mapped to a category → trailing "Other".
+      const known = new Set(MOBILE_CONFIG_CATEGORIES.flatMap(c => c.keys));
+      const other = [...byKey.values()].filter(c => !known.has(c.key));
+      return other.length > 0 ? [...catGroups, { name: 'Other', configs: other }] : catGroups;
+    }
+    return filtered;
+  }, [data, filter, debugEnv]);
 
   const saveMut = useMutation({
     mutationFn: async (params: { name: string; value: string; enabled: string }) => {
@@ -71,8 +107,31 @@ const Configurations: React.FC = () => {
     setValidationError('');
   };
 
+  // ── ai_model picker: list models Grid exposes for the configured key ──
+  // Fetched only while the ai_model modal is open. Falls back to a free-text
+  // input if Grid can't be reached (available:false) so it's never a dead end.
+  const isAiModelKey = selectedConfig?.key === 'ai_model';
+  const aiModelsQuery = useQuery({
+    queryKey: ['ai-models'],
+    queryFn: async () => {
+      const res = await apiClient.get('/ai/models');
+      return res.data as { available: boolean; models: string[]; current: string | null; reason: string | null };
+    },
+    enabled: isAiModelKey,
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+  // If the current value is blank, default the picker to the first model.
+  React.useEffect(() => {
+    if (isAiModelKey && aiModelsQuery.data?.available && !modalValue) {
+      const first = aiModelsQuery.data.models?.[0];
+      if (first) setModalValue(first);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAiModelKey, aiModelsQuery.data]);
+
   const validateValue = (type: string, value: string): string => {
-    switch (type) {
+    switch ((type || '').toLowerCase()) {
       case 'bool':
         if (!['true', 'false', '1', '0', 'yes', 'no'].includes(value.toLowerCase())) {
           return 'Must be true or false';
@@ -142,7 +201,7 @@ const Configurations: React.FC = () => {
   };
 
   const typeBadgeVariant = (type: string): 'default' | 'purple' | 'warning' | 'success' => {
-    switch (type) {
+    switch ((type || '').toLowerCase()) {
       case 'bool': return 'purple';
       case 'int': case 'double': return 'warning';
       case 'json': return 'success';
@@ -152,7 +211,60 @@ const Configurations: React.FC = () => {
 
   const renderValueInput = () => {
     if (!selectedConfig) return null;
-    const { type } = selectedConfig;
+    const type = (selectedConfig.type || '').toLowerCase();
+
+    // ai_model → dropdown of models Grid exposes for the configured key.
+    if (selectedConfig.key === 'ai_model') {
+      const q = aiModelsQuery;
+      const models = q.data?.models ?? [];
+      const hasModels = (q.data?.available ?? false) && models.length > 0;
+      // Keep the current value selectable even if Grid no longer lists it.
+      const options = modalValue && !models.includes(modalValue) ? [modalValue, ...models] : models;
+      return (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider">Model</label>
+            <button
+              type="button"
+              onClick={() => q.refetch()}
+              className="inline-flex items-center gap-1 text-[11px] text-zinc-500 hover:text-zinc-800 cursor-pointer"
+            >
+              <RefreshCw className={`w-3 h-3 ${q.isFetching ? 'animate-spin' : ''}`} /> Refresh
+            </button>
+          </div>
+          {q.isLoading ? (
+            <div className="h-10 sm:h-9 flex items-center text-sm text-zinc-400">Loading models from Grid…</div>
+          ) : hasModels ? (
+            <select
+              value={modalValue}
+              onChange={e => { setModalValue(e.target.value); setValidationError(''); }}
+              className="w-full h-10 sm:h-9 rounded-lg border border-zinc-300 bg-white px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+            >
+              {options.map(m => (
+                <option key={m} value={m}>{m}{!models.includes(m) ? ' (not in /v1/models)' : ''}</option>
+              ))}
+            </select>
+          ) : (
+            <>
+              <input
+                type="text"
+                value={modalValue}
+                onChange={e => { setModalValue(e.target.value); setValidationError(''); }}
+                placeholder="e.g. claude-sonnet-4-6"
+                className="w-full h-10 sm:h-9 rounded-lg border border-zinc-300 px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+              />
+              <p className="text-xs text-amber-600">
+                Couldn't load models from Grid{q.data?.reason ? `: ${q.data.reason}` : ''}. Enter the model name manually.
+              </p>
+            </>
+          )}
+          <p className="text-[11px] text-zinc-400">
+            Models available to your Grid API key (<span className="font-mono">/v1/models</span>).
+          </p>
+          {validationError && <p className="text-xs text-red-500">{validationError}</p>}
+        </div>
+      );
+    }
 
     if (type === 'bool') {
       return (
@@ -211,7 +323,9 @@ const Configurations: React.FC = () => {
   return (
     <div className="flex flex-col w-full pb-12">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 sm:mb-5">
-        <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Server Configurations</h1>
+        <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">
+          {filter === 'mobile' ? 'Mobile Server Config' : 'Backend Server Config'}
+        </h1>
         <div className="flex items-center gap-2 sm:gap-3">
           <div className="relative flex-1 sm:flex-none">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
@@ -294,7 +408,7 @@ const Configurations: React.FC = () => {
                                 <Badge variant={typeBadgeVariant(cfg.type)} size="sm">{cfg.type}</Badge>
                               </td>
                               <td className="px-4 py-2.5">
-                                {cfg.type === 'bool' ? (
+                                {cfg.type?.toLowerCase() === 'bool' ? (
                                   <span className={cn(
                                     'inline-flex items-center gap-1.5 text-xs font-medium',
                                     cfg.value === 'true' ? 'text-emerald-600' : 'text-zinc-400'

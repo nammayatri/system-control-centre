@@ -62,9 +62,13 @@ export interface ReleaseContext {
     version_code?: number;
     tag_pushed?: string | null;
     matrix_job_name?: string;
-    destination?: string;
+    build_type?: string;
     ota_namespace?: string | null;
     change_log?: string;
+    // Mobile build workflow status (e.g. MBTagPushed / MBInReview / MBRollingOut).
+    // Injected by the backend serializer from the MobileBuildState so the list +
+    // detail can derive the promote→rollout stage without a /rollout call.
+    mb_wf_status?: string;
 }
 
 // ── All statuses (UPPERCASE — canonical) ─────
@@ -131,6 +135,72 @@ export interface APRelease {
     rollout_history: RolloutHistoryEvent[];
     events: RolloutEvent[];
     release_context: ReleaseContext;
+    // ── Revert chain (mobile + future backend revert plumbing) ──────
+    // Server-side optional; null on rows that pre-date 0012-mobile-revert.
+    sourceRef?: string | null;
+    commitSha?: string | null;
+    revertsReleaseId?: string | null;
+    // `metadata.reverted_by` is set on a bad release once its revert
+    // row has been created. Drives the "Reverted by" banner.
+    metadata?: { reverted_by?: string;[k: string]: any } | null;
+    // AB validation fields — null on pre-migration rows.
+    abValidationStatus?: ABValidationStatus | null;
+    abValidation?: ABValidation | null;
+}
+
+// ── AB Validation types ────────────────────────────────────────────
+
+export type ABValidationStatus =
+    | 'UNASSIGNED'
+    | 'VERIFIED'
+    | 'MISSED_ABORT'
+    | 'FALSE_ABORT'
+    | 'TRUE_ABORT'
+    | 'INVALID';
+
+export interface ABValidationEntry {
+    abveStatus: ABValidationStatus;
+    abveChangedBy: string;
+    abveIsApproved: boolean;
+    abveRcaDesc?: string | null;
+    abveUpdatedAt: string;
+}
+
+export interface ABValidation {
+    abvStatus: ABValidationStatus;
+    abvIsApproved: boolean;
+    abvRcaDesc?: string | null;
+    abvHistory: ABValidationEntry[];
+}
+
+export const AB_STATUS_LABELS: Record<ABValidationStatus, string> = {
+    UNASSIGNED: 'Unassigned',
+    VERIFIED: 'Verified',
+    MISSED_ABORT: 'Missed Abort',
+    FALSE_ABORT: 'False Abort',
+    TRUE_ABORT: 'True Abort',
+    INVALID: 'Invalid',
+};
+
+export const AB_STATUS_COLORS: Record<ABValidationStatus, string> = {
+    UNASSIGNED: 'bg-gray-400 text-white',
+    VERIFIED: 'bg-green-600 text-white',
+    MISSED_ABORT: 'bg-orange-500 text-white',
+    FALSE_ABORT: 'bg-yellow-500 text-white',
+    TRUE_ABORT: 'bg-red-600 text-white',
+    INVALID: 'bg-gray-600 text-white',
+};
+
+export interface ABMetricItem {
+    status: ABValidationStatus;
+    count: number;
+    percentage: number;
+    ab_success_rate?: number;
+}
+
+export interface ABMetrics {
+    total_releases: number;
+    list: ABMetricItem[];
 }
 
 // ── ConfigMap type ─────────────────────────────────────────────────
@@ -341,9 +411,10 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         version_code:     (r.releaseContext as any)?.version_code,
         tag_pushed:       (r.releaseContext as any)?.tag_pushed,
         matrix_job_name:  (r.releaseContext as any)?.matrix_job_name,
-        destination:      (r.releaseContext as any)?.destination,
+        build_type:       (r.releaseContext as any)?.build_type,
         ota_namespace:    (r.releaseContext as any)?.ota_namespace,
         change_log:       (r.releaseContext as any)?.change_log,
+        mb_wf_status:     (r.releaseContext as any)?.mb_wf_status,
     },
 
     rollout_strategy: (r.rolloutStrategy || []).map(s => ({
@@ -366,6 +437,15 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
     })),
 
     events: [],
+
+    // Revert-chain fields — added by migration 0012-mobile-revert.
+    // Pre-0012 rows have nulls; consumers must handle undefined too.
+    sourceRef: (r as any).sourceRef ?? null,
+    commitSha: (r as any).commitSha ?? null,
+    revertsReleaseId: (r as any).revertsReleaseId ?? null,
+    metadata: (r as any).metadata ?? null,
+    abValidationStatus: (r as any).abValidationStatus ?? null,
+    abValidation: (r as any).abValidation ?? null,
 });
 
 export function statusColor(status: ReleaseStatus | string): string {
@@ -613,6 +693,109 @@ export async function fastForwardRelease(releaseId: string): Promise<any> {
 
 export async function immediateRevertRelease(releaseId: string, isRevertSync: boolean): Promise<any> {
     const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/revert/immediate`, { isRevertSync });
+    return data;
+}
+
+// ── Mobile revert ─────────────────────────────────────────────────
+// GET /releases/:id/mobile-revert/draft  — read-only preview
+// POST /releases/:id/mobile-revert       — confirm + create
+//
+// Both gated by RELEASE_REVERT permission. The draft returns the
+// previous good release's tag + auto-generated changelog; the create
+// endpoint enforces version-name and version-code strictly-greater
+// than the bad release's.
+
+export interface RevertCommit {
+    rcShortSha: string;
+    rcSubject: string;
+    rcAuthorLogin: string;
+    rcHtmlUrl: string;
+    rcPrNumber: number | null;
+}
+
+export interface RevertDraft {
+    rdBadReleaseId: string;
+    rdBadVersion: string;
+    rdBadVersionCode: number | null;
+    rdPrevGoodReleaseId: string;
+    rdPrevGoodVersion: string;
+    rdPrevGoodShortSha: string;
+    rdPrevGoodTag: string;
+    rdSuggestedVersion: string;
+    rdSuggestedCode: number | null;
+    rdChangelog: string;
+    rdCommits: RevertCommit[];
+    rdCommitCount: number;
+    rdPlatform: string; // "android" | "ios"
+    rdIsStoreSyncRevert: boolean;
+    rdStoreVersion: string | null;
+    rdStoreVersionCode: number | null;
+}
+
+export interface RevertCreateReq {
+    rrNewVersionName: string;
+    rrNewVersionCode: number | null;
+    rrChangelog: string;
+    rrSourceCommit?: string | null;
+}
+
+export interface RevertCreateResp {
+    rrRevertReleaseId: string;
+}
+
+export async function getMobileRevertDraft(releaseId: string): Promise<RevertDraft> {
+    const { data } = await apiClient.get(`/releases/${encodeURIComponent(releaseId)}/mobile-revert/draft`);
+    return data;
+}
+
+export async function createMobileRevert(
+    releaseId: string,
+    body: RevertCreateReq,
+): Promise<RevertCreateResp> {
+    const { data } = await apiClient.post(
+        `/releases/${encodeURIComponent(releaseId)}/mobile-revert`,
+        body,
+    );
+    return data;
+}
+
+export interface VerifyCommitResp {
+    vcFullSha: string;
+    vcShortSha: string;
+    vcMessage: string;
+    vcAuthor: string;
+    vcHtmlUrl: string;
+}
+
+export async function verifyRevertCommit(
+    releaseId: string,
+    sha: string,
+): Promise<VerifyCommitResp> {
+    const { data } = await apiClient.get(
+        `/releases/${encodeURIComponent(releaseId)}/mobile-revert/verify-commit`,
+        { params: { sha } },
+    );
+    return data;
+}
+
+// Live "commits being rolled back" for whatever source the operator selects
+// (previous-good tag, a custom SHA, or a branch) vs the bad release.
+export interface RevertDiffResp {
+    rdfCommits: RevertCommit[];
+    rdfCommitCount: number;
+    rdfBaseRef: string;
+    rdfHeadRef: string;
+    rdfStatus: string;
+}
+
+export async function getRevertDiff(
+    releaseId: string,
+    source: string,
+): Promise<RevertDiffResp> {
+    const { data } = await apiClient.get(
+        `/releases/${encodeURIComponent(releaseId)}/mobile-revert/diff`,
+        { params: { source } },
+    );
     return data;
 }
 
@@ -872,6 +1055,34 @@ export async function fetchConfigMapData(product: string, name: string): Promise
     return data.configMap || '';
 }
 
+// ── AB Validation API ─────────────────────────────────────────────
+
+export async function fetchValidABStatuses(releaseId: string): Promise<{
+    statusList: ABValidationStatus[];
+    currentStatus: ABValidationStatus;
+    isApproved: boolean;
+}> {
+    const { data } = await apiClient.get(`/releases/${releaseId}/ab`);
+    return data;
+}
+
+export async function updateABValidation(
+    releaseId: string,
+    payload: { status: ABValidationStatus; is_approved: boolean; rca_description?: string }
+): Promise<{ status: string; message: string }> {
+    const { data } = await apiClient.put(`/releases/${releaseId}/ab`, payload);
+    return data;
+}
+
+export async function fetchABMetrics(params?: {
+    from?: string;
+    to?: string;
+    product?: string;
+}): Promise<ABMetrics> {
+    const { data } = await apiClient.get('/releases/abstatus', { params });
+    return data;
+}
+
 // ── Mobile Releases API ───────────────────────────────────────────
 // Parallel namespace for the mobile-release flow. Kept separate from
 // the legacy free-function exports above so call sites read clearly
@@ -881,12 +1092,131 @@ export async function fetchConfigMapData(product: string, name: string): Promise
 
 import type {
     AppCatalogEntry,
+    BranchInfo,
+    ChangelogPreviewResp,
     CreateMobileReleasesReq,
     CreateMobileReleasesResp,
     DispatchMobileReleasesResp,
     VersionPreviewItem,
     LiveReleasesResp,
 } from './types';
+
+// ─── AI (Grid / LiteLLM) ─────────────────────────────────────────
+// Shared response shape for every AI endpoint. `available:false` (with a
+// `reason`) means AI is disabled / unconfigured / errored — render a notice,
+// not an error toast.
+export interface AiResp {
+    available: boolean;
+    reason?: string | null;
+    summary?: string | null;
+    model?: string | null;
+    cached?: boolean | null;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+}
+
+// Mobile changelog summary: long (AI prose, chunked; deterministic fallback) +
+// short (2-3 line AI synopsis). Generated async server-side; `status` drives
+// polling. `summaryLong` is present even while `pending`/`failed`.
+export interface ChangelogSummaryResp {
+    available: boolean;
+    status: 'ready' | 'pending' | 'failed' | 'unavailable';
+    reason?: string | null;
+    summaryLong?: string | null;
+    summaryShort?: string | null;
+    model?: string | null;
+}
+
+export async function releaseAiSummary(id: string, force = false): Promise<AiResp> {
+    const { data } = await apiClient.post(`/releases/${id}/ai/summary`, { force });
+    return data;
+}
+
+export async function releaseAiRisk(id: string, force = false): Promise<AiResp> {
+    const { data } = await apiClient.post(`/releases/${id}/ai/risk`, { force });
+    return data;
+}
+
+export async function releaseAiAsk(id: string, question: string): Promise<AiResp> {
+    const { data } = await apiClient.post(`/releases/${id}/ai/ask`, { question });
+    return data;
+}
+
+// ── Promote-to-review + staged rollout (Phase 6/8) ──────────────────
+// Backend encodes Haskell record field names verbatim (pf*/rd* responses;
+// pr*/rs*/mr* requests). Every endpoint is gated on
+// `mobile_staged_rollout_enabled` — when the flag is off they 400, and the
+// rollout panel stays hidden (no behavior change until ops opt in).
+
+export interface PromoteForm {
+    pfReleaseId: string;
+    pfPlatform: string; // "android" | "ios"
+    pfAppLabel: string;
+    pfVersion: string;
+    pfReleaseNotes: string; // editable default: prod "What's New" if store-synced, else the changelog
+    pfReviewStatus: string | null;
+    pfLocked: boolean; // true once submitted (iOS notes can't change mid-review)
+    pfPhasedSupported: boolean; // iOS only
+    pfIsStoreSync: boolean; // store-synced → notes are the live prod notes; don't swap in AI
+}
+
+export interface RolloutDetail {
+    rdReleaseId: string;
+    rdPlatform: string; // "android" | "ios"
+    rdMbStatus: string; // MBTagPushed | MBInReview | MBReviewApproved | MBRollingOut | MBCompleted | MBReviewRejected | …
+    rdReviewStatus: string | null; // in_review | submitted | approved | rejected
+    rdReviewRejectReason: string | null;
+    rdReviewSubmittedAt: string | null;
+    rdReviewDecidedAt: string | null;
+    rdRolloutStatus: string | null; // rolling_out | halted | completed
+    rdRolloutPercent: number | null;
+    rdPhasedId: string | null; // iOS phased-release id (present ⇒ phased ramp on)
+    rdStoreTrack: string | null; // production | internal | testflight (store-sync rows)
+}
+
+export interface PromoteReq {
+    prReleaseNotes: string;
+    prEnablePhasedRelease?: boolean; // iOS only
+    prInitialRolloutPercent?: number; // Android only; omit → config fraction
+}
+
+export interface PromoteResp {
+    prResult: string;
+    prWarning?: string | null; // non-fatal warning, e.g. phased release couldn't be enabled
+}
+
+// ── App Release Monitoring (store-monitor) ──────────────────────────
+// One read-through-cache call powers the dashboard grid AND every modal:
+// `GET /mobile/store-monitor` returns the live per-track store state for
+// every app; the modal opens client-side from a loaded card object (no
+// fetch). The ↻ button hits `POST /mobile/store-monitor/:id/refresh` to
+// live re-poll a single app and returns its fresh card. Field names match
+// the backend contract verbatim.
+
+export interface TrackCell {
+    version: string | null;
+    buildCode: number | null;
+    status: string | null;          // live | completed | inProgress | halted | VALID | none
+    rolloutPercent: number | null;
+    reviewStatus: string | null;    // in_review | approved | rejected | null
+    releaseNotes: string | null;
+    drift: boolean;                 // store version != last SCC-shipped version
+    syncedAt: string | null;        // ISO timestamp
+}
+
+export interface PlatformBlock {
+    appCatalogId: number;
+    bundleId: string | null;
+    production: TrackCell | null;
+    internal: TrackCell | null;     // android only (null for ios)
+    testflight: TrackCell | null;   // ios only (null for android)
+}
+
+export interface StoreMonitorApp {
+    app: string;                    // display label
+    surface: string;                // customer | driver
+    platforms: { android: PlatformBlock | null; ios: PlatformBlock | null };
+}
 
 export const mobileApi = {
     listApps: async (): Promise<AppCatalogEntry[]> => {
@@ -921,6 +1251,105 @@ export const mobileApi = {
 
     liveReleases: async (category: 'all' | 'backend' | 'mobile' = 'all'): Promise<LiveReleasesResp> => {
         const { data } = await apiClient.get(`/releases/live?category=${category}`);
+        return data;
+    },
+
+    listBranches: async (q?: string): Promise<BranchInfo[]> => {
+        const params: Record<string, string> = {};
+        if (q) params.q = q;
+        const { data } = await apiClient.get('/mobile/branches', { params });
+        return data?.branches ?? [];
+    },
+
+    changelogPreview: async (
+        app: string,
+        surface: string,
+        platform: string,
+        branch: string,
+        base?: string,
+    ): Promise<ChangelogPreviewResp> => {
+        const params: Record<string, string> = { app, surface, platform, branch };
+        if (base) params.base = base;
+        const { data } = await apiClient.get('/mobile/changelog-preview', { params });
+        return data;
+    },
+
+    // Create-time changelog summary of the commit range (before the release
+    // exists). Generated async server-side; poll while status === 'pending'.
+    changelogAiSummary: async (
+        app: string,
+        surface: string,
+        platform: string,
+        branch: string,
+        base = '',
+        versionName = '',
+        versionCode = '',
+    ): Promise<ChangelogSummaryResp> => {
+        const params: Record<string, string> = { app, surface, platform, branch };
+        if (base) params.base = base;
+        if (versionName) params.versionName = versionName;
+        if (versionCode) params.versionCode = versionCode;
+        const { data } = await apiClient.get('/mobile/changelog-ai-summary', { params });
+        return data;
+    },
+
+    // ── Promote-to-review + staged rollout ──
+    getPromoteForm: async (id: string): Promise<PromoteForm> => {
+        const { data } = await apiClient.get(`/releases/${encodeURIComponent(id)}/promote-form`);
+        return data;
+    },
+
+    getRolloutDetail: async (id: string): Promise<RolloutDetail> => {
+        const { data } = await apiClient.get(`/releases/${encodeURIComponent(id)}/rollout`);
+        return data;
+    },
+
+    promote: async (id: string, body: PromoteReq): Promise<PromoteResp> => {
+        const { data } = await apiClient.post(`/releases/${encodeURIComponent(id)}/promote`, body);
+        return data;
+    },
+
+    // iOS only — release an approved (held) version.
+    releaseApproved: async (id: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/release`, {});
+    },
+
+    // Android only — set staged rollout % in (0,100]; 100 finishes the release.
+    rolloutSet: async (id: string, percent: number): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/rollout/set`, { rsPercent: percent });
+    },
+
+    rolloutHalt: async (id: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/rollout/halt`, {});
+    },
+
+    rolloutResume: async (id: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/rollout/resume`, {});
+    },
+
+    rolloutReleaseAll: async (id: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/rollout/release-all`, {});
+    },
+
+    // Android only — record the opaque Play review outcome.
+    markApproved: async (id: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/review/mark-approved`, {});
+    },
+
+    markRejected: async (id: string, reason: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/review/mark-rejected`, { mrReason: reason });
+    },
+
+    // ── App Release Monitoring ──
+    // One call → the whole grid + all modal data (incl. release notes).
+    storeMonitor: async (): Promise<StoreMonitorApp[]> => {
+        const { data } = await apiClient.get('/mobile/store-monitor');
+        return Array.isArray(data) ? data : [];
+    },
+
+    // Live re-poll one app → upsert the cache → return its fresh card.
+    refreshStoreApp: async (appCatalogId: number): Promise<StoreMonitorApp> => {
+        const { data } = await apiClient.post(`/mobile/store-monitor/${appCatalogId}/refresh`, {});
         return data;
     },
 };

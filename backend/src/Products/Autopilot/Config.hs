@@ -274,4 +274,103 @@ autopilotConfigs =
         DeploymentGroup
         "BackendJob category: max wall-clock hours to wait for a Kubernetes Job to complete before aborting the release. Read by monitorJobStatus (polls = hours × 360)."
         (Just "autopilot")
+    , -- Mobile (React Native) release flags.
+      -- Note: mobile_build_type is intentionally NOT registered here. It's a
+      -- per-environment invariant (master = debug, prod = release) set once via
+      -- migration; exposing it as an editable runtime toggle would let someone
+      -- break the env-lock guarantee. It's hidden from the config UI too.
+      ConfigEntry
+        "version_preview_enabled"
+        (BoolConfig True)
+        MobileGroup
+        "Fetch next-version suggestions from Play Console / App Store Connect on the create-release form. Disable in debug-only envs."
+        (Just "autopilot")
+    , ConfigEntry
+        "store_sync_enabled"
+        (BoolConfig False)
+        MobileGroup
+        "Periodically poll production stores (Play Console / App Store Connect) and record live versions as synthetic COMPLETED releases."
+        (Just "autopilot")
+    , ConfigEntry
+        "store_sync_interval_minutes"
+        (IntConfig 30)
+        MobileGroup
+        "How often the store-sync background loop polls the stores (minutes)."
+        (Just "autopilot")
+    , ConfigEntry
+        "mobile_dispatch_enabled"
+        (BoolConfig False)
+        MobileGroup
+        "Master kill-switch for dispatching mobile release workflows to GitHub Actions. When off, releases can be drafted but not dispatched."
+        (Just "autopilot")
+    , ConfigEntry
+        "mobile_tag_confirm_timeout_minutes"
+        (IntConfig 60)
+        MobileGroup
+        "Minutes the ConfirmTag stage waits for the build's Git tag before failing the release (tag_timeout → ABORTED). Release builds only."
+        (Just "autopilot")
+    , -- Staged store rollout + review polling. All gated behind
+      -- mobile_staged_rollout_enabled; when off, release builds keep
+      -- auto-completing at tag-push (legacy behavior, no review hold).
+      ConfigEntry
+        "mobile_staged_rollout_enabled"
+        (BoolConfig False)
+        MobileGroup
+        "Master switch for staged store rollout. When on, release builds hold at tag-push for an explicit promote-to-review action instead of auto-completing. Off keeps the legacy auto-complete behavior."
+        (Just "autopilot")
+    , ConfigEntry
+        "review_poll_interval_sec"
+        (IntConfig 1200)
+        MobileGroup
+        "How often the review-poll stage checks App Store Connect for the iOS review decision (seconds). Default 1200 = 20 min."
+        (Just "autopilot")
+    , ConfigEntry
+        "review_poll_timeout_days"
+        (IntConfig 7)
+        MobileGroup
+        "Days the review-poll stage waits for a store review decision before emitting a soft nudge. Does not abort the release."
+        (Just "autopilot")
+    , ConfigEntry
+        "android_review_rollout_fraction"
+        (DoubleConfig 0.000001)
+        MobileGroup
+        "Effectively-zero Play rollout fraction used when promoting to production for review, so approval exposes ~0 users until the operator rolls out. Must stay strictly in (0,1)."
+        (Just "autopilot")
+    , -- AI (Grid / LiteLLM). The SC_AI_API_KEY secret is NOT here — it lives in env.
+      ConfigEntry
+        "ai_enabled"
+        (BoolConfig False)
+        MobileGroup
+        "Master switch for AI features (release changelog summary, risk assessment, Q&A). Off by default."
+        (Just "autopilot")
+    , ConfigEntry
+        "ai_base_url"
+        (TextConfig "https://grid.ai.juspay.net")
+        MobileGroup
+        "Grid (LiteLLM) gateway base URL. No trailing slash."
+        (Just "autopilot")
+    , ConfigEntry
+        "ai_model"
+        (TextConfig "claude-sonnet-4-6")
+        MobileGroup
+        "Model id — a Grid alias from GET /v1/models (e.g. claude-sonnet-4-6)."
+        (Just "autopilot")
+    , ConfigEntry
+        "ai_allowed_host_suffix"
+        (TextConfig "grid.ai.juspay.net")
+        MobileGroup
+        "SSRF allowlist: ai_base_url's host must end with this suffix."
+        (Just "autopilot")
+    , ConfigEntry
+        "ai_temperature"
+        (DoubleConfig 0.2)
+        MobileGroup
+        "Sampling temperature (low = more deterministic summaries)."
+        (Just "autopilot")
+    , ConfigEntry
+        "ai_cache_ttl_hours"
+        (IntConfig 168)
+        MobileGroup
+        "How long generated summaries are cached, in hours."
+        (Just "autopilot")
     ]

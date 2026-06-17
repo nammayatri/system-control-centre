@@ -1,15 +1,16 @@
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
 -- | Cross-cluster sync — pushes a completed release to a secondary
 -- scc instance. Background fan-out uses 'forkFlow'.
-module Products.Autopilot.Sync (
-    triggerSyncIfEnabled,
+module Products.Autopilot.Sync
+  ( triggerSyncIfEnabled,
     triggerRevertSyncIfEnabled,
     triggerImmediateRevertSync,
     buildAuthHeaders,
     normaliseBase,
-)
+  )
 where
 
 import Control.Monad (when)
@@ -19,22 +20,22 @@ import Core.Environment (Flow, MonadFlow, forkFlow, getConfig)
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value (..), eitherDecode, encode, object, toJSON, (.=))
-import qualified Data.Aeson.Key as AK
-import qualified Data.Aeson.KeyMap as KM
-import qualified Data.ByteString.Lazy.Char8 as LBS
+import Data.Aeson.Key qualified as AK
+import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString.Lazy.Char8 qualified as LBS
 import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import GHC.Int (Int32)
 import Products.Autopilot.Queries.ProductService (findProductByName, getProductSyncCluster, getSlackChannelDirect)
 import Products.Autopilot.Queries.ReleaseTracker (insertReleaseEvent)
 import Products.Autopilot.RuntimeConfig (isK8sEnabled, isSlackEnabled, isSyncClusterEnabled)
 import Products.Autopilot.Types
 import Products.Autopilot.Types.Target (TargetState (..))
-import Products.Autopilot.Types.Target.Kubernetes (
-    K8sDeploymentState (context),
+import Products.Autopilot.Types.Target.Kubernetes
+  ( K8sDeploymentState (context),
     K8sReleaseContext (dockerImage, syncClusterEnvOverrideData, syncClusterRolloutStrategy, syncXForwardedEmail, syncXPomeriumJwt),
- )
+  )
 import Shared.Config.Runtime (getConfigTextForProduct)
 import System.Environment (lookupEnv)
 import Prelude
@@ -185,7 +186,6 @@ doCreate cfg tracker mts targetCluster = do
             "mode" .= show (mode tracker),
             "priority" .= (0 :: Int32),
             "release_manager" .= createdBy tracker,
-            "old_version" .= oldVersion tracker,
             "new_version" .= newVersion tracker,
             "trackerType" .= category tracker,
             "description" .= description tracker,

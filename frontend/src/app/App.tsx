@@ -38,10 +38,15 @@ function App() {
           <Route path="/admin/roles/:id" element={<RoleDetail />} />
         </Route>
 
-        {/* Product workspaces — each uses ProductLayout with product-specific sidebar */}
-        <Route element={<ProductLayout />}>
-          {PRODUCT_REGISTRY.flatMap((product) =>
-            product.routes.map((route) => (
+        {/* Product workspaces — each gets its own layout route with product as prop */}
+        {PRODUCT_REGISTRY.map((product) => (
+          <Route
+            key={product.basePath}
+            path={product.basePath}
+            element={<ProductLayout product={product} />}
+          >
+            <Route index element={<Navigate to={product.navItems[0].path} replace />} />
+            {product.routes.map((route) => (
               <Route
                 key={route.path}
                 path={route.path}
@@ -51,9 +56,9 @@ function App() {
                   </ProtectedRoute>
                 }
               />
-            ))
-          )}
-        </Route>
+            ))}
+          </Route>
+        ))}
       </Routes>
     </Router>
   );
