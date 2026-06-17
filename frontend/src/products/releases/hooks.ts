@@ -408,6 +408,17 @@ export function useLiveReleases(category: 'all' | 'backend' | 'mobile' = 'all') 
   });
 }
 
+// App Release Monitoring — one read-through-cache call powers the grid and
+// every modal. Auto-polls every 60s like the other mobile dashboards; the ↻
+// button does an explicit per-app live re-poll (see StoreMonitor.tsx).
+export function useStoreMonitor() {
+  return useQuery({
+    queryKey: ['store-monitor'],
+    queryFn: () => mobileApi.storeMonitor(),
+    refetchInterval: 60_000,
+  });
+}
+
 export type ChangelogApp = { id: number; name: string; surface: string; platform: string; label: string };
 
 export function useChangelogPreviews(

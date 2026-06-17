@@ -29,6 +29,9 @@ module Products.Autopilot.Mobile.StoreSync (
     pendingPublishRelease,
     detectConsoleRollout,
     detectIosRelease,
+    -- * App Release Monitoring (store_status cache)
+    syncStoreStatus,
+    refreshStoreStatusOne,
 ) where
 
 import Control.Exception (SomeException)
@@ -50,7 +53,15 @@ import Products.Autopilot.Mobile.Queries.AppCatalog (
     LatestBuildRow (..),
     TrackSnapshot (..),
     fetchLatestBuildsPerApp,
+    listAppCatalog,
     listEnabledAppCatalog,
+ )
+import Products.Autopilot.Mobile.Queries.StoreStatus (
+    ActiveMobileState (..),
+    StoreStatusUpsert (..),
+    findActiveMobileState,
+    latestShippedVersionsPerApp,
+    upsertStoreStatus,
  )
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
@@ -81,8 +92,10 @@ import Products.Autopilot.Mobile.Versioning.Apple (
     AscCreds,
     AscPhasedState (..),
     AscReviewState (..),
+    AscSnapshot (..),
     applePhasedPercent,
     fetchAscBuildInfo,
+    fetchAscSnapshots,
     getAscReviewState,
     getInFlightReview,
     getLiveAppStoreVersion,
@@ -96,8 +109,10 @@ import Products.Autopilot.Mobile.Versioning.Play (
     PlayCreds (..),
     PlayRolloutState (..),
     ProdTrackRelease (..),
+    StoreTrackSnapshot (..),
     TrackInfo (..),
     fetchPlayTracks,
+    fetchTrackSnapshots,
     getProductionReleases,
     getTrackRolloutState,
     loadPlayCreds,
@@ -131,7 +146,11 @@ storeSyncLoop = do
                 else do
                     enabled <- isStoreSyncEnabled
                     if enabled
-                        then runStoreSync
+                        then do
+                            runStoreSync
+                            -- App Release Monitoring: refresh the per-track
+                            -- store_status cache (all apps, enabled or not).
+                            syncStoreStatus
                         else logInfo "[STORE_SYNC] Disabled via server_config, skipping"
                     -- Phase 7: reconcile active staged rollouts with the live store
                     -- state (Apple's auto-ramp %, external halt/resume, completion).
@@ -1010,3 +1029,120 @@ pctChanged :: Maybe Double -> Maybe Double -> Bool
 pctChanged (Just a) (Just b) = abs (a - b) > 0.0001
 pctChanged Nothing Nothing = False
 pctChanged _ _ = True
+
+-- ─── App Release Monitoring: store_status cache poll ───────────────────
+
+{- | Refresh the store-monitor cache for EVERY app in the catalog — enabled or
+not, so the dashboard shows every app's live releases (the user's explicit ask).
+Reads each app's live per-track state (version / code / status / rollout % /
+notes) and upserts it into @store_status@, the table the monitor reads in one
+shot. Distinct from 'runStoreSync' above, which writes synthetic @release_tracker@
+rows only for enabled apps. -}
+syncStoreStatus :: Flow ()
+syncStoreStatus = do
+    apps <- listAppCatalog
+    expected <- latestShippedVersionsPerApp
+    mPlayCreds <- loadPlayCreds
+    mAscCreds <- loadAscCreds
+    mapM_ (refreshStoreStatusForApp mPlayCreds mAscCreds expected) apps
+    logInfo $ "[STORE_MONITOR] Synced store_status for " <> T.pack (show (length apps)) <> " app(s)"
+
+{- | Live re-poll a single app (loads creds + the drift baseline, then refreshes
+its @store_status@ rows). Backs the on-demand ↻ refresh endpoint. -}
+refreshStoreStatusOne :: AppCatalog -> Flow ()
+refreshStoreStatusOne ac = do
+    expected <- latestShippedVersionsPerApp
+    mPlayCreds <- loadPlayCreds
+    mAscCreds <- loadAscCreds
+    refreshStoreStatusForApp mPlayCreds mAscCreds expected ac
+
+{- | Poll ONE app's live store state and upsert each of its tracks into
+@store_status@. Shared by the batch poll and the refresh endpoint. Missing creds
+or a store error logs and leaves the existing cached row untouched (never blanks
+it). @expected@ stamps the drift baseline; the active SCC review/rollout is
+overlaid on the production cell. -}
+refreshStoreStatusForApp ::
+    Maybe PlayCreds ->
+    Maybe AscCreds ->
+    Map.Map (Text, Text, Text) Text ->
+    AppCatalog ->
+    Flow ()
+refreshStoreStatusForApp mPlayCreds mAscCreds expected ac = case acPackageName ac of
+    Just pkg | not (T.null pkg) -> do
+        let mExpected = Map.lookup (acName ac, acSurface ac, acPlatform ac) expected
+        mActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac)
+        case acPlatform ac of
+            "android" -> case mPlayCreds of
+                Nothing -> logWarning $ "[STORE_MONITOR] No Play creds — skipping " <> acName ac
+                Just creds ->
+                    fetchTrackSnapshots creds pkg >>= \case
+                        Left e -> logWarning $ "[STORE_MONITOR] Play snapshot error for " <> acName ac <> ": " <> renderPlayErr e
+                        Right snaps -> mapM_ (upsertStoreStatus . androidSnapToUpsert ac mExpected mActive) snaps
+            "ios" -> case mAscCreds of
+                Nothing -> logWarning $ "[STORE_MONITOR] No ASC creds — skipping " <> acName ac
+                Just creds ->
+                    fetchAscSnapshots creds pkg >>= \case
+                        Left e -> logWarning $ "[STORE_MONITOR] ASC snapshot error for " <> acName ac <> ": " <> renderAscErr e
+                        Right snaps -> mapM_ (upsertStoreStatus . iosSnapToUpsert ac mExpected mActive) snaps
+            p -> logWarning $ "[STORE_MONITOR] Unknown platform " <> p <> " for " <> acName ac
+    _ -> pure ()
+
+{- | Map a Play track snapshot → a @store_status@ upsert. Production carries the
+live staged-rollout % (the near-zero "pending" fraction reads as a tiny %, which
+the badge treats as not-yet-ramped) and overlays SCC's review state — Play never
+reports review, so this is the only way an Android "in review" surfaces; internal
+testing has neither rollout nor review. -}
+androidSnapToUpsert :: AppCatalog -> Maybe Text -> Maybe ActiveMobileState -> StoreTrackSnapshot -> StoreStatusUpsert
+androidSnapToUpsert ac mExpected mActive s =
+    let isProd = stsTrack s == "production"
+        -- A production fraction below the rollout floor is the parked "pending"
+        -- fraction (~1e-6) of a submitted / approved-held build under managed
+        -- publishing — NOT an active ramp — so it stores as no %, and the badge
+        -- reads it as "Approved · held" rather than "rolling out ~0%". The live
+        -- track is authoritative (no optimistic fallback to SCC's cached %): if
+        -- managed publishing holds a SET 10% at ~0%, the monitor truthfully shows
+        -- it as held, surfacing the hold instead of masking it.
+        realRollout = (fmap (* 100) (stsFraction s)) >>= \p -> if p >= androidRolloutFloorPercent then Just p else Nothing
+     in StoreStatusUpsert
+            { ssuAppCatalogId = acId ac
+            , ssuPlatform = "android"
+            , ssuTrack = stsTrack s
+            , ssuVersionName = nonEmptyVersion (stsVersion s)
+            , ssuVersionCode = stsCode s
+            , ssuStatus = Just (stsStatus s)
+            , ssuRolloutPercent = if isProd then realRollout else Nothing
+            , ssuReviewStatus = if isProd then mActive >>= amsReviewStatus else Nothing
+            , ssuReleaseNotes = stsNotes s
+            , ssuExpectedVersion = mExpected
+            }
+
+-- | Production rollout floor (percent). Below this, a live @userFraction@ is the
+-- parked review/pending fraction, not a real ramp — the 0–100 mirror of
+-- 'androidPendingFractionThreshold' (0.01 fraction = 1%).
+androidRolloutFloorPercent :: Double
+androidRolloutFloorPercent = androidPendingFractionThreshold * 100
+
+{- | Map an ASC snapshot → a @store_status@ upsert. The snapshot carries neither
+rollout % nor review state, so production overlays SCC's phased % + review state;
+TestFlight is build-only. -}
+iosSnapToUpsert :: AppCatalog -> Maybe Text -> Maybe ActiveMobileState -> AscSnapshot -> StoreStatusUpsert
+iosSnapToUpsert ac mExpected mActive s =
+    let isProd = ascTrack s == "production"
+     in StoreStatusUpsert
+            { ssuAppCatalogId = acId ac
+            , ssuPlatform = "ios"
+            , ssuTrack = ascTrack s
+            , ssuVersionName = nonEmptyVersion (ascVersion s)
+            , ssuVersionCode = Nothing
+            , ssuStatus = Just (ascStatus s)
+            , ssuRolloutPercent = if isProd then mActive >>= amsRolloutPercent else Nothing
+            , ssuReviewStatus = if isProd then mActive >>= amsReviewStatus else Nothing
+            , ssuReleaseNotes = ascNotes s
+            , ssuExpectedVersion = mExpected
+            }
+
+-- | A snapshot's placeholder "no build on this track" markers → 'Nothing'.
+nonEmptyVersion :: Text -> Maybe Text
+nonEmptyVersion v
+    | v `elem` ["", "0.0.0", "none"] = Nothing
+    | otherwise = Just v

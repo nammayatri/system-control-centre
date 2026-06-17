@@ -68,6 +68,7 @@ import ReleaseGroupDetail from './releases/pages/mobile/ReleaseGroupDetail';
 import ReleaseGroupsList from './releases/pages/mobile/ReleaseGroupsList';
 import MobileAppsAdmin from './releases/pages/mobile/MobileAppsAdmin';
 import MobileRevert from './releases/pages/mobile/MobileRevert';
+import StoreMonitor from './releases/pages/mobile/StoreMonitor';
 import LiveReleases from './releases/pages/LiveReleases';
 
 const backendProduct: ProductDefinition = {
@@ -163,6 +164,7 @@ const mobileProduct: ProductDefinition = {
     { label: 'Release Groups', path: '/mobile/groups',         icon: 'Layers' },
     { label: 'New Release',    path: '/mobile/releases/new',   icon: 'Plus' },
     { label: 'Live Releases',  path: '/mobile/releases/live',  icon: 'Activity' },
+    { label: 'App Release Monitor',  path: '/mobile/releases/monitor', icon: 'Gauge' },
     { label: 'Apps',           path: '/mobile/apps',           icon: 'Package',
       permission: 'MOBILE_APP_MANAGE' },
     { label: 'Server Config', path: '/mobile/server-config',   icon: 'Settings' },
@@ -175,6 +177,7 @@ const mobileProduct: ProductDefinition = {
     { path: 'releases/:id',        component: ReleaseSummary },
     { path: 'releases/:id/revert', component: MobileRevert,        permission: 'RELEASE_REVERT' },
     { path: 'releases/live',       component: LiveReleases },
+    { path: 'releases/monitor',    component: StoreMonitor },
     { path: 'groups',              component: ReleaseGroupsList },
     { path: 'groups/:groupId',     component: ReleaseGroupDetail },
     { path: 'apps',                component: MobileAppsAdmin,     permission: 'MOBILE_APP_MANAGE' },
@@ -189,6 +192,8 @@ const mobileProduct: ProductDefinition = {
         crumbs.push({ label: 'New Release' });
       } else if (parts[2] === 'live') {
         crumbs.push({ label: 'Live Releases' });
+      } else if (parts[2] === 'monitor') {
+        crumbs.push({ label: 'App Release Monitor' });
       } else if (parts.length >= 3) {
         crumbs.push({ label: parts[2], to: `/mobile/releases/${parts[2]}` });
         if (parts[3] === 'revert') {

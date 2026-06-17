@@ -5,7 +5,7 @@ import {
   Rocket, FileText, Settings, Package, Layers,
   Plus, List, ChevronLeft,
   PanelLeftClose, PanelLeft, X,
-  Activity, Flame, ExternalLink, Smartphone, Server,
+  Activity, Flame, ExternalLink, Smartphone, Server, Gauge,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import TopBar from './TopBar';
@@ -22,6 +22,7 @@ const iconMap: Record<string, React.ReactNode> = {
   Flame: <Flame className="w-3.5 h-3.5" />,
   Smartphone: <Smartphone className="w-4 h-4" />,
   Server: <Server className="w-4 h-4" />,
+  Gauge: <Gauge className="w-3.5 h-3.5" />,
 };
 
 interface SidebarBodyProps {

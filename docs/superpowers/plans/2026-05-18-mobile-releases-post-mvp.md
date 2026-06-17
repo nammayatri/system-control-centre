@@ -1842,3 +1842,128 @@ Both Create form and Revert page share the same commit row style:
 - Future scope: `docs/MOBILE_RELEASE_FUTURE_SCOPE.md`
 - Roadmap: `docs/MOBILE_RELEASE_ROADMAP.md`
 - DB schema: `docs/DATABASE.md`
+
+---
+
+## Store-Track Visibility + Snapshot Promote (2026-06-12)
+
+> Consolidated here from the former standalone `2026-06-12-store-track-visibility-and-snapshot-promote.md`.
+> **Status:** Built & green (backend `-Wall` clean, `sc-test` PASS, frontend `tsc` clean).
+> **Builds on:** `2026-06-09-promote-review-and-staged-rollout.md` (the promote→rollout feature;
+> §16 there covers the iOS build-number read this thread reuses).
+
+The store-track thread: making the **track** a build lives on (Play production/internal ·
+App Store/TestFlight) visible everywhere, teaching the iOS version bump to be track-aware, and
+(Option A) letting a store-sync **internal/TestFlight** snapshot be promoted to production through
+the full lifecycle.
+
+### 1. Store-sync now records the *track* (not just production)
+
+Previously `StoreSync` recorded only the **production** version (Android) / latest **TestFlight**
+build (iOS), with no track label. Now (`Mobile/StoreSync.hs`):
+
+- **`syncAndroid`** reads both Play tracks (`fetchPlayTracks` already returns
+  `(internal, production)`) and records the **latest** one: if the internal build code is ahead
+  of production → that build tagged **`internal`**; otherwise production tagged **`production`**.
+- **`syncIos`** tags the recorded TestFlight build **`testflight`** (and derives the iOS git tag
+  from the build number — see §16 of `2026-06-09-promote-review-and-staged-rollout.md`).
+- **`insertSyntheticRelease`** gained a `track` parameter and writes it to
+  **`release_tracker.metadata` as `{"store_track": "<track>"}`**.
+
+So every store-sync row now carries `metadata.store_track ∈ {production, internal, testflight}`.
+
+**Promotion-lag caveat (no-migration trade-off):** store-sync dedups one row per
+`(app, surface, env, version)`. When an internal version later promotes to production, its row
+keeps the `internal` label until a *newer* version appears. In practice internal usually equals
+production, so most rows read `production` and `internal` shows only for a genuinely-pending
+build. A clean fix is putting the track in the dedup key (a small migration) — deferred.
+
+### 2. Track-aware iOS version bump (`computeNextIosVersion`)
+
+Mirrors Android's `Play.computeNextVersion`. `Versioning/Apple.hs`:
+
+```haskell
+computeNextIosVersion :: Maybe Text -> Maybe Text -> Text   -- (latest TestFlight, live App Store)
+computeNextIosVersion Nothing  _      = "1.0.0"
+computeNextIosVersion (Just tf) mProd
+    | mProd == Just tf = bumpPatch tf   -- TestFlight == live production → a fresh build is needed
+    | otherwise        = tf             -- TestFlight ahead (or no live prod) → reuse the existing build
+```
+
+To compare, the iOS resolver now reads **both** the TestFlight build and the live
+**`READY_FOR_SALE`** App Store version (`getLiveAppStoreVersionString`), via a shared
+`resolveIosVersionWithToken`. The iOS **build number** (CFBundleVersion) is still resolved by the
+build workflow — SCC only suggests the version *number*. Covered by test `[37]`.
+
+### 3. Track badges in the UI (three surfaces)
+
+The track is surfaced as a small badge — **green = serving users (production); blue = staged
+(internal / testflight / App-Store-prepare)** — on:
+
+| Surface | Component | File |
+|---|---|---|
+| Releases **list** | `mobileTrackBadge` | `pages/ListRelease.tsx` |
+| **Create**-release app picker | `LatestBuildBadge` | `pages/mobile/CreateMobileRelease.tsx` |
+| Release **detail** "Latest builds" | `PrevBuildBadge` | `pages/ReleaseSummary.tsx` |
+
+**Backend plumbing** for the create/detail badges: `store_track` is threaded through the
+latest-build query (`Queries/AppCatalog.hs` — added `metadata` to the SELECT + `lbrStoreTrack` +
+`storeTrackOf` parser) → `LatestBuildResp.track` (`Handlers/AppCatalog.hs`) → `LatestBuild.track`
+(frontend `types.ts`).
+
+**Resolution order in each badge:** explicit `store_track` (re-synced rows) → else a
+**platform fallback** for pre-`store_track` rows: iOS release → `testflight`, Android release →
+`production`. Debug builds keep their `DEBUG` label.
+
+### 4. Option A — promote a store-sync internal/TestFlight snapshot
+
+A store-sync **internal/TestFlight** build is now promotable to production through the full
+lifecycle, not just SCC-created releases held at tag-push.
+
+**Backend (`Handlers/Rollout.hs`):**
+- `promoteH` guard relaxed: also accepts a row whose `metadata.store_track ∈ {internal,
+  testflight}` with **no review/rollout started** (a pre-production snapshot), alongside the
+  existing `MBTagPushed` case.
+- On promote, the snapshot is **flipped to `INPROGRESS`** (`markReleaseInProgress`, new in
+  `Queries/Tracker.hs`) so the **runner + Phase-7 reconciler adopt it** — review-poll, rollout
+  reconcile, and finalize all apply, exactly like an SCC release. (Safe: the runner *skips*
+  INPROGRESS mobile rows on startup; they're resumable.)
+- `GET /rollout` now returns **`rdStoreTrack`**.
+
+**Frontend (`components/MobileRolloutPanel.tsx`):** `stageOf` returns **promote** for an
+un-promoted internal/TestFlight snapshot, so the panel shows **"Promote to Review"** instead of
+the misleading "Released · 100%". Production snapshots still show "Released · 100%" (they're live).
+
+**Both platforms:** Android → `promoteToProduction(versionCode)` at the ~0% review fraction;
+iOS → `submitVersionForReview`, which **creates the App Store version from the latest TestFlight
+build** (the Phase-10 `ensureAppStoreVersion` path) → review → release → phased rollout.
+
+**Known gap (open):** the panel's promote-stage detection uses the *explicit* `rdStoreTrack`
+(from `metadata.store_track`), with **no platform fallback** — so a truly-old store-sync row that
+pre-dates the `store_track` change won't offer promote until it re-syncs once. The list/create
+badges *do* fall back by platform, which is why an old iOS row can read `TESTFLIGHT` in the list
+yet not show "Promote" on its detail page. Fix options: backfill `store_track` on existing rows,
+or add the same platform fallback to the panel's `stageOf` (scoped to store-sync rows).
+
+### 5. Config tab placement
+
+The four staged-rollout configs are mobile-tab configs. The Mobile/Backend split is a **frontend
+allowlist** (`products/server-config-filter.ts → MOBILE_SERVER_CONFIG_NAMES`), not the backend
+`ConfigGroup` — so they were added there: `mobile_staged_rollout_enabled`,
+`review_poll_interval_sec`, `review_poll_timeout_days`, `android_review_rollout_fraction`.
+
+### 6. Files touched (this thread)
+
+**Backend:** `Mobile/StoreSync.hs`, `Mobile/Versioning/Apple.hs`, `Mobile/Queries/AppCatalog.hs`,
+`Mobile/Queries/Tracker.hs`, `Mobile/Handlers/Rollout.hs`, `Mobile/Handlers/AppCatalog.hs`,
+`test/Main.hs` (`[36]` ASC builds parse, `[37]` iOS bump rule).
+
+**Frontend:** `pages/ListRelease.tsx`, `pages/ReleaseSummary.tsx`,
+`pages/mobile/CreateMobileRelease.tsx`, `components/MobileRolloutPanel.tsx`, `api.ts`, `types.ts`,
+`products/server-config-filter.ts`.
+
+### 7. Follow-ups
+
+- **Backfill / panel fallback** for old store-sync rows so Option A promote shows without a re-sync (§4 gap).
+- **Track in the store-sync dedup key** (migration) to kill the promotion-lag label staleness (§1).
+- **Releases-list rollout badge** ("In review", "↗ 5%", "Halted") — still needs the rollout columns on the domain `ReleaseTracker` + list serialization (separate from `store_track`).

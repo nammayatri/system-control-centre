@@ -12,6 +12,9 @@ module Products.Autopilot.Mobile.Types.Storage (
     AppCatalog,
     AppCatalogId,
     appCatalog,
+    StoreStatusT (..),
+    StoreStatus,
+    storeStatus,
 ) where
 
 import Data.Text (Text)
@@ -61,4 +64,54 @@ appCatalog =
                 , acFirebaseProjectId = fieldNamed "firebase_project_id"
                 , acEnabled = fieldNamed "enabled"
                 , acCreatedAt = fieldNamed "created_at"
+                }
+
+{- | Per-track live store-state cache (migration 0030) behind the App Release
+Monitoring dashboard. One row per (app_catalog_id, platform, track); written by
+the StoreSync poller / on-demand refresh, read in a single query by the monitor.
+-}
+data StoreStatusT f = StoreStatus
+    { ssAppCatalogId :: Columnar f Int32
+    , ssPlatform :: Columnar f Text
+    , ssTrack :: Columnar f Text
+    , ssVersionName :: Columnar f (Maybe Text)
+    , ssVersionCode :: Columnar f (Maybe Int32)
+    , ssStatus :: Columnar f (Maybe Text)
+    , ssRolloutPercent :: Columnar f (Maybe Double)
+    , ssReviewStatus :: Columnar f (Maybe Text)
+    , ssReleaseNotes :: Columnar f (Maybe Text)
+    , ssExpectedVersion :: Columnar f (Maybe Text)
+    , ssSyncedAt :: Columnar f UTCTime
+    }
+    deriving (Generic, Beamable)
+
+instance Table StoreStatusT where
+    -- Composite PK: (app_catalog_id, platform, track). app_catalog_id already
+    -- determines platform, but the column mirrors the migration verbatim.
+    data PrimaryKey StoreStatusT f
+        = StoreStatusId (Columnar f Int32) (Columnar f Text) (Columnar f Text)
+        deriving (Generic, Beamable)
+    primaryKey s = StoreStatusId (ssAppCatalogId s) (ssPlatform s) (ssTrack s)
+
+type StoreStatus = StoreStatusT Identity
+
+deriving instance Show StoreStatus
+deriving instance Eq StoreStatus
+
+storeStatus :: EntityModification (DatabaseEntity be db) be (TableEntity StoreStatusT)
+storeStatus =
+    setEntityName "store_status"
+        <> modifyTableFields
+            tableModification
+                { ssAppCatalogId = fieldNamed "app_catalog_id"
+                , ssPlatform = fieldNamed "platform"
+                , ssTrack = fieldNamed "track"
+                , ssVersionName = fieldNamed "version_name"
+                , ssVersionCode = fieldNamed "version_code"
+                , ssStatus = fieldNamed "status"
+                , ssRolloutPercent = fieldNamed "rollout_percent"
+                , ssReviewStatus = fieldNamed "review_status"
+                , ssReleaseNotes = fieldNamed "release_notes"
+                , ssExpectedVersion = fieldNamed "expected_version"
+                , ssSyncedAt = fieldNamed "synced_at"
                 }

@@ -61,7 +61,7 @@ import Products.Autopilot.Mobile.Handlers.Release (resolveBaseFromTracks)
 import Products.Autopilot.Mobile.Queries.AppCatalog (TrackSnapshot (..))
 import qualified Data.Map.Strict as Map
 import Products.Autopilot.Mobile.Versioning.Apple (AscPhasedState (..), AscReviewState (..), AscVersion (..), BuildsResp (..), appStoreStateToReview, applePhasedPercent, computeNextIosVersion, firstWhatsNew, parseAscVersion, parseVersionStates, selectInFlightReview)
-import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), ProdTrackRelease (..), parseProdReleaseNotes, parseProdTrackReleases, parseRolloutState, userFractionInRange)
+import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), ProdTrackRelease (..), StoreTrackSnapshot (..), parseProdReleaseNotes, parseProdTrackReleases, parseRolloutState, parseTrackSnapshot, userFractionInRange)
 import Products.Autopilot.Queries.ReleaseTracker (keepSnapshot)
 import Products.Autopilot.Mobile.Workflow (reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
 import Products.Autopilot.Types.Permission
@@ -154,6 +154,7 @@ main = do
     section "[42] List dedup (hide store-sync snapshot when external review owns build)" testListDedup
     section "[43] Console rollout detection (approved android adopts a Console-set %)" testConsoleRolloutDetect
     section "[44] iOS release detection (adopt an out-of-band App Store Connect release)" testIosReleaseDetect
+    section "[45] Play track snapshot parse (App Release Monitoring)" testTrackSnapshotParse
 
     putStrLn ""
     putStrLn "==========================================="
@@ -1592,6 +1593,25 @@ testIosReleaseDetect = do
     assertEqual "live + phased PAUSED day3 → halted @ 10%" (Just (SetRollout "halted" (Just 10))) (detectIosRelease AscLive (AscPhasedState "PAUSED" (Just 3)))
     assertEqual "live + phased COMPLETE → complete" (Just CompleteRollout) (detectIosRelease AscLive (AscPhasedState "COMPLETE" (Just 6)))
     assertEqual "live + no phasing (INACTIVE) → complete" (Just CompleteRollout) (detectIosRelease AscLive (AscPhasedState "INACTIVE" Nothing))
+
+-- | The per-track snapshot parser the App Release Monitoring poller uses: picks the
+-- leading release (active staged rollout if any, else the latest) and reads its
+-- version / code / status / fraction / first non-empty note.
+testTrackSnapshotParse :: IO ()
+testTrackSnapshotParse = do
+    putStrLn "play track snapshot: version / code / status / fraction / notes"
+    let prod = parseTrackSnapshot "production" "{\"releases\":[{\"name\":\"0.0.26\",\"status\":\"inProgress\",\"userFraction\":0.25,\"versionCodes\":[\"59\"],\"releaseNotes\":[{\"language\":\"en-US\",\"text\":\"Bug fixes\"}]}]}"
+    assertEqual "version" "0.0.26" (stsVersion prod)
+    assertEqual "code" (Just 59) (stsCode prod)
+    assertEqual "status" "inProgress" (stsStatus prod)
+    assertEqual "fraction" (Just 0.25) (stsFraction prod)
+    assertEqual "notes" (Just "Bug fixes") (stsNotes prod)
+    assertEqual "track" "production" (stsTrack prod)
+    let comp = parseTrackSnapshot "internal" "{\"releases\":[{\"name\":\"0.0.26\",\"status\":\"completed\",\"versionCodes\":[\"59\"]}]}"
+    assertEqual "completed status" "completed" (stsStatus comp)
+    assertEqual "completed → no notes" Nothing (stsNotes comp)
+    assertEqual "empty → none status" "none" (stsStatus (parseTrackSnapshot "production" "{}"))
+    assertEqual "empty → baseline version" "0.0.0" (stsVersion (parseTrackSnapshot "production" "{}"))
 
 testVersionBumpLogic :: IO ()
 testVersionBumpLogic = do

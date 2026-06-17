@@ -47,6 +47,11 @@ module Products.Autopilot.Mobile.Versioning.Play (
     getProductionReleases,
     parseProdTrackReleases,
 
+    -- * Per-track snapshots (App Release Monitoring)
+    StoreTrackSnapshot (..),
+    fetchTrackSnapshots,
+    parseTrackSnapshot,
+
     -- * Dispatcher entry point
     resolve,
 ) where
@@ -650,6 +655,95 @@ parseProdTrackReleases bs = case decode bs :: Maybe TrackBody of
             , ptrStatus = fromMaybe "draft" (rStatus r)
             , ptrUserFraction = rUserFraction r
             }
+
+-- ─── Per-track snapshots (App Release Monitoring) ──────────────────────────
+
+{- | A single store track's current state for the release-monitoring dashboard:
+the leading release's version / code / status / staged-rollout fraction, plus the
+first non-empty "What's New" note. -}
+data StoreTrackSnapshot = StoreTrackSnapshot
+    { stsTrack :: Text
+    -- ^ "production" | "internal"
+    , stsVersion :: Text
+    , stsCode :: Maybe Int32
+    , stsStatus :: Text
+    -- ^ completed | inProgress | halted | draft | none
+    , stsFraction :: Maybe Double
+    -- ^ staged-rollout userFraction (production only)
+    , stsNotes :: Maybe Text
+    }
+    deriving (Eq, Show, Generic)
+
+instance ToJSON StoreTrackSnapshot
+instance FromJSON StoreTrackSnapshot
+
+{- | Fetch the production + internal track snapshots for a Play package in one edit
+round-trip (create edit → GET both tracks → discard edit). Read-only. -}
+fetchTrackSnapshots ::
+    (MonadFlow m) => PlayCreds -> Text -> m (Either PlayApiError [StoreTrackSnapshot])
+fetchTrackSnapshots (PlayCreds saJson) packageName =
+    case parseServiceAccount saJson of
+        Left e -> do
+            logError $ "[play-console] bad service-account JSON: " <> T.pack e
+            pure (Left PlayUnauthorized)
+        Right sa -> liftIO (runFetchSnapshots sa packageName)
+
+runFetchSnapshots :: ServiceAccount -> Text -> IO (Either PlayApiError [StoreTrackSnapshot])
+runFetchSnapshots sa packageName = do
+    eToken <- mintAndExchange sa
+    case eToken of
+        Left err -> pure (Left err)
+        Right token -> do
+            eEdit <- createEdit token packageName
+            case eEdit of
+                Left err -> pure (Left err)
+                Right editId -> do
+                    eInternal <- fetchTrackBody token packageName editId "internal"
+                    eProd <- fetchTrackBody token packageName editId "production"
+                    _ <- try @SomeException (deleteEdit token packageName editId)
+                    pure $
+                        (\i p -> [parseTrackSnapshot "internal" i, parseTrackSnapshot "production" p])
+                            <$> eInternal
+                            <*> eProd
+
+-- | GET a track and return the raw body (404 → "{}" so it parses to the "none"
+-- snapshot). Like 'fetchTrack', but defers parsing to 'parseTrackSnapshot'.
+fetchTrackBody :: Text -> Text -> Text -> Text -> IO (Either PlayApiError LBS.ByteString)
+fetchTrackBody token packageName editId trackName = do
+    let url = playBase <> packageName <> "/edits/" <> editId <> "/tracks/" <> trackName
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = [("Authorization", "Bearer " <> token)]
+                , reqTimeout = Seconds 30
+                , reqLogTag = "play-track-snapshot"
+                }
+    resp <- httpRaw req
+    pure $ case resp of
+        Right HttpResponse{respStatus = s, respBody = b}
+            | s == 200 -> Right b
+            | s == 401 || s == 403 -> Left PlayUnauthorized
+            | s == 404 -> Right "{}"
+            | otherwise -> Left (PlayHttpError s (TE.decodeUtf8 (LBS.toStrict b)))
+        Left e -> Left (PlayHttpError 0 (T.pack (show e)))
+
+{- | Parse a track GET body into a 'StoreTrackSnapshot' — the leading release
+(active staged rollout if any, else the latest) with its version / code / status /
+fraction / first non-empty note. Empty / undecodable → the "none" snapshot.
+Exposed for unit testing. -}
+parseTrackSnapshot :: Text -> LBS.ByteString -> StoreTrackSnapshot
+parseTrackSnapshot track bs = case decode bs :: Maybe TrackBody of
+    Just (TrackBody rels)
+        | Just r <- pickRolloutRelease rels ->
+            StoreTrackSnapshot
+                { stsTrack = track
+                , stsVersion = fromMaybe "0.0.0" (rName r)
+                , stsCode = case maxVersionCode (rVersionCodes r) of 0 -> Nothing; n -> Just n
+                , stsStatus = fromMaybe "draft" (rStatus r)
+                , stsFraction = rUserFraction r
+                , stsNotes = find (not . T.null . T.strip) (rReleaseNotes r)
+                }
+    _ -> StoreTrackSnapshot track "0.0.0" Nothing "none" Nothing Nothing
 
 -- ── IO helpers ──
 

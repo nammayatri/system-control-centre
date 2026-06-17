@@ -1185,6 +1185,39 @@ export interface PromoteResp {
     prWarning?: string | null; // non-fatal warning, e.g. phased release couldn't be enabled
 }
 
+// ── App Release Monitoring (store-monitor) ──────────────────────────
+// One read-through-cache call powers the dashboard grid AND every modal:
+// `GET /mobile/store-monitor` returns the live per-track store state for
+// every app; the modal opens client-side from a loaded card object (no
+// fetch). The ↻ button hits `POST /mobile/store-monitor/:id/refresh` to
+// live re-poll a single app and returns its fresh card. Field names match
+// the backend contract verbatim.
+
+export interface TrackCell {
+    version: string | null;
+    buildCode: number | null;
+    status: string | null;          // live | completed | inProgress | halted | VALID | none
+    rolloutPercent: number | null;
+    reviewStatus: string | null;    // in_review | approved | rejected | null
+    releaseNotes: string | null;
+    drift: boolean;                 // store version != last SCC-shipped version
+    syncedAt: string | null;        // ISO timestamp
+}
+
+export interface PlatformBlock {
+    appCatalogId: number;
+    bundleId: string | null;
+    production: TrackCell | null;
+    internal: TrackCell | null;     // android only (null for ios)
+    testflight: TrackCell | null;   // ios only (null for android)
+}
+
+export interface StoreMonitorApp {
+    app: string;                    // display label
+    surface: string;                // customer | driver
+    platforms: { android: PlatformBlock | null; ios: PlatformBlock | null };
+}
+
 export const mobileApi = {
     listApps: async (): Promise<AppCatalogEntry[]> => {
         const { data } = await apiClient.get('/mobile/apps');
@@ -1305,5 +1338,18 @@ export const mobileApi = {
 
     markRejected: async (id: string, reason: string): Promise<void> => {
         await apiClient.post(`/releases/${encodeURIComponent(id)}/review/mark-rejected`, { mrReason: reason });
+    },
+
+    // ── App Release Monitoring ──
+    // One call → the whole grid + all modal data (incl. release notes).
+    storeMonitor: async (): Promise<StoreMonitorApp[]> => {
+        const { data } = await apiClient.get('/mobile/store-monitor');
+        return Array.isArray(data) ? data : [];
+    },
+
+    // Live re-poll one app → upsert the cache → return its fresh card.
+    refreshStoreApp: async (appCatalogId: number): Promise<StoreMonitorApp> => {
+        const { data } = await apiClient.post(`/mobile/store-monitor/${appCatalogId}/refresh`, {});
+        return data;
     },
 };

@@ -40,6 +40,8 @@ module Products.Autopilot.Mobile.Versioning.Apple (
     fetchAscVersions,
     AscBuildInfo (..),
     fetchAscBuildInfo,
+    AscSnapshot (..),
+    fetchAscSnapshots,
     BuildsResp (..),
     getLiveAppStoreVersion,
     getLiveReleaseNotes,
@@ -245,6 +247,39 @@ data AscBuildInfo = AscBuildInfo
     -- ^ CFBundleVersion, e.g. @"458"@
     }
     deriving (Eq, Show)
+
+-- | One iOS store track's current state for the App Release Monitoring dashboard.
+data AscSnapshot = AscSnapshot
+    { ascTrack :: Text
+    -- ^ "production" | "testflight"
+    , ascVersion :: Text
+    , ascStatus :: Text
+    -- ^ live | none | VALID
+    , ascNotes :: Maybe Text
+    }
+    deriving (Eq, Show)
+
+{- | Production + TestFlight snapshots for an iOS app: the live App Store version
+(+ its "What's New") and the latest TestFlight build. Composes the existing
+live-version / release-notes / build readers — read-only, no new auth. The
+production rollout % is filled by the poller from @release_tracker@ (Phase 7), not
+re-read here. -}
+fetchAscSnapshots :: (MonadFlow m) => AscCreds -> Text -> m (Either AscError [AscSnapshot])
+fetchAscSnapshots creds bundleId = do
+    eProdVer <- liftIO (getLiveAppStoreVersion creds bundleId)
+    case eProdVer of
+        Left e -> pure (Left e)
+        Right mProdVer -> do
+            mNotes <- either (const Nothing) id <$> liftIO (getLiveReleaseNotes creds bundleId)
+            eTf <- fetchAscBuildInfo creds bundleId
+            case eTf of
+                Left e -> pure (Left e)
+                Right mTf ->
+                    pure $
+                        Right
+                            [ AscSnapshot "production" (fromMaybe "0.0.0" mProdVer) (maybe "none" (const "live") mProdVer) mNotes
+                            , AscSnapshot "testflight" (maybe "0.0.0" abiVersion mTf) (maybe "none" (const "VALID") mTf) Nothing
+                            ]
 
 -- ─── Live ASC call (IO-only) ───────────────────────────────────────
 

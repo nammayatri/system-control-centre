@@ -14,7 +14,7 @@ import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import Database.Beam
 import GHC.Int (Int32)
-import Products.Autopilot.Mobile.Types.Storage (AppCatalogT, appCatalog)
+import Products.Autopilot.Mobile.Types.Storage (AppCatalogT, StoreStatusT, appCatalog, storeStatus)
 
 -- | Product-level row when @dcService@ IS NULL; service-level otherwise.
 data DeploymentConfigT f = DeploymentConfigT
@@ -134,7 +134,8 @@ data AutopilotDb f = AutopilotDb
   { deploymentConfig :: f (TableEntity DeploymentConfigT),
     releaseTrackers :: f (TableEntity ReleaseTrackerT),
     releaseEvents :: f (TableEntity ReleaseEventT),
-    appCatalogs :: f (TableEntity AppCatalogT)
+    appCatalogs :: f (TableEntity AppCatalogT),
+    storeStatuses :: f (TableEntity StoreStatusT)
   }
   deriving (Generic, Database be)
 
@@ -230,5 +231,6 @@ autopilotDb =
                   rePayload = fieldNamed "re_payload",
                   reCreatedAt = fieldNamed "re_created_at"
                 },
-        appCatalogs = appCatalog
+        appCatalogs = appCatalog,
+        storeStatuses = storeStatus
       }
