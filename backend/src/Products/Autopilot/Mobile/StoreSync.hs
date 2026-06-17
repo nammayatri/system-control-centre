@@ -150,7 +150,10 @@ storeSyncLoop = do
                             runStoreSync
                             -- App Release Monitoring: refresh the per-track
                             -- store_status cache (all apps, enabled or not).
-                            syncStoreStatus
+                            -- Isolated so a cache failure (e.g. store_status not
+                            -- yet migrated on a fresh deploy) can't starve the
+                            -- staged-rollout reconcile that follows.
+                            safeSyncStoreStatus
                         else logInfo "[STORE_SYNC] Disabled via server_config, skipping"
                     -- Phase 7: reconcile active staged rollouts with the live store
                     -- state (Apple's auto-ramp %, external halt/resume, completion).
@@ -1048,13 +1051,30 @@ syncStoreStatus = do
     logInfo $ "[STORE_MONITOR] Synced store_status for " <> T.pack (show (length apps)) <> " app(s)"
 
 {- | Live re-poll a single app (loads creds + the drift baseline, then refreshes
-its @store_status@ rows). Backs the on-demand ↻ refresh endpoint. -}
+its @store_status@ rows). Backs the on-demand ↻ refresh endpoint. A debug
+deployment has no production store data, so it's a no-op there — never pull
+production store data into a debug deployment (matches the background poller). -}
 refreshStoreStatusOne :: AppCatalog -> Flow ()
 refreshStoreStatusOne ac = do
-    expected <- latestShippedVersionsPerApp
-    mPlayCreds <- loadPlayCreds
-    mAscCreds <- loadAscCreds
-    refreshStoreStatusForApp mPlayCreds mAscCreds expected ac
+    buildType <- getMobileBuildType
+    if isDebugBuildType buildType
+        then logInfo "[STORE_MONITOR] Debug build env, skipping live refresh (release-only)"
+        else do
+            expected <- latestShippedVersionsPerApp
+            mPlayCreds <- loadPlayCreds
+            mAscCreds <- loadAscCreds
+            refreshStoreStatusForApp mPlayCreds mAscCreds expected ac
+
+{- | 'syncStoreStatus' wrapped so a cache failure can't abort the store-sync
+iteration. Notably, on a fresh deploy where @store_status@ isn't migrated yet the
+upsert throws — isolating it here keeps that from starving the staged-rollout
+reconcile that runs later in the same loop tick. -}
+safeSyncStoreStatus :: Flow ()
+safeSyncStoreStatus = do
+    result <- MC.try @_ @SomeException syncStoreStatus
+    case result of
+        Left e -> logError $ "[STORE_MONITOR] store_status sync failed (continuing): " <> T.pack (show e)
+        Right () -> pure ()
 
 {- | Poll ONE app's live store state and upsert each of its tracks into
 @store_status@. Shared by the batch poll and the refresh endpoint. Missing creds

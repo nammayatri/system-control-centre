@@ -21,6 +21,7 @@ module Products.Autopilot.Mobile.Handlers.StoreMonitor (
     PlatformBlockResp (..),
     PlatformsResp (..),
     StoreMonitorAppResp (..),
+    StoreMonitorResp (..),
     storeMonitorH,
     refreshStoreAppH,
 ) where
@@ -40,7 +41,9 @@ import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById, listAppCatalog)
 import Products.Autopilot.Mobile.Queries.StoreStatus (listStoreStatus)
 import Products.Autopilot.Mobile.StoreSync (refreshStoreStatusOne)
+import Products.Autopilot.Mobile.Types (isDebugBuildType)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..), StoreStatus, StoreStatusT (..))
+import Products.Autopilot.RuntimeConfig (getMobileBuildType)
 
 -- | One track's live cell. Field names match the frontend @TrackCell@ verbatim.
 data TrackCellResp = TrackCellResp
@@ -92,24 +95,57 @@ data StoreMonitorAppResp = StoreMonitorAppResp
 instance ToJSON StoreMonitorAppResp
 instance FromJSON StoreMonitorAppResp
 
+-- | The monitor payload + an availability flag. @available = false@ (with a
+-- @reason@) tells the UI to render a notice instead of the grid — used for debug
+-- deployments, which have no live production store data. Mirrors the AI
+-- endpoints' @{available, reason}@ shape.
+data StoreMonitorResp = StoreMonitorResp
+    { available :: Bool
+    , reason :: Maybe Text
+    , apps :: [StoreMonitorAppResp]
+    }
+    deriving (Generic, Show)
+
+instance ToJSON StoreMonitorResp
+instance FromJSON StoreMonitorResp
+
+-- | Why the monitor is hidden in a debug deployment.
+debugUnavailableReason :: Text
+debugUnavailableReason =
+    "App Release Monitoring isn't available for debug builds — it tracks live production \
+    \store releases, which a debug deployment doesn't have."
+
 -- ─── Handlers ──────────────────────────────────────────────────────
 
--- | The whole grid + modal data in one cache read.
-storeMonitorH :: AuthedPerson -> Flow [StoreMonitorAppResp]
+-- | The whole grid + modal data in one cache read. A debug deployment has no
+-- production store data, so it short-circuits to @available = false@ (no DB read,
+-- no store calls) and the UI shows a notice.
+storeMonitorH :: AuthedPerson -> Flow StoreMonitorResp
 storeMonitorH _ap = do
-    apps <- listAppCatalog
-    statuses <- listStoreStatus
-    pure (assembleCards apps statuses)
+    buildType <- getMobileBuildType
+    if isDebugBuildType buildType
+        then pure (StoreMonitorResp False (Just debugUnavailableReason) [])
+        else do
+            apps_ <- listAppCatalog
+            statuses <- listStoreStatus
+            pure (StoreMonitorResp True Nothing (assembleCards apps_ statuses))
 
--- | Live re-poll one app, then return its fresh card. 404 on an unknown id.
+-- | Live re-poll one app, then return its fresh card. 404 on an unknown id. In a
+-- debug deployment it re-polls nothing and reads no @store_status@ (the table may
+-- not even be migrated there) — returns an empty card.
 refreshStoreAppH :: AuthedPerson -> Int32 -> Flow StoreMonitorAppResp
 refreshStoreAppH _ap aid = do
     mRow <- findAppCatalogById aid
     case mRow of
         Nothing -> throwM $ NotFound "app_catalog row not found"
         Just row -> do
-            refreshStoreStatusOne row
-            statuses <- listStoreStatus
+            buildType <- getMobileBuildType
+            -- Debug: no store data, and store_status may be unmigrated — skip both
+            -- the live re-poll and the table read entirely.
+            statuses <-
+                if isDebugBuildType buildType
+                    then pure []
+                    else refreshStoreStatusOne row >> listStoreStatus
             apps <- listAppCatalog
             let key = (acName row, acSurface row)
                 groupRows = filter (\a -> (acName a, acSurface a) == key) apps

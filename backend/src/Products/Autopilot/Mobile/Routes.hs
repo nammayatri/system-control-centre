@@ -50,6 +50,7 @@ import Products.Autopilot.Mobile.Handlers.Rollout (
  )
 import Products.Autopilot.Mobile.Handlers.StoreMonitor (
     StoreMonitorAppResp,
+    StoreMonitorResp,
     refreshStoreAppH,
     storeMonitorH,
  )
@@ -212,7 +213,7 @@ type MobileAPI =
         :<|> "mobile"
             :> "store-monitor"
             :> Protected 'AP_RELEASE_VIEW
-            :> Get '[JSON] [StoreMonitorAppResp]
+            :> Get '[JSON] StoreMonitorResp
         :<|> "mobile"
             :> "store-monitor"
             :> Capture "appCatalogId" Int32

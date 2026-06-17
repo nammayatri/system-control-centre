@@ -1218,6 +1218,15 @@ export interface StoreMonitorApp {
     platforms: { android: PlatformBlock | null; ios: PlatformBlock | null };
 }
 
+// GET /mobile/store-monitor envelope. `available:false` (with a `reason`) means
+// the monitor is off for this deployment — e.g. a debug build, which has no live
+// production store data — and the UI shows a notice instead of the grid.
+export interface StoreMonitorResult {
+    available: boolean;
+    reason: string | null;
+    apps: StoreMonitorApp[];
+}
+
 export const mobileApi = {
     listApps: async (): Promise<AppCatalogEntry[]> => {
         const { data } = await apiClient.get('/mobile/apps');
@@ -1341,10 +1350,18 @@ export const mobileApi = {
     },
 
     // ── App Release Monitoring ──
-    // One call → the whole grid + all modal data (incl. release notes).
-    storeMonitor: async (): Promise<StoreMonitorApp[]> => {
+    // One call → the whole grid + all modal data (incl. release notes), wrapped
+    // in an availability envelope (`available:false` for debug builds).
+    storeMonitor: async (): Promise<StoreMonitorResult> => {
         const { data } = await apiClient.get('/mobile/store-monitor');
-        return Array.isArray(data) ? data : [];
+        // Tolerate both the new {available,reason,apps} object and the old bare
+        // array (until the backend redeploys).
+        if (Array.isArray(data)) return { available: true, reason: null, apps: data };
+        return {
+            available: data?.available ?? true,
+            reason: data?.reason ?? null,
+            apps: Array.isArray(data?.apps) ? data.apps : [],
+        };
     },
 
     // Live re-poll one app → upsert the cache → return its fresh card.
