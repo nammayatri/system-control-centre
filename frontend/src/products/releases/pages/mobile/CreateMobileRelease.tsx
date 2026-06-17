@@ -293,6 +293,7 @@ export default function CreateMobileRelease() {
   const validation = useMemo(() => {
     if (selectedIds.length === 0) return { ok: false, reason: 'Select at least one app' };
     if (!changeLog.trim()) return { ok: false, reason: 'Change log is required' };
+    if (/^[0-9a-fA-F]{6,40}$/.test(changeLog.trim())) return { ok: false, reason: 'Change log cannot be a git commit ID. Please provide a descriptive changelog.' };
     if (!isDebug) {
       for (const id of selectedIds) {
         const v = versionEdits[id];

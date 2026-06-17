@@ -307,8 +307,12 @@ const CreateRelease: React.FC = () => {
     e.preventDefault();
     setError('');
 
-    if (/^[0-9a-fA-F]{7,40}$/.test(formData.change_log.trim())) {
+    if (/^[0-9a-fA-F]{6,40}$/.test(formData.change_log.trim())) {
       toast.error('Change log cannot be a git commit ID. Please provide a descriptive changelog.');
+      return;
+    }
+    if (formData.change_log.trim() && formData.new_version.trim() && formData.change_log.trim() === formData.new_version.trim()) {
+      toast.error('Change log cannot be the same as the version. Please provide a descriptive changelog.');
       return;
     }
 
