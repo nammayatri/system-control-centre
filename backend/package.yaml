@@ -44,12 +44,16 @@ ghc-options:
 dependencies:
   - base >= 4.16 && < 5
   - aeson
+  - asn1-encoding
+  - asn1-types
   - async
+  - base64-bytestring
   - beam-core
   - beam-postgres
   - bytestring
   - case-insensitive
   - containers
+  - cryptonite
   - fast-logger
   - directory
   - exceptions
@@ -57,6 +61,8 @@ dependencies:
   - http-client
   - http-client-tls
   - http-types
+  - jwt
+  - memory
   - mtl
   - postgresql-simple
   - process
@@ -88,6 +94,101 @@ default-extensions:
 
 library:
   source-dirs: src
+  exposed-modules:
+    - Core.Admin.Queries
+    - Core.Admin.Routes
+    - Core.Admin.Types
+    - Core.Auth.Middleware
+    - Core.Auth.Permission
+    - Core.Auth.Protected
+    - Core.Auth.Queries
+    - Core.Auth.RouteCheck
+    - Core.Auth.Routes
+    - Core.Auth.Schema
+    - Core.Auth.Types
+    - Core.AppError
+    - Core.Config
+    - Core.Http.Client
+    - Core.Logging
+    - Core.Types.Id
+    - Core.Types.Time
+    - Core.Middleware.RequestId
+    - Shared.Config.Runtime
+    - Core.DB.Connection
+    - Core.Environment
+    - Core.Workflow.Engine
+    - Core.Workflow.Recorded
+    - Core.Workflow.Spec
+    - Core.Workflow.Stage
+    - Core.Workflow.StageInterface
+    - Core.Workflow.Types
+    - Core.Server
+    - Products.Autopilot.Config
+    - Products.Autopilot.DecisionEngine
+    - Products.Autopilot.Discovery
+    - Products.Autopilot.EventLog
+    - Products.Autopilot.K8s.Deployment
+    - Products.Autopilot.K8s.DestinationRule
+    - Products.Autopilot.K8s.Execute
+    - Products.Autopilot.K8s.HPA
+    - Products.Autopilot.K8s.Kubectl
+    - Products.Autopilot.Notifications
+    - Products.Autopilot.K8s.VirtualService
+    - Products.Autopilot.Mobile.Types
+    - Products.Autopilot.Mobile.Types.Storage
+    - Products.Autopilot.Mobile.Queries.AppCatalog
+    - Products.Autopilot.Mobile.Queries.Tracker
+    - Products.Autopilot.Mobile.Handlers.AppCatalog
+    - Products.Autopilot.Mobile.Handlers.Live
+    - Products.Autopilot.Mobile.Handlers.Release
+    - Products.Autopilot.Mobile.Handlers.Versions
+    - Products.Autopilot.Mobile.Routes
+    - Products.Autopilot.Mobile.Versioning
+    - Products.Autopilot.Mobile.Versioning.Play
+    - Products.Autopilot.Mobile.Versioning.Apple
+    - Products.Autopilot.Mobile.Github
+    - Products.Autopilot.Mobile.Github.Auth
+    - Products.Autopilot.Mobile.Workflow
+    - Products.Autopilot.Queries.ProductService
+    - Products.Autopilot.Queries.ReleaseTracker
+    - Products.Autopilot.Queries.VsEditTracker
+    - Products.Autopilot.Actions.Config
+    - Products.Autopilot.Actions.ConfigMap
+    - Products.Autopilot.Actions.K8sResource
+    - Products.Autopilot.Actions.Release
+    - Products.Autopilot.Actions.VSEdit
+    - Products.Autopilot.Routes
+    - Products.Autopilot.Runner
+    - Products.Autopilot.RuntimeConfig
+    - Products.Autopilot.Sync
+    - Products.Autopilot.SyncWatcher
+    - Products.Autopilot.Types
+    - Products.Autopilot.Types.API
+    - Products.Autopilot.Types.Permission
+    - Products.Autopilot.Types.Release
+    - Products.Autopilot.Types.Storage.Schema
+    - Products.Autopilot.Types.Target
+    - Products.Autopilot.Types.Target.Config
+    - Products.Autopilot.Types.Target.Kubernetes
+    - Products.Autopilot.Types.Workflow
+    - Products.Autopilot.Workflow.BackendConfigWorkflow
+    - Products.Autopilot.Workflow.BackendSchedulerWorkflow
+    - Products.Autopilot.Workflow.BackendServiceWorkflow
+    - Products.Autopilot.Workflow.Factory
+    - Products.Autopilot.Workflow.Helpers
+    - Products.Autopilot.Workflow.Recorded
+    - Products.Autopilot.Workflow.StageHelpers
+    - Products.Autopilot.Workflow.Types
+    - Products.ConfigCatalog
+    - Products.Registry
+    - Products.Types
+    - Shared.API.Response
+    - Shared.Config.Registry
+    - Shared.Config.Types
+    - Shared.Error
+    - Shared.JSON
+    - Shared.Queries.ServerConfig
+    - Shared.Types.Storage.ServerConfig
 
 executables:
   scc:

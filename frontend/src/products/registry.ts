@@ -5,6 +5,10 @@
  *   1. Create a folder: products/my-product/
  *   2. Register it here by adding to PRODUCT_REGISTRY
  *   3. That's it — routes, sidebar, permissions all auto-wire.
+ *
+ * Two entries may share the same `slug` to surface a single backend
+ * product as multiple dashboard tiles (e.g. Backend Releases vs Mobile
+ * Releases — both backed by the `autopilot` slug for unified RBAC).
  */
 
 import type { ComponentType } from 'react';
@@ -13,6 +17,13 @@ export interface ProductNavItem {
   label: string;
   path: string;
   icon: string;          // Lucide icon name
+  permission?: string;   // optional: hide nav item unless caller has this permission
+  // Optional extra route prefixes that should also keep this nav item
+  // highlighted as "active". Useful for routes that conceptually belong to
+  // a nav item but aren't reachable directly from it (e.g.,
+  // `/release-groups/:groupId` is part of the Mobile Releases flow but
+  // sits at a different URL root than `/releases?category=mobile`).
+  matchPaths?: string[];
 }
 
 export interface ProductRoute {
@@ -35,12 +46,15 @@ export interface ProductDefinition {
   viewPermission: string; // permission string required to see this product (e.g., 'RELEASE_VIEW')
   navItems: ProductNavItem[];
   routes: ProductRoute[];
+  // Optional: for products that share a slug, hint which release category
+  // this tile is scoped to ('backend' | 'mobile' | 'all').
+  defaultCategoryFilter?: 'backend' | 'mobile' | 'all';
   // Optional: build breadcrumbs for a path under this product.
   // Return an empty array if this product does not own the given path.
   getBreadcrumbs?: (parts: string[]) => Crumb[];
 }
 
-// ── Product: Releases ────────────────────────────────────────────
+// ── Product: Backend Releases ─────────────────────────────────────
 
 import ListRelease from './releases/pages/ListRelease';
 import CreateRelease from './releases/pages/CreateRelease';
@@ -54,12 +68,20 @@ import ListVSEdit from './vs-editor/pages/ListVSEdit';
 import EditVS from './vs-editor/pages/EditVS';
 import VSEditSummary from './vs-editor/pages/VSEditSummary';
 
-const releasesProduct: ProductDefinition = {
+// ── Product: Mobile Releases (stubs land in T23–T26) ──────────────
+import CreateMobileRelease from './releases/pages/mobile/CreateMobileRelease';
+import ReleaseGroupDetail from './releases/pages/mobile/ReleaseGroupDetail';
+import ReleaseGroupsList from './releases/pages/mobile/ReleaseGroupsList';
+import MobileAppsAdmin from './releases/pages/mobile/MobileAppsAdmin';
+import LiveReleases from './releases/pages/LiveReleases';
+
+const backendReleasesProduct: ProductDefinition = {
   slug: 'autopilot',
   label: 'Backend Releases',
-  description: 'Create, approve, and manage backend service releases',
-  icon: 'Rocket',
+  description: 'Microservice rollouts, VS edits, config maps',
+  icon: 'Server',
   basePath: '/releases',
+  defaultCategoryFilter: 'backend',
   viewPermission: 'RELEASE_VIEW',
   navItems: [
     { label: 'Releases', path: '/releases', icon: 'List' },
@@ -122,11 +144,44 @@ const releasesProduct: ProductDefinition = {
   },
 };
 
+const mobileReleasesProduct: ProductDefinition = {
+  slug: 'autopilot',
+  label: 'Mobile Releases',
+  description: 'React Native app releases via GitHub Actions',
+  icon: 'Smartphone',
+  basePath: '/releases',
+  defaultCategoryFilter: 'mobile',
+  viewPermission: 'RELEASE_VIEW',
+  navItems: [
+    { label: 'All Mobile Releases', path: '/releases?category=mobile', icon: 'List' },
+    {
+      label: 'Release Groups',
+      // List page; clicking a row deep-links to `/release-groups/<UUID>`.
+      // matchPaths keeps this nav item highlighted on the detail page too,
+      // even though the URL has a different prefix.
+      path: '/release-groups',
+      icon: 'Layers',
+      matchPaths: ['/release-groups'],
+    },
+    { label: 'New Mobile Release', path: '/releases/mobile/new', icon: 'Plus' },
+    { label: 'Live Releases', path: '/releases/live', icon: 'Activity' },
+    { label: 'Mobile Apps', path: '/mobile/apps', icon: 'Package', permission: 'MOBILE_APP_MANAGE' },
+  ],
+  routes: [
+    { path: '/releases/mobile/new', component: CreateMobileRelease, permission: 'RELEASE_CREATE' },
+    { path: '/release-groups', component: ReleaseGroupsList },
+    { path: '/release-groups/:groupId', component: ReleaseGroupDetail },
+    { path: '/mobile/apps', component: MobileAppsAdmin, permission: 'MOBILE_APP_MANAGE' },
+    { path: '/releases/live', component: LiveReleases },
+  ],
+};
+
 // ── Registry ─────────────────────────────────────────────────────
-// Only two products for now: Backend Releases
-// Admin Console is handled separately in App.tsx (not a product)
+// Two tiles share slug='autopilot' so backend RBAC stays unified
+// while the dashboard surfaces the backend and mobile flows separately.
+// Admin Console is handled in App.tsx (not a product).
 
 export const PRODUCT_REGISTRY: ProductDefinition[] = [
-  releasesProduct,
-  // ← Add new products here when ready
+  backendReleasesProduct,
+  mobileReleasesProduct,
 ];

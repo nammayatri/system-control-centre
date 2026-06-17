@@ -225,17 +225,18 @@ upsertServiceH _ap req = do
 -- Release CRUD Handlers
 -- ============================================================================
 
-listReleasesH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow [ReleaseTracker]
-listReleasesH _ap mFrom mTo = do
+listReleasesH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow [ReleaseTracker]
+listReleasesH _ap mFrom mTo mCategory = do
+    let mWhitelist = categoryWhitelist mCategory
     case (mFrom >>= parseISO, mTo >>= parseISO) of
         (Just fromTime, Just toTime) -> do
-            pairs <- listReleaseTrackersByDateRange fromTime toTime
+            pairs <- listReleaseTrackersByDateRangeAndCategory fromTime toTime mWhitelist
             pure (map fst pairs)
         _ -> do
             -- No valid date range -- default to last 30 days as safety limit
             now <- liftIO getCurrentTime
             let thirtyDaysAgo = addUTCTime (-30 * 86400) now
-            pairs <- listReleaseTrackersByDateRange thirtyDaysAgo now
+            pairs <- listReleaseTrackersByDateRangeAndCategory thirtyDaysAgo now mWhitelist
             pure (map fst pairs)
   where
     parseISO :: Text -> Maybe UTCTime
@@ -243,6 +244,16 @@ listReleasesH _ap mFrom mTo = do
         parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" (T.unpack t)
             <|> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" (T.unpack t)
             <|> parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%Q%Z" (T.unpack t)
+    -- 'Nothing' / unknown values fall through to the default UI exclusions
+    -- (VSEdit + BackendConfig hidden). 'Just "mobile"' restricts to
+    -- MobileBuild; 'Just "backend"' to the three backend categories,
+    -- including BackendConfig (overriding the default exclusion since the
+    -- caller is asking for it explicitly).
+    categoryWhitelist :: Maybe Text -> Maybe [Text]
+    categoryWhitelist (Just "mobile") = Just ["MobileBuild"]
+    categoryWhitelist (Just "backend") =
+        Just ["BackendService", "BackendScheduler", "BackendConfig"]
+    categoryWhitelist _ = Nothing
 
 createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseH ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
@@ -1596,187 +1607,187 @@ immediateRevertH _ap rid req@ImmediateRevertReq{isRevertSync = mIsRevertSync} = 
                         APIResponse
                             "ERROR"
                             "Immediate revert is not allowed on releases with env changes. Use normal revert (POST /releases/{id}/revert) — it restores env and image together via the full revert workflow."
-                else
-                    -- Julia parity: COMPLETED only. INPROGRESS is rejected because
-                    -- in-place image-swapping a release that's still rolling out
-                    -- would race the workflow's stage progression.
+                else -- Julia parity: COMPLETED only. INPROGRESS is rejected because
+                -- in-place image-swapping a release that's still rolling out
+                -- would race the workflow's stage progression.
+
                     if currentStatus /= COMPLETED
                         then pure $ APIResponse "ERROR" ("Immediate revert requires status=COMPLETED (current: " <> T.pack (show currentStatus) <> ")")
                         else case mTargetState of
-                    Just (K8sState k8s) -> do
-                        let ctx = context k8s
-                            K8s.K8sReleaseContext{K8s.namespace = ns} = ctx
-                            nsQ = shellQuote ns
-                            newDepName = deploymentName ctx
-                            depQ = shellQuote newDepName
-                            cName = (K8s.containerName :: K8sReleaseContext -> Text) ctx
-                            cNameQ = shellQuote cName
-                            oldDepName = (K8s.serviceName :: K8sReleaseContext -> Text) ctx <> "-" <> NT.oldVersion tracker
-                            oldDepQ = shellQuote oldDepName
-                        -- Step 1 (Julia parity): read the OLD deployment's container image LIVE
-                        -- via kubectl get. Don't trust the tracker's stored dockerImage field;
-                        -- the tracker may be stale and the fallback to oldVersion (a label) is
-                        -- not a valid image string.
-                        let getImageCmd =
-                                unwords
-                                    [ kubectlBin cfg
-                                    , "-n"
-                                    , nsQ
-                                    , "get deployment"
-                                    , oldDepQ
-                                    , "-o"
-                                    , "jsonpath='{.spec.template.spec.containers[?(@.name==\"" <> T.unpack cName <> "\")].image}'"
-                                    ]
-                        getResult <- liftIO $ runCmd getImageCmd
-                        case getResult of
-                            Left (K8sError err) ->
-                                pure $
-                                    APIResponse
-                                        "ERROR"
-                                        ( "Cannot read image from old deployment "
-                                            <> oldDepName
-                                            <> " (does it still exist?): "
-                                            <> err
-                                        )
-                            Right (K8sResult rawImage) -> do
-                                let oldImage = T.strip (T.dropAround (== '\'') (T.strip rawImage))
-                                if T.null oldImage
-                                    then
+                            Just (K8sState k8s) -> do
+                                let ctx = context k8s
+                                    K8s.K8sReleaseContext{K8s.namespace = ns} = ctx
+                                    nsQ = shellQuote ns
+                                    newDepName = deploymentName ctx
+                                    depQ = shellQuote newDepName
+                                    cName = (K8s.containerName :: K8sReleaseContext -> Text) ctx
+                                    cNameQ = shellQuote cName
+                                    oldDepName = (K8s.serviceName :: K8sReleaseContext -> Text) ctx <> "-" <> NT.oldVersion tracker
+                                    oldDepQ = shellQuote oldDepName
+                                -- Step 1 (Julia parity): read the OLD deployment's container image LIVE
+                                -- via kubectl get. Don't trust the tracker's stored dockerImage field;
+                                -- the tracker may be stale and the fallback to oldVersion (a label) is
+                                -- not a valid image string.
+                                let getImageCmd =
+                                        unwords
+                                            [ kubectlBin cfg
+                                            , "-n"
+                                            , nsQ
+                                            , "get deployment"
+                                            , oldDepQ
+                                            , "-o"
+                                            , "jsonpath='{.spec.template.spec.containers[?(@.name==\"" <> T.unpack cName <> "\")].image}'"
+                                            ]
+                                getResult <- liftIO $ runCmd getImageCmd
+                                case getResult of
+                                    Left (K8sError err) ->
                                         pure $
                                             APIResponse
                                                 "ERROR"
-                                                ( "Old deployment "
+                                                ( "Cannot read image from old deployment "
                                                     <> oldDepName
-                                                    <> " exists but container '"
-                                                    <> cName
-                                                    <> "' has no image. Cannot immediate-revert."
+                                                    <> " (does it still exist?): "
+                                                    <> err
                                                 )
-                                    else do
-                                        let oldImageQ = shellQuote oldImage
-                                        -- Step 2: Set image on the NEW deployment to OLD image
-                                        let setImageCmd =
-                                                unwords
-                                                    [ kubectlBin cfg
-                                                    , "set"
-                                                    , "image"
-                                                    , "deployment/" <> depQ
-                                                    , cNameQ <> "=" <> oldImageQ
-                                                    , "-n"
-                                                    , nsQ
-                                                    ]
-                                        imgResult <- liftIO $ executeWithRetry cfg setImageCmd
-                                        case imgResult of
-                                            Left (K8sError err) ->
-                                                pure $ APIResponse "ERROR" ("Failed to set image: " <> err)
-                                            Right _ -> do
-                                                -- Step 2b (bug fix): if the release had an env-switch
-                                                -- override (envOverrideData), also restore the envs
-                                                -- from the OLD deployment. Without this, immediate
-                                                -- revert would leave the new deployment with the
-                                                -- overridden envs, which contradicts "undo the
-                                                -- release". Read the old deployment's env array
-                                                -- live and patch it onto the new deployment.
-                                                let hadEnvOverride = case NT.envOverrideData tracker of
-                                                        Just t -> not (T.null t)
-                                                        Nothing -> False
-                                                when hadEnvOverride $ do
-                                                    let getEnvCmd =
-                                                            unwords
-                                                                [ kubectlBin cfg
-                                                                , "-n"
-                                                                , nsQ
-                                                                , "get deployment"
-                                                                , oldDepQ
-                                                                , "-o"
-                                                                , "jsonpath='{.spec.template.spec.containers[?(@.name==\"" <> T.unpack cName <> "\")].env}'"
-                                                                ]
-                                                    envResult <- liftIO $ runCmd getEnvCmd
-                                                    case envResult of
-                                                        Left (K8sError e) ->
-                                                            logInfo $ "[immediateRevertH] env restore: could not read old envs: " <> e
-                                                        Right (K8sResult rawEnv) -> do
-                                                            let oldEnv = T.strip (T.dropAround (== '\'') (T.strip rawEnv))
-                                                                oldEnvNonEmpty = not (T.null oldEnv) && oldEnv /= "[]"
-                                                            if oldEnvNonEmpty
-                                                                then do
-                                                                    patchEnvRes <- liftIO $ executeWithRetry cfg (buildPatchDeploymentEnvsCommand cfg ctx oldEnv)
-                                                                    case patchEnvRes of
-                                                                        Left (K8sError pe) ->
-                                                                            logInfo $ "[immediateRevertH] env restore: patch failed: " <> pe
-                                                                        Right _ ->
-                                                                            logInfo "[immediateRevertH] env restore: patched envs from old deployment"
-                                                                else -- Old had no envs — clear the override by patching empty env
-                                                                do
-                                                                    patchEnvRes <- liftIO $ executeWithRetry cfg (buildPatchDeploymentEnvsCommand cfg ctx "[]")
-                                                                    case patchEnvRes of
-                                                                        Left (K8sError pe) ->
-                                                                            logInfo $ "[immediateRevertH] env clear: failed: " <> pe
-                                                                        Right _ ->
-                                                                            logInfo "[immediateRevertH] env restore: cleared envs (old had none)"
-
-                                                -- Step 3: rollout restart to bounce pods onto the old image
-                                                let restartCmd =
+                                    Right (K8sResult rawImage) -> do
+                                        let oldImage = T.strip (T.dropAround (== '\'') (T.strip rawImage))
+                                        if T.null oldImage
+                                            then
+                                                pure $
+                                                    APIResponse
+                                                        "ERROR"
+                                                        ( "Old deployment "
+                                                            <> oldDepName
+                                                            <> " exists but container '"
+                                                            <> cName
+                                                            <> "' has no image. Cannot immediate-revert."
+                                                        )
+                                            else do
+                                                let oldImageQ = shellQuote oldImage
+                                                -- Step 2: Set image on the NEW deployment to OLD image
+                                                let setImageCmd =
                                                         unwords
                                                             [ kubectlBin cfg
-                                                            , "rollout"
-                                                            , "restart"
+                                                            , "set"
+                                                            , "image"
                                                             , "deployment/" <> depQ
+                                                            , cNameQ <> "=" <> oldImageQ
                                                             , "-n"
                                                             , nsQ
                                                             ]
-                                                restartResult <- liftIO $ executeWithRetry cfg restartCmd
-                                                let mRestartErr = case restartResult of
-                                                        Left (K8sError e) -> Just e
-                                                        Right _ -> Nothing
-                                                -- Audit event on the ORIGINAL tracker — Julia parity, no
-                                                -- status mutation. The tracker stays COMPLETED.
-                                                insertReleaseEvent
-                                                    rid
-                                                    "BUSINESS"
-                                                    "IMMEDIATE_REVERT"
-                                                    ( object
-                                                        [ "requestedBy" .= (req :: ImmediateRevertReq).requestedBy
-                                                        , "info" .= (req :: ImmediateRevertReq).info
-                                                        , "fromImage" .= (NT.newVersion tracker :: Text)
-                                                        , "toImage" .= (oldImage :: Text)
-                                                        , "patchedDeployment" .= (newDepName :: Text)
-                                                        , "imageReadFrom" .= (oldDepName :: Text)
-                                                        ]
-                                                    )
-                                                notifyImmediateReverted tracker
-                                                let shouldSync = fromMaybe False mIsRevertSync
-                                                when shouldSync $
-                                                    triggerImmediateRevertSync tracker mTargetState
-                                                case mRestartErr of
-                                                    Just err -> do
-                                                        logInfo $ "[immediateRevertH] rollout restart failed for " <> rid <> ": " <> err
+                                                imgResult <- liftIO $ executeWithRetry cfg setImageCmd
+                                                case imgResult of
+                                                    Left (K8sError err) ->
+                                                        pure $ APIResponse "ERROR" ("Failed to set image: " <> err)
+                                                    Right _ -> do
+                                                        -- Step 2b (bug fix): if the release had an env-switch
+                                                        -- override (envOverrideData), also restore the envs
+                                                        -- from the OLD deployment. Without this, immediate
+                                                        -- revert would leave the new deployment with the
+                                                        -- overridden envs, which contradicts "undo the
+                                                        -- release". Read the old deployment's env array
+                                                        -- live and patch it onto the new deployment.
+                                                        let hadEnvOverride = case NT.envOverrideData tracker of
+                                                                Just t -> not (T.null t)
+                                                                Nothing -> False
+                                                        when hadEnvOverride $ do
+                                                            let getEnvCmd =
+                                                                    unwords
+                                                                        [ kubectlBin cfg
+                                                                        , "-n"
+                                                                        , nsQ
+                                                                        , "get deployment"
+                                                                        , oldDepQ
+                                                                        , "-o"
+                                                                        , "jsonpath='{.spec.template.spec.containers[?(@.name==\"" <> T.unpack cName <> "\")].env}'"
+                                                                        ]
+                                                            envResult <- liftIO $ runCmd getEnvCmd
+                                                            case envResult of
+                                                                Left (K8sError e) ->
+                                                                    logInfo $ "[immediateRevertH] env restore: could not read old envs: " <> e
+                                                                Right (K8sResult rawEnv) -> do
+                                                                    let oldEnv = T.strip (T.dropAround (== '\'') (T.strip rawEnv))
+                                                                        oldEnvNonEmpty = not (T.null oldEnv) && oldEnv /= "[]"
+                                                                    if oldEnvNonEmpty
+                                                                        then do
+                                                                            patchEnvRes <- liftIO $ executeWithRetry cfg (buildPatchDeploymentEnvsCommand cfg ctx oldEnv)
+                                                                            case patchEnvRes of
+                                                                                Left (K8sError pe) ->
+                                                                                    logInfo $ "[immediateRevertH] env restore: patch failed: " <> pe
+                                                                                Right _ ->
+                                                                                    logInfo "[immediateRevertH] env restore: patched envs from old deployment"
+                                                                        else -- Old had no envs — clear the override by patching empty env
+                                                                        do
+                                                                            patchEnvRes <- liftIO $ executeWithRetry cfg (buildPatchDeploymentEnvsCommand cfg ctx "[]")
+                                                                            case patchEnvRes of
+                                                                                Left (K8sError pe) ->
+                                                                                    logInfo $ "[immediateRevertH] env clear: failed: " <> pe
+                                                                                Right _ ->
+                                                                                    logInfo "[immediateRevertH] env restore: cleared envs (old had none)"
+
+                                                        -- Step 3: rollout restart to bounce pods onto the old image
+                                                        let restartCmd =
+                                                                unwords
+                                                                    [ kubectlBin cfg
+                                                                    , "rollout"
+                                                                    , "restart"
+                                                                    , "deployment/" <> depQ
+                                                                    , "-n"
+                                                                    , nsQ
+                                                                    ]
+                                                        restartResult <- liftIO $ executeWithRetry cfg restartCmd
+                                                        let mRestartErr = case restartResult of
+                                                                Left (K8sError e) -> Just e
+                                                                Right _ -> Nothing
+                                                        -- Audit event on the ORIGINAL tracker — Julia parity, no
+                                                        -- status mutation. The tracker stays COMPLETED.
                                                         insertReleaseEvent
                                                             rid
                                                             "BUSINESS"
-                                                            "REVERT_RESTART_FAILED"
-                                                            (object ["error" .= err])
-                                                        pure $
-                                                            APIResponse
-                                                                "WARNING"
-                                                                ( "Immediate revert: image swapped to "
-                                                                    <> oldImage
-                                                                    <> ", but rollout restart failed: "
-                                                                    <> err
-                                                                    <> ". Pods may still be running the new image; manual intervention may be required."
-                                                                )
-                                                    Nothing ->
-                                                        pure $
-                                                            APIResponse
-                                                                "SUCCESS"
-                                                                ( "Immediate revert: "
-                                                                    <> newDepName
-                                                                    <> " patched to image "
-                                                                    <> oldImage
-                                                                    <> " (read live from "
-                                                                    <> oldDepName
-                                                                    <> "); pods restarting"
-                                                                )
-                    _ -> pure $ APIResponse "ERROR" "No K8s context available for revert"
+                                                            "IMMEDIATE_REVERT"
+                                                            ( object
+                                                                [ "requestedBy" .= (req :: ImmediateRevertReq).requestedBy
+                                                                , "info" .= (req :: ImmediateRevertReq).info
+                                                                , "fromImage" .= (NT.newVersion tracker :: Text)
+                                                                , "toImage" .= (oldImage :: Text)
+                                                                , "patchedDeployment" .= (newDepName :: Text)
+                                                                , "imageReadFrom" .= (oldDepName :: Text)
+                                                                ]
+                                                            )
+                                                        notifyImmediateReverted tracker
+                                                        let shouldSync = fromMaybe False mIsRevertSync
+                                                        when shouldSync $
+                                                            triggerImmediateRevertSync tracker mTargetState
+                                                        case mRestartErr of
+                                                            Just err -> do
+                                                                logInfo $ "[immediateRevertH] rollout restart failed for " <> rid <> ": " <> err
+                                                                insertReleaseEvent
+                                                                    rid
+                                                                    "BUSINESS"
+                                                                    "REVERT_RESTART_FAILED"
+                                                                    (object ["error" .= err])
+                                                                pure $
+                                                                    APIResponse
+                                                                        "WARNING"
+                                                                        ( "Immediate revert: image swapped to "
+                                                                            <> oldImage
+                                                                            <> ", but rollout restart failed: "
+                                                                            <> err
+                                                                            <> ". Pods may still be running the new image; manual intervention may be required."
+                                                                        )
+                                                            Nothing ->
+                                                                pure $
+                                                                    APIResponse
+                                                                        "SUCCESS"
+                                                                        ( "Immediate revert: "
+                                                                            <> newDepName
+                                                                            <> " patched to image "
+                                                                            <> oldImage
+                                                                            <> " (read live from "
+                                                                            <> oldDepName
+                                                                            <> "); pods restarting"
+                                                                        )
+                            _ -> pure $ APIResponse "ERROR" "No K8s context available for revert"
 
 -- ============================================================================
 -- Restart Release (POST /releases/:id/restart)

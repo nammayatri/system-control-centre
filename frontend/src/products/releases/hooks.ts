@@ -21,13 +21,18 @@ import {
   fetchPodHealth,
   fetchResources,
   TERMINAL_STATUSES,
+  mobileApi,
 } from './api';
 import { toast } from 'sonner';
 
-export function useReleases(from: string, to: string) {
+export function useReleases(
+  from: string,
+  to: string,
+  category?: 'backend' | 'mobile',
+) {
   return useQuery({
-    queryKey: ['releases', from, to],
-    queryFn: () => fetchAPReleases(from, to),
+    queryKey: ['releases', from, to, category ?? 'all'],
+    queryFn: () => fetchAPReleases(from, to, category),
     refetchInterval: 60000,
     enabled: !!from && !!to,
   });
@@ -290,5 +295,59 @@ export function useResources(product: string | undefined, service: string | unde
     queryKey: ['resources', product, service],
     queryFn: () => fetchResources(product!, service!),
     enabled: !!product && !!service,
+  });
+}
+
+// ── Mobile Releases hooks ─────────────────────────────────────────
+
+export function useMobileApps() {
+  return useQuery({
+    queryKey: ['mobile', 'apps'],
+    queryFn: () => mobileApi.listApps(),
+  });
+}
+
+export function usePreviewVersions(appCatalogIds: number[]) {
+  // sort the ids so the cache key is order-independent
+  const sortedKey = [...appCatalogIds].sort((a, b) => a - b).join(',');
+  return useQuery({
+    queryKey: ['mobile', 'versions', 'preview', sortedKey],
+    queryFn: () => mobileApi.previewVersions(appCatalogIds),
+    enabled: appCatalogIds.length > 0,
+    staleTime: 60_000,
+  });
+}
+
+export function useCreateMobileReleases() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: mobileApi.createReleases,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['releases'] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err.message || 'Failed to create mobile releases');
+    },
+  });
+}
+
+export function useDispatchMobileReleases() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: mobileApi.dispatchReleases,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['releases'] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err.message || 'Failed to dispatch mobile releases');
+    },
+  });
+}
+
+export function useLiveReleases(category: 'all' | 'backend' | 'mobile' = 'all') {
+  return useQuery({
+    queryKey: ['releases', 'live', category],
+    queryFn: () => mobileApi.liveReleases(category),
+    refetchInterval: 10_000,
   });
 }
