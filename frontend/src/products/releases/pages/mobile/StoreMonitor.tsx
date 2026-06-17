@@ -12,10 +12,11 @@ import {
   User,
   Car,
   Zap,
+  Info,
 } from 'lucide-react';
 import { useStoreMonitor } from '../../hooks';
 import { mobileApi } from '../../api';
-import type { PlatformBlock, StoreMonitorApp, TrackCell } from '../../api';
+import type { PlatformBlock, StoreMonitorApp, StoreMonitorResult, TrackCell } from '../../api';
 import { Button } from '../../../../shared/ui/button';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { Badge } from '../../../../shared/ui/badge';
@@ -182,6 +183,23 @@ function EmptyState({ children }: { children: ReactNode }) {
   );
 }
 
+// Shown when the API reports the monitor is off for this deployment (e.g. a debug
+// build — no live production store data).
+function UnavailableNotice({ reason }: { reason?: string | null }) {
+  return (
+    <div className="rounded-xl border border-amber-200 bg-amber-50/40 px-6 py-14 text-center">
+      <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-amber-100">
+        <Info className="h-5 w-5 text-amber-600" />
+      </div>
+      <p className="text-sm font-semibold text-zinc-800">App Release Monitoring isn’t available here</p>
+      <p className="mx-auto mt-1.5 max-w-md text-xs leading-relaxed text-zinc-500">
+        {reason ??
+          'This deployment is a debug build; the monitor tracks live production store releases, which a debug build does not have.'}
+      </p>
+    </div>
+  );
+}
+
 // ── Track / platform / surface / brand ─────────────────────────────
 
 function TrackLine({ label, cell }: { label: string; cell: TrackCell | null }) {
@@ -316,10 +334,10 @@ function BrandCard({
     setRefreshing(true);
     try {
       const fresh = await Promise.all(ids.map((id) => mobileApi.refreshStoreApp(id)));
-      qc.setQueryData<StoreMonitorApp[]>(['store-monitor'], (prev) => {
+      qc.setQueryData<StoreMonitorResult>(['store-monitor'], (prev) => {
         if (!prev) return prev;
         const byKey = new Map(fresh.map((f) => [`${f.app}|${f.surface}`, f]));
-        return prev.map((row) => byKey.get(`${row.app}|${row.surface}`) ?? row);
+        return { ...prev, apps: prev.apps.map((row) => byKey.get(`${row.app}|${row.surface}`) ?? row) };
       });
     } catch (err: any) {
       toast.error(err?.response?.data?.message || err.message || 'Failed to refresh app');
@@ -412,7 +430,9 @@ function ActiveRolloutsPanel({
 // ── Page ───────────────────────────────────────────────────────────
 
 export default function StoreMonitor() {
-  const { data: apps = [], isLoading } = useStoreMonitor();
+  const { data, isLoading } = useStoreMonitor();
+  const apps = useMemo(() => data?.apps ?? [], [data]);
+  const unavailable = !!data && !data.available;
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
   const [refreshingAll, setRefreshingAll] = useState(false);
@@ -453,8 +473,15 @@ export default function StoreMonitor() {
       await runPool(ids, 4, async (id) => {
         try {
           const card = await mobileApi.refreshStoreApp(id);
-          qc.setQueryData<StoreMonitorApp[]>(['store-monitor'], (prev) =>
-            prev ? prev.map((row) => (row.app === card.app && row.surface === card.surface ? card : row)) : prev,
+          qc.setQueryData<StoreMonitorResult>(['store-monitor'], (prev) =>
+            prev
+              ? {
+                  ...prev,
+                  apps: prev.apps.map((row) =>
+                    row.app === card.app && row.surface === card.surface ? card : row,
+                  ),
+                }
+              : prev,
           );
         } catch {
           // skip this app — a single store read failing shouldn't abort the rest
@@ -477,38 +504,44 @@ export default function StoreMonitor() {
         <div className="flex min-w-0 items-center gap-2">
           <MonitorSmartphone className="h-4 w-4 text-violet-600" />
           <h1 className="text-base font-semibold text-zinc-900 sm:text-lg">App Release Monitoring</h1>
-          <span className="text-xs text-zinc-500">
-            {groups.length} {groups.length === 1 ? 'app' : 'apps'} · {apps.length} variants
-          </span>
+          {!unavailable && (
+            <span className="text-xs text-zinc-500">
+              {groups.length} {groups.length === 1 ? 'app' : 'apps'} · {apps.length} variants
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search app or surface…"
-              className="h-9 w-48 rounded-lg border border-zinc-300 bg-white pl-9 pr-3 text-sm text-zinc-900 transition-shadow placeholder:text-zinc-400 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-zinc-400 sm:w-56"
-            />
+        {!unavailable && (
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search app or surface…"
+                className="h-9 w-48 rounded-lg border border-zinc-300 bg-white pl-9 pr-3 text-sm text-zinc-900 transition-shadow placeholder:text-zinc-400 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-zinc-400 sm:w-56"
+              />
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void refreshAll()}
+              loading={refreshingAll}
+              title="Live re-poll every app from the stores"
+            >
+              {!refreshingAll && <RefreshCw className="h-4 w-4" />}
+              {refreshingAll && refreshProgress ? `Refreshing ${refreshProgress.done}/${refreshProgress.total}` : 'Refresh'}
+            </Button>
           </div>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void refreshAll()}
-            loading={refreshingAll}
-            title="Live re-poll every app from the stores"
-          >
-            {!refreshingAll && <RefreshCw className="h-4 w-4" />}
-            {refreshingAll && refreshProgress ? `Refreshing ${refreshProgress.done}/${refreshProgress.total}` : 'Refresh'}
-          </Button>
-        </div>
+        )}
       </div>
 
       {isLoading ? (
         <div className="rounded-xl border border-zinc-200 bg-white">
           <TableSkeleton rows={4} cols={4} />
         </div>
+      ) : unavailable ? (
+        <UnavailableNotice reason={data?.reason} />
       ) : apps.length === 0 ? (
         <EmptyState>No apps to monitor yet.</EmptyState>
       ) : (
