@@ -47,6 +47,6 @@
   "overrides": {
     "picomatch": "^4.0.4",
     "follow-redirects": "^1.16.0",
-    "dompurify": "^3.4.0"
+    "dompurify": "^3.4.10"
   }
 }
