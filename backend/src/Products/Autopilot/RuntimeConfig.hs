@@ -16,8 +16,7 @@ module Products.Autopilot.RuntimeConfig (
     getABHSAllowedTimeDiffMins,
     isSyncClusterEnabled,
     isMultiReleasePerProduct,
-    isStoreSyncEnabled,
-    getStoreSyncIntervalMinutes,
+    getStoreRefreshCooldownSeconds,
     isVersionPreviewEnabled,
     getMobileBuildType,
     getMobileTagConfirmTimeoutMinutes,
@@ -214,11 +213,13 @@ always blocked regardless.
 isMultiReleasePerProduct :: (MonadFlow m) => m Bool
 isMultiReleasePerProduct = getConfigBoolForProduct "multi_release_per_product" (Just "autopilot") False
 
-isStoreSyncEnabled :: (MonadFlow m) => m Bool
-isStoreSyncEnabled = getConfigBoolForProduct "store_sync_enabled" (Just "autopilot") False
-
-getStoreSyncIntervalMinutes :: (MonadFlow m) => m Int
-getStoreSyncIntervalMinutes = getConfigIntForProduct "store_sync_interval_minutes" (Just "autopilot") 30
+{- | Single freshness threshold (seconds) for on-demand store sync. Two roles:
+the backend serves cache instead of spending a Play edit when an app was synced
+within this window (the quota guard), and the UI uses the same value to decide
+when to auto-refresh on open + warn that data is stale. Default 300s — keep it
+above Play's ~180s/app edit rate limit. -}
+getStoreRefreshCooldownSeconds :: (MonadFlow m) => m Int
+getStoreRefreshCooldownSeconds = getConfigIntForProduct "store_refresh_cooldown_seconds" (Just "autopilot") 300
 
 isVersionPreviewEnabled :: (MonadFlow m) => m Bool
 isVersionPreviewEnabled = getConfigBoolForProduct "version_preview_enabled" (Just "autopilot") True

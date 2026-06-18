@@ -286,10 +286,26 @@ export function MobileRolloutPanel({
             {stage === 'review' && (
                 <div className="space-y-3">
                     {isIos ? (
-                        <p className="flex items-center gap-1.5 text-xs text-zinc-600">
-                            <Loader2 size={12} className="animate-spin text-indigo-500" />
-                            Waiting on App Store review — the outcome is detected automatically.
-                        </p>
+                        <div className="space-y-2">
+                            <p className="flex items-center gap-1.5 text-xs text-zinc-600">
+                                <Loader2 size={12} className="animate-spin text-indigo-500" />
+                                Waiting on App Store review — the outcome is detected automatically.
+                            </p>
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                className="border-red-300 text-red-700 hover:bg-red-50"
+                                disabled={!canPromote}
+                                loading={busy === 'Withdrawn from review'}
+                                onClick={() => run('Withdrawn from review', () => mobileApi.withdraw(releaseId))}
+                            >
+                                <XCircle size={13} /> Withdraw from review
+                            </Button>
+                            <p className="text-[11px] text-zinc-500">
+                                Cancels the App Store submission and aborts this release — use it to pull a bad
+                                build before it&apos;s approved.
+                            </p>
+                        </div>
                     ) : (
                         <>
                             <p className="text-xs text-zinc-600">
@@ -316,6 +332,14 @@ export function MobileRolloutPanel({
                                     <XCircle size={13} /> Mark Rejected
                                 </Button>
                             </div>
+                            <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-zinc-500">
+                                <Info size={12} className="mt-0.5 shrink-0 text-zinc-400" />
+                                <span>
+                                    A submitted Play review <strong>can&apos;t be withdrawn</strong> — Google Play
+                                    has no cancel-review API. Wait for the verdict (record it above), or once it&apos;s
+                                    live, halt the rollout. To replace it, ship a new build.
+                                </span>
+                            </p>
                             {showReject && (
                                 <div className="space-y-2 rounded-md border border-red-200 bg-white/70 p-3">
                                     <textarea

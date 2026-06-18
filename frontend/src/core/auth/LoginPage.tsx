@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import { Eye, EyeOff } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import nyLogo from '../../assets/ny-logo.svg';
+import nyIcon from '../../assets/ny-icon.svg';
 import { apiClient } from '../../lib/api-client';
 
 const LoginPage: React.FC = () => {
@@ -98,7 +98,7 @@ const LoginPage: React.FC = () => {
         <div className="bg-white rounded-xl shadow-sm border border-zinc-200">
           <div className="px-6 sm:px-8 pt-7 sm:pt-8 pb-2 text-center">
             <div className="flex items-center justify-center mb-3">
-              <img src={nyLogo} alt="Logo" className="h-8 w-auto" />
+              <img src={nyIcon} alt="System Control Centre" className="h-9 w-9" />
             </div>
             <h1 className="text-base sm:text-lg font-semibold text-zinc-900">System Control Centre</h1>
             <p className="text-sm text-zinc-500 mt-1">

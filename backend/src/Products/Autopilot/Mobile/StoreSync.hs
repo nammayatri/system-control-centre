@@ -17,8 +17,8 @@ background loop in 'Products.Autopilot.Runner'.
 -}
 module Products.Autopilot.Mobile.StoreSync (
     runStoreSync,
-    storeSyncLoop,
     reconcileActiveRollouts,
+
     -- * Pure reconcile decision (unit-tested)
     ReconcileAction (..),
     androidReconcileAction,
@@ -29,16 +29,17 @@ module Products.Autopilot.Mobile.StoreSync (
     pendingPublishRelease,
     detectConsoleRollout,
     detectIosRelease,
+
     -- * App Release Monitoring (store_status cache)
-    syncStoreStatus,
     refreshStoreStatusOne,
 ) where
 
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
 import Control.Exception (SomeException)
+import Control.Monad (forM_, when)
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (liftIO)
 import Core.Environment (Flow, MonadFlow, logError, logInfo, logWarning)
-import Core.Types.Time (threadDelaySec)
 import Data.Aeson (object, (.=))
 import Data.Char (isAlphaNum)
 import Data.Int (Int32)
@@ -54,21 +55,21 @@ import Products.Autopilot.Mobile.Queries.AppCatalog (
     TrackSnapshot (..),
     fetchLatestBuildsPerApp,
     listAppCatalog,
-    listEnabledAppCatalog,
  )
 import Products.Autopilot.Mobile.Queries.StoreStatus (
     ActiveMobileState (..),
     StoreStatusUpsert (..),
     findActiveMobileState,
     latestShippedVersionsPerApp,
+    secondsSinceLastSync,
     upsertStoreStatus,
  )
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
     completeExternalReviewRow,
     findActiveRolloutReleases,
-    findMobileAwaitingRollout,
     findExternalReviewRow,
+    findMobileAwaitingRollout,
     logEvent,
     mkMobileTrackerRow,
     parseMobileTargetState,
@@ -98,22 +99,24 @@ import Products.Autopilot.Mobile.Versioning.Apple (
     fetchAscSnapshots,
     getAscReviewState,
     getInFlightReview,
+    getIosVersionStateDump,
     getLiveAppStoreVersion,
     getPhasedReleaseId,
     getPhasedReleaseState,
     loadAscCreds,
     renderAscErr,
  )
-import Text.Read (readMaybe)
 import Products.Autopilot.Mobile.Versioning.Play (
     PlayCreds (..),
     PlayRolloutState (..),
     ProdTrackRelease (..),
     StoreTrackSnapshot (..),
     TrackInfo (..),
-    fetchPlayTracks,
-    fetchTrackSnapshots,
-    getProductionReleases,
+    bodiesToProdReleases,
+    bodiesToRolloutState,
+    bodiesToSnapshots,
+    bodiesToTracks,
+    fetchPlayTrackBodies,
     getTrackRolloutState,
     loadPlayCreds,
     renderPlayErr,
@@ -123,60 +126,27 @@ import Products.Autopilot.Queries.ReleaseTracker (
     insertReleaseEvent,
     insertReleaseTrackerRowIfAbsent,
  )
-import Products.Autopilot.RuntimeConfig (getMobileBuildType, getStoreSyncIntervalMinutes, isStagedRolloutEnabled, isStoreSyncEnabled)
+import Products.Autopilot.RuntimeConfig (getMobileBuildType, getStoreRefreshCooldownSeconds, isStagedRolloutEnabled)
 import Products.Autopilot.Types.Storage.Schema (ReleaseTrackerRow, ReleaseTrackerT (..))
 import Products.Autopilot.Types.Target (TargetState (..))
+import System.IO.Unsafe (unsafePerformIO)
+import Text.Read (readMaybe)
 
 type BuildMap = Map.Map (Text, Text, Text) LatestBuildRow
 
-storeSyncLoop :: Flow ()
-storeSyncLoop = do
-    logInfo "[STORE_SYNC] Background loop started"
-    loop
-  where
-    loop = do
-        result <- MC.try @_ @SomeException $ do
-            -- Store sync polls PRODUCTION stores and records release builds, so
-            -- it only makes sense in a release env. In a debug env it's a no-op
-            -- regardless of store_sync_enabled — never pull production data into
-            -- a debug deployment.
-            buildType <- getMobileBuildType
-            if isDebugBuildType buildType
-                then logInfo "[STORE_SYNC] Debug build env, skipping (release-only)"
-                else do
-                    enabled <- isStoreSyncEnabled
-                    if enabled
-                        then do
-                            runStoreSync
-                            -- App Release Monitoring: refresh the per-track
-                            -- store_status cache (all apps, enabled or not).
-                            -- Isolated so a cache failure (e.g. store_status not
-                            -- yet migrated on a fresh deploy) can't starve the
-                            -- staged-rollout reconcile that follows.
-                            safeSyncStoreStatus
-                        else logInfo "[STORE_SYNC] Disabled via server_config, skipping"
-                    -- Phase 7: reconcile active staged rollouts with the live store
-                    -- state (Apple's auto-ramp %, external halt/resume, completion).
-                    -- Independent of store_sync_enabled — it's the staged-rollout
-                    -- feature, gated on its own flag.
-                    staged <- isStagedRolloutEnabled
-                    if staged
-                        then reconcileActiveRollouts
-                        else pure ()
-            interval <- getStoreSyncIntervalMinutes
-            threadDelaySec (interval * 60)
-        case result of
-            Left e ->
-                logError $
-                    "[STORE_SYNC] Iteration failed (continuing): " <> T.pack (show e)
-            Right () -> pure ()
-        loop
-
+{- | Sync EVERY app in one pass — the backend for an explicit "refresh all". The
+usual path is per-app on-demand refresh ('refreshStoreStatusOne', cooldown-gated);
+this is the full sweep. Each app costs ONE Play edit (Android) via 'syncAppUnified'.
+-}
 runStoreSync :: Flow ()
 runStoreSync = do
     logInfo "[STORE_SYNC] Starting store sync"
-    apps <- listEnabledAppCatalog
+    -- ALL apps (not just enabled): the store_status monitor cache covers every
+    -- app, while the release recorder + external-review rows are gated on
+    -- 'acEnabled' inside 'syncAppUnified'.
+    apps <- listAppCatalog
     builds <- fetchLatestBuildsPerApp
+    expected <- latestShippedVersionsPerApp
     let buildMap =
             Map.fromList
                 [ ((lbrAppGroup b, lbrSurface b, lbrPlatform b), b)
@@ -184,95 +154,163 @@ runStoreSync = do
                 ]
     mPlayCreds <- loadPlayCreds
     mAscCreds <- loadAscCreds
-    mapM_ (syncApp mPlayCreds mAscCreds buildMap) apps
+    mapM_ (syncAppUnified mPlayCreds mAscCreds buildMap expected) apps
     logInfo $ "[STORE_SYNC] Finished — checked " <> T.pack (show (length apps)) <> " app(s)"
 
-syncApp ::
+{- | Run an action, logging (but swallowing) any exception so one app's failure —
+e.g. a @store_status@ upsert against a not-yet-migrated table — can't abort the
+rest of the per-app sync.
+-}
+safely :: Text -> Flow () -> Flow ()
+safely label act =
+    MC.try @_ @SomeException act
+        >>= either
+            (\e -> logError $ "[STORE_MONITOR] " <> label <> " failed (continuing): " <> T.pack (show e))
+            pure
+
+-- | Extract a non-empty package / bundle id, or log-and-skip when absent.
+withPkg :: AppCatalog -> (Text -> Flow ()) -> Flow ()
+withPkg ac k = case acPackageName ac of
+    Just p | not (T.null p) -> k p
+    _ -> logWarning $ "[STORE_SYNC] No package/bundle id for " <> acName ac <> ", skipping"
+
+{- | Sync ONE app from a single store read.
+
+Android: one Play edit (`fetchPlayTrackBodies`) feeds all consumers — the
+@store_status@ monitor cache (every app), the release recorder + external-review
+detector (enabled apps only), and the rollout reconcile — via the pure @bodiesTo*@
+projections. This is the quota fix: collapses the former ~3 edits/app to 1.
+
+iOS is ASC-backed (no Play edit-creation quota), so the cache and the recorder
+keep their own reads.
+-}
+syncAppUnified ::
     Maybe PlayCreds ->
     Maybe AscCreds ->
     BuildMap ->
+    Map.Map (Text, Text, Text) Text ->
     AppCatalog ->
     Flow ()
-syncApp mPlayCreds mAscCreds buildMap ac = do
+syncAppUnified mPlayCreds mAscCreds buildMap expected ac = do
     let key = (acName ac, acSurface ac, acPlatform ac)
         existing = Map.lookup key buildMap
+        mExpected = Map.lookup key expected
     case acPlatform ac of
         "android" -> case mPlayCreds of
-            Nothing ->
-                logWarning $ "[STORE_SYNC] No Play Console creds — skipping " <> acName ac
-            Just creds -> do
-                syncAndroid creds ac existing
-                -- Also surface an out-of-band production submission pending review/publish.
-                syncAndroidExternalReview creds ac
+            Nothing -> logWarning $ "[STORE_SYNC] No Play Console creds — skipping " <> acName ac
+            Just creds -> withPkg ac $ \pkg ->
+                fetchPlayTrackBodies creds pkg >>= \case
+                    Left e -> logWarning $ "[STORE_SYNC] Play API error for " <> acName ac <> ": " <> renderPlayErr e
+                    Right bodies -> do
+                        mActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac)
+                        safely ("store_status " <> acName ac) $
+                            mapM_ (upsertStoreStatus . androidSnapToUpsert ac mExpected mActive) (bodiesToSnapshots bodies)
+                        when (acEnabled ac) $ do
+                            let (internal, production) = bodiesToTracks bodies
+                            recordAndroidTracks ac existing internal production
+                            reconcileAndroidExternalReviewFrom ac (bodiesToProdReleases bodies)
+                        -- Rollout reconcile from the SAME fetch — no extra edit.
+                        reconcileAndroidRolloutsFrom ac (bodiesToRolloutState bodies)
         "ios" -> case mAscCreds of
-            Nothing ->
-                logWarning $ "[STORE_SYNC] No ASC creds — skipping " <> acName ac
-            Just creds -> do
-                syncIos creds ac existing
-                -- Also surface an App Store review that was started outside SCC.
-                syncIosExternalReview creds ac
-        p ->
-            logWarning $ "[STORE_SYNC] Unknown platform " <> p <> " for " <> acName ac
+            Nothing -> logWarning $ "[STORE_SYNC] No ASC creds — skipping " <> acName ac
+            Just creds -> withPkg ac $ \bundleId -> do
+                mActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac)
+                safely ("store_status " <> acName ac) $
+                    fetchAscSnapshots creds bundleId >>= \case
+                        Left e -> logWarning $ "[STORE_MONITOR] ASC snapshot error for " <> acName ac <> ": " <> renderAscErr e
+                        Right snaps -> mapM_ (upsertStoreStatus . iosSnapToUpsert ac mExpected mActive) snaps
+                when (acEnabled ac) $ do
+                    syncIos creds ac existing
+                    -- Also surface an App Store review that was started outside SCC.
+                    syncIosExternalReview creds ac
+                -- Rollout reconcile (ASC reads — no Play edit quota).
+                reconcileIosRollouts creds ac
+        p -> logWarning $ "[STORE_SYNC] Unknown platform " <> p <> " for " <> acName ac
 
-syncAndroid :: PlayCreds -> AppCatalog -> Maybe LatestBuildRow -> Flow ()
-syncAndroid creds ac existing = do
-    pkgName <- case acPackageName ac of
-        Just p | not (T.null p) -> pure p
-        _ -> do
-            logWarning $ "[STORE_SYNC] No package name for " <> acName ac <> ", skipping"
-            pure ""
-    if T.null pkgName
-        then pure ()
-        else do
-            result <- fetchPlayTracks creds pkgName
-            case result of
-                Left e ->
-                    logWarning $
-                        "[STORE_SYNC] Play API error for "
-                            <> acName ac
-                            <> ": "
-                            <> renderPlayErr e
-                Right (internal, production) -> do
-                    -- Record BOTH tracks. The leading track owns the synthetic row's
-                    -- version/badge: internal when its build code is ahead (an
-                    -- internal-only build pending promotion), else production. Both
-                    -- tracks are written to metadata.tracks so the create page can show
-                    -- and diff against either (default base = production).
-                    let internalAhead = tiCode internal > tiCode production
-                        (chosen, track) = if internalAhead then (internal, "internal") else (production, "production")
-                        chosenVer = tiName chosen
-                        chosenCode = Just (tiCode chosen)
-                        tagFor = chosenVer <> "+" <> T.pack (show (tiCode chosen))
-                        mkSnap ti =
-                            TrackSnapshot
-                                { tsVersion = tiName ti
-                                , tsCode = Just (tiCode ti)
-                                , tsTag = derivedStoreTag ac (tiName ti) (Just (tiCode ti))
-                                }
-                        -- internal is a distinct track only when ahead; otherwise
-                        -- internal == production and one "production" entry suffices.
-                        tracks =
-                            Map.fromList $
-                                ("production", mkSnap production)
-                                    : [("internal", mkSnap internal) | internalAhead]
-                        metaJson = buildStoreMeta track tracks
-                    if isNewerAndroid chosen existing
-                        then case existing of
-                            -- Same version, build code bumped → update the snapshot's code +
-                            -- tag in place (the version-keyed dedup index blocks a re-insert).
-                            Just lb
-                                | lbrVersion lb == chosenVer -> do
-                                    logInfo $ "[STORE_SYNC] Play build bump for " <> acName ac <> " (" <> track <> "): " <> tagFor
-                                    updateStoreSyncBuildCode ac chosenVer chosenCode (derivedStoreTag ac chosenVer chosenCode)
-                                    setStoreSyncMetadata ac chosenVer metaJson
-                            -- New version → insert a fresh row.
-                            _ -> do
-                                logInfo $ "[STORE_SYNC] New Play version for " <> acName ac <> " (" <> track <> "): " <> tagFor
-                                insertSyntheticRelease ac chosenVer chosenCode track tracks
-                        else
-                            -- Leading row unchanged — still refresh metadata.tracks so a
-                            -- moved production version doesn't lag the stored snapshot.
-                            setStoreSyncMetadata ac chosenVer metaJson
+-- | True when this @release_tracker@ row belongs to the given app catalog entry.
+rowIsApp :: AppCatalog -> ReleaseTrackerRow -> Bool
+rowIsApp ac row =
+    rtAppGroup row == acName ac
+        && rtService row == acSurface ac
+        && rtEnv row == acPlatform ac
+
+{- | Reconcile THIS Android app's staged rollouts from the rollout state already
+read in its single fetch — no extra Play edit. Mirrors %/halt and completes at
+100% for an SCC-owned active rollout, and adopts a rollout started in the Play
+Console on a still-in-review row. Gated on the staged-rollout flag; per-row
+isolated so one bad row can't abort the rest.
+-}
+reconcileAndroidRolloutsFrom :: AppCatalog -> PlayRolloutState -> Flow ()
+reconcileAndroidRolloutsFrom ac st = do
+    staged <- isStagedRolloutEnabled
+    when staged $ do
+        active <- filter (rowIsApp ac) <$> findActiveRolloutReleases
+        forM_ active $ \row ->
+            safely ("rollout " <> rtId row) $
+                execReconcile (rtId row) "play" row (androidReconcileAction st)
+        awaiting <- filter (rowIsApp ac) <$> findMobileAwaitingRollout "android"
+        forM_ awaiting $ \row ->
+            safely ("console-rollout " <> rtId row) $
+                case parseMobileTargetState (rtTargetState row) >>= mbcVersionCode . mbContext of
+                    Just code -> mapM_ (adoptExternalRollout (rtId row) "play") (detectConsoleRollout androidPendingFractionThreshold code st)
+                    Nothing -> pure ()
+
+{- | Reconcile THIS iOS app's staged rollouts. iOS uses ASC reads (phased / review
+state) — no Play edit quota — so it reuses the existing per-row reconcilers,
+app-scoped and triggered on demand. Gated on the staged-rollout flag.
+-}
+reconcileIosRollouts :: AscCreds -> AppCatalog -> Flow ()
+reconcileIosRollouts creds ac = do
+    staged <- isStagedRolloutEnabled
+    when staged $ do
+        active <- filter (rowIsApp ac) <$> findActiveRolloutReleases
+        mapM_ (safeReconcile Nothing (Just creds)) active
+        awaiting <- filter (rowIsApp ac) <$> findMobileAwaitingRollout "ios"
+        mapM_ (safeDetectIosRelease creds) awaiting
+
+{- | Record both Play tracks into the synthetic @release_tracker@ row from the
+already-fetched tracks (no Play call of its own). The leading track owns the
+row's version/badge: internal when its build code is ahead (an internal-only
+build pending promotion), else production. Both tracks are written to
+metadata.tracks so the create page can show and diff against either (default base
+= production).
+-}
+recordAndroidTracks :: AppCatalog -> Maybe LatestBuildRow -> TrackInfo -> TrackInfo -> Flow ()
+recordAndroidTracks ac existing internal production = do
+    let internalAhead = tiCode internal > tiCode production
+        (chosen, track) = if internalAhead then (internal, "internal") else (production, "production")
+        chosenVer = tiName chosen
+        chosenCode = Just (tiCode chosen)
+        tagFor = chosenVer <> "+" <> T.pack (show (tiCode chosen))
+        mkSnap ti =
+            TrackSnapshot
+                { tsVersion = tiName ti
+                , tsCode = Just (tiCode ti)
+                , tsTag = derivedStoreTag ac (tiName ti) (Just (tiCode ti))
+                }
+        -- internal is a distinct track only when ahead; otherwise
+        -- internal == production and one "production" entry suffices.
+        tracks =
+            Map.fromList $
+                ("production", mkSnap production)
+                    : [("internal", mkSnap internal) | internalAhead]
+        metaJson = buildStoreMeta track tracks
+    if isNewerAndroid chosen existing
+        then case existing of
+            -- Same version, build code bumped → update the snapshot's code +
+            -- tag in place (the version-keyed dedup index blocks a re-insert).
+            Just lb
+                | lbrVersion lb == chosenVer -> do
+                    logInfo $ "[STORE_SYNC] Play build bump for " <> acName ac <> " (" <> track <> "): " <> tagFor
+                    updateStoreSyncBuildCode ac chosenVer chosenCode (derivedStoreTag ac chosenVer chosenCode)
+                    setStoreSyncMetadata ac chosenVer metaJson
+            -- New version → insert a fresh row.
+            _ -> do
+                logInfo $ "[STORE_SYNC] New Play version for " <> acName ac <> " (" <> track <> "): " <> tagFor
+                insertSyntheticRelease ac chosenVer chosenCode track tracks
+        else -- Leading row unchanged — still refresh metadata.tracks so a
+        -- moved production version doesn't lag the stored snapshot.
+            setStoreSyncMetadata ac chosenVer metaJson
 
 syncIos :: AscCreds -> AppCatalog -> Maybe LatestBuildRow -> Flow ()
 syncIos creds ac existing = do
@@ -284,57 +322,66 @@ syncIos creds ac existing = do
     if T.null bundleId
         then pure ()
         else do
-            result <- fetchAscBuildInfo creds bundleId
-            case result of
+            fetchAscBuildInfo creds bundleId >>= \case
                 Left e ->
-                    logWarning $
-                        "[STORE_SYNC] ASC API error for "
-                            <> acName ac
-                            <> ": "
-                            <> renderAscErr e
-                Right Nothing ->
-                    logInfo $ "[STORE_SYNC] No ASC version found for " <> acName ac
-                Right (Just bi) -> do
-                    -- The iOS tag is derived from the build number (CFBundleVersion), the same
-                    -- way Android uses its version code, so the changelog has a baseline.
-                    -- Unparseable build number → no code → no tag (graceful fallback).
-                    let storeVer = abiVersion bi
-                        mCode = abiBuildNumber bi >>= readMaybe . T.unpack :: Maybe Int32
-                    -- Live App Store (production) version, best-effort — labels the
-                    -- production track. We read only the version (no build code), so the
-                    -- prod base carries a version but no tag: the create page shows it and
-                    -- a prod-base diff falls back. TestFlight is the "internal" track.
+                    logWarning $ "[STORE_SYNC] ASC API error for " <> acName ac <> ": " <> renderAscErr e
+                Right mBi -> do
+                    -- Read the live App Store (production) version INDEPENDENTLY of the
+                    -- TestFlight build. An app can be live on the App Store with no recent
+                    -- TestFlight build (the prod read must not be gated behind it, or the
+                    -- production version is never recorded for those apps).
                     mProdVer <- either (const Nothing) id <$> liftIO (getLiveAppStoreVersion creds bundleId)
-                    let tfSnap =
-                            TrackSnapshot
-                                { tsVersion = storeVer
-                                , tsCode = mCode
-                                , tsTag = derivedStoreTag ac storeVer mCode
-                                }
-                        tracks =
-                            Map.fromList $
-                                ("internal", tfSnap)
-                                    : maybe [] (\pv -> [("production", TrackSnapshot pv Nothing Nothing)]) mProdVer
-                        metaJson = buildStoreMeta "testflight" tracks
-                    if isNewerIos storeVer existing
-                        then do
-                            logInfo $
-                                "[STORE_SYNC] New ASC version for "
-                                    <> acName ac
-                                    <> ": "
-                                    <> storeVer
-                                    <> maybe "" (\c -> " (build " <> T.pack (show c) <> ")") mCode
-                            insertSyntheticRelease ac storeVer mCode "testflight" tracks
-                        else case (existing, mCode) of
-                            -- Same version, new TestFlight build number (e.g. 3.3.73(1) → (2)).
-                            -- isNewerIos only compares the version name, so this is the only
-                            -- path that catches a same-version rebuild → update code + tag in place.
-                            (Just lb, Just newC)
-                                | lbrVersion lb == storeVer && Just newC /= lbrVersionCode lb -> do
-                                    logInfo $ "[STORE_SYNC] ASC build bump for " <> acName ac <> ": " <> storeVer <> "+" <> T.pack (show newC)
-                                    updateStoreSyncBuildCode ac storeVer mCode (derivedStoreTag ac storeVer mCode)
-                                    setStoreSyncMetadata ac storeVer metaJson
-                            _ -> setStoreSyncMetadata ac storeVer metaJson
+                    let tfCode bi = abiBuildNumber bi >>= readMaybe . T.unpack :: Maybe Int32
+                        tfDesc = maybe "none" (\bi -> abiVersion bi <> maybe "" (\c -> "+" <> T.pack (show c)) (tfCode bi)) mBi
+                    logInfo $
+                        "[STORE_SYNC] " <> acName ac <> " iOS → testflight=" <> tfDesc <> ", production=" <> fromMaybe "none" mProdVer
+                    -- When no live production resolves, dump the version→state pairs so the
+                    -- reason is visible (genuinely not live, or a different Apple account).
+                    case mProdVer of
+                        Just _ -> pure ()
+                        Nothing ->
+                            liftIO (getIosVersionStateDump creds bundleId) >>= \case
+                                Right states -> logInfo $ "[STORE_SYNC] " <> acName ac <> " iOS no live production; appStoreVersions: " <> T.intercalate "; " states
+                                Left e -> logWarning $ "[STORE_SYNC] " <> acName ac <> " iOS version-state dump failed: " <> renderAscErr e
+                    -- Production snapshot: version only (the live App Store read carries no
+                    -- build code, so no tag).
+                    let prodTrack = (\pv -> ("production", TrackSnapshot pv Nothing Nothing)) <$> mProdVer
+                    case mBi of
+                        -- TestFlight build present → it leads (the newest build); production secondary.
+                        Just bi ->
+                            let storeVer = abiVersion bi
+                                mCode = tfCode bi
+                                tfSnap = TrackSnapshot storeVer mCode (derivedStoreTag ac storeVer mCode)
+                                tracks = Map.fromList $ ("internal", tfSnap) : maybe [] pure prodTrack
+                             in recordIosSnapshot ac existing storeVer mCode "testflight" tracks
+                        -- No TestFlight build → the live production version leads (if the app is live).
+                        Nothing -> case mProdVer of
+                            Just pv -> recordIosSnapshot ac existing pv Nothing "production" (Map.fromList (maybe [] pure prodTrack))
+                            Nothing -> logInfo $ "[STORE_SYNC] No ASC build or live version for " <> acName ac
+
+{- | Insert-or-update an iOS store-sync snapshot for whichever track leads —
+TestFlight when a build exists, else production. Factored out so the live
+production version is recorded even for an app with no recent TestFlight build.
+-}
+recordIosSnapshot :: AppCatalog -> Maybe LatestBuildRow -> Text -> Maybe Int32 -> Text -> Map.Map Text TrackSnapshot -> Flow ()
+recordIosSnapshot ac existing leadVer leadCode leadTrack tracks =
+    if isNewerIos leadVer existing
+        then do
+            logInfo $
+                "[STORE_SYNC] New ASC version for "
+                    <> acName ac
+                    <> ": "
+                    <> leadVer
+                    <> maybe "" (\c -> " (build " <> T.pack (show c) <> ")") leadCode
+            insertSyntheticRelease ac leadVer leadCode leadTrack tracks
+        else case (existing, leadCode) of
+            -- Same version, new TestFlight build number → update code + tag in place.
+            (Just lb, Just newC)
+                | lbrVersion lb == leadVer && Just newC /= lbrVersionCode lb -> do
+                    logInfo $ "[STORE_SYNC] ASC build bump for " <> acName ac <> ": " <> leadVer <> "+" <> T.pack (show newC)
+                    updateStoreSyncBuildCode ac leadVer leadCode (derivedStoreTag ac leadVer leadCode)
+                    setStoreSyncMetadata ac leadVer (buildStoreMeta leadTrack tracks)
+            _ -> setStoreSyncMetadata ac leadVer (buildStoreMeta leadTrack tracks)
 
 isNewerAndroid :: TrackInfo -> Maybe LatestBuildRow -> Bool
 isNewerAndroid store Nothing = tiName store /= "0.0.0"
@@ -352,7 +399,8 @@ isNewerIos ver (Just lb) = ver /= lbrVersion lb
 Each pass reads the in-flight (non-live) version + its review state, then
 reconciles a single synthetic @EXTERNAL_REVIEW@ row against it — create / update /
 complete — so the UI reflects reality. Skipped when an actual SCC release already
-tracks the version (SCC owns that review). iOS only; Play review state is opaque. -}
+tracks the version (SCC owns that review). iOS only; Play review state is opaque.
+-}
 syncIosExternalReview :: AscCreds -> AppCatalog -> Flow ()
 syncIosExternalReview creds ac = case acPackageName ac of
     Just bundleId | not (T.null bundleId) -> do
@@ -372,27 +420,24 @@ in-review and approved-but-held alike). Mapped to the same @EXTERNAL_REVIEW@ row
 the iOS detector uses, but flagged @inferred@ since the state is derived from the
 track, not read authoritatively. Skipped when an SCC release already owns the
 version. The one blind spot — a rejected version reverting to @completed@ — clears
-the row as if it published (documented; rejections surface via the Console). -}
-syncAndroidExternalReview :: PlayCreds -> AppCatalog -> Flow ()
-syncAndroidExternalReview creds ac = case acPackageName ac of
-    Just pkg | not (T.null pkg) -> do
-        existing <- findExternalReviewRow (acName ac) (acSurface ac) (acPlatform ac)
-        getProductionReleases creds pkg >>= \case
-            Left e -> logWarning $ "[STORE_SYNC] Play production-track read error for " <> acName ac <> ": " <> renderPlayErr e
-            Right releases ->
-                let mPending = pendingPublishRelease androidPendingFractionThreshold releases
-                    -- Android can't distinguish in-review from approved-held, so a
-                    -- pending version always surfaces as MBInReview ("Pending review").
-                    mMapped = (\(version, _) -> (version, "in_review", MBInReview)) <$> mPending
-                 in reconcileExternalReviewMapped ac (snd <$> mPending) True existing mMapped
-    _ -> pure ()
+the row as if it published (documented; rejections surface via the Console).
+-}
+reconcileAndroidExternalReviewFrom :: AppCatalog -> [ProdTrackRelease] -> Flow ()
+reconcileAndroidExternalReviewFrom ac releases = do
+    existing <- findExternalReviewRow (acName ac) (acSurface ac) (acPlatform ac)
+    let mPending = pendingPublishRelease androidPendingFractionThreshold releases
+        -- Android can't distinguish in-review from approved-held, so a
+        -- pending version always surfaces as MBInReview ("Pending review").
+        mMapped = (\(version, _) -> (version, "in_review", MBInReview)) <$> mPending
+    reconcileExternalReviewMapped ac (snd <$> mPending) True existing mMapped
 
 {- | Below this production-rollout @userFraction@ a release is treated as "not yet
 ramped" — a freshly-submitted / approved-held version parked at the near-zero
 review fraction, not an active staged rollout. This deployment always submits at
 ~1e-6, so a 1% cutoff leaves wide margin while still excluding any real rollout
 step. (Out-of-band rollouts ramped above this are intentionally not surfaced as
-pending — they're past review and exposing users.) -}
+pending — they're past review and exposing users.)
+-}
 androidPendingFractionThreshold :: Double
 androidPendingFractionThreshold = 0.01
 
@@ -400,7 +445,8 @@ androidPendingFractionThreshold = 0.01
 track: the highest-code @inProgress@ release sitting at a sub-threshold
 @userFraction@ whose code is newer than the live (@completed@) version. 'Nothing'
 when there's no such release — only a live version, or a version already rolling
-out at a real fraction. Pure — unit-tested ([41]). -}
+out at a real fraction. Pure — unit-tested ([41]).
+-}
 pendingPublishRelease :: Double -> [ProdTrackRelease] -> Maybe (Text, Int32)
 pendingPublishRelease threshold releases = case best of
     Just r | ptrCode r > liveCode -> Just (ptrName r, ptrCode r)
@@ -419,23 +465,25 @@ pendingPublishRelease threshold releases = case best of
     higher r Nothing = Just r
     higher r (Just a) = Just (if ptrCode r >= ptrCode a then r else a)
 
--- | Reconcile the external-review row against the live iOS in-flight review state.
--- iOS reads an authoritative review state from ASC, so @inferred = False@ and the
--- version code is left unset (the release path self-heals the ASC ids).
+{- | Reconcile the external-review row against the live iOS in-flight review state.
+iOS reads an authoritative review state from ASC, so @inferred = False@ and the
+version code is left unset (the release path self-heals the ASC ids).
+-}
 reconcileExternalReview :: AppCatalog -> Maybe ReleaseTrackerRow -> Maybe (Text, AscReviewState) -> Flow ()
 reconcileExternalReview ac existing mInFlight =
     reconcileExternalReviewMapped ac Nothing False existing $
         mInFlight >>= \(v, rs) -> (\(rstatus, wf) -> (v, rstatus, wf)) <$> reviewStateToStatus rs
 
--- | Reconcile the external-review row against an already-mapped @(version,
--- review_status, wf_status)@ ('Nothing' = nothing to surface). Shared by the iOS
--- (authoritative) and Android (inferred) detectors. The decision is pure
--- ('externalReviewAction'); this runs the side effects.
---
---   * @mCode@     — version code stamped on a fresh row (Android needs it to drive
---                   a later rollout; iOS passes 'Nothing').
---   * @inferred@  — whether the review state is inferred from the track rather than
---                   read authoritatively (Android), which softens the row's label.
+{- | Reconcile the external-review row against an already-mapped @(version,
+review_status, wf_status)@ ('Nothing' = nothing to surface). Shared by the iOS
+(authoritative) and Android (inferred) detectors. The decision is pure
+('externalReviewAction'); this runs the side effects.
+
+  * @mCode@     — version code stamped on a fresh row (Android needs it to drive
+                  a later rollout; iOS passes 'Nothing').
+  * @inferred@  — whether the review state is inferred from the track rather than
+                  read authoritatively (Android), which softens the row's label.
+-}
 reconcileExternalReviewMapped ::
     AppCatalog ->
     Maybe Int32 ->
@@ -484,7 +532,8 @@ The @inferred@ guard protects an Android operator decision. Store sync can only
 ever infer @"in_review"@ for Android, so once the operator has marked the row
 @approved@ / @rejected@ it must NOT be downgraded back to @"in_review"@ on the
 next pass — that was silently erasing the approval. iOS is authoritative, so its
-state always wins (including a genuine rejected → resubmitted → in-review). -}
+state always wins (including a genuine rejected → resubmitted → in-review).
+-}
 externalReviewAction ::
     Bool ->
     Maybe (Text, Text) ->
@@ -509,8 +558,9 @@ externalReviewAction inferred mExisting mMapped sccOwns = case mMapped of
     retireExisting = maybe ExtNoop (const ExtComplete) mExisting
     isOperatorDecided s = s == "approved" || s == "rejected"
 
--- | Map a review state to @(review_status, mb_wf_status)@; 'Nothing' for states we
--- don't surface (prepare-for-submission / live / unknown).
+{- | Map a review state to @(review_status, mb_wf_status)@; 'Nothing' for states we
+don't surface (prepare-for-submission / live / unknown).
+-}
 reviewStateToStatus :: AscReviewState -> Maybe (Text, MobileBuildWFStatus)
 reviewStateToStatus = \case
     AscWaitingForReview -> Just ("in_review", MBInReview)
@@ -519,9 +569,10 @@ reviewStateToStatus = \case
     AscRejected _ -> Just ("rejected", MBReviewRejected)
     _ -> Nothing
 
--- | The human-readable description / changelog for an external-review row.
--- @inferred@ (Android) softens it to "pending" because the review state is
--- derived from the track, not read authoritatively; iOS phrases by exact state.
+{- | The human-readable description / changelog for an external-review row.
+@inferred@ (Android) softens it to "pending" because the review state is
+derived from the track, not read authoritatively; iOS phrases by exact state.
+-}
 externalRowDescription :: Bool -> Text -> Text
 externalRowDescription True _ =
     "Pending review/publish — submitted outside SCC (Android review state isn't exposed by Google)"
@@ -530,12 +581,13 @@ externalRowDescription False reviewStatus = case reviewStatus of
     "rejected" -> "Rejected — submitted outside SCC"
     _ -> "In review — submitted outside SCC"
 
--- | Insert a fresh @EXTERNAL_REVIEW@ row reflecting an out-of-band store review.
--- mode 'EXTERNAL_REVIEW' + no dispatch_id keeps it clear of the build runner, the
--- rollout reconciler, and the store-sync version dedup index. @mCode@ stamps the
--- version code (Android, for a later rollout); @inferred@ marks the review state
--- as track-derived rather than authoritative (Android) — surfaced in metadata so
--- the UI labels it "Pending review" instead of a confident "In review".
+{- | Insert a fresh @EXTERNAL_REVIEW@ row reflecting an out-of-band store review.
+mode 'EXTERNAL_REVIEW' + no dispatch_id keeps it clear of the build runner, the
+rollout reconciler, and the store-sync version dedup index. @mCode@ stamps the
+version code (Android, for a later rollout); @inferred@ marks the review state
+as track-derived rather than authoritative (Android) — surfaced in metadata so
+the UI labels it "Pending review" instead of a confident "In review".
+-}
 insertExternalReviewRow :: AppCatalog -> Maybe Int32 -> Bool -> Text -> Text -> MobileBuildWFStatus -> Flow ()
 insertExternalReviewRow ac mCode inferred version reviewStatus mbStatus = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
@@ -575,10 +627,10 @@ insertExternalReviewRow ac mCode inferred version reviewStatus mbStatus = do
                 , rtReviewStatus = Just reviewStatus
                 , rtReviewSubmittedAt = Just now
                 , rtDescription = Just desc
-                -- No store_track: it's a pending submission, not live on a track,
-                -- so don't let the UI badge it as a live production build.
-                -- review_inferred (Android) flags the state as best-effort.
-                , rtMetadata =
+                , -- No store_track: it's a pending submission, not live on a track,
+                  -- so don't let the UI badge it as a live production build.
+                  -- review_inferred (Android) flags the state as best-effort.
+                  rtMetadata =
                     Just (encodeJsonText (object (["external" .= True] <> ["review_inferred" .= True | inferred])))
                 }
     -- ON CONFLICT DO NOTHING against uq_release_tracker_external_review: if a
@@ -714,18 +766,20 @@ insertSyntheticRelease ac version mCode track tracks = do
                     <> version
                     <> maybe "" (\t -> " (tag: " <> t <> ")") derivedTag
 
--- | The metadata JSON a store-sync row carries: the leading @store_track@ (drives
--- the list/badge) plus the per-track @tracks@ snapshots (drive the create-page
--- production/internal badges + the changelog base selection).
+{- | The metadata JSON a store-sync row carries: the leading @store_track@ (drives
+the list/badge) plus the per-track @tracks@ snapshots (drive the create-page
+production/internal badges + the changelog base selection).
+-}
 buildStoreMeta :: Text -> Map.Map Text TrackSnapshot -> Text
 buildStoreMeta track tracks =
     encodeJsonText (object ["store_track" .= track, "tracks" .= tracks])
 
--- | The git tag a store-sync row records, matching the CI tag scheme
--- (see Workflow.execConfirmTag):
---   consumer: {normalize(app)}/prod/{platform}/v{version}+{code}
---   provider: {acName}-v{version}-{code}
--- 'Nothing' when there's no build code (then the row has no changelog baseline).
+{- | The git tag a store-sync row records, matching the CI tag scheme
+(see Workflow.execConfirmTag):
+  consumer: {normalize(app)}/prod/{platform}/v{version}+{code}
+  provider: {acName}-v{version}-{code}
+'Nothing' when there's no build code (then the row has no changelog baseline).
+-}
 derivedStoreTag :: AppCatalog -> Text -> Maybe Int32 -> Maybe Text
 derivedStoreTag ac version mCode = case mCode of
     Just code
@@ -783,7 +837,8 @@ Android release SCC promoted but is still showing as in review / approved-held.
 The Publishing API can't report review state, but a live production fraction
 at/above the rollout floor — versus the ~0 review fraction — means the build was
 approved AND ramped in the Console; SCC adopts it into its rollout lifecycle so
-the view stops lagging reality. -}
+the view stops lagging reality.
+-}
 detectConsoleRollouts :: Maybe PlayCreds -> Flow ()
 detectConsoleRollouts Nothing = pure ()
 detectConsoleRollouts (Just creds) = do
@@ -818,7 +873,8 @@ exposes an authoritative state: @READY_FOR_SALE@ ('AscLive') means the build is
 live. SCC reads the live review + phased state and adopts it ('detectIosRelease')
 — a phased release becomes @rolling_out@ at the ramp % (the Phase-7 reconciler
 then tracks the 7-day schedule), a non-phased one completes. Still-held
-(@PENDING_DEVELOPER_RELEASE@) or in-review versions are left untouched. -}
+(@PENDING_DEVELOPER_RELEASE@) or in-review versions are left untouched.
+-}
 detectIosReleases :: Maybe AscCreds -> Flow ()
 detectIosReleases Nothing = pure ()
 detectIosReleases (Just creds) = do
@@ -863,10 +919,11 @@ detectIosReleaseForRow creds row = do
                     Right _ -> pure () -- held / in review / rejected → leave as-is
         _ -> pure ()
 
--- | Best-effort backfill of @asc_phased_id@ from the store so the Phase-7
--- reconciler can track an adopted phased ramp (it reads the cached id to follow
--- Apple's 7-day schedule). A miss / error leaves it unset — the ramp still rolls
--- out at Apple; only SCC's % tracking would lag.
+{- | Best-effort backfill of @asc_phased_id@ from the store so the Phase-7
+reconciler can track an adopted phased ramp (it reads the cached id to follow
+Apple's 7-day schedule). A miss / error leaves it unset — the ramp still rolls
+out at Apple; only SCC's % tracking would lag.
+-}
 backfillPhasedId :: AscCreds -> Text -> Text -> Text -> Flow ()
 backfillPhasedId creds bundleId version rid =
     getPhasedReleaseId creds bundleId version >>= \case
@@ -875,9 +932,10 @@ backfillPhasedId creds bundleId version rid =
             logInfo $ "[ROLLOUT_SYNC] " <> rid <> " backfilled asc_phased_id from store (adopted phased ramp)"
         _ -> pure ()
 
--- | Apply an adopted out-of-band release/rollout: bring the row into SCC's rollout
--- lifecycle (rollout columns + MBRollingOut/MBCompleted) so the active reconciler
--- keeps it in sync from here on. @store@ is "play" | "asc" for the audit event.
+{- | Apply an adopted out-of-band release/rollout: bring the row into SCC's rollout
+lifecycle (rollout columns + MBRollingOut/MBCompleted) so the active reconciler
+keeps it in sync from here on. @store@ is "play" | "asc" for the audit event.
+-}
 adoptExternalRollout :: Text -> Text -> ReconcileAction -> Flow ()
 adoptExternalRollout rid store = \case
     SetRollout status mPct -> do
@@ -892,8 +950,9 @@ adoptExternalRollout rid store = \case
         logEvent rid "EXTERNAL_ROLLOUT_DETECTED" $ object ["store" .= store, "status" .= ("completed" :: Text), "percent" .= (100 :: Double)]
     LeaveAsIs _ -> pure ()
 
--- | Reconcile one row, isolating failures so a single bad row (e.g. a missing
--- app-catalog join, or a one-off store error) never aborts the whole batch.
+{- | Reconcile one row, isolating failures so a single bad row (e.g. a missing
+app-catalog join, or a one-off store error) never aborts the whole batch.
+-}
 safeReconcile :: Maybe PlayCreds -> Maybe AscCreds -> ReleaseTrackerRow -> Flow ()
 safeReconcile mPlay mAsc row = do
     result <- MC.try @_ @SomeException (reconcileRollout mPlay mAsc row)
@@ -917,10 +976,11 @@ reconcileRollout mPlay mAsc row = do
                 p -> logWarning $ "[ROLLOUT_SYNC] Unknown platform " <> p <> " for " <> rid
         _ -> logWarning $ "[ROLLOUT_SYNC] No store id for " <> rid <> ", skipping"
 
--- | Android: read the production track; mirror its status + userFraction, and
--- complete the release when the rollout reaches 100% (status=completed).
--- | The decision a reconcile pass makes from a live store rollout state. Pure
--- so the mapping is unit-tested ([35]) without hitting a store.
+{- | Android: read the production track; mirror its status + userFraction, and
+complete the release when the rollout reaches 100% (status=completed).
+| The decision a reconcile pass makes from a live store rollout state. Pure
+so the mapping is unit-tested ([35]) without hitting a store.
+-}
 data ReconcileAction
     = -- | mirror the live status ("rolling_out" | "halted") + percent
       SetRollout Text (Maybe Double)
@@ -930,8 +990,9 @@ data ReconcileAction
       LeaveAsIs Text
     deriving (Eq, Show)
 
--- | Android production-track status → action. Play reports a 0–1 @userFraction@;
--- we store it as a 0–100 percent.
+{- | Android production-track status → action. Play reports a 0–1 @userFraction@;
+we store it as a 0–100 percent.
+-}
 androidReconcileAction :: PlayRolloutState -> ReconcileAction
 androidReconcileAction st = case prsStatus st of
     "completed" -> CompleteRollout
@@ -941,8 +1002,9 @@ androidReconcileAction st = case prsStatus st of
   where
     pct = fmap (* 100) (prsUserFraction st)
 
--- | iOS phased-release state + ramp day → action (Apple drives the %; we map the
--- day through 'applePhasedPercent').
+{- | iOS phased-release state + ramp day → action (Apple drives the %; we map the
+day through 'applePhasedPercent').
+-}
 iosPhasedReconcileAction :: AscPhasedState -> ReconcileAction
 iosPhasedReconcileAction (AscPhasedState st mDay) = case st of
     "COMPLETE" -> CompleteRollout
@@ -958,7 +1020,8 @@ from the perspective of a row SCC still has as in review / approved-held. Reacts
 only when the live release carries OUR version code (so a different version going
 live, e.g. after a rejection-revert, is ignored). 'Nothing' = still at/near the
 review fraction (in review or approved-held) → leave the row as-is. Reuses
-'androidReconcileAction' for the status → action mapping. Unit-tested ([43]). -}
+'androidReconcileAction' for the status → action mapping. Unit-tested ([43]).
+-}
 detectConsoleRollout :: Double -> Int32 -> PlayRolloutState -> Maybe ReconcileAction
 detectConsoleRollout threshold ourCode st
     | T.pack (show ourCode) `notElem` prsVersionCodes st = Nothing
@@ -972,7 +1035,8 @@ detectConsoleRollout threshold ourCode st
 (@READY_FOR_SALE@) is adopted — a phased release maps through
 'iosPhasedReconcileAction' (rolling_out / halted / complete), a non-phased one
 (INACTIVE → 'LeaveAsIs') is fully live so it completes. Any non-live state →
-'Nothing' (leave the row as approved / in review). Unit-tested ([44]). -}
+'Nothing' (leave the row as approved / in review). Unit-tested ([44]).
+-}
 detectIosRelease :: AscReviewState -> AscPhasedState -> Maybe ReconcileAction
 detectIosRelease AscLive ps = Just $ case iosPhasedReconcileAction ps of
     LeaveAsIs _ -> CompleteRollout
@@ -986,9 +1050,10 @@ reconcileAndroid creds rid storeId row = do
         Left e -> logWarning $ "[ROLLOUT_SYNC] Play read error for " <> rid <> ": " <> renderPlayErr e
         Right st -> execReconcile rid "play" row (androidReconcileAction st)
 
--- | iOS phased release: mirror Apple's ramp day → %, completing when Apple
--- finishes the 7-day schedule. Non-phased releases complete at /release time
--- (Phase 6), so a rolling_out row with no phased id has nothing to ramp.
+{- | iOS phased release: mirror Apple's ramp day → %, completing when Apple
+finishes the 7-day schedule. Non-phased releases complete at /release time
+(Phase 6), so a rolling_out row with no phased id has nothing to ramp.
+-}
 reconcileIos :: AscCreds -> Text -> Text -> ReleaseTrackerRow -> Flow ()
 reconcileIos creds rid bundleId row =
     case rtAscPhasedId row of
@@ -1007,8 +1072,9 @@ execReconcile rid storeTag row = \case
     SetRollout status mPct -> updateRollout rid status mPct row
     LeaveAsIs raw -> logInfo $ "[ROLLOUT_SYNC] " <> rid <> " store status '" <> raw <> "', leaving as-is"
 
--- | Persist a rollout %/status update, logging + auditing only when it actually
--- changed (the loop polls every store_sync_interval, so most passes are no-ops).
+{- | Persist a rollout %/status update, logging + auditing only when it actually
+changed (a refresh re-reads the live state, so most passes are no-ops).
+-}
 updateRollout :: Text -> Text -> Maybe Double -> ReleaseTrackerRow -> Flow ()
 updateRollout rid newStatus mPct row = do
     setRolloutState rid newStatus mPct
@@ -1018,8 +1084,9 @@ updateRollout rid newStatus mPct row = do
             logEvent rid "ROLLOUT_RECONCILED" $ object ["status" .= newStatus, "percent" .= mPct]
         else pure ()
 
--- | Rollout reached 100%: mark it completed and hand off to the runner's
--- Finalize stage, which flips the release to COMPLETED on the next tick.
+{- | Rollout reached 100%: mark it completed and hand off to the runner's
+Finalize stage, which flips the release to COMPLETED on the next tick.
+-}
 completeRollout :: Text -> Text -> Flow ()
 completeRollout rid store = do
     setRolloutState rid "completed" (Just 100)
@@ -1033,85 +1100,96 @@ pctChanged (Just a) (Just b) = abs (a - b) > 0.0001
 pctChanged Nothing Nothing = False
 pctChanged _ _ = True
 
--- ─── App Release Monitoring: store_status cache poll ───────────────────
+-- ─── App Release Monitoring: on-demand store refresh ───────────────────
 
-{- | Refresh the store-monitor cache for EVERY app in the catalog — enabled or
-not, so the dashboard shows every app's live releases (the user's explicit ask).
-Reads each app's live per-track state (version / code / status / rollout % /
-notes) and upserts it into @store_status@, the table the monitor reads in one
-shot. Distinct from 'runStoreSync' above, which writes synthetic @release_tracker@
-rows only for enabled apps. -}
-syncStoreStatus :: Flow ()
-syncStoreStatus = do
-    apps <- listAppCatalog
-    expected <- latestShippedVersionsPerApp
-    mPlayCreds <- loadPlayCreds
-    mAscCreds <- loadAscCreds
-    mapM_ (refreshStoreStatusForApp mPlayCreds mAscCreds expected) apps
-    logInfo $ "[STORE_MONITOR] Synced store_status for " <> T.pack (show (length apps)) <> " app(s)"
-
-{- | Live re-poll a single app (loads creds + the drift baseline, then refreshes
-its @store_status@ rows). Backs the on-demand ↻ refresh endpoint. A debug
-deployment has no production store data, so it's a no-op there — never pull
-production store data into a debug deployment (matches the background poller). -}
+{- | Live re-poll a single app via ONE store read, then write everything that read
+yields — @store_status@ monitor cache, the @release_tracker@ create-page snapshot,
+external-review rows, AND the rollout reconcile — through 'syncAppUnified'. This is
+the on-demand entry point: the ↻ refresh button and the pages' cold-start auto-refresh
+drive it. A debug deployment has no production store data, so it's a no-op there —
+never pull production store data into a debug deployment.
+-}
 refreshStoreStatusOne :: AppCatalog -> Flow ()
 refreshStoreStatusOne ac = do
     buildType <- getMobileBuildType
     if isDebugBuildType buildType
         then logInfo "[STORE_MONITOR] Debug build env, skipping live refresh (release-only)"
         else do
-            expected <- latestShippedVersionsPerApp
-            mPlayCreds <- loadPlayCreds
-            mAscCreds <- loadAscCreds
-            refreshStoreStatusForApp mPlayCreds mAscCreds expected ac
+            -- Cooldown: a Play track read costs a daily-quota'd edit. Within the
+            -- window we serve the cache instead of re-polling — this caps the per-app
+            -- edit rate against rapid / multi-user refresh-button mashing (each click
+            -- would otherwise mint a fresh edit per app). Configurable via
+            -- @store_refresh_cooldown_seconds@; same value the UI reads as its
+            -- stale/auto-refresh threshold.
+            cooldown <- fromIntegral <$> getStoreRefreshCooldownSeconds
+            mAge <- secondsSinceLastSync (acId ac)
+            case mAge of
+                Just age
+                    | age < cooldown ->
+                        logInfo $
+                            "[STORE_MONITOR] "
+                                <> acName ac
+                                <> " synced "
+                                <> T.pack (show (round age :: Int))
+                                <> "s ago (< "
+                                <> T.pack (show (round cooldown :: Int))
+                                <> "s cooldown) — serving cache, skipping live re-poll"
+                _ -> withRefreshSingleFlight (acId ac) $ do
+                    builds <- fetchLatestBuildsPerApp
+                    expected <- latestShippedVersionsPerApp
+                    let buildMap =
+                            Map.fromList
+                                [ ((lbrAppGroup b, lbrSurface b, lbrPlatform b), b)
+                                | b <- builds
+                                ]
+                    mPlayCreds <- loadPlayCreds
+                    mAscCreds <- loadAscCreds
+                    -- ONE fetch → store_status + create-page snapshot + external-review
+                    -- + rollout reconcile, all for this app.
+                    syncAppUnified mPlayCreds mAscCreds buildMap expected ac
 
-{- | 'syncStoreStatus' wrapped so a cache failure can't abort the store-sync
-iteration. Notably, on a fresh deploy where @store_status@ isn't migrated yet the
-upsert throws — isolating it here keeps that from starving the staged-rollout
-reconcile that runs later in the same loop tick. -}
-safeSyncStoreStatus :: Flow ()
-safeSyncStoreStatus = do
-    result <- MC.try @_ @SomeException syncStoreStatus
-    case result of
-        Left e -> logError $ "[STORE_MONITOR] store_status sync failed (continuing): " <> T.pack (show e)
-        Right () -> pure ()
+{- | Process-global in-flight registry for on-demand refreshes: @app_catalog_id →
+barrier@. Coalesces concurrent refreshes of the SAME app — without it, several
+users clicking Refresh on one app in the same instant all pass the (DB) cooldown
+check before any of them writes @synced_at@, then each spends its own Play edit.
+With it, the first caller fetches and the rest wait for it and serve the (now
+fresh) cache. Caps the per-app live read at ONE concurrent fetch.
 
-{- | Poll ONE app's live store state and upsert each of its tracks into
-@store_status@. Shared by the batch poll and the refresh endpoint. Missing creds
-or a store error logs and leaves the existing cached row untouched (never blanks
-it). @expected@ stamps the drift baseline; the active SCC review/rollout is
-overlaid on the production cell. -}
-refreshStoreStatusForApp ::
-    Maybe PlayCreds ->
-    Maybe AscCreds ->
-    Map.Map (Text, Text, Text) Text ->
-    AppCatalog ->
-    Flow ()
-refreshStoreStatusForApp mPlayCreds mAscCreds expected ac = case acPackageName ac of
-    Just pkg | not (T.null pkg) -> do
-        let mExpected = Map.lookup (acName ac, acSurface ac, acPlatform ac) expected
-        mActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac)
-        case acPlatform ac of
-            "android" -> case mPlayCreds of
-                Nothing -> logWarning $ "[STORE_MONITOR] No Play creds — skipping " <> acName ac
-                Just creds ->
-                    fetchTrackSnapshots creds pkg >>= \case
-                        Left e -> logWarning $ "[STORE_MONITOR] Play snapshot error for " <> acName ac <> ": " <> renderPlayErr e
-                        Right snaps -> mapM_ (upsertStoreStatus . androidSnapToUpsert ac mExpected mActive) snaps
-            "ios" -> case mAscCreds of
-                Nothing -> logWarning $ "[STORE_MONITOR] No ASC creds — skipping " <> acName ac
-                Just creds ->
-                    fetchAscSnapshots creds pkg >>= \case
-                        Left e -> logWarning $ "[STORE_MONITOR] ASC snapshot error for " <> acName ac <> ": " <> renderAscErr e
-                        Right snaps -> mapM_ (upsertStoreStatus . iosSnapToUpsert ac mExpected mActive) snaps
-            p -> logWarning $ "[STORE_MONITOR] Unknown platform " <> p <> " for " <> acName ac
-    _ -> pure ()
+In-memory, so it coalesces within a single backend process. Multiple replicas
+would each elect their own leader; a Postgres advisory lock keyed on the package
+is the cross-instance evolution. -}
+{-# NOINLINE refreshInflight #-}
+refreshInflight :: MVar (Map.Map Int32 (MVar ()))
+refreshInflight = unsafePerformIO (newMVar Map.empty)
+
+{- | Run @live@ for this app under single-flight. The first caller for @aid@ runs
+it; concurrent callers block until it finishes, then return without re-fetching
+(the leader's write already refreshed the shared cache). The barrier is always
+released — even if @live@ throws — so followers never hang. -}
+withRefreshSingleFlight :: Int32 -> Flow () -> Flow ()
+withRefreshSingleFlight aid live = do
+    decision <- liftIO $ modifyMVar refreshInflight $ \m ->
+        case Map.lookup aid m of
+            Just barrier -> pure (m, Left barrier)
+            Nothing -> do
+                barrier <- newEmptyMVar
+                pure (Map.insert aid barrier m, Right barrier)
+    case decision of
+        Left barrier -> do
+            logInfo $ "[STORE_MONITOR] Refresh already in flight for app " <> T.pack (show aid) <> " — joining, serving cache"
+            liftIO (readMVar barrier)
+        Right barrier ->
+            live `MC.finally` liftIO (do
+                modifyMVar_ refreshInflight (pure . Map.delete aid)
+                putMVar barrier ()
+            )
 
 {- | Map a Play track snapshot → a @store_status@ upsert. Production carries the
 live staged-rollout % (the near-zero "pending" fraction reads as a tiny %, which
 the badge treats as not-yet-ramped) and overlays SCC's review state — Play never
 reports review, so this is the only way an Android "in review" surfaces; internal
-testing has neither rollout nor review. -}
+testing has neither rollout nor review.
+-}
 androidSnapToUpsert :: AppCatalog -> Maybe Text -> Maybe ActiveMobileState -> StoreTrackSnapshot -> StoreStatusUpsert
 androidSnapToUpsert ac mExpected mActive s =
     let isProd = stsTrack s == "production"
@@ -1136,15 +1214,17 @@ androidSnapToUpsert ac mExpected mActive s =
             , ssuExpectedVersion = mExpected
             }
 
--- | Production rollout floor (percent). Below this, a live @userFraction@ is the
--- parked review/pending fraction, not a real ramp — the 0–100 mirror of
--- 'androidPendingFractionThreshold' (0.01 fraction = 1%).
+{- | Production rollout floor (percent). Below this, a live @userFraction@ is the
+parked review/pending fraction, not a real ramp — the 0–100 mirror of
+'androidPendingFractionThreshold' (0.01 fraction = 1%).
+-}
 androidRolloutFloorPercent :: Double
 androidRolloutFloorPercent = androidPendingFractionThreshold * 100
 
 {- | Map an ASC snapshot → a @store_status@ upsert. The snapshot carries neither
 rollout % nor review state, so production overlays SCC's phased % + review state;
-TestFlight is build-only. -}
+TestFlight is build-only.
+-}
 iosSnapToUpsert :: AppCatalog -> Maybe Text -> Maybe ActiveMobileState -> AscSnapshot -> StoreStatusUpsert
 iosSnapToUpsert ac mExpected mActive s =
     let isProd = ascTrack s == "production"

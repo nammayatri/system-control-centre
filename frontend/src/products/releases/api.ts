@@ -1225,6 +1225,9 @@ export interface StoreMonitorResult {
     available: boolean;
     reason: string | null;
     apps: StoreMonitorApp[];
+    // Single freshness threshold (= the backend refresh cooldown, `store_refresh_cooldown_seconds`).
+    // Drives both the auto-refresh-on-open and the "stale" warning, so there's one source of truth.
+    staleThresholdSeconds: number;
 }
 
 export const mobileApi = {
@@ -1349,6 +1352,12 @@ export const mobileApi = {
         await apiClient.post(`/releases/${encodeURIComponent(id)}/review/mark-rejected`, { mrReason: reason });
     },
 
+    // iOS only — cancel the in-flight App Store review (ASC reviewSubmission) and
+    // abort the release. 400s for Android (Play has no cancel-review API).
+    withdraw: async (id: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/withdraw`, {});
+    },
+
     // ── App Release Monitoring ──
     // One call → the whole grid + all modal data (incl. release notes), wrapped
     // in an availability envelope (`available:false` for debug builds).
@@ -1356,11 +1365,12 @@ export const mobileApi = {
         const { data } = await apiClient.get('/mobile/store-monitor');
         // Tolerate both the new {available,reason,apps} object and the old bare
         // array (until the backend redeploys).
-        if (Array.isArray(data)) return { available: true, reason: null, apps: data };
+        if (Array.isArray(data)) return { available: true, reason: null, apps: data, staleThresholdSeconds: 300 };
         return {
             available: data?.available ?? true,
             reason: data?.reason ?? null,
             apps: Array.isArray(data?.apps) ? data.apps : [],
+            staleThresholdSeconds: data?.staleThresholdSeconds ?? 300,
         };
     },
 

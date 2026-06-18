@@ -47,6 +47,7 @@ import Products.Autopilot.Mobile.Handlers.Rollout (
     rolloutReleaseAllH,
     rolloutResumeH,
     rolloutSetH,
+    withdrawH,
  )
 import Products.Autopilot.Mobile.Handlers.StoreMonitor (
     StoreMonitorAppResp,
@@ -209,6 +210,11 @@ type MobileAPI =
             :> Protected 'AP_RELEASE_PROMOTE
             :> ReqBody '[JSON] MarkRejectedReq
             :> Post '[JSON] APISuccess
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "withdraw"
+            :> Protected 'AP_RELEASE_PROMOTE
+            :> Post '[JSON] APISuccess
         -- ── App Release Monitoring (store-monitor) ──
         :<|> "mobile"
             :> "store-monitor"
@@ -248,6 +254,7 @@ mobileServer =
         :<|> (\rid ap -> rolloutReleaseAllH ap rid)
         :<|> (\rid ap -> markApprovedH ap rid)
         :<|> (\rid ap req -> markRejectedH ap rid req)
+        :<|> (\rid ap -> withdrawH ap rid)
         -- ── App Release Monitoring (store-monitor) ──
         :<|> storeMonitorH
         :<|> (\aid ap -> refreshStoreAppH ap aid)
