@@ -43,7 +43,7 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (listStoreStatus)
 import Products.Autopilot.Mobile.StoreSync (refreshStoreStatusOne)
 import Products.Autopilot.Mobile.Types (isDebugBuildType)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..), StoreStatus, StoreStatusT (..))
-import Products.Autopilot.RuntimeConfig (getMobileBuildType)
+import Products.Autopilot.RuntimeConfig (getMobileBuildType, getStoreRefreshCooldownSeconds)
 
 -- | One track's live cell. Field names match the frontend @TrackCell@ verbatim.
 data TrackCellResp = TrackCellResp
@@ -103,6 +103,10 @@ data StoreMonitorResp = StoreMonitorResp
     { available :: Bool
     , reason :: Maybe Text
     , apps :: [StoreMonitorAppResp]
+    , staleThresholdSeconds :: Int
+    -- ^ The single freshness threshold (= the backend refresh cooldown). The UI
+    -- uses it to decide when to auto-refresh on open + warn that data is stale, so
+    -- there's one source of truth instead of a separate hardcoded client value.
     }
     deriving (Generic, Show)
 
@@ -123,12 +127,13 @@ debugUnavailableReason =
 storeMonitorH :: AuthedPerson -> Flow StoreMonitorResp
 storeMonitorH _ap = do
     buildType <- getMobileBuildType
+    cooldown <- getStoreRefreshCooldownSeconds
     if isDebugBuildType buildType
-        then pure (StoreMonitorResp False (Just debugUnavailableReason) [])
+        then pure (StoreMonitorResp False (Just debugUnavailableReason) [] cooldown)
         else do
             apps_ <- listAppCatalog
             statuses <- listStoreStatus
-            pure (StoreMonitorResp True Nothing (assembleCards apps_ statuses))
+            pure (StoreMonitorResp True Nothing (assembleCards apps_ statuses) cooldown)
 
 -- | Live re-poll one app, then return its fresh card. 404 on an unknown id. In a
 -- debug deployment it re-polls nothing and reads no @store_status@ (the table may

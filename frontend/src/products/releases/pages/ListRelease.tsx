@@ -6,6 +6,7 @@ import { useRefreshAnimation } from '../../../shared/hooks';
 import { ReleaseStatusBadge } from '../components/ReleaseStatusBadge';
 import { versionWithBuild } from '../versionLabel';
 import { stageOf, lifecycleFromRelease } from '../components/mobileStage';
+import { StoreSyncBanner } from '../components/StoreSync';
 import { ABORTED_STATUSES } from '../api';
 import { Button } from '../../../shared/ui/button';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
@@ -364,6 +365,8 @@ const ListRelease: React.FC = () => {
           </button>
         ))}
       </div>
+
+      {category === 'mobile' && <StoreSyncBanner auto={false} className="mb-4 sm:mb-5" />}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-4 sm:mb-6">
         {kpiCards.map((kpi, i) => (

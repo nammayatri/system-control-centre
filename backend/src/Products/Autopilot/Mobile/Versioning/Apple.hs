@@ -44,6 +44,7 @@ module Products.Autopilot.Mobile.Versioning.Apple (
     fetchAscSnapshots,
     BuildsResp (..),
     getLiveAppStoreVersion,
+    getIosVersionStateDump,
     getLiveReleaseNotes,
     firstWhatsNew,
     loadAscCreds,
@@ -59,6 +60,7 @@ module Products.Autopilot.Mobile.Versioning.Apple (
     parseAscVersion,
     getAscReviewState,
     submitVersionForReview,
+    cancelReviewSubmission,
     releaseApprovedVersion,
     getBuildProcessingState,
     enablePhasedRelease,
@@ -119,12 +121,15 @@ import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Base64.URL as B64U
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (find)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
+import System.IO.Unsafe (unsafePerformIO)
 
 -- ─── Pure algorithm ────────────────────────────────────────────────
 
@@ -325,20 +330,59 @@ Implementation:
 Built on @cryptonite@ — no new dependency. PyJWT does the same thing
 in the iOS workflow's auto-detect (fastlane.yaml:290-298).
 -}
+-- | ASC bearer-token validity (seconds). 15 min — well under Apple's 20-min cap,
+-- leaving headroom for the @iat@ backdate + clock skew.
+ascTokenTtlSec :: Integer
+ascTokenTtlSec = 840
+
+-- | Re-mint when a cached token has less than this much validity left, so a reused
+-- token is never close to expiry when it reaches Apple.
+ascTokenReuseFloorSec :: Integer
+ascTokenReuseFloorSec = 180
+
+{- | Process-global ASC token cache: @keyId → (token, expiresAtEpoch)@.
+
+Apple's ASC API is designed for token REUSE — one signed JWT, valid up to 20 min,
+sent on many requests. Minting a fresh JWT per call (which every read used to do)
+churns auth: a single app refresh fans out ~8–10 calls, and a burst throws dozens
+of distinct tokens at Apple in seconds, which it intermittently rejects with
+401/403 (surfacing as @asc_unauthorized@). Caching one token per key and reusing it
+collapses that to ~one mint per 15 min. -}
+{-# NOINLINE ascTokenCache #-}
+ascTokenCache :: IORef (Map.Map Text (Text, Integer))
+ascTokenCache = unsafePerformIO (newIORef Map.empty)
+
 mintAscToken :: AscCreds -> IO (Either AscError Text)
-mintAscToken AscCreds{..} = do
+mintAscToken creds@AscCreds{acKeyId = keyId} = do
+    nowSec <- (round :: Double -> Integer) . realToFrac <$> getPOSIXTime
+    cached <- Map.lookup keyId <$> readIORef ascTokenCache
+    case cached of
+        Just (tok, expAt) | expAt - nowSec > ascTokenReuseFloorSec -> pure (Right tok)
+        _ ->
+            signAscToken creds nowSec >>= \case
+                Left e -> pure (Left e)
+                Right tok -> do
+                    atomicModifyIORef' ascTokenCache (\m -> (Map.insert keyId (tok, nowSec + ascTokenTtlSec) m, ()))
+                    pure (Right tok)
+
+-- | Sign a fresh ASC JWT. @iat@ is backdated and @exp@ kept well under Apple's
+-- 20-min cap so a forward clock drift can't make Apple see @iat@ in the future or
+-- @exp@ out of range (both → 401). Callers should prefer 'mintAscToken' (cached).
+signAscToken :: AscCreds -> Integer -> IO (Either AscError Text)
+signAscToken AscCreds{..} nowSec =
     case parseEcP256PrivateKey acP8 of
         Left e -> pure (Left (AscJwtSigningFailed (T.pack e)))
         Right privKey -> do
-            nowSec <- (round :: Double -> Integer) . realToFrac <$> getPOSIXTime
-            let header :: Value
+            let iatSec = nowSec - 60
+                expSec = nowSec + ascTokenTtlSec
+                header :: Value
                 header = object ["alg" .= ("ES256" :: Text), "kid" .= acKeyId, "typ" .= ("JWT" :: Text)]
                 claims :: Value
                 claims =
                     object
                         [ "iss" .= acIssuerId
-                        , "iat" .= nowSec
-                        , "exp" .= (nowSec + 1200) -- 20 min, Apple's max
+                        , "iat" .= iatSec
+                        , "exp" .= expSec
                         , "aud" .= ("appstoreconnect-v1" :: Text)
                         ]
                 headerB64 = b64url (LBS.toStrict (encode header))
@@ -539,8 +583,32 @@ findScalarInECPrivateKey =
 ascBase :: Text
 ascBase = "https://api.appstoreconnect.apple.com/v1"
 
+{- | Process-global @bundleId → appId@ cache. An App Store app's numeric id is
+permanent for a bundle, so a successful resolution is cached for the process
+lifetime. Every ASC operation needs the appId, so without this each call re-runs
+the @\/apps@ lookup — roughly DOUBLING the request volume (and auth churn) per
+refresh. Only successful resolutions are cached; not-found / unauthorized are
+never cached, so a fix (app published, key access granted) is picked up on retry. -}
+{-# NOINLINE ascAppIdCache #-}
+ascAppIdCache :: IORef (Map.Map Text Text)
+ascAppIdCache = unsafePerformIO (newIORef Map.empty)
+
+-- | Resolve a bundle id to its App Store app id, served from 'ascAppIdCache' when
+-- known. Falls through to the live @\/apps@ lookup on a miss and caches the result.
 lookupAppByBundleId :: Text -> Text -> IO (Either AscError Text)
 lookupAppByBundleId token bundleId = do
+    cached <- Map.lookup bundleId <$> readIORef ascAppIdCache
+    case cached of
+        Just appId -> pure (Right appId)
+        Nothing ->
+            fetchAppIdByBundleId token bundleId >>= \case
+                Right appId -> do
+                    atomicModifyIORef' ascAppIdCache (\m -> (Map.insert bundleId appId m, ()))
+                    pure (Right appId)
+                left -> pure left
+
+fetchAppIdByBundleId :: Text -> Text -> IO (Either AscError Text)
+fetchAppIdByBundleId token bundleId = do
     -- Apple's ASC API uses bracketed filter syntax (`filter[bundleId]=...`).
     -- Haskell's http-client rejects raw `[` / `]` in URLs with
     -- 'InvalidUrlException' (RFC 3986 strict mode). Percent-encode the
@@ -660,6 +728,7 @@ instance FromJSON BuildsResp where
 -- | IO-Either bind: short-circuit on the first 'Left'. ExceptT-lite, no transformer.
 (>>?) :: IO (Either e a) -> (a -> IO (Either e b)) -> IO (Either e b)
 m >>? f = m >>= either (pure . Left) f
+
 infixl 1 >>?
 
 -- | App Store review state, derived from a version's @appStoreState@.
@@ -866,7 +935,8 @@ created the version but then failed to attach — can't be submitted: the review
 call 409s with "the build associated with appStoreVersions … was not found". If a
 build is already attached we keep it; otherwise we attach the latest non-expired
 TestFlight build for this @versionString@. Makes the whole submit idempotent and
-self-healing across retries. -}
+self-healing across retries.
+-}
 ensureBuildAttached :: Text -> Text -> Text -> AscVersion -> IO (Either AscError AscVersion)
 ensureBuildAttached token appId versionString ver =
     getVersionBuildId token (avId ver) >>? \mExisting ->
@@ -885,8 +955,9 @@ ensureBuildAttached token appId versionString ver =
                         Just buildId ->
                             attachBuildToVersion token (avId ver) buildId >>? \_ -> pure (Right ver)
 
--- | The build id currently attached to an App Store version, or 'Nothing' if it
--- has none. (@parseRelId@ reads @data.id@ of the @/build@ relationship.)
+{- | The build id currently attached to an App Store version, or 'Nothing' if it
+has none. (@parseRelId@ reads @data.id@ of the @/build@ relationship.)
+-}
 getVersionBuildId :: Text -> Text -> IO (Either AscError (Maybe Text))
 getVersionBuildId token vid =
     ascGet (ascBase <> "/appStoreVersions/" <> vid <> "/build") token "asc-version-build-id"
@@ -949,31 +1020,58 @@ attachBuildToVersion token versionId buildId =
 
 -- ── Live App Store version (for the track-aware iOS bump rule) ──
 
--- | @data[]@ element of an appStoreVersions response → its @attributes.versionString@.
-newtype VsItem = VsItem (Maybe Text)
+{- | @data[]@ element of an appStoreVersions response → its @versionString@ plus
+whether it's the currently-live (distributable) version. "Live" accepts BOTH
+the legacy @appStoreState == READY_FOR_SALE@ and the newer
+@state == READY_FOR_DISTRIBUTION@ — Apple is migrating @appStoreState@ → @state@,
+and many apps' live versions now report only the new field, so filtering on the
+legacy one alone silently dropped their production version.
+-}
+data VsItem = VsItem (Maybe Text) Bool
 
 instance FromJSON VsItem where
     parseJSON = withObject "VsItem" $ \o -> do
         ma <- o .:? "attributes"
         case ma of
-            Nothing -> pure (VsItem Nothing)
-            Just attrs -> VsItem <$> withObject "attrs" (.:? "versionString") attrs
+            Nothing -> pure (VsItem Nothing False)
+            Just attrs ->
+                withObject
+                    "attrs"
+                    ( \a -> do
+                        v <- a .:? "versionString"
+                        legacy <- a .:? "appStoreState"
+                        modern <- a .:? "state"
+                        pure
+                            ( VsItem
+                                v
+                                ( legacy == Just ("READY_FOR_SALE" :: Text)
+                                    || modern == Just ("READY_FOR_DISTRIBUTION" :: Text)
+                                )
+                            )
+                    )
+                    attrs
 
 newtype LiveVersionResp = LiveVersionResp (Maybe Text)
 
 instance FromJSON LiveVersionResp where
     parseJSON = withObject "LiveVersionResp" $ \o -> do
         items <- fromMaybe [] <$> o .:? "data"
-        pure (LiveVersionResp (listToMaybe (mapMaybe (\(VsItem v) -> v) items)))
+        -- Pick the live version's string (first item flagged live), not just the
+        -- first item — the list also contains any in-flight (in-review / prepared)
+        -- version.
+        pure (LiveVersionResp (listToMaybe [v | VsItem (Just v) True <- items]))
 
-{- | The version string of the currently-live (READY_FOR_SALE) App Store version,
-or 'Nothing' if the app has no live version yet. Drives 'computeNextIosVersion'’s
-bump-vs-reuse decision.
+{- | The version string of the currently-live App Store version (legacy
+@READY_FOR_SALE@ or the newer @READY_FOR_DISTRIBUTION@), or 'Nothing' if the app
+has no live version yet. Fetches the recent iOS versions and selects the live one
+rather than filtering server-side on the deprecated @appStoreState@ — that filter
+returned nothing for apps whose live version reports only the new @state@. Drives
+'computeNextIosVersion'’s bump-vs-reuse decision and the store-sync prod snapshot.
 -}
 getLiveAppStoreVersionString :: Text -> Text -> IO (Either AscError (Maybe Text))
 getLiveAppStoreVersionString token appId =
     ascGet
-        (ascBase <> "/apps/" <> appId <> "/appStoreVersions?filter%5BappStoreState%5D=READY_FOR_SALE&limit=1")
+        (ascBase <> "/apps/" <> appId <> "/appStoreVersions?filter%5Bplatform%5D=IOS&limit=10")
         token
         "asc-live-version"
         >>? \b -> pure (Right (decode b >>= \(LiveVersionResp v) -> v))
@@ -986,10 +1084,52 @@ getLiveAppStoreVersion :: AscCreds -> Text -> IO (Either AscError (Maybe Text))
 getLiveAppStoreVersion creds bundleId =
     withAscApp creds bundleId getLiveAppStoreVersionString
 
+-- ── Diagnostic: iOS version → state dump ──────────────────────────────
+
+-- | One appStoreVersions item for diagnostics: (versionString, appStoreState, state).
+data VsDiag = VsDiag (Maybe Text) (Maybe Text) (Maybe Text)
+
+instance FromJSON VsDiag where
+    parseJSON = withObject "VsDiag" $ \o -> do
+        ma <- o .:? "attributes"
+        case ma of
+            Nothing -> pure (VsDiag Nothing Nothing Nothing)
+            Just attrs ->
+                withObject
+                    "attrs"
+                    (\a -> VsDiag <$> a .:? "versionString" <*> a .:? "appStoreState" <*> a .:? "state")
+                    attrs
+
+newtype VsDiagResp = VsDiagResp [VsDiag]
+
+instance FromJSON VsDiagResp where
+    parseJSON = withObject "VsDiagResp" $ \o -> VsDiagResp . fromMaybe [] <$> o .:? "data"
+
+{- | Diagnostic read: each recent iOS appStoreVersion's @(versionString,
+appStoreState, state)@, formatted for a log line. Store sync logs this when it
+can't resolve a live production version, so an operator can see exactly what the
+App Store reports — a state we don't match, the new @state@ field absent, or
+genuinely no live version.
+-}
+getIosVersionStateDump :: AscCreds -> Text -> IO (Either AscError [Text])
+getIosVersionStateDump creds bundleId = withAscApp creds bundleId $ \token appId ->
+    ascGet
+        (ascBase <> "/apps/" <> appId <> "/appStoreVersions?filter%5Bplatform%5D=IOS&limit=10")
+        token
+        "asc-version-dump"
+        >>? \b -> pure (Right (fmtDump (decode b)))
+  where
+    fmtDump (Just (VsDiagResp xs)) =
+        [ fromMaybe "?" v <> " [appStoreState=" <> fromMaybe "-" l <> ", state=" <> fromMaybe "-" s <> "]"
+        | VsDiag v l s <- xs
+        ]
+    fmtDump Nothing = ["<unparseable appStoreVersions response>"]
+
 {- | Read the live (READY_FOR_SALE) App Store version's "What's New" text — the
 first non-empty locale. Used to pre-fill the promote dialog for a store-synced
 release (where SCC has no changelog of its own). 'Nothing' when there's no live
-version or it carries no notes. -}
+version or it carries no notes.
+-}
 getLiveReleaseNotes :: AscCreds -> Text -> IO (Either AscError (Maybe Text))
 getLiveReleaseNotes creds bundleId = withAscApp creds bundleId $ \token appId ->
     getLiveAppStoreVersionString token appId >>? \mVer ->
@@ -1137,6 +1277,46 @@ submitReviewSubmission token subId =
                     ]
      in void <$> ascSend PATCH (ascBase <> "/reviewSubmissions/" <> subId) token body "asc-review-submit"
 
+{- | Withdraw the app's in-flight App Store review — the inverse of
+'submitVersionForReview'. Finds the active @reviewSubmission@ (READY / WAITING /
+IN_REVIEW) for the app and PATCHes @canceled:true@ (→ CANCELING → CANCELED), pulling
+the build out of review. 'Right ()' no-op if nothing is in flight. iOS only —
+Google Play exposes no equivalent.
+-}
+cancelReviewSubmission :: (MonadFlow m) => AscCreds -> Text -> m (Either AscError ())
+cancelReviewSubmission creds bundleId = liftIO $ withAscApp creds bundleId $ \token appId ->
+    findActiveReviewSubmission token appId >>? \mSub ->
+        maybe (pure (Right ())) (patchCancelReviewSubmission token) mSub
+
+{- | The app's active (cancellable) reviewSubmission id, if any. Brackets +
+commas are percent-encoded, matching the other ASC filter queries.
+-}
+findActiveReviewSubmission :: Text -> Text -> IO (Either AscError (Maybe Text))
+findActiveReviewSubmission token appId =
+    let url =
+            ascBase
+                <> "/reviewSubmissions?filter%5Bapp%5D="
+                <> appId
+                <> "&filter%5Bplatform%5D=IOS"
+                <> "&filter%5Bstate%5D=READY_FOR_REVIEW%2CWAITING_FOR_REVIEW%2CIN_REVIEW"
+                <> "&limit=1"
+     in ascGet url token "asc-review-find" >>? \b ->
+            pure (Right (listToMaybe (parseLocIds b))) -- parseLocIds = data[].id
+
+patchCancelReviewSubmission :: Text -> Text -> IO (Either AscError ())
+patchCancelReviewSubmission token subId =
+    let body =
+            encode $
+                object
+                    [ "data"
+                        .= object
+                            [ "type" .= ("reviewSubmissions" :: Text)
+                            , "id" .= subId
+                            , "attributes" .= object ["canceled" .= True]
+                            ]
+                    ]
+     in void <$> ascSend PATCH (ascBase <> "/reviewSubmissions/" <> subId) token body "asc-review-cancel"
+
 -- | Release an approved (held) version — the iOS "Release" button.
 releaseApprovedVersion :: (MonadFlow m) => AscCreds -> Text -> Text -> m (Either AscError ())
 releaseApprovedVersion creds bundleId versionString = liftIO $ withAscApp creds bundleId $ \token appId ->
@@ -1189,17 +1369,20 @@ createPhasedRelease token vid =
      in ascSend POST (ascBase <> "/appStoreVersionPhasedReleases") token body "asc-phased-create" >>? \b ->
             pure (maybe (Left (AscHttpError 0 "could not read phasedRelease id")) Right (parseCreatedId b))
 
--- | The id of the phasedRelease already attached to a version, or 'Nothing'. The
--- to-one related-resource GET returns @{"data": null}@ (200) when none exists, so
--- 'parseRelId' yields 'Nothing' there.
+{- | The id of the phasedRelease already attached to a version, or 'Nothing'. The
+to-one related-resource GET returns @{"data": null}@ (200) when none exists, so
+'parseRelId' yields 'Nothing' there.
+-}
 getExistingPhasedReleaseId :: Text -> Text -> IO (Either AscError (Maybe Text))
 getExistingPhasedReleaseId token vid =
     ascGet (ascBase <> "/appStoreVersions/" <> vid <> "/appStoreVersionPhasedRelease") token "asc-phased-existing"
         >>? \b -> pure (Right (parseRelId b))
 
 -- | Pause / resume / complete a phased release (by its cached id).
-pausePhasedRelease, resumePhasedRelease, completePhasedRelease ::
-    (MonadFlow m) => AscCreds -> Text -> m (Either AscError ())
+pausePhasedRelease
+    , resumePhasedRelease
+    , completePhasedRelease ::
+        (MonadFlow m) => AscCreds -> Text -> m (Either AscError ())
 pausePhasedRelease creds pid = liftIO $ withAscToken creds $ \token -> setPhasedState token pid "PAUSE"
 resumePhasedRelease creds pid = liftIO $ withAscToken creds $ \token -> setPhasedState token pid "ACTIVE"
 completePhasedRelease creds pid = liftIO $ withAscToken creds $ \token -> setPhasedState token pid "COMPLETE"

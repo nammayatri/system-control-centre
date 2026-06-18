@@ -29,16 +29,16 @@ CREATE TABLE IF NOT EXISTS app_catalog (
 -- before it exists. ON CONFLICT keeps this idempotent across re-runs.
 INSERT INTO app_catalog (name, surface, platform, github_repo, workflow_path, package_name, display_label, enabled)
 VALUES
-  ('Cumta',         'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.mobility.cumta',                  'Cumta (Customer Android)',           false),
-  ('NammaYatri',    'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.juspay.nammayatri',               'Namma Yatri (Customer Android)',     false),
-  ('ManaYatri',     'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.mobility.manayatri',              'Mana Yatri (Customer Android)',      false),
-  ('Yatri',         'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'net.openkochi.yatri',                'Yatri (Customer Android)',           false),
-  ('OdishaYatri',   'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.mobility.odishayatri',            'Odisha Yatri (Customer Android)',    false),
-  ('YatriSathi',    'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.juspay.jatrisaathi',              'Yatri Sathi (Customer Android)',     false),
-  ('KeralaSavaari', 'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.mobility.keralasavaariconsumer',  'Kerala Savaari (Customer Android)',  false),
-  ('Bridge',        'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'com.mobility.bridge',                'Bridge (Customer Android)',          false),
-  ('BharatTaxi',    'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.mobility.bharatTaxi',             'Bharat Taxi (Customer Android)',     false),
-  ('Lynx',          'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.mobility.international',          'Lynx (Customer Android)',            false)
+  ('Cumta',         'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.mobility.cumta',                  'Cumta (Customer Android)',           true),
+  ('NammaYatri',    'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.juspay.nammayatri',               'Namma Yatri (Customer Android)',     true),
+  ('ManaYatri',     'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.mobility.manayatri',              'Mana Yatri (Customer Android)',      true),
+  ('Yatri',         'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'net.openkochi.yatri',                'Yatri (Customer Android)',           true),
+  ('OdishaYatri',   'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.mobility.odishayatri',            'Odisha Yatri (Customer Android)',    true),
+  ('YatriSathi',    'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.juspay.jatrisaathi',              'Yatri Sathi (Customer Android)',     true),
+  ('KeralaSavaari', 'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.mobility.keralasavaariconsumer',  'Kerala Savaari (Customer Android)',  true),
+  ('Bridge',        'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'com.mobility.movingtech',            'Bridge (Customer Android)',          true),
+  ('BharatTaxi',    'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.mobility.bharatTaxi',             'Bharat Taxi (Customer Android)',     true),
+  ('Lynx',          'customer', 'android', 'nammayatri/ny-react-native', '.github/workflows/fastlane-android-debug.yaml', 'in.mobility.international',          'Lynx (Customer Android)',            true)
 ON CONFLICT (name, surface, platform) DO NOTHING;
 
 -- ─── iOS extension (added 2026-05-14) ───────────────────────────────
@@ -51,14 +51,14 @@ ON CONFLICT (name, surface, platform) DO NOTHING;
 -- ON CONFLICT keeps this idempotent on re-run.
 INSERT INTO app_catalog (name, surface, platform, github_repo, workflow_path, package_name, display_label, enabled)
 VALUES
-  ('Cumta',         'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.mobility.cumta',                  'Cumta (Customer iOS)',           false),
-  ('NammaYatri',    'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.juspay.nammayatri',               'Namma Yatri (Customer iOS)',     false),
-  ('ManaYatri',     'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.mobility.manayatri',              'Mana Yatri (Customer iOS)',      false),
-  ('Yatri',         'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'net.openkochi.yatri',                'Yatri (Customer iOS)',           false),
-  ('OdishaYatri',   'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.mobility.odishayatri',            'Odisha Yatri (Customer iOS)',    false),
-  ('YatriSathi',    'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.juspay.yatrisathi',              'Yatri Sathi (Customer iOS)',     false),
-  ('KeralaSavaari', 'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.mobility.keralasavaariconsumer',  'Kerala Savaari (Customer iOS)',  false),
-  ('Bridge',        'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'com.mobility.bridge',                'Bridge (Customer iOS)',          false),
-  ('BharatTaxi',    'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.mobility.bharatTaxi',             'Bharat Taxi (Customer iOS)',     false),
-  ('Lynx',          'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.mobility.international',          'Lynx (Customer iOS)',            false)
+  ('Cumta',         'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.mobility.cumta',                  'Cumta (Customer iOS)',           true),
+  ('NammaYatri',    'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.juspay.nammayatri',               'Namma Yatri (Customer iOS)',     true),
+  ('ManaYatri',     'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.mobility.manayatri',              'Mana Yatri (Customer iOS)',      true),
+  ('Yatri',         'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'net.openkochi.yatri',                'Yatri (Customer iOS)',           true),
+  ('OdishaYatri',   'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.mobility.odishayatri',            'Odisha Yatri (Customer iOS)',    true),
+  ('YatriSathi',    'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.juspay.yatrisathi',              'Yatri Sathi (Customer iOS)',     true),
+  ('KeralaSavaari', 'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.mobility.keralasavaariconsumer',  'Kerala Savaari (Customer iOS)',  true),
+  ('Bridge',        'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'com.mobility.movingtech',            'Bridge (Customer iOS)',          true),
+  ('BharatTaxi',    'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.mobility.bharatTaxi',             'Bharat Taxi (Customer iOS)',     true),
+  ('Lynx',          'customer', 'ios', 'nammayatri/ny-react-native', '.github/workflows/fastlane-ios-debug.yaml', 'in.mobility.international',          'Lynx (Customer iOS)',            true)
 ON CONFLICT (name, surface, platform) DO NOTHING;

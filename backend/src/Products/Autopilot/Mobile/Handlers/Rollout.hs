@@ -46,6 +46,7 @@ module Products.Autopilot.Mobile.Handlers.Rollout (
     rolloutReleaseAllH,
     markApprovedH,
     markRejectedH,
+    withdrawH,
 ) where
 
 import Control.Monad (unless, when)
@@ -80,6 +81,7 @@ import Products.Autopilot.Mobile.Types (
  )
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..))
 import Products.Autopilot.Mobile.Versioning.Apple (
+    cancelReviewSubmission,
     completePhasedRelease,
     enablePhasedRelease,
     getLiveReleaseNotes,
@@ -157,7 +159,8 @@ instance FromJSON PromoteReq
 {- | POST /promote response. The review submission either fully succeeds or the
 whole call fails ('bad'), so there's no partial-failure result here EXCEPT the
 best-effort phased-release enable: that can fail without undoing the (already
-submitted) review, so it's surfaced as a non-fatal 'prWarning' the FE shows. -}
+submitted) review, so it's surfaced as a non-fatal 'prWarning' the FE shows.
+-}
 data PromoteResp = PromoteResp
     { prResult :: Text
     , prWarning :: Maybe Text
@@ -236,9 +239,10 @@ promoteFormH _ap rid = do
             , pfIsStoreSync = isStoreSync
             }
 
--- | Best-effort fetch of the current production "What's New" from the store
--- (App Store live version / Play production track). 'Nothing' on any missing
--- creds / package name / store error / empty notes — the caller falls back.
+{- | Best-effort fetch of the current production "What's New" from the store
+(App Store live version / Play production track). 'Nothing' on any missing
+creds / package name / store error / empty notes — the caller falls back.
+-}
 fetchProdReleaseNotes :: AppCatalog -> Text -> Flow (Maybe Text)
 fetchProdReleaseNotes ac platform = case (platform, acPackageName ac) of
     ("ios", Just pkg) | not (T.null pkg) -> do
@@ -333,13 +337,15 @@ promoteH ap rid PromoteReq{..} = do
             pure (PromoteResp "Success" Nothing)
 
 -- | GET /releases/:id/rollout — cached review + rollout state for the FE panel.
+
 {- | The phased-release id to surface in the rollout detail. Normally the
 persisted @asc_phased_id@; but for an approved-held iOS version with none persisted
 — e.g. a release whose phasing was configured in App Store Connect rather than
 enabled through SCC (an externally-submitted version) — fall back to a best-effort
 live read so the UI's "phased vs release-to-all" label matches what @/release@ will
 actually do (releaseH does the same self-heal on the action path). Best-effort: any
-miss / error / missing creds yields the persisted value. -}
+miss / error / missing creds yields the persisted value.
+-}
 resolveDetailPhasedId :: AppCatalog -> ReleaseTrackerRow -> MobileBuildTargetState -> Flow (Maybe Text)
 resolveDetailPhasedId ac row target
     | Just pid <- rtAscPhasedId row, not (T.null pid) = pure (Just pid)
@@ -513,9 +519,10 @@ rolloutReleaseAllH ap rid = do
             -- A phased ramp is completed to 100%; a non-phased release is already
             -- fully live, so there's nothing more to call.
             case rtAscPhasedId row of
-                Just pid | not (T.null pid) ->
-                    completePhasedRelease creds pid
-                        >>= either (\e -> bad ("App Store complete failed: " <> renderAscErr e)) pure
+                Just pid
+                    | not (T.null pid) ->
+                        completePhasedRelease creds pid
+                            >>= either (\e -> bad ("App Store complete failed: " <> renderAscErr e)) pure
                 _ -> pure ()
         else do
             vc <- versionCodeText target
@@ -559,10 +566,35 @@ markRejectedH ap rid MarkRejectedReq{..} = do
     logEvent rid "REVIEW_REJECTED" (object ["reason" .= mrReason, "manual" .= True, "actor" .= apEmail ap])
     pure Success
 
+{- | POST /releases/:id/withdraw — iOS only. Cancels the in-flight App Store
+review (ASC @reviewSubmission@ → @canceled@), then drives the release terminal
+(@MBAborted@ → USER_ABORTED at Finalize). Because the store review is actually
+cancelled, store-sync won't re-surface it as an out-of-band review. Valid only
+while the review is pending. Google Play has no cancel-review API, so this 400s
+for Android — withdraw is impossible there.
+-}
+withdrawH :: AuthedPerson -> Text -> Flow APISuccess
+withdrawH ap rid = do
+    requireStaged
+    (row, target, ac) <- loadPromotable rid
+    unless (rtEnv row == "ios") $
+        bad "Withdraw from review is iOS-only — Google Play has no API to cancel a review."
+    ensureInReview (mbWfStatus target)
+    bundleId <- storeIdOf ac
+    creds <- loadAscCreds >>= maybe (bad "App Store Connect credentials not configured.") pure
+    cancelReviewSubmission creds bundleId
+        >>= either (\e -> bad ("App Store withdraw failed: " <> renderAscErr e)) pure
+    now <- liftIO getCurrentTime
+    setReviewDecided rid "withdrawn" now Nothing
+    setMobileWfStatus rid MBAborted
+    logEvent rid "REVIEW_WITHDRAWN" (object ["store" .= ("asc" :: Text), "actor" .= apEmail ap])
+    pure Success
+
 -- ─── Internal helpers ──────────────────────────────────────────────────
 
--- | 400 unless the staged-rollout flag is on. Keeps every endpoint a no-op
--- (clean error) until ops opt in.
+{- | 400 unless the staged-rollout flag is on. Keeps every endpoint a no-op
+(clean error) until ops opt in.
+-}
 requireStaged :: Flow ()
 requireStaged = do
     on <- isStagedRolloutEnabled
@@ -601,8 +633,9 @@ requirePhasedId row = case rtAscPhasedId row of
     Just p | not (T.null p) -> pure p
     _ -> bad "No phased release is enabled for this version (promote with enablePhasedRelease, or use /rollout/release-all)."
 
--- | Read the live Android production rollout fraction (§12.10); error if there
--- is no in-progress fraction to act on.
+{- | Read the live Android production rollout fraction (§12.10); error if there
+is no in-progress fraction to act on.
+-}
 liveAndroidFraction :: PlayCreds -> Text -> Flow Double
 liveAndroidFraction creds storeId =
     getTrackRolloutState creds storeId >>= \case
@@ -611,12 +644,13 @@ liveAndroidFraction creds storeId =
             Just f -> pure f
             Nothing -> bad "No in-progress rollout fraction to act on (rollout is at 0% or already complete)."
 
--- | Android rollout requires an explicit approval first. The Play API can't see
--- review state, so SCC won't let a still-in-review build start a rollout: that
--- would read as "rolling out" while Google still gates it, and a later rejection
--- (Play reverts the track to the prior version, status=completed) could be
--- misread by the reconciler as a finished rollout. The operator must confirm in
--- the Play Console that Google approved, then Mark approved.
+{- | Android rollout requires an explicit approval first. The Play API can't see
+review state, so SCC won't let a still-in-review build start a rollout: that
+would read as "rolling out" while Google still gates it, and a later rejection
+(Play reverts the track to the prior version, status=completed) could be
+misread by the reconciler as a finished rollout. The operator must confirm in
+the Play Console that Google approved, then Mark approved.
+-}
 ensureAndroidRollable :: MobileBuildWFStatus -> Flow ()
 ensureAndroidRollable = \case
     MBReviewApproved -> pure ()

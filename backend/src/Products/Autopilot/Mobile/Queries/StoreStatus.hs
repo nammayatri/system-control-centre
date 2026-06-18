@@ -4,7 +4,7 @@
 {- | Queries for the @store_status@ cache (migration 0030) — the per-track live
 store-state table behind the App Release Monitoring dashboard.
 
-The poller / refresh writes via 'upsertStoreStatus'; the monitor reads the whole
+The on-demand refresh writes via 'upsertStoreStatus'; the monitor reads the whole
 table in one shot via 'listStoreStatus'. Two small @release_tracker@ reads enrich
 the cache: 'latestShippedVersionsPerApp' (the last SCC-shipped version, for drift)
 and 'findActiveMobileState' (an active review/rollout to overlay on the live
@@ -16,6 +16,7 @@ module Products.Autopilot.Mobile.Queries.StoreStatus (
     StoreStatusUpsert (..),
     upsertStoreStatus,
     listStoreStatus,
+    secondsSinceLastSync,
     latestShippedVersionsPerApp,
     ActiveMobileState (..),
     findActiveMobileState,
@@ -27,9 +28,9 @@ import Data.Int (Int32)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import Database.Beam
-import Database.PostgreSQL.Simple (execute, query, query_)
+import Database.PostgreSQL.Simple (Only (..), execute, query, query_)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
-import Products.Autopilot.Mobile.Types.Storage (StoreStatus, StoreStatusT (..))
+import Products.Autopilot.Mobile.Types.Storage (StoreStatus, StoreStatusT)
 import Products.Autopilot.Types.Storage.Schema (AutopilotDb (..), autopilotDb)
 
 -- | Fields written on a poll. @synced_at@ is stamped @now()@ by the upsert.
@@ -80,6 +81,24 @@ listStoreStatus = withDb $ \db ->
     runDB db $
         runSelectReturningList $
             select (all_ (storeStatuses autopilotDb))
+
+{- | Seconds since this app's most recent track was synced (the freshest
+@synced_at@ across its @store_status@ rows). 'Nothing' when the app has no cached
+row yet (never synced). Backs the on-demand refresh cooldown: a Play track read
+costs a daily-quota'd edit, so a manual ↻ within the cooldown serves cache
+instead of re-polling.
+-}
+secondsSinceLastSync :: (MonadFlow m) => Int32 -> m (Maybe Double)
+secondsSinceLastSync aid = withDb $ \db -> withConn db $ \conn -> do
+    rows <-
+        query
+            conn
+            "SELECT EXTRACT(EPOCH FROM (now() - max(synced_at)))::double precision \
+            \ FROM store_status WHERE app_catalog_id = ?"
+            (Only aid)
+    pure $ case rows of
+        (Only ms : _) -> ms
+        [] -> Nothing
 
 {- | The last version SCC itself shipped, per @(app_group, service, env)@ — i.e.
 the newest @MobileBuild@ release NOT created by store-sync. Stamped into

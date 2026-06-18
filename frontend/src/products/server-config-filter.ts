@@ -9,7 +9,7 @@ export const MOBILE_CONFIG_CATEGORIES: { name: string; keys: string[] }[] = [
   },
   {
     name: 'Store Sync',
-    keys: ['store_sync_enabled', 'store_sync_interval_minutes', 'version_preview_enabled'],
+    keys: [ 'version_preview_enabled', 'store_refresh_cooldown_seconds'],
   },
   {
     // Promote-to-review + staged rollout (mobile_staged_rollout_enabled gates the feature).
@@ -45,15 +45,3 @@ export const HIDDEN_SERVER_CONFIG_NAMES = new Set([
 
 export const isHiddenServerConfig = (name: string): boolean =>
   HIDDEN_SERVER_CONFIG_NAMES.has(name);
-
-// Configs that only apply to release deployments. Store sync polls production
-// stores and version preview fetches store versions — both are inert when
-// buildType is 'debug', so hide them there (see useAuth().buildType).
-export const RELEASE_ONLY_SERVER_CONFIG_NAMES = new Set([
-  'store_sync_enabled',
-  'store_sync_interval_minutes',
-  'version_preview_enabled',
-]);
-
-export const isReleaseOnlyServerConfig = (name: string): boolean =>
-  RELEASE_ONLY_SERVER_CONFIG_NAMES.has(name);

@@ -8,6 +8,7 @@ import {
   useCreateMobileReleases,
   useChangelogPreviews,
 } from '../../hooks';
+import { StoreSyncBanner } from '../../components/StoreSync';
 import type { ChangelogApp } from '../../hooks';
 import type {
   AppCatalogEntry,
@@ -350,6 +351,10 @@ export default function CreateMobileRelease() {
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
       <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-6 max-w-4xl">
+
+        {/* Store versions shown below come from the on-demand cache; auto-refreshes
+            on open when cold/stale so the base build per track is current. */}
+        <StoreSyncBanner />
 
         {/* ─── Apps card ─────────────────────────────── */}
         <section className="bg-white rounded-xl border border-zinc-200">

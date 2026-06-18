@@ -1,5 +1,13 @@
 # Mobile Releases — Post-MVP Implementation Plan (Consolidated)
 
+> **⚠️ Superseded (2026-06-18) — store sync is now on-demand.** The `storeSyncLoop`
+> background poller + `store_sync_enabled` / `store_sync_interval_minutes` flags described
+> here were **removed**. Store sync now refreshes **on demand** (UI ↻ / page open) via
+> `refreshStoreStatusOne`, bounded per app by `store_refresh_cooldown_seconds` (one Play
+> edit/app/refresh; ASC token + appId caches; single-flight for concurrency). Treat the
+> store-sync sections below as historical. Current behaviour: `CLAUDE.md`
+> § "Mobile store sync (on-demand)" and `docs/scc-deployment.md` §7.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement all mobile release features after the MVP. Covers: mobile revert (full flow + store-sync integration + debug exclusion + version-ordered rollback resolution / revert-of-a-revert [B6] + custom commit source), branch picker + server-side search, debug/release build types, latest build enrichment, periodic store sync, platform filter, apps admin redesign, dispatch from summary, Firebase observability (Crashlytics + Performance Monitoring + Alerts).

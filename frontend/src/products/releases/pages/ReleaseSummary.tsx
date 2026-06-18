@@ -1003,8 +1003,18 @@ const ReleaseSummary: React.FC = () => {
       : null;
   // While the build sits in a lifecycle stage, the generic Pause / Fast-Forward
   // (rollout-runner) controls don't apply — the real action is Promote/Rollout in
-  // the Store panel. Abort still applies (cancel the release).
+  // the Store panel.
   const inMobileLifecycle = !!mobileStatus;
+  // Once the build is submitted to the store (in review onward), a generic Abort
+  // is misleading — it doesn't stop the store review, and the build re-surfaces
+  // via store-sync. The honest action lives in the Store panel: iOS "Withdraw
+  // from review", or halt the rollout. So hide Abort past promotion.
+  const isMobilePostPromote =
+    isMobile &&
+    !!rollout &&
+    ['MBSubmittingForReview', 'MBInReview', 'MBReviewApproved', 'MBRollingOut', 'MBCompleted'].includes(
+      rollout.rdMbStatus,
+    );
 
   const matchedMobileApp = isMobile
     ? mobileApps.find(
@@ -1187,7 +1197,9 @@ const ReleaseSummary: React.FC = () => {
                 {!inMobileLifecycle && (
                   <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
                 )}
-                <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
+                {!isMobilePostPromote && (
+                  <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
+                )}
               </PermissionGate>
               {!isMobile && (
                 <PermissionGate product="autopilot" permission="RELEASE_UPDATE">

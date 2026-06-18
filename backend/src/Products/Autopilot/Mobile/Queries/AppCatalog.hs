@@ -42,9 +42,9 @@ import Database.Beam.Postgres.Full (
  )
 import Database.PostgreSQL.Simple (query, query_)
 import Products.Autopilot.Mobile.Queries.Tracker (parseMobileTargetState)
-import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe)
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..))
 import Products.Autopilot.Mobile.Types.Storage
+import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe)
 import Products.Autopilot.Types.Storage.Schema (AutopilotDb (..), autopilotDb)
 
 -- | Fields needed to INSERT a row. @id@ and @created_at@ are DB-generated.

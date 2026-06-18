@@ -89,10 +89,6 @@ import Products.Autopilot.Mobile.Types.Storage (
  )
 import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch)
 import Products.Autopilot.RuntimeConfig (getMobileBuildType)
-import qualified Shared.AI.Changelog as CL
-import Shared.AI.Config (loadAiConfig)
-import Shared.AI.Queries (claimReleaseSummary, computePromptHash, lookupReleaseSummary, upsertReleaseSummary)
-import Shared.AI.ReleaseSummary (generateWithFallback)
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
     ReleaseTracker (..),
@@ -104,6 +100,10 @@ import Products.Autopilot.Types.Storage.Schema (
     autopilotDb,
  )
 import Products.Autopilot.Types.Target (TargetState (..))
+import qualified Shared.AI.Changelog as CL
+import Shared.AI.Config (loadAiConfig)
+import Shared.AI.Queries (claimReleaseSummary, computePromptHash, lookupReleaseSummary, upsertReleaseSummary)
+import Shared.AI.ReleaseSummary (generateWithFallback)
 import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 
 -- ─── Create: request / response types ──────────────────────────────
@@ -210,10 +210,10 @@ buildRow ::
     Text ->
     Text ->
     Text ->
+    -- | destination (provider prod Android only)
     Maybe Text ->
-    -- ^ destination (provider prod Android only)
+    -- | source ref
     Maybe Text ->
-    -- ^ source ref
     UTCTime ->
     CreateMobileReleasesItem ->
     Flow (ReleaseTrackerRow, CreatedReleaseSummary)

@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
@@ -124,9 +124,13 @@ async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promis
 
 // ── Freshness ──────────────────────────────────────────────────────
 
-const STALE_MS = 30 * 60 * 1000; // amber once older than the default poll cadence
+// Single freshness threshold (ms), sourced from the backend's
+// `store_refresh_cooldown_seconds` via the store-monitor response and shared down
+// the tree by context. Default until the value loads — matches the server default.
+const DEFAULT_STALE_MS = 300 * 1000;
+const StaleMsContext = createContext(DEFAULT_STALE_MS);
 
-function freshness(syncedAt: string | null): { label: string; stale: boolean } | null {
+function freshness(syncedAt: string | null, staleMs: number): { label: string; stale: boolean } | null {
   if (!syncedAt) return null;
   const t = new Date(syncedAt).getTime();
   if (isNaN(t)) return null;
@@ -139,7 +143,7 @@ function freshness(syncedAt: string | null): { label: string; stale: boolean } |
     const hrs = Math.round(mins / 60);
     label = hrs < 24 ? `${hrs}h ago` : `${Math.round(hrs / 24)}d ago`;
   }
-  return { label, stale: ageMs > STALE_MS };
+  return { label, stale: ageMs > staleMs };
 }
 
 function platformSyncedAt(block: PlatformBlock): string | null {
@@ -211,7 +215,7 @@ function TrackLine({ label, cell }: { label: string; cell: TrackCell | null }) {
     <div className="py-2">
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="w-10 shrink-0 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">{label}</span>
+          <span className="w-20 shrink-0 truncate text-[10px] font-semibold uppercase tracking-wide text-zinc-400">{label}</span>
           {empty ? (
             <span className="text-sm text-zinc-300">—</span>
           ) : (
@@ -249,7 +253,7 @@ function PlatformPanel({
   const secondaryLabel = platform === 'ios' ? 'TestFlight' : 'Internal';
   const secondaryCell = platform === 'ios' ? block.testflight : block.internal;
   const rolling = activeRolloutOf(block.production) != null;
-  const fresh = freshness(platformSyncedAt(block));
+  const fresh = freshness(platformSyncedAt(block), useContext(StaleMsContext));
 
   return (
     <button
@@ -433,6 +437,9 @@ export default function StoreMonitor() {
   const { data, isLoading } = useStoreMonitor();
   const apps = useMemo(() => data?.apps ?? [], [data]);
   const unavailable = !!data && !data.available;
+  // Single freshness threshold from the backend (store_refresh_cooldown_seconds):
+  // drives the cold-start auto-refresh and, via context, the per-card "stale" amber.
+  const staleMs = (data?.staleThresholdSeconds ?? 300) * 1000;
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
   const [refreshingAll, setRefreshingAll] = useState(false);
@@ -498,7 +505,26 @@ export default function StoreMonitor() {
     }
   };
 
+  // Cold-start: on first open — or when the cache is stale (> STALE_MS) — auto-fire
+  // one full refresh. Cooldown-gated server-side, so a quick re-open serves cache
+  // instead of spending edits. Fires once per mount.
+  const autoFired = useRef(false);
+  useEffect(() => {
+    if (autoFired.current || refreshingAll || apps.length === 0) return;
+    let latest: string | null = null;
+    for (const a of apps)
+      for (const blk of [a.platforms.android, a.platforms.ios])
+        if (blk)
+          for (const cell of [blk.production, blk.internal, blk.testflight])
+            if (cell?.syncedAt && (latest === null || cell.syncedAt > latest)) latest = cell.syncedAt;
+    if (latest === null || Date.now() - new Date(latest).getTime() > staleMs) {
+      autoFired.current = true;
+      void refreshAll();
+    }
+  }, [apps, refreshingAll, staleMs]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
+    <StaleMsContext.Provider value={staleMs}>
     <div className="flex w-full flex-1 flex-col space-y-4 pb-12">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
@@ -570,5 +596,6 @@ export default function StoreMonitor() {
         />
       )}
     </div>
+    </StaleMsContext.Provider>
   );
 }

@@ -1,5 +1,13 @@
 # App Release Monitoring — Design & Build Plan
 
+> **⚠️ Superseded (2026-06-18) — store sync is now on-demand.** The background poller this
+> doc builds on (`storeSyncLoop`, `store_sync_enabled`, `store_sync_interval_minutes`) was
+> **removed**. Store sync now refreshes **on demand** (UI ↻ / page open) via
+> `refreshStoreStatusOne`, bounded per app by `store_refresh_cooldown_seconds` (one Play
+> edit/app/refresh; ASC token + appId caches; single-flight for concurrency). Treat the
+> store-sync sections below as historical design. Current behaviour: `CLAUDE.md`
+> § "Mobile store sync (on-demand)" and `docs/scc-deployment.md` §7.
+
 > **Status:** Design locked (Tier 1). Ready to build later from this doc.
 > **Date:** 2026-06-12 · **Branch base:** `mobile-release-features`
 > **Related:** builds on `2026-06-09-promote-review-and-staged-rollout.md` (reuses its

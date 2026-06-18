@@ -1,5 +1,12 @@
 # Promote to Review → Staged Rollout — Implementation Plan
 
+> **⚠️ Note (2026-06-18) — store sync is now on-demand.** Where this plan references the
+> `storeSyncLoop` background poller / `store_sync_*` flags, those were **removed**: store
+> sync (and the rollout reconcile it carried) now runs **on demand** via
+> `refreshStoreStatusOne`, bounded by `store_refresh_cooldown_seconds`. The staged-rollout
+> logic itself is unchanged. Current behaviour: `CLAUDE.md` § "Mobile store sync
+> (on-demand)" and `docs/scc-deployment.md` §7.
+
 > **Status:** Design locked, ready to build.
 > **Date:** 2026-06-09 · **Branch base:** `mobile-release-features`
 > **Supersedes:** `2026-05-20-staged-rollout.md` (that plan is stale — it references a
