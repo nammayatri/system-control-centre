@@ -731,7 +731,7 @@ fromRow ReleaseTrackerT {..} =
         -- rolling-out) without an extra /rollout call. The bare-tag rendering
         -- matches the rollout endpoint's rdMbStatus (tshow (mbWfStatus …)).
         Just (MobileBuildState mb) ->
-          Just (addMbStatus (T.pack (show (mbWfStatus mb))) (toJSON (mbContext mb)))
+          Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent (toJSON (mbContext mb)))
         _ -> Nothing
       tracker =
         ReleaseTracker
@@ -775,11 +775,20 @@ fromRow ReleaseTrackerT {..} =
           }
    in (tracker, mTargetState)
 
--- | Inject @mb_wf_status@ into the flattened mbContext JSON object so the FE can
--- read the lifecycle stage off a list row. No-op if the value isn't an object.
-addMbStatus :: Text -> Value -> Value
-addMbStatus st (Object o) = Object (KM.insert "mb_wf_status" (toJSON st) o)
-addMbStatus _ v = v
+-- | Inject the mobile lifecycle fields the FE derives a list row's stage from —
+-- @mb_wf_status@ (one level up in MobileBuildState) plus the authoritative
+-- @rollout_status@ / @rollout_percent@ COLUMNS — into the flattened mbContext JSON.
+-- This lets the releases list/detail read the live rollout % straight off the row
+-- (the same source the rollout endpoint uses), instead of a stale metadata mirror.
+-- No-op if the value isn't an object.
+addMobileLifecycle :: Text -> Maybe Text -> Maybe Double -> Value -> Value
+addMobileLifecycle st mRolloutStatus mRolloutPct (Object o) =
+  Object
+    . KM.insert "mb_wf_status" (toJSON st)
+    . KM.insert "rollout_status" (toJSON mRolloutStatus)
+    . KM.insert "rollout_percent" (toJSON mRolloutPct)
+    $ o
+addMobileLifecycle _ _ _ v = v
 
 parseReleaseCategory :: Text -> ReleaseCategory
 parseReleaseCategory t =

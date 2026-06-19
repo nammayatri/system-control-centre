@@ -101,6 +101,10 @@ export function MobileRolloutPanel({
         void q.refetch();
         qc.invalidateQueries({ queryKey: ['release', releaseId] });
         qc.invalidateQueries({ queryKey: ['releases'] });
+        // The App Monitor reads the store_status cache (not release_tracker); every
+        // action here mirrors its new state into that cache on the backend, so refetch
+        // the monitor to surface the promote / rollout / halt / resume / release there too.
+        qc.invalidateQueries({ queryKey: ['store-monitor'] });
     };
 
     const run = async (label: string, fn: () => Promise<unknown>) => {

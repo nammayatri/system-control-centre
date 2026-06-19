@@ -69,6 +69,11 @@ export interface ReleaseContext {
     // Injected by the backend serializer from the MobileBuildState so the list +
     // detail can derive the promote→rollout stage without a /rollout call.
     mb_wf_status?: string;
+    // Authoritative rollout columns, injected alongside mb_wf_status — the live
+    // source the rollout endpoint uses, so the list shows the real % (not a stale
+    // metadata mirror) right after a successful set.
+    rollout_status?: string | null;
+    rollout_percent?: number | null;
 }
 
 // ── All statuses (UPPERCASE — canonical) ─────
@@ -415,6 +420,8 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         ota_namespace:    (r.releaseContext as any)?.ota_namespace,
         change_log:       (r.releaseContext as any)?.change_log,
         mb_wf_status:     (r.releaseContext as any)?.mb_wf_status,
+        rollout_status:   (r.releaseContext as any)?.rollout_status,
+        rollout_percent:  (r.releaseContext as any)?.rollout_percent,
     },
 
     rollout_strategy: (r.rolloutStrategy || []).map(s => ({
@@ -1185,6 +1192,30 @@ export interface PromoteResp {
     prWarning?: string | null; // non-fatal warning, e.g. phased release couldn't be enabled
 }
 
+// ── Bulk promote / rollout (one action over many apps) ──
+export interface BulkPromoteItem {
+    bpiReleaseId: string;
+    bpiReleaseNotes?: string | null;     // omit → server fills the per-app store default
+    bpiEnablePhasedRelease?: boolean | null;
+    bpiInitialRolloutPercent?: number | null;
+}
+export interface BulkRolloutItem {
+    briReleaseId: string;
+    briPercent: number;                  // Android staged-rollout %, (0,100]
+}
+export interface BulkItemResult {
+    birReleaseId: string;
+    birOk: boolean;
+    birMessage: string;
+    birWarning?: string | null;
+}
+export interface BulkActionResp {
+    barTotal: number;
+    barSucceeded: number;
+    barFailed: number;
+    barResults: BulkItemResult[];
+}
+
 // ── App Release Monitoring (store-monitor) ──────────────────────────
 // One read-through-cache call powers the dashboard grid AND every modal:
 // `GET /mobile/store-monitor` returns the live per-track store state for
@@ -1377,6 +1408,17 @@ export const mobileApi = {
     // Live re-poll one app → upsert the cache → return its fresh card.
     refreshStoreApp: async (appCatalogId: number): Promise<StoreMonitorApp> => {
         const { data } = await apiClient.post(`/mobile/store-monitor/${appCatalogId}/refresh`, {});
+        return data;
+    },
+
+    // ── Bulk promote / rollout — one action over many apps. Always resolves 200
+    // with a per-app verdict; partial failures don't fail the whole call.
+    bulkPromote: async (items: BulkPromoteItem[]): Promise<BulkActionResp> => {
+        const { data } = await apiClient.post('/mobile/bulk/promote', { bpItems: items });
+        return data;
+    },
+    bulkRollout: async (items: BulkRolloutItem[]): Promise<BulkActionResp> => {
+        const { data } = await apiClient.post('/mobile/bulk/rollout', { brItems: items });
         return data;
     },
 };

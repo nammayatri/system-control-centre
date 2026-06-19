@@ -23,6 +23,7 @@ module Products.Autopilot.Mobile.Queries.Tracker
     markReleaseInProgress,
     updateStoreSyncBuildCode,
     setStoreSyncMetadata,
+    setProductionRolloutReflection,
     findExternalReviewRow,
     sccActiveReleaseExistsForVersion,
     setExternalReviewState,
@@ -49,6 +50,7 @@ module Products.Autopilot.Mobile.Queries.Tracker
   )
 where
 
+import Control.Monad (forM_, when)
 import Control.Monad.Catch (throwM)
 import Core.AppError (DBError (..))
 import Core.DB.Connection (runDB)
@@ -326,6 +328,90 @@ setStoreSyncMetadata ac version metaJson = withDb $ \db ->
               &&. rtStatus rt ==. val_ "COMPLETED"
               &&. isNothing_ (rtReviewStatus rt)
         )
+
+-- | Reconcile the production-rollout REFLECTION across an app's android store-sync
+-- snapshot rows in one pass, so the release list matches the App Monitor. The
+-- leading-track logic ('setStoreSyncMetadata') only refreshes the NEWEST build's
+-- row; when an OLDER version is mid-rollout on production (a newer build sits on
+-- internal), that version's row would otherwise never show the ramp.
+--
+-- @mActive@ is @Just (version, rollout_status, percent)@ for the version actively
+-- ramping on production below 100%, else @Nothing@. This stamps
+-- @rollout_status@ + @rollout_percent@ onto that version's row (bumping
+-- @date_updated@ so it floats to the top of the list) and CLEARS those keys from
+-- every other store-sync row — so a version SUPERSEDED by a later 100% promote
+-- stops showing "rolling out" and reverts to its natural track badge.
+--
+-- It deliberately does NOT touch @store_track@ or @status@: the row stays a
+-- COMPLETED snapshot outside the rollout reconciler ('findActiveRolloutReleases' is
+-- INPROGRESS-gated — Apple / the operator owns the ramp), and the rollout-aware
+-- track badge shows "Rolling out X%" without implying the version is fully live.
+-- 100% is intentionally excluded by the caller: a completed rollout IS the live
+-- production version, badged "Production" via 'setStoreSyncMetadata' as usual.
+setProductionRolloutReflection :: (MonadFlow m) => AppCatalog -> Maybe (Text, Text, Double) -> UTCTime -> m ()
+setProductionRolloutReflection ac mActive now = withDb $ \db -> do
+  rows <-
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtAppGroup rt ==. val_ (acName ac))
+          guard_ (rtService rt ==. val_ (acSurface ac))
+          guard_ (rtEnv rt ==. val_ (acPlatform ac))
+          guard_ (rtMode rt ==. val_ (Just "STORE_SYNC"))
+          guard_ (rtStatus rt ==. val_ "COMPLETED")
+          guard_ (isNothing_ (rtReviewStatus rt))
+          pure rt
+  forM_ rows $ \row -> do
+    -- The list reads the reflection from @metadata@ (the rollout columns aren't in
+    -- its response); the detail page (GET /rollout) reads the @rollout_status@ /
+    -- @rollout_percent@ COLUMNS. Write both so every surface agrees. The row stays
+    -- COMPLETED, so the INPROGRESS-gated reconciler still never touches it.
+    let (newMeta, newStatus, newPct, bump) = case mActive of
+          Just (v, st, pct)
+            | rtNewVersion row == v -> (setRolloutMeta (rtMetadata row) st pct, Just st, Just pct, True)
+          _ -> (clearRolloutMeta (rtMetadata row), Nothing, Nothing, False)
+        changed =
+          Just newMeta /= rtMetadata row
+            || newStatus /= rtRolloutStatus row
+            || newPct /= rtRolloutPercent row
+    when changed $
+      runDB db $
+        runUpdate $
+          update
+            (releaseTrackers autopilotDb)
+            ( \rt ->
+                mconcat $
+                  [ rtMetadata rt <-. val_ (Just newMeta),
+                    rtRolloutStatus rt <-. val_ newStatus,
+                    rtRolloutPercent rt <-. val_ newPct
+                  ]
+                    <> [rtUpdatedAt rt <-. val_ now | bump]
+            )
+            (\rt -> rtId rt ==. val_ (rtId row))
+
+-- | The store-sync @metadata@ object (or empty), shared by the rollout-reflection
+-- set/clear helpers. Preserves every existing key (notably @store_track@ and the
+-- per-track @tracks@ snapshots).
+storeMetaObject :: Maybe Text -> KM.KeyMap Value
+storeMetaObject mCur = case mCur >>= (Aeson.decodeStrict . TE.encodeUtf8) of
+  Just (Aeson.Object o) -> o
+  _ -> KM.empty
+
+-- | Add @rollout_status@ + @rollout_percent@ to a store-sync metadata blob.
+setRolloutMeta :: Maybe Text -> Text -> Double -> Text
+setRolloutMeta mCur rolloutStatus pct =
+  encodeJsonText . Aeson.Object $
+    KM.insert "rollout_status" (Aeson.String rolloutStatus) $
+      KM.insert "rollout_percent" (Aeson.Number (realToFrac pct)) $
+        storeMetaObject mCur
+
+-- | Strip the @rollout_status@ / @rollout_percent@ reflection back out (a version
+-- no longer actively rolling out on production — finished or superseded).
+clearRolloutMeta :: Maybe Text -> Text
+clearRolloutMeta mCur =
+  encodeJsonText . Aeson.Object . KM.delete "rollout_status" . KM.delete "rollout_percent" $
+    storeMetaObject mCur
 
 -- ─── Out-of-band (external) review snapshots ───────────────────────
 --

@@ -15,6 +15,9 @@ convention.
 module Products.Autopilot.Mobile.Queries.StoreStatus (
     StoreStatusUpsert (..),
     upsertStoreStatus,
+    setProductionRolloutStatus,
+    setProductionReleased,
+    setProductionReviewStatus,
     listStoreStatus,
     secondsSinceLastSync,
     latestShippedVersionsPerApp,
@@ -73,6 +76,62 @@ upsertStoreStatus u = withDb $ \db -> withConn db $ \conn -> do
             ( (ssuAppCatalogId u, ssuPlatform u, ssuTrack u, ssuVersionName u, ssuVersionCode u, ssuStatus u)
                 :. (ssuRolloutPercent u, ssuReviewStatus u, ssuReleaseNotes u, ssuExpectedVersion u)
             )
+    pure ()
+
+{- | Optimistically reflect a just-applied production rollout state into the
+@store_status@ cache (the App Monitor's source) so the monitor matches the release
+list right after a rollout action — without spending a Play/ASC edit to re-read.
+
+Targets only the production track and only the rollout-relevant columns (version,
+%, status), preserving the review overlay and notes. @status@ carries the value the
+next sync would compute — @"inProgress"@ while ramping/resumed, @"halted"@ while
+paused — so the monitor badge derives the same label ("Rolling out X%" / "Halted @
+X%") immediately. A no-op if the app has no production row yet (the next real store
+refresh fills it). The Phase-7 reconciler reconciles it to the true live value on the
+next refresh.
+-}
+setProductionRolloutStatus :: (MonadFlow m) => Int32 -> Text -> Text -> Maybe Int32 -> Text -> Double -> m ()
+setProductionRolloutStatus aid platform version mCode status pct = withDb $ \db -> withConn db $ \conn -> do
+    _ <-
+        execute
+            conn
+            "UPDATE store_status SET rollout_percent = ?, status = ?, \
+            \  version_name = ?, version_code = ? \
+            \ WHERE app_catalog_id = ? AND platform = ? AND track = 'production'"
+            (pct, status, version, mCode, aid, platform)
+    pure ()
+
+{- | Mirror a COMPLETED production release (100%, fully live) onto the production
+row AND clear the review overlay — matching what the next sync computes once the
+release leaves @INPROGRESS@ ('findActiveMobileState' → Nothing, so review_status
+falls away and the cell reads "Live · 100%" instead of a stale "Approved · held").
+Used by @/rollout/release-all@, @/rollout/set@ at 100, and a non-phased iOS release.
+-}
+setProductionReleased :: (MonadFlow m) => Int32 -> Text -> Text -> Maybe Int32 -> m ()
+setProductionReleased aid platform version mCode = withDb $ \db -> withConn db $ \conn -> do
+    _ <-
+        execute
+            conn
+            "UPDATE store_status SET rollout_percent = 100, status = 'completed', \
+            \  review_status = NULL, version_name = ?, version_code = ? \
+            \ WHERE app_catalog_id = ? AND platform = ? AND track = 'production'"
+            (version, mCode, aid, platform)
+    pure ()
+
+{- | Mirror a production review state (submit / approve / reject) onto the production
+row — the same overlay 'findActiveMobileState' applies on the next sync, shown now so
+the App Monitor reflects a promote / mark-approved / mark-rejected immediately.
+'Nothing' clears the overlay. Touches only @review_status@, leaving the live version
+and rollout columns intact.
+-}
+setProductionReviewStatus :: (MonadFlow m) => Int32 -> Text -> Maybe Text -> m ()
+setProductionReviewStatus aid platform mReview = withDb $ \db -> withConn db $ \conn -> do
+    _ <-
+        execute
+            conn
+            "UPDATE store_status SET review_status = ? \
+            \ WHERE app_catalog_id = ? AND platform = ? AND track = 'production'"
+            (mReview, aid, platform)
     pure ()
 
 -- | All cached rows (~40). The monitor groups these by app_catalog_id in Haskell.
