@@ -111,7 +111,7 @@ import Products.Autopilot.Mobile.Versioning (
 import Products.Autopilot.Mobile.Versioning.Apple (
     AscReviewState (..),
     getAscReviewState,
-    loadAscCreds,
+    loadAscCredsFor,
     renderAscErr,
  )
 import Products.Autopilot.RuntimeConfig (
@@ -197,10 +197,11 @@ stageResolveRunId =
         { stageGuard = hasExternalRunId
         }
 
--- | Stage 5 — poll @\/runs/:id\/jobs@; track this row's matrix job.
--- Skip once the build is submitted (MBSubmittedToStore) — its job is done by then.
--- Guarding on terminal alone would re-poll forever for a staged-rollout-held release
--- (parked non-terminal at MBTagPushed), spamming MATRIX_JOB_UPDATED + GitHub calls.
+{- | Stage 5 — poll @\/runs/:id\/jobs@; track this row's matrix job.
+Skip once the build is submitted (MBSubmittedToStore) — its job is done by then.
+Guarding on terminal alone would re-poll forever for a staged-rollout-held release
+(parked non-terminal at MBTagPushed), spamming MATRIX_JOB_UPDATED + GitHub calls.
+-}
 stagePollMatrixJobs =
     (mkStage "PollMatrixJobs" execPollMatrixJobs)
         { stageGuard = mbStatusReached MBSubmittedToStore
@@ -381,7 +382,7 @@ execResolveVersion = mobileStage "ResolveVersion" $ do
                         "AppCatalog row for "
                             <> appGroup rt
                             <> " has no package_name; cannot resolve next version"
-            res <- resolveNextVersion (acPlatform ac) pkgName
+            res <- resolveNextVersion (acStoreAccount ac) (acPlatform ac) pkgName
             case res of
                 Left err
                     | isConfigError err -> abort err
@@ -1129,6 +1130,7 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
 * anything else               → no-op (engine should not have called
   Finalize before a terminal mb status; defensive).
 -}
+
 {- | Stage 6.5: bounded, throttled poll of the store review state. Runs only when
 @mbWfStatus == MBInReview@. iOS advances to MBReviewApproved / MBReviewRejected via
 'getAscReviewState'; Android review is opaque, so the stage waits for the operator's
@@ -1162,7 +1164,7 @@ execPollReview = mobileStage "PollReview" $ do
                                 [ "message" .= ("App Store review pending beyond the soft timeout — check App Store Connect" :: Text)
                                 , "timeout_days" .= timeoutDays
                                 ]
-                    mCreds <- loadAscCreds
+                    mCreds <- loadAscCredsFor (acStoreAccount ac)
                     case mCreds of
                         Nothing -> do
                             logInfoIO $ "[PollReview] " <> releaseId rt <> " ASC creds missing; will retry"

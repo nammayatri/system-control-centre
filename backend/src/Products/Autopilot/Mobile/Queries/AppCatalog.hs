@@ -137,6 +137,7 @@ insertAppCatalog NewAppCatalogRow{..} = withDb $ \db -> do
                             , acDisplayLabel = val_ nacDisplayLabel
                             , acFirebaseProjectId = val_ nacFirebaseProjectId
                             , acEnabled = val_ enabled'
+                            , acStoreAccount = val_ Nothing
                             , acCreatedAt = default_
                             }
                         ]
