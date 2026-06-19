@@ -48,6 +48,7 @@ module Products.Autopilot.Mobile.Versioning.Apple (
     getLiveReleaseNotes,
     firstWhatsNew,
     loadAscCreds,
+    loadAscCredsFor,
     mintAscToken,
     renderAscErr,
 
@@ -121,6 +122,7 @@ import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Base64.URL as B64U
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as LBS
+import Data.Char (isAlphaNum)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
@@ -268,7 +270,8 @@ data AscSnapshot = AscSnapshot
 (+ its "What's New") and the latest TestFlight build. Composes the existing
 live-version / release-notes / build readers — read-only, no new auth. The
 production rollout % is filled by the poller from @release_tracker@ (Phase 7), not
-re-read here. -}
+re-read here.
+-}
 fetchAscSnapshots :: (MonadFlow m) => AscCreds -> Text -> m (Either AscError [AscSnapshot])
 fetchAscSnapshots creds bundleId = do
     eProdVer <- liftIO (getLiveAppStoreVersion creds bundleId)
@@ -330,13 +333,16 @@ Implementation:
 Built on @cryptonite@ — no new dependency. PyJWT does the same thing
 in the iOS workflow's auto-detect (fastlane.yaml:290-298).
 -}
--- | ASC bearer-token validity (seconds). 15 min — well under Apple's 20-min cap,
--- leaving headroom for the @iat@ backdate + clock skew.
+
+{- | ASC bearer-token validity (seconds). 15 min — well under Apple's 20-min cap,
+leaving headroom for the @iat@ backdate + clock skew.
+-}
 ascTokenTtlSec :: Integer
 ascTokenTtlSec = 840
 
--- | Re-mint when a cached token has less than this much validity left, so a reused
--- token is never close to expiry when it reaches Apple.
+{- | Re-mint when a cached token has less than this much validity left, so a reused
+token is never close to expiry when it reaches Apple.
+-}
 ascTokenReuseFloorSec :: Integer
 ascTokenReuseFloorSec = 180
 
@@ -347,7 +353,8 @@ sent on many requests. Minting a fresh JWT per call (which every read used to do
 churns auth: a single app refresh fans out ~8–10 calls, and a burst throws dozens
 of distinct tokens at Apple in seconds, which it intermittently rejects with
 401/403 (surfacing as @asc_unauthorized@). Caching one token per key and reusing it
-collapses that to ~one mint per 15 min. -}
+collapses that to ~one mint per 15 min.
+-}
 {-# NOINLINE ascTokenCache #-}
 ascTokenCache :: IORef (Map.Map Text (Text, Integer))
 ascTokenCache = unsafePerformIO (newIORef Map.empty)
@@ -365,9 +372,10 @@ mintAscToken creds@AscCreds{acKeyId = keyId} = do
                     atomicModifyIORef' ascTokenCache (\m -> (Map.insert keyId (tok, nowSec + ascTokenTtlSec) m, ()))
                     pure (Right tok)
 
--- | Sign a fresh ASC JWT. @iat@ is backdated and @exp@ kept well under Apple's
--- 20-min cap so a forward clock drift can't make Apple see @iat@ in the future or
--- @exp@ out of range (both → 401). Callers should prefer 'mintAscToken' (cached).
+{- | Sign a fresh ASC JWT. @iat@ is backdated and @exp@ kept well under Apple's
+20-min cap so a forward clock drift can't make Apple see @iat@ in the future or
+@exp@ out of range (both → 401). Callers should prefer 'mintAscToken' (cached).
+-}
 signAscToken :: AscCreds -> Integer -> IO (Either AscError Text)
 signAscToken AscCreds{..} nowSec =
     case parseEcP256PrivateKey acP8 of
@@ -588,13 +596,15 @@ permanent for a bundle, so a successful resolution is cached for the process
 lifetime. Every ASC operation needs the appId, so without this each call re-runs
 the @\/apps@ lookup — roughly DOUBLING the request volume (and auth churn) per
 refresh. Only successful resolutions are cached; not-found / unauthorized are
-never cached, so a fix (app published, key access granted) is picked up on retry. -}
+never cached, so a fix (app published, key access granted) is picked up on retry.
+-}
 {-# NOINLINE ascAppIdCache #-}
 ascAppIdCache :: IORef (Map.Map Text Text)
 ascAppIdCache = unsafePerformIO (newIORef Map.empty)
 
--- | Resolve a bundle id to its App Store app id, served from 'ascAppIdCache' when
--- known. Falls through to the live @\/apps@ lookup on a miss and caches the result.
+{- | Resolve a bundle id to its App Store app id, served from 'ascAppIdCache' when
+known. Falls through to the live @\/apps@ lookup on a miss and caches the result.
+-}
 lookupAppByBundleId :: Text -> Text -> IO (Either AscError Text)
 lookupAppByBundleId token bundleId = do
     cached <- Map.lookup bundleId <$> readIORef ascAppIdCache
@@ -696,8 +706,9 @@ instance FromJSON IncludedAttrs where
     parseJSON = withObject "IncludedAttrs" $ \o ->
         IncludedAttrs <$> o .:? "version"
 
--- | One element of @data[]@ in a /v1/builds response. The build number
--- (CFBundleVersion) is at @attributes.version@ — reuse 'IncludedAttrs' (also @.version@).
+{- | One element of @data[]@ in a /v1/builds response. The build number
+(CFBundleVersion) is at @attributes.version@ — reuse 'IncludedAttrs' (also @.version@).
+-}
 newtype BuildItem = BuildItem (Maybe IncludedAttrs)
 
 instance FromJSON BuildItem where
@@ -1340,7 +1351,8 @@ and @ACTIVE@ means "actively ramping", which Apple only permits once the version
 is @READY_FOR_SALE@; POSTing @ACTIVE@ on an in-review version is rejected, leaving
 the release un-phased. @INACTIVE@ just records the intent; Apple auto-activates
 the 7-day ramp when the version is released. Matches the state model in
-'AscPhasedState' / 'getPhasedReleaseState' (default @INACTIVE@ → @ACTIVE@). -}
+'AscPhasedState' / 'getPhasedReleaseState' (default @INACTIVE@ → @ACTIVE@).
+-}
 enablePhasedRelease :: (MonadFlow m) => AscCreds -> Text -> Text -> m (Either AscError Text)
 enablePhasedRelease creds bundleId versionString = liftIO $ withAscApp creds bundleId $ \token appId ->
     getAppStoreVersion token appId versionString >>? \ver ->
@@ -1352,8 +1364,9 @@ enablePhasedRelease creds bundleId versionString = liftIO $ withAscApp creds bun
                 Just pid -> pure (Right pid)
                 Nothing -> createPhasedRelease token (avId ver)
 
--- | POST a new INACTIVE phasedRelease for a version; returns its id. (See
--- 'enablePhasedRelease' for why INACTIVE rather than ACTIVE.)
+{- | POST a new INACTIVE phasedRelease for a version; returns its id. (See
+'enablePhasedRelease' for why INACTIVE rather than ACTIVE.)
+-}
 createPhasedRelease :: Text -> Text -> IO (Either AscError Text)
 createPhasedRelease token vid =
     let body =
@@ -1411,7 +1424,8 @@ getPhasedReleaseState creds bundleId versionString = liftIO $ withAscApp creds b
 {- | The id of the phasedRelease attached to a version (by version string), or
 'Nothing' if none exists. Used to self-heal a release whose promote-time enable
 failed to persist the id (e.g. a duplicate-create 409 even though the phased
-release exists) — so the release isn't later mistaken for non-phased. -}
+release exists) — so the release isn't later mistaken for non-phased.
+-}
 getPhasedReleaseId :: (MonadFlow m) => AscCreds -> Text -> Text -> m (Either AscError (Maybe Text))
 getPhasedReleaseId creds bundleId versionString = liftIO $ withAscApp creds bundleId $ \token appId ->
     getAppStoreVersion token appId versionString >>? \ver ->
@@ -1421,7 +1435,8 @@ getPhasedReleaseId creds bundleId versionString = liftIO $ withAscApp creds bund
 its @(versionString, reviewState)@ — used by store sync to surface a review that
 was submitted OUTSIDE SCC. Returns 'Nothing' when there's no in-flight version
 (only a live @READY_FOR_SALE@ one) or none could be read. Picks the newest
-non-live, non-superseded version; the caller decides which states to surface. -}
+non-live, non-superseded version; the caller decides which states to surface.
+-}
 getInFlightReview :: (MonadFlow m) => AscCreds -> Text -> m (Either AscError (Maybe (Text, AscReviewState)))
 getInFlightReview creds bundleId = liftIO $ withAscApp creds bundleId $ \token appId ->
     ascGet
@@ -1430,8 +1445,9 @@ getInFlightReview creds bundleId = liftIO $ withAscApp creds bundleId $ \token a
         "asc-inflight-review"
         >>? \b -> pure (Right (selectInFlightReview (parseVersionStates b)))
 
--- | Pick the in-flight (non-live, non-superseded) version + its review state from
--- a parsed @appStoreVersions@ list. Exposed for testing.
+{- | Pick the in-flight (non-live, non-superseded) version + its review state from
+a parsed @appStoreVersions@ list. Exposed for testing.
+-}
 selectInFlightReview :: [(Text, Text)] -> Maybe (Text, AscReviewState)
 selectInFlightReview infos =
     listToMaybe
@@ -1457,24 +1473,42 @@ instance FromJSON VersionStates where
 
 -- ─── Server-config helper ──────────────────────────────────────────
 
-{- | Read the three App Store Connect secrets from the process __environment__
-(k8s Secret in prod; @local-mobile-secrets.env@ in dev) — never from the DB.
-Returns 'Nothing' if any is empty — caller surfaces a clear error.
-
-* @SC_ASC_ISSUER_ID@
-* @SC_ASC_KEY_ID@
-* @SC_ASC_PRIVATE_KEY_P8_B64@ — the @.p8@ PEM, base64-encoded (single line).
+{- | Env-var suffix for a store account: 'Nothing' / blank → @""@ (the default,
+unsuffixed key); @"cumta"@ → @"_CUMTA"@. Non-alphanumerics collapse to @_@.
 -}
-loadAscCreds :: (MonadFlow m) => m (Maybe AscCreds)
-loadAscCreds = do
-    mIssuer <- lookupEnvSecret "SC_ASC_ISSUER_ID"
-    mKeyId <- lookupEnvSecret "SC_ASC_KEY_ID"
-    mP8 <- lookupEnvSecretB64 "SC_ASC_PRIVATE_KEY_P8_B64"
+ascAccountSuffix :: Maybe Text -> String
+ascAccountSuffix mAcct = case fmap T.strip mAcct of
+    Just a | not (T.null a) -> "_" <> T.unpack (T.toUpper (T.map (\c -> if isAlphaNum c then c else '_') a))
+    _ -> ""
+
+{- | Read the App Store Connect secrets for a given account from the process
+__environment__ (k8s Secret in prod; @local-mobile-secrets.env@ in dev) — never the
+DB. The account selects the env suffix ('Nothing' → the default unsuffixed key):
+
+* @SC_ASC_ISSUER_ID[_ACCOUNT]@
+* @SC_ASC_KEY_ID[_ACCOUNT]@
+* @SC_ASC_PRIVATE_KEY_P8_B64[_ACCOUNT]@ — the @.p8@ PEM, base64-encoded (single line).
+
+Returns 'Nothing' if any is empty — caller surfaces a clear error. No fallback to
+the default key for a tagged account: that would hit the wrong Apple team and 403.
+-}
+loadAscCredsFor :: (MonadFlow m) => Maybe Text -> m (Maybe AscCreds)
+loadAscCredsFor mAcct = do
+    let sfx = ascAccountSuffix mAcct
+    mIssuer <- lookupEnvSecret ("SC_ASC_ISSUER_ID" <> sfx)
+    mKeyId <- lookupEnvSecret ("SC_ASC_KEY_ID" <> sfx)
+    mP8 <- lookupEnvSecretB64 ("SC_ASC_PRIVATE_KEY_P8_B64" <> sfx)
     pure $ case (mIssuer, mKeyId, mP8) of
         (Just iss, Just kid, Just p8)
             | not (T.null iss) && not (T.null kid) && not (T.null p8) ->
                 Just (AscCreds iss kid p8)
         _ -> Nothing
+
+{- | The default-account ASC creds (unsuffixed env). Back-compat for callers with no
+app context; per-app callers should use 'loadAscCredsFor' with the app's account.
+-}
+loadAscCreds :: (MonadFlow m) => m (Maybe AscCreds)
+loadAscCreds = loadAscCredsFor Nothing
 
 -- ─── Error rendering ───────────────────────────────────────────────
 
@@ -1501,19 +1535,22 @@ handles it.
 -}
 resolve ::
     (MonadFlow m) =>
+    -- | Store account (@app_catalog.store_account@); 'Nothing' = default ASC key.
+    Maybe Text ->
     -- | iOS bundle id (from @app_catalog.package_name@).
     Text ->
     m (Either Text Text)
-resolve bundleId = do
-    mCreds <- loadAscCreds
+resolve mAcct bundleId = do
+    mCreds <- loadAscCredsFor mAcct
     case mCreds of
         Nothing -> pure (Left (renderAscErr AscCredsMissing))
         Just creds -> do
             res <- liftIO (mintAscToken creds >>? \token -> resolveIosVersionWithToken token bundleId)
             pure (either (Left . renderAscErr) Right res)
 
--- | Read TestFlight + the live App Store version for an app, then apply the
--- track-aware iOS bump rule ('computeNextIosVersion'). Shared by the two entry points.
+{- | Read TestFlight + the live App Store version for an app, then apply the
+track-aware iOS bump rule ('computeNextIosVersion'). Shared by the two entry points.
+-}
 resolveIosVersionWithToken :: Text -> Text -> IO (Either AscError Text)
 resolveIosVersionWithToken token bundleId =
     lookupAppByBundleId token bundleId >>? \appId ->

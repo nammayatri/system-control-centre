@@ -33,6 +33,10 @@ data AppCatalogT f = AppCatalog
     , acDisplayLabel :: Columnar f (Maybe Text)
     , acFirebaseProjectId :: Columnar f (Maybe Text)
     , acEnabled :: Columnar f Bool
+    , acStoreAccount :: Columnar f (Maybe Text)
+    -- ^ Which App Store Connect account/team this app lives in. NULL = the default
+    -- (unsuffixed) ASC key; a value (e.g. "cumta") selects @SC_ASC_*_<ACCOUNT>@. Lets
+    -- one SCC instance read apps that span multiple Apple accounts.
     , acCreatedAt :: Columnar f UTCTime
     }
     deriving (Generic, Beamable)
@@ -63,6 +67,7 @@ appCatalog =
                 , acDisplayLabel = fieldNamed "display_label"
                 , acFirebaseProjectId = fieldNamed "firebase_project_id"
                 , acEnabled = fieldNamed "enabled"
+                , acStoreAccount = fieldNamed "store_account"
                 , acCreatedAt = fieldNamed "created_at"
                 }
 

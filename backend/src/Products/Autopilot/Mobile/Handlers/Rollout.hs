@@ -86,7 +86,7 @@ import Products.Autopilot.Mobile.Versioning.Apple (
     enablePhasedRelease,
     getLiveReleaseNotes,
     getPhasedReleaseId,
-    loadAscCreds,
+    loadAscCredsFor,
     pausePhasedRelease,
     releaseApprovedVersion,
     renderAscErr,
@@ -246,7 +246,7 @@ creds / package name / store error / empty notes — the caller falls back.
 fetchProdReleaseNotes :: AppCatalog -> Text -> Flow (Maybe Text)
 fetchProdReleaseNotes ac platform = case (platform, acPackageName ac) of
     ("ios", Just pkg) | not (T.null pkg) -> do
-        mCreds <- loadAscCreds
+        mCreds <- loadAscCredsFor (acStoreAccount ac)
         case mCreds of
             Just creds -> either (const Nothing) id <$> liftIO (getLiveReleaseNotes creds pkg)
             Nothing -> pure Nothing
@@ -290,7 +290,7 @@ promoteH ap rid PromoteReq{..} = do
     let version = rtNewVersion row
     if rtEnv row == "ios"
         then do
-            creds <- loadAscCreds >>= maybe (bad "App Store Connect credentials not configured.") pure
+            creds <- loadAscCredsFor (acStoreAccount ac) >>= maybe (bad "App Store Connect credentials not configured.") pure
             submitVersionForReview creds storeId version prReleaseNotes
                 >>= either (\e -> bad ("App Store submit failed: " <> renderAscErr e)) pure
             -- Phased release is opt-in and best-effort: a failure here must not
@@ -353,7 +353,7 @@ resolveDetailPhasedId ac row target
     , mbWfStatus target == MBReviewApproved
     , Just bundleId <- acPackageName ac
     , not (T.null bundleId) =
-        loadAscCreds >>= \case
+        loadAscCredsFor (acStoreAccount ac) >>= \case
             Just creds -> either (const Nothing) id <$> getPhasedReleaseId creds bundleId (rtNewVersion row)
             Nothing -> pure Nothing
     | otherwise = pure (rtAscPhasedId row)
@@ -390,7 +390,7 @@ releaseH ap rid = do
     unless (mbWfStatus target == MBReviewApproved) $
         bad ("Cannot release: state is " <> tshow (mbWfStatus target) <> ", expected approved (MBReviewApproved).")
     storeId <- storeIdOf ac
-    creds <- loadAscCreds >>= maybe (bad "App Store Connect credentials not configured.") pure
+    creds <- loadAscCredsFor (acStoreAccount ac) >>= maybe (bad "App Store Connect credentials not configured.") pure
     releaseApprovedVersion creds storeId (rtNewVersion row)
         >>= either (\e -> bad ("App Store release failed: " <> renderAscErr e)) pure
     -- Decide phased vs non-phased from the STORE, not just the stored id: a
@@ -461,7 +461,7 @@ rolloutHaltH ap rid = do
     if rtEnv row == "ios"
         then do
             pid <- requirePhasedId row
-            creds <- loadAscCreds >>= maybe (bad "App Store Connect credentials not configured.") pure
+            creds <- loadAscCredsFor (acStoreAccount ac) >>= maybe (bad "App Store Connect credentials not configured.") pure
             pausePhasedRelease creds pid
                 >>= either (\e -> bad ("App Store pause failed: " <> renderAscErr e)) pure
             setRolloutState rid "halted" (rtRolloutPercent row)
@@ -487,7 +487,7 @@ rolloutResumeH ap rid = do
     if rtEnv row == "ios"
         then do
             pid <- requirePhasedId row
-            creds <- loadAscCreds >>= maybe (bad "App Store Connect credentials not configured.") pure
+            creds <- loadAscCredsFor (acStoreAccount ac) >>= maybe (bad "App Store Connect credentials not configured.") pure
             resumePhasedRelease creds pid
                 >>= either (\e -> bad ("App Store resume failed: " <> renderAscErr e)) pure
             setRolloutState rid "rolling_out" (rtRolloutPercent row)
@@ -515,7 +515,7 @@ rolloutReleaseAllH ap rid = do
     storeId <- storeIdOf ac
     if rtEnv row == "ios"
         then do
-            creds <- loadAscCreds >>= maybe (bad "App Store Connect credentials not configured.") pure
+            creds <- loadAscCredsFor (acStoreAccount ac) >>= maybe (bad "App Store Connect credentials not configured.") pure
             -- A phased ramp is completed to 100%; a non-phased release is already
             -- fully live, so there's nothing more to call.
             case rtAscPhasedId row of
@@ -581,7 +581,7 @@ withdrawH ap rid = do
         bad "Withdraw from review is iOS-only — Google Play has no API to cancel a review."
     ensureInReview (mbWfStatus target)
     bundleId <- storeIdOf ac
-    creds <- loadAscCreds >>= maybe (bad "App Store Connect credentials not configured.") pure
+    creds <- loadAscCredsFor (acStoreAccount ac) >>= maybe (bad "App Store Connect credentials not configured.") pure
     cancelReviewSubmission creds bundleId
         >>= either (\e -> bad ("App Store withdraw failed: " <> renderAscErr e)) pure
     now <- liftIO getCurrentTime

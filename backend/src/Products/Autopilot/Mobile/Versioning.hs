@@ -71,18 +71,20 @@ get a stable, machine-readable string suitable for audit events.
 -}
 resolveNextVersion ::
     (MonadFlow m) =>
+    -- | Store account (@app_catalog.store_account@); 'Nothing' = default key. iOS only.
+    Maybe Text ->
     -- | Platform — value of @app_catalog.platform@.
     Text ->
     -- | Package name or bundle id — value of @app_catalog.package_name@.
     Text ->
     m (Either Text VersionResolution)
-resolveNextVersion platform pkg =
+resolveNextVersion mAcct platform pkg =
     case platform of
         "android" -> do
             res <- P.resolve pkg
             pure (fmap (\(n, c) -> AndroidVersion n c) res)
         "ios" -> do
-            res <- A.resolve pkg
+            res <- A.resolve mAcct pkg
             pure (fmap IosVersion res)
         other -> pure (Left ("unsupported platform: " <> other))
 
@@ -105,7 +107,7 @@ resolveNextVersionWithToken mAscToken platform pkg =
             Just token -> do
                 res <- A.resolveWithToken token pkg
                 pure (fmap IosVersion res)
-            Nothing -> do
-                res <- A.resolve pkg
-                pure (fmap IosVersion res)
+            -- No token = this app's store account has no ASC creds configured. Don't
+            -- fall back to the default key (that would hit the wrong Apple team).
+            Nothing -> pure (Left "asc_creds_missing")
         other -> pure (Left ("unsupported platform: " <> other))

@@ -104,6 +104,7 @@ import Products.Autopilot.Mobile.Versioning.Apple (
     getPhasedReleaseId,
     getPhasedReleaseState,
     loadAscCreds,
+    loadAscCredsFor,
     renderAscErr,
  )
 import Products.Autopilot.Mobile.Versioning.Play (
@@ -153,8 +154,8 @@ runStoreSync = do
                 | b <- builds
                 ]
     mPlayCreds <- loadPlayCreds
-    mAscCreds <- loadAscCreds
-    mapM_ (syncAppUnified mPlayCreds mAscCreds buildMap expected) apps
+    -- ASC creds are resolved per-app (per store account) inside 'syncAppUnified'.
+    mapM_ (syncAppUnified mPlayCreds buildMap expected) apps
     logInfo $ "[STORE_SYNC] Finished — checked " <> T.pack (show (length apps)) <> " app(s)"
 
 {- | Run an action, logging (but swallowing) any exception so one app's failure —
@@ -186,12 +187,11 @@ keep their own reads.
 -}
 syncAppUnified ::
     Maybe PlayCreds ->
-    Maybe AscCreds ->
     BuildMap ->
     Map.Map (Text, Text, Text) Text ->
     AppCatalog ->
     Flow ()
-syncAppUnified mPlayCreds mAscCreds buildMap expected ac = do
+syncAppUnified mPlayCreds buildMap expected ac = do
     let key = (acName ac, acSurface ac, acPlatform ac)
         existing = Map.lookup key buildMap
         mExpected = Map.lookup key expected
@@ -211,20 +211,24 @@ syncAppUnified mPlayCreds mAscCreds buildMap expected ac = do
                             reconcileAndroidExternalReviewFrom ac (bodiesToProdReleases bodies)
                         -- Rollout reconcile from the SAME fetch — no extra edit.
                         reconcileAndroidRolloutsFrom ac (bodiesToRolloutState bodies)
-        "ios" -> case mAscCreds of
-            Nothing -> logWarning $ "[STORE_SYNC] No ASC creds — skipping " <> acName ac
-            Just creds -> withPkg ac $ \bundleId -> do
-                mActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac)
-                safely ("store_status " <> acName ac) $
-                    fetchAscSnapshots creds bundleId >>= \case
-                        Left e -> logWarning $ "[STORE_MONITOR] ASC snapshot error for " <> acName ac <> ": " <> renderAscErr e
-                        Right snaps -> mapM_ (upsertStoreStatus . iosSnapToUpsert ac mExpected mActive) snaps
-                when (acEnabled ac) $ do
-                    syncIos creds ac existing
-                    -- Also surface an App Store review that was started outside SCC.
-                    syncIosExternalReview creds ac
-                -- Rollout reconcile (ASC reads — no Play edit quota).
-                reconcileIosRollouts creds ac
+        -- Resolve the ASC key for THIS app's account (multi-account: Cumta /
+        -- YatriSathi live in different Apple teams). No fallback to the default key
+        -- for a tagged app — that would 403 against the wrong team.
+        "ios" ->
+            loadAscCredsFor (acStoreAccount ac) >>= \case
+                Nothing -> logWarning $ "[STORE_SYNC] No ASC creds for account '" <> fromMaybe "default" (acStoreAccount ac) <> "' — skipping " <> acName ac
+                Just creds -> withPkg ac $ \bundleId -> do
+                    mActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac)
+                    safely ("store_status " <> acName ac) $
+                        fetchAscSnapshots creds bundleId >>= \case
+                            Left e -> logWarning $ "[STORE_MONITOR] ASC snapshot error for " <> acName ac <> ": " <> renderAscErr e
+                            Right snaps -> mapM_ (upsertStoreStatus . iosSnapToUpsert ac mExpected mActive) snaps
+                    when (acEnabled ac) $ do
+                        syncIos creds ac existing
+                        -- Also surface an App Store review that was started outside SCC.
+                        syncIosExternalReview creds ac
+                    -- Rollout reconcile (ASC reads — no Play edit quota).
+                    reconcileIosRollouts creds ac
         p -> logWarning $ "[STORE_SYNC] Unknown platform " <> p <> " for " <> acName ac
 
 -- | True when this @release_tracker@ row belongs to the given app catalog entry.
@@ -1143,10 +1147,10 @@ refreshStoreStatusOne ac = do
                                 | b <- builds
                                 ]
                     mPlayCreds <- loadPlayCreds
-                    mAscCreds <- loadAscCreds
                     -- ONE fetch → store_status + create-page snapshot + external-review
-                    -- + rollout reconcile, all for this app.
-                    syncAppUnified mPlayCreds mAscCreds buildMap expected ac
+                    -- + rollout reconcile, all for this app. ASC creds resolved per
+                    -- store account inside.
+                    syncAppUnified mPlayCreds buildMap expected ac
 
 {- | Process-global in-flight registry for on-demand refreshes: @app_catalog_id →
 barrier@. Coalesces concurrent refreshes of the SAME app — without it, several
@@ -1157,7 +1161,8 @@ fresh) cache. Caps the per-app live read at ONE concurrent fetch.
 
 In-memory, so it coalesces within a single backend process. Multiple replicas
 would each elect their own leader; a Postgres advisory lock keyed on the package
-is the cross-instance evolution. -}
+is the cross-instance evolution.
+-}
 {-# NOINLINE refreshInflight #-}
 refreshInflight :: MVar (Map.Map Int32 (MVar ()))
 refreshInflight = unsafePerformIO (newMVar Map.empty)
@@ -1165,7 +1170,8 @@ refreshInflight = unsafePerformIO (newMVar Map.empty)
 {- | Run @live@ for this app under single-flight. The first caller for @aid@ runs
 it; concurrent callers block until it finishes, then return without re-fetching
 (the leader's write already refreshed the shared cache). The barrier is always
-released — even if @live@ throws — so followers never hang. -}
+released — even if @live@ throws — so followers never hang.
+-}
 withRefreshSingleFlight :: Int32 -> Flow () -> Flow ()
 withRefreshSingleFlight aid live = do
     decision <- liftIO $ modifyMVar refreshInflight $ \m ->
@@ -1179,10 +1185,12 @@ withRefreshSingleFlight aid live = do
             logInfo $ "[STORE_MONITOR] Refresh already in flight for app " <> T.pack (show aid) <> " — joining, serving cache"
             liftIO (readMVar barrier)
         Right barrier ->
-            live `MC.finally` liftIO (do
-                modifyMVar_ refreshInflight (pure . Map.delete aid)
-                putMVar barrier ()
-            )
+            live
+                `MC.finally` liftIO
+                    ( do
+                        modifyMVar_ refreshInflight (pure . Map.delete aid)
+                        putMVar barrier ()
+                    )
 
 {- | Map a Play track snapshot → a @store_status@ upsert. Production carries the
 live staged-rollout % (the near-zero "pending" fraction reads as a tiny %, which
