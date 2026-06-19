@@ -43,6 +43,7 @@ import Core.Environment (Flow, MonadFlow, logError, logInfo, logWarning)
 import Data.Aeson (object, (.=))
 import Data.Char (isAlphaNum)
 import Data.Int (Int32)
+import Data.List (find)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -71,6 +72,7 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     findExternalReviewRow,
     findMobileAwaitingRollout,
     logEvent,
+    setProductionRolloutReflection,
     mkMobileTrackerRow,
     parseMobileTargetState,
     sccActiveReleaseExistsForVersion,
@@ -208,6 +210,10 @@ syncAppUnified mPlayCreds buildMap expected ac = do
                         when (acEnabled ac) $ do
                             let (internal, production) = bodiesToTracks bodies
                             recordAndroidTracks ac existing internal production
+                            -- Mirror a production ramp of an OLDER version (newer build
+                            -- still on internal) onto its own row so the list matches
+                            -- the monitor — recordAndroidTracks only touches the leader.
+                            reflectProductionRollout ac (bodiesToSnapshots bodies)
                             reconcileAndroidExternalReviewFrom ac (bodiesToProdReleases bodies)
                         -- Rollout reconcile from the SAME fetch — no extra edit.
                         reconcileAndroidRolloutsFrom ac (bodiesToRolloutState bodies)
@@ -315,6 +321,32 @@ recordAndroidTracks ac existing internal production = do
         else -- Leading row unchanged — still refresh metadata.tracks so a
         -- moved production version doesn't lag the stored snapshot.
             setStoreSyncMetadata ac chosenVer metaJson
+
+{- | Reflect the live production track's staged rollout onto the matching store-sync
+row so the release list matches the App Monitor. 'recordAndroidTracks' badges only
+the LEADING version (highest build code), so a PREVIOUS version mid-rollout on
+production — while a newer build sits on internal — would never show the ramp.
+
+Only an in-flight ramp BELOW 100% is reflected: a parked ≈0 pending fraction
+(approved-but-held, below 'androidRolloutFloorPercent') and a completed 100% rollout
+are both excluded — at 100% the version IS the live production build, already badged
+"Production" by 'recordAndroidTracks'/'setStoreSyncMetadata'. Passing the active
+version (or 'Nothing') to 'setProductionRolloutReflection' also CLEARS the reflection
+off any version that has since been superseded, so it stops showing "rolling out".
+-}
+reflectProductionRollout :: AppCatalog -> [StoreTrackSnapshot] -> Flow ()
+reflectProductionRollout ac snaps = do
+    now <- liftIO getCurrentTime
+    let mActive = case find ((== "production") . stsTrack) snaps of
+            Just s
+                | stsVersion s /= "0.0.0"
+                , stsStatus s `elem` ["inProgress", "halted"]
+                , Just pct <- (* 100) <$> stsFraction s
+                , pct >= androidRolloutFloorPercent
+                , pct < 100 ->
+                    Just (stsVersion s, if stsStatus s == "halted" then "halted" else "rolling_out", pct)
+            _ -> Nothing
+    setProductionRolloutReflection ac mActive now
 
 syncIos :: AscCreds -> AppCatalog -> Maybe LatestBuildRow -> Flow ()
 syncIos creds ac existing = do

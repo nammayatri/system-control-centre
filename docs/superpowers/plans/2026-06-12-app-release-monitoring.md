@@ -202,7 +202,7 @@ existing `/mobile` Servant tree; no versioning churn.
 | `Versioning/Apple.hs` | extend | `fetchAscSnapshots` — production + testflight snapshots incl. `whatsNew` |
 | `Mobile/Types/Storage.hs` | extend | `StoreStatusT` Beam table |
 | `dev/migrations/.../00NN-store-status.sql` | new | the cache table |
-| `Mobile/Queries/StoreStatus.hs` | new | upsert + `listStoreStatus` (joined with `app_catalog`) |
+| `Mobile/Queries/StoreStatus.hs` | new | upsert + `listStoreStatus` (joined with `app_catalog`) + action mirrors (`setProductionRolloutStatus` / `setProductionReleased` / `setProductionReviewStatus`, see §10) |
 | `Mobile/StoreSync.hs` | extend | poll snapshots → upsert `store_status` (+ drift compare vs `release_tracker`) |
 | `Mobile/Handlers/StoreMonitor.hs` | new | `GET /store-monitor`, `POST /refresh` |
 | `Mobile/Routes.hs` | extend | mount the two endpoints |
@@ -232,9 +232,23 @@ for that `(app_group, service, env)`. Computed at read (or stamped on poll into
 - `store_status` **is** the cache. `synced_at` drives the freshness badge (amber if older
   than the poll interval).
 - **Refresh paths:** the poller overwrites on schedule; ↻ forces a one-app live re-poll.
-- **Invalidate on action:** a promote / rollout / `mark-*` from the staged-rollout feature
-  touches the same app → enqueue an immediate one-app refresh so the monitor reflects it
-  without waiting for the next tick.
+- **Reflect on action — mirror, don't re-poll** *(2026-06-19)*: a promote / rollout-set /
+  halt / resume / release-all / `mark-approved` / `mark-rejected` / withdraw from the
+  staged-rollout feature changes one app's state. Re-polling the store here is the wrong
+  tool — the per-app refresh is **cooldown-gated** (within the window it just serves the
+  stale cache), and forcing it past the cooldown spends a **second** Play/ASC edit right
+  after the action's own edit, which is the per-app edit rate the cooldown exists to cap.
+  Instead each handler **mirrors the new state it just applied straight into `store_status`**
+  (production row only, no store call): the rollout `%` + `status` (`inProgress` while
+  ramping/resumed, `halted` while paused, `completed`+`review_status = NULL` at 100%) and the
+  review overlay (`in_review` / `approved` / `rejected`) — i.e. exactly what the next sync's
+  live-status + `findActiveMobileState` overlay would compute. The FE then invalidates
+  `['store-monitor']` so the grid refetches the patched cache. Phase 7's reconciler still
+  corrects the row to the true live value on the next real refresh.
+  Helpers: `setProductionRolloutStatus` / `setProductionReleased` / `setProductionReviewStatus`
+  in `Queries/StoreStatus`; wired through `Handlers/Rollout`. Without this the monitor lagged
+  the release list (which reads `release_tracker` directly) until the next poll — most visibly,
+  a **halt** showed on the list but not the monitor.
 
 ---
 
@@ -271,6 +285,9 @@ for that `(app_group, service, env)`. Computed at read (or stamped on poll into
 - [x] **M4 — API** — `Handlers/StoreMonitor` (`GET /store-monitor`) + route; cards assembled from the cache.
 - [x] **M5 — Frontend** — `StoreMonitor` grid + `AppTrackModal` (client-side) + api/types/route.
 - [x] **M6 — Refresh** — `POST /:id/refresh` (live re-poll) + the ↻ button + freshness badge.
+- [x] **M7 — Action mirror** *(2026-06-19)* — every staged-rollout action mirrors its new
+  state into `store_status` (no extra store edit) so the monitor matches the release list
+  immediately; FE invalidates `['store-monitor']` after each action. See §10.
 
 ---
 
