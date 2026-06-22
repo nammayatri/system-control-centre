@@ -99,6 +99,7 @@ data ReleaseTrackerT f = ReleaseTrackerT
     rtStoreRolloutHistory :: Columnar f (Maybe Text),
     rtAscVersionId :: Columnar f (Maybe Text),
     rtAscPhasedId :: Columnar f (Maybe Text),
+    rtStoreTrack :: Columnar f (Maybe Text),
     rtCreatedAt :: Columnar f UTCTime,
     rtUpdatedAt :: Columnar f UTCTime
   }
@@ -217,6 +218,7 @@ autopilotDb =
                   rtStoreRolloutHistory = fieldNamed "store_rollout_history",
                   rtAscVersionId = fieldNamed "asc_version_id",
                   rtAscPhasedId = fieldNamed "asc_phased_id",
+                  rtStoreTrack = fieldNamed "store_track",
                   rtCreatedAt = fieldNamed "date_created",
                   rtUpdatedAt = fieldNamed "last_updated"
                 },

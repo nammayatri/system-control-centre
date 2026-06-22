@@ -178,11 +178,16 @@ latestShippedVersionsPerApp = withDb $ \db -> withConn db $ \conn -> do
     -- (the newer row) and drop the later (older) one.
     pure $ Map.fromListWith (\_older keep -> keep) [((ag, svc, env), ver) | (ag, svc, env, ver) <- rows]
 
-{- | The review / rollout state of the most recent ACTIVE (@INPROGRESS@)
-@MobileBuild@ release for an app, overlaid onto the live production cell. This is
+{- | The review / rollout state of the ACTIVE (@INPROGRESS@) @MobileBuild@ release
+for an app AT A SPECIFIC VERSION, overlaid onto the live production cell. This is
 how an Android "in review" reaches the monitor at all (the Play track is opaque),
-and how an iOS phased % shows before the next reconcile. 'Nothing' when nothing
-is in flight → the cell shows pure live store state.
+and how an iOS phased % shows before the next reconcile.
+
+Scoped to @version@ — the version actually shown on the production cell — so a
+DIFFERENT in-flight version (e.g. a freshly-submitted review build while an older
+version is still rolling out) can't bleed its "in review" onto the live version's
+cell. 'Nothing' when that version has nothing in flight → the cell shows pure live
+store state.
 -}
 data ActiveMobileState = ActiveMobileState
     { amsReviewStatus :: Maybe Text
@@ -190,17 +195,17 @@ data ActiveMobileState = ActiveMobileState
     , amsRolloutPercent :: Maybe Double
     }
 
-findActiveMobileState :: (MonadFlow m) => Text -> Text -> Text -> m (Maybe ActiveMobileState)
-findActiveMobileState ag svc env = withDb $ \db -> withConn db $ \conn -> do
+findActiveMobileState :: (MonadFlow m) => Text -> Text -> Text -> Text -> m (Maybe ActiveMobileState)
+findActiveMobileState ag svc env version = withDb $ \db -> withConn db $ \conn -> do
     rows <-
         query
             conn
             "SELECT review_status, rollout_status, rollout_percent \
             \ FROM release_tracker \
             \ WHERE category = 'MobileBuild' AND status = 'INPROGRESS' \
-            \   AND app_group = ? AND service = ? AND env = ? \
+            \   AND app_group = ? AND service = ? AND env = ? AND new_version = ? \
             \ ORDER BY date_created DESC LIMIT 1"
-            (ag, svc, env)
+            (ag, svc, env, version)
     pure $ case rows of
         ((rs, rost, rp) : _) -> Just (ActiveMobileState rs rost rp)
         [] -> Nothing

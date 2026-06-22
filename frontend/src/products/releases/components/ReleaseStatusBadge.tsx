@@ -22,9 +22,10 @@ export function ReleaseStatusBadge({ release }: { release: APRelease }) {
     const lc = lifecycleFromRelease(release);
     // Override the raw status for an INPROGRESS row (its raw status is misleading)
     // OR a COMPLETED store-sync snapshot that's mirroring a live production rollout
-    // (stage 'rollout' from the reflected rollout_status) — so the badge matches the
-    // status filter and the row's track chip.
-    if (release.status === 'INPROGRESS' || stageOf(lc) === 'rollout') {
+    // (stage 'rollout') OR a superseded version frozen as history (stage 'superseded',
+    // also COMPLETED) — so the badge matches the status filter and the row's track chip.
+    const stage = stageOf(lc);
+    if (release.status === 'INPROGRESS' || stage === 'rollout' || stage === 'superseded') {
       const mb = mobileDisplayStatus(lc);
       if (mb) return <Badge variant={mb.variant} dot>{mb.label}</Badge>;
     }

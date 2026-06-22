@@ -40,9 +40,11 @@ import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById, listAppCatalog)
 import Products.Autopilot.Mobile.Queries.StoreStatus (listStoreStatus)
+import Products.Autopilot.Mobile.Queries.Tracker (listIncomingMobileVersions, parseMobileTargetState)
 import Products.Autopilot.Mobile.StoreSync (refreshStoreStatusOne)
-import Products.Autopilot.Mobile.Types (isDebugBuildType)
+import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), isDebugBuildType)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..), StoreStatus, StoreStatusT (..))
+import Products.Autopilot.Types.Storage.Schema (ReleaseTrackerRow, ReleaseTrackerT (..))
 import Products.Autopilot.RuntimeConfig (getMobileBuildType, getStoreRefreshCooldownSeconds)
 
 -- | One track's live cell. Field names match the frontend @TrackCell@ verbatim.
@@ -67,6 +69,9 @@ data PlatformBlockResp = PlatformBlockResp
     { appCatalogId :: Int32
     , bundleId :: Maybe Text
     , production :: Maybe TrackCellResp
+    , -- | The PROD-INCOMING version (in review / approved-held / rejected), if any —
+      -- sourced from release_tracker so it shows even after leaving the internal track.
+      incoming :: Maybe TrackCellResp
     , internal :: Maybe TrackCellResp
     , testflight :: Maybe TrackCellResp
     }
@@ -133,7 +138,8 @@ storeMonitorH _ap = do
         else do
             apps_ <- listAppCatalog
             statuses <- listStoreStatus
-            pure (StoreMonitorResp True Nothing (assembleCards apps_ statuses) cooldown)
+            incomings <- listIncomingMobileVersions
+            pure (StoreMonitorResp True Nothing (assembleCards apps_ statuses incomings) cooldown)
 
 -- | Live re-poll one app, then return its fresh card. 404 on an unknown id. In a
 -- debug deployment it re-polls nothing and reads no @store_status@ (the table may
@@ -152,9 +158,10 @@ refreshStoreAppH _ap aid = do
                     then pure []
                     else refreshStoreStatusOne row >> listStoreStatus
             apps <- listAppCatalog
+            incomings <- listIncomingMobileVersions
             let key = (acName row, acSurface row)
                 groupRows = filter (\a -> (acName a, acSurface a) == key) apps
-            pure (toCard (indexStatuses statuses) key groupRows)
+            pure (toCard (indexStatuses statuses) (indexIncoming incomings) key groupRows)
 
 -- ─── Assembly (pure) ───────────────────────────────────────────────
 
@@ -162,36 +169,58 @@ refreshStoreAppH _ap aid = do
 indexStatuses :: [StoreStatus] -> Map.Map (Int32, Text) StoreStatus
 indexStatuses statuses = Map.fromList [((ssAppCatalogId s, ssTrack s), s) | s <- statuses]
 
+-- | Index the PROD-INCOMING rows by (app_group, service, env) = (name, surface,
+-- platform), the catalog join key — at most one incoming per app by the slot model.
+indexIncoming :: [ReleaseTrackerRow] -> Map.Map (Text, Text, Text) ReleaseTrackerRow
+indexIncoming rows = Map.fromList [((rtAppGroup r, rtService r, rtEnv r), r) | r <- rows]
+
 -- | Group catalog rows by (name, surface) — each group has up to one android +
 -- one ios row — and project a card per group. Map keys give a stable A→Z order.
-assembleCards :: [AppCatalog] -> [StoreStatus] -> [StoreMonitorAppResp]
-assembleCards apps statuses =
+assembleCards :: [AppCatalog] -> [StoreStatus] -> [ReleaseTrackerRow] -> [StoreMonitorAppResp]
+assembleCards apps statuses incomings =
     let idx = indexStatuses statuses
+        incIdx = indexIncoming incomings
         groups = Map.toList $ Map.fromListWith (flip (++)) [((acName a, acSurface a), [a]) | a <- apps]
-     in [toCard idx k rows | (k, rows) <- groups]
+     in [toCard idx incIdx k rows | (k, rows) <- groups]
 
-toCard :: Map.Map (Int32, Text) StoreStatus -> (Text, Text) -> [AppCatalog] -> StoreMonitorAppResp
-toCard idx (nm, sfc) rows =
+toCard :: Map.Map (Int32, Text) StoreStatus -> Map.Map (Text, Text, Text) ReleaseTrackerRow -> (Text, Text) -> [AppCatalog] -> StoreMonitorAppResp
+toCard idx incIdx (nm, sfc) rows =
     StoreMonitorAppResp
         { app = fromMaybe nm (listToMaybe (mapMaybe acDisplayLabel rows))
         , surface = sfc
         , platforms =
             PlatformsResp
-                { android = toBlock idx <$> find ((== "android") . acPlatform) rows
-                , ios = toBlock idx <$> find ((== "ios") . acPlatform) rows
+                { android = toBlock idx incIdx <$> find ((== "android") . acPlatform) rows
+                , ios = toBlock idx incIdx <$> find ((== "ios") . acPlatform) rows
                 }
         }
 
-toBlock :: Map.Map (Int32, Text) StoreStatus -> AppCatalog -> PlatformBlockResp
-toBlock idx r =
+toBlock :: Map.Map (Int32, Text) StoreStatus -> Map.Map (Text, Text, Text) ReleaseTrackerRow -> AppCatalog -> PlatformBlockResp
+toBlock idx incIdx r =
     let cellFor trk = toCell <$> Map.lookup (acId r, trk) idx
      in PlatformBlockResp
             { appCatalogId = acId r
             , bundleId = acPackageName r
             , production = cellFor "production"
+            , incoming = incomingCell <$> Map.lookup (acName r, acSurface r, acPlatform r) incIdx
             , internal = if acPlatform r == "android" then cellFor "internal" else Nothing
             , testflight = if acPlatform r == "ios" then cellFor "testflight" else Nothing
             }
+
+-- | Project a PROD-INCOMING release_tracker row into a monitor cell. Carries the
+-- review verdict so the badge reads "In review" / "Approved · held" / "Rejected".
+incomingCell :: ReleaseTrackerRow -> TrackCellResp
+incomingCell r =
+    TrackCellResp
+        { version = Just (rtNewVersion r)
+        , buildCode = mbcVersionCode . mbContext =<< parseMobileTargetState (rtTargetState r)
+        , status = Just "inProgress"
+        , rolloutPercent = Nothing
+        , reviewStatus = rtReviewStatus r
+        , releaseNotes = Nothing
+        , drift = False
+        , syncedAt = Just (rtUpdatedAt r)
+        }
 
 toCell :: StoreStatus -> TrackCellResp
 toCell ss =

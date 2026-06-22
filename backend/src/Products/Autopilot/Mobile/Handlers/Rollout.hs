@@ -67,6 +67,8 @@ import Core.AppError (APIError (..), ToAppError (..))
 import Core.Auth.Protected (AuthedPerson (..))
 import Core.Environment (Flow)
 import Data.Aeson (FromJSON, ToJSON, object, (.=))
+import Data.Int (Int32)
+import Data.List (find)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -78,6 +80,7 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (
     setProductionReviewStatus,
     setProductionRolloutStatus,
  )
+import Products.Autopilot.Mobile.Queries.Supersession (retireOlderIncoming, supersedePreviousLive)
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
     findMobileReleaseById,
@@ -111,10 +114,10 @@ import Products.Autopilot.Mobile.Versioning.Apple (
  )
 import Products.Autopilot.Mobile.Versioning.Play (
     PlayCreds,
-    PlayRolloutState (..),
+    ProdTrackRelease (..),
     completeTrackRollout,
     getProductionReleaseNotes,
-    getTrackRolloutState,
+    getProductionReleases,
     haltTrackRollout,
     loadPlayCreds,
     promoteToProduction,
@@ -337,6 +340,7 @@ promoteH ap rid PromoteReq{..} = do
             setAscIds rid Nothing mPhasedId
             setReviewSubmitted rid "in_review" now
             when isPrePromoteSnapshot $ markReleaseInProgress rid
+            retireOlderIncomingFor row -- Rule B: newer incoming supersedes any older one
             -- Reflect "in review" on the App Monitor immediately (it reads store_status).
             mirrorProdReview ac row (Just "in_review")
             logEvent rid "REVIEW_SUBMITTED" $
@@ -356,6 +360,7 @@ promoteH ap rid PromoteReq{..} = do
                 >>= either (\e -> bad ("Play promote failed: " <> renderPlayErr e)) pure
             setReviewSubmitted rid "submitted" now
             when isPrePromoteSnapshot $ markReleaseInProgress rid
+            retireOlderIncomingFor row -- Rule B: newer incoming supersedes any older one
             mirrorProdReview ac row (Just "submitted")
             logEvent rid "REVIEW_SUBMITTED" $
                 object ["store" .= ("play" :: Text), "actor" .= apEmail ap, "fraction" .= frac, "from_snapshot" .= isPrePromoteSnapshot]
@@ -433,10 +438,15 @@ releaseH ap rid = do
                 _ -> pure Nothing
     case mPhasedId of
         Just _ -> do
-            -- Phased: Apple ramps over 7 days; the Phase-7 reconciler tracks the
-            -- live % and completes the release when the ramp finishes.
-            setRolloutState rid "rolling_out" Nothing
+            -- Phased: Apple ramps over 7 days; the Phase-7 reconciler tracks the live
+            -- % and completes the release when the ramp finishes. Seed at the day-1
+            -- phased % (1%) and mirror it onto the monitor cache, so the list AND the
+            -- App Monitor both read "Rolling out 1%" the instant Release is clicked
+            -- (the reconciler then refines the % as Apple ramps) — matching Android,
+            -- which updates SCC immediately and reconciles from the store afterward.
+            setRolloutState rid "rolling_out" (Just 1)
             setMobileWfStatus rid MBRollingOut
+            mirrorProdRollout ac row target "inProgress" 1
             logEvent rid "ROLLOUT_RELEASED" (object ["store" .= ("asc" :: Text), "actor" .= apEmail ap, "phased" .= True])
         Nothing -> do
             -- Non-phased: the version goes fully live on release → done.
@@ -444,6 +454,7 @@ releaseH ap rid = do
             setMobileWfStatus rid MBCompleted
             mirrorProdReleased ac row target
             logEvent rid "ROLLOUT_RELEASED" (object ["store" .= ("asc" :: Text), "actor" .= apEmail ap, "phased" .= False])
+    supersedePreviousLiveFor row -- Rule A: this version releasing supersedes the previous live one
     pure Success
 
 {- | POST /releases/:id/rollout/set — Android staged rollout. Sets the production
@@ -490,6 +501,7 @@ rolloutSetH ap rid RolloutSetReq{..} = do
     if rsPercent >= 100
         then mirrorProdReleased ac row target
         else mirrorProdRollout ac row target "inProgress" rsPercent
+    supersedePreviousLiveFor row -- Rule A: this version rolling out supersedes the previous live one
     logEvent rid "ROLLOUT_SET" (object ["percent" .= rsPercent, "actor" .= apEmail ap, "adopted" .= adopt])
     pure Success
 
@@ -514,7 +526,7 @@ rolloutHaltH ap rid = do
             vc <- versionCodeText target
             creds <- loadPlayCreds >>= maybe (bad "Google Play credentials not configured.") pure
             -- §12.10: read the live fraction, halt AT it — never trust the cached %.
-            frac <- liveAndroidFraction creds storeId
+            frac <- liveAndroidFraction creds storeId (mbcVersionCode (mbContext target))
             haltTrackRollout creds storeId vc frac
                 >>= either (\e -> bad ("Play halt failed: " <> renderPlayErr e)) pure
             setRolloutState rid "halted" (Just (frac * 100))
@@ -543,7 +555,7 @@ rolloutResumeH ap rid = do
             storeId <- storeIdOf ac
             vc <- versionCodeText target
             creds <- loadPlayCreds >>= maybe (bad "Google Play credentials not configured.") pure
-            frac <- liveAndroidFraction creds storeId
+            frac <- liveAndroidFraction creds storeId (mbcVersionCode (mbContext target))
             resumeTrackRollout creds storeId vc frac
                 >>= either (\e -> bad ("Play resume failed: " <> renderPlayErr e)) pure
             setRolloutState rid "rolling_out" (Just (frac * 100))
@@ -826,6 +838,22 @@ mirrorProdReleased ac row target =
 mirrorProdReview :: AppCatalog -> ReleaseTrackerRow -> Maybe Text -> Flow ()
 mirrorProdReview ac row mReview = setProductionReviewStatus (acId ac) (rtEnv row) mReview
 
+-- | Rule A (migration 0034): @row@ just started rolling out, so freeze the previous
+-- live version of this app and move it to history as @superseded@.
+supersedePreviousLiveFor :: ReleaseTrackerRow -> Flow ()
+supersedePreviousLiveFor row = do
+    ids <- supersedePreviousLive (rtAppGroup row) (rtService row) (rtEnv row) (rtNewVersion row) (rtId row)
+    forM_ ids $ \i ->
+        logEvent i "ROLLOUT_SUPERSEDED" (object ["by_version" .= rtNewVersion row, "reason" .= ("newer_version_rolling_out" :: Text)])
+
+-- | Rule B (migration 0034): @row@ just entered the incoming (review) slot, so drop
+-- any older incoming version of this app to history.
+retireOlderIncomingFor :: ReleaseTrackerRow -> Flow ()
+retireOlderIncomingFor row = do
+    ids <- retireOlderIncoming (rtAppGroup row) (rtService row) (rtEnv row) (rtNewVersion row) (rtId row)
+    forM_ ids $ \i ->
+        logEvent i "INCOMING_SUPERSEDED" (object ["by_version" .= rtNewVersion row])
+
 -- | The Android version code as text (required to address the production release).
 versionCodeText :: MobileBuildTargetState -> Flow Text
 versionCodeText target = case mbcVersionCode (mbContext target) of
@@ -838,16 +866,23 @@ requirePhasedId row = case rtAscPhasedId row of
     Just p | not (T.null p) -> pure p
     _ -> bad "No phased release is enabled for this version (promote with enablePhasedRelease, or use /rollout/release-all)."
 
-{- | Read the live Android production rollout fraction (§12.10); error if there
-is no in-progress fraction to act on.
+{- | Read the live Android production rollout fraction OF OUR VERSION (§12.10);
+error if there is no in-progress fraction to act on. The production track can carry
+several releases at once (e.g. our rolling/halted version AND a freshly-submitted
+review version parked at the near-zero fraction), so we MUST pick our own version
+code's release — never the newest on the track, or a halt/resume would read the
+wrong release's fraction and, say, halt our 51% rollout down to ~0%.
 -}
-liveAndroidFraction :: PlayCreds -> Text -> Flow Double
-liveAndroidFraction creds storeId =
-    getTrackRolloutState creds storeId >>= \case
+liveAndroidFraction :: PlayCreds -> Text -> Maybe Int32 -> Flow Double
+liveAndroidFraction creds storeId mCode = do
+    code <- maybe (bad "Android release has no version code recorded.") pure mCode
+    getProductionReleases creds storeId >>= \case
         Left e -> bad ("Could not read live Play rollout state: " <> renderPlayErr e)
-        Right st -> case prsUserFraction st of
-            Just f -> pure f
-            Nothing -> bad "No in-progress rollout fraction to act on (rollout is at 0% or already complete)."
+        Right releases -> case find ((== code) . ptrCode) releases of
+            Nothing -> bad "This version is not currently on the production track (it may have completed or been superseded)."
+            Just r -> case ptrUserFraction r of
+                Just f -> pure f
+                Nothing -> bad "No in-progress rollout fraction to act on (rollout is at 0% or already complete)."
 
 {- | Android rollout requires an explicit approval first. The Play API can't see
 review state, so SCC won't let a still-in-review build start a rollout: that

@@ -19,12 +19,15 @@ module Products.Autopilot.Mobile.Queries.Tracker
     setReviewSubmitted,
     setMobileWfStatus,
     setRolloutState,
+    clearRolloutColumns,
     setAscIds,
     markReleaseInProgress,
     updateStoreSyncBuildCode,
     setStoreSyncMetadata,
     setProductionRolloutReflection,
     findExternalReviewRow,
+    findMobileVersionRow,
+    listIncomingMobileVersions,
     sccActiveReleaseExistsForVersion,
     setExternalReviewState,
     completeExternalReviewRow,
@@ -245,6 +248,22 @@ setRolloutState releaseId_ rolloutStatus mPercent = withDb $ \db ->
         )
         (\rt -> rtId rt ==. val_ releaseId_)
 
+-- | Clear the rollout columns (rollout_status / rollout_percent → NULL). Used when
+-- retiring a superseded rollout row so it no longer reads as rolling out / halted.
+clearRolloutColumns :: (MonadFlow m) => Text -> m ()
+clearRolloutColumns releaseId_ = withDb $ \db ->
+  runDB db $
+    runUpdate $
+      update
+        (releaseTrackers autopilotDb)
+        ( \rt ->
+            mconcat
+              [ rtRolloutStatus rt <-. val_ Nothing,
+                rtRolloutPercent rt <-. val_ Nothing
+              ]
+        )
+        (\rt -> rtId rt ==. val_ releaseId_)
+
 -- | Cache the iOS App Store version id and/or phased-release id returned by the
 -- store calls (@enablePhasedRelease@ → @asc_phased_id@), so later pause / resume /
 -- release-all can act on the phased id directly without re-resolving it. A no-op
@@ -272,7 +291,14 @@ markReleaseInProgress releaseId_ = withDb $ \db ->
     runUpdate $
       update
         (releaseTrackers autopilotDb)
-        (\rt -> rtStatus rt <-. val_ "INPROGRESS")
+        -- Promote = the version leaves the internal slot for the production review.
+        -- Advance the monotonic track so it shows in PROD-INCOMING, not INTERNAL.
+        ( \rt ->
+            mconcat
+              [ rtStatus rt <-. val_ "INPROGRESS"
+              , rtStoreTrack rt <-. val_ (Just "production")
+              ]
+        )
         (\rt -> rtId rt ==. val_ releaseId_)
 
 -- | Update a PRISTINE store-sync snapshot's build code + derived tag in place,
@@ -442,26 +468,53 @@ findExternalReviewRow appGroup surface platform = withDb $ \db ->
           guard_ (isNothing_ (rtRolloutStatus rt))
           pure rt
 
--- | Does a real SCC release already own this version's review/rollout — i.e. is
--- there an INPROGRESS MobileBuild row for it that ISN'T one of our own synthetic
--- EXTERNAL_REVIEW rows? If so, SCC drives that review and store sync must NOT also
--- surface a duplicate external row.
+-- | The SINGLE mobile-build row for a version. With the version-keyed identity
+-- (migration 0034: one row per (app_group, service, env, new_version)) this is
+-- unique regardless of mode/origin — the convergence point every reconcile/merge
+-- writes through, so a store-sync snapshot, an external-review detection, and a
+-- rollout all land on the same row instead of forking.
+findMobileVersionRow :: (MonadFlow m) => Text -> Text -> Text -> Text -> m (Maybe ReleaseTrackerRow)
+findMobileVersionRow appGroup surface platform version = withDb $ \db ->
+  runDB db $
+    runSelectReturningOne $
+      select $
+        limit_ 1 $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtAppGroup rt ==. val_ appGroup)
+          guard_ (rtService rt ==. val_ surface)
+          guard_ (rtEnv rt ==. val_ platform)
+          guard_ (rtNewVersion rt ==. val_ version)
+          guard_ (rtCategory rt ==. val_ "MobileBuild")
+          pure rt
+
+-- | The PROD-INCOMING rows across all apps (version-keyed model): a version on the
+-- production track that's in review / approved-held / rejected but NOT yet rolling
+-- out — i.e. the "next" version, distinct from the live serving one. The App Monitor
+-- surfaces these as its Incoming cell, so an in-review build shows even after it has
+-- left the internal track. At most one per (app_group, service, env) by the slot model.
+listIncomingMobileVersions :: (MonadFlow m) => m [ReleaseTrackerRow]
+listIncomingMobileVersions = withDb $ \db ->
+  runDB db $
+    runSelectReturningList $
+      select $ do
+        rt <- all_ (releaseTrackers autopilotDb)
+        guard_ (rtCategory rt ==. val_ "MobileBuild")
+        guard_ (rtStatus rt ==. val_ "INPROGRESS")
+        guard_ (rtStoreTrack rt ==. val_ (Just "production"))
+        guard_ (not_ (isNothing_ (rtReviewStatus rt))) -- in review / approved / rejected
+        guard_ (isNothing_ (rtRolloutStatus rt)) -- not yet rolling out (that's PROD-LIVE)
+        pure rt
+
+-- | Has this version GRADUATED PAST review — i.e. does its row carry a
+-- @rollout_status@ (rolling out / halted / superseded / live mirror, at any
+-- status)? That's the single signal the external reconcile uses to STOP surfacing
+-- "in review" and retire it: once a version is rolling out it's past review.
 --
--- This INCLUDES a promoted store-sync snapshot. Promoting an internal / TestFlight
--- snapshot to review (Option A) flips it to INPROGRESS but leaves mode = STORE_SYNC
--- (see 'markReleaseInProgress'); excluding STORE_SYNC here would miss SCC's own
--- submission and spawn a duplicate EXTERNAL_REVIEW row for the same version (the
--- iOS/Android "two rows for one version" bug). A plain, un-promoted snapshot stays
--- COMPLETED, so the INPROGRESS filter already excludes it.
---
--- It also INCLUDES an EXTERNAL_REVIEW row that's already ROLLING OUT (rollout_status
--- set). Once an external row is released it leaves 'findExternalReviewRow' (the
--- rollout_status-NULL guard) AND the dedup index — and with Managed Publishing on
--- the live track still shows the build at the near-zero review fraction, so
--- pendingPublishRelease re-detects the SAME version and a second external row gets
--- spawned. Counting the rolling-out row as owning the version stops that. Only an
--- IN-REVIEW external row (rollout_status NULL) is excluded — that's the one the
--- external reconcile itself manages.
+-- In the version-keyed model (migration 0034) the review state lives ON the one
+-- version row, so a plain INPROGRESS in-review row is NOT "owned by a separate SCC
+-- release" — it IS the review. Counting INPROGRESS here (as an earlier version did)
+-- made the convergence retire its OWN review on the next sync (the in-review →
+-- COMPLETED flip-flop with a stale @production@ track). So only rollout_status counts.
 sccActiveReleaseExistsForVersion :: (MonadFlow m) => Text -> Text -> Text -> Text -> m Bool
 sccActiveReleaseExistsForVersion appGroup surface platform version = withDb $ \db -> do
   mRow <-
@@ -475,12 +528,25 @@ sccActiveReleaseExistsForVersion appGroup surface platform version = withDb $ \d
             guard_ (rtEnv rt ==. val_ platform)
             guard_ (rtNewVersion rt ==. val_ version)
             guard_ (rtCategory rt ==. val_ "MobileBuild")
-            guard_ (rtStatus rt ==. val_ "INPROGRESS")
-            guard_ (rtMode rt /=. val_ (Just "EXTERNAL_REVIEW") ||. not_ (isNothing_ (rtRolloutStatus rt)))
+            -- Owned = the version has GRADUATED PAST review, i.e. carries a
+            -- rollout_status (rolling out / halted / superseded / live mirror),
+            -- regardless of INPROGRESS/COMPLETED. That's the only signal that means
+            -- "stop surfacing in-review" — when it's true the external reconcile
+            -- retires the review. We must NOT count a plain INPROGRESS in-review row
+            -- here: with the version-keyed model (migration 0034) the review state
+            -- lives ON the single version row, so an INPROGRESS in-review row IS the
+            -- review — counting it as "owned" made the convergence retire its own
+            -- review on the next pass (the in-review → COMPLETED flip-flop).
+            guard_ (not_ (isNothing_ (rtRolloutStatus rt)))
             pure (rtId rt)
   pure (isJust mRow)
 
--- | Update an external-review row's review status + workflow status in place.
+-- | Apply a review state onto the version's row in place. Used both to update an
+-- existing EXTERNAL_REVIEW row AND to CONVERGE a store-sync snapshot of the same
+-- version onto the review state (version-keyed identity) instead of forking a
+-- second row. Review is a production-track, in-progress lifecycle state, so this
+-- also advances @store_track@ -> production and @status@ -> INPROGRESS (both no-ops
+-- for an existing external row, correct for a converged snapshot).
 setExternalReviewState :: (MonadFlow m) => Text -> Text -> MobileBuildWFStatus -> m ()
 setExternalReviewState releaseId_ reviewStatus mbStatus = withDb $ \db -> do
   mRow <-
@@ -501,6 +567,8 @@ setExternalReviewState releaseId_ reviewStatus mbStatus = withDb $ \db -> do
                 ( \rt ->
                     mconcat
                       [ rtReviewStatus rt <-. val_ (Just reviewStatus)
+                      , rtStatus rt <-. val_ "INPROGRESS"
+                      , rtStoreTrack rt <-. val_ (Just "production")
                       , rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s')))
                       ]
                 )
@@ -527,6 +595,9 @@ completeExternalReviewRow releaseId_ = withDb $ \db -> do
                 ( \rt ->
                     mconcat
                       [ rtStatus rt <-. val_ "COMPLETED"
+                      , -- Clear the now-stale review_status so a retired external row can
+                        -- never resurface as "in_review" (e.g. a path reading the column).
+                        rtReviewStatus rt <-. val_ Nothing
                       , rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s')))
                       ]
                 )
@@ -789,6 +860,9 @@ mkMobileTrackerRow rid ac targetState mVersionName mSourceRef createdBy_ created
           rtStoreRolloutHistory = Nothing,
           rtAscVersionId = Nothing,
           rtAscPhasedId = Nothing,
+          -- track is unknown until the build lands on a store / is promoted;
+          -- store-sync and promote set it (internal -> production).
+          rtStoreTrack = Nothing,
           rtCreatedAt = createdAt,
           rtUpdatedAt = createdAt
         }
@@ -1048,6 +1122,9 @@ insertMobileRevertTracker rid ac targetState versionName changeLog_ sourceRef_ r
           rtStoreRolloutHistory = Nothing,
           rtAscVersionId = Nothing,
           rtAscPhasedId = Nothing,
+          -- track is unknown until the build lands on a store / is promoted;
+          -- store-sync and promote set it (internal -> production).
+          rtStoreTrack = Nothing,
           rtCreatedAt = createdAt,
           rtUpdatedAt = createdAt
         }
