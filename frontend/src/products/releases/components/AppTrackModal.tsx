@@ -10,7 +10,7 @@ import {
 import { Badge } from '../../../shared/ui/badge';
 import { cn } from '../../../lib/utils';
 import type { PlatformBlock, TrackCell } from '../api';
-import { deriveStoreBadge, formatRolloutPercent, activeRolloutOf } from './storeBadge';
+import { deriveStoreBadge, formatRolloutPercent, activeRolloutOf, type TrackKind } from './storeBadge';
 import { RolloutBar } from './RolloutBar';
 
 type PlatformName = 'android' | 'ios';
@@ -41,8 +41,8 @@ function PlatformIcon({ platform }: { platform: PlatformName }) {
     : <Cpu className="w-4 h-4 text-emerald-600" />;
 }
 
-function TrackBody({ cell }: { cell: TrackCell | null }) {
-  const badge = deriveStoreBadge(cell);
+function TrackBody({ cell, track }: { cell: TrackCell | null; track: TrackKind }) {
+  const badge = deriveStoreBadge(cell, track);
   const ar = activeRolloutOf(cell);
 
   return (
@@ -107,6 +107,7 @@ function TrackBody({ cell }: { cell: TrackCell | null }) {
 export function AppTrackModal({ open, onClose, appLabel, surface, platform, block }: AppTrackModalProps) {
   const [tab, setTab] = useState<TabKey>('production');
   const cell = tab === 'production' ? block.production : secondaryCell(platform, block);
+  const track: TrackKind = tab === 'production' ? 'production' : platform === 'ios' ? 'testflight' : 'internal';
 
   const tabs: { key: TabKey; label: string }[] = [
     { key: 'production', label: 'Production' },
@@ -159,7 +160,7 @@ export function AppTrackModal({ open, onClose, appLabel, surface, platform, bloc
             ))}
           </div>
 
-          <TrackBody cell={cell} />
+          <TrackBody cell={cell} track={track} />
         </DialogBody>
       </DialogContent>
     </Dialog>

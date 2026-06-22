@@ -34,6 +34,7 @@ module Products.Autopilot.Mobile.StoreSync (
     refreshStoreStatusOne,
 ) where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
 import Control.Exception (SomeException)
 import Control.Monad (forM_, when)
@@ -63,22 +64,25 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (
     findActiveMobileState,
     latestShippedVersionsPerApp,
     secondsSinceLastSync,
+    setProductionRolloutStatus,
     upsertStoreStatus,
  )
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
+    clearRolloutColumns,
     completeExternalReviewRow,
     findActiveRolloutReleases,
     findExternalReviewRow,
     findMobileAwaitingRollout,
+    findMobileVersionRow,
     logEvent,
-    setProductionRolloutReflection,
     mkMobileTrackerRow,
     parseMobileTargetState,
     sccActiveReleaseExistsForVersion,
     setAscIds,
     setExternalReviewState,
     setMobileWfStatus,
+    setProductionRolloutReflection,
     setRolloutState,
     setStoreSyncMetadata,
     updateStoreSyncBuildCode,
@@ -116,11 +120,10 @@ import Products.Autopilot.Mobile.Versioning.Play (
     StoreTrackSnapshot (..),
     TrackInfo (..),
     bodiesToProdReleases,
-    bodiesToRolloutState,
     bodiesToSnapshots,
     bodiesToTracks,
     fetchPlayTrackBodies,
-    getTrackRolloutState,
+    getProductionReleases,
     loadPlayCreds,
     renderPlayErr,
  )
@@ -204,9 +207,15 @@ syncAppUnified mPlayCreds buildMap expected ac = do
                 fetchPlayTrackBodies creds pkg >>= \case
                     Left e -> logWarning $ "[STORE_SYNC] Play API error for " <> acName ac <> ": " <> renderPlayErr e
                     Right bodies -> do
-                        mActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac)
+                        let snaps = bodiesToSnapshots bodies
+                        -- Overlay each cell with ITS OWN version's lifecycle (review /
+                        -- rollout), scoped per cell so a promoted-to-review version on the
+                        -- internal track reads "In review" while the live production cell
+                        -- stays "Live" — no bleeding the incoming review onto the live cell.
                         safely ("store_status " <> acName ac) $
-                            mapM_ (upsertStoreStatus . androidSnapToUpsert ac mExpected mActive) (bodiesToSnapshots bodies)
+                            forM_ snaps $ \s -> do
+                                cellActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac) (stsVersion s)
+                                upsertStoreStatus (androidSnapToUpsert ac mExpected cellActive s)
                         when (acEnabled ac) $ do
                             let (internal, production) = bodiesToTracks bodies
                             recordAndroidTracks ac existing internal production
@@ -216,7 +225,7 @@ syncAppUnified mPlayCreds buildMap expected ac = do
                             reflectProductionRollout ac (bodiesToSnapshots bodies)
                             reconcileAndroidExternalReviewFrom ac (bodiesToProdReleases bodies)
                         -- Rollout reconcile from the SAME fetch — no extra edit.
-                        reconcileAndroidRolloutsFrom ac (bodiesToRolloutState bodies)
+                        reconcileAndroidRolloutsFrom ac (bodiesToProdReleases bodies)
         -- Resolve the ASC key for THIS app's account (multi-account: Cumta /
         -- YatriSathi live in different Apple teams). No fallback to the default key
         -- for a tagged app — that would 403 against the wrong team.
@@ -224,11 +233,17 @@ syncAppUnified mPlayCreds buildMap expected ac = do
             loadAscCredsFor (acStoreAccount ac) >>= \case
                 Nothing -> logWarning $ "[STORE_SYNC] No ASC creds for account '" <> fromMaybe "default" (acStoreAccount ac) <> "' — skipping " <> acName ac
                 Just creds -> withPkg ac $ \bundleId -> do
-                    mActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac)
                     safely ("store_status " <> acName ac) $
                         fetchAscSnapshots creds bundleId >>= \case
                             Left e -> logWarning $ "[STORE_MONITOR] ASC snapshot error for " <> acName ac <> ": " <> renderAscErr e
-                            Right snaps -> mapM_ (upsertStoreStatus . iosSnapToUpsert ac mExpected mActive) snaps
+                            Right snaps ->
+                                -- Per-cell lifecycle overlay (see the Android branch): each
+                                -- cell reads its OWN version's review state, so a promoted
+                                -- TestFlight build can read "In review" without mislabelling
+                                -- the live production cell.
+                                forM_ snaps $ \s -> do
+                                    cellActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac) (ascVersion s)
+                                    upsertStoreStatus (iosSnapToUpsert ac mExpected cellActive s)
                     when (acEnabled ac) $ do
                         syncIos creds ac existing
                         -- Also surface an App Store review that was started outside SCC.
@@ -244,26 +259,79 @@ rowIsApp ac row =
         && rtService row == acSurface ac
         && rtEnv row == acPlatform ac
 
-{- | Reconcile THIS Android app's staged rollouts from the rollout state already
-read in its single fetch — no extra Play edit. Mirrors %/halt and completes at
-100% for an SCC-owned active rollout, and adopts a rollout started in the Play
-Console on a still-in-review row. Gated on the staged-rollout flag; per-row
-isolated so one bad row can't abort the rest.
+{- | Reconcile THIS Android app's staged rollouts from the production releases
+already read in its single fetch — no extra Play edit. Mirrors %/halt and completes
+at 100% for an SCC-owned active rollout, and adopts a rollout started in the Play
+Console on a still-in-review row. Gated on the staged-rollout flag; per-row isolated
+so one bad row can't abort the rest.
+
+The production track can hold MULTIPLE releases at once — e.g. an older version
+HALTED mid-rollout AND a freshly-submitted version parked at the near-zero review
+fraction. So each row is reconciled against the release matching ITS OWN version
+code (via 'rolloutStateForCode'), never a single collapsed track state: the collapsed
+state picks the newest release, which would mis-attribute the new review fraction onto
+the older halted rollout (the "rolling out 0.000001%" bug). A row whose version is no
+longer on the track is left as-is.
 -}
-reconcileAndroidRolloutsFrom :: AppCatalog -> PlayRolloutState -> Flow ()
-reconcileAndroidRolloutsFrom ac st = do
+reconcileAndroidRolloutsFrom :: AppCatalog -> [ProdTrackRelease] -> Flow ()
+reconcileAndroidRolloutsFrom ac releases = do
     staged <- isStagedRolloutEnabled
     when staged $ do
         active <- filter (rowIsApp ac) <$> findActiveRolloutReleases
         forM_ active $ \row ->
             safely ("rollout " <> rtId row) $
-                execReconcile (rtId row) "play" row (androidReconcileAction st)
+                forM_ (rowVersionCode row) $ \code ->
+                    case rolloutStateForCode code releases of
+                        Just rst -> execReconcile (rtId row) "play" row (androidReconcileAction rst)
+                        -- Our version is gone from a SUCCESSFUL, non-empty track read →
+                        -- it was superseded (a newer build replaced it). Retire the row
+                        -- so it stops showing a phantom "rolling out". An empty list means
+                        -- a brand-new app / no production yet → leave as-is, don't retire.
+                        Nothing | not (null releases) -> retireSupersededRollout (rtId row)
+                        Nothing -> pure ()
         awaiting <- filter (rowIsApp ac) <$> findMobileAwaitingRollout "android"
         forM_ awaiting $ \row ->
             safely ("console-rollout " <> rtId row) $
-                case parseMobileTargetState (rtTargetState row) >>= mbcVersionCode . mbContext of
-                    Just code -> mapM_ (adoptExternalRollout (rtId row) "play") (detectConsoleRollout androidPendingFractionThreshold code st)
-                    Nothing -> pure ()
+                forM_ (rowVersionCode row) $ \code ->
+                    forM_ (rolloutStateForCode code releases) $ \rst ->
+                        mapM_ (adoptExternalRollout (rtId row) "play") (detectConsoleRollout androidPendingFractionThreshold code rst)
+
+{- | Retire a SUPERSEDED rollout: an actively-rolling version that has dropped off
+the production track because a newer build replaced it. Clear the rollout columns and
+drive the row terminal (@MBAborted@ → the runner finalizes it to ABORTED), so it
+leaves the active-rollout set and reads "Aborted" instead of a frozen "rolling out X%".
+Uniform for both store-sync-adopted and SCC-driven rows. The cleared @rollout_status@
+also removes it from 'findActiveRolloutReleases', so it is never re-processed.
+-}
+retireSupersededRollout :: Text -> Flow ()
+retireSupersededRollout rid = do
+    clearRolloutColumns rid
+    setMobileWfStatus rid MBAborted
+    logInfo $ "[ROLLOUT_SYNC] " <> rid <> " version no longer on production track — retiring superseded rollout"
+    logEvent rid "ROLLOUT_SUPERSEDED" (object ["reason" .= ("version_left_production_track" :: Text)])
+
+-- | The Android version code recorded on a mobile release row (from its target state).
+rowVersionCode :: ReleaseTrackerRow -> Maybe Int32
+rowVersionCode row = parseMobileTargetState (rtTargetState row) >>= mbcVersionCode . mbContext
+
+{- | Strict version-string ordering by dotted numeric components ("9.9.14" \< "9.9.15").
+Non-numeric parts compare as 0. Used to confirm an iOS rollout row was superseded by a
+strictly NEWER live version before retiring it.
+-}
+versionOlderThan :: Text -> Text -> Bool
+versionOlderThan a b = comps a < comps b
+  where
+    comps = map (\p -> fromMaybe 0 (readMaybe (T.unpack p)) :: Int) . T.splitOn "."
+
+{- | The live production rollout state of the release carrying THIS version code,
+selected from the full production-track release list — so a multi-release track
+(halted old version + near-zero new submission) reconciles each row against its own
+release. 'Nothing' when our version is no longer on the track (superseded).
+-}
+rolloutStateForCode :: Int32 -> [ProdTrackRelease] -> Maybe PlayRolloutState
+rolloutStateForCode code rels =
+    (\r -> PlayRolloutState (ptrStatus r) (ptrUserFraction r) [T.pack (show (ptrCode r))])
+        <$> find ((== code) . ptrCode) rels
 
 {- | Reconcile THIS iOS app's staged rollouts. iOS uses ASC reads (phased / review
 state) — no Play edit quota — so it reuses the existing per-row reconcilers,
@@ -337,7 +405,8 @@ off any version that has since been superseded, so it stops showing "rolling out
 reflectProductionRollout :: AppCatalog -> [StoreTrackSnapshot] -> Flow ()
 reflectProductionRollout ac snaps = do
     now <- liftIO getCurrentTime
-    let mActive = case find ((== "production") . stsTrack) snaps of
+    let mProd = find ((== "production") . stsTrack) snaps
+        mActive = case mProd of
             Just s
                 | stsVersion s /= "0.0.0"
                 , stsStatus s `elem` ["inProgress", "halted"]
@@ -346,7 +415,48 @@ reflectProductionRollout ac snaps = do
                 , pct < 100 ->
                     Just (stsVersion s, if stsStatus s == "halted" then "halted" else "rolling_out", pct)
             _ -> Nothing
+    case (mActive, mProd) of
+        (Just _, Just s) ->
+            let tracks = Map.singleton "production" (TrackSnapshot (stsVersion s) (stsCode s) (derivedStoreTag ac (stsVersion s) (stsCode s)))
+             in insertSyntheticRelease ac (stsVersion s) (stsCode s) "production" tracks
+        _ -> pure ()
     setProductionRolloutReflection ac mActive now
+
+{- | iOS counterpart of 'reflectProductionRollout': mirror an App Store PHASED
+production rollout onto the version's store-sync row so the list/detail show
+"Rolling out X%" / "Halted X%" instead of a stale TestFlight badge. This is the
+ONLY path that surfaces a phased release started in App Store Connect OUTSIDE SCC:
+the row was never promoted, so 'detectIosReleases' (which only adopts promoted,
+INPROGRESS rows) never touches it. Apple's % is derived from the phased current-day
+number ('applePhasedPercent' — 1/2/5/10/20/50/100). Ensures the row exists first
+(insert-if-absent), since a phased production version need not be the TestFlight
+leader 'recordIosSnapshot' records. A COMPLETE / INACTIVE (fully live) version, or a
+100% ramp, clears the reflection.
+-}
+reflectIosPhasedRollout :: AscCreds -> AppCatalog -> Text -> Maybe Text -> Flow ()
+reflectIosPhasedRollout _ _ _ Nothing = pure ()
+reflectIosPhasedRollout creds ac bundleId (Just pv) = do
+    now <- liftIO getCurrentTime
+    getPhasedReleaseState creds bundleId pv >>= \case
+        Left e -> logWarning $ "[STORE_SYNC] iOS phased-state read error for " <> acName ac <> ": " <> renderAscErr e
+        Right ps -> do
+            let pct = maybe 0 applePhasedPercent (apsCurrentDay ps)
+                inRamp st
+                    | pct >= androidRolloutFloorPercent, pct < 100 = Just (pv, st, pct)
+                    | otherwise = Nothing
+                mActive = case apsState ps of
+                    "ACTIVE" -> inRamp "rolling_out"
+                    "PAUSED" -> inRamp "halted"
+                    _ -> Nothing
+            -- Make sure the rolling version has a row to attach the reflection to.
+            forM_ mActive $ \_ ->
+                insertSyntheticRelease ac pv Nothing "production" $
+                    Map.singleton "production" (TrackSnapshot pv Nothing (derivedStoreTag ac pv Nothing))
+            setProductionRolloutReflection ac mActive now
+            forM_ mActive $ \(ver, rs, p) ->
+                setProductionRolloutStatus (acId ac) "ios" ver Nothing (if rs == "halted" then "halted" else "inProgress") p
+    stale <- filter (\r -> rtNewVersion r `versionOlderThan` pv) . filter (rowIsApp ac) <$> findActiveRolloutReleases
+    forM_ stale (retireSupersededRollout . rtId)
 
 syncIos :: AscCreds -> AppCatalog -> Maybe LatestBuildRow -> Flow ()
 syncIos creds ac existing = do
@@ -394,6 +504,11 @@ syncIos creds ac existing = do
                         Nothing -> case mProdVer of
                             Just pv -> recordIosSnapshot ac existing pv Nothing "production" (Map.fromList (maybe [] pure prodTrack))
                             Nothing -> logInfo $ "[STORE_SYNC] No ASC build or live version for " <> acName ac
+                    -- Reflect an App Store PHASED rollout (incl. one started in App
+                    -- Store Connect, outside SCC) onto the version's store-sync row so
+                    -- the list shows "Rolling out X%" not a stale TestFlight badge —
+                    -- the iOS counterpart of 'reflectProductionRollout'.
+                    reflectIosPhasedRollout creds ac bundleId mProdVer
 
 {- | Insert-or-update an iOS store-sync snapshot for whichever track leads —
 TestFlight when a build exists, else production. Factored out so the live
@@ -528,21 +643,25 @@ reconcileExternalReviewMapped ::
     Maybe (Text, Text, MobileBuildWFStatus) ->
     Flow ()
 reconcileExternalReviewMapped ac mCode inferred existing mMapped = do
-    let mExistingId = rtId <$> existing
-        -- Carry the existing row's operator-set review_status so an inferred pass
+    mVersionRow <- case mMapped of
+        Just (version, _, _) -> findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) version
+        Nothing -> pure Nothing
+    let target = mVersionRow <|> existing
+        mTargetId = rtId <$> target
+        -- Carry the target row's operator-set review_status so an inferred pass
         -- can't downgrade an approve/reject (defaults to in_review if unset).
-        mExisting = (\r -> (rtNewVersion r, fromMaybe "in_review" (rtReviewStatus r))) <$> existing
+        mExisting = (\r -> (rtNewVersion r, fromMaybe "in_review" (rtReviewStatus r))) <$> target
     -- Only the dedup check needs a DB read, and only when there's a version to check.
     sccOwns <- case mMapped of
         Just (version, _, _) -> sccActiveReleaseExistsForVersion (acName ac) (acSurface ac) (acPlatform ac) version
         Nothing -> pure False
     case externalReviewAction inferred mExisting mMapped sccOwns of
         ExtNoop -> pure ()
-        ExtComplete -> mapM_ completeExternalReviewRow mExistingId
-        ExtUpdate reviewStatus wf -> mapM_ (\i -> setExternalReviewState i reviewStatus wf) mExistingId
+        ExtComplete -> mapM_ completeExternalReviewRow mTargetId
+        ExtUpdate reviewStatus wf -> mapM_ (\i -> setExternalReviewState i reviewStatus wf) mTargetId
         ExtInsert version reviewStatus wf -> insertExternalReviewRow ac mCode inferred version reviewStatus wf
         ExtRetireAndInsert version reviewStatus wf -> do
-            mapM_ completeExternalReviewRow mExistingId
+            mapM_ completeExternalReviewRow mTargetId
             insertExternalReviewRow ac mCode inferred version reviewStatus wf
 
 -- | What to do with the external-review row this pass.
@@ -663,9 +782,12 @@ insertExternalReviewRow ac mCode inferred version reviewStatus mbStatus = do
                 , rtReviewStatus = Just reviewStatus
                 , rtReviewSubmittedAt = Just now
                 , rtDescription = Just desc
-                , -- No store_track: it's a pending submission, not live on a track,
-                  -- so don't let the UI badge it as a live production build.
-                  -- review_inferred (Android) flags the state as best-effort.
+                , -- Review is a PRODUCTION-track lifecycle state (it's the incoming
+                  -- version under review on the prod track), so the row lives on the
+                  -- production track. The stage badge reads review_status, not track,
+                  -- so it still shows "In review"/"Pending review", not "live".
+                  rtStoreTrack = Just "production"
+                , -- review_inferred (Android) flags the state as best-effort.
                   rtMetadata =
                     Just (encodeJsonText (object (["external" .= True] <> ["review_inferred" .= True | inferred])))
                 }
@@ -770,6 +892,7 @@ insertSyntheticRelease ac version mCode track tracks = do
                 , rtStoreRolloutHistory = Nothing
                 , rtAscVersionId = Nothing
                 , rtAscPhasedId = Nothing
+                , rtStoreTrack = Just track
                 , rtCreatedAt = now
                 , rtUpdatedAt = now
                 }
@@ -894,13 +1017,17 @@ safeDetectConsoleRollout creds row = do
 detectConsoleRolloutForRow :: PlayCreds -> ReleaseTrackerRow -> Flow ()
 detectConsoleRolloutForRow creds row = do
     ac <- appCatalogForRowRaw row
-    let mCode = parseMobileTargetState (rtTargetState row) >>= mbcVersionCode . mbContext
-    case (acPackageName ac, mCode) of
+    case (acPackageName ac, rowVersionCode row) of
         (Just pkg, Just code)
             | not (T.null pkg) ->
-                getTrackRolloutState creds pkg >>= \case
+                getProductionReleases creds pkg >>= \case
                     Left e -> logWarning $ "[ROLLOUT_SYNC] Console-rollout read error for " <> rtId row <> ": " <> renderPlayErr e
-                    Right st -> mapM_ (adoptExternalRollout (rtId row) "play") (detectConsoleRollout androidPendingFractionThreshold code st)
+                    -- Match OUR version's release on the track (not the newest), so a
+                    -- genuine Console rollout of this version is detected even when a
+                    -- newer review submission sits ahead of it on the track.
+                    Right releases ->
+                        forM_ (rolloutStateForCode code releases) $ \st ->
+                            mapM_ (adoptExternalRollout (rtId row) "play") (detectConsoleRollout androidPendingFractionThreshold code st)
         _ -> pure ()
 
 {- | Detect an App Store Connect "Release" (not from SCC) on an iOS release SCC
@@ -1081,10 +1208,19 @@ detectIosRelease _ _ = Nothing
 
 reconcileAndroid :: PlayCreds -> Text -> Text -> ReleaseTrackerRow -> Flow ()
 reconcileAndroid creds rid storeId row = do
-    res <- getTrackRolloutState creds storeId
+    res <- getProductionReleases creds storeId
     case res of
         Left e -> logWarning $ "[ROLLOUT_SYNC] Play read error for " <> rid <> ": " <> renderPlayErr e
-        Right st -> execReconcile rid "play" row (androidReconcileAction st)
+        -- Version-match against OUR release on the (possibly multi-release) production
+        -- track — never the newest one, else a freshly-submitted near-zero review
+        -- version overwrites our halted/rolling %. Our version absent from a successful,
+        -- non-empty read → superseded → retire it.
+        Right releases ->
+            forM_ (rowVersionCode row) $ \code ->
+                case rolloutStateForCode code releases of
+                    Just st -> execReconcile rid "play" row (androidReconcileAction st)
+                    Nothing | not (null releases) -> retireSupersededRollout rid
+                    Nothing -> pure ()
 
 {- | iOS phased release: mirror Apple's ramp day → %, completing when Apple
 finishes the 7-day schedule. Non-phased releases complete at /release time
@@ -1249,7 +1385,9 @@ androidSnapToUpsert ac mExpected mActive s =
             , ssuVersionCode = stsCode s
             , ssuStatus = Just (stsStatus s)
             , ssuRolloutPercent = if isProd then realRollout else Nothing
-            , ssuReviewStatus = if isProd then mActive >>= amsReviewStatus else Nothing
+            , -- Per-cell review state (any track): a promoted internal build reads its
+              -- own "in review" / "approved" / "rejected"; a plain build has none.
+              ssuReviewStatus = mActive >>= amsReviewStatus
             , ssuReleaseNotes = stsNotes s
             , ssuExpectedVersion = mExpected
             }
@@ -1276,7 +1414,9 @@ iosSnapToUpsert ac mExpected mActive s =
             , ssuVersionCode = Nothing
             , ssuStatus = Just (ascStatus s)
             , ssuRolloutPercent = if isProd then mActive >>= amsRolloutPercent else Nothing
-            , ssuReviewStatus = if isProd then mActive >>= amsReviewStatus else Nothing
+            , -- Per-cell review state (any track): a promoted TestFlight build reads its
+              -- own review verdict; a plain build has none.
+              ssuReviewStatus = mActive >>= amsReviewStatus
             , ssuReleaseNotes = ascNotes s
             , ssuExpectedVersion = mExpected
             }

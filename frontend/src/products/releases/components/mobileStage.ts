@@ -10,6 +10,7 @@ export type Stage =
   | 'approved'
   | 'rollout'
   | 'rejected'
+  | 'superseded'
   | 'completed'
   | 'none';
 
@@ -46,9 +47,10 @@ export function lifecycleFromRollout(d: RolloutDetail): MobileLifecycle {
 export function lifecycleFromRelease(release: {
   release_context?: {
     mb_wf_status?: string;
-    // Authoritative rollout columns injected by the backend serializer.
+    // Authoritative columns injected by the backend serializer (migration 0034).
     rollout_status?: string | null;
     rollout_percent?: number | null;
+    store_track?: string | null;
   } | null;
   metadata?: unknown;
 }): MobileLifecycle {
@@ -66,7 +68,9 @@ export function lifecycleFromRelease(release: {
     | undefined;
   return {
     mbStatus: ctx?.mb_wf_status ?? '',
-    storeTrack: meta?.store_track ?? null,
+    // Prefer the authoritative store_track COLUMN; fall back to the metadata mirror
+    // for rows that predate the column injection.
+    storeTrack: ctx?.store_track ?? meta?.store_track ?? null,
     reviewInferred: meta?.review_inferred ?? null,
     // Prefer the live rollout COLUMNS (updated on a successful set); fall back to the
     // store-sync metadata mirror.
@@ -90,6 +94,9 @@ export function stageOf(d: MobileLifecycle): Stage {
   )
     return 'promote';
   if (mb === 'MBReviewRejected' || d.reviewStatus === 'rejected') return 'rejected';
+  // A previous live version overtaken by a newer rollout (Rule A, migration 0034):
+  // frozen at its last % as history. Checked before the rolling/completed states.
+  if (d.rolloutStatus === 'superseded') return 'superseded';
   // An active rollout outranks a "completed" build status: a store-sync snapshot
   // row stays mb=MBCompleted even while store-sync mirrors a live production ramp
   // onto it (rollout_status from metadata), so check rolling-out BEFORE completed.
@@ -148,6 +155,9 @@ export function mobileDisplayStatus(
       return d.rolloutStatus === 'halted'
         ? { label: `Halted${pctSuffix}`, variant: 'warning' }
         : { label: `Rolling out${pctSuffix}`, variant: 'info' };
+    case 'superseded':
+      // Overtaken by a newer version's rollout — history, frozen at its last %.
+      return { label: `Superseded${pctSuffix}`, variant: 'default' };
     case 'rejected':
       return { label: 'Review rejected', variant: 'danger' };
     case 'completed':

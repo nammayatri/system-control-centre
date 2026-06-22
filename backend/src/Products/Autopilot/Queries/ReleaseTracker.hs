@@ -709,6 +709,7 @@ toRow createdAt updatedAt ReleaseTracker {..} mts =
       rtStoreRolloutHistory = Nothing,
       rtAscVersionId = Nothing,
       rtAscPhasedId = Nothing,
+      rtStoreTrack = Nothing,
       rtCreatedAt = createdAt,
       rtUpdatedAt = updatedAt
     }
@@ -731,7 +732,7 @@ fromRow ReleaseTrackerT {..} =
         -- rolling-out) without an extra /rollout call. The bare-tag rendering
         -- matches the rollout endpoint's rdMbStatus (tshow (mbWfStatus …)).
         Just (MobileBuildState mb) ->
-          Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent (toJSON (mbContext mb)))
+          Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent rtStoreTrack (toJSON (mbContext mb)))
         _ -> Nothing
       tracker =
         ReleaseTracker
@@ -781,14 +782,18 @@ fromRow ReleaseTrackerT {..} =
 -- This lets the releases list/detail read the live rollout % straight off the row
 -- (the same source the rollout endpoint uses), instead of a stale metadata mirror.
 -- No-op if the value isn't an object.
-addMobileLifecycle :: Text -> Maybe Text -> Maybe Double -> Value -> Value
-addMobileLifecycle st mRolloutStatus mRolloutPct (Object o) =
+addMobileLifecycle :: Text -> Maybe Text -> Maybe Double -> Maybe Text -> Value -> Value
+addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack (Object o) =
   Object
     . KM.insert "mb_wf_status" (toJSON st)
     . KM.insert "rollout_status" (toJSON mRolloutStatus)
     . KM.insert "rollout_percent" (toJSON mRolloutPct)
+    -- Authoritative track column (migration 0034) — the FE prefers this over the
+    -- metadata mirror, so a converged in-review row reads "production", not a stale
+    -- "internal" left in metadata.
+    . KM.insert "store_track" (toJSON mStoreTrack)
     $ o
-addMobileLifecycle _ _ _ v = v
+addMobileLifecycle _ _ _ _ v = v
 
 parseReleaseCategory :: Text -> ReleaseCategory
 parseReleaseCategory t =

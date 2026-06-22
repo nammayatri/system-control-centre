@@ -96,7 +96,7 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int32)
-import Data.List (find)
+import Data.List (find, foldl')
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
@@ -426,14 +426,16 @@ The version code is the maximum across @versionCodes[]@ (Play stores a
 list because a single release can ship multiple ABIs). Names default to
 @0.0.0@ if missing — the bump algorithm handles that case explicitly.
 -}
+
+{- | The leading version of a track for the next-build / badge logic. Uses
+'pickLiveRelease' so a production track mid-rollout reports the RAMPING version
+(not the prior completed baseline) — otherwise a version rolling out on production
+looks "behind" internal and the row gets mis-badged Internal.
+-}
 pickRelease :: TrackBody -> TrackInfo
-pickRelease (TrackBody []) = TrackInfo "0.0.0" 0
-pickRelease (TrackBody rels) =
-    let chosen = case filter (\r -> rStatus r == Just "completed") rels of
-            (r : _) -> r
-            [] -> head rels
-        name = fromMaybe "0.0.0" (rName chosen)
-     in TrackInfo name (maxVersionCode (rVersionCodes chosen))
+pickRelease (TrackBody rels) = case pickLiveRelease rels of
+    Just r -> TrackInfo (fromMaybe "0.0.0" (rName r)) (maxVersionCode (rVersionCodes r))
+    Nothing -> TrackInfo "0.0.0" 0
 
 {- | The highest parseable @versionCodes[]@ entry (Play lists multiple codes when
 a release ships several ABIs). 0 when none parse. Shared by the next-version
@@ -741,18 +743,24 @@ fraction / first non-empty note. Empty / undecodable → the "none" snapshot.
 Exposed for unit testing.
 -}
 parseTrackSnapshot :: Text -> LBS.ByteString -> StoreTrackSnapshot
-parseTrackSnapshot track bs = case decode bs :: Maybe TrackBody of
-    Just (TrackBody rels)
-        | Just r <- pickRolloutRelease rels ->
-            StoreTrackSnapshot
-                { stsTrack = track
-                , stsVersion = fromMaybe "0.0.0" (rName r)
-                , stsCode = case maxVersionCode (rVersionCodes r) of 0 -> Nothing; n -> Just n
-                , stsStatus = fromMaybe "draft" (rStatus r)
-                , stsFraction = rUserFraction r
-                , stsNotes = find (not . T.null . T.strip) (rReleaseNotes r)
-                }
-    _ -> StoreTrackSnapshot track "0.0.0" Nothing "none" Nothing Nothing
+parseTrackSnapshot track bs =
+    -- The production cell must show what's actually SERVING users — 'pickLiveRelease'
+    -- — not the newest release ('pickRolloutRelease'), so a freshly-submitted
+    -- near-zero review version can't eclipse an older one still rolling at, say, 51%.
+    -- Other tracks (internal) keep the leading-release pick.
+    let pick = if track == "production" then pickLiveRelease else pickRolloutRelease
+     in case decode bs :: Maybe TrackBody of
+            Just (TrackBody rels)
+                | Just r <- pick rels ->
+                    StoreTrackSnapshot
+                        { stsTrack = track
+                        , stsVersion = fromMaybe "0.0.0" (rName r)
+                        , stsCode = case maxVersionCode (rVersionCodes r) of 0 -> Nothing; n -> Just n
+                        , stsStatus = fromMaybe "draft" (rStatus r)
+                        , stsFraction = rUserFraction r
+                        , stsNotes = find (not . T.null . T.strip) (rReleaseNotes r)
+                        }
+            _ -> StoreTrackSnapshot track "0.0.0" Nothing "none" Nothing Nothing
 
 -- ─── Consolidated single-edit read (quota-friendly) ────────────────────────
 
@@ -927,6 +935,43 @@ pickRolloutRelease rels =
         [] -> case rels of
             (r : _) -> Just r
             [] -> Nothing
+
+{- | Production staged-rollout floor (fraction). At/below this a @userFraction@ is the
+parked review/pending fraction (~1e-6), not a real ramp. Mirrors StoreSync's
+@androidPendingFractionThreshold@ (kept local to avoid a circular import).
+-}
+productionRolloutFloor :: Double
+productionRolloutFloor = 0.01
+
+{- | Pick the release that represents the CURRENT production activity for the monitor
+cell + rollout reflection. Priority:
+
+  1. the ACTIVE staged rollout — an @inProgress@/@halted@ release ramping at/above the
+     rollout floor (a real rollout, NOT a parked near-zero review fraction); highest
+     @userFraction@ wins;
+  2. else the live baseline — the highest @completed@ release;
+  3. else the first release.
+
+This is the key fix for staged rollouts: a new version rolling out on production (e.g.
+5%) sits ALONGSIDE the previous @completed@ baseline, so picking "completed first" (the
+old behavior) hid the ramp and mis-badged the row as Internal/Completed. It also still
+ignores a freshly-submitted near-zero review release, so that can't masquerade as the
+rollout either.
+-}
+pickLiveRelease :: [Release] -> Maybe Release
+pickLiveRelease rels =
+    case filter ramping rels of
+        (r : rs) -> Just (foldl' higherFrac r rs)
+        [] -> case filter isCompleted rels of
+            (r : rs) -> Just (foldl' higherCode r rs)
+            [] -> listToMaybe rels
+  where
+    ramping r =
+        rStatus r `elem` [Just "inProgress", Just "halted"]
+            && maybe False (>= productionRolloutFloor) (rUserFraction r)
+    isCompleted r = rStatus r == Just "completed"
+    higherFrac a b = if fromMaybe 0 (rUserFraction a) >= fromMaybe 0 (rUserFraction b) then a else b
+    higherCode a b = if maxVersionCode (rVersionCodes a) >= maxVersionCode (rVersionCodes b) then a else b
 
 -- ─── Server-config helper ──────────────────────────────────────────
 

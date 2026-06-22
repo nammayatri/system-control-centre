@@ -18,7 +18,7 @@ import { Button } from '../../../../shared/ui/button';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { Badge } from '../../../../shared/ui/badge';
 import { cn } from '../../../../lib/utils';
-import { deriveStoreBadge, activeRolloutOf } from '../../components/storeBadge';
+import { deriveStoreBadge, activeRolloutOf, type TrackKind } from '../../components/storeBadge';
 import { RolloutBar } from '../../components/RolloutBar';
 import { AppTrackModal } from '../../components/AppTrackModal';
 import { MobileBulkPanel } from '../../components/MobileBulkPanel';
@@ -176,9 +176,9 @@ function UnavailableNotice({ reason }: { reason?: string | null }) {
 
 // ── Track / platform / surface / brand ─────────────────────────────
 
-function TrackLine({ label, cell }: { label: string; cell: TrackCell | null }) {
+function TrackLine({ label, cell, track }: { label: string; cell: TrackCell | null; track: TrackKind }) {
   const empty = isEmptyCell(cell);
-  const badge = deriveStoreBadge(empty ? null : cell);
+  const badge = deriveStoreBadge(empty ? null : cell, track);
   const ar = empty ? null : activeRolloutOf(cell);
 
   return (
@@ -221,7 +221,12 @@ function PlatformPanel({
   }
 
   const secondaryLabel = platform === 'ios' ? 'TestFlight' : 'Internal';
-  const secondaryCell = platform === 'ios' ? block.testflight : block.internal;
+  const secondaryCellRaw = platform === 'ios' ? block.testflight : block.internal;
+  // Most-advanced-track-wins: a build that's gone to review shows in the Incoming
+  // row, so suppress the testing row when it's the same version (avoid double-show).
+  const incoming = block.incoming;
+  const secondaryCell =
+    incoming && secondaryCellRaw && incoming.version === secondaryCellRaw.version ? null : secondaryCellRaw;
   const rolling = activeRolloutOf(block.production) != null;
   const fresh = freshness(platformSyncedAt(block), useContext(StaleMsContext));
 
@@ -242,8 +247,9 @@ function PlatformPanel({
         <ChevronRight className="h-4 w-4 text-zinc-300 transition-colors group-hover:text-zinc-500" />
       </div>
       <div className="divide-y divide-zinc-100">
-        <TrackLine label="Prod" cell={block.production} />
-        <TrackLine label={secondaryLabel} cell={secondaryCell} />
+        <TrackLine label="Prod" cell={block.production} track="production" />
+        {incoming && <TrackLine label="Incoming" cell={incoming} track="production" />}
+        <TrackLine label={secondaryLabel} cell={secondaryCell} track={platform === 'ios' ? 'testflight' : 'internal'} />
       </div>
       {fresh && (
         <div className={cn('mt-2 text-[10px]', fresh.stale ? 'font-medium text-amber-600' : 'text-zinc-400')}>

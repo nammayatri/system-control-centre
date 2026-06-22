@@ -1239,6 +1239,7 @@ export interface PlatformBlock {
     appCatalogId: number;
     bundleId: string | null;
     production: TrackCell | null;
+    incoming: TrackCell | null;     // prod-incoming version in review/approved/rejected (null if none)
     internal: TrackCell | null;     // android only (null for ios)
     testflight: TrackCell | null;   // ios only (null for android)
 }

@@ -1107,7 +1107,16 @@ const ReleaseSummary: React.FC = () => {
 
       <div className="flex flex-col gap-3 mb-4 sm:mb-5">
         <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-          <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Release Summary</h1>
+          <div className="flex flex-col">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Release Summary</span>
+            <h1 className="text-lg sm:text-xl font-semibold text-zinc-900 flex items-baseline gap-2 flex-wrap">
+              <span>{release.appGroup || 'Release'}</span>
+              {release.service && <span className="text-sm font-normal text-zinc-400">{release.service}</span>}
+              {versionWithBuild(release) && (
+                <span className="font-mono text-base font-medium text-zinc-500">v{versionWithBuild(release)}</span>
+              )}
+            </h1>
+          </div>
           {mobileStatus ? (
             <Badge variant={mobileStatus.variant} dot>{mobileStatus.label}</Badge>
           ) : (
