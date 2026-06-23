@@ -10,6 +10,7 @@ import {
   useFastForwardRelease, useImmediateRevertWithSync,
   useReleaseDiff, usePodHealth, useResources, useUpdateTracker,
   useMobileApps, useDispatchMobileReleases, useMobileRollout,
+  useRolloutRestartDeployment,
 } from '../hooks';
 import { mobileDisplayStatus, lifecycleFromRollout } from '../components/mobileStage';
 import { versionWithBuild } from '../versionLabel';
@@ -889,6 +890,7 @@ const ReleaseSummary: React.FC = () => {
   const immRevertMut = useImmediateRevert();
   const deleteMut = useDeleteRelease();
   const restartMut = useRestartRelease();
+  const rolloutRestartMut = useRolloutRestartDeployment();
   const fastForwardMut = useFastForwardRelease();
   // Mobile promote→rollout detail, used to derive the top-level status badge +
   // gate the rollout-runner action buttons. `enabled` is read off the (possibly
@@ -1229,7 +1231,13 @@ const ReleaseSummary: React.FC = () => {
                 <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: actor, isRevertSync: revertSyncChecked }), true)}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
               </PermissionGate>
               <PermissionGate product="autopilot" permission="RELEASE_REVERT">
-                <Button size="sm" variant="danger" loading={immRevertSyncMut.isPending} onClick={doImmediateRevert}><Zap className="w-3.5 h-3.5" /> Immediate Revert</Button>
+                {release.env_override_data ? (
+                  <SimpleTooltip content="Immediate Revert is disabled when the release has env changes. Use normal Revert to restore env + image together.">
+                    <Button size="sm" variant="danger" disabled><Zap className="w-3.5 h-3.5" /> Immediate Revert</Button>
+                  </SimpleTooltip>
+                ) : (
+                  <Button size="sm" variant="danger" loading={immRevertSyncMut.isPending} onClick={doImmediateRevert}><Zap className="w-3.5 h-3.5" /> Immediate Revert</Button>
+                )}
               </PermissionGate>
               {/* Single shared "Also revert in other cloud" checkbox — applies to both
                   Revert and Immediate Revert. Only meaningful when the original
@@ -1240,6 +1248,11 @@ const ReleaseSummary: React.FC = () => {
                   <input type="checkbox" checked={revertSyncChecked} onChange={(e) => setRevertSyncChecked(e.target.checked)} className="rounded border-zinc-300 accent-zinc-900" />
                   Also revert in other cloud
                 </label>
+              </PermissionGate>
+              <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+                <Button size="sm" variant="outline" className="border-blue-300 text-blue-700 hover:bg-blue-50" loading={rolloutRestartMut.isPending} onClick={() => doAction('restart deployment', () => rolloutRestartMut.mutateAsync({ releaseId: id!, requestedBy: actor }), false, 'This will perform a kubectl rollout restart on the current deployment, bouncing all pods. Use this to pick up new secrets/configmaps or recover from pod crashes.')}>
+                  <RotateCw className="w-3.5 h-3.5" /> Restart Deployment
+                </Button>
               </PermissionGate>
             </>
           )}
