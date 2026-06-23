@@ -17,6 +17,7 @@ import {
   restartRelease,
   fastForwardRelease,
   immediateRevertRelease,
+  rolloutRestartDeployment,
   fetchReleaseDiff,
   fetchPodHealth,
   fetchResources,
@@ -268,6 +269,21 @@ export function useRestartRelease() {
     },
     onError: (err: any) => {
       toast.error(err?.response?.data?.message || err.message || 'Restart failed');
+    },
+  });
+}
+
+export function useRolloutRestartDeployment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ releaseId, requestedBy }: { releaseId: string; requestedBy?: string }) =>
+      rolloutRestartDeployment(releaseId, requestedBy),
+    onSuccess: (_, { releaseId }) => {
+      toast.success('Deployment rollout restart initiated');
+      qc.invalidateQueries({ queryKey: ['release', releaseId] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err.message || 'Rollout restart failed');
     },
   });
 }

@@ -698,6 +698,11 @@ export async function fastForwardRelease(releaseId: string): Promise<any> {
     return data;
 }
 
+export async function rolloutRestartDeployment(releaseId: string, requestedBy?: string): Promise<any> {
+    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/rollout-restart`, { requestedBy });
+    return data;
+}
+
 export async function immediateRevertRelease(releaseId: string, isRevertSync: boolean): Promise<any> {
     const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/revert/immediate`, { isRevertSync });
     return data;
