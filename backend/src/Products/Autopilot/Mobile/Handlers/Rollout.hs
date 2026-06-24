@@ -77,6 +77,7 @@ import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Queries.AppCatalog (storeTrackOf)
 import Products.Autopilot.Mobile.Queries.StoreStatus (
     findProductionStoreCell,
+    secondsSinceLastSync,
     setProductionReleased,
     setProductionReviewStatus,
     setProductionRolloutStatus,
@@ -128,7 +129,7 @@ import Products.Autopilot.Mobile.Versioning.Play (
     setTrackRollout,
     userFractionInRange,
  )
-import Products.Autopilot.RuntimeConfig (getAndroidReviewRolloutFraction, isStagedRolloutEnabled)
+import Products.Autopilot.RuntimeConfig (getAndroidReviewRolloutFraction, getStoreRefreshCooldownSeconds, isStagedRolloutEnabled)
 import Products.Autopilot.Types.Storage.Schema (ReleaseTrackerRow, ReleaseTrackerT (..))
 import Shared.API.Response (APISuccess (..))
 
@@ -213,6 +214,34 @@ data RolloutDetail = RolloutDetail
     -- stage (held at MBTagPushed, or an un-promoted internal/TestFlight snapshot) AND
     -- it isn't already live on production. The FE gates the promote UI on this instead
     -- of re-deriving it, so it never offers a promote the backend would reject.
+    , rdAppCatalogId :: Int32
+    -- ^ The app's @app_catalog.id@ — lets the FE force a store-sync
+    -- (@POST /mobile/store-monitor/:id/refresh@) before re-reading, so a just-published
+    -- Managed-Publishing change is picked up and @rdLiveOnProduction@ flips.
+    , rdLiveOnProduction :: Bool
+    -- ^ BE truth for "is THIS build the one currently live on the production track",
+    -- read from the synced @store_status@ production cell (code-first, version-name
+    -- fallback). Under Play Managed Publishing a promoted Android build sits STAGED on
+    -- production until the operator clicks Publish in the Console; until then this is
+    -- False and the live cell still shows the previous version. The FE uses it to gate
+    -- the Android approved-stage UI: not-live ⇒ show the "Publish in Play Console" link
+    -- (a rollout % wouldn't apply yet); live ⇒ show the rollout controls. NOTE: it's a
+    -- read of a CACHE, so it only flips once a sync runs — the FE Refresh forces one.
+    , rdSyncedSecondsAgo :: Maybe Double
+    -- ^ Seconds since this app's @store_status@ was last synced ('Nothing' = never).
+    -- The publish gate surfaces it so the operator knows whether a Refresh will do a
+    -- live store re-poll (age ≥ cooldown) or just serve cache (age < cooldown).
+    , rdRefreshCooldownSeconds :: Int32
+    -- ^ The per-app refresh cooldown (@store_refresh_cooldown_seconds@). A Refresh only
+    -- triggers a live store re-poll once the last sync is older than this — within the
+    -- window it serves cache (protects Play's per-app edit quota). Paired with
+    -- @rdSyncedSecondsAgo@ so the FE can show "live re-check available in N s".
+    , rdManagedPublishing :: Bool
+    -- ^ Whether this app uses Play Managed Publishing (@app_catalog.managed_publishing@,
+    -- migration 0037 — no API to detect it, so it's recorded explicitly). The FE shows the
+    -- "Publish in Play Console" gate only when this is True AND the build isn't live yet;
+    -- a Managed-Publishing-OFF app (provider/driver) gets the rollout controls directly,
+    -- since a rollout % applies immediately there.
     }
     deriving (Eq, Show, Generic)
 
@@ -321,6 +350,27 @@ atOrBelowProduction ac buildVer mCode = do
   where
     codeAtOrBelow (Just b) (Just p) = b <= p
     codeAtOrBelow _ _ = False -- same version, codes unknown → can't prove not-ahead → allow
+
+{- | Is THIS build the version currently live on the production track, per the synced
+@store_status@ production cell? Compare by build CODE first (Android version codes are
+globally unique per build, so an exact-code match means it's literally this build that's
+live — not merely the same marketing version at a different code), falling back to the
+marketing version name when either code is unknown.
+
+This is a read of a CACHE, not a live store call, so it only reflects reality as of the
+last sync. Under Play Managed Publishing a promoted build stays STAGED on production until
+the operator publishes in the Console, and the cell keeps showing the previous version
+until a sync runs — so the FE Refresh forces a sync before re-reading. Fails CLOSED (not
+live) when production hasn't been synced, so we never claim a build is live we can't prove.
+-}
+liveOnProduction :: AppCatalog -> Text -> Maybe Int32 -> Flow Bool
+liveOnProduction ac buildVer mCode = do
+    mProd <- findProductionStoreCell (acId ac) (acPlatform ac)
+    pure $ case mProd of
+        Just (mpVer, mpCode) -> case (mCode, mpCode) of
+            (Just b, Just p) -> b == p
+            _ -> fmap T.strip mpVer == Just (T.strip buildVer)
+        Nothing -> False
 
 promoteH :: AuthedPerson -> Text -> PromoteReq -> Flow PromoteResp
 promoteH ap rid PromoteReq{..} = do
@@ -444,6 +494,9 @@ rolloutDetailH _ap rid = do
                 && storeTrack `elem` [Just "internal", Just "testflight"]
         promotableStage = mbWfStatus target == MBTagPushed || isPrePromoteSnapshot
     notAhead <- atOrBelowProduction ac (rtNewVersion row) (rtVersionCode row)
+    liveProd <- liveOnProduction ac (rtNewVersion row) (rtVersionCode row)
+    syncedAgo <- secondsSinceLastSync (acId ac)
+    cooldown <- fromIntegral <$> getStoreRefreshCooldownSeconds
     pure
         RolloutDetail
             { rdReleaseId = rid
@@ -458,6 +511,11 @@ rolloutDetailH _ap rid = do
             , rdPhasedId = phasedId
             , rdStoreTrack = storeTrack
             , rdPromotable = promotableStage && not notAhead
+            , rdAppCatalogId = acId ac
+            , rdLiveOnProduction = liveProd
+            , rdSyncedSecondsAgo = syncedAgo
+            , rdRefreshCooldownSeconds = cooldown
+            , rdManagedPublishing = acManagedPublishing ac
             }
 
 {- | POST /releases/:id/release — the iOS "Release" button. Releases an approved

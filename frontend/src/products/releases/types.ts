@@ -23,6 +23,7 @@ export type AppCatalogEntry = {
   displayLabel: string | null;
   firebaseProjectId: string | null;
   enabled: boolean;
+  managedPublishing: boolean; // Play Managed Publishing (per-app; no API to detect — set explicitly)
   createdAt: string;
   latestReleaseBuild?: LatestBuild | null;
   latestDebugBuild?: LatestBuild | null;

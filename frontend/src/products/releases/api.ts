@@ -1197,6 +1197,11 @@ export interface RolloutDetail {
     rdPhasedId: string | null; // iOS phased-release id (present ⇒ phased ramp on)
     rdStoreTrack: string | null; // production | internal | testflight (store-sync rows)
     rdPromotable: boolean; // BE truth: can be promoted now (promotable stage AND not already live on prod)
+    rdAppCatalogId: number; // app_catalog.id — force a store sync (refreshStoreApp) before re-reading
+    rdLiveOnProduction: boolean; // BE truth: is THIS build the version live on production (synced cache, code-first)
+    rdSyncedSecondsAgo: number | null; // seconds since store_status last synced (null = never)
+    rdRefreshCooldownSeconds: number; // a Refresh only re-polls the live store once age ≥ this (else serves cache)
+    rdManagedPublishing: boolean; // app uses Play Managed Publishing → show the publish gate when not-live (no API to detect; recorded per-app)
 }
 
 export interface PromoteReq {
