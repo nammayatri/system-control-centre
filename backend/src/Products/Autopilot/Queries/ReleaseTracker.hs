@@ -90,7 +90,7 @@ import Database.Beam.Postgres.Full (anyConflict, insertReturning, onConflict, on
 import Database.PostgreSQL.Simple (Only (..), execute, execute_, query, withTransaction)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
 import Debug.Trace qualified as DT
-import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..), MobileBuildWFStatus (..))
+import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), MobileBuildWFStatus (..), claimsStoreIdentity)
 import Products.Autopilot.Types
 import Products.Autopilot.Types qualified as NT
 import Products.Autopilot.Types.Storage.Schema
@@ -710,6 +710,9 @@ toRow createdAt updatedAt ReleaseTracker {..} mts =
       rtAscVersionId = Nothing,
       rtAscPhasedId = Nothing,
       rtStoreTrack = Nothing,
+      rtVersionCode = case mts of
+        Just (MobileBuildState s) | claimsStoreIdentity (mbContext s) -> mbcVersionCode (mbContext s)
+        _ -> Nothing,
       rtCreatedAt = createdAt,
       rtUpdatedAt = updatedAt
     }

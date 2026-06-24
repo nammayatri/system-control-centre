@@ -123,7 +123,7 @@ export function MobileBulkPanel() {
   const [open, setOpen] = useState(true);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [showPromote, setShowPromote] = useState(false);
-  const [rolloutPct, setRolloutPct] = useState('20');
+  const [rolloutPct, setRolloutPct] = useState('0');
   const [busy, setBusy] = useState(false);
 
   const selPromote = promotable.filter((e) => sel.has(e.r.id)).map((e) => e.r);

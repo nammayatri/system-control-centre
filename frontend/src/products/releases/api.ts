@@ -63,8 +63,14 @@ export interface ReleaseContext {
     tag_pushed?: string | null;
     matrix_job_name?: string;
     build_type?: string;
+    destination?: string | null;
     ota_namespace?: string | null;
     change_log?: string;
+    // BE truth (injected by listReleasesH): the build's code is strictly higher than the
+    // production track's, so it's actually promotable. The list badge ANDs this with its
+    // own stage logic so it never offers a promote the backend would reject. Absent/true
+    // ⇒ no constraint; false ⇒ at or below production (overtaken).
+    promotable?: boolean;
     // Mobile build workflow status (e.g. MBTagPushed / MBInReview / MBRollingOut).
     // Injected by the backend serializer from the MobileBuildState so the list +
     // detail can derive the promote→rollout stage without a /rollout call.
@@ -417,11 +423,17 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         tag_pushed:       (r.releaseContext as any)?.tag_pushed,
         matrix_job_name:  (r.releaseContext as any)?.matrix_job_name,
         build_type:       (r.releaseContext as any)?.build_type,
+        // Provider Android store destination ("GooglePlay" | "Firebase") — drives the
+        // "Firebase internal" badge. Must be passed through here or it's dropped.
+        destination:      (r.releaseContext as any)?.destination,
         ota_namespace:    (r.releaseContext as any)?.ota_namespace,
         change_log:       (r.releaseContext as any)?.change_log,
         mb_wf_status:     (r.releaseContext as any)?.mb_wf_status,
         rollout_status:   (r.releaseContext as any)?.rollout_status,
         rollout_percent:  (r.releaseContext as any)?.rollout_percent,
+        // BE-injected promotability (higher than production). Must be passed through here
+        // or it's dropped before the badge can read it.
+        promotable:       (r.releaseContext as any)?.promotable,
     },
 
     rollout_strategy: (r.rolloutStrategy || []).map(s => ({
@@ -1184,6 +1196,7 @@ export interface RolloutDetail {
     rdRolloutPercent: number | null;
     rdPhasedId: string | null; // iOS phased-release id (present ⇒ phased ramp on)
     rdStoreTrack: string | null; // production | internal | testflight (store-sync rows)
+    rdPromotable: boolean; // BE truth: can be promoted now (promotable stage AND not already live on prod)
 }
 
 export interface PromoteReq {

@@ -90,6 +90,11 @@ import Products.Autopilot.Types qualified as NT
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Storage.Schema qualified as S
 import Products.Autopilot.Types.Target (TargetState (..))
+import Products.Autopilot.Mobile.Types (mbContext, mbcVersionCode)
+import Products.Autopilot.Mobile.Queries.StoreStatus (productionVersionsByApp)
+import Products.Autopilot.Mobile.StoreSync (versionOlderThan)
+import Data.Map.Strict qualified as Map
+import Data.Int (Int32)
 import Products.Autopilot.Types.Target.Kubernetes
 import Products.Autopilot.Types.Target.Kubernetes qualified as K8s
 import Products.Autopilot.Workflow.Helpers (captureDeploymentPreview, captureDeploymentSnapshot)
@@ -229,16 +234,17 @@ upsertServiceH _ap req = do
 listReleasesH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow [ReleaseTracker]
 listReleasesH _ap mFrom mTo mCategory = do
   let mWhitelist = categoryWhitelist mCategory
+  prodCodes <- productionVersionsByApp
   case (mFrom >>= parseISO, mTo >>= parseISO) of
     (Just fromTime, Just toTime) -> do
       pairs <- listReleaseTrackersByDateRangeAndCategory fromTime toTime mWhitelist
-      pure (map fst pairs)
+      pure (map (fst . injectPromotable prodCodes) pairs)
     _ -> do
       -- No valid date range -- default to last 30 days as safety limit
       now <- liftIO getCurrentTime
       let thirtyDaysAgo = addUTCTime (-30 * 86400) now
       pairs <- listReleaseTrackersByDateRangeAndCategory thirtyDaysAgo now mWhitelist
-      pure (map fst pairs)
+      pure (map (fst . injectPromotable prodCodes) pairs)
   where
     parseISO :: Text -> Maybe UTCTime
     parseISO t =
@@ -255,6 +261,33 @@ listReleasesH _ap mFrom mTo mCategory = do
     categoryWhitelist (Just "backend") =
       Just ["BackendService", "BackendScheduler", "BackendConfig"]
     categoryWhitelist _ = Nothing
+
+{- | Inject a per-row @promotable@ flag (BE truth) into a mobile release's release_context:
+True when the build is ahead of production — a NEWER marketing version, or the same version
+with a HIGHER build number. Mirrors the promote handler's gate (and is version-first so iOS,
+whose build number resets per marketing version, isn't wrongly marked superseded). Non-mobile
+rows are left untouched (no flag → the FE keeps its own stage logic); an app with no synced
+production is promotable by default.
+-}
+injectPromotable :: Map.Map (Text, Text, Text) (Text, Maybe Int32) -> TrackerWithTarget -> TrackerWithTarget
+injectPromotable prods pair@(tracker, mts) =
+  case mts of
+    Just (MobileBuildState s) ->
+      let key = (NT.appGroup tracker, NT.service tracker, NT.env tracker)
+          buildVer = NT.newVersion tracker
+          bCode = mbcVersionCode (mbContext s)
+          promotable = case Map.lookup key prods of
+            Just (pVer, mpCode) ->
+              not (buildVer `versionOlderThan` pVer || (buildVer == pVer && codeAtOrBelow bCode mpCode))
+            Nothing -> True -- no synced production → ahead by default
+          rc' = case NT.releaseContext tracker of
+            Just (Object o) -> Just (Object (KM.insert (K.fromText "promotable") (Bool promotable) o))
+            other -> other
+       in (tracker {releaseContext = rc'}, mts)
+    _ -> pair
+  where
+    codeAtOrBelow (Just b) (Just p) = b <= p
+    codeAtOrBelow _ _ = False
 
 createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseH ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq {..} = do

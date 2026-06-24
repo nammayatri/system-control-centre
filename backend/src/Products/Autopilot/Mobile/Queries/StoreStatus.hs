@@ -21,6 +21,8 @@ module Products.Autopilot.Mobile.Queries.StoreStatus (
     listStoreStatus,
     secondsSinceLastSync,
     latestShippedVersionsPerApp,
+    findProductionStoreCell,
+    productionVersionsByApp,
     ActiveMobileState (..),
     findActiveMobileState,
 ) where
@@ -165,6 +167,39 @@ the newest @MobileBuild@ release NOT created by store-sync. Stamped into
 as out-of-band drift. Excluding store-sync rows avoids flagging our own imports
 (edge case #7). 'Nothing' for an app SCC has never released → no drift claim.
 -}
+{- | The production track's currently-synced @(version_name, version_code)@ for an app
+from the @store_status@ cache, or 'Nothing' when production hasn't been synced. Either
+field may be NULL. Used by the promote guard to reject re-promoting a build that is
+already live on production.
+-}
+findProductionStoreCell :: (MonadFlow m) => Int32 -> Text -> m (Maybe (Maybe Text, Maybe Int32))
+findProductionStoreCell appCatalogId platform = withDb $ \db -> withConn db $ \conn -> do
+    rows <-
+        query
+            conn
+            "SELECT version_name, version_code FROM store_status \
+            \ WHERE app_catalog_id = ? AND platform = ? AND track = 'production' LIMIT 1"
+            (appCatalogId, platform)
+    pure $ case rows of
+        (r : _) -> Just r
+        [] -> Nothing
+
+{- | Production-track @(version_name, version_code)@ per app @(app_group, service, env)@ from
+the store_status cache (joined to app_catalog for the name/surface/platform the release rows
+key on). Powers the release list's per-row @promotable@ flag — which compares by version
+THEN code — without an N+1 store read. Only cells with a known version are included; the code
+may still be NULL.
+-}
+productionVersionsByApp :: (MonadFlow m) => m (Map.Map (Text, Text, Text) (Text, Maybe Int32))
+productionVersionsByApp = withDb $ \db -> withConn db $ \conn -> do
+    rows <-
+        query_
+            conn
+            "SELECT a.name, a.surface, a.platform, ss.version_name, ss.version_code \
+            \ FROM store_status ss JOIN app_catalog a ON a.id = ss.app_catalog_id \
+            \ WHERE ss.track = 'production' AND ss.version_name IS NOT NULL"
+    pure $ Map.fromList [((n, s, p), (vn, vc)) | (n, s, p, vn, vc) <- rows]
+
 latestShippedVersionsPerApp :: (MonadFlow m) => m (Map.Map (Text, Text, Text) Text)
 latestShippedVersionsPerApp = withDb $ \db -> withConn db $ \conn -> do
     rows <-

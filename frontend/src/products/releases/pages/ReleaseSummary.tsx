@@ -20,6 +20,7 @@ import type { LatestBuild } from '../types';
 import { ABValidationModal } from '../components/ABValidationModal';
 import { Badge } from '../../../shared/ui/badge';
 import { StatusBadge } from '../components/StatusBadge';
+import { isFirebaseInternal, FirebaseInternalBadge } from '../components/FirebaseBadge';
 import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
@@ -997,8 +998,12 @@ const ReleaseSummary: React.FC = () => {
   // genuinely-building release keep their truthful raw StatusBadge, so an aborted
   // row left at MBTagPushed never reads "Ready to promote".
   const rollout = isMobile ? rolloutQ.data : undefined;
+  // An internal/TestFlight snapshot is only "promotable" when the BACKEND says so
+  // (rdPromotable) — i.e. not already live on production. Otherwise it's not offered the
+  // promote flow and the header doesn't read "Ready to promote".
   const isPromotableSnapshot =
-    rollout?.rdStoreTrack === 'internal' || rollout?.rdStoreTrack === 'testflight';
+    (rollout?.rdStoreTrack === 'internal' || rollout?.rdStoreTrack === 'testflight') &&
+    !!rollout?.rdPromotable;
   const mobileStatus =
     rollout && (s === 'INPROGRESS' || isPromotableSnapshot)
       ? mobileDisplayStatus(lifecycleFromRollout(rollout))
@@ -1124,6 +1129,26 @@ const ReleaseSummary: React.FC = () => {
           ) : (
             <StatusBadge status={release.status} />
           )}
+          {/* Store track (Internal / TestFlight / Production) — surfaces which track the
+              build sits on, e.g. an un-promotable internal build below production. */}
+          {isMobile && rollout?.rdStoreTrack && (
+            <Badge
+              variant={
+                rollout.rdStoreTrack === 'production'
+                  ? 'success'
+                  : rollout.rdStoreTrack === 'testflight'
+                    ? 'info'
+                    : 'blue'
+              }
+            >
+              {rollout.rdStoreTrack === 'production'
+                ? 'Production'
+                : rollout.rdStoreTrack === 'testflight'
+                  ? 'TestFlight'
+                  : 'Internal'}
+            </Badge>
+          )}
+          {isFirebaseInternal(release) && <FirebaseInternalBadge />}
           {(release.release_context?.revert === 1 || revertsTarget) && <Badge variant="purple" dot>REVERT</Badge>}
           {isMobile && release.release_context?.build_type === 'debug' && (
             <Badge variant="warning" dot>DEBUG</Badge>

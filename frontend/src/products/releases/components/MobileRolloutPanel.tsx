@@ -92,6 +92,11 @@ export function MobileRolloutPanel({
 
     const stage = stageOf(lifecycleFromRollout(d));
     if (stage === 'none') return null;
+    // A promote-stage build the backend says is NOT promotable (already at/below the
+    // production code) has nothing to do here — hide the whole Store-release panel rather
+    // than show a "Ready to promote" header next to a "nothing to promote" note. Its track
+    // (e.g. Internal) is surfaced at the top of the release summary instead.
+    if (stage === 'promote' && !d.rdPromotable) return null;
 
     const isIos = d.rdPlatform === 'ios';
     const canPromote = hasPermission('autopilot', 'RELEASE_PROMOTE');
@@ -223,7 +228,8 @@ export function MobileRolloutPanel({
                 </Button>
             </div>
 
-            {/* ── Promote ── */}
+            {/* ── Promote (a not-promotable promote-stage build already returned null above,
+                 so reaching here means rdPromotable is true) ── */}
             {stage === 'promote' && (
                 <div className="space-y-3">
                     <p className="text-xs text-zinc-600">

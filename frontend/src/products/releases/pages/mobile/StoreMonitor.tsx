@@ -6,7 +6,6 @@ import {
   Smartphone,
   Search,
   RefreshCw,
-  AlertTriangle,
   ChevronRight,
   MonitorSmartphone,
   Zap,
@@ -140,17 +139,6 @@ function RollingChip() {
   );
 }
 
-function DriftChip() {
-  return (
-    <span
-      className="inline-flex items-center gap-0.5 rounded border border-amber-200 bg-amber-50 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700"
-      title="Store version differs from the last version SCC shipped"
-    >
-      <AlertTriangle className="w-2.5 h-2.5" /> drift
-    </span>
-  );
-}
-
 function EmptyState({ children }: { children: ReactNode }) {
   return (
     <div className="rounded-xl border border-zinc-200 bg-white py-16 text-center text-sm text-zinc-400">{children}</div>
@@ -192,7 +180,6 @@ function TrackLine({ label, cell, track }: { label: string; cell: TrackCell | nu
             <span className="flex min-w-0 items-center gap-1.5 font-mono text-sm text-zinc-800">
               <span className="truncate">{cell?.version ?? '—'}</span>
               {cell?.buildCode != null && <span className="text-zinc-400">+{cell.buildCode}</span>}
-              {cell?.drift === true && <DriftChip />}
             </span>
           )}
         </div>
@@ -222,11 +209,17 @@ function PlatformPanel({
 
   const secondaryLabel = platform === 'ios' ? 'TestFlight' : 'Internal';
   const secondaryCellRaw = platform === 'ios' ? block.testflight : block.internal;
-  // Most-advanced-track-wins: a build that's gone to review shows in the Incoming
-  // row, so suppress the testing row when it's the same version (avoid double-show).
   const incoming = block.incoming;
+  // Hide the testing-track cell only when it is the SAME BUILD as the Incoming review
+  // build — matching version AND build number. A different build number (e.g. internal
+  // 3.3.17+461 vs incoming 3.3.17+460) is a genuinely newer testing build, so keep it.
   const secondaryCell =
-    incoming && secondaryCellRaw && incoming.version === secondaryCellRaw.version ? null : secondaryCellRaw;
+    incoming &&
+    secondaryCellRaw &&
+    incoming.version === secondaryCellRaw.version &&
+    incoming.buildCode === secondaryCellRaw.buildCode
+      ? null
+      : secondaryCellRaw;
   const rolling = activeRolloutOf(block.production) != null;
   const fresh = freshness(platformSyncedAt(block), useContext(StaleMsContext));
 

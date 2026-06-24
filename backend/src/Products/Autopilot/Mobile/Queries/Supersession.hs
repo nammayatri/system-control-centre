@@ -29,32 +29,34 @@ import Products.Autopilot.Types.Storage.Schema
     autopilotDb,
   )
 
--- | Scope shared by both rules: another production-track MobileBuild row of the
--- SAME app for a DIFFERENT version than the one taking the slot.
-otherProductionVersion ::
-  Text -> Text -> Text -> Text -> Text -> ReleaseTrackerT (QExpr Postgres s) -> QExpr Postgres s Bool
-otherProductionVersion appGroup surface platform newVersion excludeRid rt =
+-- | Scope shared by both rules: another production-track MobileBuild BUILD of the
+-- same app, excluding the one taking the slot (by id). Excludes by build id only —
+-- NOT by version name — because builds are identified by (name + build number)
+-- (migration 0035), so a different-code build of the SAME name (e.g. 3.3.16+396
+-- superseding 3.3.16+395) must still be caught.
+otherProductionBuild ::
+  Text -> Text -> Text -> Text -> ReleaseTrackerT (QExpr Postgres s) -> QExpr Postgres s Bool
+otherProductionBuild appGroup surface platform excludeRid rt =
   rtAppGroup rt ==. val_ appGroup
     &&. rtService rt ==. val_ surface
     &&. rtEnv rt ==. val_ platform
     &&. rtCategory rt ==. val_ "MobileBuild"
     &&. rtStoreTrack rt ==. val_ (Just "production")
     &&. rtId rt /=. val_ excludeRid
-    &&. rtNewVersion rt /=. val_ newVersion
 
 -- | Rule A. Freeze the previous live version (different version, still rolling out /
 -- halted below 100%) at its last percent and mark it @superseded@ → HISTORY. A
 -- version already at completed/100% is left alone (it drops to history by version
 -- order on its own). Returns the affected release ids for the caller to log.
 supersedePreviousLive ::
-  (MonadFlow m) => Text -> Text -> Text -> Text -> Text -> m [Text]
-supersedePreviousLive appGroup surface platform newVersion excludeRid = withDb $ \db -> do
+  (MonadFlow m) => Text -> Text -> Text -> Text -> m [Text]
+supersedePreviousLive appGroup surface platform excludeRid = withDb $ \db -> do
   ids <-
     runDB db $
       runSelectReturningList $
         select $ do
           rt <- all_ (releaseTrackers autopilotDb)
-          guard_ (otherProductionVersion appGroup surface platform newVersion excludeRid rt)
+          guard_ (otherProductionBuild appGroup surface platform excludeRid rt)
           guard_
             ( rtRolloutStatus rt ==. val_ (Just "rolling_out")
                 ||. rtRolloutStatus rt ==. val_ (Just "halted")
@@ -79,14 +81,14 @@ supersedePreviousLive appGroup surface platform newVersion excludeRid = withDb $
 -- HISTORY when a newer version takes the incoming slot. Keeps review_status so the
 -- history row still reads its last review state. Returns the affected ids.
 retireOlderIncoming ::
-  (MonadFlow m) => Text -> Text -> Text -> Text -> Text -> m [Text]
-retireOlderIncoming appGroup surface platform newVersion excludeRid = withDb $ \db -> do
+  (MonadFlow m) => Text -> Text -> Text -> Text -> m [Text]
+retireOlderIncoming appGroup surface platform excludeRid = withDb $ \db -> do
   ids <-
     runDB db $
       runSelectReturningList $
         select $ do
           rt <- all_ (releaseTrackers autopilotDb)
-          guard_ (otherProductionVersion appGroup surface platform newVersion excludeRid rt)
+          guard_ (otherProductionBuild appGroup surface platform excludeRid rt)
           guard_ (not_ (isNothing_ (rtReviewStatus rt))) -- has a review state (incoming)
           guard_ (isNothing_ (rtRolloutStatus rt)) -- but not yet rolling out
           pure (rtId rt)

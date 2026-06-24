@@ -2,6 +2,7 @@ import type { APRelease } from '../api';
 import { StatusBadge } from './StatusBadge';
 import { Badge } from '../../../shared/ui/badge';
 import { mobileDisplayStatus, lifecycleFromRelease, stageOf } from './mobileStage';
+import { isFirebaseInternal, FirebaseInternalBadge } from './FirebaseBadge';
 
 /**
  * Status badge for a release in a LIST / GROUP context.
@@ -17,7 +18,21 @@ import { mobileDisplayStatus, lifecycleFromRelease, stageOf } from './mobileStag
  * The detail page derives from the richer GET /rollout payload directly; this is
  * the cheap list/group variant that needs no per-row request.
  */
-export function ReleaseStatusBadge({ release }: { release: APRelease }) {
+export function ReleaseStatusBadge({
+  release,
+  suppressPromote = false,
+}: {
+  release: APRelease;
+  // True when a NEWER build of the same app exists, so this (older) internal build is no
+  // longer the one to promote — it reads "Superseded" instead of "Ready to promote".
+  // Computed by the list (cross-row); defaults off everywhere else.
+  suppressPromote?: boolean;
+}) {
+  // Firebase App Distribution builds go to an INTERNAL channel, not Google Play —
+  // flag them so operators don't read them as a store release (shared component so
+  // every surface shows the same badge).
+  const firebaseBadge = isFirebaseInternal(release) ? <FirebaseInternalBadge /> : null;
+
   if (release.tracker_type === 'MobileBuild') {
     const lc = lifecycleFromRelease(release);
     // Override the raw status for an INPROGRESS row (its raw status is misleading)
@@ -25,10 +40,47 @@ export function ReleaseStatusBadge({ release }: { release: APRelease }) {
     // (stage 'rollout') OR a superseded version frozen as history (stage 'superseded',
     // also COMPLETED) — so the badge matches the status filter and the row's track chip.
     const stage = stageOf(lc);
-    if (release.status === 'INPROGRESS' || stage === 'rollout' || stage === 'superseded') {
+    // An internal / TestFlight store-sync build (stage 'promote') is NOT released — it's
+    // the latest build pending promotion, so show "Ready to promote" instead of a
+    // misleading COMPLETED. EXCEPT a Firebase provider build: Firebase App Distribution is
+    // a terminal internal channel with nothing to promote to Play, so it keeps its plain
+    // status (COMPLETED) + the Firebase badge.
+    const promotable = stage === 'promote' && !isFirebaseInternal(release);
+    // BE truth: a build at or below the production code is not promotable (overtaken by
+    // production). Combined with the list's latest-per-app suppression — either makes a
+    // promote-stage build read "Superseded" instead of "Ready to promote".
+    const beNotPromotable = release.release_context?.promotable === false;
+    // Only the latest, higher-than-production build is promotable; an older internal build
+    // a newer one (or production) has overtaken reads "Superseded" (not COMPLETED — it
+    // isn't released to users).
+    if (promotable && (suppressPromote || beNotPromotable)) {
+      return (
+        <>
+          {firebaseBadge}
+          <Badge variant="default" dot>Superseded</Badge>
+        </>
+      );
+    }
+    if (
+      release.status === 'INPROGRESS' ||
+      stage === 'rollout' ||
+      stage === 'superseded' ||
+      promotable
+    ) {
       const mb = mobileDisplayStatus(lc);
-      if (mb) return <Badge variant={mb.variant} dot>{mb.label}</Badge>;
+      if (mb)
+        return (
+          <>
+            {firebaseBadge}
+            <Badge variant={mb.variant} dot>{mb.label}</Badge>
+          </>
+        );
     }
   }
-  return <StatusBadge status={release.status} />;
+  return (
+    <>
+      {firebaseBadge}
+      <StatusBadge status={release.status} />
+    </>
+  );
 }

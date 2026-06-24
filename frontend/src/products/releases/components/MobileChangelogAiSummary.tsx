@@ -1,6 +1,6 @@
 import { useEffect, useState, useId } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Sparkles, Loader2, ChevronDown } from 'lucide-react';
+import { Sparkles, Loader2, ChevronDown, Copy, Check } from 'lucide-react';
 import { Button } from '../../../shared/ui/button';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { mobileApi } from '../api';
@@ -42,8 +42,25 @@ function RevealText({ text, dim }: { text: string; dim?: boolean }) {
         transition: 'opacity 450ms ease, transform 450ms ease',
       }}
     >
-      {text}
+      {renderWithMentions(text)}
     </div>
+  );
+}
+
+/**
+ * Render text with @author mentions in italics. Splits on the @handle token (a
+ * capturing split keeps the delimiters), so the surrounding text stays plain,
+ * escaped text — we never inject HTML. Odd indices are the captured mentions.
+ */
+function renderWithMentions(text: string) {
+  return text.split(/(@[A-Za-z0-9_.-]+)/g).map((part, i) =>
+    i % 2 === 1 ? (
+      <em key={i} className="italic text-zinc-500">
+        {part}
+      </em>
+    ) : (
+      part
+    ),
   );
 }
 
@@ -89,9 +106,23 @@ export function MobileChangelogAiSummary({
   });
 
   const [collapsed, setCollapsed] = useState(false);
+  const [copied, setCopied] = useState(false);
   const panelId = useId();
   const d = q.data;
   const isPending = d?.status === 'pending';
+  // The full generated summary: short synopsis + the changelog prose.
+  const copyText = [d?.summaryShort, d?.summaryLong].filter(Boolean).join('\n\n');
+
+  const onCopy = async () => {
+    if (!copyText) return;
+    try {
+      await navigator.clipboard.writeText(copyText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked (insecure context / permissions) — silently ignore */
+    }
+  };
   const isAi = d?.status === 'ready' && !!d.model;
   const badge = !d?.available
     ? null
@@ -135,12 +166,28 @@ export function MobileChangelogAiSummary({
               {collapsed ? 'Show' : 'Hide'}
             </span>
           </button>
-          {/* Refresh is meaningless mid-generation (the panel already polls) and
-              while collapsed — hide it in both cases. */}
-          {!isPending && !collapsed && (
-            <Button size="sm" variant="ghost" loading={q.isFetching} onClick={() => q.refetch()}>
-              Refresh
-            </Button>
+          {/* Copy + Refresh controls (siblings of the title button, never nested).
+              Refresh is meaningless mid-generation (the panel already polls); Copy
+              stays available so the current text can be grabbed even while pending. */}
+          {!collapsed && (
+            <div className="flex shrink-0 items-center gap-1">
+              {d?.available && copyText && (
+                <button
+                  type="button"
+                  onClick={onCopy}
+                  title={copied ? 'Copied' : 'Copy summary'}
+                  aria-label={copied ? 'Copied' : 'Copy summary to clipboard'}
+                  className="rounded p-1.5 text-violet-400 transition-colors hover:bg-violet-100 hover:text-violet-600"
+                >
+                  {copied ? <Check size={14} className="text-emerald-600" /> : <Copy size={14} />}
+                </button>
+              )}
+              {!isPending && (
+                <Button size="sm" variant="ghost" loading={q.isFetching} onClick={() => q.refetch()}>
+                  Refresh
+                </Button>
+              )}
+            </div>
           )}
         </div>
 

@@ -155,6 +155,7 @@ main = do
     section "[43] Console rollout detection (approved android adopts a Console-set %)" testConsoleRolloutDetect
     section "[44] iOS release detection (adopt an out-of-band App Store Connect release)" testIosReleaseDetect
     section "[45] Play track snapshot parse (App Release Monitoring)" testTrackSnapshotParse
+    section "[46] claimsStoreIdentity (store-identity gate — single source of truth)" testClaimsStoreIdentity
 
     putStrLn ""
     putStrLn "==========================================="
@@ -990,6 +991,43 @@ testMobileBuildWFStatusTransitions = do
 -- ============================================================================
 -- [19] MobileBuildContext JSON Round-Trip
 -- ============================================================================
+
+-- ============================================================================
+-- [46] claimsStoreIdentity — the single source of truth for the store-identity
+-- rule. Only builds published to a versioned store (Play prod / App Store) under
+-- their version_code own a (version, code) identity; debug + Firebase internal
+-- builds reuse a repeating code and must be free to coexist. Allowlist, so a NEW
+-- destination defaults to "no identity" rather than re-creating the collision bug.
+-- ============================================================================
+
+testClaimsStoreIdentity :: IO ()
+testClaimsStoreIdentity = do
+    putStrLn "claimsStoreIdentity: only store-published builds own a (version, code) identity"
+    let ctx bt dest =
+            MobileBuildContext
+                { mbcVersionCode = Just 386
+                , mbcChangeLog = "x"
+                , mbcBuildType = bt
+                , mbcReleaseGroupId = "g"
+                , mbcMatrixJobName = "j"
+                , mbcOtaNamespace = Nothing
+                , mbcTagPushed = Nothing
+                , mbcDestination = dest
+                }
+    -- Store-bound builds DO claim an identity.
+    assertBool "consumer Android (release, no destination)" $ claimsStoreIdentity (ctx "release" Nothing)
+    assertBool "provider Android -> GooglePlay" $ claimsStoreIdentity (ctx "release" (Just "GooglePlay"))
+    assertBool "iOS release (release, no destination)" $ claimsStoreIdentity (ctx "release" Nothing)
+    -- Internal / non-store builds DO NOT — their code repeats, so they must coexist.
+    assertBool "provider Android -> Firebase is NOT a store identity" $
+        not (claimsStoreIdentity (ctx "release" (Just "Firebase")))
+    assertBool "debug build is NOT a store identity" $
+        not (claimsStoreIdentity (ctx "debug" Nothing))
+    assertBool "debug + Firebase is NOT a store identity" $
+        not (claimsStoreIdentity (ctx "debug" (Just "Firebase")))
+    -- Allowlist: an unknown/new destination defaults to NO identity (safe direction).
+    assertBool "unknown destination defaults to NOT a store identity" $
+        not (claimsStoreIdentity (ctx "release" (Just "Huawei")))
 
 testMobileBuildContextJsonRoundTrip :: IO ()
 testMobileBuildContextJsonRoundTrip = do
