@@ -8,6 +8,7 @@ import {
   useCreateMobileReleases,
   useChangelogPreviews,
 } from '../../hooks';
+import { StoreSyncBanner } from '../../components/StoreSync';
 import type { ChangelogApp } from '../../hooks';
 import type {
   AppCatalogEntry,
@@ -114,6 +115,26 @@ export default function CreateMobileRelease() {
   const appGroups = useMemo(() => groupAppsBySurface(enabledApps), [enabledApps]);
   const { isOpen, toggle } = useGroupCollapse();
 
+  // Free-text filter over the app picker — matches name / label / surface /
+  // platform. Filters the visible tiles only; it never touches selection, so an
+  // already-selected app that's filtered out stays selected (count badge holds).
+  const [appSearch, setAppSearch] = useState('');
+  const visibleGroups = useMemo(() => {
+    const term = appSearch.trim().toLowerCase();
+    if (!term) return appGroups;
+    return appGroups
+      .map((g) => ({
+        ...g,
+        apps: g.apps.filter((a) =>
+          (a.displayLabel || a.name).toLowerCase().includes(term) ||
+          a.name.toLowerCase().includes(term) ||
+          a.surface.toLowerCase().includes(term) ||
+          a.platform.toLowerCase().includes(term),
+        ),
+      }))
+      .filter((g) => g.apps.length > 0);
+  }, [appGroups, appSearch]);
+
   const [sourceRef, setSourceRef] = useState<string>('main');
   const [branchSearch, setBranchSearch] = useState('main');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -181,6 +202,33 @@ export default function CreateMobileRelease() {
   const isIosId = (id: number): boolean =>
     enabledApps.find((a) => a.id === id)?.platform === 'ios';
 
+  // A provider (driver) Android release going to Firebase: its version is
+  // auto-generated per build (year.MMDD.HHMM) and never reaches Play, so the
+  // operator doesn't enter a version/code for it. Drives the read-only Versions
+  // row + skips that row's version validation.
+  const isFirebaseId = (id: number): boolean => {
+    const a = enabledApps.find((x) => x.id === id);
+    return (
+      buildType === 'release' &&
+      destination === 'Firebase' &&
+      a?.surface === 'driver' &&
+      a?.platform === 'android'
+    );
+  };
+
+  // Live preview of the auto version a Firebase build would get right now, matching the
+  // backend's UTC `year.MMDD.HHMM` format (execResolveVersion). Approximate — the final
+  // value is stamped server-side when the build's ResolveVersion stage runs, so it may
+  // differ by a minute; the resolved version then shows on the release row/detail.
+  const firebaseVersionPreview = (): string => {
+    const d = new Date();
+    const mm = d.getUTCMonth() + 1;
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    const HH = String(d.getUTCHours()).padStart(2, '0');
+    const MM = String(d.getUTCMinutes()).padStart(2, '0');
+    return `${d.getUTCFullYear()}.${mm}${dd}.${HH}${MM}`;
+  };
+
   // Platforms in the current selection — drives the destination dropdown
   // and gives us a quick check for mixed-platform validation messaging.
   const selectedPlatforms = useMemo(() => {
@@ -191,14 +239,6 @@ export default function CreateMobileRelease() {
     }
     return s;
   }, [selectedIds, enabledApps]);
-
-  // Primary platform drives the "uploaded to …" hint in the Build type
-  // card. Build type/destination are decided by the backend (env-locked),
-  // so nothing is sent from here.
-  const primaryPlatform: 'android' | 'ios' =
-    selectedPlatforms.has('ios') && !selectedPlatforms.has('android')
-      ? 'ios'
-      : 'android';
 
   // The destination picker is relevant only to provider-prod-apk-gen.yaml, so
   // show it iff a provider (driver) Android app is selected on a release build —
@@ -212,6 +252,26 @@ export default function CreateMobileRelease() {
     [selectedIds, enabledApps],
   );
   const showDestination = buildType === 'release' && hasProviderAndroid;
+
+  // The store(s) builds will land on, derived from the SELECTED platforms (not a
+  // single "primary" one) — so a mixed Android+iOS release reads "Google Play and
+  // App Store", an iOS-only one "App Store", etc. Drives the Build type hint.
+  const uploadTargets = useMemo(() => {
+    const hasAndroid = selectedPlatforms.has('android');
+    const hasIos = selectedPlatforms.has('ios');
+    const targets: string[] = [];
+    if (buildType === 'debug') {
+      if (hasAndroid) targets.push('Firebase App Distribution');
+      if (hasIos) targets.push('TestFlight');
+    } else {
+      if (hasAndroid)
+        // A provider Android prod build can be routed to Firebase via the
+        // destination picker; otherwise consumer/provider Android lands on Play.
+        targets.push(showDestination && destination === 'Firebase' ? 'Firebase App Distribution' : 'Google Play');
+      if (hasIos) targets.push('App Store');
+    }
+    return targets;
+  }, [selectedPlatforms, buildType, showDestination, destination]);
 
   // When a fresh preview lands, prefill any unedited rows with the suggested
   // version. Don't clobber values the user has already typed. Per-platform:
@@ -296,6 +356,8 @@ export default function CreateMobileRelease() {
     if (/^[0-9a-fA-F]{6,40}$/.test(changeLog.trim())) return { ok: false, reason: 'Change log cannot be a git commit ID. Please provide a descriptive changelog.' };
     if (!isDebug) {
       for (const id of selectedIds) {
+        // Firebase builds auto-generate their version — nothing to validate here.
+        if (isFirebaseId(id)) continue;
         const v = versionEdits[id];
         const ios = isIosId(id);
         const fieldLabel = ios ? 'version number' : 'version name';
@@ -310,7 +372,7 @@ export default function CreateMobileRelease() {
       }
     }
     return { ok: true as const };
-  }, [selectedIds, versionEdits, changeLog, enabledApps, isDebug]);
+  }, [selectedIds, versionEdits, changeLog, enabledApps, isDebug, destination, buildType]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -319,7 +381,9 @@ export default function CreateMobileRelease() {
       return;
     }
     const items: CreateMobileReleasesItem[] = selectedIds.map((id) => {
-      if (isDebug) {
+      // Debug + Firebase builds carry no operator version — the workflow generates it
+      // (debug = CalVer, Firebase = unique timestamp). Send nulls so the backend owns it.
+      if (isDebug || isFirebaseId(id)) {
         return { appCatalogId: id, versionName: null, versionCode: null };
       }
       const v = versionEdits[id];
@@ -350,6 +414,10 @@ export default function CreateMobileRelease() {
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
       <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-6 max-w-4xl">
+
+        {/* Store versions shown below come from the on-demand cache; auto-refreshes
+            on open when cold/stale so the base build per track is current. */}
+        <StoreSyncBanner />
 
         {/* ─── Apps card ─────────────────────────────── */}
         <section className="bg-white rounded-xl border border-zinc-200">
@@ -386,14 +454,30 @@ export default function CreateMobileRelease() {
               </div>
             ) : (
               <div className="space-y-2.5">
-                {appGroups.map((g) => {
+                {/* App search — filters the tiles below by name / surface / platform. */}
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={appSearch}
+                    onChange={(e) => setAppSearch(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Escape') setAppSearch(''); }}
+                    placeholder="Search apps — name, surface, platform…"
+                    className="w-full h-10 sm:h-9 border border-zinc-300 rounded-lg pl-9 pr-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-zinc-400"
+                  />
+                </div>
+                {visibleGroups.length === 0 ? (
+                  <p className="px-1 py-6 text-center text-sm text-zinc-400">
+                    No apps match “{appSearch.trim()}”.
+                  </p>
+                ) : visibleGroups.map((g) => {
                   const groupSel = g.apps.filter((a) => selectedIds.includes(a.id)).length;
                   return (
                     <CollapsibleGroup
                       key={g.key}
                       label={g.label}
                       count={g.apps.length}
-                      open={isOpen(g.key)}
+                      open={appSearch.trim() ? true : isOpen(g.key)}
                       onToggle={() => toggle(g.key)}
                       badge={
                         groupSel > 0 ? (
@@ -841,6 +925,38 @@ export default function CreateMobileRelease() {
                 const preview = previewById.get(id);
                 const v = versionEdits[id] || { versionName: '', versionCode: '' };
                 const ios = app.platform === 'ios';
+
+                // Firebase build: no editable version — it's auto-generated per build.
+                // Show a clear read-only row instead of inputs the operator shouldn't fill.
+                if (isFirebaseId(id)) {
+                  return (
+                    <div
+                      key={id}
+                      className="rounded-lg border border-amber-200 bg-amber-50/50 px-3 py-2.5"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider">
+                          {app.displayLabel || app.name}
+                          <span className="text-zinc-400 ml-1.5 normal-case font-normal tracking-normal">
+                            ({app.surface} {app.platform})
+                          </span>
+                        </label>
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-800 border border-amber-200">
+                          Firebase
+                        </span>
+                      </div>
+                      <div className="mt-1.5 flex items-center gap-2 text-[12px] text-amber-800">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                        <span>
+                          Auto version:{' '}
+                          <code className="font-mono">{firebaseVersionPreview()}</code> — no input
+                          needed.
+                        </span>
+                      </div>
+                    </div>
+                  );
+                }
+
                 // Android rows render a 3-column grid (name + code + status);
                 // iOS rows collapse to a 2-column grid (just the version_number
                 // input + status) since the build number is workflow-computed.
@@ -945,9 +1061,9 @@ export default function CreateMobileRelease() {
               {buildType === 'debug' ? 'Debug' : 'Release'}
             </span>
             <p className="mt-2.5 text-xs text-zinc-500">
-              {buildType === 'debug'
-                ? `Builds will be uploaded to ${primaryPlatform === 'ios' ? 'TestFlight' : 'Firebase App Distribution'}.`
-                : `Builds will be uploaded to ${primaryPlatform === 'ios' ? 'App Store' : 'Google Play'}.`}
+              {uploadTargets.length === 0
+                ? 'Select apps to see where builds will be uploaded.'
+                : `Builds will be uploaded to ${uploadTargets.join(' and ')}.`}
             </p>
 
             {showDestination && (
@@ -970,6 +1086,16 @@ export default function CreateMobileRelease() {
                   Where the provider (driver) Android prod build is published. iOS
                   and consumer apps in this release ignore it.
                 </p>
+                {destination === 'Firebase' && (
+                  <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-600 mt-0.5 shrink-0" />
+                    <p className="text-[11px] text-amber-800 leading-relaxed">
+                      Firebase builds don’t go to the Play Store — each gets an{' '}
+                      <span className="font-medium">auto-generated unique version</span> (shown in
+                      the Versions section above). No version or code is needed.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </div>

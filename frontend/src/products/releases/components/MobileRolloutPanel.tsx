@@ -13,6 +13,7 @@ import {
     Send,
     Flag,
     Info,
+    ExternalLink,
 } from 'lucide-react';
 import { Button } from '../../../shared/ui/button';
 import { Badge } from '../../../shared/ui/badge';
@@ -28,6 +29,12 @@ function errMsg(e: any): string {
         'Request failed'
     );
 }
+
+// Where the operator goes to click "Publish" under Play Managed Publishing. We don't
+// store per-app Play Console ids (only the package name), and Managed Publishing batches
+// every app's pending changes at the account level, so the account console is the right
+// landing spot — the operator opens the app's Publishing overview from there.
+const PLAY_CONSOLE_URL = 'https://play.google.com/console';
 
 /**
  * Promote-to-review → staged-rollout control panel for a single mobile release
@@ -80,6 +87,7 @@ export function MobileRolloutPanel({
     });
 
     const [busy, setBusy] = useState<string | null>(null);
+    const [syncing, setSyncing] = useState(false);
     const [showPromote, setShowPromote] = useState(false);
     const [notes, setNotes] = useState('');
     const [phased, setPhased] = useState(true);
@@ -92,6 +100,11 @@ export function MobileRolloutPanel({
 
     const stage = stageOf(lifecycleFromRollout(d));
     if (stage === 'none') return null;
+    // A promote-stage build the backend says is NOT promotable (already at/below the
+    // production code) has nothing to do here — hide the whole Store-release panel rather
+    // than show a "Ready to promote" header next to a "nothing to promote" note. Its track
+    // (e.g. Internal) is surfaced at the top of the release summary instead.
+    if (stage === 'promote' && !d.rdPromotable) return null;
 
     const isIos = d.rdPlatform === 'ios';
     const canPromote = hasPermission('autopilot', 'RELEASE_PROMOTE');
@@ -101,6 +114,30 @@ export function MobileRolloutPanel({
         void q.refetch();
         qc.invalidateQueries({ queryKey: ['release', releaseId] });
         qc.invalidateQueries({ queryKey: ['releases'] });
+        // The App Monitor reads the store_status cache (not release_tracker); every
+        // action here mirrors its new state into that cache on the backend, so refetch
+        // the monitor to surface the promote / rollout / halt / resume / release there too.
+        qc.invalidateQueries({ queryKey: ['store-monitor'] });
+    };
+
+    // A "hard" refresh that first forces a live store sync (refreshStoreApp) so the
+    // store_status cache reflects an out-of-band Console publish, THEN re-reads the
+    // rollout detail. This is what makes `rdLiveOnProduction` flip after the operator
+    // publishes — the cached cell alone would lag until the next sync. Best-effort: a
+    // sync failure (cooldown / quota) still falls through to the plain refetch.
+    const syncAndRefetch = async () => {
+        setSyncing(true);
+        try {
+            if (d.rdAppCatalogId) {
+                await mobileApi.refreshStoreApp(d.rdAppCatalogId).catch(() => {});
+            }
+            await q.refetch();
+            qc.invalidateQueries({ queryKey: ['release', releaseId] });
+            qc.invalidateQueries({ queryKey: ['releases'] });
+            qc.invalidateQueries({ queryKey: ['store-monitor'] });
+        } finally {
+            setSyncing(false);
+        }
     };
 
     const run = async (label: string, fn: () => Promise<unknown>) => {
@@ -214,12 +251,18 @@ export function MobileRolloutPanel({
                     Store release
                     <StageBadge stage={stage} pctLabel={pctLabel} halted={d.rdRolloutStatus === 'halted'} />
                 </div>
-                <Button size="sm" variant="ghost" loading={q.isFetching} onClick={() => q.refetch()}>
+                <Button
+                    size="sm"
+                    variant="ghost"
+                    loading={q.isFetching || syncing}
+                    onClick={syncAndRefetch}
+                >
                     <RefreshCw size={13} /> Refresh
                 </Button>
             </div>
 
-            {/* ── Promote ── */}
+            {/* ── Promote (a not-promotable promote-stage build already returned null above,
+                 so reaching here means rdPromotable is true) ── */}
             {stage === 'promote' && (
                 <div className="space-y-3">
                     <p className="text-xs text-zinc-600">
@@ -286,10 +329,26 @@ export function MobileRolloutPanel({
             {stage === 'review' && (
                 <div className="space-y-3">
                     {isIos ? (
-                        <p className="flex items-center gap-1.5 text-xs text-zinc-600">
-                            <Loader2 size={12} className="animate-spin text-indigo-500" />
-                            Waiting on App Store review — the outcome is detected automatically.
-                        </p>
+                        <div className="space-y-2">
+                            <p className="flex items-center gap-1.5 text-xs text-zinc-600">
+                                <Loader2 size={12} className="animate-spin text-indigo-500" />
+                                Waiting on App Store review — the outcome is detected automatically.
+                            </p>
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                className="border-red-300 text-red-700 hover:bg-red-50"
+                                disabled={!canPromote}
+                                loading={busy === 'Withdrawn from review'}
+                                onClick={() => run('Withdrawn from review', () => mobileApi.withdraw(releaseId))}
+                            >
+                                <XCircle size={13} /> Withdraw from review
+                            </Button>
+                            <p className="text-[11px] text-zinc-500">
+                                Cancels the App Store submission and aborts this release — use it to pull a bad
+                                build before it&apos;s approved.
+                            </p>
+                        </div>
                     ) : (
                         <>
                             <p className="text-xs text-zinc-600">
@@ -315,7 +374,20 @@ export function MobileRolloutPanel({
                                 >
                                     <XCircle size={13} /> Mark Rejected
                                 </Button>
+                                <a href={PLAY_CONSOLE_URL} target="_blank" rel="noreferrer">
+                                    <Button size="sm" variant="ghost">
+                                        <ExternalLink size={13} /> Open Play Console
+                                    </Button>
+                                </a>
                             </div>
+                            <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-zinc-500">
+                                <Info size={12} className="mt-0.5 shrink-0 text-zinc-400" />
+                                <span>
+                                    A submitted Play review <strong>can&apos;t be withdrawn</strong> — Google Play
+                                    has no cancel-review API. Wait for the verdict (record it above), or once it&apos;s
+                                    live, halt the rollout. To replace it, ship a new build.
+                                </span>
+                            </p>
                             {showReject && (
                                 <div className="space-y-2 rounded-md border border-red-200 bg-white/70 p-3">
                                     <textarea
@@ -384,6 +456,19 @@ export function MobileRolloutPanel({
                                 <Rocket size={13} /> {d.rdPhasedId ? 'Release (phased · 7 days)' : 'Release to all users'}
                             </Button>
                         </div>
+                    ) : d.rdManagedPublishing && !d.rdLiveOnProduction ? (
+                        // Android + Managed Publishing ON + not live yet: the build is STAGED on
+                        // production, so a rollout % wouldn't apply. Point the operator at the Play
+                        // Console to Publish, then a hard Refresh (forces a store sync) flips
+                        // rdLiveOnProduction and reveals the rollout controls. Managed-Publishing-OFF
+                        // apps (providers) skip this entirely — a % applies immediately there.
+                        <PublishGate
+                            consoleUrl={PLAY_CONSOLE_URL}
+                            syncing={syncing}
+                            onRefresh={syncAndRefetch}
+                            syncedSecondsAgo={d.rdSyncedSecondsAgo}
+                            cooldownSeconds={d.rdRefreshCooldownSeconds}
+                        />
                     ) : (
                         <RolloutControls
                             pct={pct}
@@ -516,6 +601,71 @@ function StageBadge({
         default:
             return null;
     }
+}
+
+/**
+ * Android-only "held under Managed Publishing" gate. The build is approved and staged on
+ * the production track, but nothing is live until the operator clicks Publish in the Play
+ * Console — and a rollout % set here wouldn't apply until then. So instead of the rollout
+ * controls we show a Publish link + a Refresh that forces a store sync (which is what flips
+ * `rdLiveOnProduction` once the change is published).
+ */
+// "Xs" under a minute, else "Xm" — coarse freshness label.
+function fmtAge(secs: number): string {
+    return secs < 60 ? `${Math.round(secs)}s` : `${Math.round(secs / 60)}m`;
+}
+
+function PublishGate({
+    consoleUrl,
+    syncing,
+    onRefresh,
+    syncedSecondsAgo,
+    cooldownSeconds,
+}: {
+    consoleUrl: string;
+    syncing: boolean;
+    onRefresh: () => void;
+    syncedSecondsAgo: number | null;
+    cooldownSeconds: number;
+}) {
+    // A Refresh only re-polls the LIVE store once the last sync is older than the
+    // cooldown; within the window it serves cache (protects Play's edit quota). Surface
+    // that so the operator knows whether clicking now will actually pick up their publish.
+    const liveReady = syncedSecondsAgo == null || syncedSecondsAgo >= cooldownSeconds;
+    const waitSecs = liveReady ? 0 : Math.ceil(cooldownSeconds - syncedSecondsAgo!);
+    return (
+        <div className="space-y-2.5 rounded-md border border-amber-200 bg-amber-50 p-3">
+            <p className="flex items-start gap-1.5 text-xs leading-relaxed text-amber-800">
+                <Info size={13} className="mt-0.5 shrink-0 text-amber-600" />
+                <span>
+                    Held under <strong>Play Managed Publishing</strong> — this build is staged on the
+                    production track but <strong>not live yet</strong>. A rollout&nbsp;% won&apos;t apply
+                    until it&apos;s published. Open the Play Console, click <strong>Publish</strong>, then
+                    Refresh here to manage the staged rollout.
+                </span>
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+                <a href={consoleUrl} target="_blank" rel="noreferrer">
+                    <Button size="sm" className="bg-indigo-600 text-white hover:bg-indigo-700">
+                        <ExternalLink size={13} /> Open Play Console
+                    </Button>
+                </a>
+                <Button size="sm" variant="outline" loading={syncing} onClick={onRefresh}>
+                    <RefreshCw size={13} /> I&apos;ve published — Refresh
+                </Button>
+            </div>
+            <p className="text-[11px] leading-relaxed text-amber-700">
+                {liveReady ? (
+                    'Refresh now runs a live store check.'
+                ) : (
+                    <>
+                        Last checked {fmtAge(syncedSecondsAgo!)} ago — a live re-check is available in{' '}
+                        <strong>{fmtAge(waitSecs)}</strong>. Until then Refresh shows the cached state.
+                    </>
+                )}
+            </p>
+        </div>
+    );
 }
 
 function RolloutControls({

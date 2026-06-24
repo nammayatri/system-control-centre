@@ -63,12 +63,23 @@ export interface ReleaseContext {
     tag_pushed?: string | null;
     matrix_job_name?: string;
     build_type?: string;
+    destination?: string | null;
     ota_namespace?: string | null;
     change_log?: string;
+    // BE truth (injected by listReleasesH): the build's code is strictly higher than the
+    // production track's, so it's actually promotable. The list badge ANDs this with its
+    // own stage logic so it never offers a promote the backend would reject. Absent/true
+    // ⇒ no constraint; false ⇒ at or below production (overtaken).
+    promotable?: boolean;
     // Mobile build workflow status (e.g. MBTagPushed / MBInReview / MBRollingOut).
     // Injected by the backend serializer from the MobileBuildState so the list +
     // detail can derive the promote→rollout stage without a /rollout call.
     mb_wf_status?: string;
+    // Authoritative rollout columns, injected alongside mb_wf_status — the live
+    // source the rollout endpoint uses, so the list shows the real % (not a stale
+    // metadata mirror) right after a successful set.
+    rollout_status?: string | null;
+    rollout_percent?: number | null;
 }
 
 // ── All statuses (UPPERCASE — canonical) ─────
@@ -412,9 +423,17 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         tag_pushed:       (r.releaseContext as any)?.tag_pushed,
         matrix_job_name:  (r.releaseContext as any)?.matrix_job_name,
         build_type:       (r.releaseContext as any)?.build_type,
+        // Provider Android store destination ("GooglePlay" | "Firebase") — drives the
+        // "Firebase internal" badge. Must be passed through here or it's dropped.
+        destination:      (r.releaseContext as any)?.destination,
         ota_namespace:    (r.releaseContext as any)?.ota_namespace,
         change_log:       (r.releaseContext as any)?.change_log,
         mb_wf_status:     (r.releaseContext as any)?.mb_wf_status,
+        rollout_status:   (r.releaseContext as any)?.rollout_status,
+        rollout_percent:  (r.releaseContext as any)?.rollout_percent,
+        // BE-injected promotability (higher than production). Must be passed through here
+        // or it's dropped before the badge can read it.
+        promotable:       (r.releaseContext as any)?.promotable,
     },
 
     rollout_strategy: (r.rolloutStrategy || []).map(s => ({
@@ -688,6 +707,11 @@ export async function restartRelease(releaseId: string): Promise<any> {
 
 export async function fastForwardRelease(releaseId: string): Promise<any> {
     const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/fast-forward`, {});
+    return data;
+}
+
+export async function rolloutRestartDeployment(releaseId: string, requestedBy?: string): Promise<any> {
+    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/rollout-restart`, { requestedBy });
     return data;
 }
 
@@ -1172,6 +1196,12 @@ export interface RolloutDetail {
     rdRolloutPercent: number | null;
     rdPhasedId: string | null; // iOS phased-release id (present ⇒ phased ramp on)
     rdStoreTrack: string | null; // production | internal | testflight (store-sync rows)
+    rdPromotable: boolean; // BE truth: can be promoted now (promotable stage AND not already live on prod)
+    rdAppCatalogId: number; // app_catalog.id — force a store sync (refreshStoreApp) before re-reading
+    rdLiveOnProduction: boolean; // BE truth: is THIS build the version live on production (synced cache, code-first)
+    rdSyncedSecondsAgo: number | null; // seconds since store_status last synced (null = never)
+    rdRefreshCooldownSeconds: number; // a Refresh only re-polls the live store once age ≥ this (else serves cache)
+    rdManagedPublishing: boolean; // app uses Play Managed Publishing → show the publish gate when not-live (no API to detect; recorded per-app)
 }
 
 export interface PromoteReq {
@@ -1183,6 +1213,30 @@ export interface PromoteReq {
 export interface PromoteResp {
     prResult: string;
     prWarning?: string | null; // non-fatal warning, e.g. phased release couldn't be enabled
+}
+
+// ── Bulk promote / rollout (one action over many apps) ──
+export interface BulkPromoteItem {
+    bpiReleaseId: string;
+    bpiReleaseNotes?: string | null;     // omit → server fills the per-app store default
+    bpiEnablePhasedRelease?: boolean | null;
+    bpiInitialRolloutPercent?: number | null;
+}
+export interface BulkRolloutItem {
+    briReleaseId: string;
+    briPercent: number;                  // Android staged-rollout %, (0,100]
+}
+export interface BulkItemResult {
+    birReleaseId: string;
+    birOk: boolean;
+    birMessage: string;
+    birWarning?: string | null;
+}
+export interface BulkActionResp {
+    barTotal: number;
+    barSucceeded: number;
+    barFailed: number;
+    barResults: BulkItemResult[];
 }
 
 // ── App Release Monitoring (store-monitor) ──────────────────────────
@@ -1208,6 +1262,7 @@ export interface PlatformBlock {
     appCatalogId: number;
     bundleId: string | null;
     production: TrackCell | null;
+    incoming: TrackCell | null;     // prod-incoming version in review/approved/rejected (null if none)
     internal: TrackCell | null;     // android only (null for ios)
     testflight: TrackCell | null;   // ios only (null for android)
 }
@@ -1225,6 +1280,9 @@ export interface StoreMonitorResult {
     available: boolean;
     reason: string | null;
     apps: StoreMonitorApp[];
+    // Single freshness threshold (= the backend refresh cooldown, `store_refresh_cooldown_seconds`).
+    // Drives both the auto-refresh-on-open and the "stale" warning, so there's one source of truth.
+    staleThresholdSeconds: number;
 }
 
 export const mobileApi = {
@@ -1349,6 +1407,12 @@ export const mobileApi = {
         await apiClient.post(`/releases/${encodeURIComponent(id)}/review/mark-rejected`, { mrReason: reason });
     },
 
+    // iOS only — cancel the in-flight App Store review (ASC reviewSubmission) and
+    // abort the release. 400s for Android (Play has no cancel-review API).
+    withdraw: async (id: string): Promise<void> => {
+        await apiClient.post(`/releases/${encodeURIComponent(id)}/withdraw`, {});
+    },
+
     // ── App Release Monitoring ──
     // One call → the whole grid + all modal data (incl. release notes), wrapped
     // in an availability envelope (`available:false` for debug builds).
@@ -1356,17 +1420,29 @@ export const mobileApi = {
         const { data } = await apiClient.get('/mobile/store-monitor');
         // Tolerate both the new {available,reason,apps} object and the old bare
         // array (until the backend redeploys).
-        if (Array.isArray(data)) return { available: true, reason: null, apps: data };
+        if (Array.isArray(data)) return { available: true, reason: null, apps: data, staleThresholdSeconds: 300 };
         return {
             available: data?.available ?? true,
             reason: data?.reason ?? null,
             apps: Array.isArray(data?.apps) ? data.apps : [],
+            staleThresholdSeconds: data?.staleThresholdSeconds ?? 300,
         };
     },
 
     // Live re-poll one app → upsert the cache → return its fresh card.
     refreshStoreApp: async (appCatalogId: number): Promise<StoreMonitorApp> => {
         const { data } = await apiClient.post(`/mobile/store-monitor/${appCatalogId}/refresh`, {});
+        return data;
+    },
+
+    // ── Bulk promote / rollout — one action over many apps. Always resolves 200
+    // with a per-app verdict; partial failures don't fail the whole call.
+    bulkPromote: async (items: BulkPromoteItem[]): Promise<BulkActionResp> => {
+        const { data } = await apiClient.post('/mobile/bulk/promote', { bpItems: items });
+        return data;
+    },
+    bulkRollout: async (items: BulkRolloutItem[]): Promise<BulkActionResp> => {
+        const { data } = await apiClient.post('/mobile/bulk/rollout', { brItems: items });
         return data;
     },
 };

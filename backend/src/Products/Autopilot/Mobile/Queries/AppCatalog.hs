@@ -42,9 +42,9 @@ import Database.Beam.Postgres.Full (
  )
 import Database.PostgreSQL.Simple (query, query_)
 import Products.Autopilot.Mobile.Queries.Tracker (parseMobileTargetState)
-import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe)
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..))
 import Products.Autopilot.Mobile.Types.Storage
+import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe)
 import Products.Autopilot.Types.Storage.Schema (AutopilotDb (..), autopilotDb)
 
 -- | Fields needed to INSERT a row. @id@ and @created_at@ are DB-generated.
@@ -59,6 +59,8 @@ data NewAppCatalogRow = NewAppCatalogRow
     , nacFirebaseProjectId :: Maybe Text
     , nacEnabled :: Maybe Bool
     -- ^ Defaults to True if Nothing.
+    , nacManagedPublishing :: Maybe Bool
+    -- ^ Play Managed Publishing flag; defaults to True if Nothing.
     }
 
 -- | Partial-update fields. Only @Just@ fields are updated.
@@ -137,6 +139,8 @@ insertAppCatalog NewAppCatalogRow{..} = withDb $ \db -> do
                             , acDisplayLabel = val_ nacDisplayLabel
                             , acFirebaseProjectId = val_ nacFirebaseProjectId
                             , acEnabled = val_ enabled'
+                            , acStoreAccount = val_ Nothing
+                            , acManagedPublishing = val_ (fromMaybe True nacManagedPublishing)
                             , acCreatedAt = default_
                             }
                         ]
@@ -292,7 +296,7 @@ fetchLatestBuildsPerApp = withDb $ \db ->
                 "SELECT app_group, service, env, new_version, commit_sha, \
                 \  date_created, release_context, metadata \
                 \FROM release_tracker \
-                \WHERE category = 'MobileBuild' AND status = 'COMPLETED' \
+                \WHERE category = 'MobileBuild' AND status IN ('COMPLETED', 'INPROGRESS') \
                 \  AND release_context IS NOT NULL \
                 \ORDER BY date_created DESC"
         pure (latestBuildsFromRows rows)
@@ -311,7 +315,7 @@ fetchLatestBuildsForApp appGroup surface platform = withDb $ \db ->
                 "SELECT app_group, service, env, new_version, commit_sha, \
                 \  date_created, release_context, metadata \
                 \FROM release_tracker \
-                \WHERE category = 'MobileBuild' AND status = 'COMPLETED' \
+                \WHERE category = 'MobileBuild' AND status IN ('COMPLETED', 'INPROGRESS') \
                 \  AND release_context IS NOT NULL \
                 \  AND app_group = ? AND service = ? AND env = ? \
                 \ORDER BY date_created DESC"
@@ -326,9 +330,18 @@ latestBuildsFromRows :: [(Text, Text, Text, Text, Maybe Text, UTCTime, Text, May
 latestBuildsFromRows rows =
     let parsed = mapMaybe toLatestBuildRow rows
         keyOf r = (lbrAppGroup r, lbrSurface r, lbrPlatform r, lbrBuildType r)
-        -- newest-first input ⇒ keep the first row seen per key (the existing
-        -- value in the map), so insertWith returns the existing one.
-        latest = Map.fromListWith (\_incoming existing -> existing) [(keyOf r, r) | r <- parsed]
+        hasTracks = not . Map.null . lbrTracks
+        -- newest-first input. Keep the newest row per key, BUT prefer one that carries
+        -- the store snapshot's metadata.tracks: a version row can now be INPROGRESS
+        -- (in review / rolling) while still being the store-sync snapshot that holds
+        -- prod+internal versions, and a newer trackless pure-external-review row must
+        -- not blank an app's track chips. fromListWith calls (f incoming existing)
+        -- where `existing` is the newest-so-far and `incoming` arrives oldest-last.
+        preferTracks incoming existing
+            | hasTracks existing = existing
+            | hasTracks incoming = incoming
+            | otherwise = existing
+        latest = Map.fromListWith preferTracks [(keyOf r, r) | r <- parsed]
      in Map.elems latest
 
 {- | Parse one raw row into a 'LatestBuildRow'. Returns 'Nothing' when the

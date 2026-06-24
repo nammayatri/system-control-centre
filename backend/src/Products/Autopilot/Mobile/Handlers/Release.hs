@@ -48,7 +48,7 @@ module Products.Autopilot.Mobile.Handlers.Release (
     changelogAiSummaryH,
 ) where
 
-import Control.Monad (unless, void, when)
+import Control.Monad (forM_, unless, void, when)
 import Control.Monad.Catch (throwM)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..))
@@ -62,6 +62,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Database.Beam
@@ -72,6 +73,7 @@ import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), TrackS
 import Products.Autopilot.Mobile.Queries.Tracker (
     ReleaseTrackerRow,
     appCatalogByKey,
+    findMobileVersionRow,
     gitOwner,
     gitRepo,
     logEvent,
@@ -89,10 +91,6 @@ import Products.Autopilot.Mobile.Types.Storage (
  )
 import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch)
 import Products.Autopilot.RuntimeConfig (getMobileBuildType)
-import qualified Shared.AI.Changelog as CL
-import Shared.AI.Config (loadAiConfig)
-import Shared.AI.Queries (claimReleaseSummary, computePromptHash, lookupReleaseSummary, upsertReleaseSummary)
-import Shared.AI.ReleaseSummary (generateWithFallback)
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
     ReleaseTracker (..),
@@ -104,6 +102,10 @@ import Products.Autopilot.Types.Storage.Schema (
     autopilotDb,
  )
 import Products.Autopilot.Types.Target (TargetState (..))
+import qualified Shared.AI.Changelog as CL
+import Shared.AI.Config (loadAiConfig)
+import Shared.AI.Queries (claimReleaseSummary, computePromptHash, lookupReleaseSummary, upsertReleaseSummary)
+import Shared.AI.ReleaseSummary (generateWithFallback)
 import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 
 -- ─── Create: request / response types ──────────────────────────────
@@ -193,6 +195,27 @@ createMobileReleasesH ap CreateMobileReleasesReq{..} = do
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
     built <- mapM (buildRow ap appById groupId changeLog buildType destination sourceRef now) items
+    -- Friendly duplicate check: a build is identified by (version name + build number)
+    -- (migration 0035). If that exact pair already exists, reject with a clear message
+    -- instead of letting the unique index throw a raw 23505 / INTERNAL_ERROR. Only checks
+    -- rows that carry a code (provider builds get theirs from CI later — no collision yet).
+    forM_ (map fst built) $ \row ->
+        forM_ (rtVersionCode row) $ \_ -> do
+            mDup <- findMobileVersionRow (rtAppGroup row) (rtService row) (rtEnv row) (rtNewVersion row) (rtVersionCode row)
+            case mDup of
+                Just _ ->
+                    throwM $
+                        BadRequest $
+                            rtAppGroup row
+                                <> " "
+                                <> rtService row
+                                <> " ("
+                                <> rtEnv row
+                                <> ") "
+                                <> rtNewVersion row
+                                <> maybe "" (\c -> "+" <> T.pack (show c)) (rtVersionCode row)
+                                <> " already exists — use a new build number, or promote the existing build."
+                Nothing -> pure ()
     insertReleaseTrackerRowsBatch (map fst built)
     pure
         CreateMobileReleasesResp
@@ -210,10 +233,10 @@ buildRow ::
     Text ->
     Text ->
     Text ->
+    -- | destination (provider prod Android only)
     Maybe Text ->
-    -- ^ destination (provider prod Android only)
+    -- | source ref
     Maybe Text ->
-    -- ^ source ref
     UTCTime ->
     CreateMobileReleasesItem ->
     Flow (ReleaseTrackerRow, CreatedReleaseSummary)
@@ -228,9 +251,17 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
             acSurface app_ == "driver"
                 && acPlatform app_ == "android"
                 && not (isDebugBuildType buildType)
+        -- Firebase App Distribution build: its version is arbitrary (never reaches Play),
+        -- so stamp a UNIQUE timestamp version (year.MMDD.HHMM, UTC) right here at create —
+        -- not deferred to ResolveVersion — so the version is populated and visible on the
+        -- release row the instant it's created (and even if the build later gets stuck
+        -- before dispatch). version_code stays Nothing for these.
+        isFirebase = isProviderProdAndroid && mDestination == Just "Firebase"
+        firebaseVer = T.pack (formatTime defaultTimeLocale "%Y.%-m%d.%H%M" now)
+        mVerFinal = if isFirebase then Just firebaseVer else mVer
         ctx =
             MobileBuildContext
-                { mbcVersionCode = mCode
+                { mbcVersionCode = if isFirebase then Nothing else mCode
                 , mbcChangeLog = changeLog_
                 , mbcBuildType = buildType
                 , mbcReleaseGroupId = groupId
@@ -251,7 +282,7 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                 , mbReviewSubmittedAt = Nothing
                 , mbReviewLastPolledAt = Nothing
                 }
-        row = mkMobileTrackerRow rid app_ target mVer mSourceRef (apEmail ap) now
+        row = mkMobileTrackerRow rid app_ target mVerFinal mSourceRef (apEmail ap) now
     pure
         ( row
         , CreatedReleaseSummary

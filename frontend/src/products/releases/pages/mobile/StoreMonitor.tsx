@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
@@ -6,27 +6,25 @@ import {
   Smartphone,
   Search,
   RefreshCw,
-  AlertTriangle,
   ChevronRight,
   MonitorSmartphone,
-  User,
-  Car,
   Zap,
   Info,
 } from 'lucide-react';
 import { useStoreMonitor } from '../../hooks';
-import { mobileApi } from '../../api';
-import type { PlatformBlock, StoreMonitorApp, StoreMonitorResult, TrackCell } from '../../api';
+import type { PlatformBlock, StoreMonitorApp, TrackCell } from '../../api';
 import { Button } from '../../../../shared/ui/button';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { Badge } from '../../../../shared/ui/badge';
 import { cn } from '../../../../lib/utils';
-import { deriveStoreBadge, activeRolloutOf } from '../../components/storeBadge';
+import { deriveStoreBadge, activeRolloutOf, type TrackKind } from '../../components/storeBadge';
 import { RolloutBar } from '../../components/RolloutBar';
 import { AppTrackModal } from '../../components/AppTrackModal';
+import { MobileBulkPanel } from '../../components/MobileBulkPanel';
+import { SURFACE_META, SURFACE_ORDER, surfaceKeyOf, type SurfaceKey } from '../../components/surfaces';
+import { useRepollMonitor } from '../../components/useRepollMonitor';
 
 type PlatformName = 'android' | 'ios';
-type SurfaceKey = 'consumer' | 'driver' | 'other';
 
 // ── Grouping helpers ───────────────────────────────────────────────
 
@@ -38,21 +36,6 @@ function brandOf(appLabel: string): string {
   const base = appLabel.split(' (')[0].trim();
   return base.replace(/\s*(Partner|Driver)$/i, '').trim() || appLabel;
 }
-
-function surfaceKeyOf(surface: string): SurfaceKey {
-  const s = surface.toLowerCase();
-  if (s === 'customer' || s === 'consumer') return 'consumer';
-  if (s === 'driver' || s === 'provider' || s === 'partner') return 'driver';
-  return 'other';
-}
-
-const SURFACE_META: Record<SurfaceKey, { label: string; Icon: typeof User; tint: string }> = {
-  consumer: { label: 'Consumer', Icon: User, tint: 'text-sky-600' },
-  driver: { label: 'Driver', Icon: Car, tint: 'text-emerald-600' },
-  other: { label: 'Other', Icon: User, tint: 'text-zinc-500' },
-};
-
-const SURFACE_ORDER: SurfaceKey[] = ['consumer', 'driver', 'other'];
 
 interface BrandGroup {
   brand: string;
@@ -108,25 +91,15 @@ const isEmptyCell = (cell: TrackCell | null): boolean => !cell || cell.status ==
 const anyRolling = (card: StoreMonitorApp): boolean =>
   (['android', 'ios'] as PlatformName[]).some((p) => activeRolloutOf(card.platforms[p]?.production ?? null) != null);
 
-// Run async `worker` over `items` with at most `limit` in flight. The "refresh
-// all" button uses this to live re-poll every app without firing N parallel
-// store reads at once (Play / ASC rate limits).
-async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
-  let cursor = 0;
-  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (cursor < items.length) {
-      const idx = cursor++;
-      await worker(items[idx]);
-    }
-  });
-  await Promise.all(runners);
-}
-
 // ── Freshness ──────────────────────────────────────────────────────
 
-const STALE_MS = 30 * 60 * 1000; // amber once older than the default poll cadence
+// Single freshness threshold (ms), sourced from the backend's
+// `store_refresh_cooldown_seconds` via the store-monitor response and shared down
+// the tree by context. Default until the value loads — matches the server default.
+const DEFAULT_STALE_MS = 300 * 1000;
+const StaleMsContext = createContext(DEFAULT_STALE_MS);
 
-function freshness(syncedAt: string | null): { label: string; stale: boolean } | null {
+function freshness(syncedAt: string | null, staleMs: number): { label: string; stale: boolean } | null {
   if (!syncedAt) return null;
   const t = new Date(syncedAt).getTime();
   if (isNaN(t)) return null;
@@ -139,7 +112,7 @@ function freshness(syncedAt: string | null): { label: string; stale: boolean } |
     const hrs = Math.round(mins / 60);
     label = hrs < 24 ? `${hrs}h ago` : `${Math.round(hrs / 24)}d ago`;
   }
-  return { label, stale: ageMs > STALE_MS };
+  return { label, stale: ageMs > staleMs };
 }
 
 function platformSyncedAt(block: PlatformBlock): string | null {
@@ -162,17 +135,6 @@ function RollingChip() {
   return (
     <span className="inline-flex items-center gap-0.5 rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-indigo-700">
       <Zap className="w-2.5 h-2.5" /> rolling out
-    </span>
-  );
-}
-
-function DriftChip() {
-  return (
-    <span
-      className="inline-flex items-center gap-0.5 rounded border border-amber-200 bg-amber-50 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700"
-      title="Store version differs from the last version SCC shipped"
-    >
-      <AlertTriangle className="w-2.5 h-2.5" /> drift
     </span>
   );
 }
@@ -202,23 +164,22 @@ function UnavailableNotice({ reason }: { reason?: string | null }) {
 
 // ── Track / platform / surface / brand ─────────────────────────────
 
-function TrackLine({ label, cell }: { label: string; cell: TrackCell | null }) {
+function TrackLine({ label, cell, track }: { label: string; cell: TrackCell | null; track: TrackKind }) {
   const empty = isEmptyCell(cell);
-  const badge = deriveStoreBadge(empty ? null : cell);
+  const badge = deriveStoreBadge(empty ? null : cell, track);
   const ar = empty ? null : activeRolloutOf(cell);
 
   return (
     <div className="py-2">
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="w-10 shrink-0 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">{label}</span>
+          <span className="w-20 shrink-0 truncate text-[10px] font-semibold uppercase tracking-wide text-zinc-400">{label}</span>
           {empty ? (
             <span className="text-sm text-zinc-300">—</span>
           ) : (
             <span className="flex min-w-0 items-center gap-1.5 font-mono text-sm text-zinc-800">
               <span className="truncate">{cell?.version ?? '—'}</span>
               {cell?.buildCode != null && <span className="text-zinc-400">+{cell.buildCode}</span>}
-              {cell?.drift === true && <DriftChip />}
             </span>
           )}
         </div>
@@ -247,9 +208,20 @@ function PlatformPanel({
   }
 
   const secondaryLabel = platform === 'ios' ? 'TestFlight' : 'Internal';
-  const secondaryCell = platform === 'ios' ? block.testflight : block.internal;
+  const secondaryCellRaw = platform === 'ios' ? block.testflight : block.internal;
+  const incoming = block.incoming;
+  // Hide the testing-track cell only when it is the SAME BUILD as the Incoming review
+  // build — matching version AND build number. A different build number (e.g. internal
+  // 3.3.17+461 vs incoming 3.3.17+460) is a genuinely newer testing build, so keep it.
+  const secondaryCell =
+    incoming &&
+    secondaryCellRaw &&
+    incoming.version === secondaryCellRaw.version &&
+    incoming.buildCode === secondaryCellRaw.buildCode
+      ? null
+      : secondaryCellRaw;
   const rolling = activeRolloutOf(block.production) != null;
-  const fresh = freshness(platformSyncedAt(block));
+  const fresh = freshness(platformSyncedAt(block), useContext(StaleMsContext));
 
   return (
     <button
@@ -268,8 +240,9 @@ function PlatformPanel({
         <ChevronRight className="h-4 w-4 text-zinc-300 transition-colors group-hover:text-zinc-500" />
       </div>
       <div className="divide-y divide-zinc-100">
-        <TrackLine label="Prod" cell={block.production} />
-        <TrackLine label={secondaryLabel} cell={secondaryCell} />
+        <TrackLine label="Prod" cell={block.production} track="production" />
+        {incoming && <TrackLine label="Incoming" cell={incoming} track="production" />}
+        <TrackLine label={secondaryLabel} cell={secondaryCell} track={platform === 'ios' ? 'testflight' : 'internal'} />
       </div>
       {fresh && (
         <div className={cn('mt-2 text-[10px]', fresh.stale ? 'font-medium text-amber-600' : 'text-zinc-400')}>
@@ -313,19 +286,22 @@ function SurfaceSection({
   );
 }
 
-function BrandCard({
+// Memoised: a full-tree refresh patches the cache per app, and the page re-renders
+// on every refresh-progress tick — memo keeps untouched brand cards from re-rendering
+// (`onOpen` is stabilised with useCallback at the page, so the props stay equal).
+const BrandCard = memo(function BrandCard({
   group,
   onOpen,
 }: {
   group: BrandGroup;
   onOpen: (brand: string, surface: SurfaceKey, platform: PlatformName, block: PlatformBlock) => void;
 }) {
-  const qc = useQueryClient();
+  const repoll = useRepollMonitor();
   const [refreshing, setRefreshing] = useState(false);
   const rolling = group.cards.some(anyRolling);
 
-  // ↻ → live re-poll every catalog id across this brand's variants, then patch
-  // each returned card back into the single ['store-monitor'] cache entry.
+  // ↻ → live re-poll every catalog id across this brand's variants (shared bounded
+  // re-poll: each fresh card is patched into the ['store-monitor'] cache as it returns).
   const onRefresh = async () => {
     const ids = group.cards
       .flatMap((c) => [c.platforms.android?.appCatalogId, c.platforms.ios?.appCatalogId])
@@ -333,14 +309,8 @@ function BrandCard({
     if (!ids.length) return;
     setRefreshing(true);
     try {
-      const fresh = await Promise.all(ids.map((id) => mobileApi.refreshStoreApp(id)));
-      qc.setQueryData<StoreMonitorResult>(['store-monitor'], (prev) => {
-        if (!prev) return prev;
-        const byKey = new Map(fresh.map((f) => [`${f.app}|${f.surface}`, f]));
-        return { ...prev, apps: prev.apps.map((row) => byKey.get(`${row.app}|${row.surface}`) ?? row) };
-      });
-    } catch (err: any) {
-      toast.error(err?.response?.data?.message || err.message || 'Failed to refresh app');
+      const { failed } = await repoll(ids);
+      if (failed) toast.error(`Failed to refresh ${failed} variant${failed > 1 ? 's' : ''}`);
     } finally {
       setRefreshing(false);
     }
@@ -379,7 +349,7 @@ function BrandCard({
       </div>
     </div>
   );
-}
+});
 
 function ActiveRolloutsPanel({
   items,
@@ -433,7 +403,11 @@ export default function StoreMonitor() {
   const { data, isLoading } = useStoreMonitor();
   const apps = useMemo(() => data?.apps ?? [], [data]);
   const unavailable = !!data && !data.available;
+  // Single freshness threshold from the backend (store_refresh_cooldown_seconds):
+  // drives the cold-start auto-refresh and, via context, the per-card "stale" amber.
+  const staleMs = (data?.staleThresholdSeconds ?? 300) * 1000;
   const qc = useQueryClient();
+  const repoll = useRepollMonitor();
   const [search, setSearch] = useState('');
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [refreshProgress, setRefreshProgress] = useState<{ done: number; total: number } | null>(null);
@@ -453,43 +427,26 @@ export default function StoreMonitor() {
     );
   }, [groups, search]);
 
-  const open = (brand: string, surface: SurfaceKey, platform: PlatformName, block: PlatformBlock) =>
-    setModal({ brand, surface, platform, block });
+  // Stable so the memoised BrandCards don't re-render on every page state change
+  // (search keystroke, refresh-progress tick, etc.).
+  const open = useCallback(
+    (brand: string, surface: SurfaceKey, platform: PlatformName, block: PlatformBlock) =>
+      setModal({ brand, surface, platform, block }),
+    [],
+  );
 
-  // Top-right Refresh → LIVE re-poll every app (not just re-read the cache, which
-  // is what a plain refetch does). Fans out the per-app refresh endpoint with
-  // bounded concurrency, patching each fresh card into the grid as it returns,
-  // then reconciles with one authoritative GET. One app's store error is skipped,
-  // not fatal.
+  // Top-right Refresh → LIVE re-poll every app (not just re-read the cache, which is
+  // what a plain refetch does) via the shared bounded re-poll, surfacing per-app
+  // progress, then reconciling with one authoritative GET.
   const refreshAll = async () => {
     const ids = apps
       .flatMap((a) => [a.platforms.android?.appCatalogId, a.platforms.ios?.appCatalogId])
       .filter((id): id is number => id != null);
     if (!ids.length || refreshingAll) return;
     setRefreshingAll(true);
-    let done = 0;
-    setRefreshProgress({ done, total: ids.length });
+    setRefreshProgress({ done: 0, total: ids.length });
     try {
-      await runPool(ids, 4, async (id) => {
-        try {
-          const card = await mobileApi.refreshStoreApp(id);
-          qc.setQueryData<StoreMonitorResult>(['store-monitor'], (prev) =>
-            prev
-              ? {
-                  ...prev,
-                  apps: prev.apps.map((row) =>
-                    row.app === card.app && row.surface === card.surface ? card : row,
-                  ),
-                }
-              : prev,
-          );
-        } catch {
-          // skip this app — a single store read failing shouldn't abort the rest
-        } finally {
-          done += 1;
-          setRefreshProgress({ done, total: ids.length });
-        }
-      });
+      await repoll(ids, (done, total) => setRefreshProgress({ done, total }));
       toast.success('Store data refreshed');
     } finally {
       setRefreshingAll(false);
@@ -498,7 +455,26 @@ export default function StoreMonitor() {
     }
   };
 
+  // Cold-start: on first open auto-fire one full refresh ONLY when the cached data
+  // is stale (older than the cooldown). Fresh data is shown as-is — a quick re-open
+  // serves cache instead of spending Play/ASC edits. Fires once per mount.
+  const autoFired = useRef(false);
+  useEffect(() => {
+    if (autoFired.current || refreshingAll || apps.length === 0) return;
+    let latest: string | null = null;
+    for (const a of apps)
+      for (const blk of [a.platforms.android, a.platforms.ios])
+        if (blk)
+          for (const cell of [blk.production, blk.internal, blk.testflight])
+            if (cell?.syncedAt && (latest === null || cell.syncedAt > latest)) latest = cell.syncedAt;
+    if (latest === null || Date.now() - new Date(latest).getTime() > staleMs) {
+      autoFired.current = true;
+      void refreshAll();
+    }
+  }, [apps, refreshingAll, staleMs]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
+    <StaleMsContext.Provider value={staleMs}>
     <div className="flex w-full flex-1 flex-col space-y-4 pb-12">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
@@ -547,6 +523,7 @@ export default function StoreMonitor() {
       ) : (
         <>
           <ActiveRolloutsPanel items={rollouts} onOpen={open} />
+          <MobileBulkPanel />
           {filtered.length === 0 ? (
             <EmptyState>No apps match “{search}”.</EmptyState>
           ) : (
@@ -570,5 +547,6 @@ export default function StoreMonitor() {
         />
       )}
     </div>
+    </StaleMsContext.Provider>
   );
 }

@@ -79,6 +79,7 @@ import Products.Autopilot.RuntimeConfig
     getMaxVsLockWaitRetries,
     getPodReadinessMaxAttempts,
     getPodReadinessPollSeconds,
+    getPodReadyStabilizeSeconds,
     getPodRestartCountThreshold,
     getPodsCalculationFactor,
     getPodsScaleDownDelayFromConfig,
@@ -251,8 +252,19 @@ waitForStagePodsReady cfg ctx = do
           rt
           ("Aborting at stage transition — new pods never became Ready: " <> errMsg)
       liftIO $ throwIO $ WorkflowError "rollout-stage" ("Stage pod readiness: " <> errMsg)
-    Right () ->
-      logInfoS "    [stage] new deployment pods Ready, proceeding with VS flip"
+    Right () -> do
+      logInfoS "    [stage] new deployment pods Ready"
+      stabilizeSecs <- lift getPodReadyStabilizeSeconds
+      when (stabilizeSecs > 0) $ do
+        logInfoS $ "    [stage] stabilize wait: " <> T.pack (show stabilizeSecs) <> "s before VS flip"
+        rt <- getRT
+        insertReleaseEvent
+          (releaseId rt)
+          "BUSINESS"
+          "POD_READY_STABILIZE_WAIT"
+          (object ["stabilize_seconds" .= stabilizeSecs, "phase" .= ("stage" :: T.Text)])
+        threadDelay (Seconds stabilizeSecs)
+      logInfoS "    [stage] proceeding with VS flip"
 
 scaleNewDeploymentForStage ::
   Config ->
@@ -774,8 +786,17 @@ prepareK8sResources = do
             rt
             ("Aborting before traffic shift — new deployment never became Ready: " <> errMsg)
         liftIO $ throwIO $ WorkflowError "deploy" ("Pod readiness in PREPARING: " <> errMsg)
-      Right () ->
+      Right () -> do
         logInfoS "  [PREPARING] New deployment pods Ready"
+        stabilizeSecs <- lift getPodReadyStabilizeSeconds
+        when (stabilizeSecs > 0) $ do
+          logInfoS $ "  [PREPARING] stabilize wait: " <> T.pack (show stabilizeSecs) <> "s before traffic shift"
+          insertReleaseEvent
+            (releaseId rt)
+            "BUSINESS"
+            "POD_READY_STABILIZE_WAIT"
+            (object ["stabilize_seconds" .= stabilizeSecs, "phase" .= ("preparing" :: T.Text)])
+          threadDelay (Seconds stabilizeSecs)
 
   updateK8sStatus BSUpdateService
   logInfoS "  Checking Service exists"

@@ -66,6 +66,7 @@ library
       Products.Autopilot.Mobile.Queries.AppCatalog
       Products.Autopilot.Mobile.Queries.Tracker
       Products.Autopilot.Mobile.Queries.StoreStatus
+      Products.Autopilot.Mobile.Queries.Supersession
       Products.Autopilot.Mobile.Handlers.AppCatalog
       Products.Autopilot.Mobile.Handlers.Live
       Products.Autopilot.Mobile.Handlers.Release
@@ -146,6 +147,7 @@ library
       DeriveGeneric
       DuplicateRecordFields
       FlexibleContexts
+      ImportQualifiedPost
       OverloadedStrings
       RecordWildCards
       TypeOperators
@@ -204,6 +206,7 @@ executable scc
       DeriveGeneric
       DuplicateRecordFields
       FlexibleContexts
+      ImportQualifiedPost
       OverloadedStrings
       RecordWildCards
       TypeOperators
@@ -251,6 +254,7 @@ test-suite scc-test
       DeriveGeneric
       DuplicateRecordFields
       FlexibleContexts
+      ImportQualifiedPost
       OverloadedStrings
       RecordWildCards
       TypeOperators

@@ -1,5 +1,13 @@
 # Mobile Releases — Post-MVP Design (Consolidated)
 
+> **⚠️ Superseded (2026-06-18) — store sync is now on-demand.** The `storeSyncLoop`
+> background loop + `store_sync_enabled` / `store_sync_interval_minutes` flags this spec
+> describes were **removed**. Store sync now refreshes **on demand** (UI ↻ / page open) via
+> `refreshStoreStatusOne`, bounded per app by `store_refresh_cooldown_seconds` (one Play
+> edit/app/refresh; ASC token + appId caches; single-flight for concurrency). Treat the
+> store-sync sections below as historical. Current behaviour: `CLAUDE.md`
+> § "Mobile store sync (on-demand)" and `docs/scc-deployment.md` §7.
+
 | | |
 |---|---|
 | **Date** | 2026-05-18 (initial) — 2026-05-26 (latest) |

@@ -90,7 +90,7 @@ import Database.Beam.Postgres.Full (anyConflict, insertReturning, onConflict, on
 import Database.PostgreSQL.Simple (Only (..), execute, execute_, query, withTransaction)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
 import Debug.Trace qualified as DT
-import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..), MobileBuildWFStatus (..))
+import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), MobileBuildWFStatus (..), claimsStoreIdentity)
 import Products.Autopilot.Types
 import Products.Autopilot.Types qualified as NT
 import Products.Autopilot.Types.Storage.Schema
@@ -709,6 +709,10 @@ toRow createdAt updatedAt ReleaseTracker {..} mts =
       rtStoreRolloutHistory = Nothing,
       rtAscVersionId = Nothing,
       rtAscPhasedId = Nothing,
+      rtStoreTrack = Nothing,
+      rtVersionCode = case mts of
+        Just (MobileBuildState s) | claimsStoreIdentity (mbContext s) -> mbcVersionCode (mbContext s)
+        _ -> Nothing,
       rtCreatedAt = createdAt,
       rtUpdatedAt = updatedAt
     }
@@ -731,7 +735,7 @@ fromRow ReleaseTrackerT {..} =
         -- rolling-out) without an extra /rollout call. The bare-tag rendering
         -- matches the rollout endpoint's rdMbStatus (tshow (mbWfStatus …)).
         Just (MobileBuildState mb) ->
-          Just (addMbStatus (T.pack (show (mbWfStatus mb))) (toJSON (mbContext mb)))
+          Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent rtStoreTrack (toJSON (mbContext mb)))
         _ -> Nothing
       tracker =
         ReleaseTracker
@@ -775,11 +779,24 @@ fromRow ReleaseTrackerT {..} =
           }
    in (tracker, mTargetState)
 
--- | Inject @mb_wf_status@ into the flattened mbContext JSON object so the FE can
--- read the lifecycle stage off a list row. No-op if the value isn't an object.
-addMbStatus :: Text -> Value -> Value
-addMbStatus st (Object o) = Object (KM.insert "mb_wf_status" (toJSON st) o)
-addMbStatus _ v = v
+-- | Inject the mobile lifecycle fields the FE derives a list row's stage from —
+-- @mb_wf_status@ (one level up in MobileBuildState) plus the authoritative
+-- @rollout_status@ / @rollout_percent@ COLUMNS — into the flattened mbContext JSON.
+-- This lets the releases list/detail read the live rollout % straight off the row
+-- (the same source the rollout endpoint uses), instead of a stale metadata mirror.
+-- No-op if the value isn't an object.
+addMobileLifecycle :: Text -> Maybe Text -> Maybe Double -> Maybe Text -> Value -> Value
+addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack (Object o) =
+  Object
+    . KM.insert "mb_wf_status" (toJSON st)
+    . KM.insert "rollout_status" (toJSON mRolloutStatus)
+    . KM.insert "rollout_percent" (toJSON mRolloutPct)
+    -- Authoritative track column (migration 0034) — the FE prefers this over the
+    -- metadata mirror, so a converged in-review row reads "production", not a stale
+    -- "internal" left in metadata.
+    . KM.insert "store_track" (toJSON mStoreTrack)
+    $ o
+addMobileLifecycle _ _ _ _ v = v
 
 parseReleaseCategory :: Text -> ReleaseCategory
 parseReleaseCategory t =

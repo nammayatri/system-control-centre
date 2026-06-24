@@ -17,6 +17,7 @@ module Products.Autopilot.Mobile.Types (
     rolloutStatusToText,
     rolloutStatusFromText,
     isDebugBuildType,
+    claimsStoreIdentity,
     validMBTransition,
     isMBTerminal,
 ) where
@@ -98,6 +99,32 @@ instance FromJSON MobileBuildContext where
             <*> o .:? "ota_namespace"
             <*> o .:? "tag_pushed"
             <*> pure mDest
+
+{- | Whether a build claims a STORE identity — i.e. it actually publishes to a
+versioned app store (Google Play production / App Store) under its version_code,
+so that (app, version, code) uniquely identifies it.
+
+This is the SINGLE source of truth for the mobile-build identity rule: it gates
+the @version_code@ COLUMN write (so the column only ever carries a real store
+code) and 'findMobileVersionRow' (so review/rollout/supersession only resolve to
+store rows). The unique index then keys purely on @version_code IS NOT NULL@.
+
+It is an ALLOWLIST, not a denylist: a build owns an identity only when it is
+non-debug AND its destination is a store destination ('Nothing' = consumer
+Android / iOS / default, or "GooglePlay"). This way a NEW non-store destination
+(another internal channel, a renamed Firebase, etc.) defaults to "no identity"
+rather than silently re-creating the collision bug.
+
+Platform note: @destination@ is only ever set for provider PROD Android builds,
+so the destination clause is Android-only in effect; iOS always has
+@destination = Nothing@ and is gated purely by the debug check (iOS internal =
+TestFlight = debug). iOS release builds always get a fresh, incrementing build
+number, so they never reuse a code the way Firebase Android builds do.
+-}
+claimsStoreIdentity :: MobileBuildContext -> Bool
+claimsStoreIdentity c =
+    not (isDebugBuildType (mbcBuildType c))
+        && mbcDestination c `elem` [Nothing, Just "GooglePlay"]
 
 data MobileBuildWFStatus
     = MBInit
