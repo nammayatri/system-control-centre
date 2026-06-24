@@ -147,6 +147,7 @@ library
       DeriveGeneric
       DuplicateRecordFields
       FlexibleContexts
+      ImportQualifiedPost
       OverloadedStrings
       RecordWildCards
       TypeOperators
@@ -205,6 +206,7 @@ executable scc
       DeriveGeneric
       DuplicateRecordFields
       FlexibleContexts
+      ImportQualifiedPost
       OverloadedStrings
       RecordWildCards
       TypeOperators
@@ -252,6 +254,7 @@ test-suite scc-test
       DeriveGeneric
       DuplicateRecordFields
       FlexibleContexts
+      ImportQualifiedPost
       OverloadedStrings
       RecordWildCards
       TypeOperators
