@@ -30,6 +30,7 @@ module Products.Autopilot.Actions.Release
     logsLinkH,
     decisionWebhookH,
     staggerInfoH,
+    rolloutRestartDeploymentH,
 
     -- * Product/Service Handlers (used in Routes wiring)
     listProductsH,
@@ -1991,6 +1992,68 @@ restartReleaseH _ap rid req = do
                           notifyReleaseRestarted restartedTracker
                           pure $ APIResponse "SUCCESS" ("Restart created: " <> newRid)
 
+rolloutRestartDeploymentH :: AuthedPerson -> Text -> RestartReleaseReq -> Flow APIResponse
+rolloutRestartDeploymentH _ap rid req = do
+  cfg <- getConfig
+  m <- findReleaseTracker rid
+  case m of
+    Nothing -> pure $ APIResponse "ERROR" "Release not found"
+    Just (tracker, mTargetState) -> do
+      let currentStatus = NT.status tracker
+      if currentStatus /= COMPLETED
+        then
+          pure $
+            APIResponse
+              "ERROR"
+              ( "Rollout restart requires status=COMPLETED (current: "
+                  <> T.pack (show currentStatus)
+                  <> ")"
+              )
+        else case mTargetState of
+          Just (K8sState k8s) -> do
+            let ctx = context k8s
+                K8s.K8sReleaseContext {K8s.namespace = ns} = ctx
+                nsQ = shellQuote ns
+                depName = deploymentName ctx
+                depQ = shellQuote depName
+                restartCmd =
+                  unwords
+                    [ kubectlBin cfg,
+                      "rollout",
+                      "restart",
+                      "deployment/" <> depQ,
+                      "-n",
+                      nsQ
+                    ]
+            restartResult <- liftIO $ executeWithRetry cfg restartCmd
+            case restartResult of
+              Left (K8sError err) -> do
+                logInfo $ "[rolloutRestartDeploymentH] rollout restart failed for " <> rid <> ": " <> err
+                insertReleaseEvent
+                  rid
+                  "BUSINESS"
+                  "DEPLOYMENT_RESTART_FAILED"
+                  ( object
+                      [ "requestedBy" .= (req :: RestartReleaseReq).requestedBy,
+                        "deployment" .= depName,
+                        "error" .= err
+                      ]
+                  )
+                pure $ APIResponse "ERROR" ("Rollout restart failed: " <> err)
+              Right _ -> do
+                insertReleaseEvent
+                  rid
+                  "BUSINESS"
+                  "DEPLOYMENT_RESTARTED"
+                  ( object
+                      [ "requestedBy" .= (req :: RestartReleaseReq).requestedBy,
+                        "deployment" .= depName
+                      ]
+                  )
+                pure $ APIResponse "SUCCESS" ("Rollout restart initiated for deployment/" <> depName)
+          _ ->
+            pure $ APIResponse "ERROR" "No K8s context available for this release"
+
 -- ============================================================================
 -- Fast Forward (POST /releases/:id/fast-forward)
 -- ============================================================================
@@ -2107,21 +2170,21 @@ isValidK8sVersion ver
 -- time is the release start time.  Falls back to 0 / epoch on missing data.
 staggerInfoH :: Text -> Flow Value
 staggerInfoH rid = do
-    m <- findReleaseTracker rid
-    case m of
-        Nothing -> pure $ object ["percentage" .= (0.0 :: Double), "time" .= ("1970-01-01T00:00:00Z" :: Text)]
-        Just (rt, mts) -> do
-            let pct :: Double
-                pct = case mts of
-                    Just ts -> case A.fromJSON (toJSON ts) of
-                        A.Success (Object o) ->
-                            case KM.lookup (K.fromText "trafficPercentage") o of
-                                Just (Number n) -> realToFrac n
-                                _ -> 0
-                        _ -> 0
-                    Nothing -> 0
-                startIso = maybe "1970-01-01T00:00:00Z" (T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ") (NT.startTime rt)
-            pure $ object ["percentage" .= pct, "time" .= startIso]
+  m <- findReleaseTracker rid
+  case m of
+    Nothing -> pure $ object ["percentage" .= (0.0 :: Double), "time" .= ("1970-01-01T00:00:00Z" :: Text)]
+    Just (rt, mts) -> do
+      let pct :: Double
+          pct = case mts of
+            Just ts -> case A.fromJSON (toJSON ts) of
+              A.Success (Object o) ->
+                case KM.lookup (K.fromText "trafficPercentage") o of
+                  Just (Number n) -> realToFrac n
+                  _ -> 0
+              _ -> 0
+            Nothing -> 0
+          startIso = maybe "1970-01-01T00:00:00Z" (T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ") (NT.startTime rt)
+      pure $ object ["percentage" .= pct, "time" .= startIso]
 
 -- | Extract just the data section from a K8s ConfigMap YAML as JSON.
 -- Input: full K8s YAML like "apiVersion: v1\ndata:\n  app.conf: |-\n    ...\nkind: ..."
