@@ -106,6 +106,7 @@ import Data.ASN1.Types (
  )
 import Data.Aeson (
     FromJSON (..),
+    Object,
     Value,
     decode,
     encode,
@@ -116,6 +117,7 @@ import Data.Aeson (
     (.:?),
     (.=),
  )
+import Data.Aeson.Types (Parser)
 import Data.Bits (shiftR, (.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
@@ -124,6 +126,7 @@ import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.Int (Int32)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
@@ -132,6 +135,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.IO.Unsafe (unsafePerformIO)
+import Text.Read (readMaybe)
 
 -- ─── Pure algorithm ────────────────────────────────────────────────
 
@@ -263,6 +267,10 @@ data AscSnapshot = AscSnapshot
     , ascStatus :: Text
     -- ^ live | none | VALID
     , ascNotes :: Maybe Text
+    , ascCode :: Maybe Int32
+    -- ^ build number (CFBundleVersion) when known — populated for TestFlight from the
+    -- latest build's @version@; 'Nothing' for the live App Store cell (its build number
+    -- isn't read here). Lets the monitor show + dedup iOS builds by (version, build no.).
     }
     deriving (Eq, Show)
 
@@ -274,10 +282,12 @@ re-read here.
 -}
 fetchAscSnapshots :: (MonadFlow m) => AscCreds -> Text -> m (Either AscError [AscSnapshot])
 fetchAscSnapshots creds bundleId = do
-    eProdVer <- liftIO (getLiveAppStoreVersion creds bundleId)
-    case eProdVer of
+    eProd <- liftIO (getLiveAppStoreVersionAndBuild creds bundleId)
+    case eProd of
         Left e -> pure (Left e)
-        Right mProdVer -> do
+        Right mProd -> do
+            let mProdVer = fst <$> mProd
+                mProdCode = (readMaybe . T.unpack =<< (mProd >>= snd))
             mNotes <- either (const Nothing) id <$> liftIO (getLiveReleaseNotes creds bundleId)
             eTf <- fetchAscBuildInfo creds bundleId
             case eTf of
@@ -285,8 +295,8 @@ fetchAscSnapshots creds bundleId = do
                 Right mTf ->
                     pure $
                         Right
-                            [ AscSnapshot "production" (fromMaybe "0.0.0" mProdVer) (maybe "none" (const "live") mProdVer) mNotes
-                            , AscSnapshot "testflight" (maybe "0.0.0" abiVersion mTf) (maybe "none" (const "VALID") mTf) Nothing
+                            [ AscSnapshot "production" (fromMaybe "0.0.0" mProdVer) (maybe "none" (const "live") mProdVer) mNotes mProdCode
+                            , AscSnapshot "testflight" (maybe "0.0.0" abiVersion mTf) (maybe "none" (const "VALID") mTf) Nothing ((readMaybe . T.unpack =<< (abiBuildNumber =<< mTf)))
                             ]
 
 -- ─── Live ASC call (IO-only) ───────────────────────────────────────
@@ -1072,6 +1082,68 @@ instance FromJSON LiveVersionResp where
         -- version.
         pure (LiveVersionResp (listToMaybe [v | VsItem (Just v) True <- items]))
 
+-- ── Live App Store version + its build number (appStoreVersions?include=build) ──
+
+-- | Dig @relationships.build.data.id@ off an appStoreVersions data[] item (the id of
+-- the build attached to that store version), or 'Nothing' when no build is attached.
+parseBuildRelId :: Object -> Parser (Maybe Text)
+parseBuildRelId o = do
+    mRels <- o .:? "relationships"
+    case mRels :: Maybe Object of
+        Nothing -> pure Nothing
+        Just rels -> do
+            mBuild <- rels .:? "build"
+            case mBuild :: Maybe Object of
+                Nothing -> pure Nothing
+                Just bld -> do
+                    mData <- bld .:? "data"
+                    case mData :: Maybe Object of
+                        Nothing -> pure Nothing
+                        Just dd -> dd .:? "id"
+
+-- | An appStoreVersions data[] item: version string, live flag, and the attached
+-- build's relationship id.
+data LiveVsRel = LiveVsRel (Maybe Text) Bool (Maybe Text)
+
+instance FromJSON LiveVsRel where
+    parseJSON = withObject "LiveVsRel" $ \o -> do
+        mAttrs <- o .:? "attributes"
+        (v, live) <- case mAttrs :: Maybe Object of
+            Nothing -> pure (Nothing, False)
+            Just a -> do
+                vv <- a .:? "versionString"
+                legacy <- a .:? "appStoreState"
+                modern <- a .:? "state"
+                pure
+                    ( vv
+                    , legacy == Just ("READY_FOR_SALE" :: Text) || modern == Just ("READY_FOR_DISTRIBUTION" :: Text)
+                    )
+        bid <- parseBuildRelId o
+        pure (LiveVsRel v live bid)
+
+-- | An included[] build record (type "builds"): id + version (CFBundleVersion).
+data IncludedBuild = IncludedBuild Text (Maybe Text)
+
+instance FromJSON IncludedBuild where
+    parseJSON = withObject "IncludedBuild" $ \o -> do
+        ty <- o .: "type" :: Parser Text
+        bid <- o .: "id"
+        mAttrs <- o .:? "attributes"
+        pure (IncludedBuild bid (if ty == "builds" then mAttrs >>= iaVersion else Nothing))
+
+-- | (live version string, its build number) from appStoreVersions?include=build.
+newtype LiveVersionBuildResp = LiveVersionBuildResp (Maybe (Text, Maybe Text))
+
+instance FromJSON LiveVersionBuildResp where
+    parseJSON = withObject "LiveVersionBuildResp" $ \o -> do
+        dataItems <- fromMaybe [] <$> o .:? "data"
+        included <- fromMaybe [] <$> o .:? "included"
+        let buildById = Map.fromList [(bid, mv) | IncludedBuild bid mv <- included]
+            mLive = listToMaybe [(v, bid) | LiveVsRel (Just v) True bid <- dataItems]
+        pure $
+            LiveVersionBuildResp $
+                fmap (\(v, mbid) -> (v, (mbid >>= \bid -> Map.lookup bid buildById) >>= id)) mLive
+
 {- | The version string of the currently-live App Store version (legacy
 @READY_FOR_SALE@ or the newer @READY_FOR_DISTRIBUTION@), or 'Nothing' if the app
 has no live version yet. Fetches the recent iOS versions and selects the live one
@@ -1094,6 +1166,17 @@ production-track snapshot alongside the TestFlight (internal) one.
 getLiveAppStoreVersion :: AscCreds -> Text -> IO (Either AscError (Maybe Text))
 getLiveAppStoreVersion creds bundleId =
     withAscApp creds bundleId getLiveAppStoreVersionString
+
+-- | The live App Store version string + its build number (CFBundleVersion), in ONE
+-- call via @include=build@. Powers the production iOS cell's @+code@ on the monitor.
+getLiveAppStoreVersionAndBuild :: AscCreds -> Text -> IO (Either AscError (Maybe (Text, Maybe Text)))
+getLiveAppStoreVersionAndBuild creds bundleId =
+    withAscApp creds bundleId $ \token appId ->
+        ascGet
+            (ascBase <> "/apps/" <> appId <> "/appStoreVersions?filter%5Bplatform%5D=IOS&include=build&fields%5Bbuilds%5D=version&limit=10")
+            token
+            "asc-live-version-build"
+            >>? \b -> pure (Right (decode b >>= \(LiveVersionBuildResp r) -> r))
 
 -- ── Diagnostic: iOS version → state dump ──────────────────────────────
 

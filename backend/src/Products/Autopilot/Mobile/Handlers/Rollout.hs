@@ -76,11 +76,13 @@ import Data.Time.Clock (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Queries.AppCatalog (storeTrackOf)
 import Products.Autopilot.Mobile.Queries.StoreStatus (
+    findProductionStoreCell,
     setProductionReleased,
     setProductionReviewStatus,
     setProductionRolloutStatus,
  )
 import Products.Autopilot.Mobile.Queries.Supersession (retireOlderIncoming, supersedePreviousLive)
+import Products.Autopilot.Mobile.StoreSync (versionOlderThan)
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
     findMobileReleaseById,
@@ -206,6 +208,11 @@ data RolloutDetail = RolloutDetail
     , rdStoreTrack :: Maybe Text
     -- ^ store track ("production" | "internal" | "testflight") for store-sync rows;
     -- an un-promoted internal/testflight snapshot is offered the promote flow.
+    , rdPromotable :: Bool
+    -- ^ BE truth for "can this build be promoted right now": it's in a promotable
+    -- stage (held at MBTagPushed, or an un-promoted internal/TestFlight snapshot) AND
+    -- it isn't already live on production. The FE gates the promote UI on this instead
+    -- of re-deriving it, so it never offers a promote the backend would reject.
     }
     deriving (Eq, Show, Generic)
 
@@ -289,6 +296,32 @@ effectively-zero review fraction so approval exposes ~0 users. The release moves
 to @MBInReview@; the Phase-5 poll stage takes it from there (iOS auto, Android
 awaits the operator's mark-*).
 -}
+{- | True when this build is NOT ahead of production, so it can't be promoted. Compare by
+marketing VERSION first, then by build number WITHIN the same version:
+
+  * build version older than production         → not ahead (older release);
+  * same version AND build code <= prod code    → not ahead (already live / a rebuild that
+                                                  isn't newer).
+
+Version-first is essential for iOS, where the build number (CFBundleVersion) resets per
+marketing version — so a newer version legitimately carries the same/lower code as the live
+one. Android version codes are monotonic, so either test works there. The single source of
+truth for the promote guard and the @rdPromotable@ flag. Reads the synced cache (no store
+call); fails OPEN when the production version is unknown, so it never blocks a promote it
+can't disprove.
+-}
+atOrBelowProduction :: AppCatalog -> Text -> Maybe Int32 -> Flow Bool
+atOrBelowProduction ac buildVer mCode = do
+    mProd <- findProductionStoreCell (acId ac) (acPlatform ac)
+    pure $ case mProd of
+        Just (Just pVer, mpCode) ->
+            buildVer `versionOlderThan` pVer
+                || (buildVer == pVer && codeAtOrBelow mCode mpCode)
+        _ -> False
+  where
+    codeAtOrBelow (Just b) (Just p) = b <= p
+    codeAtOrBelow _ _ = False -- same version, codes unknown → can't prove not-ahead → allow
+
 promoteH :: AuthedPerson -> Text -> PromoteReq -> Flow PromoteResp
 promoteH ap rid PromoteReq{..} = do
     requireStaged
@@ -313,6 +346,13 @@ promoteH ap rid PromoteReq{..} = do
     storeId <- storeIdOf ac
     now <- liftIO getCurrentTime
     let version = rtNewVersion row
+    -- Backstop (the FE also gates the promote UI on rdPromotable, computed from the same
+    -- helper): only a build HIGHER than production can be promoted. Refuse one that's at or
+    -- below production — it's already live (equal code) or older (lower code), so there's
+    -- nothing to promote and a re-submit just spins a redundant store review.
+    notAhead <- atOrBelowProduction ac version (rtVersionCode row)
+    when notAhead $
+        bad ("Version " <> version <> " is not ahead of the production build — nothing to promote.")
     if rtEnv row == "ios"
         then do
             creds <- loadAscCredsFor (acStoreAccount ac) >>= maybe (bad "App Store Connect credentials not configured.") pure
@@ -393,6 +433,17 @@ rolloutDetailH _ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
     phasedId <- resolveDetailPhasedId ac row target
+    -- Promotable = in a promotable stage (held at MBTagPushed, or an un-promoted
+    -- internal/TestFlight snapshot with no review/rollout) AND not already live on
+    -- production. Same checks promoteH enforces, so the FE never offers a promote the
+    -- backend would reject.
+    let storeTrack = storeTrackOf (rtMetadata row)
+        isPrePromoteSnapshot =
+            rtReviewStatus row == Nothing
+                && rtRolloutStatus row == Nothing
+                && storeTrack `elem` [Just "internal", Just "testflight"]
+        promotableStage = mbWfStatus target == MBTagPushed || isPrePromoteSnapshot
+    notAhead <- atOrBelowProduction ac (rtNewVersion row) (rtVersionCode row)
     pure
         RolloutDetail
             { rdReleaseId = rid
@@ -405,7 +456,8 @@ rolloutDetailH _ap rid = do
             , rdRolloutStatus = rtRolloutStatus row
             , rdRolloutPercent = rtRolloutPercent row
             , rdPhasedId = phasedId
-            , rdStoreTrack = storeTrackOf (rtMetadata row)
+            , rdStoreTrack = storeTrack
+            , rdPromotable = promotableStage && not notAhead
             }
 
 {- | POST /releases/:id/release — the iOS "Release" button. Releases an approved
@@ -842,7 +894,7 @@ mirrorProdReview ac row mReview = setProductionReviewStatus (acId ac) (rtEnv row
 -- live version of this app and move it to history as @superseded@.
 supersedePreviousLiveFor :: ReleaseTrackerRow -> Flow ()
 supersedePreviousLiveFor row = do
-    ids <- supersedePreviousLive (rtAppGroup row) (rtService row) (rtEnv row) (rtNewVersion row) (rtId row)
+    ids <- supersedePreviousLive (rtAppGroup row) (rtService row) (rtEnv row) (rtId row)
     forM_ ids $ \i ->
         logEvent i "ROLLOUT_SUPERSEDED" (object ["by_version" .= rtNewVersion row, "reason" .= ("newer_version_rolling_out" :: Text)])
 
@@ -850,7 +902,7 @@ supersedePreviousLiveFor row = do
 -- any older incoming version of this app to history.
 retireOlderIncomingFor :: ReleaseTrackerRow -> Flow ()
 retireOlderIncomingFor row = do
-    ids <- retireOlderIncoming (rtAppGroup row) (rtService row) (rtEnv row) (rtNewVersion row) (rtId row)
+    ids <- retireOlderIncoming (rtAppGroup row) (rtService row) (rtEnv row) (rtId row)
     forM_ ids $ \i ->
         logEvent i "INCOMING_SUPERSEDED" (object ["by_version" .= rtNewVersion row])
 

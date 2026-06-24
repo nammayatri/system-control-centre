@@ -359,6 +359,9 @@ execResolveVersion = mobileStage "ResolveVersion" $ do
         isDebug = case mobileTarget rs of
             Just target -> isDebugBuildType (mbcBuildType (mbContext target))
             Nothing -> False
+        isFirebase = case mobileTarget rs of
+            Just target -> mbcDestination (mbContext target) == Just "Firebase"
+            Nothing -> False
     if isDebug
         then do
             logInfoIO $
@@ -372,6 +375,35 @@ execResolveVersion = mobileStage "ResolveVersion" $ do
                  in s{targetState = Just (MobileBuildState ts')}
             logEvent (releaseId rt) "VERSION_RESOLVED" $
                 object ["source" .= ("debug_skip" :: T.Text)]
+            pure StageSuccess
+        else if isFirebase
+        then do
+            -- Firebase App Distribution builds never publish to Play, so a Play-resolved
+            -- version just REPEATS (Firebase doesn't advance Play's code). The unique
+            -- timestamp version (year.MMDD.HHMM) is stamped at CREATE (buildRow) so it's
+            -- visible immediately; here we KEEP that value (don't regenerate, so the row's
+            -- version never shifts under the operator) and only synthesize one as a
+            -- fallback for older rows created before create-time stamping. version_code
+            -- stays Nothing — the provider workflow computes its own.
+            now <- liftIO getCurrentTime
+            let existing = newVersion rt
+                ver =
+                    if T.null existing
+                        then T.pack (formatTime defaultTimeLocale "%Y.%-m%d.%H%M" now)
+                        else existing
+            logInfoIO $
+                "[ResolveVersion] " <> releaseId rt <> " Firebase build, version " <> ver
+            modify $ \s ->
+                let rt' = (releaseTracker s){newVersion = ver}
+                    ts' =
+                        applyMobileTarget s $ \mt ->
+                            mt
+                                { mbContext = (mbContext mt){mbcVersionCode = Nothing}
+                                , mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
+                                }
+                 in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
+            logEvent (releaseId rt) "VERSION_RESOLVED" $
+                object ["version_name" .= ver, "source" .= ("firebase_auto" :: T.Text)]
             pure StageSuccess
         else do
             ac <- appCatalogForRow rt
@@ -658,7 +690,28 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                     , "version_code" .= versionCode
                     ]
             pure StageSuccess
-        Left e -> retry ("dispatchWorkflow failed: " <> e)
+        -- A 4xx from GitHub means the request itself is rejected — unknown/extra
+        -- inputs (422, e.g. the dispatched ref's workflow declares a different input
+        -- schema), workflow or ref not found (404), malformed body (400). These NEVER
+        -- succeed on retry, so retrying just hangs the build at MBVersionResolved
+        -- forever (the symptom that motivated this branch). Abort to MBFailed with
+        -- GitHub's message surfaced so the operator sees the real cause immediately;
+        -- only genuinely transient failures (5xx / network) keep retrying.
+        Left e
+            | isPermanentDispatchError e -> abort ("workflow_dispatch rejected by GitHub (check the workflow inputs / source ref): " <> e)
+            | otherwise -> retry ("dispatchWorkflow failed: " <> e)
+
+-- | A 'dispatchWorkflow' error that will never succeed on retry — GitHub rejected
+-- the request, not a transient hiccup. Matched on the rendered HTTP error string.
+isPermanentDispatchError :: Text -> Bool
+isPermanentDispatchError e =
+    any
+        (`T.isInfixOf` e)
+        [ "HTTP 422"
+        , "HTTP 404"
+        , "HTTP 400"
+        , "Unexpected inputs"
+        ]
 
 {- | Stage 4: Resolve @external_run_id@ by polling GH for a recently-
 created @workflow_dispatch@ run.

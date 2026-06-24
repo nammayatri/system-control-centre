@@ -62,6 +62,7 @@ import Data.Aeson (Value)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AK
 import Data.Aeson.KeyMap qualified as KM
+import Data.List (find)
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -74,6 +75,7 @@ import Products.Autopilot.Mobile.Types
   ( MobileBuildContext (..),
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
+    claimsStoreIdentity,
     isDebugBuildType,
   )
 import Products.Autopilot.Mobile.Types.Storage
@@ -330,7 +332,13 @@ updateStoreSyncBuildCode ac version newCode newTag = withDb $ \db -> do
             runUpdate $
               update
                 (releaseTrackers autopilotDb)
-                (\rt -> rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s'))))
+                ( \rt ->
+                    mconcat
+                      [ rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s')))
+                      , -- keep the build-identity column in sync with the bumped code
+                        rtVersionCode rt <-. val_ newCode
+                      ]
+                )
                 (\rt -> rtId rt ==. val_ (rtId row))
 
 -- | Overwrite the @metadata@ JSON of the leading store-sync row for an app
@@ -384,7 +392,14 @@ setProductionRolloutReflection ac mActive now = withDb $ \db -> do
           guard_ (rtAppGroup rt ==. val_ (acName ac))
           guard_ (rtService rt ==. val_ (acSurface ac))
           guard_ (rtEnv rt ==. val_ (acPlatform ac))
-          guard_ (rtMode rt ==. val_ (Just "STORE_SYNC"))
+          -- Both STORE_SYNC and EXTERNAL_REVIEW are store-sync-managed synthetic rows.
+          -- A build that went through external review keeps its production-rollout
+          -- reflection (it flips to EXTERNAL_REVIEW once a review is detected, but its
+          -- later staged rollout must still surface as "Rolling out X%" not "Completed").
+          guard_
+            ( rtMode rt ==. val_ (Just "STORE_SYNC")
+                ||. rtMode rt ==. val_ (Just "EXTERNAL_REVIEW")
+            )
           guard_ (rtStatus rt ==. val_ "COMPLETED")
           guard_ (isNothing_ (rtReviewStatus rt))
           pure rt
@@ -439,6 +454,16 @@ clearRolloutMeta mCur =
   encodeJsonText . Aeson.Object . KM.delete "rollout_status" . KM.delete "rollout_percent" $
     storeMetaObject mCur
 
+-- | Strip the external-review markers (@external@ / @review_inferred@) from a metadata
+-- blob, preserving everything else (e.g. a rollout reflection's rollout_status/percent).
+-- Once a build leaves review (rolling out / live) it is no longer an out-of-band store
+-- submission, so it should drop the EXTERNAL chip and read as a normal store row.
+-- 'Nothing' when nothing else remains, so the row carries no stale metadata.
+clearExternalMeta :: Maybe Text -> Maybe Text
+clearExternalMeta mCur =
+  let o = KM.delete "external" (KM.delete "review_inferred" (storeMetaObject mCur))
+   in if KM.null o then Nothing else Just (encodeJsonText (Aeson.Object o))
+
 -- ─── Out-of-band (external) review snapshots ───────────────────────
 --
 -- When an App Store version is in review but was NOT submitted from SCC, store
@@ -473,19 +498,40 @@ findExternalReviewRow appGroup surface platform = withDb $ \db ->
 -- unique regardless of mode/origin — the convergence point every reconcile/merge
 -- writes through, so a store-sync snapshot, an external-review detection, and a
 -- rollout all land on the same row instead of forking.
-findMobileVersionRow :: (MonadFlow m) => Text -> Text -> Text -> Text -> m (Maybe ReleaseTrackerRow)
-findMobileVersionRow appGroup surface platform version = withDb $ \db ->
-  runDB db $
-    runSelectReturningOne $
-      select $
-        limit_ 1 $ do
-          rt <- all_ (releaseTrackers autopilotDb)
-          guard_ (rtAppGroup rt ==. val_ appGroup)
-          guard_ (rtService rt ==. val_ surface)
-          guard_ (rtEnv rt ==. val_ platform)
-          guard_ (rtNewVersion rt ==. val_ version)
-          guard_ (rtCategory rt ==. val_ "MobileBuild")
-          pure rt
+findMobileVersionRow :: (MonadFlow m) => Text -> Text -> Text -> Text -> Maybe Int32 -> m (Maybe ReleaseTrackerRow)
+findMobileVersionRow appGroup surface platform version mCode = do
+  rows <- withDb $ \db ->
+    runDB db $
+      runSelectReturningList $
+        select $
+          -- Build identity is (name, code) (migration 0035), so when the caller knows
+          -- the build number, match it exactly. Without it (iOS authoritative review),
+          -- fall back to name and take the highest code (latest build) deterministically.
+          orderBy_ (\rt -> desc_ (rtVersionCode rt)) $ do
+            rt <- all_ (releaseTrackers autopilotDb)
+            guard_ (rtAppGroup rt ==. val_ appGroup)
+            guard_ (rtService rt ==. val_ surface)
+            guard_ (rtEnv rt ==. val_ platform)
+            guard_ (rtNewVersion rt ==. val_ version)
+            guard_ (rtCategory rt ==. val_ "MobileBuild")
+            maybe (pure ()) (\c -> guard_ (rtVersionCode rt ==. val_ (Just c))) mCode
+            pure rt
+  -- Resolve only to a STORE-IDENTITY row (mirrors the uq_release_tracker_mobile_build
+  -- predicate): skip debug + Firebase-distribution builds, which inherit a repeating
+  -- Play-derived (name, code) and so must never be the convergence target for a real
+  -- store release's review / rollout / supersession. Rows stay ordered by desc code, so
+  -- 'find' still yields the highest-code store build for the iOS (no-code) fallback.
+  pure (find isStoreIdentityRow rows)
+
+-- | A row that actually claims a store identity: published to Play / App Store under its
+-- version_code — i.e. NOT a debug build and NOT routed to Firebase App Distribution
+-- (those reuse a Play-derived code that repeats, so they own no unique identity). A row
+-- whose target state can't be parsed defaults to True (conservative — preserves the prior
+-- "any matching row" behaviour for non-mobile-shaped rows).
+isStoreIdentityRow :: ReleaseTrackerRow -> Bool
+isStoreIdentityRow row = case parseMobileTargetState (rtTargetState row) of
+  Just st -> claimsStoreIdentity (mbContext st)
+  Nothing -> True
 
 -- | The PROD-INCOMING rows across all apps (version-keyed model): a version on the
 -- production track that's in review / approved-held / rejected but NOT yet rolling
@@ -598,6 +644,9 @@ completeExternalReviewRow releaseId_ = withDb $ \db -> do
                       , -- Clear the now-stale review_status so a retired external row can
                         -- never resurface as "in_review" (e.g. a path reading the column).
                         rtReviewStatus rt <-. val_ Nothing
+                      , -- It has left review (rolling out / live) → drop the EXTERNAL chip
+                        -- so it reads as a normal store row (rolling out X%, then Production).
+                        rtMetadata rt <-. val_ (clearExternalMeta (rtMetadata row))
                       , rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s')))
                       ]
                 )
@@ -863,6 +912,14 @@ mkMobileTrackerRow rid ac targetState mVersionName mSourceRef createdBy_ created
           -- track is unknown until the build lands on a store / is promoted;
           -- store-sync and promote set it (internal -> production).
           rtStoreTrack = Nothing,
+          -- build number from the target context — part of the build identity
+          -- (migration 0035) so two builds of the same version name don't collide.
+          -- Gated on claimsStoreIdentity: only store-bound builds (not debug, not
+          -- Firebase) stamp the COLUMN; internal builds keep the code in the JSON only.
+          rtVersionCode =
+            if claimsStoreIdentity (mbContext targetState)
+              then mbcVersionCode (mbContext targetState)
+              else Nothing,
           rtCreatedAt = createdAt,
           rtUpdatedAt = createdAt
         }
@@ -1125,6 +1182,14 @@ insertMobileRevertTracker rid ac targetState versionName changeLog_ sourceRef_ r
           -- track is unknown until the build lands on a store / is promoted;
           -- store-sync and promote set it (internal -> production).
           rtStoreTrack = Nothing,
+          -- build number from the target context — part of the build identity
+          -- (migration 0035) so two builds of the same version name don't collide.
+          -- Gated on claimsStoreIdentity: only store-bound builds (not debug, not
+          -- Firebase) stamp the COLUMN; internal builds keep the code in the JSON only.
+          rtVersionCode =
+            if claimsStoreIdentity (mbContext targetState)
+              then mbcVersionCode (mbContext targetState)
+              else Nothing,
           rtCreatedAt = createdAt,
           rtUpdatedAt = createdAt
         }

@@ -73,14 +73,11 @@ export function deriveStoreBadge(cell: TrackCell | null, track: TrackKind = 'pro
 
   const { status, reviewStatus, rolloutPercent: pct } = cell;
 
-  // Testing tracks: badge by track, not by store status (an internal/TestFlight
-  // build is "available for testing", never "Live"). BUT if this build has been
-  // promoted and carries a review verdict, that wins — it has graduated past the
-  // testing slot (Rule: most-advanced state wins).
+  // Testing tracks: badge purely by track (an internal/TestFlight build is "available
+  // for testing", never "Live"). The production-review verdict (In review / Approved ·
+  // held / Rejected) is NOT shown here — it belongs to the dedicated Incoming cell, so
+  // surfacing it on the testing row too would double-show the same state.
   if (track === 'internal' || track === 'testflight') {
-    if (reviewStatus === 'rejected') return { label: 'Rejected', variant: 'danger' };
-    if (reviewStatus === 'in_review') return { label: 'In review', variant: 'purple' };
-    if (reviewStatus === 'approved') return { label: 'Approved · held', variant: 'success' };
     if (status == null || status === 'none') return { label: '—', variant: 'muted' };
     return track === 'internal'
       ? { label: 'Internal', variant: 'blue' }

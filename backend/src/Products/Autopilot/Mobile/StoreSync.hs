@@ -32,6 +32,9 @@ module Products.Autopilot.Mobile.StoreSync (
 
     -- * App Release Monitoring (store_status cache)
     refreshStoreStatusOne,
+
+    -- * Version ordering (semver-ish component compare; unit-tested via callers)
+    versionOlderThan,
 ) where
 
 import Control.Applicative ((<|>))
@@ -448,10 +451,19 @@ reflectIosPhasedRollout creds ac bundleId (Just pv) = do
                     "ACTIVE" -> inRamp "rolling_out"
                     "PAUSED" -> inRamp "halted"
                     _ -> Nothing
-            -- Make sure the rolling version has a row to attach the reflection to.
-            forM_ mActive $ \_ ->
-                insertSyntheticRelease ac pv Nothing "production" $
-                    Map.singleton "production" (TrackSnapshot pv Nothing (derivedStoreTag ac pv Nothing))
+            -- Make sure the rolling version has a row to attach the reflection to —
+            -- but ONLY if it has none yet. The iOS reflection has no build number here,
+            -- so a blind insert would seed a NULL-code row; since (name, code) treats
+            -- NULLs as distinct (migration 0035), that spawns a fresh duplicate every
+            -- sync. When the snapshot row (with its real code) already exists, skip the
+            -- insert and let setProductionRolloutReflection attach to it by version.
+            forM_ mActive $ \_ -> do
+                mExisting <- findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) pv Nothing
+                case mExisting of
+                    Just _ -> pure ()
+                    Nothing ->
+                        insertSyntheticRelease ac pv Nothing "production" $
+                            Map.singleton "production" (TrackSnapshot pv Nothing (derivedStoreTag ac pv Nothing))
             setProductionRolloutReflection ac mActive now
             forM_ mActive $ \(ver, rs, p) ->
                 setProductionRolloutStatus (acId ac) "ios" ver Nothing (if rs == "halted" then "halted" else "inProgress") p
@@ -644,7 +656,7 @@ reconcileExternalReviewMapped ::
     Flow ()
 reconcileExternalReviewMapped ac mCode inferred existing mMapped = do
     mVersionRow <- case mMapped of
-        Just (version, _, _) -> findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) version
+        Just (version, _, _) -> findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) version mCode
         Nothing -> pure Nothing
     let target = mVersionRow <|> existing
         mTargetId = rtId <$> target
@@ -893,6 +905,7 @@ insertSyntheticRelease ac version mCode track tracks = do
                 , rtAscVersionId = Nothing
                 , rtAscPhasedId = Nothing
                 , rtStoreTrack = Just track
+                , rtVersionCode = mCode
                 , rtCreatedAt = now
                 , rtUpdatedAt = now
                 }
@@ -1411,7 +1424,7 @@ iosSnapToUpsert ac mExpected mActive s =
             , ssuPlatform = "ios"
             , ssuTrack = ascTrack s
             , ssuVersionName = nonEmptyVersion (ascVersion s)
-            , ssuVersionCode = Nothing
+            , ssuVersionCode = ascCode s
             , ssuStatus = Just (ascStatus s)
             , ssuRolloutPercent = if isProd then mActive >>= amsRolloutPercent else Nothing
             , -- Per-cell review state (any track): a promoted TestFlight build reads its
