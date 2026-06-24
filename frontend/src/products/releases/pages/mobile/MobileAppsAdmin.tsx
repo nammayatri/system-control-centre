@@ -7,6 +7,7 @@ import type { AppCatalogEntry, LatestBuild } from '../../types';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { cn } from '../../../../lib/utils';
 import { groupAppsBySurface, useGroupCollapse, GroupChevron } from '../../components/appGroups';
+import { AddAppButton } from '../../components/AddAppModal';
 import { toast } from 'sonner';
 
 const AndroidIcon = ({ className }: { className?: string }) => (
@@ -135,8 +136,7 @@ export default function MobileAppsAdmin() {
             </h1>
             <span className="text-xs text-zinc-500">{apps.length}</span>
           </div>
-          {/* Add-app modal deferred — entries can be seeded via SQL or a
-              future modal hooked to mobileApi.createApp. */}
+          <AddAppButton />
         </header>
 
         {error ? (
@@ -199,7 +199,14 @@ export default function MobileAppsAdmin() {
                             </td>
                             <td className="py-3 px-4">
                               <div className="font-medium text-zinc-800">{app.displayLabel || app.name}</div>
-                              <div className="text-[11px] text-zinc-500 mt-0.5">{app.surface}</div>
+                              <div className="text-[11px] text-zinc-500 mt-0.5 flex items-center gap-1.5">
+                                <span>{app.surface}</span>
+                                {!app.managedPublishing && (
+                                  <span className="rounded bg-zinc-100 px-1 py-0.5 text-[10px] font-medium text-zinc-500" title="Play Managed Publishing is off — rollout % applies immediately (no manual Publish)">
+                                    MP off
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             <td className="py-3 px-4">
                               <PlatformBadge platform={app.platform} />
