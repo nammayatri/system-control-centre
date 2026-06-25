@@ -58,6 +58,15 @@ data MobileBuildContext = MobileBuildContext
     -- rows created before this field existed); the dispatch falls back to
     -- "GooglePlay" in that case. Consumed solely by the provider prod Android
     -- @workflow_dispatch@ — ignored everywhere else.
+    , mbcChangelogSummary :: Maybe Text
+    -- ^ Per-release opt-in for the post-build changelog Slack message (create
+    -- page's "Send changelog summary to Slack" tickbox). @Just body@ = opted in
+    -- AND carries the body to post (the rich AI summary, or the typed changelog
+    -- as fallback); 'Nothing' = NOT opted in (no post). It lives HERE, in
+    -- @release_context@, rather than in the shared @metadata@ column — because
+    -- many writers (store-sync, rollout reconcile) overwrite @metadata@ wholesale
+    -- between create and ConfirmTag and would clobber it. @release_context@ is
+    -- owned solely by the workflow, so the opt-in survives to ConfirmTag.
     }
     deriving (Eq, Show, Generic)
 
@@ -73,6 +82,7 @@ instance ToJSON MobileBuildContext where
             , "ota_namespace" .= mbcOtaNamespace c
             , "tag_pushed" .= mbcTagPushed c
             , "destination" .= mbcDestination c
+            , "changelog_summary" .= mbcChangelogSummary c
             ]
 
 instance FromJSON MobileBuildContext where
@@ -99,6 +109,8 @@ instance FromJSON MobileBuildContext where
             <*> o .:? "ota_namespace"
             <*> o .:? "tag_pushed"
             <*> pure mDest
+            -- absent in rows persisted before this field → Nothing (not opted in)
+            <*> o .:? "changelog_summary"
 
 {- | Whether a build claims a STORE identity — i.e. it actually publishes to a
 versioned app store (Google Play production / App Store) under its version_code,

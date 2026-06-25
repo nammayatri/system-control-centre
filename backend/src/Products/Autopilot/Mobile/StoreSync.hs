@@ -770,6 +770,7 @@ insertExternalReviewRow ac mCode inferred version reviewStatus mbStatus = do
                 , mbcOtaNamespace = Nothing
                 , mbcTagPushed = Nothing
                 , mbcDestination = Nothing
+                , mbcChangelogSummary = Nothing
                 }
         targetState =
             MobileBuildTargetState
@@ -842,6 +843,7 @@ insertSyntheticRelease ac version mCode track tracks = do
                 , mbcOtaNamespace = Nothing
                 , mbcTagPushed = derivedTag
                 , mbcDestination = Nothing
+                , mbcChangelogSummary = Nothing
                 }
         targetState =
             MobileBuildTargetState

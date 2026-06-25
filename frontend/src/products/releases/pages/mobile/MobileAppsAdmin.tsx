@@ -199,14 +199,7 @@ export default function MobileAppsAdmin() {
                             </td>
                             <td className="py-3 px-4">
                               <div className="font-medium text-zinc-800">{app.displayLabel || app.name}</div>
-                              <div className="text-[11px] text-zinc-500 mt-0.5 flex items-center gap-1.5">
-                                <span>{app.surface}</span>
-                                {!app.managedPublishing && (
-                                  <span className="rounded bg-zinc-100 px-1 py-0.5 text-[10px] font-medium text-zinc-500" title="Play Managed Publishing is off — rollout % applies immediately (no manual Publish)">
-                                    MP off
-                                  </span>
-                                )}
-                              </div>
+                              <div className="text-[11px] text-zinc-500 mt-0.5">{app.surface}</div>
                             </td>
                             <td className="py-3 px-4">
                               <PlatformBadge platform={app.platform} />

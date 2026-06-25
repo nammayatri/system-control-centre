@@ -12,7 +12,7 @@ import { toast } from 'sonner';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { cn } from '../../../lib/utils';
 import { useRefreshAnimation } from '../../../shared/hooks';
-import { isMobileServerConfig, isHiddenServerConfig, MOBILE_CONFIG_CATEGORIES } from '../../server-config-filter';
+import { isMobileServerConfig, isSharedServerConfig, isHiddenServerConfig, MOBILE_CONFIG_CATEGORIES } from '../../server-config-filter';
 
 interface ConfigItem {
   key: string;
@@ -61,7 +61,10 @@ const Configurations: React.FC = () => {
         ...g,
         configs: g.configs.filter(c =>
           !isHiddenServerConfig(c.key) &&
-          (filter === 'mobile' ? isMobileServerConfig(c.key) : !isMobileServerConfig(c.key))
+          // Shared configs (e.g. slack_enabled) appear on BOTH tabs.
+          (filter === 'mobile'
+            ? (isMobileServerConfig(c.key) || isSharedServerConfig(c.key))
+            : (!isMobileServerConfig(c.key) || isSharedServerConfig(c.key)))
         ),
       }))
       .filter(g => g.configs.length > 0);

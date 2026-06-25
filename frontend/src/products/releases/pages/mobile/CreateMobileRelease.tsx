@@ -337,6 +337,12 @@ export default function CreateMobileRelease() {
     changelogBase,
   );
   const [changelogTab, setChangelogTab] = useState(0);
+  // "Send changelog summary to Slack after build" — one toggle for the whole
+  // release; the per-app summary text is captured into summaryByApp as each
+  // app's changelog panel reports it (onSummary). Apps whose tab was never
+  // opened won't have a captured summary — the backend falls back to changeLog.
+  const [sendChangelogSlack, setSendChangelogSlack] = useState(false);
+  const [summaryByApp, setSummaryByApp] = useState<Record<number, string>>({});
   useEffect(() => { setChangelogTab(0); }, [selectedIds.join(',')]);
   // Free-text filter over the active tab's commit list. Reset whenever the
   // visible tab changes so a stale query doesn't carry across apps.
@@ -392,6 +398,10 @@ export default function CreateMobileRelease() {
         appCatalogId: id,
         versionName: v.versionName.trim(),
         versionCode: ios ? null : parseInt(v.versionCode, 10),
+        sendChangelogSlack,
+        // captured only for apps whose changelog tab was opened; omit otherwise
+        // so the backend falls back to the request-level changeLog.
+        ...(summaryByApp[id] ? { changelogSummary: summaryByApp[id] } : {}),
       };
     });
     const req: CreateMobileReleasesReq = {
@@ -787,6 +797,24 @@ export default function CreateMobileRelease() {
               )}
 
               <div className="p-4 sm:p-6">
+                {/* Opt-in sits ABOVE the AI changelog summary. Always shown while the
+                    changelog section is visible — not gated on commits — so even a
+                    no-diff "testing" build can opt in (the backend falls back to the
+                    typed changelog when no AI summary was captured). */}
+                <label className="mb-3 flex items-start gap-2 text-xs text-zinc-600 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={sendChangelogSlack}
+                    onChange={(e) => setSendChangelogSlack(e.target.checked)}
+                    className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-300 text-violet-600 focus:ring-violet-400"
+                  />
+                  <span>
+                    Send changelog summary to Slack after build
+                    <span className="block text-[11px] text-zinc-400">
+                      Posts once the build succeeds and its tag is confirmed — never before. Applies to all apps in this release.
+                    </span>
+                  </span>
+                </label>
                 {q.data && q.data.cpCommits.length > 0 && (
                   <MobileChangelogAiSummary
                     app={app.name}
@@ -796,6 +824,9 @@ export default function CreateMobileRelease() {
                     base={changelogBase}
                     versionName={versionEdits[app.id]?.versionName || ''}
                     versionCode={versionEdits[app.id]?.versionCode || ''}
+                    onSummary={(text) =>
+                      setSummaryByApp((m) => (m[app.id] === text ? m : { ...m, [app.id]: text }))
+                    }
                   />
                 )}
                 {q.isLoading ? (

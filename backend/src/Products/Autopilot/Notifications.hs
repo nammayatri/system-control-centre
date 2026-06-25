@@ -44,6 +44,8 @@ module Products.Autopilot.Notifications (
     notifyConfigMapFastForwarded,
     notifyGenericThreadMessage,
     notifyDecisionThreadMessage,
+    sendMobileChangelogSlack,
+    chunkForSlack,
 )
 where
 
@@ -156,15 +158,34 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
                                     <> truncateT 200 (TL.toStrict (TLE.decodeUtf8 b))
                         pure Nothing
                     | otherwise -> do
-                        let mTs = do
-                                val <- decode b :: Maybe Value
-                                case val of
-                                    Object obj -> case KM.lookup (K.fromText "ts") obj of
-                                        Just (String ts) -> Just ts
-                                        _ -> Nothing
-                                    _ -> Nothing
-                        logInfoG $ "[SLACK] Sent to #" <> channel <> maybe "" (\ts -> " (ts=" <> ts <> ")") mTs
-                        pure mTs
+                        -- chat.postMessage returns HTTP 200 even on logical
+                        -- failures (e.g. not_in_channel / channel_not_found):
+                        -- {"ok":false,"error":"..."}. A real success carries a
+                        -- "ts". So a present "ts" — not the 2xx status — is the
+                        -- only reliable success signal.
+                        let mObj = case decode b :: Maybe Value of
+                                Just (Object obj) -> Just obj
+                                _ -> Nothing
+                            strField k = case mObj >>= KM.lookup (K.fromText k) of
+                                Just (String t) -> Just t
+                                _ -> Nothing
+                            mTs = strField "ts"
+                        case mTs of
+                            Just ts -> do
+                                logInfoG $ "[SLACK] Sent to #" <> channel <> " (ts=" <> ts <> ")"
+                                pure (Just ts)
+                            Nothing -> do
+                                -- ok:false (or an unexpected body) — surface
+                                -- Slack's error so this never looks like a send.
+                                let err = fromMaybe "unknown" (strField "error")
+                                logWarningG $
+                                    "[SLACK] postMessage NOT sent to #"
+                                        <> channel
+                                        <> " (ok=false, error="
+                                        <> err
+                                        <> "): "
+                                        <> truncateT 200 (TL.toStrict (TLE.decodeUtf8 b))
+                                pure Nothing
 
 sectionBlock :: Text -> Value
 sectionBlock txt =
@@ -179,6 +200,52 @@ contextBlock items =
         [ "type" .= ("context" :: Text)
         , "elements" .= map (\t -> object ["type" .= ("mrkdwn" :: Text), "text" .= t]) items
         ]
+
+{- | Split changelog text into Slack-safe section chunks. Packs whole lines into
+chunks of <= ~2900 chars (Slack's per-section text limit is 3000) and caps the
+number of chunks so a runaway summary can't blow past Slack's 50-block limit;
+a "truncated" notice is appended when the cap is hit. A single over-long line is
+hard-split so it never exceeds the section limit.
+-}
+chunkForSlack :: Text -> [Text]
+chunkForSlack input =
+    let maxChunk = 2900 :: Int
+        maxChunks = 12 :: Int
+        -- hard-split a single line that is itself longer than maxChunk
+        splitLong :: Text -> [Text]
+        splitLong l
+            | T.length l <= maxChunk = [l]
+            | otherwise = let (h, t) = T.splitAt maxChunk l in h : splitLong t
+        pack :: [Text] -> Text -> [Text] -> [Text]
+        pack acc cur [] = reverse (if T.null cur then acc else cur : acc)
+        pack acc cur (l : ls)
+            | T.null cur = pack acc l ls
+            | T.length cur + 1 + T.length l <= maxChunk = pack acc (cur <> "\n" <> l) ls
+            | otherwise = pack (cur : acc) l ls
+        ls = concatMap splitLong (T.lines input)
+        chunks = pack [] "" ls
+     in if length chunks <= maxChunks
+            then chunks
+            else take maxChunks chunks <> ["_…changelog truncated._"]
+
+{- | Post a mobile release changelog to a Slack channel as a TOP-LEVEL message
+(not threaded). Header line + chunked body. Returns whether a message was sent.
+Reuses 'sendSlackRich'; the channel is resolved by the caller via
+'getMobileSlackChannel'.
+-}
+sendMobileChangelogSlack :: Text -> Text -> Text -> Text -> Text -> Flow Bool
+sendMobileChangelogSlack channel app surface versionLabel summaryLong = do
+    let surfaceSuffix = if T.null (T.strip surface) then "" else " (" <> surface <> ")"
+        header = ":rocket: *" <> app <> "*" <> surfaceSuffix <> " — " <> versionLabel
+        bodyChunks = case chunkForSlack (T.strip summaryLong) of
+            [] -> ["_No changelog summary._"]
+            cs -> cs
+        blocks = sectionBlock header : map sectionBlock bodyChunks
+        fallback = app <> surfaceSuffix <> " — " <> versionLabel
+    mTs <- sendSlackRich channel fallback colorCreated blocks Nothing
+    case mTs of
+        Just _ -> pure True
+        Nothing -> pure False
 
 -- | Run the notification body async iff Slack is enabled.
 whenSlackEnabled :: Flow () -> Flow ()

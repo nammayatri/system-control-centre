@@ -50,6 +50,7 @@ import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
 import Control.Monad.State.Strict (gets, modify)
+import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Reader (runReaderT)
 import Control.Monad.Trans.State.Strict (runStateT)
 import Core.DB.Connection (withConn)
@@ -114,7 +115,9 @@ import Products.Autopilot.Mobile.Versioning.Apple (
     loadAscCredsFor,
     renderAscErr,
  )
+import Products.Autopilot.Notifications (sendMobileChangelogSlack)
 import Products.Autopilot.RuntimeConfig (
+    getMobileSlackChannel,
     getMobileTagConfirmTimeoutMinutes,
     getReviewPollIntervalSeconds,
     getReviewPollTimeoutDays,
@@ -1054,6 +1057,45 @@ reviewPollDue now mLastPolled intervalSec =
         Nothing -> True
         Just t -> diffUTCTime now t >= fromIntegral intervalSec
 
+{- | After a build is confirmed built+tagged (ConfirmTag → MBTagPushed), post the
+release changelog to the mobile Slack channel — but ONLY for releases that opted
+in at create time (the "Send changelog summary to Slack" tickbox).
+
+The opt-in + body live in @mbcChangelogSummary@ on the build context
+('release_context'), read straight off @target@: @Just body@ = opted in (send
+@body@; if blank, fall back to the typed changelog @mbcChangeLog@); 'Nothing' =
+not opted in (skip). Storing it in @release_context@ — not the shared @metadata@
+column — is what makes it reliable: store-sync / rollout passes overwrite
+@metadata@ between create and ConfirmTag, but never touch @release_context@.
+
+@mobile_slack_channel@ is the destination (not the gate). Exactly-once is
+provided by the ConfirmTag stage guard (skipped once MBTagPushed is reached).
+Best-effort: a Slack failure is logged, never aborts the stage.
+-}
+maybeSendChangelogSlack :: ReleaseTracker -> MobileBuildTargetState -> StateFlow ()
+maybeSendChangelogSlack rt target =
+    case mbcChangelogSummary (mbContext target) of
+        Nothing -> pure () -- this release did not opt in
+        Just bodyRaw -> do
+            mCh <- getMobileSlackChannel
+            case mCh of
+                Nothing ->
+                    logInfoIO $
+                        "[ConfirmTag] "
+                            <> releaseId rt
+                            <> " opted into changelog Slack but mobile_slack_channel is not set — skipping"
+                Just ch -> do
+                    let body = if T.null (T.strip bodyRaw) then mbcChangeLog (mbContext target) else bodyRaw
+                        versionLabel = "v" <> newVersion rt
+                    ok <- lift (sendMobileChangelogSlack ch (appGroup rt) (service rt) versionLabel body)
+                    if ok
+                        then
+                            logEvent (releaseId rt) "CHANGELOG_SLACK_SENT" $
+                                object ["channel" .= ch, "version" .= newVersion rt]
+                        else
+                            logInfoIO $
+                                "[ConfirmTag] " <> releaseId rt <> " changelog Slack send failed (see [SLACK] logs)"
+
 execConfirmTag :: forall m. (StageM ReleaseState m) => m StageOutcome
 execConfirmTag = mobileStage "ConfirmTag" $ do
     rs <- gets id
@@ -1082,6 +1124,9 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                     }
             logEvent (releaseId rt) "TAG_OBSERVED" $
                 object ["tag" .= ("debug-no-tag" :: Text), "source" .= ("debug_skip" :: Text)]
+            -- Debug builds: only posts if mobile_slack_channel is set; body falls
+            -- back to mbcChangeLog (debug create has no rich summary).
+            maybeSendChangelogSlack rt target
             pure StageSuccess
         else do
             ac <- appCatalogForRow rt
@@ -1170,6 +1215,10 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                             <> releaseId rt
                             <> " bound to tag="
                             <> tagName
+                    -- Build is fully successful and tagged: post the changelog to
+                    -- Slack if this release opted in. Exactly-once via the
+                    -- ConfirmTag stage guard (skipped once MBTagPushed is reached).
+                    maybeSendChangelogSlack rt target
                     pure StageSuccess
 
 {- | Stage 7: Map fine-grained @MobileBuildWFStatus@ to the user-facing
@@ -1456,6 +1505,7 @@ applyMobileTarget rs f =
                             , mbcOtaNamespace = Nothing
                             , mbcTagPushed = Nothing
                             , mbcDestination = Nothing
+                            , mbcChangelogSummary = Nothing
                             }
                     , mbExternalRunId = Nothing
                     , mbMatrixJobStatus = Nothing

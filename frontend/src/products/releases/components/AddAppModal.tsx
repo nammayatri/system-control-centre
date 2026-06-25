@@ -29,7 +29,6 @@ type FormState = {
     packageName: string;
     firebaseProjectId: string;
     enabled: boolean;
-    managedPublishing: boolean;
 };
 
 const EMPTY: FormState = {
@@ -42,7 +41,6 @@ const EMPTY: FormState = {
     packageName: '',
     firebaseProjectId: '',
     enabled: true,
-    managedPublishing: true,
 };
 
 function CheckRow({
@@ -124,7 +122,6 @@ export function AddAppButton() {
             displayLabel: form.displayLabel.trim() || null,
             firebaseProjectId: form.firebaseProjectId.trim() || null,
             enabled: form.enabled,
-            managedPublishing: form.managedPublishing,
         };
         createMutation.mutate(body);
     };
@@ -219,12 +216,6 @@ export function AddAppButton() {
                                 hint="Shows up on the Create Mobile Release page"
                                 checked={form.enabled}
                                 onChange={(v) => set('enabled', v)}
-                            />
-                            <CheckRow
-                                label="Play Managed Publishing"
-                                hint="Turn off for provider/driver apps that publish without the manual-Publish hold (no API to detect this — set it here)."
-                                checked={form.managedPublishing}
-                                onChange={(v) => set('managedPublishing', v)}
                             />
                         </div>
                     </DialogBody>

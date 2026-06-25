@@ -37,12 +37,6 @@ data AppCatalogT f = AppCatalog
     -- ^ Which App Store Connect account/team this app lives in. NULL = the default
     -- (unsuffixed) ASC key; a value (e.g. "cumta") selects @SC_ASC_*_<ACCOUNT>@. Lets
     -- one SCC instance read apps that span multiple Apple accounts.
-    , acManagedPublishing :: Columnar f Bool
-    -- ^ Whether this app uses Play Managed Publishing (Console-only setting, no API to
-    -- detect — recorded explicitly, migration 0037). True ⇒ a promoted build stays
-    -- STAGED on production until the operator clicks Publish, so the release summary
-    -- shows the "Publish in Play Console" gate. False (provider/driver apps) ⇒ a rollout
-    -- % applies immediately, so the rollout controls are shown directly.
     , acCreatedAt :: Columnar f UTCTime
     }
     deriving (Generic, Beamable)
@@ -74,7 +68,6 @@ appCatalog =
                 , acFirebaseProjectId = fieldNamed "firebase_project_id"
                 , acEnabled = fieldNamed "enabled"
                 , acStoreAccount = fieldNamed "store_account"
-                , acManagedPublishing = fieldNamed "managed_publishing"
                 , acCreatedAt = fieldNamed "created_at"
                 }
 

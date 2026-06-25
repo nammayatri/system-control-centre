@@ -114,6 +114,12 @@ data CreateMobileReleasesItem = CreateMobileReleasesItem
     { appCatalogId :: Int32
     , versionName :: Maybe Text
     , versionCode :: Maybe Int32
+    , -- | when True, post the changelog to the mobile Slack channel after the
+      -- build succeeds and its tag is confirmed (ConfirmTag → MBTagPushed)
+      sendChangelogSlack :: Maybe Bool
+    , -- | the changelog summary captured on the create page; falls back to the
+      -- request-level changeLog when absent
+      changelogSummary :: Maybe Text
     }
     deriving (Generic, Show)
 
@@ -240,7 +246,7 @@ buildRow ::
     UTCTime ->
     CreateMobileReleasesItem ->
     Flow (ReleaseTrackerRow, CreatedReleaseSummary)
-buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode} = do
+buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode, sendChangelogSlack = mSendSlack, changelogSummary = mSummary} = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     -- safe: createMobileReleasesH validated that every id is present in appById
     let app_ = appById Map.! aid
@@ -269,6 +275,15 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                 , mbcOtaNamespace = Nothing
                 , mbcTagPushed = Nothing
                 , mbcDestination = if isProviderProdAndroid then mDestination else Nothing
+                , -- Per-release opt-in for the post-build changelog Slack post. Store
+                  -- it in the build context (release_context) — NOT release_tracker.metadata,
+                  -- which store-sync/rollout overwrite before ConfirmTag runs. @Just body@
+                  -- means "send"; the body is the captured rich summary, falling back to
+                  -- the typed changelog. ConfirmTag reads this straight off the target.
+                  mbcChangelogSummary =
+                    if mSendSlack == Just True
+                        then Just (maybe changeLog_ (\s -> if T.null (T.strip s) then changeLog_ else s) mSummary)
+                        else Nothing
                 }
         target =
             MobileBuildTargetState

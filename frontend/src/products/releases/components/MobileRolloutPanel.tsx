@@ -456,12 +456,13 @@ export function MobileRolloutPanel({
                                 <Rocket size={13} /> {d.rdPhasedId ? 'Release (phased · 7 days)' : 'Release to all users'}
                             </Button>
                         </div>
-                    ) : d.rdManagedPublishing && !d.rdLiveOnProduction ? (
-                        // Android + Managed Publishing ON + not live yet: the build is STAGED on
-                        // production, so a rollout % wouldn't apply. Point the operator at the Play
-                        // Console to Publish, then a hard Refresh (forces a store sync) flips
-                        // rdLiveOnProduction and reveals the rollout controls. Managed-Publishing-OFF
-                        // apps (providers) skip this entirely — a % applies immediately there.
+                    ) : !d.rdLiveOnProduction ? (
+                        // Android approved but not serving on production yet: the build counts as
+                        // live only once it's rolling out above 1% (or fully released). Below that
+                        // it's staged (e.g. held under Managed Publishing) and a rollout % wouldn't
+                        // apply — so point the operator at the Play Console to Publish, then a hard
+                        // Refresh (forces a store sync) flips rdLiveOnProduction and reveals the
+                        // rollout controls.
                         <PublishGate
                             consoleUrl={PLAY_CONSOLE_URL}
                             syncing={syncing}
@@ -638,10 +639,8 @@ function PublishGate({
             <p className="flex items-start gap-1.5 text-xs leading-relaxed text-amber-800">
                 <Info size={13} className="mt-0.5 shrink-0 text-amber-600" />
                 <span>
-                    Held under <strong>Play Managed Publishing</strong> — this build is staged on the
-                    production track but <strong>not live yet</strong>. A rollout&nbsp;% won&apos;t apply
-                    until it&apos;s published. Open the Play Console, click <strong>Publish</strong>, then
-                    Refresh here to manage the staged rollout.
+                    <strong>Staged, not live yet.</strong> Counts as live only above <strong>1%</strong>{' '}
+                    rollout (or fully released). Publish in the Play Console if held, then Refresh.
                 </span>
             </p>
             <div className="flex flex-wrap items-center gap-2">

@@ -59,8 +59,6 @@ data NewAppCatalogRow = NewAppCatalogRow
     , nacFirebaseProjectId :: Maybe Text
     , nacEnabled :: Maybe Bool
     -- ^ Defaults to True if Nothing.
-    , nacManagedPublishing :: Maybe Bool
-    -- ^ Play Managed Publishing flag; defaults to True if Nothing.
     }
 
 -- | Partial-update fields. Only @Just@ fields are updated.
@@ -140,7 +138,6 @@ insertAppCatalog NewAppCatalogRow{..} = withDb $ \db -> do
                             , acFirebaseProjectId = val_ nacFirebaseProjectId
                             , acEnabled = val_ enabled'
                             , acStoreAccount = val_ Nothing
-                            , acManagedPublishing = val_ (fromMaybe True nacManagedPublishing)
                             , acCreatedAt = default_
                             }
                         ]
