@@ -57,6 +57,7 @@ module Products.Autopilot.RuntimeConfig
     getHpaTemplate,
     -- Notifications (MonadFlow versions)
     isSlackEnabled,
+    getMobileSlackChannel,
     -- Snapshot
     RuntimeConfigSnapshot (..),
     loadRuntimeConfigSnapshot,
@@ -386,6 +387,16 @@ isHpaEnabledForProduct productName = withDb $ \db -> do
 
 getHpaTemplate :: (MonadFlow m) => m (Maybe Text)
 getHpaTemplate = withDb $ \db -> getEnabledServerConfigValueForProduct_io db "hpa_template" (Just "autopilot")
+
+{- | Slack channel for mobile release changelogs. Empty string in config is
+treated as unset ('Nothing'), which turns the changelog-to-Slack feature off.
+-}
+getMobileSlackChannel :: (MonadFlow m) => m (Maybe Text)
+getMobileSlackChannel = do
+    mVal <- withDb $ \db -> getEnabledServerConfigValueForProduct_io db "mobile_slack_channel" (Just "autopilot")
+    pure $ case fmap T.strip mVal of
+        Just v | not (T.null v) -> Just v
+        _ -> Nothing
 
 -- ── Snapshot ───────────────────────────────────────────────────────
 

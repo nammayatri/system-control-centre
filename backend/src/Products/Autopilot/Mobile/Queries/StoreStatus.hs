@@ -22,6 +22,7 @@ module Products.Autopilot.Mobile.Queries.StoreStatus (
     secondsSinceLastSync,
     latestShippedVersionsPerApp,
     findProductionStoreCell,
+    findProductionLiveCell,
     productionVersionsByApp,
     ActiveMobileState (..),
     findActiveMobileState,
@@ -178,6 +179,27 @@ findProductionStoreCell appCatalogId platform = withDb $ \db -> withConn db $ \c
         query
             conn
             "SELECT version_name, version_code FROM store_status \
+            \ WHERE app_catalog_id = ? AND platform = ? AND track = 'production' LIMIT 1"
+            (appCatalogId, platform)
+    pure $ case rows of
+        (r : _) -> Just r
+        [] -> Nothing
+
+{- | The production track's serving release as @(version_name, version_code, status,
+rollout_percent)@ — the publish gate's "is this build actually live" source. Builds on the
+fact that @androidSnapToUpsert@ only writes a @rollout_percent@ when the fraction is at/above
+the 1% floor (a real ramp), and stamps @status='completed'@ for a fully-live version: so a
+version that is parked below 1% (held/staged) has a NULL @rollout_percent@ and a non-completed
+@status@. 'liveOnProduction' reads this to require a serving release (completed OR ramping
+>1%), not merely a version present on the track. 'Nothing' when production hasn't synced.
+-}
+findProductionLiveCell ::
+    (MonadFlow m) => Int32 -> Text -> m (Maybe (Maybe Text, Maybe Int32, Maybe Text, Maybe Double))
+findProductionLiveCell appCatalogId platform = withDb $ \db -> withConn db $ \conn -> do
+    rows <-
+        query
+            conn
+            "SELECT version_name, version_code, status, rollout_percent FROM store_status \
             \ WHERE app_catalog_id = ? AND platform = ? AND track = 'production' LIMIT 1"
             (appCatalogId, platform)
     pure $ case rows of

@@ -132,6 +132,12 @@ autopilotConfigs =
         NotificationGroup
         "Enable Slack notifications for release events"
         (Just "autopilot")
+    , ConfigEntry
+        "mobile_slack_channel"
+        (TextConfig "")
+        NotificationGroup
+        "Slack channel for mobile release changelogs (e.g. #mobile-releases). Empty = off."
+        (Just "autopilot")
     , -- Decision engine / AB / HS (grouped under ABTestingGroup)
       ConfigEntry
         "ab_decision_enabled"

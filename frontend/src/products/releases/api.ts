@@ -1201,7 +1201,6 @@ export interface RolloutDetail {
     rdLiveOnProduction: boolean; // BE truth: is THIS build the version live on production (synced cache, code-first)
     rdSyncedSecondsAgo: number | null; // seconds since store_status last synced (null = never)
     rdRefreshCooldownSeconds: number; // a Refresh only re-polls the live store once age ≥ this (else serves cache)
-    rdManagedPublishing: boolean; // app uses Play Managed Publishing → show the publish gate when not-live (no API to detect; recorded per-app)
 }
 
 export interface PromoteReq {

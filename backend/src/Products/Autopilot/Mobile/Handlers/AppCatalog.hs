@@ -55,7 +55,6 @@ data AppCatalogEntryResp = AppCatalogEntryResp
     , displayLabel :: Maybe Text
     , firebaseProjectId :: Maybe Text
     , enabled :: Bool
-    , managedPublishing :: Bool
     , createdAt :: UTCTime
     , latestReleaseBuild :: Maybe LatestBuildResp
     , latestDebugBuild :: Maybe LatestBuildResp
@@ -81,9 +80,6 @@ data NewAppReq = NewAppReq
     , displayLabel :: Maybe Text
     , firebaseProjectId :: Maybe Text
     , enabled :: Maybe Bool
-    , managedPublishing :: Maybe Bool
-    -- ^ Play Managed Publishing for this app; defaults to True. Set False for
-    -- provider/driver apps that publish without the manual-Publish hold.
     }
     deriving (Generic, Show)
 
@@ -151,7 +147,6 @@ toResp buildMap r =
             , displayLabel = acDisplayLabel r
             , firebaseProjectId = acFirebaseProjectId r
             , enabled = acEnabled r
-            , managedPublishing = acManagedPublishing r
             , createdAt = acCreatedAt r
             , latestReleaseBuild = toBuildResp <$> releaseRow
             , latestDebugBuild = toBuildResp <$> debugRow
@@ -173,7 +168,6 @@ toRespNoBuild r =
         , displayLabel = acDisplayLabel r
         , firebaseProjectId = acFirebaseProjectId r
         , enabled = acEnabled r
-        , managedPublishing = acManagedPublishing r
         , createdAt = acCreatedAt r
         , latestReleaseBuild = Nothing
         , latestDebugBuild = Nothing
@@ -193,7 +187,7 @@ listAppsH _ap = do
     pure (map (toResp buildMap) apps)
 
 createAppH :: AuthedPerson -> NewAppReq -> Flow AppCatalogEntryResp
-createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, workflowPath = w, packageName = pkg, displayLabel = d, firebaseProjectId = fbp, enabled = e, managedPublishing = mp} =
+createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, workflowPath = w, packageName = pkg, displayLabel = d, firebaseProjectId = fbp, enabled = e} =
     let row =
             NewAppCatalogRow
                 { nacName = n
@@ -205,7 +199,6 @@ createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, wo
                 , nacDisplayLabel = d
                 , nacFirebaseProjectId = fbp
                 , nacEnabled = e
-                , nacManagedPublishing = mp
                 }
      in toRespNoBuild <$> insertAppCatalog row
 

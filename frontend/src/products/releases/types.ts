@@ -23,7 +23,6 @@ export type AppCatalogEntry = {
   displayLabel: string | null;
   firebaseProjectId: string | null;
   enabled: boolean;
-  managedPublishing: boolean; // Play Managed Publishing (per-app; no API to detect — set explicitly)
   createdAt: string;
   latestReleaseBuild?: LatestBuild | null;
   latestDebugBuild?: LatestBuild | null;
@@ -47,6 +46,12 @@ export type CreateMobileReleasesItem = {
   appCatalogId: number;
   versionName: string | null;
   versionCode: number | null;
+  // when true, post the changelog to the mobile Slack channel after the build
+  // succeeds and its git tag is confirmed (backend ConfirmTag stage)
+  sendChangelogSlack?: boolean;
+  // changelog summary captured on the create page; backend falls back to
+  // the request-level changeLog when omitted
+  changelogSummary?: string;
 };
 
 // Store destination for provider (driver) PROD Android builds — mirrors the

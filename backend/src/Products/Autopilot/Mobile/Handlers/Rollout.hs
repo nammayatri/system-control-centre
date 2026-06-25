@@ -76,6 +76,7 @@ import Data.Time.Clock (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Queries.AppCatalog (storeTrackOf)
 import Products.Autopilot.Mobile.Queries.StoreStatus (
+    findProductionLiveCell,
     findProductionStoreCell,
     secondsSinceLastSync,
     setProductionReleased,
@@ -236,12 +237,6 @@ data RolloutDetail = RolloutDetail
     -- triggers a live store re-poll once the last sync is older than this — within the
     -- window it serves cache (protects Play's per-app edit quota). Paired with
     -- @rdSyncedSecondsAgo@ so the FE can show "live re-check available in N s".
-    , rdManagedPublishing :: Bool
-    -- ^ Whether this app uses Play Managed Publishing (@app_catalog.managed_publishing@,
-    -- migration 0037 — no API to detect it, so it's recorded explicitly). The FE shows the
-    -- "Publish in Play Console" gate only when this is True AND the build isn't live yet;
-    -- a Managed-Publishing-OFF app (provider/driver) gets the rollout controls directly,
-    -- since a rollout % applies immediately there.
     }
     deriving (Eq, Show, Generic)
 
@@ -351,25 +346,33 @@ atOrBelowProduction ac buildVer mCode = do
     codeAtOrBelow (Just b) (Just p) = b <= p
     codeAtOrBelow _ _ = False -- same version, codes unknown → can't prove not-ahead → allow
 
-{- | Is THIS build the version currently live on the production track, per the synced
-@store_status@ production cell? Compare by build CODE first (Android version codes are
-globally unique per build, so an exact-code match means it's literally this build that's
-live — not merely the same marketing version at a different code), falling back to the
-marketing version name when either code is unknown.
+{- | Is THIS build the version currently live & SERVING on the production track, per the
+synced @store_status@ production cell? Two conditions, both required:
 
-This is a read of a CACHE, not a live store call, so it only reflects reality as of the
-last sync. Under Play Managed Publishing a promoted build stays STAGED on production until
-the operator publishes in the Console, and the cell keeps showing the previous version
-until a sync runs — so the FE Refresh forces a sync before re-reading. Fails CLOSED (not
-live) when production hasn't been synced, so we never claim a build is live we can't prove.
+  1. Identity — the build matches the production cell. Compare by build CODE first (Android
+     version codes are globally unique per build, so an exact-code match means it's literally
+     this build), falling back to the marketing version name when either code is unknown.
+  2. Serving — the cell is either fully released (@status = 'completed'@) OR rolling out
+     above the 1% floor (a non-NULL @rollout_percent@; 'androidSnapToUpsert' only records one
+     when the fraction clears the floor). A version merely present on the track but parked
+     below 1% (held / staged for publishing) is NOT serving, so it reads NOT live and the
+     publish gate stays up.
+
+This is a read of a CACHE, not a live store call, so it only reflects reality as of the last
+sync; the FE Refresh forces a sync before re-reading. Fails CLOSED (not live) when production
+hasn't synced, so we never claim a build is live we can't prove.
 -}
 liveOnProduction :: AppCatalog -> Text -> Maybe Int32 -> Flow Bool
 liveOnProduction ac buildVer mCode = do
-    mProd <- findProductionStoreCell (acId ac) (acPlatform ac)
+    mProd <- findProductionLiveCell (acId ac) (acPlatform ac)
     pure $ case mProd of
-        Just (mpVer, mpCode) -> case (mCode, mpCode) of
-            (Just b, Just p) -> b == p
-            _ -> fmap T.strip mpVer == Just (T.strip buildVer)
+        Just (mpVer, mpCode, mStatus, mPct) -> identityMatches && serving
+          where
+            identityMatches = case (mCode, mpCode) of
+                (Just b, Just p) -> b == p
+                _ -> fmap T.strip mpVer == Just (T.strip buildVer)
+            -- completed = fully live; a non-NULL percent = a real ramp (>1% floor).
+            serving = mStatus == Just "completed" || mPct /= Nothing
         Nothing -> False
 
 promoteH :: AuthedPerson -> Text -> PromoteReq -> Flow PromoteResp
@@ -515,7 +518,6 @@ rolloutDetailH _ap rid = do
             , rdLiveOnProduction = liveProd
             , rdSyncedSecondsAgo = syncedAgo
             , rdRefreshCooldownSeconds = cooldown
-            , rdManagedPublishing = acManagedPublishing ac
             }
 
 {- | POST /releases/:id/release — the iOS "Release" button. Releases an approved

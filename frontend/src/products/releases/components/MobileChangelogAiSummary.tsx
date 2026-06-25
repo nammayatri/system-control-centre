@@ -84,6 +84,7 @@ export function MobileChangelogAiSummary({
   base = 'production',
   versionName = '',
   versionCode = '',
+  onSummary,
 }: {
   app: string;
   surface: string;
@@ -92,6 +93,9 @@ export function MobileChangelogAiSummary({
   base?: string;
   versionName?: string;
   versionCode?: string;
+  // Reports the current summary text (AI prose once ready, else the deterministic
+  // changelog) up to the parent, so the create page can stash it for "send to Slack".
+  onSummary?: (text: string) => void;
 }) {
   const enabled = !!(app && surface && platform && branch);
   const q = useQuery({
@@ -112,6 +116,11 @@ export function MobileChangelogAiSummary({
   const isPending = d?.status === 'pending';
   // The full generated summary: short synopsis + the changelog prose.
   const copyText = [d?.summaryShort, d?.summaryLong].filter(Boolean).join('\n\n');
+
+  // Surface the current summary text to the parent (for "send changelog to Slack").
+  useEffect(() => {
+    if (onSummary && d?.summaryLong) onSummary(d.summaryLong);
+  }, [onSummary, d?.summaryLong]);
 
   const onCopy = async () => {
     if (!copyText) return;
