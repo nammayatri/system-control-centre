@@ -26,9 +26,9 @@ export type AppCatalogEntry = {
   createdAt: string;
   latestReleaseBuild?: LatestBuild | null;
   latestDebugBuild?: LatestBuild | null;
-  // Per-track latest builds (from store-sync metadata.tracks). Drive the
-  // create-page prod/internal badges + changelog base toggle. `track` on each
-  // is 'production' | 'internal' (iOS internal == TestFlight).
+  // Per-track latest builds (from the store_status cache — same source as the
+  // App Monitor). Drive the create-page prod/internal badges + changelog base
+  // toggle. `track` on each is 'production' | 'internal' (iOS internal == TestFlight).
   latestProdBuild?: LatestBuild | null;
   latestInternalBuild?: LatestBuild | null;
 };

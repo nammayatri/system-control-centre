@@ -19,7 +19,7 @@ import { Button } from '../../../shared/ui/button';
 import { Badge } from '../../../shared/ui/badge';
 import { usePermissions } from '../../../core/auth/PermissionsContext';
 import { mobileApi, type RolloutDetail } from '../api';
-import { type Stage, stageOf, lifecycleFromRollout } from './mobileStage';
+import { stageOf, lifecycleFromRollout } from './mobileStage';
 
 function errMsg(e: any): string {
     return (
@@ -249,7 +249,7 @@ export function MobileRolloutPanel({
                 <div className="flex items-center gap-2 text-sm font-semibold text-indigo-800">
                     <Rocket size={15} className="shrink-0" />
                     Store release
-                    <StageBadge stage={stage} pctLabel={pctLabel} halted={d.rdRolloutStatus === 'halted'} />
+                    <StageBadge label={d.rdStatusLabel} variant={d.rdStatusVariant} />
                 </div>
                 <Button
                     size="sm"
@@ -569,39 +569,19 @@ export function MobileRolloutPanel({
     );
 }
 
+// Renders the one canonical backend displayStatus — no FE re-derivation.
 function StageBadge({
-    stage,
-    pctLabel,
-    halted,
+    label,
+    variant,
 }: {
-    stage: Stage;
-    pctLabel: string;
-    halted: boolean;
+    label: string;
+    variant: 'default' | 'success' | 'warning' | 'danger' | 'info' | 'purple' | 'blue';
 }) {
-    switch (stage) {
-        case 'promote':
-            return <Badge variant="blue" dot>Ready to promote</Badge>;
-        case 'review':
-            return (
-                <Badge variant="purple" dot>
-                    <Clock size={10} className="mr-0.5" /> In review
-                </Badge>
-            );
-        case 'approved':
-            return <Badge variant="success" dot>Approved · held</Badge>;
-        case 'rollout':
-            return (
-                <Badge variant={halted ? 'warning' : 'info'} dot>
-                    {halted ? 'Halted' : 'Rolling out'} · {pctLabel}
-                </Badge>
-            );
-        case 'rejected':
-            return <Badge variant="danger" dot>Rejected</Badge>;
-        case 'completed':
-            return <Badge variant="success" dot>Released · 100%</Badge>;
-        default:
-            return null;
-    }
+    return (
+        <Badge variant={variant} dot>
+            {label}
+        </Badge>
+    );
 }
 
 /**

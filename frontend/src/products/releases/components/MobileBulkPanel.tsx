@@ -10,14 +10,13 @@ import { mobileApi, type APRelease, type BulkActionResp } from '../api';
 import {
   stageOf,
   lifecycleFromRelease,
-  mobileDisplayStatus,
   type Stage,
   type MobileLifecycle,
 } from './mobileStage';
 import { PlatformBadge } from './PlatformBadge';
 import { RolloutBar } from './RolloutBar';
 import { surfaceMeta } from './surfaces';
-import { versionWithBuild } from '../versionLabel';
+import { versionWithBuild } from '../utils';
 
 /**
  * Bulk promote / rollout panel for the App Release Monitor page. The two actions
@@ -224,9 +223,14 @@ export function MobileBulkPanel() {
               onToggleAll={(on) => setMany(rollable.map((e) => e.r.id), on)}
               onToggle={toggle}
               renderRight={(e) => {
-                // Same projection the list/detail badges use, so "Halted · X%",
-                // "Rolling out · X%" and "Approved · held" read identically everywhere.
-                const ds = mobileDisplayStatus(e.lc);
+                // The one canonical backend displayStatus (release_context.display_*),
+                // so "Halted · X%" / "Rolling out · X%" / "Approved · held" read
+                // identically everywhere.
+                const ctx = e.r.release_context;
+                const ds =
+                  ctx?.display_label && ctx?.display_variant
+                    ? { label: ctx.display_label, variant: ctx.display_variant }
+                    : null;
                 const inFlight = e.rolloutStatus === 'rolling_out' || e.rolloutStatus === 'halted';
                 return (
                   <span className="flex shrink-0 items-center gap-2">

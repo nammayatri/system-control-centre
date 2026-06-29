@@ -9,9 +9,9 @@
 
 > **Status:** Design locked, ready to build.
 > **Date:** 2026-06-09 · **Branch base:** `mobile-release-features`
-> **Supersedes:** `2026-05-20-staged-rollout.md` (that plan is stale — it references a
-> removed `MobileDestination` ADT, Play write-functions that don't exist, and the wrong
-> migration number. Use this document instead.)
+> **Supersedes:** the earlier `2026-05-20-staged-rollout.md` plan (since **removed** — it was
+> stale: a removed `MobileDestination` ADT, Play write-functions that didn't exist, and the
+> wrong migration number). This document is the as-built record.
 
 ---
 
@@ -574,7 +574,7 @@ Phases 2 and 3 are independent and can be done in parallel.
   release** or **release to all users**, driven by `rdPhasedId`; `rolloutDetailH` live-reads the
   phased id when `asc_phased_id` is null (e.g. an externally-configured phased release) so the
   label matches App Store Connect and what `/release` will actually do.
-- **UI** — the version shows the **build number** (`3.3.17 (460)`) everywhere it renders
+- **UI** — the version shows the **build number** (`3.3.17 +460`) everywhere it renders
   (`versionWithBuild`); the releases list's **mobile status filter** uses lifecycle buckets
   (Building / In review / Approved · held / Rolling out / Rejected / Completed / Aborted /
   Reverted) instead of backend raw statuses, and "Groups" reads "Apps".

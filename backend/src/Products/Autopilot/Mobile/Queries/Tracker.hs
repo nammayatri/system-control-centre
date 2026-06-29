@@ -15,18 +15,14 @@
 module Products.Autopilot.Mobile.Queries.Tracker
   ( findSiblingsByDispatchId,
     setExternalRunIdForDispatch,
-    setReviewDecided,
-    setReviewSubmitted,
-    setMobileWfStatus,
-    setRolloutState,
-    clearRolloutColumns,
+    setPhase,
     setAscIds,
     markReleaseInProgress,
     updateStoreSyncBuildCode,
-    setStoreSyncMetadata,
     setProductionRolloutReflection,
     findExternalReviewRow,
     findMobileVersionRow,
+    retireOlderHeldInternal,
     listIncomingMobileVersions,
     sccActiveReleaseExistsForVersion,
     setExternalReviewState,
@@ -57,7 +53,7 @@ import Control.Monad (forM_, when)
 import Control.Monad.Catch (throwM)
 import Core.AppError (DBError (..))
 import Core.DB.Connection (runDB)
-import Core.Environment (MonadFlow, withDb)
+import Core.Environment (MonadFlow, logWarning, withDb)
 import Data.Aeson (Value)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AK
@@ -70,12 +66,20 @@ import Data.Text.Encoding qualified as TE
 import Data.Time.Clock (UTCTime)
 import Data.Int (Int32)
 import Database.Beam
+import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind, claimsStoreIdentity)
+import Products.Autopilot.Mobile.Lifecycle.Phase
+  ( Projection (..),
+    ReleasePhase (..),
+    canTransition,
+    phaseFromFields,
+    phaseToWfStatus,
+    project,
+  )
 import Products.Autopilot.Mobile.RevertResolver (RevertCand (..))
 import Products.Autopilot.Mobile.Types
   ( MobileBuildContext (..),
     MobileBuildTargetState (..),
     MobileBuildWFStatus (..),
-    claimsStoreIdentity,
     isDebugBuildType,
   )
 import Products.Autopilot.Mobile.Types.Storage
@@ -158,113 +162,60 @@ setExternalRunIdForDispatch dispatchId runId headSha = withDb $ \db ->
         )
         (\rt -> rtDispatchId rt ==. val_ (Just dispatchId))
 
--- | Persist the review outcome to the @0027@ columns (called by the review-poll
--- stage on approve/reject, and by the operator mark-* endpoints in Phase 6).
-setReviewDecided ::
-  (MonadFlow m) =>
-  Text ->
-  Text ->
-  UTCTime ->
-  Maybe Text ->
-  m ()
-setReviewDecided releaseId_ reviewStatus decidedAt mReason = withDb $ \db ->
-  runDB db $
-    runUpdate $
-      update
-        (releaseTrackers autopilotDb)
-        ( \rt ->
-            mconcat
-              [ rtReviewStatus rt <-. val_ (Just reviewStatus),
-                rtReviewDecidedAt rt <-. val_ (Just decidedAt),
-                rtReviewRejectReason rt <-. val_ mReason
-              ]
-        )
-        (\rt -> rtId rt ==. val_ releaseId_)
-
--- | Promote → review: set @mb_wf_status = MBInReview@ + @mbReviewSubmittedAt@ in
--- the target-state JSON, plus the @review_status@ / @review_submitted_at@ columns.
--- Called by @POST /promote@ after a successful store submission.
-setReviewSubmitted :: (MonadFlow m) => Text -> Text -> UTCTime -> m ()
-setReviewSubmitted releaseId_ reviewStatus now = withDb $ \db -> do
-  mRow <-
-    runDB db $
-      runSelectReturningOne $
-        select $ do
-          rt <- all_ (releaseTrackers autopilotDb)
-          guard_ (rtId rt ==. val_ releaseId_)
-          pure rt
-  case mRow of
-    Nothing -> throwM $ DBError "setReviewSubmitted" ("release not found: " <> releaseId_)
-    Just row -> case parseMobileTargetState (rtTargetState row) of
-      Nothing -> throwM $ DBError "setReviewSubmitted" ("not a mobile release: " <> releaseId_)
-      Just s -> do
-        let encoded = encodeJsonText (MobileBuildState s {mbWfStatus = MBInReview, mbReviewSubmittedAt = Just now})
-        runDB db $
-          runUpdate $
-            update
-              (releaseTrackers autopilotDb)
-              ( \rt ->
-                  mconcat
-                    [ rtTargetState rt <-. val_ (Just encoded),
-                      rtReviewStatus rt <-. val_ (Just reviewStatus),
-                      rtReviewSubmittedAt rt <-. val_ (Just now)
-                    ]
-              )
-              (\rt -> rtId rt ==. val_ releaseId_)
-
--- | Read-modify-write the target-state JSON to set @mb_wf_status@ (used by the
--- rollout / mark-* transitions: MBReviewApproved, MBReviewRejected, MBRollingOut, MBCompleted).
-setMobileWfStatus :: (MonadFlow m) => Text -> MobileBuildWFStatus -> m ()
-setMobileWfStatus releaseId_ st = withDb $ \db -> do
-  mRow <-
-    runDB db $
-      runSelectReturningOne $
-        select $ do
-          rt <- all_ (releaseTrackers autopilotDb)
-          guard_ (rtId rt ==. val_ releaseId_)
-          pure rt
-  case mRow of
-    Nothing -> throwM $ DBError "setMobileWfStatus" ("release not found: " <> releaseId_)
-    Just row -> case parseMobileTargetState (rtTargetState row) of
-      Nothing -> throwM $ DBError "setMobileWfStatus" ("not a mobile release: " <> releaseId_)
-      Just s ->
-        runDB db $
-          runUpdate $
-            update
-              (releaseTrackers autopilotDb)
-              (\rt -> rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s {mbWfStatus = st}))))
-              (\rt -> rtId rt ==. val_ releaseId_)
-
--- | Set the @rollout_status@ / @rollout_percent@ columns.
-setRolloutState :: (MonadFlow m) => Text -> Text -> Maybe Double -> m ()
-setRolloutState releaseId_ rolloutStatus mPercent = withDb $ \db ->
-  runDB db $
-    runUpdate $
-      update
-        (releaseTrackers autopilotDb)
-        ( \rt ->
-            mconcat
-              [ rtRolloutStatus rt <-. val_ (Just rolloutStatus),
-                rtRolloutPercent rt <-. val_ mPercent
-              ]
-        )
-        (\rt -> rtId rt ==. val_ releaseId_)
-
--- | Clear the rollout columns (rollout_status / rollout_percent → NULL). Used when
--- retiring a superseded rollout row so it no longer reads as rolling out / halted.
-clearRolloutColumns :: (MonadFlow m) => Text -> m ()
-clearRolloutColumns releaseId_ = withDb $ \db ->
-  runDB db $
-    runUpdate $
-      update
-        (releaseTrackers autopilotDb)
-        ( \rt ->
-            mconcat
-              [ rtRolloutStatus rt <-. val_ Nothing,
-                rtRolloutPercent rt <-. val_ Nothing
-              ]
-        )
-        (\rt -> rtId rt ==. val_ releaseId_)
+-- | The single writer: one ReleasePhase projects the whole status tuple
+-- (review/rollout/percent/track/reason + mb_wf_status + review *_at) in one UPDATE.
+-- Logged-not-blocked guard; rt_status stays Finalize-owned till step 5.
+setPhase :: (MonadFlow m) => UTCTime -> Text -> ReleasePhase -> m ()
+setPhase now releaseId_ next = do
+  mWarn <- withDb $ \db -> do
+    mRow <-
+      runDB db $
+        runSelectReturningOne $
+          select $ do
+            rt <- all_ (releaseTrackers autopilotDb)
+            guard_ (rtId rt ==. val_ releaseId_)
+            pure rt
+    case mRow of
+      Nothing -> throwM $ DBError "setPhase" ("release not found: " <> releaseId_)
+      Just row -> case parseMobileTargetState (rtTargetState row) of
+        Nothing -> throwM $ DBError "setPhase" ("not a mobile release: " <> releaseId_)
+        Just s -> do
+          let cur =
+                phaseFromFields
+                  (buildKind (mbContext s))
+                  (mbWfStatus s)
+                  (rtReviewStatus row)
+                  (rtRolloutStatus row)
+                  (rtRolloutPercent row)
+                  (rtStoreTrack row)
+              Projection rv ro pct trk = project next
+              -- JSON side-effect: stamp review-submitted-at on entry to review
+              -- (anchors the 7-day review timeout, read from the target-state).
+              s' = case next of
+                InReview -> s {mbWfStatus = MBInReview, mbReviewSubmittedAt = Just now}
+                _ -> maybe s (\w -> s {mbWfStatus = w}) (phaseToWfStatus next)
+              reason = case next of Rejected r | not (T.null r) -> Just r; _ -> Nothing
+              decided = case next of Approved -> True; Rejected _ -> True; _ -> False
+          runDB db $
+            runUpdate $
+              update
+                (releaseTrackers autopilotDb)
+                ( \rt ->
+                    mconcat $
+                      [ rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s'))),
+                        rtReviewStatus rt <-. val_ rv,
+                        rtRolloutStatus rt <-. val_ ro,
+                        rtRolloutPercent rt <-. val_ pct,
+                        rtStoreTrack rt <-. val_ trk,
+                        rtReviewRejectReason rt <-. val_ reason
+                      ]
+                        <> [rtReviewSubmittedAt rt <-. val_ (Just now) | InReview <- [next]]
+                        <> [rtReviewDecidedAt rt <-. val_ (Just now) | decided]
+                )
+                (\rt -> rtId rt ==. val_ releaseId_)
+          -- Shadow guard: report (don't block) an out-of-order transition.
+          pure (if canTransition cur next then Nothing else Just (T.pack (show cur) <> " -> " <> T.pack (show next)))
+  forM_ mWarn $ \t -> logWarning ("setPhase " <> releaseId_ <> ": unexpected transition " <> t)
 
 -- | Cache the iOS App Store version id and/or phased-release id returned by the
 -- store calls (@enablePhasedRelease@ → @asc_phased_id@), so later pause / resume /
@@ -303,13 +254,12 @@ markReleaseInProgress releaseId_ = withDb $ \db ->
         )
         (\rt -> rtId rt ==. val_ releaseId_)
 
--- | Update a PRISTINE store-sync snapshot's build code + derived tag in place,
--- for when a new build of the SAME version appears on the store (e.g. iOS
--- 3.3.73(1) → (2)). The version-keyed store-sync dedup index blocks a re-insert,
--- so the build number/tag would otherwise stay frozen. Only touches COMPLETED
--- store-sync rows that were never promoted (review_status IS NULL) — never a
--- promoted/active row.
-updateStoreSyncBuildCode :: (MonadFlow m) => AppCatalog -> Text -> Maybe Int32 -> Maybe Text -> m ()
+-- | Bump a PRISTINE store-sync snapshot's build code + tag in place when a newer build
+-- of the SAME version appears (e.g. iOS 3.3.73(1) → (2)); the dedup index blocks a
+-- re-insert. Only COMPLETED store-sync rows with no review (never a promoted/MANUAL row).
+-- Returns True if it bumped one; False (no snapshot to bump — a MANUAL build owns the
+-- version) tells the caller the observed build is out-of-band and needs its own row.
+updateStoreSyncBuildCode :: (MonadFlow m) => AppCatalog -> Text -> Maybe Int32 -> Maybe Text -> m Bool
 updateStoreSyncBuildCode ac version newCode newTag = withDb $ \db -> do
   mRow <-
     runDB db $
@@ -325,48 +275,26 @@ updateStoreSyncBuildCode ac version newCode newTag = withDb $ \db -> do
           guard_ (isNothing_ (rtReviewStatus rt))
           pure rt
   case mRow >>= \row -> (,) row <$> parseMobileTargetState (rtTargetState row) of
-    Nothing -> pure ()
-    Just (row, s) ->
+    Nothing -> pure False
+    Just (row, s) -> do
       let s' = s {mbContext = (mbContext s){mbcVersionCode = newCode, mbcTagPushed = newTag}}
-       in runDB db $
-            runUpdate $
-              update
-                (releaseTrackers autopilotDb)
-                ( \rt ->
-                    mconcat
-                      [ rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s')))
-                      , -- keep the build-identity column in sync with the bumped code
-                        rtVersionCode rt <-. val_ newCode
-                      ]
-                )
-                (\rt -> rtId rt ==. val_ (rtId row))
-
--- | Overwrite the @metadata@ JSON of the leading store-sync row for an app
--- (identified by version). Store-sync calls this each pass to keep the per-track
--- snapshots (@metadata.tracks@) fresh — so e.g. the production version doesn't
--- lag while the (leading) internal version stays put. Only touches COMPLETED,
--- never-promoted store-sync rows; a no-op if no such row exists yet.
-setStoreSyncMetadata :: (MonadFlow m) => AppCatalog -> Text -> Text -> m ()
-setStoreSyncMetadata ac version metaJson = withDb $ \db ->
-  runDB db $
-    runUpdate $
-      update
-        (releaseTrackers autopilotDb)
-        (\rt -> rtMetadata rt <-. val_ (Just metaJson))
-        ( \rt ->
-            rtAppGroup rt ==. val_ (acName ac)
-              &&. rtService rt ==. val_ (acSurface ac)
-              &&. rtEnv rt ==. val_ (acPlatform ac)
-              &&. rtNewVersion rt ==. val_ version
-              &&. rtMode rt ==. val_ (Just "STORE_SYNC")
-              &&. rtStatus rt ==. val_ "COMPLETED"
-              &&. isNothing_ (rtReviewStatus rt)
-        )
+      runDB db $
+        runUpdate $
+          update
+            (releaseTrackers autopilotDb)
+            ( \rt ->
+                mconcat
+                  [ rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s')))
+                  , rtVersionCode rt <-. val_ newCode
+                  ]
+            )
+            (\rt -> rtId rt ==. val_ (rtId row))
+      pure True
 
 -- | Reconcile the production-rollout REFLECTION across an app's android store-sync
 -- snapshot rows in one pass, so the release list matches the App Monitor. The
--- leading-track logic ('setStoreSyncMetadata') only refreshes the NEWEST build's
--- row; when an OLDER version is mid-rollout on production (a newer build sits on
+-- leading-track logic ('recordAndroidTracks') only badges the NEWEST build's row;
+-- when an OLDER version is mid-rollout on production (a newer build sits on
 -- internal), that version's row would otherwise never show the ramp.
 --
 -- @mActive@ is @Just (version, rollout_status, percent)@ for the version actively
@@ -381,7 +309,7 @@ setStoreSyncMetadata ac version metaJson = withDb $ \db ->
 -- INPROGRESS-gated — Apple / the operator owns the ramp), and the rollout-aware
 -- track badge shows "Rolling out X%" without implying the version is fully live.
 -- 100% is intentionally excluded by the caller: a completed rollout IS the live
--- production version, badged "Production" via 'setStoreSyncMetadata' as usual.
+-- production version, badged "Production" via 'recordAndroidTracks' as usual.
 setProductionRolloutReflection :: (MonadFlow m) => AppCatalog -> Maybe (Text, Text, Double) -> UTCTime -> m ()
 setProductionRolloutReflection ac mActive now = withDb $ \db -> do
   rows <-
@@ -532,6 +460,43 @@ isStoreIdentityRow :: ReleaseTrackerRow -> Bool
 isStoreIdentityRow row = case parseMobileTargetState (rtTargetState row) of
   Just st -> claimsStoreIdentity (mbContext st)
   Nothing -> True
+
+-- | Rule C: when a newer build is promoted, retire OLDER held-on-internal builds of the
+-- app to history (COMPLETED, keeping version_code). A lower code can't reach production
+-- once a higher one is in review. Only LANDED (MBTagPushed) builds, never mid-build.
+retireOlderHeldInternal :: (MonadFlow m) => Text -> Text -> Text -> Text -> Maybe Int32 -> m [Text]
+retireOlderHeldInternal _ _ _ _ Nothing = pure []
+retireOlderHeldInternal appGroup surface platform excludeRid (Just promotedCode) = do
+  rows <- withDb $ \db ->
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtAppGroup rt ==. val_ appGroup)
+          guard_ (rtService rt ==. val_ surface)
+          guard_ (rtEnv rt ==. val_ platform)
+          guard_ (rtCategory rt ==. val_ "MobileBuild")
+          guard_ (rtId rt /=. val_ excludeRid)
+          guard_ (rtStatus rt ==. val_ "INPROGRESS")
+          guard_ (isNothing_ (rtStoreTrack rt)) -- not promoted (no production track)
+          guard_ (isNothing_ (rtReviewStatus rt)) -- not in review
+          guard_ (isNothing_ (rtRolloutStatus rt)) -- not rolling out
+          guard_ (rtVersionCode rt <. just_ (val_ promotedCode))
+          pure rt
+  -- Only retire builds that actually landed (held at MBTagPushed); never orphan a
+  -- build still in flight.
+  let landed :: ReleaseTrackerRow -> Bool
+      landed r = (mbWfStatus <$> parseMobileTargetState (rtTargetState r)) == Just MBTagPushed
+      ids = map rtId (filter landed rows)
+  forM_ ids $ \i ->
+    withDb $ \db ->
+      runDB db $
+        runUpdate $
+          update
+            (releaseTrackers autopilotDb)
+            (\rt -> rtStatus rt <-. val_ "COMPLETED")
+            (\rt -> rtId rt ==. val_ i)
+  pure ids
 
 -- | The PROD-INCOMING rows across all apps (version-keyed model): a version on the
 -- production track that's in review / approved-held / rejected but NOT yet rolling
@@ -1035,7 +1000,7 @@ findMobileReleaseById releaseId' = withDb $ \db -> do
 -- creation time — see "Products.Autopilot.Mobile.RevertResolver". The B4
 -- store-sync dedup index keeps this window from filling with duplicates. If
 -- an app ever outgrows 50, promote @version_code@ to an indexed column and
--- resolve with a single ordered @LIMIT 1@ (see post-MVP design §15).
+-- resolve with a single ordered @LIMIT 1@ (see post-MVP design).
 --
 -- Filtering of debug / reverted rows happens in Haskell because that state
 -- lives inside the @target_state@ / @metadata@ JSON columns.

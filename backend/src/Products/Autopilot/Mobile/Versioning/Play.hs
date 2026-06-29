@@ -341,7 +341,7 @@ fetchTrack token packageName editId trackName = do
     pure $ case resp of
         Right HttpResponse{respStatus = s, respBody = b}
             | s == 200 -> case decode b :: Maybe TrackBody of
-                Just tb -> Right (pickRelease tb)
+                Just tb -> Right (trackInfoFrom trackName tb)
                 Nothing -> Left (PlayHttpError s "could not decode track body")
             | s == 401 -> Left PlayUnauthorized
             | s == 403 -> Left PlayUnauthorized
@@ -416,24 +416,12 @@ instance FromJSON Release where
         notes <- o .:? "releaseNotes" .!= []
         pure (Release n s uf (fromMaybe [] (codes :: Maybe [Text])) (mapMaybe (\(RNote t) -> t) notes))
 
-{- | Pick the release used for the next-version computation:
-
-* Prefer the first release whose @status == "completed"@.
-* Else fall back to the first release in the array.
-* If no releases at all, return the @0.0.0@ / @0@ baseline.
-
-The version code is the maximum across @versionCodes[]@ (Play stores a
-list because a single release can ship multiple ABIs). Names default to
-@0.0.0@ if missing — the bump algorithm handles that case explicitly.
+{- | A track's 'TrackInfo' (version + max code) via 'representativeRelease' — the same
+pick the monitor cell uses, so next-version and the cell agree. Version code = max across
+@versionCodes[]@ (Play lists multiple for multi-ABI). Empty → @0.0.0@/@0@ baseline.
 -}
-
-{- | The leading version of a track for the next-build / badge logic. Uses
-'pickLiveRelease' so a production track mid-rollout reports the RAMPING version
-(not the prior completed baseline) — otherwise a version rolling out on production
-looks "behind" internal and the row gets mis-badged Internal.
--}
-pickRelease :: TrackBody -> TrackInfo
-pickRelease (TrackBody rels) = case pickLiveRelease rels of
+trackInfoFrom :: Text -> TrackBody -> TrackInfo
+trackInfoFrom track (TrackBody rels) = case representativeRelease track rels of
     Just r -> TrackInfo (fromMaybe "0.0.0" (rName r)) (maxVersionCode (rVersionCodes r))
     Nothing -> TrackInfo "0.0.0" 0
 
@@ -744,11 +732,10 @@ Exposed for unit testing.
 -}
 parseTrackSnapshot :: Text -> LBS.ByteString -> StoreTrackSnapshot
 parseTrackSnapshot track bs =
-    -- The production cell must show what's actually SERVING users — 'pickLiveRelease'
-    -- — not the newest release ('pickRolloutRelease'), so a freshly-submitted
-    -- near-zero review version can't eclipse an older one still rolling at, say, 51%.
-    -- Other tracks (internal) keep the leading-release pick.
-    let pick = if track == "production" then pickLiveRelease else pickRolloutRelease
+    -- One representative-release pick per track (shared with 'trackInfoFrom', so the
+    -- monitor cell and release list can't diverge): production = serving version,
+    -- internal/testflight = latest build by code.
+    let pick = representativeRelease track
      in case decode bs :: Maybe TrackBody of
             Just (TrackBody rels)
                 | Just r <- pick rels ->
@@ -803,9 +790,9 @@ runFetchBodies sa packageName = do
 'fetchPlayTracks' result without a second edit.
 -}
 bodiesToTracks :: PlayTrackBodies -> (TrackInfo, TrackInfo)
-bodiesToTracks (PlayTrackBodies i p) = (decodeTrackInfo i, decodeTrackInfo p)
+bodiesToTracks (PlayTrackBodies i p) = (decodeTrackInfo "internal" i, decodeTrackInfo "production" p)
   where
-    decodeTrackInfo b = pickRelease (fromMaybe (TrackBody []) (decode b))
+    decodeTrackInfo trk b = trackInfoFrom trk (fromMaybe (TrackBody []) (decode b))
 
 {- | The per-track monitor snapshots from the cached bodies — the
 'fetchTrackSnapshots' result without a second edit.
@@ -972,6 +959,21 @@ pickLiveRelease rels =
     isCompleted r = rStatus r == Just "completed"
     higherFrac a b = if fromMaybe 0 (rUserFraction a) >= fromMaybe 0 (rUserFraction b) then a else b
     higherCode a b = if maxVersionCode (rVersionCodes a) >= maxVersionCode (rVersionCodes b) then a else b
+
+-- | Latest build by version code, any status or array order (internal / TestFlight).
+pickLatestByCode :: [Release] -> Maybe Release
+pickLatestByCode [] = Nothing
+pickLatestByCode rs = Just (foldl1 higherCode rs)
+  where
+    higherCode a b = if maxVersionCode (rVersionCodes a) >= maxVersionCode (rVersionCodes b) then a else b
+
+{- | The representative release for a track — one pick shared by the monitor cell and the
+next-version reads so they can't diverge. Production = what's SERVING ('pickLiveRelease');
+internal / testflight = the latest build by code ('pickLatestByCode').
+-}
+representativeRelease :: Text -> [Release] -> Maybe Release
+representativeRelease "production" = pickLiveRelease
+representativeRelease _ = pickLatestByCode
 
 -- ─── Server-config helper ──────────────────────────────────────────
 

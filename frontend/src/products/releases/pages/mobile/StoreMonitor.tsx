@@ -18,6 +18,7 @@ import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { Badge } from '../../../../shared/ui/badge';
 import { cn } from '../../../../lib/utils';
 import { deriveStoreBadge, activeRolloutOf, type TrackKind } from '../../components/storeBadge';
+import { formatBuildCode } from '../../utils';
 import { RolloutBar } from '../../components/RolloutBar';
 import { AppTrackModal } from '../../components/AppTrackModal';
 import { MobileBulkPanel } from '../../components/MobileBulkPanel';
@@ -179,7 +180,7 @@ function TrackLine({ label, cell, track }: { label: string; cell: TrackCell | nu
           ) : (
             <span className="flex min-w-0 items-center gap-1.5 font-mono text-sm text-zinc-800">
               <span className="truncate">{cell?.version ?? '—'}</span>
-              {cell?.buildCode != null && <span className="text-zinc-400">+{cell.buildCode}</span>}
+              {cell?.buildCode != null && <span className="text-zinc-400">{formatBuildCode(cell.buildCode)}</span>}
             </span>
           )}
         </div>
@@ -385,7 +386,7 @@ function ActiveRolloutsPanel({
               </div>
               <div className="truncate font-mono text-[11px] text-zinc-500">
                 {it.cell.version}
-                {it.cell.buildCode != null ? ` +${it.cell.buildCode}` : ''}
+                {it.cell.buildCode != null ? ` ${formatBuildCode(it.cell.buildCode)}` : ''}
               </div>
             </div>
             <RolloutBar pct={it.pct} halted={it.halted} className="w-28 shrink-0 sm:w-36" />

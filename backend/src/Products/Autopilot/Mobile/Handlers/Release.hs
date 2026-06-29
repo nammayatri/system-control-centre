@@ -69,7 +69,8 @@ import Database.Beam
 import Products.Autopilot.Mobile.Github (BranchInfo (..), listBranches, searchBranches)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
 import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), CompareResult (..), compareAllCommits, compareRefs)
-import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), TrackSnapshot (..), fetchLatestBuildsForApp, findAppCatalogByIds, listAppCatalog, listEnabledAppCatalog)
+import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), TrackSnapshot (..), derivedStoreTag, fetchLatestBuildsForApp, findAppCatalogByIds, listAppCatalog, listEnabledAppCatalog)
+import Products.Autopilot.Mobile.Queries.StoreStatus (findStoreTracksForApp)
 import Products.Autopilot.Mobile.Queries.Tracker (
     ReleaseTrackerRow,
     appCatalogByKey,
@@ -559,7 +560,7 @@ changelogPreviewH _ap appName surface platform branch mBase = do
         Nothing ->
             pure emptyPreview
         Just lb -> do
-            let (baseRef, baseTag, baseVersion) = resolveChangelogBase mBase lb
+            (baseRef, baseTag, baseVersion) <- resolveChangelogBase mBase ac lb
             if T.null baseRef
                 then pure emptyPreview
                 else do
@@ -627,15 +628,29 @@ findLastReleaseBuild builds appName surface platform =
 {- | Resolve the changelog base for the requested track ("production" |
 "internal"; default "production"), returning @(baseRef, baseTag, baseVersion)@.
 
-Prefers the chosen track's snapshot tag from @metadata.tracks@ (written by
-store-sync). Falls back to the leading store-sync row's own tag/commit when the
-track — or its tag — is absent: rows synced before this carried no tracks, and an
-iOS production version is recorded without a build code (so no tag). This keeps
-the preview working in every case, defaulting to a sensible (leading-track) diff.
+Sources the chosen track's version/code from the @store_status@ cache (the same
+single source the App Monitor and create page read) and derives its git tag with
+'derivedStoreTag'. Falls back to the leading store-sync row's own tag/commit when
+the track — or its tag — is absent: an app not yet synced has no cell, and an iOS
+production version is recorded without a build code (so no tag). This keeps the
+preview working in every case, defaulting to a sensible (leading-track) diff.
 -}
-resolveChangelogBase :: Maybe Text -> LatestBuildRow -> (Text, Maybe Text, Maybe Text)
-resolveChangelogBase mBase lb =
-    resolveBaseFromTracks mBase (lbrTracks lb) (lbrTagPushed lb) (lbrCommitSha lb) (lbrVersion lb)
+resolveChangelogBase :: Maybe Text -> AppCatalog -> LatestBuildRow -> Flow (Text, Maybe Text, Maybe Text)
+resolveChangelogBase mBase ac lb = do
+    cells <- findStoreTracksForApp (acId ac)
+    -- iOS internal distribution is TestFlight, so its cell maps to the "internal" base.
+    let baseKeyOf t = case t of
+            "production" -> Just "production"
+            "internal" -> Just "internal"
+            "testflight" -> Just "internal"
+            _ -> Nothing
+        tracks =
+            Map.fromList
+                [ (bk, TrackSnapshot ver code (derivedStoreTag ac ver code))
+                | (trk, ver, code) <- cells
+                , Just bk <- [baseKeyOf trk]
+                ]
+    pure (resolveBaseFromTracks mBase tracks (lbrTagPushed lb) (lbrCommitSha lb) (lbrVersion lb))
 
 {- | Pure core of 'resolveChangelogBase' (exported for testing). Given the
 requested track, the per-track snapshots, and the leading row's tag / commit /
@@ -733,7 +748,7 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
     case findLastReleaseBuild builds appName surface platform of
         Nothing -> pure (aiUnavailable "no prior release build to compare against")
         Just lb -> do
-            let (baseRef, _, _) = resolveChangelogBase mBase lb
+            (baseRef, _, _) <- resolveChangelogBase mBase ac lb
             if T.null baseRef
                 then pure (aiUnavailable "no base ref to compare against")
                 else do

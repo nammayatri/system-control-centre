@@ -1792,7 +1792,7 @@ Both Create form and Revert page share the same commit row style:
 ```
 0012-mobile-revert.sql                    commit_sha, source_ref, reverts_release_id + indexes + uq_release_tracker_revert_inflight (B6)
 0013-local-mobile-revert-test-data.sql    test data for revert dev (local only)
-0015-store-sync-config.sql                store_sync_enabled, store_sync_interval_minutes
+0015-store-sync-config.sql                REMOVED (store_sync_enabled / store_sync_interval_minutes) — store sync went on-demand; see 0031-store-refresh-cooldown.sql
 0019-version-preview-config.sql           version_preview_enabled (gates /mobile/versions/preview)
 0020-mobile-build-type-config.sql         mobile_build_type (env invariant: master=debug, prod=release)
 0021-store-sync-dedup.sql                 partial unique index uq_release_tracker_store_sync (dedup synthetic rows)
@@ -1805,15 +1805,15 @@ Both Create form and Revert page share the same commit row style:
 | `Mobile/Github/Compare.hs` | GitHub Compare API client — `compareRefs`, `CommitInfo`, `CompareResult` |
 | `Mobile/Changelog.hs` | Revert changelog renderer (`renderRevertChangelog`) + `bumpPatch` |
 | `Mobile/Handlers/Revert.hs` | Draft + create + verify-commit + live-diff (`mobileRevertDiffH`) handlers; version-ordered rollback (B6); store-sync rows revert via the same resolver (re-assert removed) |
-| `Mobile/StoreSync.hs` | Periodic store sync background job — `storeSyncLoop`, `runStoreSync` |
+| `Mobile/StoreSync.hs` | On-demand store sync — per-app `refreshStoreStatusOne` (cooldown-gated); the `storeSyncLoop` background poller was **removed** (`runStoreSync` remains for a long-interval scheduler call) |
 | `Mobile/Github.hs` | `listBranches`, `searchBranches`, `createGitRef`, `getCommitInfo`, `CommitDetail` |
 | `Mobile/Workflow.hs` | `source_ref` dispatch, `commit_sha` capture, debug stage skipping, `markReleaseRevertedBy` in finalize |
 | `Mobile/Handlers/Release.hs` | `sourceRef` on create, `listBranchesH` with search, matrix job name suffix, `changelogPreviewH` + `ChangelogPreviewResp` |
 | `Mobile/Handlers/AppCatalog.hs` | Latest build enrichment |
 | `Mobile/RevertResolver.hs` | Pure rollback resolver (B6) — `seqKey`/`compareSeq`/`parseSemver`/`resolveRollback`, target-vs-source split |
 | `Mobile/Queries/Tracker.hs` | `fetchRevertCandidates` (B6, replaced `findPreviousGoodMobileRelease`/`findPreviousGoodSCCRelease`), `isReverted`, `markReleaseRevertedBy` |
-| `Mobile/Queries/AppCatalog.hs` | `fetchLatestBuildsPerApp` — raw SQL with `ROW_NUMBER() OVER (PARTITION BY ...)` |
-| `RuntimeConfig.hs` | `isStoreSyncEnabled`, `getStoreSyncIntervalMinutes` |
+| `Mobile/Queries/AppCatalog.hs` | `fetchLatestBuildsPerApp` — SQL pulls COMPLETED/INPROGRESS rows newest-first; Haskell parses `MobileBuildContext` and keeps the newest per (app, surface, platform, build_type) |
+| `RuntimeConfig.hs` | `getStoreRefreshCooldownSeconds` (`store_refresh_cooldown_seconds`) — **replaced** the removed `isStoreSyncEnabled` / `getStoreSyncIntervalMinutes` |
 
 ## Frontend files added/modified
 

@@ -5,6 +5,7 @@ import { useLiveReleases } from '../hooks';
 import { Button } from '../../../shared/ui/button';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { cn } from '../../../lib/utils';
+import { formatBuildCode } from '../utils';
 
 // MVP assumption: all mobile builds today come from this monorepo, so we can
 // hardcode the GH owner/repo for the tag link. Once multiple repos are wired
@@ -209,7 +210,7 @@ export default function LiveReleases() {
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">
                           {row.liveVersion}
                           {row.versionCode != null && (
-                            <span className="text-zinc-400 ml-1">({row.versionCode})</span>
+                            <span className="text-zinc-400 ml-1">{formatBuildCode(row.versionCode)}</span>
                           )}
                         </td>
                         <td className="py-3 px-4 font-mono text-xs">

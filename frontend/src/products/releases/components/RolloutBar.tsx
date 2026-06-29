@@ -1,5 +1,5 @@
 import { cn } from '../../../lib/utils';
-import { formatRolloutPercent } from './storeBadge';
+import { formatRolloutPercent } from '../utils';
 
 interface RolloutBarProps {
   pct: number;

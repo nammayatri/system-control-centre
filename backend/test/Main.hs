@@ -41,6 +41,7 @@ import Products.Autopilot.Mobile.Github (
     JobsResp (..),
     WorkflowRun (..),
     WorkflowRunsResp (..),
+    dispatchRunCandidates,
  )
 import Products.Autopilot.Mobile.Github.Compare (
     CommitInfo (..),
@@ -55,6 +56,8 @@ import Products.Autopilot.Mobile.RevertResolver (
     resolveRollback,
  )
 import Products.Autopilot.Mobile.Types
+import Products.Autopilot.Mobile.Lifecycle.BuildKind (BuildKind (..), buildKind, claimsStoreIdentity, hasStoreIdentity)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), Projection (..), ReleasePhase (..), canTransition, displayStatus, pEngineStatus, phaseFromFields, phaseToWfStatus, project)
 import Products.Autopilot.Mobile.Versioning (TrackInfo (..), computeNextVersion)
 import Products.Autopilot.Mobile.StoreSync (ExternalReviewAction (..), ReconcileAction (..), androidReconcileAction, detectConsoleRollout, detectIosRelease, externalReviewAction, iosPhasedReconcileAction, pendingPublishRelease, reviewStateToStatus)
 import Products.Autopilot.Mobile.Handlers.Release (resolveBaseFromTracks)
@@ -156,6 +159,8 @@ main = do
     section "[44] iOS release detection (adopt an out-of-band App Store Connect release)" testIosReleaseDetect
     section "[45] Play track snapshot parse (App Release Monitoring)" testTrackSnapshotParse
     section "[46] claimsStoreIdentity (store-identity gate — single source of truth)" testClaimsStoreIdentity
+    section "[47] ReleasePhase (canonical lifecycle: project / transition / display)" testReleasePhase
+    section "[48] dispatchRunCandidates (abort-cancel run match: window + newest-first)" testDispatchRunCandidates
 
     putStrLn ""
     putStrLn "==========================================="
@@ -1013,6 +1018,7 @@ testClaimsStoreIdentity = do
                 , mbcOtaNamespace = Nothing
                 , mbcTagPushed = Nothing
                 , mbcDestination = dest
+                , mbcChangelogSummary = Nothing
                 }
     -- Store-bound builds DO claim an identity.
     assertBool "consumer Android (release, no destination)" $ claimsStoreIdentity (ctx "release" Nothing)
@@ -1028,6 +1034,67 @@ testClaimsStoreIdentity = do
     -- Allowlist: an unknown/new destination defaults to NO identity (safe direction).
     assertBool "unknown destination defaults to NOT a store identity" $
         not (claimsStoreIdentity (ctx "release" (Just "Huawei")))
+    -- buildKind axis: claimsStoreIdentity is exactly hasStoreIdentity . buildKind.
+    assertEqual "consumer/iOS release -> StoreBound" StoreBound (buildKind (ctx "release" Nothing))
+    assertEqual "provider GooglePlay -> StoreBound" StoreBound (buildKind (ctx "release" (Just "GooglePlay")))
+    assertEqual "provider Firebase -> FirebaseInternal" FirebaseInternal (buildKind (ctx "release" (Just "Firebase")))
+    assertEqual "non-Play store (Huawei) -> FirebaseInternal" FirebaseInternal (buildKind (ctx "release" (Just "Huawei")))
+    assertEqual "debug -> Debug" Debug (buildKind (ctx "debug" Nothing))
+    let kinds = [ctx "release" Nothing, ctx "release" (Just "GooglePlay"), ctx "release" (Just "Firebase"), ctx "release" (Just "Huawei"), ctx "debug" Nothing, ctx "debug" (Just "Firebase")]
+    assertBool "claimsStoreIdentity == hasStoreIdentity . buildKind" $
+        all (\c -> claimsStoreIdentity c == hasStoreIdentity (buildKind c)) kinds
+
+-- ============================================================================
+-- [47] ReleasePhase — the canonical lifecycle value. The pure
+-- projection/transition/display functions everything else derives from.
+-- ============================================================================
+
+testReleasePhase :: IO ()
+testReleasePhase = do
+    putStrLn "ReleasePhase: project / displayStatus / canTransition / pEngineStatus"
+    -- project: review and rollout are mutually exclusive by construction (Cumta bug
+    -- can't be built) — InReview nulls rollout, RollingOut nulls review.
+    assertEqual "InReview -> review set, rollout NULL" (Projection (Just "in_review") Nothing Nothing (Just "production")) (project InReview)
+    assertEqual "RollingOut 0.01 -> rollout 1%, review NULL" (Projection Nothing (Just "rolling_out") (Just 1) (Just "production")) (project (RollingOut 0.01))
+    assertEqual "InternalHeld -> internal track only" (Projection Nothing Nothing Nothing (Just "internal")) (project InternalHeld)
+    assertEqual "Distributed Debug -> all NULL (no store lifecycle)" (Projection Nothing Nothing Nothing Nothing) (project (Distributed Debug))
+    -- canTransition: a % bump is legal; review+rolling is not; terminals go nowhere.
+    assertBool "RollingOut 1% -> RollingOut 50% (a bump) is legal" $ canTransition (RollingOut 0.01) (RollingOut 0.5)
+    assertBool "InReview -> RollingOut is NOT legal" $ not (canTransition InReview (RollingOut 0.01))
+    assertBool "InternalHeld -> InReview is legal" $ canTransition InternalHeld InReview
+    assertBool "Live is terminal" $ not (canTransition Live (RollingOut 0.5))
+    -- pEngineStatus: the generic rt_status moves with the phase.
+    assertEqual "Live -> COMPLETED" COMPLETED (pEngineStatus Live)
+    assertEqual "Rejected -> ABORTED" ABORTED (pEngineStatus (Rejected "x"))
+    assertEqual "Aborted -> USER_ABORTED" USER_ABORTED (pEngineStatus Aborted)
+    assertEqual "InReview -> INPROGRESS" INPROGRESS (pEngineStatus InReview)
+    -- displayStatus: one label per phase (the single deriver every surface uses).
+    assertEqual "RollingOut 0.01 label" "Rolling out 1%" (dLabel (displayStatus (RollingOut 0.01)))
+    assertEqual "Approved label" "Approved · held" (dLabel (displayStatus Approved))
+    -- phaseToWfStatus: the 1:1 wf-status mirror for store-lifecycle phases.
+    assertEqual "InReview -> MBInReview" (Just MBInReview) (phaseToWfStatus InReview)
+    assertEqual "Live -> MBCompleted" (Just MBCompleted) (phaseToWfStatus Live)
+    assertEqual "Halted -> MBRollingOut (mid-rollout, resumable)" (Just MBRollingOut) (phaseToWfStatus (Halted 0.5))
+    -- Superseded terminalizes via MBAborted (→USER_ABORTED, not COMPLETED) so
+    -- markReleaseRevertedBy never fires; the "Superseded" display is column-driven.
+    assertEqual "Superseded -> MBAborted (terminalize, no revert trigger)" (Just MBAborted) (phaseToWfStatus Superseded)
+    -- phaseFromFields: rollout columns win over review (a rolling row is past review).
+    assertEqual "rolling_out 50% -> RollingOut 0.5" (RollingOut 0.5) (phaseFromFields StoreBound MBRollingOut (Just "in_review") (Just "rolling_out") (Just 50) (Just "production"))
+    assertEqual "approved, no rollout -> Approved" Approved (phaseFromFields StoreBound MBReviewApproved (Just "approved") Nothing Nothing (Just "production"))
+    assertEqual "debug completed -> Distributed Debug" (Distributed Debug) (phaseFromFields Debug MBCompleted Nothing Nothing Nothing Nothing)
+    assertEqual "debug still building -> Building (not Distributed yet)" Building (phaseFromFields Debug MBBuilding Nothing Nothing Nothing Nothing)
+    assertEqual "store-bound on internal -> InternalHeld" InternalHeld (phaseFromFields StoreBound MBTagPushed Nothing Nothing Nothing (Just "internal"))
+    -- MBTagPushed (built, held) with NO track column → InternalHeld, so promote's
+    -- InternalHeld→InReview is a legal transition (no spurious shadow-warning).
+    assertEqual "MBTagPushed, null track -> InternalHeld" InternalHeld (phaseFromFields StoreBound MBTagPushed Nothing Nothing Nothing Nothing)
+    assertEqual "TestFlight snapshot -> InternalHeld" InternalHeld (phaseFromFields StoreBound MBCompleted Nothing Nothing Nothing (Just "testflight"))
+    -- Round-trip: project a store phase to columns, reconstruct the same tag back.
+    let roundTrips ph =
+            let Projection rv ro pp tk = project ph
+             in phaseFromFields StoreBound MBRollingOut rv ro pp tk
+    assertEqual "round-trip RollingOut 0.01" (RollingOut 0.01) (roundTrips (RollingOut 0.01))
+    assertEqual "round-trip Approved" Approved (roundTrips Approved)
+    assertEqual "round-trip InReview" InReview (roundTrips InReview)
 
 testMobileBuildContextJsonRoundTrip :: IO ()
 testMobileBuildContextJsonRoundTrip = do
@@ -1042,6 +1109,7 @@ testMobileBuildContextJsonRoundTrip = do
                 , mbcOtaNamespace = Just "nammayatriv2"
                 , mbcTagPushed = Nothing
                 , mbcDestination = Nothing
+                , mbcChangelogSummary = Nothing
                 }
     let encoded = Aeson.encode ctx
     let decoded = Aeson.decode encoded :: Maybe MobileBuildContext
@@ -1650,6 +1718,9 @@ testTrackSnapshotParse = do
     assertEqual "completed → no notes" Nothing (stsNotes comp)
     assertEqual "empty → none status" "none" (stsStatus (parseTrackSnapshot "production" "{}"))
     assertEqual "empty → baseline version" "0.0.0" (stsVersion (parseTrackSnapshot "production" "{}"))
+    -- internal cell picks the highest code even when Play lists the older release first.
+    let intl = parseTrackSnapshot "internal" "{\"releases\":[{\"name\":\"3.3.17\",\"status\":\"completed\",\"versionCodes\":[\"460\"]},{\"name\":\"3.3.17\",\"status\":\"completed\",\"versionCodes\":[\"463\"]}]}"
+    assertEqual "internal → latest code, not first element" (Just 463) (stsCode intl)
 
 testVersionBumpLogic :: IO ()
 testVersionBumpLogic = do
@@ -1864,3 +1935,30 @@ testDecodeSeedJson = do
             putStrLn "  PASS: decoded as MobileBuildState"
         Right _ -> fail "  FAIL: decoded as wrong variant"
         Left e -> fail ("  FAIL: decode error: " <> e)
+
+-- Shared by ResolveRunId and the abort-cancel path: matches workflow_dispatch runs in
+-- [dispatchedAt-30s, +5m], newest first.
+testDispatchRunCandidates :: IO ()
+testDispatchRunCandidates = do
+    putStrLn "Dispatch run match: window + event filter + newest-first"
+    now <- getCurrentTime
+    let at s = addUTCTime (fromIntegral (s :: Int)) now
+        mkRun i ev secs =
+            WorkflowRun
+                { wrId = i
+                , wrEvent = ev
+                , wrStatus = "in_progress"
+                , wrConclusion = Nothing
+                , wrCreatedAt = at secs
+                , wrHtmlUrl = ""
+                , wrName = ""
+                , wrDisplayTitle = Nothing
+                , wrHeadSha = ""
+                }
+        ids = map wrId . dispatchRunCandidates now
+    assertEqual "in-window dispatch run matched" [1] (ids [mkRun 1 "workflow_dispatch" 10])
+    assertEqual "too-early / too-late excluded" [] (ids [mkRun 2 "workflow_dispatch" (-60), mkRun 3 "workflow_dispatch" 600])
+    assertEqual "non-dispatch event excluded" [] (ids [mkRun 4 "push" 10])
+    -- boundaries inclusive (-30s lower, +300s upper); result is newest-first
+    assertEqual "boundaries inclusive, newest-first" [6, 5] (ids [mkRun 5 "workflow_dispatch" (-30), mkRun 6 "workflow_dispatch" 300])
+    assertEqual "multiple in-window sorted newest-first" [8, 7] (ids [mkRun 7 "workflow_dispatch" 10, mkRun 8 "workflow_dispatch" 200])

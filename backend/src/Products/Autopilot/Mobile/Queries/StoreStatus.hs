@@ -21,6 +21,7 @@ module Products.Autopilot.Mobile.Queries.StoreStatus (
     listStoreStatus,
     secondsSinceLastSync,
     latestShippedVersionsPerApp,
+    findStoreTracksForApp,
     findProductionStoreCell,
     findProductionLiveCell,
     productionVersionsByApp,
@@ -168,6 +169,19 @@ the newest @MobileBuild@ release NOT created by store-sync. Stamped into
 as out-of-band drift. Excluding store-sync rows avoids flagging our own imports
 (edge case #7). 'Nothing' for an app SCC has never released → no drift claim.
 -}
+{- | An app's synced store cells as @(track, version_name, version_code)@, restricted
+to cells that carry a version. The changelog-base resolver reads this — the same
+@store_status@ cache the monitor reads — so the base diff sources its prod/internal
+version from one place instead of a duplicate metadata snapshot.
+-}
+findStoreTracksForApp :: (MonadFlow m) => Int32 -> m [(Text, Text, Maybe Int32)]
+findStoreTracksForApp aid = withDb $ \db -> withConn db $ \conn ->
+    query
+        conn
+        "SELECT track, version_name, version_code FROM store_status \
+        \ WHERE app_catalog_id = ? AND version_name IS NOT NULL"
+        (Only aid)
+
 {- | The production track's currently-synced @(version_name, version_code)@ for an app
 from the @store_status@ cache, or 'Nothing' when production hasn't been synced. Either
 field may be NULL. Used by the promote guard to reject re-promoting a build that is

@@ -40,12 +40,11 @@ module Products.Autopilot.Mobile.StoreSync (
 import Control.Applicative ((<|>))
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
 import Control.Exception (SomeException)
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, unless, when)
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (liftIO)
 import Core.Environment (Flow, MonadFlow, logError, logInfo, logWarning)
 import Data.Aeson (object, (.=))
-import Data.Char (isAlphaNum)
 import Data.Int (Int32)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
@@ -57,7 +56,7 @@ import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Products.Autopilot.Mobile.Queries.AppCatalog (
     LatestBuildRow (..),
-    TrackSnapshot (..),
+    derivedStoreTag,
     fetchLatestBuildsPerApp,
     listAppCatalog,
  )
@@ -70,9 +69,9 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (
     setProductionRolloutStatus,
     upsertStoreStatus,
  )
+import Products.Autopilot.Mobile.Lifecycle.Phase (ReleasePhase (..))
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
-    clearRolloutColumns,
     completeExternalReviewRow,
     findActiveRolloutReleases,
     findExternalReviewRow,
@@ -84,10 +83,8 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     sccActiveReleaseExistsForVersion,
     setAscIds,
     setExternalReviewState,
-    setMobileWfStatus,
+    setPhase,
     setProductionRolloutReflection,
-    setRolloutState,
-    setStoreSyncMetadata,
     updateStoreSyncBuildCode,
  )
 import Products.Autopilot.Mobile.Types (
@@ -300,16 +297,16 @@ reconcileAndroidRolloutsFrom ac releases = do
                         mapM_ (adoptExternalRollout (rtId row) "play") (detectConsoleRollout androidPendingFractionThreshold code rst)
 
 {- | Retire a SUPERSEDED rollout: an actively-rolling version that has dropped off
-the production track because a newer build replaced it. Clear the rollout columns and
-drive the row terminal (@MBAborted@ → the runner finalizes it to ABORTED), so it
-leaves the active-rollout set and reads "Aborted" instead of a frozen "rolling out X%".
-Uniform for both store-sync-adopted and SCC-driven rows. The cleared @rollout_status@
-also removes it from 'findActiveRolloutReleases', so it is never re-processed.
+the production track because a newer build replaced it. setPhase Superseded sets
+@rollout_status='superseded'@ (so it reads "Superseded", not a frozen "rolling X%")
+and terminalizes via MBAborted (engine stops; USER_ABORTED, never COMPLETED, so
+markReleaseRevertedBy stays unfired). 'superseded' also drops it from
+'findActiveRolloutReleases', so it is never re-processed.
 -}
 retireSupersededRollout :: Text -> Flow ()
 retireSupersededRollout rid = do
-    clearRolloutColumns rid
-    setMobileWfStatus rid MBAborted
+    now <- liftIO getCurrentTime
+    setPhase now rid Superseded
     logInfo $ "[ROLLOUT_SYNC] " <> rid <> " version no longer on production track — retiring superseded rollout"
     logEvent rid "ROLLOUT_SUPERSEDED" (object ["reason" .= ("version_left_production_track" :: Text)])
 
@@ -349,12 +346,12 @@ reconcileIosRollouts creds ac = do
         awaiting <- filter (rowIsApp ac) <$> findMobileAwaitingRollout "ios"
         mapM_ (safeDetectIosRelease creds) awaiting
 
-{- | Record both Play tracks into the synthetic @release_tracker@ row from the
+{- | Record the leading Play track into a synthetic @release_tracker@ row from the
 already-fetched tracks (no Play call of its own). The leading track owns the
 row's version/badge: internal when its build code is ahead (an internal-only
-build pending promotion), else production. Both tracks are written to
-metadata.tracks so the create page can show and diff against either (default base
-= production).
+build pending promotion), else production. The live prod/internal versions
+themselves live in @store_status@ (the create page + changelog base read that),
+so an unchanged leading row needs no metadata refresh here.
 -}
 recordAndroidTracks :: AppCatalog -> Maybe LatestBuildRow -> TrackInfo -> TrackInfo -> Flow ()
 recordAndroidTracks ac existing internal production = do
@@ -363,35 +360,19 @@ recordAndroidTracks ac existing internal production = do
         chosenVer = tiName chosen
         chosenCode = Just (tiCode chosen)
         tagFor = chosenVer <> "+" <> T.pack (show (tiCode chosen))
-        mkSnap ti =
-            TrackSnapshot
-                { tsVersion = tiName ti
-                , tsCode = Just (tiCode ti)
-                , tsTag = derivedStoreTag ac (tiName ti) (Just (tiCode ti))
-                }
-        -- internal is a distinct track only when ahead; otherwise
-        -- internal == production and one "production" entry suffices.
-        tracks =
-            Map.fromList $
-                ("production", mkSnap production)
-                    : [("internal", mkSnap internal) | internalAhead]
-        metaJson = buildStoreMeta track tracks
-    if isNewerAndroid chosen existing
-        then case existing of
-            -- Same version, build code bumped → update the snapshot's code +
-            -- tag in place (the version-keyed dedup index blocks a re-insert).
-            Just lb
-                | lbrVersion lb == chosenVer -> do
-                    logInfo $ "[STORE_SYNC] Play build bump for " <> acName ac <> " (" <> track <> "): " <> tagFor
-                    updateStoreSyncBuildCode ac chosenVer chosenCode (derivedStoreTag ac chosenVer chosenCode)
-                    setStoreSyncMetadata ac chosenVer metaJson
-            -- New version → insert a fresh row.
-            _ -> do
-                logInfo $ "[STORE_SYNC] New Play version for " <> acName ac <> " (" <> track <> "): " <> tagFor
-                insertSyntheticRelease ac chosenVer chosenCode track tracks
-        else -- Leading row unchanged — still refresh metadata.tracks so a
-        -- moved production version doesn't lag the stored snapshot.
-            setStoreSyncMetadata ac chosenVer metaJson
+    when (isNewerAndroid chosen existing) $ case existing of
+        -- Same version, newer code: bump a store-sync snapshot in place. If there's
+        -- none to bump, a MANUAL build owns this version and the observed code is a
+        -- different, out-of-band build → give it its own row, never touch the MANUAL row.
+        Just lb
+            | lbrVersion lb == chosenVer -> do
+                logInfo $ "[STORE_SYNC] Play build bump for " <> acName ac <> " (" <> track <> "): " <> tagFor
+                bumped <- updateStoreSyncBuildCode ac chosenVer chosenCode (derivedStoreTag ac chosenVer chosenCode)
+                unless bumped $ insertSyntheticRelease ac chosenVer chosenCode track
+        -- New version → insert a fresh row.
+        _ -> do
+            logInfo $ "[STORE_SYNC] New Play version for " <> acName ac <> " (" <> track <> "): " <> tagFor
+            insertSyntheticRelease ac chosenVer chosenCode track
 
 {- | Reflect the live production track's staged rollout onto the matching store-sync
 row so the release list matches the App Monitor. 'recordAndroidTracks' badges only
@@ -401,9 +382,9 @@ production — while a newer build sits on internal — would never show the ram
 Only an in-flight ramp BELOW 100% is reflected: a parked ≈0 pending fraction
 (approved-but-held, below 'androidRolloutFloorPercent') and a completed 100% rollout
 are both excluded — at 100% the version IS the live production build, already badged
-"Production" by 'recordAndroidTracks'/'setStoreSyncMetadata'. Passing the active
-version (or 'Nothing') to 'setProductionRolloutReflection' also CLEARS the reflection
-off any version that has since been superseded, so it stops showing "rolling out".
+"Production" by 'recordAndroidTracks'. Passing the active version (or 'Nothing') to
+'setProductionRolloutReflection' also CLEARS the reflection off any version that has
+since been superseded, so it stops showing "rolling out".
 -}
 reflectProductionRollout :: AppCatalog -> [StoreTrackSnapshot] -> Flow ()
 reflectProductionRollout ac snaps = do
@@ -419,9 +400,7 @@ reflectProductionRollout ac snaps = do
                     Just (stsVersion s, if stsStatus s == "halted" then "halted" else "rolling_out", pct)
             _ -> Nothing
     case (mActive, mProd) of
-        (Just _, Just s) ->
-            let tracks = Map.singleton "production" (TrackSnapshot (stsVersion s) (stsCode s) (derivedStoreTag ac (stsVersion s) (stsCode s)))
-             in insertSyntheticRelease ac (stsVersion s) (stsCode s) "production" tracks
+        (Just _, Just s) -> insertSyntheticRelease ac (stsVersion s) (stsCode s) "production"
         _ -> pure ()
     setProductionRolloutReflection ac mActive now
 
@@ -461,9 +440,7 @@ reflectIosPhasedRollout creds ac bundleId (Just pv) = do
                 mExisting <- findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) pv Nothing
                 case mExisting of
                     Just _ -> pure ()
-                    Nothing ->
-                        insertSyntheticRelease ac pv Nothing "production" $
-                            Map.singleton "production" (TrackSnapshot pv Nothing (derivedStoreTag ac pv Nothing))
+                    Nothing -> insertSyntheticRelease ac pv Nothing "production"
             setProductionRolloutReflection ac mActive now
             forM_ mActive $ \(ver, rs, p) ->
                 setProductionRolloutStatus (acId ac) "ios" ver Nothing (if rs == "halted" then "halted" else "inProgress") p
@@ -501,20 +478,15 @@ syncIos creds ac existing = do
                             liftIO (getIosVersionStateDump creds bundleId) >>= \case
                                 Right states -> logInfo $ "[STORE_SYNC] " <> acName ac <> " iOS no live production; appStoreVersions: " <> T.intercalate "; " states
                                 Left e -> logWarning $ "[STORE_SYNC] " <> acName ac <> " iOS version-state dump failed: " <> renderAscErr e
-                    -- Production snapshot: version only (the live App Store read carries no
-                    -- build code, so no tag).
-                    let prodTrack = (\pv -> ("production", TrackSnapshot pv Nothing Nothing)) <$> mProdVer
                     case mBi of
                         -- TestFlight build present → it leads (the newest build); production secondary.
                         Just bi ->
                             let storeVer = abiVersion bi
                                 mCode = tfCode bi
-                                tfSnap = TrackSnapshot storeVer mCode (derivedStoreTag ac storeVer mCode)
-                                tracks = Map.fromList $ ("internal", tfSnap) : maybe [] pure prodTrack
-                             in recordIosSnapshot ac existing storeVer mCode "testflight" tracks
+                             in recordIosSnapshot ac existing storeVer mCode "testflight"
                         -- No TestFlight build → the live production version leads (if the app is live).
                         Nothing -> case mProdVer of
-                            Just pv -> recordIosSnapshot ac existing pv Nothing "production" (Map.fromList (maybe [] pure prodTrack))
+                            Just pv -> recordIosSnapshot ac existing pv Nothing "production"
                             Nothing -> logInfo $ "[STORE_SYNC] No ASC build or live version for " <> acName ac
                     -- Reflect an App Store PHASED rollout (incl. one started in App
                     -- Store Connect, outside SCC) onto the version's store-sync row so
@@ -526,8 +498,8 @@ syncIos creds ac existing = do
 TestFlight when a build exists, else production. Factored out so the live
 production version is recorded even for an app with no recent TestFlight build.
 -}
-recordIosSnapshot :: AppCatalog -> Maybe LatestBuildRow -> Text -> Maybe Int32 -> Text -> Map.Map Text TrackSnapshot -> Flow ()
-recordIosSnapshot ac existing leadVer leadCode leadTrack tracks =
+recordIosSnapshot :: AppCatalog -> Maybe LatestBuildRow -> Text -> Maybe Int32 -> Text -> Flow ()
+recordIosSnapshot ac existing leadVer leadCode leadTrack =
     if isNewerIos leadVer existing
         then do
             logInfo $
@@ -536,15 +508,16 @@ recordIosSnapshot ac existing leadVer leadCode leadTrack tracks =
                     <> ": "
                     <> leadVer
                     <> maybe "" (\c -> " (build " <> T.pack (show c) <> ")") leadCode
-            insertSyntheticRelease ac leadVer leadCode leadTrack tracks
+            insertSyntheticRelease ac leadVer leadCode leadTrack
         else case (existing, leadCode) of
-            -- Same version, new TestFlight build number → update code + tag in place.
+            -- Same version, new build number: bump a store-sync snapshot in place; if none
+            -- (a MANUAL build owns it), the observed build is out-of-band → own row.
             (Just lb, Just newC)
                 | lbrVersion lb == leadVer && Just newC /= lbrVersionCode lb -> do
                     logInfo $ "[STORE_SYNC] ASC build bump for " <> acName ac <> ": " <> leadVer <> "+" <> T.pack (show newC)
-                    updateStoreSyncBuildCode ac leadVer leadCode (derivedStoreTag ac leadVer leadCode)
-                    setStoreSyncMetadata ac leadVer (buildStoreMeta leadTrack tracks)
-            _ -> setStoreSyncMetadata ac leadVer (buildStoreMeta leadTrack tracks)
+                    bumped <- updateStoreSyncBuildCode ac leadVer leadCode (derivedStoreTag ac leadVer leadCode)
+                    unless bumped $ insertSyntheticRelease ac leadVer leadCode leadTrack
+            _ -> pure ()
 
 isNewerAndroid :: TrackInfo -> Maybe LatestBuildRow -> Bool
 isNewerAndroid store Nothing = tiName store /= "0.0.0"
@@ -825,10 +798,8 @@ insertSyntheticRelease ::
     Maybe Int32 ->
     -- | store track: "production" | "internal" | "testflight"
     Text ->
-    -- | per-track snapshots written to @metadata.tracks@
-    Map.Map Text TrackSnapshot ->
     m ()
-insertSyntheticRelease ac version mCode track tracks = do
+insertSyntheticRelease ac version mCode track = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
@@ -885,7 +856,7 @@ insertSyntheticRelease ac version mCode track tracks = do
                 , rtInfo = Nothing
                 , rtDescription = Just ("Imported from store (" <> track <> ")")
                 , rtChangeLog = Nothing
-                , rtMetadata = Just (buildStoreMeta track tracks)
+                , rtMetadata = Just (buildStoreMeta track)
                 , rtGlobalId = Nothing
                 , rtSyncEnabled = Nothing
                 , rtEnvOverrideData = Nothing
@@ -940,41 +911,13 @@ insertSyntheticRelease ac version mCode track tracks = do
                     <> version
                     <> maybe "" (\t -> " (tag: " <> t <> ")") derivedTag
 
-{- | The metadata JSON a store-sync row carries: the leading @store_track@ (drives
-the list/badge) plus the per-track @tracks@ snapshots (drive the create-page
-production/internal badges + the changelog base selection).
+{- | The metadata JSON a store-sync row carries: the leading @store_track@, which
+drives the list/badge and marks the row as a store-sync snapshot. The live
+prod/internal versions are read from @store_status@, not from here.
 -}
-buildStoreMeta :: Text -> Map.Map Text TrackSnapshot -> Text
-buildStoreMeta track tracks =
-    encodeJsonText (object ["store_track" .= track, "tracks" .= tracks])
-
-{- | The git tag a store-sync row records, matching the CI tag scheme
-(see Workflow.execConfirmTag):
-  consumer: {normalize(app)}/prod/{platform}/v{version}+{code}
-  provider: {acName}-v{version}-{code}
-'Nothing' when there's no build code (then the row has no changelog baseline).
--}
-derivedStoreTag :: AppCatalog -> Text -> Maybe Int32 -> Maybe Text
-derivedStoreTag ac version mCode = case mCode of
-    Just code
-        | acSurface ac == "driver" ->
-            Just (acName ac <> "-v" <> version <> "-" <> T.pack (show code))
-        | otherwise ->
-            Just (normalizeAppSegment (acName ac) <> "/prod/" <> acPlatform ac <> "/v" <> version <> "+" <> T.pack (show code))
-    Nothing -> Nothing
-
-normalizeAppSegment :: Text -> Text
-normalizeAppSegment = collapseDashes . T.map step . T.toLower
-  where
-    step c
-        | isAlphaNum c = c
-        | otherwise = '-'
-    collapseDashes :: Text -> Text
-    collapseDashes t =
-        T.dropWhile (== '-') $
-            T.dropWhileEnd (== '-') $
-                T.intercalate "-" $
-                    filter (not . T.null) (T.splitOn "-" t)
+buildStoreMeta :: Text -> Text
+buildStoreMeta track =
+    encodeJsonText (object ["store_track" .= track])
 
 -- ─── Phase 7: live rollout reconciler ──────────────────────────────────
 
@@ -1114,19 +1057,28 @@ backfillPhasedId creds bundleId version rid =
 lifecycle (rollout columns + MBRollingOut/MBCompleted) so the active reconciler
 keeps it in sync from here on. @store@ is "play" | "asc" for the audit event.
 -}
+-- | Store-observed rollout status → phase ("halted" → Halted, else RollingOut).
+-- Inputs are only the canonical "rolling_out" / "halted" carried by SetRollout.
+rolloutPhase :: Text -> Maybe Double -> ReleasePhase
+rolloutPhase status mPct
+    | status == "halted" = Halted frac
+    | otherwise = RollingOut frac
+  where
+    frac = maybe 0 (/ 100) mPct
+
 adoptExternalRollout :: Text -> Text -> ReconcileAction -> Flow ()
-adoptExternalRollout rid store = \case
-    SetRollout status mPct -> do
-        setRolloutState rid status mPct
-        setMobileWfStatus rid MBRollingOut
-        logInfo $ "[ROLLOUT_SYNC] " <> rid <> " external rollout detected (" <> store <> ") → " <> status <> maybe "" (\p -> " @ " <> T.pack (show p) <> "%") mPct
-        logEvent rid "EXTERNAL_ROLLOUT_DETECTED" $ object ["store" .= store, "status" .= status, "percent" .= mPct]
-    CompleteRollout -> do
-        setRolloutState rid "completed" (Just 100)
-        setMobileWfStatus rid MBCompleted
-        logInfo $ "[ROLLOUT_SYNC] " <> rid <> " external release already at 100% (" <> store <> ") → completing"
-        logEvent rid "EXTERNAL_ROLLOUT_DETECTED" $ object ["store" .= store, "status" .= ("completed" :: Text), "percent" .= (100 :: Double)]
-    LeaveAsIs _ -> pure ()
+adoptExternalRollout rid store action = do
+    now <- liftIO getCurrentTime
+    case action of
+        SetRollout status mPct -> do
+            setPhase now rid (rolloutPhase status mPct)
+            logInfo $ "[ROLLOUT_SYNC] " <> rid <> " external rollout detected (" <> store <> ") → " <> status <> maybe "" (\p -> " @ " <> T.pack (show p) <> "%") mPct
+            logEvent rid "EXTERNAL_ROLLOUT_DETECTED" $ object ["store" .= store, "status" .= status, "percent" .= mPct]
+        CompleteRollout -> do
+            setPhase now rid Live
+            logInfo $ "[ROLLOUT_SYNC] " <> rid <> " external release already at 100% (" <> store <> ") → completing"
+            logEvent rid "EXTERNAL_ROLLOUT_DETECTED" $ object ["store" .= store, "status" .= ("completed" :: Text), "percent" .= (100 :: Double)]
+        LeaveAsIs _ -> pure ()
 
 {- | Reconcile one row, isolating failures so a single bad row (e.g. a missing
 app-catalog join, or a one-off store error) never aborts the whole batch.
@@ -1264,7 +1216,8 @@ changed (a refresh re-reads the live state, so most passes are no-ops).
 -}
 updateRollout :: Text -> Text -> Maybe Double -> ReleaseTrackerRow -> Flow ()
 updateRollout rid newStatus mPct row = do
-    setRolloutState rid newStatus mPct
+    now <- liftIO getCurrentTime
+    setPhase now rid (rolloutPhase newStatus mPct)
     if Just newStatus /= rtRolloutStatus row || pctChanged mPct (rtRolloutPercent row)
         then do
             logInfo $ "[ROLLOUT_SYNC] " <> rid <> " → " <> newStatus <> maybe "" (\p -> " @ " <> T.pack (show p) <> "%") mPct
@@ -1276,8 +1229,8 @@ Finalize stage, which flips the release to COMPLETED on the next tick.
 -}
 completeRollout :: Text -> Text -> Flow ()
 completeRollout rid store = do
-    setRolloutState rid "completed" (Just 100)
-    setMobileWfStatus rid MBCompleted
+    now <- liftIO getCurrentTime
+    setPhase now rid Live
     logInfo $ "[ROLLOUT_SYNC] " <> rid <> " rollout complete (100%) — finishing release"
     logEvent rid "ROLLOUT_COMPLETED" $ object ["store" .= store]
 
