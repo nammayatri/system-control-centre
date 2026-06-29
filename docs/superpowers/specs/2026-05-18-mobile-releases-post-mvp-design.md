@@ -13,7 +13,7 @@
 | **Date** | 2026-05-18 (initial) — 2026-05-26 (latest) |
 | **Author** | shivendra02shah@gmail.com (with assistant) |
 | **Status** | Implemented (all 14 sections) |
-| **Scope** | All mobile release features built after the MVP (`2026-05-11-mobile-releases-design.md`). Covers: mobile revert, branch picker, debug/release build types, latest build enrichment, periodic store sync, store-sync revert integration, platform filter, apps admin redesign, dispatch from summary page, Firebase Crashlytics deep-linking, changelog preview on create. |
+| **Scope** | All mobile release features built after the MVP (`2026-05-11-mobile-releases-design.md`). Covers: mobile revert, branch picker, debug/release build types, latest build enrichment, store sync (now on-demand), store-sync revert integration, platform filter, apps admin redesign, dispatch from summary page, Firebase Crashlytics deep-linking, changelog preview on create. |
 | **Base spec** | `docs/superpowers/specs/2026-05-11-mobile-releases-design.md` (untouched) |
 | **Source plan** | `docs/superpowers/plans/2026-05-18-mobile-releases-post-mvp.md` |
 
@@ -29,7 +29,7 @@
 6. [Branch Picker & Server-Side Search](#6-branch-picker--server-side-search)
 7. [Debug & Release Build Types](#7-debug--release-build-types)
 8. [Latest Build Enrichment](#8-latest-build-enrichment)
-9. [Periodic Store Sync Job](#9-periodic-store-sync-job)
+9. [Store Sync Job](#9-store-sync-job)
 10. [Platform Filter on Release List](#10-platform-filter-on-release-list)
 11. [Apps Admin Table Redesign](#11-apps-admin-table-redesign)
 12. [Dispatch Button on Release Summary](#12-dispatch-button-on-release-summary)
@@ -485,7 +485,9 @@ Added `latestReleaseBuild` and `latestDebugBuild` to `AppCatalogEntryResp`.
 
 ---
 
-## 9. Periodic Store Sync Job
+## 9. Store Sync Job
+
+> Built **on-demand**, not the periodic loop described below — see the banner at the top of this doc.
 
 ### Problem
 
@@ -762,7 +764,7 @@ The "Commits being rolled back" section in `MobileRevert.tsx` was redesigned to 
 
 [Debug/Release Build Types] (independent)
 
-[Latest Build Enrichment] ---> [Periodic Store Sync] ---> [Revert Integration]
+[Latest Build Enrichment] ---> [Store Sync] ---> [Revert Integration]
 
 [Firebase Observability] → Deep-link to Firebase Console (no in-app dashboards)
      Requires: app_catalog.firebase_project_id + package_name

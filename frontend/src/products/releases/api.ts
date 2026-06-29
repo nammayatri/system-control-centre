@@ -80,6 +80,11 @@ export interface ReleaseContext {
     // metadata mirror) right after a successful set.
     rollout_status?: string | null;
     rollout_percent?: number | null;
+    // Canonical backend displayStatus (the one definition): label + variant slug for the
+    // badge, plus a machine phase tag for branching (e.g. cross-row promote suppression).
+    display_label?: string;
+    display_variant?: 'default' | 'success' | 'warning' | 'danger' | 'info' | 'purple' | 'blue';
+    display_phase?: string;
 }
 
 // ── All statuses (UPPERCASE — canonical) ─────
@@ -434,6 +439,11 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         // BE-injected promotability (higher than production). Must be passed through here
         // or it's dropped before the badge can read it.
         promotable:       (r.releaseContext as any)?.promotable,
+        // Canonical backend displayStatus (label/variant) + machine phase tag — the
+        // list badge renders these instead of re-deriving the stage.
+        display_label:    (r.releaseContext as any)?.display_label,
+        display_variant:  (r.releaseContext as any)?.display_variant,
+        display_phase:    (r.releaseContext as any)?.display_phase,
     },
 
     rollout_strategy: (r.rolloutStrategy || []).map(s => ({
@@ -1188,6 +1198,9 @@ export interface RolloutDetail {
     rdReleaseId: string;
     rdPlatform: string; // "android" | "ios"
     rdMbStatus: string; // MBTagPushed | MBInReview | MBReviewApproved | MBRollingOut | MBCompleted | MBReviewRejected | …
+    rdStatusLabel: string; // canonical backend displayStatus label ("Rolling out 1%", "Approved · held")
+    rdStatusVariant: 'default' | 'success' | 'warning' | 'danger' | 'info' | 'purple' | 'blue'; // badge variant slug
+    rdPhase: string; // machine phase tag (building | in_review | rolling_out | …)
     rdReviewStatus: string | null; // in_review | submitted | approved | rejected
     rdReviewRejectReason: string | null;
     rdReviewSubmittedAt: string | null;
@@ -1255,6 +1268,11 @@ export interface TrackCell {
     releaseNotes: string | null;
     drift: boolean;                 // store version != last SCC-shipped version
     syncedAt: string | null;        // ISO timestamp
+    // Canonical backend displayStatus for the production/incoming lifecycle cell —
+    // the monitor renders these so it can't drift from the release list. Null for
+    // testing tracks (badged by track) and non-lifecycle cells (VALID / empty).
+    displayLabel?: string | null;
+    displayVariant?: 'default' | 'success' | 'warning' | 'danger' | 'info' | 'muted' | 'purple' | 'blue' | null;
 }
 
 export interface PlatformBlock {

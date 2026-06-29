@@ -12,8 +12,7 @@ import {
   useMobileApps, useDispatchMobileReleases, useMobileRollout,
   useRolloutRestartDeployment,
 } from '../hooks';
-import { mobileDisplayStatus, lifecycleFromRollout } from '../components/mobileStage';
-import { versionWithBuild } from '../versionLabel';
+import { formatBuildCode, versionWithBuild } from '../utils';
 import type { RolloutHistoryEvent, RolloutEvent, RolloutStrategyEvent, PodInfo, ABValidationStatus } from '../api';
 import { AB_STATUS_LABELS, AB_STATUS_COLORS } from '../api';
 import type { LatestBuild } from '../types';
@@ -667,7 +666,7 @@ const PrevBuildBadge = ({ build, label, platform }: { build: LatestBuild; label:
       <span className="uppercase">{display}</span>
       <span className="font-mono">v{build.version}</span>
       {build.versionCode != null && (
-        <span className="text-[9px] opacity-70">+{build.versionCode}</span>
+        <span className="text-[9px] opacity-70">{formatBuildCode(build.versionCode)}</span>
       )}
       {build.completedAt && (
         <span className="opacity-60">{formatShortDate(build.completedAt)}</span>
@@ -1004,24 +1003,32 @@ const ReleaseSummary: React.FC = () => {
   const isPromotableSnapshot =
     (rollout?.rdStoreTrack === 'internal' || rollout?.rdStoreTrack === 'testflight') &&
     !!rollout?.rdPromotable;
+  // The one canonical backend displayStatus (rollout.rdStatusLabel) — null while the
+  // build is still 'building' so the generic runner controls stay shown until it's
+  // sitting on the store (same behaviour the old mobileDisplayStatus null gave).
   const mobileStatus =
-    rollout && (s === 'INPROGRESS' || isPromotableSnapshot)
-      ? mobileDisplayStatus(lifecycleFromRollout(rollout))
+    rollout && (s === 'INPROGRESS' || isPromotableSnapshot) && rollout.rdPhase !== 'building'
+      ? { label: rollout.rdStatusLabel, variant: rollout.rdStatusVariant }
       : null;
   // While the build sits in a lifecycle stage, the generic Pause / Fast-Forward
   // (rollout-runner) controls don't apply — the real action is Promote/Rollout in
   // the Store panel.
   const inMobileLifecycle = !!mobileStatus;
-  // Once the build is submitted to the store (in review onward), a generic Abort
-  // is misleading — it doesn't stop the store review, and the build re-surfaces
-  // via store-sync. The honest action lives in the Store panel: iOS "Withdraw
-  // from review", or halt the rollout. So hide Abort past promotion.
-  const isMobilePostPromote =
+  // Hide Abort once the build has a store artifact (uploaded to internal/TestFlight
+  // onward): Abort can't un-ship it and it re-surfaces via store-sync. Built-but-held
+  // builds are left to be superseded by the next promote (Rule C).
+  const hasStoreArtifact =
     isMobile &&
     !!rollout &&
-    ['MBSubmittingForReview', 'MBInReview', 'MBReviewApproved', 'MBRollingOut', 'MBCompleted'].includes(
-      rollout.rdMbStatus,
-    );
+    [
+      'MBSubmittedToStore',
+      'MBTagPushed',
+      'MBSubmittingForReview',
+      'MBInReview',
+      'MBReviewApproved',
+      'MBRollingOut',
+      'MBCompleted',
+    ].includes(rollout.rdMbStatus);
 
   const matchedMobileApp = isMobile
     ? mobileApps.find(
@@ -1233,7 +1240,7 @@ const ReleaseSummary: React.FC = () => {
                 {!inMobileLifecycle && (
                   <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
                 )}
-                {!isMobilePostPromote && (
+                {!hasStoreArtifact && (
                   <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
                 )}
               </PermissionGate>

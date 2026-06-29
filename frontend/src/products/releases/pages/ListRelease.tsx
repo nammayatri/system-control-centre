@@ -4,7 +4,7 @@ import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, Chevro
 import { useReleases } from '../hooks';
 import { useRefreshAnimation } from '../../../shared/hooks';
 import { ReleaseStatusBadge } from '../components/ReleaseStatusBadge';
-import { versionWithBuild } from '../versionLabel';
+import { versionWithBuild } from '../utils';
 import { stageOf, lifecycleFromRelease } from '../components/mobileStage';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { StoreSyncBanner } from '../components/StoreSync';

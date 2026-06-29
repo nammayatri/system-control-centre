@@ -10,7 +10,8 @@ import {
 import { Badge } from '../../../shared/ui/badge';
 import { cn } from '../../../lib/utils';
 import type { PlatformBlock, TrackCell } from '../api';
-import { deriveStoreBadge, formatRolloutPercent, activeRolloutOf, type TrackKind } from './storeBadge';
+import { deriveStoreBadge, activeRolloutOf, type TrackKind } from './storeBadge';
+import { formatBuildCode, formatRolloutPercent } from '../utils';
 import { RolloutBar } from './RolloutBar';
 
 type PlatformName = 'android' | 'ios';
@@ -53,7 +54,7 @@ function TrackBody({ cell, track }: { cell: TrackCell | null; track: TrackKind }
           <div className="font-mono text-sm text-zinc-900">
             {cell?.version ?? '—'}
             {cell?.buildCode != null && (
-              <span className="text-zinc-400 ml-1">+{cell.buildCode}</span>
+              <span className="text-zinc-400 ml-1">{formatBuildCode(cell.buildCode)}</span>
             )}
           </div>
         </div>

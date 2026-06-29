@@ -42,6 +42,7 @@ import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById, listApp
 import Products.Autopilot.Mobile.Queries.StoreStatus (listStoreStatus)
 import Products.Autopilot.Mobile.Queries.Tracker (listIncomingMobileVersions, parseMobileTargetState)
 import Products.Autopilot.Mobile.StoreSync (refreshStoreStatusOne)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), displayStatus, variantSlug)
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), isDebugBuildType)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..), StoreStatus, StoreStatusT (..))
 import Products.Autopilot.Types.Storage.Schema (ReleaseTrackerRow, ReleaseTrackerT (..))
@@ -57,6 +58,11 @@ data TrackCellResp = TrackCellResp
     , releaseNotes :: Maybe Text
     , drift :: Bool
     , syncedAt :: Maybe UTCTime
+    , displayLabel :: Maybe Text
+    -- ^ Canonical backend displayStatus for the production/incoming lifecycle cell,
+    -- so the monitor and the release list render the same badge. Nothing for the
+    -- testing tracks (they badge by track) and non-lifecycle cells.
+    , displayVariant :: Maybe Text
     }
     deriving (Generic, Show)
 
@@ -220,7 +226,11 @@ incomingCell r =
         , releaseNotes = Nothing
         , drift = False
         , syncedAt = Just (rtUpdatedAt r)
+        , displayLabel = fst disp
+        , displayVariant = snd disp
         }
+  where
+    disp = cellDisplay (Just "inProgress") (rtReviewStatus r) Nothing
 
 toCell :: StoreStatus -> TrackCellResp
 toCell ss =
@@ -233,9 +243,39 @@ toCell ss =
         , releaseNotes = ssReleaseNotes ss
         , -- Drift = the live PRODUCTION version differs from the last SCC-shipped
           -- one (an out-of-band release). Other tracks never flag drift.
-          drift = ssTrack ss == "production" && driftsFromExpected ss
+          drift = isProd && driftsFromExpected ss
         , syncedAt = Just (ssSyncedAt ss)
+        , -- Only the production cell carries the lifecycle badge; testing tracks
+          -- badge by track on the FE, so leave their display Nothing.
+          displayLabel = if isProd then fst disp else Nothing
+        , displayVariant = if isProd then snd disp else Nothing
         }
+  where
+    isProd = ssTrack ss == "production"
+    disp = cellDisplay (ssStatus ss) (ssReviewStatus ss) (ssRolloutPercent ss)
+
+-- | Map an observed production/incoming store cell to a lifecycle phase, mirroring
+-- the FE deriveStoreBadge precedence (review verdict before rollout; an active ramp
+-- before "approved"). Nothing = no lifecycle (testing track / VALID / empty).
+observedToPhase :: Maybe Text -> Maybe Text -> Maybe Double -> Maybe ReleasePhase
+observedToPhase mStatus mReview mPct =
+    case mReview of
+        Just "rejected" -> Just (Rejected "")
+        Just "in_review" -> Just InReview
+        _ -> case (mStatus, mPct) of
+            (Just "halted", Just p) -> Just (Halted (p / 100))
+            (Just "inProgress", Just p) | p >= 1 && p < 100 -> Just (RollingOut (p / 100))
+            _ -> case mReview of
+                Just "approved" -> Just Approved
+                _
+                    | mStatus == Just "live" || mStatus == Just "completed" -> Just Live
+                    | otherwise -> Nothing
+
+-- | The observed phase rendered as (display label, variant slug), or both Nothing.
+cellDisplay :: Maybe Text -> Maybe Text -> Maybe Double -> (Maybe Text, Maybe Text)
+cellDisplay s r p = case observedToPhase s r p of
+    Just ph -> let d = displayStatus ph in (Just (dLabel d), Just (variantSlug (dVariant d)))
+    Nothing -> (Nothing, Nothing)
 
 driftsFromExpected :: StoreStatus -> Bool
 driftsFromExpected ss = case (ssVersionName ss, ssExpectedVersion ss) of

@@ -80,6 +80,7 @@ import Products.Autopilot.Mobile.Github (
     Job (..),
     WorkflowDispatchReq (..),
     WorkflowRun (..),
+    dispatchRunCandidates,
     dispatchWorkflow,
     listJobs,
     listTags,
@@ -95,8 +96,9 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     logEvent,
     markReleaseRevertedBy,
     setExternalRunIdForDispatch,
-    setReviewDecided,
+    setPhase,
  )
+import Products.Autopilot.Mobile.Lifecycle.Phase (ReleasePhase (..))
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
@@ -780,13 +782,7 @@ execResolveRunId = do
                 Left e -> retry ("listWorkflowRuns failed: " <> e)
             now <- liftIO getCurrentTime
             let dispatchedAt = fromMaybe now (mbBuildStartedAt target)
-                lo = addUTCTime (-30) dispatchedAt
-                hi = addUTCTime 300 dispatchedAt
-                inWindow r =
-                    wrEvent r == "workflow_dispatch"
-                        && wrCreatedAt r >= lo
-                        && wrCreatedAt r <= hi
-                candidates = sortOn (Down . wrCreatedAt) (filter inWindow allRuns)
+                candidates = dispatchRunCandidates dispatchedAt allRuns
             case candidates of
                 (r : _) -> do
                     let runIdT = T.pack (show (wrId r))
@@ -1280,7 +1276,7 @@ execPollReview = mobileStage "PollReview" $ do
                                     logInfoIO $ "[PollReview] " <> releaseId rt <> " poll error (retry): " <> renderAscErr e
                                     pure StageWaiting
                                 Right AscApproved -> do
-                                    setReviewDecided (releaseId rt) "approved" now Nothing
+                                    setPhase now (releaseId rt) Approved
                                     advanceTo now MBReviewApproved
                                     logEvent (releaseId rt) "REVIEW_APPROVED" $ object ["store" .= ("asc" :: Text)]
                                     pure StageSuccess
@@ -1289,12 +1285,12 @@ execPollReview = mobileStage "PollReview" $ do
                                     -- review). Record the approval + advance so the poll stops; the
                                     -- Phase-7 rollout reconciler then adopts the live state
                                     -- (rolling_out for a phased release, else completed).
-                                    setReviewDecided (releaseId rt) "approved" now Nothing
+                                    setPhase now (releaseId rt) Approved
                                     advanceTo now MBReviewApproved
                                     logEvent (releaseId rt) "REVIEW_APPROVED" $ object ["store" .= ("asc" :: Text), "already_live" .= True]
                                     pure StageSuccess
                                 Right (AscRejected reason) -> do
-                                    setReviewDecided (releaseId rt) "rejected" now (Just reason)
+                                    setPhase now (releaseId rt) (Rejected reason)
                                     advanceTo now MBReviewRejected
                                     logEvent (releaseId rt) "REVIEW_REJECTED" $ object ["reason" .= reason]
                                     pure StageSuccess

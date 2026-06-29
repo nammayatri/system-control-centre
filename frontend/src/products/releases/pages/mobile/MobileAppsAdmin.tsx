@@ -8,6 +8,7 @@ import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { cn } from '../../../../lib/utils';
 import { groupAppsBySurface, useGroupCollapse, GroupChevron } from '../../components/appGroups';
 import { AddAppButton } from '../../components/AddAppModal';
+import { formatBuildCode } from '../../utils';
 import { toast } from 'sonner';
 
 const AndroidIcon = ({ className }: { className?: string }) => (
@@ -81,7 +82,7 @@ const BuildCell = ({ build, label }: { build?: LatestBuild | null; label: string
           : 'bg-emerald-50 text-emerald-700 border border-emerald-200',
       )}>
         <span className="font-mono">v{build.version}</span>
-        {build.versionCode != null && <span className="opacity-70">+{build.versionCode}</span>}
+        {build.versionCode != null && <span className="opacity-70">{formatBuildCode(build.versionCode)}</span>}
       </span>
       {build.completedAt && (
         <div className="text-[10px] text-zinc-400">{formatShortDate(build.completedAt)}</div>

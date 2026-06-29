@@ -15,7 +15,7 @@ import Core.Types.Time (threadDelaySec)
 import Data.Aeson (object, toJSON, (.=))
 import Data.List (sortBy)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, listToMaybe)
 import Data.Ord (Down (..), comparing)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
@@ -24,10 +24,11 @@ import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getD
 import Products.Autopilot.K8s.Execute (isNotFoundError, runCmd)
 import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
-import Products.Autopilot.Mobile.Github (cancelRun)
+import Products.Autopilot.Mobile.Github (cancelRun, dispatchRunCandidates, listWorkflowRuns, wrId)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
 import Products.Autopilot.Mobile.Queries.Tracker (appCatalogForRow, gitOwner, gitRepo)
-import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..))
+import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..), MobileBuildWFStatus (..))
+import Products.Autopilot.Mobile.Types.Storage (acWorkflowPath)
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks, releaseService)
 import Products.Autopilot.Queries.ReleaseTracker
@@ -730,11 +731,16 @@ handleAbortingRelease cfg rt mts = do
             -- now and the next poll doesn't leak the new deployment. Idempotent.
             scheduleNewDeploymentCleanup rt mts
     now <- liftIO getCurrentTime
-    let aborted = rt{status = USER_ABORTED, endTime = Just now}
+    -- Terminalize the mobile wf-status too, so the build releases its (version,code)
+    -- slot when appropriate and its badge matches the aborted status.
+    let mts' = case (category rt, mts) of
+            (MobileBuild, Just (MobileBuildState s)) -> Just (MobileBuildState s{mbWfStatus = MBAborted})
+            _ -> mts
+        aborted = rt{status = USER_ABORTED, endTime = Just now}
     -- Round 8 audit C2: CAS against ABORTING. If a parallel runner instance
     -- or a user-initiated handler raced and already moved the row, log and
     -- skip — abort/restore was already done.
-    casOk <- conditionalUpdateTracker aborted mts (releaseStatusToText ABORTING)
+    casOk <- conditionalUpdateTracker aborted mts' (releaseStatusToText ABORTING)
     if not casOk
         then logWarning $ "[handleAbortingRelease] CAS miss for " <> releaseId rt <> "; another writer already transitioned. Skipping notify+event."
         else do
@@ -751,72 +757,66 @@ handleAbortingRelease cfg rt mts = do
             notifyReleaseAborted aborted
             releaseService (NT.appGroup aborted) (NT.service aborted)
 
-{- | Best-effort cancel of a mobile release's in-flight GitHub Actions
-run. Called from 'handleAbortingRelease' when the user moves a
-@MobileBuild@ row to @ABORTING@.
-
-No-ops cleanly when there is no @external_run_id@ set yet (the dispatch
-hadn't been made or the run id hadn't been resolved). Logs every
-failure but never throws — the row's terminal state still flips to
-@USER_ABORTED@ regardless. The GH cancel API is idempotent so a second
-call after a real cancellation is harmless.
+{- | Best-effort cancel of a mobile release's in-flight GitHub run on abort. If
+@external_run_id@ isn't resolved yet, it locates the dispatched run via the same
+window 'execResolveRunId' uses, then cancels. Never throws; idempotent.
 -}
 cancelMobileGhRun :: ReleaseTracker -> Maybe TargetState -> Flow ()
-cancelMobileGhRun rt mts = do
+cancelMobileGhRun rt mts =
     case mts of
-        Just (MobileBuildState mb) ->
-            case mbExternalRunId mb of
-                Just runId | not (T.null runId) -> do
-                    logInfo $
-                        "[handleAbortingRelease] Cancelling GH run "
-                            <> runId
-                            <> " for mobile release "
-                            <> releaseId rt
-                    -- Look up owner/repo via AppCatalog. Wrap each remote
-                    -- call in a try @SomeException so a failure here
-                    -- (missing creds, GH API hiccup, missing app catalog
-                    -- row) never blocks the row's transition to
-                    -- USER_ABORTED.
-                    attempt <-
-                        MC.try @_ @E.SomeException $ do
-                            ac <- appCatalogForRow rt
-                            creds <- loadGhCreds
-                            cancelRun creds (gitOwner ac) (gitRepo ac) runId
-                    case attempt of
-                        Right (Right ()) -> do
-                            logInfo $ "[handleAbortingRelease] GH run cancelled: " <> runId
-                            insertReleaseEvent
-                                (releaseId rt)
-                                "BUSINESS"
-                                "GH_RUN_CANCELLED"
-                                (object ["run_id" .= runId])
-                        Right (Left ghErr) -> do
-                            logWarning $
-                                "[handleAbortingRelease] cancelRun returned error for "
+        Just (MobileBuildState mb) -> do
+            attempt <-
+                MC.try @_ @E.SomeException $ do
+                    ac <- appCatalogForRow rt
+                    creds <- loadGhCreds
+                    -- Prefer the persisted run id; else locate the dispatched run, so an
+                    -- early-window abort (dispatched, not yet resolved) still stops the build.
+                    mRunId <- case mbExternalRunId mb of
+                        Just r | not (T.null r) -> pure (Just r)
+                        _ -> resolveForCancel creds ac (mbBuildStartedAt mb)
+                    case mRunId of
+                        Nothing ->
+                            logInfo $
+                                "[handleAbortingRelease] "
+                                    <> releaseId rt
+                                    <> " has no resolvable GH run; nothing to cancel on GitHub"
+                        Just runId -> do
+                            logInfo $
+                                "[handleAbortingRelease] Cancelling GH run "
                                     <> runId
-                                    <> ": "
-                                    <> ghErr
-                            insertReleaseEvent
-                                (releaseId rt)
-                                "BUSINESS"
-                                "GH_RUN_CANCEL_FAILED"
-                                (object ["run_id" .= runId, "error" .= ghErr])
-                        Left ex ->
-                            logWarning $
-                                "[handleAbortingRelease] cancelRun threw for "
-                                    <> runId
-                                    <> ": "
-                                    <> T.pack (show ex)
-                _ ->
-                    logInfo $
-                        "[handleAbortingRelease] Mobile release "
-                            <> releaseId rt
-                            <> " has no external_run_id; nothing to cancel on GitHub"
+                                    <> " for mobile release "
+                                    <> releaseId rt
+                            res <- cancelRun creds (gitOwner ac) (gitRepo ac) runId
+                            case res of
+                                Right () -> do
+                                    logInfo $ "[handleAbortingRelease] GH run cancelled: " <> runId
+                                    insertReleaseEvent (releaseId rt) "BUSINESS" "GH_RUN_CANCELLED" (object ["run_id" .= runId])
+                                Left ghErr -> do
+                                    logWarning $ "[handleAbortingRelease] cancelRun returned error for " <> runId <> ": " <> ghErr
+                                    insertReleaseEvent (releaseId rt) "BUSINESS" "GH_RUN_CANCEL_FAILED" (object ["run_id" .= runId, "error" .= ghErr])
+            case attempt of
+                Right () -> pure ()
+                Left ex ->
+                    logWarning $
+                        "[handleAbortingRelease] GH cancel path threw for " <> releaseId rt <> ": " <> T.pack (show ex)
         _ ->
             logInfo $
                 "[handleAbortingRelease] release "
                     <> releaseId rt
                     <> " is MobileBuild but has no MobileBuildState target; skipping GH cancel"
+  where
+    -- Locate the dispatched run by the ResolveRunId window (workflow_dispatch within
+    -- [dispatchedAt-30s, +5m], newest). Best-effort: Nothing on no dispatch time or API error.
+    resolveForCancel creds ac mDispatchedAt = case mDispatchedAt of
+        Nothing -> pure Nothing
+        Just dispatchedAt -> do
+            eRuns <- listWorkflowRuns creds (gitOwner ac) (gitRepo ac) (acWorkflowPath ac)
+            case eRuns of
+                Left e -> do
+                    logWarning $ "[handleAbortingRelease] run lookup for cancel failed for " <> releaseId rt <> ": " <> e
+                    pure Nothing
+                Right runs -> pure (mkRunId <$> listToMaybe (dispatchRunCandidates dispatchedAt runs))
+    mkRunId r = T.pack (show (wrId r))
 
 -- ============================================================================
 -- Scale-Down of Old Deployments After Delay

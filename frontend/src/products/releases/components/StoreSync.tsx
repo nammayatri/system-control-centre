@@ -4,6 +4,7 @@ import { RefreshCw, AlertTriangle, Clock } from 'lucide-react';
 import { mobileApi } from '../api';
 import type { StoreMonitorApp, StoreMonitorResult } from '../api';
 import { cn } from '../../../lib/utils';
+import { relativeAge } from '../utils';
 
 // Fallback freshness threshold (seconds) until the backend value loads — matches
 // the server default of `store_refresh_cooldown_seconds`.
@@ -41,17 +42,6 @@ function appIds(apps: StoreMonitorApp[]): number[] {
   return apps
     .flatMap((a) => [a.platforms.android?.appCatalogId, a.platforms.ios?.appCatalogId])
     .filter((x): x is number => x != null);
-}
-
-export function relativeAge(iso: string | null): string {
-  if (!iso) return 'never';
-  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
-  if (s < 60) return `${s}s ago`;
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
 }
 
 /**
@@ -99,8 +89,9 @@ export function useStoreSync(opts?: { auto?: boolean }) {
     } finally {
       setRefreshing(false);
       setProgress(null);
-      // A refresh updates store_status + the release_tracker synthetic rows + the
-      // create-page track metadata — refresh all three readers.
+      // A refresh updates store_status + the release_tracker synthetic rows.
+      // All three readers — monitor, releases list, and the create-page app list
+      // (its prod/internal chips now read store_status too) — invalidate together.
       void qc.invalidateQueries({ queryKey: ['store-monitor'] });
       void qc.invalidateQueries({ queryKey: ['releases'] });
       void qc.invalidateQueries({ queryKey: ['mobile', 'apps'] });

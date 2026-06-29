@@ -25,11 +25,6 @@ export interface StoreBadge {
 // backend's androidRolloutFloorPercent so the two never disagree.
 const ROLLOUT_FLOOR = 1;
 
-/** A rollout %, trimmed to 1 decimal (10 → "10", 12.5 → "12.5"). */
-export function formatRolloutPercent(pct: number): string {
-  return `${Math.round(pct * 10) / 10}`;
-}
-
 export interface ActiveRollout {
   pct: number;
   halted: boolean;
@@ -71,7 +66,7 @@ export type TrackKind = 'production' | 'internal' | 'testflight';
 export function deriveStoreBadge(cell: TrackCell | null, track: TrackKind = 'production'): StoreBadge {
   if (!cell) return { label: '—', variant: 'muted' };
 
-  const { status, reviewStatus, rolloutPercent: pct } = cell;
+  const { status } = cell;
 
   // Testing tracks: badge purely by track (an internal/TestFlight build is "available
   // for testing", never "Live"). The production-review verdict (In review / Approved ·
@@ -84,22 +79,15 @@ export function deriveStoreBadge(cell: TrackCell | null, track: TrackKind = 'pro
       : { label: 'TestFlight', variant: 'info' };
   }
 
-  if (reviewStatus === 'rejected') return { label: 'Rejected', variant: 'danger' };
-  if (reviewStatus === 'in_review') return { label: 'In review', variant: 'purple' };
-
-  // Live rollout state beats "approved" — once it's moving (or halted mid-ramp)
-  // that's the headline, not the approval that preceded it.
-  const ar = activeRolloutOf(cell);
-  if (ar?.halted) return { label: `Halted @ ${formatRolloutPercent(ar.pct)}%`, variant: 'warning' };
-  if (ar) return { label: `Rolling out ${formatRolloutPercent(ar.pct)}%`, variant: 'info' };
-
-  // Approved but not yet ramping (parked at the pending fraction / held).
-  if (reviewStatus === 'approved') return { label: 'Approved · held', variant: 'success' };
-
-  if (status === 'live' || status === 'completed') {
-    return { label: pct === 100 ? 'Live · 100%' : 'Live', variant: 'success' };
+  // Production cell: render the ONE canonical backend displayStatus when present.
+  // The BE maps the cell through the SAME phase the release list uses (observedToPhase
+  // → displayStatus), so the monitor and the list can't drift. The precedence ladder
+  // (review verdict vs rollout vs approved) now lives there, not here.
+  if (cell.displayLabel && cell.displayVariant) {
+    return { label: cell.displayLabel, variant: cell.displayVariant };
   }
 
+  // No lifecycle phase: an iOS TestFlight-VALID build on the production query, or empty.
   if (status === 'VALID') return { label: 'TestFlight', variant: 'info' };
 
   return { label: '—', variant: 'muted' };

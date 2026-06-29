@@ -5,7 +5,7 @@ import { useReleases, useDispatchMobileReleases } from '../../hooks';
 import { approveRelease } from '../../api';
 import { useAuth } from '../../../../core/auth/AuthContext';
 import { ReleaseStatusBadge } from '../../components/ReleaseStatusBadge';
-import { versionWithBuild } from '../../versionLabel';
+import { versionWithBuild } from '../../utils';
 import { Button } from '../../../../shared/ui/button';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { cn } from '../../../../lib/utils';

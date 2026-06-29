@@ -18,7 +18,7 @@ the flag off these endpoints 400 and release builds keep auto-completing at
 tag-push (the legacy behavior). Promote and rollout are __operator-gated__ (a
 human clicks) — nothing here is triggered automatically.
 
-Platform split (see plan §5):
+Platform split:
 
   * __iOS__ has a clean review signal (@appStoreState@) and Apple-driven phased
     release. Approval is auto-detected by the Phase-5 poll stage; the operator
@@ -85,16 +85,16 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (
  )
 import Products.Autopilot.Mobile.Queries.Supersession (retireOlderIncoming, supersedePreviousLive)
 import Products.Autopilot.Mobile.StoreSync (versionOlderThan)
+import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), displayStatus, phaseFromFields, phaseSlug, variantSlug)
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
     findMobileReleaseById,
     logEvent,
     markReleaseInProgress,
+    retireOlderHeldInternal,
     setAscIds,
-    setMobileWfStatus,
-    setReviewDecided,
-    setReviewSubmitted,
-    setRolloutState,
+    setPhase,
  )
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
@@ -199,6 +199,14 @@ data RolloutDetail = RolloutDetail
     { rdReleaseId :: Text
     , rdPlatform :: Text
     , rdMbStatus :: Text
+    , rdStatusLabel :: Text
+    -- ^ Canonical lifecycle label ("Rolling out 1%", "Approved · held") from the one
+    -- backend displayStatus. The FE renders this instead of re-deriving the badge.
+    , rdStatusVariant :: Text
+    -- ^ Badge-variant slug for rdStatusLabel (success | info | warning | …).
+    , rdPhase :: Text
+    -- ^ Machine phase tag (building | in_review | rolling_out | …) — lets the FE
+    -- branch (e.g. suppress the lifecycle badge while the build is still building).
     , rdReviewStatus :: Maybe Text
     , rdReviewRejectReason :: Maybe Text
     , rdReviewSubmittedAt :: Maybe UTCTime
@@ -431,9 +439,10 @@ promoteH ap rid PromoteReq{..} = do
                                     )
                     else pure (Nothing, Nothing)
             setAscIds rid Nothing mPhasedId
-            setReviewSubmitted rid "in_review" now
+            setPhase now rid InReview
             when isPrePromoteSnapshot $ markReleaseInProgress rid
             retireOlderIncomingFor row -- Rule B: newer incoming supersedes any older one
+            retireOlderHeldInternalFor row -- Rule C: retire older held-on-internal builds
             -- Reflect "in review" on the App Monitor immediately (it reads store_status).
             mirrorProdReview ac row (Just "in_review")
             logEvent rid "REVIEW_SUBMITTED" $
@@ -451,9 +460,10 @@ promoteH ap rid PromoteReq{..} = do
             -- note language to match a listed locale; "en-US" is our apps' default.
             promoteToProduction creds storeId vc frac [("en-US", prReleaseNotes)]
                 >>= either (\e -> bad ("Play promote failed: " <> renderPlayErr e)) pure
-            setReviewSubmitted rid "submitted" now
+            setPhase now rid InReview
             when isPrePromoteSnapshot $ markReleaseInProgress rid
             retireOlderIncomingFor row -- Rule B: newer incoming supersedes any older one
+            retireOlderHeldInternalFor row -- Rule C: retire older held-on-internal builds
             mirrorProdReview ac row (Just "submitted")
             logEvent rid "REVIEW_SUBMITTED" $
                 object ["store" .= ("play" :: Text), "actor" .= apEmail ap, "fraction" .= frac, "from_snapshot" .= isPrePromoteSnapshot]
@@ -496,6 +506,15 @@ rolloutDetailH _ap rid = do
                 && rtRolloutStatus row == Nothing
                 && storeTrack `elem` [Just "internal", Just "testflight"]
         promotableStage = mbWfStatus target == MBTagPushed || isPrePromoteSnapshot
+        ph =
+            phaseFromFields
+                (buildKind (mbContext target))
+                (mbWfStatus target)
+                (rtReviewStatus row)
+                (rtRolloutStatus row)
+                (rtRolloutPercent row)
+                (rtStoreTrack row)
+        disp = displayStatus ph
     notAhead <- atOrBelowProduction ac (rtNewVersion row) (rtVersionCode row)
     liveProd <- liveOnProduction ac (rtNewVersion row) (rtVersionCode row)
     syncedAgo <- secondsSinceLastSync (acId ac)
@@ -505,6 +524,9 @@ rolloutDetailH _ap rid = do
             { rdReleaseId = rid
             , rdPlatform = rtEnv row
             , rdMbStatus = tshow (mbWfStatus target)
+            , rdStatusLabel = dLabel disp
+            , rdStatusVariant = variantSlug (dVariant disp)
+            , rdPhase = phaseSlug ph
             , rdReviewStatus = rtReviewStatus row
             , rdReviewRejectReason = rtReviewRejectReason row
             , rdReviewSubmittedAt = rtReviewSubmittedAt row
@@ -548,6 +570,7 @@ releaseH ap rid = do
                     logEvent rid "PHASED_ID_BACKFILLED" (object ["phased_id" .= pid])
                     pure (Just pid)
                 _ -> pure Nothing
+    now <- liftIO getCurrentTime
     case mPhasedId of
         Just _ -> do
             -- Phased: Apple ramps over 7 days; the Phase-7 reconciler tracks the live
@@ -556,14 +579,12 @@ releaseH ap rid = do
             -- App Monitor both read "Rolling out 1%" the instant Release is clicked
             -- (the reconciler then refines the % as Apple ramps) — matching Android,
             -- which updates SCC immediately and reconciles from the store afterward.
-            setRolloutState rid "rolling_out" (Just 1)
-            setMobileWfStatus rid MBRollingOut
+            setPhase now rid (RollingOut 0.01)
             mirrorProdRollout ac row target "inProgress" 1
             logEvent rid "ROLLOUT_RELEASED" (object ["store" .= ("asc" :: Text), "actor" .= apEmail ap, "phased" .= True])
         Nothing -> do
             -- Non-phased: the version goes fully live on release → done.
-            setRolloutState rid "completed" (Just 100)
-            setMobileWfStatus rid MBCompleted
+            setPhase now rid Live
             mirrorProdReleased ac row target
             logEvent rid "ROLLOUT_RELEASED" (object ["store" .= ("asc" :: Text), "actor" .= apEmail ap, "phased" .= False])
     supersedePreviousLiveFor row -- Rule A: this version releasing supersedes the previous live one
@@ -605,8 +626,8 @@ rolloutSetH ap rid RolloutSetReq{..} = do
     -- still reads the LIVE track on the next refresh and reconciles to the true
     -- value — correcting it if Managed Publishing held the commit (the live track
     -- hasn't moved yet) or completing the release when it reaches 100%.
-    setRolloutState rid "rolling_out" (Just rsPercent)
-    setMobileWfStatus rid MBRollingOut
+    now <- liftIO getCurrentTime
+    setPhase now rid (RollingOut (rsPercent / 100))
     -- Mirror the new state into store_status too, so the App Monitor (which reads that
     -- cache, not release_tracker) matches the release list immediately — no extra Play
     -- edit. At 100% it reads as live (review overlay cleared); below 100% it's ramping.
@@ -628,7 +649,8 @@ rolloutHaltH ap rid = do
             creds <- loadAscCredsFor (acStoreAccount ac) >>= maybe (bad "App Store Connect credentials not configured.") pure
             pausePhasedRelease creds pid
                 >>= either (\e -> bad ("App Store pause failed: " <> renderAscErr e)) pure
-            setRolloutState rid "halted" (rtRolloutPercent row)
+            now <- liftIO getCurrentTime
+            setPhase now rid (Halted (maybe 0 (/ 100) (rtRolloutPercent row)))
             -- Mirror onto the monitor cache when we know the phased %.
             forM_ (rtRolloutPercent row) $ \p -> mirrorProdRollout ac row target "halted" p
             logEvent rid "ROLLOUT_HALTED" (object ["store" .= ("asc" :: Text), "actor" .= apEmail ap])
@@ -641,7 +663,8 @@ rolloutHaltH ap rid = do
             frac <- liveAndroidFraction creds storeId (mbcVersionCode (mbContext target))
             haltTrackRollout creds storeId vc frac
                 >>= either (\e -> bad ("Play halt failed: " <> renderPlayErr e)) pure
-            setRolloutState rid "halted" (Just (frac * 100))
+            now <- liftIO getCurrentTime
+            setPhase now rid (Halted frac)
             -- Reflect the halt on the App Monitor immediately (it reads store_status,
             -- not release_tracker) — same fraction we just halted at, no extra edit.
             mirrorProdRollout ac row target "halted" (frac * 100)
@@ -659,7 +682,8 @@ rolloutResumeH ap rid = do
             creds <- loadAscCredsFor (acStoreAccount ac) >>= maybe (bad "App Store Connect credentials not configured.") pure
             resumePhasedRelease creds pid
                 >>= either (\e -> bad ("App Store resume failed: " <> renderAscErr e)) pure
-            setRolloutState rid "rolling_out" (rtRolloutPercent row)
+            now <- liftIO getCurrentTime
+            setPhase now rid (RollingOut (maybe 0 (/ 100) (rtRolloutPercent row)))
             forM_ (rtRolloutPercent row) $ \p -> mirrorProdRollout ac row target "inProgress" p
             logEvent rid "ROLLOUT_RESUMED" (object ["store" .= ("asc" :: Text), "actor" .= apEmail ap])
             pure Success
@@ -670,7 +694,8 @@ rolloutResumeH ap rid = do
             frac <- liveAndroidFraction creds storeId (mbcVersionCode (mbContext target))
             resumeTrackRollout creds storeId vc frac
                 >>= either (\e -> bad ("Play resume failed: " <> renderPlayErr e)) pure
-            setRolloutState rid "rolling_out" (Just (frac * 100))
+            now <- liftIO getCurrentTime
+            setPhase now rid (RollingOut frac)
             -- Back to ramping on the monitor cache too.
             mirrorProdRollout ac row target "inProgress" (frac * 100)
             logEvent rid "ROLLOUT_RESUMED" (object ["store" .= ("play" :: Text), "actor" .= apEmail ap])
@@ -701,8 +726,8 @@ rolloutReleaseAllH ap rid = do
             creds <- loadPlayCreds >>= maybe (bad "Google Play credentials not configured.") pure
             completeTrackRollout creds storeId vc
                 >>= either (\e -> bad ("Play complete failed: " <> renderPlayErr e)) pure
-    setRolloutState rid "completed" (Just 100)
-    setMobileWfStatus rid MBCompleted
+    now <- liftIO getCurrentTime
+    setPhase now rid Live
     -- Reflect "fully live" on the App Monitor immediately (clears the review overlay).
     mirrorProdReleased ac row target
     logEvent rid "ROLLOUT_RELEASED_ALL" (object ["actor" .= apEmail ap])
@@ -719,8 +744,7 @@ markApprovedH ap rid = do
     unless (rtEnv row == "android") $ bad "mark-approved is Android-only (iOS approval is auto-detected)."
     ensureInReview (mbWfStatus target)
     now <- liftIO getCurrentTime
-    setReviewDecided rid "approved" now Nothing
-    setMobileWfStatus rid MBReviewApproved
+    setPhase now rid Approved
     mirrorProdReview ac row (Just "approved")
     logEvent rid "REVIEW_APPROVED" (object ["store" .= ("play" :: Text), "manual" .= True, "actor" .= apEmail ap])
     pure Success
@@ -736,8 +760,7 @@ markRejectedH ap rid MarkRejectedReq{..} = do
     when (T.null (T.strip mrReason)) $ bad "Rejection reason is required."
     ensureInReview (mbWfStatus target)
     now <- liftIO getCurrentTime
-    setReviewDecided rid "rejected" now (Just mrReason)
-    setMobileWfStatus rid MBReviewRejected
+    setPhase now rid (Rejected mrReason)
     mirrorProdReview ac row (Just "rejected")
     logEvent rid "REVIEW_REJECTED" (object ["reason" .= mrReason, "manual" .= True, "actor" .= apEmail ap])
     pure Success
@@ -761,8 +784,7 @@ withdrawH ap rid = do
     cancelReviewSubmission creds bundleId
         >>= either (\e -> bad ("App Store withdraw failed: " <> renderAscErr e)) pure
     now <- liftIO getCurrentTime
-    setReviewDecided rid "withdrawn" now Nothing
-    setMobileWfStatus rid MBAborted
+    setPhase now rid Aborted
     -- Review cancelled → clear the monitor's review overlay immediately.
     mirrorProdReview ac row Nothing
     logEvent rid "REVIEW_WITHDRAWN" (object ["store" .= ("asc" :: Text), "actor" .= apEmail ap])
@@ -965,6 +987,14 @@ retireOlderIncomingFor row = do
     ids <- retireOlderIncoming (rtAppGroup row) (rtService row) (rtEnv row) (rtId row)
     forM_ ids $ \i ->
         logEvent i "INCOMING_SUPERSEDED" (object ["by_version" .= rtNewVersion row])
+
+-- | Rule C: @row@ is being promoted, so retire any OLDER held-on-internal build of
+-- this app to history — a lower code can no longer reach production.
+retireOlderHeldInternalFor :: ReleaseTrackerRow -> Flow ()
+retireOlderHeldInternalFor row = do
+    ids <- retireOlderHeldInternal (rtAppGroup row) (rtService row) (rtEnv row) (rtId row) (rtVersionCode row)
+    forM_ ids $ \i ->
+        logEvent i "HELD_SUPERSEDED" (object ["by_version" .= rtNewVersion row])
 
 -- | The Android version code as text (required to address the production release).
 versionCodeText :: MobileBuildTargetState -> Flow Text

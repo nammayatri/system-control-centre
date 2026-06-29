@@ -9,6 +9,7 @@ import {
   useChangelogPreviews,
 } from '../../hooks';
 import { StoreSyncBanner } from '../../components/StoreSync';
+import { formatBuildCode } from '../../utils';
 import type { ChangelogApp } from '../../hooks';
 import type {
   AppCatalogEntry,
@@ -80,7 +81,7 @@ const LatestBuildBadge = ({ build, label, platform }: { build: LatestBuild; labe
       <span className="uppercase">{display}</span>
       <span className="font-mono">v{build.version}</span>
       {build.versionCode != null && (
-        <span className="text-[9px] opacity-70">+{build.versionCode}</span>
+        <span className="text-[9px] opacity-70">{formatBuildCode(build.versionCode)}</span>
       )}
       {build.completedAt && (
         <span className="opacity-60">{formatShort(build.completedAt)}</span>

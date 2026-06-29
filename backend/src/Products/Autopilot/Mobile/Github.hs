@@ -30,6 +30,7 @@ module Products.Autopilot.Mobile.Github (
     -- * Response shapes
     WorkflowRun (..),
     WorkflowRunsResp (..),
+    dispatchRunCandidates,
     Job (..),
     JobsResp (..),
 
@@ -79,11 +80,13 @@ import Data.Aeson (
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
+import Data.List (sortOn)
 import Data.Maybe (fromMaybe)
+import Data.Ord (Down (..))
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Time.Clock (UTCTime)
+import Data.Time.Clock (UTCTime, addUTCTime)
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Github.Auth (GhAppCreds, getInstallationToken)
 
@@ -142,6 +145,16 @@ newtype WorkflowRunsResp = WorkflowRunsResp {wrrRuns :: [WorkflowRun]}
 instance FromJSON WorkflowRunsResp where
     parseJSON = withObject "WorkflowRunsResp" $ \o ->
         WorkflowRunsResp <$> o .: "workflow_runs"
+
+-- | Candidate runs for a dispatch: @workflow_dispatch@ runs created within
+-- [dispatchedAt - 30s, dispatchedAt + 5m], newest first. Shared by ResolveRunId and
+-- the abort-cancel path so both match the dispatched run with one window.
+dispatchRunCandidates :: UTCTime -> [WorkflowRun] -> [WorkflowRun]
+dispatchRunCandidates dispatchedAt = sortOn (Down . wrCreatedAt) . filter inWindow
+  where
+    lo = addUTCTime (-30) dispatchedAt
+    hi = addUTCTime 300 dispatchedAt
+    inWindow r = wrEvent r == "workflow_dispatch" && wrCreatedAt r >= lo && wrCreatedAt r <= hi
 
 -- | One row from @\/actions\/runs\/{run_id}\/jobs@.
 data Job = Job

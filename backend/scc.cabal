@@ -63,6 +63,8 @@ library
       Products.Autopilot.K8s.VirtualService
       Products.Autopilot.Mobile.Types
       Products.Autopilot.Mobile.Types.Storage
+      Products.Autopilot.Mobile.Lifecycle.BuildKind
+      Products.Autopilot.Mobile.Lifecycle.Phase
       Products.Autopilot.Mobile.Queries.AppCatalog
       Products.Autopilot.Mobile.Queries.Tracker
       Products.Autopilot.Mobile.Queries.StoreStatus
