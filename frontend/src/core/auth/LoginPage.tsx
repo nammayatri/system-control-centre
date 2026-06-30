@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import { Eye, EyeOff } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import nyLogo from '../../assets/ny-logo.svg';
+import nyIcon from '../../assets/ny-icon.svg';
 import { apiClient } from '../../lib/api-client';
 
 const LoginPage: React.FC = () => {
@@ -18,6 +18,7 @@ const LoginPage: React.FC = () => {
 
   const [showReset, setShowReset] = useState(false);
   const [resetEmail, setResetEmail] = useState('');
+  const [pomeriumEmail, setPomeriumEmail] = useState<string | null>(null);
   const [resetPassword, setResetPassword] = useState('');
   const [resetConfirm, setResetConfirm] = useState('');
   const [showResetPassword, setShowResetPassword] = useState(false);
@@ -28,6 +29,10 @@ const LoginPage: React.FC = () => {
   const handleReset = async (e: React.FormEvent) => {
     e.preventDefault();
     setResetError('');
+    if (pomeriumEmail && resetEmail.trim().toLowerCase() !== pomeriumEmail.trim().toLowerCase()) {
+      setResetError('You can only reset your own password');
+      return;
+    }
     if (resetPassword !== resetConfirm) {
       setResetError('Passwords do not match');
       return;
@@ -47,9 +52,24 @@ const LoginPage: React.FC = () => {
     }
   };
 
+  const handleShowReset = async (prefillEmail: string) => {
+    setShowReset(true);
+    setResetEmail(prefillEmail);
+    try {
+      const { data } = await apiClient.get('/pomerium-email');
+      if (data?.email) {
+        setPomeriumEmail(data.email);
+        setResetEmail(data.email);
+      }
+    } catch {
+
+    }
+  };
+
   const handleBackToLogin = () => {
     setShowReset(false);
     setResetEmail('');
+    setPomeriumEmail(null);
     setResetPassword('');
     setResetConfirm('');
     setResetError('');
@@ -98,7 +118,7 @@ const LoginPage: React.FC = () => {
         <div className="bg-white rounded-xl shadow-sm border border-zinc-200">
           <div className="px-6 sm:px-8 pt-7 sm:pt-8 pb-2 text-center">
             <div className="flex items-center justify-center mb-3">
-              <img src={nyLogo} alt="Logo" className="h-8 w-auto" />
+              <img src={nyIcon} alt="System Control Centre" className="h-9 w-9" />
             </div>
             <h1 className="text-base sm:text-lg font-semibold text-zinc-900">System Control Centre</h1>
             <p className="text-sm text-zinc-500 mt-1">
@@ -148,7 +168,7 @@ const LoginPage: React.FC = () => {
                     </label>
                     <button
                       type="button"
-                      onClick={() => { setShowReset(true); setResetEmail(email); }}
+                      onClick={() => handleShowReset(email)}
                       className="text-[11px] text-zinc-400 hover:text-zinc-600 transition-colors duration-150 cursor-pointer"
                     >
                       Forgot password?
@@ -233,12 +253,16 @@ const LoginPage: React.FC = () => {
                         type="email"
                         autoComplete="email"
                         value={resetEmail}
-                        onChange={(e) => setResetEmail(e.target.value)}
+                        onChange={(e) => !pomeriumEmail && setResetEmail(e.target.value)}
                         required
                         disabled={resetLoading}
+                        readOnly={!!pomeriumEmail}
                         placeholder="you@company.com"
-                        className="w-full h-10 border border-zinc-300 rounded-lg px-3 text-sm text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent disabled:bg-zinc-50 disabled:text-zinc-500 transition-shadow duration-150"
+                        className={`w-full h-10 border border-zinc-300 rounded-lg px-3 text-sm text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent disabled:bg-zinc-50 disabled:text-zinc-500 transition-shadow duration-150 ${pomeriumEmail ? 'bg-zinc-50 cursor-not-allowed text-zinc-500' : ''}`}
                       />
+                      {pomeriumEmail && (
+                        <p className="text-[11px] text-zinc-400">You can only reset your own password</p>
+                      )}
                     </div>
 
                     <div className="space-y-1.5">

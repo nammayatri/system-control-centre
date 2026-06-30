@@ -1,11 +1,14 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X, SlidersHorizontal, Server, Smartphone, Layers, Undo2, Apple } from 'lucide-react';
+import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, ChevronLeft, ChevronRight, X, SlidersHorizontal, Server, Smartphone, Layers, Undo2 } from 'lucide-react';
 import { useReleases } from '../hooks';
 import { useRefreshAnimation } from '../../../shared/hooks';
 import { ReleaseStatusBadge } from '../components/ReleaseStatusBadge';
-import { versionWithBuild } from '../versionLabel';
+import { BrandLogo } from '../components/BrandLogo';
+import { versionWithBuild } from '../utils';
 import { stageOf, lifecycleFromRelease } from '../components/mobileStage';
+import { PlatformBadge } from '../components/PlatformBadge';
+import { StoreSyncBanner } from '../components/StoreSync';
 import { ABORTED_STATUSES } from '../api';
 import { Button } from '../../../shared/ui/button';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
@@ -14,43 +17,6 @@ import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
 import type { APRelease, ReleaseStatus } from '../api';
-
-const AndroidIcon = ({ className }: { className?: string }) => (
-  <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
-    <path d="M17.6 9.48l1.84-3.18c.16-.31.04-.69-.27-.85a.637.637 0 00-.83.22l-1.88 3.24a11.463 11.463 0 00-8.92 0L5.66 5.67c-.19-.29-.58-.38-.87-.2-.28.18-.37.54-.19.83L6.4 9.48A10.78 10.78 0 003 16h18a10.78 10.78 0 00-3.4-6.52zM8.86 13a.98.98 0 110-1.96.98.98 0 010 1.96zm6.28 0a.98.98 0 110-1.96.98.98 0 010 1.96z"/>
-  </svg>
-);
-
-const PlatformBadge = ({ platform, isMobile }: { platform: string; isMobile: boolean }) => {
-  if (!isMobile) {
-    return (
-      <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-sky-700 text-white">
-        {platform}
-      </span>
-    );
-  }
-  if (platform === 'android') {
-    return (
-      <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-[#3DDC84]/15 text-[#1B8A4F] border border-[#3DDC84]/30">
-        <AndroidIcon className="w-3 h-3" />
-        Android
-      </span>
-    );
-  }
-  if (platform === 'ios') {
-    return (
-      <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-zinc-500/15 text-zinc-700 border border-zinc-400/30">
-        <Apple className="w-3 h-3" />
-        iOS
-      </span>
-    );
-  }
-  return (
-    <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-violet-600 text-white">
-      {platform}
-    </span>
-  );
-};
 
 // The store track a mobile row lives on — surfaced as a badge. Derived, not stored:
 //   • store-sync rows reflect the LIVE store track SCC reads — Android = Play
@@ -70,10 +36,21 @@ const mobileTrackBadge = (release: APRelease): { label: string; cls: string; tit
   const live = 'bg-emerald-700 text-white';   // serving real users
   const staged = 'bg-sky-600 text-white';     // built / uploaded, not live
 
+  const meta = release.metadata as
+    | { store_track?: string; rollout_status?: string; rollout_percent?: number }
+    | null
+    | undefined;
+  // A production track mid-rollout (<100%) is NOT fully live. The ReleaseStatusBadge
+  // already shows "Rolling out X%" for these rows (driven by the same reflected
+  // rollout_status), so suppress the track chip here to avoid a duplicate badge and
+  // a misleading green "Production" (which implies fully live). A completed/absent
+  // rollout falls through to the plain track badge below ("Production" at 100%).
+  if (meta?.rollout_status === 'rolling_out' || meta?.rollout_status === 'halted') return null;
+
   // Store-sync rows carry the exact track they were read from (StoreSync writes
   // metadata.store_track = production | internal | testflight). Prefer it.
-  const storeTrack = (release.metadata as { store_track?: string } | null | undefined)?.store_track;
-  if (storeTrack === 'production') return { label: 'Production', cls: live, title: 'Live on the production track' };
+  const storeTrack = meta?.store_track;
+  if (storeTrack === 'production') return { label: 'Production', cls: live, title: 'Live on the production track (fully rolled out)' };
   if (storeTrack === 'internal') return { label: 'Internal', cls: staged, title: 'Latest build on the Play internal-testing track (ahead of production, not live)' };
   if (storeTrack === 'testflight') return { label: 'TestFlight', cls: staged, title: 'Latest TestFlight build — App Store live version is not tracked' };
 
@@ -140,10 +117,12 @@ const MOBILE_STATUS_OPTIONS: { value: string; label: string }[] = [
 // active (INPROGRESS), else the terminal raw status. Mirrors what the Status
 // column shows, so filtering by a value matches the visible badge.
 function mobileStatusCategory(r: APRelease): string {
-  if (r.status === 'INPROGRESS') {
-    const s = stageOf(lifecycleFromRelease(r));
-    return s === 'none' ? 'building' : s;
-  }
+  const stage = stageOf(lifecycleFromRelease(r));
+  // A COMPLETED store-sync snapshot can be mirroring a live production rollout
+  // (rollout_status in metadata) — bucket it by the lifecycle stage so the filter
+  // matches the visible "Rolling out" badge, not the raw COMPLETED status.
+  if (stage === 'rollout') return 'rollout';
+  if (r.status === 'INPROGRESS') return stage === 'none' ? 'building' : stage;
   if (r.status === 'COMPLETED') return 'completed';
   if (r.status === 'REVERTED') return 'reverted';
   if (ABORTED_STATUSES.includes(r.status)) return 'aborted';
@@ -292,6 +271,13 @@ const ListRelease: React.FC = () => {
     });
 
     list.sort((a, b) => {
+      // Float in-flight mobile rollouts to the very top — including a production
+      // ramp store-sync only OBSERVED (mirrored onto the row via metadata), which
+      // the App Monitor shows but a Created-At sort would otherwise bury. Then
+      // apply the chosen column sort within each group.
+      const aRolling = category === 'mobile' && stageOf(lifecycleFromRelease(a)) === 'rollout' ? 0 : 1;
+      const bRolling = category === 'mobile' && stageOf(lifecycleFromRelease(b)) === 'rollout' ? 0 : 1;
+      if (aRolling !== bRolling) return aRolling - bRolling;
       let aVal = (a as any)[sortField] || '';
       let bVal = (b as any)[sortField] || '';
       if (sortDir === 'asc') return aVal > bVal ? 1 : -1;
@@ -300,6 +286,37 @@ const ListRelease: React.FC = () => {
 
     return list;
   }, [releases, debouncedSearch, statusFilter, productFilter, platformFilter, sortField, sortDir, category]);
+
+  // Among an app's builds pending promotion (stage 'promote' — internal / TestFlight),
+  // only the LATEST by (version name, build code) is actually the one to promote; older
+  // internal builds a newer one has overtaken are stale. Collect those non-latest ids so
+  // the badge reads "Superseded" for them and "Ready to promote" only on the latest.
+  const supersededPromoteIds = useMemo(() => {
+    const cmp = (a: typeof filteredReleases[number], b: typeof filteredReleases[number]): number => {
+      const pa = (a.new_version || '').split('.').map(n => parseInt(n, 10) || 0);
+      const pb = (b.new_version || '').split('.').map(n => parseInt(n, 10) || 0);
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+        if (d !== 0) return d;
+      }
+      return (a.release_context?.version_code ?? -1) - (b.release_context?.version_code ?? -1);
+    };
+    const byApp = new Map<string, typeof filteredReleases>();
+    for (const r of filteredReleases) {
+      if (r.tracker_type !== 'MobileBuild') continue;
+      if (stageOf(lifecycleFromRelease(r)) !== 'promote') continue;
+      const key = `${r.appGroup}|${r.service}|${r.env}`;
+      const arr = byApp.get(key);
+      if (arr) arr.push(r); else byApp.set(key, [r]);
+    }
+    const superseded = new Set<string>();
+    for (const rows of byApp.values()) {
+      if (rows.length < 2) continue;
+      const latest = rows.reduce((a, b) => (cmp(a, b) >= 0 ? a : b));
+      for (const r of rows) if (r.id !== latest.id) superseded.add(r.id);
+    }
+    return superseded;
+  }, [filteredReleases]);
 
   const totalPages = Math.ceil(filteredReleases.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
@@ -364,6 +381,8 @@ const ListRelease: React.FC = () => {
           </button>
         ))}
       </div>
+
+      {category === 'mobile' && <StoreSyncBanner className="mb-4 sm:mb-5" />}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-4 sm:mb-6">
         {kpiCards.map((kpi, i) => (
@@ -631,12 +650,25 @@ const ListRelease: React.FC = () => {
                             {isMobile ? 'Mobile' : 'Backend'}
                           </span>
                         </td>
-                        <td className="py-3 px-4 text-xs text-zinc-600">{release.appGroup}</td>
+                        <td className="py-3 px-4 text-xs text-zinc-600">
+                          {isMobile ? (
+                            <span className="inline-flex items-center gap-2">
+                              <BrandLogo
+                                brand={release.appGroup}
+                                surface={release.service === 'driver' || release.service === 'provider' ? 'driver' : undefined}
+                                size="sm"
+                              />
+                              {release.appGroup}
+                            </span>
+                          ) : (
+                            release.appGroup
+                          )}
+                        </td>
                         <td className="py-3 px-4 font-medium text-zinc-800">{release.service}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">{versionWithBuild(release)}</td>
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <ReleaseStatusBadge release={release} />
+                            <ReleaseStatusBadge release={release} suppressPromote={supersededPromoteIds.has(release.id)} />
                             {release.env && (
                               <PlatformBadge platform={release.env} isMobile={isMobile} />
                             )}
@@ -781,8 +813,15 @@ const ListRelease: React.FC = () => {
                             {isMobile ? 'Mobile' : 'Backend'}
                           </span>
                         </div>
-                        <div className="text-sm font-medium text-zinc-900 truncate">
-                          {isMobile ? release.appGroup : release.service}
+                        <div className="flex items-center gap-2 text-sm font-medium text-zinc-900">
+                          {isMobile && (
+                            <BrandLogo
+                              brand={release.appGroup}
+                              surface={release.service === 'driver' || release.service === 'provider' ? 'driver' : undefined}
+                              size="sm"
+                            />
+                          )}
+                          <span className="truncate">{isMobile ? release.appGroup : release.service}</span>
                         </div>
                         <div className="text-xs text-zinc-500 mt-0.5 truncate flex items-center gap-1.5">
                           {isMobile ? (
@@ -826,7 +865,7 @@ const ListRelease: React.FC = () => {
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5 flex-wrap mb-2">
-                      <ReleaseStatusBadge release={release} />
+                      <ReleaseStatusBadge release={release} suppressPromote={supersededPromoteIds.has(release.id)} />
                       {/* For mobile rows the platform is already shown inline above; skip the badge to avoid duplicating it. */}
                       {release.env && !isMobile && (
                         <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-sky-700 text-white">

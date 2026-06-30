@@ -90,7 +90,9 @@ import Database.Beam.Postgres.Full (anyConflict, insertReturning, onConflict, on
 import Database.PostgreSQL.Simple (Only (..), execute, execute_, query, withTransaction)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
 import Debug.Trace qualified as DT
-import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..), MobileBuildWFStatus (..))
+import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind, claimsStoreIdentity)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), displayStatus, phaseFromFields, phaseSlug, variantSlug)
+import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), MobileBuildWFStatus (..), isFailedMBTerminal, releasesIdentitySlot)
 import Products.Autopilot.Types
 import Products.Autopilot.Types qualified as NT
 import Products.Autopilot.Types.Storage.Schema
@@ -709,6 +711,15 @@ toRow createdAt updatedAt ReleaseTracker {..} mts =
       rtStoreRolloutHistory = Nothing,
       rtAscVersionId = Nothing,
       rtAscPhasedId = Nothing,
+      rtStoreTrack = Nothing,
+      -- Identity: a store build holds its (version, code) slot unless it aborted/failed
+      -- before uploading an artifact ('releasesIdentitySlot') — only then NULL the column
+      -- to free it for a rebuild. A built-then-aborted build keeps its slot (it's on the store).
+      rtVersionCode = case mts of
+        Just (MobileBuildState s)
+          | claimsStoreIdentity (mbContext s) && not (releasesIdentitySlot s) ->
+              mbcVersionCode (mbContext s)
+        _ -> Nothing,
       rtCreatedAt = createdAt,
       rtUpdatedAt = updatedAt
     }
@@ -731,7 +742,9 @@ fromRow ReleaseTrackerT {..} =
         -- rolling-out) without an extra /rollout call. The bare-tag rendering
         -- matches the rollout endpoint's rdMbStatus (tshow (mbWfStatus …)).
         Just (MobileBuildState mb) ->
-          Just (addMbStatus (T.pack (show (mbWfStatus mb))) (toJSON (mbContext mb)))
+          let ph = phaseFromFields (buildKind (mbContext mb)) (mbWfStatus mb) rtReviewStatus rtRolloutStatus rtRolloutPercent rtStoreTrack
+              disp = displayStatus ph
+           in Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent rtStoreTrack (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) (toJSON (mbContext mb)))
         _ -> Nothing
       tracker =
         ReleaseTracker
@@ -775,11 +788,29 @@ fromRow ReleaseTrackerT {..} =
           }
    in (tracker, mTargetState)
 
--- | Inject @mb_wf_status@ into the flattened mbContext JSON object so the FE can
--- read the lifecycle stage off a list row. No-op if the value isn't an object.
-addMbStatus :: Text -> Value -> Value
-addMbStatus st (Object o) = Object (KM.insert "mb_wf_status" (toJSON st) o)
-addMbStatus _ v = v
+-- | Inject the mobile lifecycle fields the FE derives a list row's stage from —
+-- @mb_wf_status@ (one level up in MobileBuildState) plus the authoritative
+-- @rollout_status@ / @rollout_percent@ COLUMNS — into the flattened mbContext JSON.
+-- This lets the releases list/detail read the live rollout % straight off the row
+-- (the same source the rollout endpoint uses), instead of a stale metadata mirror.
+-- No-op if the value isn't an object.
+addMobileLifecycle :: Text -> Maybe Text -> Maybe Double -> Maybe Text -> Text -> Text -> Text -> Value -> Value
+addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack dispLabel dispVariant dispPhase (Object o) =
+  Object
+    . KM.insert "mb_wf_status" (toJSON st)
+    . KM.insert "rollout_status" (toJSON mRolloutStatus)
+    . KM.insert "rollout_percent" (toJSON mRolloutPct)
+    -- Authoritative track column (migration 0034) — the FE prefers this over the
+    -- metadata mirror, so a converged in-review row reads "production", not a stale
+    -- "internal" left in metadata.
+    . KM.insert "store_track" (toJSON mStoreTrack)
+    -- Canonical backend displayStatus (label/variant) + machine phase tag, so the
+    -- list renders the badge without re-deriving it.
+    . KM.insert "display_label" (toJSON dispLabel)
+    . KM.insert "display_variant" (toJSON dispVariant)
+    . KM.insert "display_phase" (toJSON dispPhase)
+    $ o
+addMobileLifecycle _ _ _ _ _ _ _ v = v
 
 parseReleaseCategory :: Text -> ReleaseCategory
 parseReleaseCategory t =

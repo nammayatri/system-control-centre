@@ -50,6 +50,7 @@ import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
 import Control.Monad.State.Strict (gets, modify)
+import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Reader (runReaderT)
 import Control.Monad.Trans.State.Strict (runStateT)
 import Core.DB.Connection (withConn)
@@ -79,6 +80,7 @@ import Products.Autopilot.Mobile.Github (
     Job (..),
     WorkflowDispatchReq (..),
     WorkflowRun (..),
+    dispatchRunCandidates,
     dispatchWorkflow,
     listJobs,
     listTags,
@@ -94,8 +96,9 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     logEvent,
     markReleaseRevertedBy,
     setExternalRunIdForDispatch,
-    setReviewDecided,
+    setPhase,
  )
+import Products.Autopilot.Mobile.Lifecycle.Phase (ReleasePhase (..))
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
@@ -111,10 +114,12 @@ import Products.Autopilot.Mobile.Versioning (
 import Products.Autopilot.Mobile.Versioning.Apple (
     AscReviewState (..),
     getAscReviewState,
-    loadAscCreds,
+    loadAscCredsFor,
     renderAscErr,
  )
+import Products.Autopilot.Notifications (sendMobileChangelogSlack)
 import Products.Autopilot.RuntimeConfig (
+    getMobileSlackChannel,
     getMobileTagConfirmTimeoutMinutes,
     getReviewPollIntervalSeconds,
     getReviewPollTimeoutDays,
@@ -197,10 +202,11 @@ stageResolveRunId =
         { stageGuard = hasExternalRunId
         }
 
--- | Stage 5 — poll @\/runs/:id\/jobs@; track this row's matrix job.
--- Skip once the build is submitted (MBSubmittedToStore) — its job is done by then.
--- Guarding on terminal alone would re-poll forever for a staged-rollout-held release
--- (parked non-terminal at MBTagPushed), spamming MATRIX_JOB_UPDATED + GitHub calls.
+{- | Stage 5 — poll @\/runs/:id\/jobs@; track this row's matrix job.
+Skip once the build is submitted (MBSubmittedToStore) — its job is done by then.
+Guarding on terminal alone would re-poll forever for a staged-rollout-held release
+(parked non-terminal at MBTagPushed), spamming MATRIX_JOB_UPDATED + GitHub calls.
+-}
 stagePollMatrixJobs =
     (mkStage "PollMatrixJobs" execPollMatrixJobs)
         { stageGuard = mbStatusReached MBSubmittedToStore
@@ -358,6 +364,9 @@ execResolveVersion = mobileStage "ResolveVersion" $ do
         isDebug = case mobileTarget rs of
             Just target -> isDebugBuildType (mbcBuildType (mbContext target))
             Nothing -> False
+        isFirebase = case mobileTarget rs of
+            Just target -> mbcDestination (mbContext target) == Just "Firebase"
+            Nothing -> False
     if isDebug
         then do
             logInfoIO $
@@ -372,6 +381,35 @@ execResolveVersion = mobileStage "ResolveVersion" $ do
             logEvent (releaseId rt) "VERSION_RESOLVED" $
                 object ["source" .= ("debug_skip" :: T.Text)]
             pure StageSuccess
+        else if isFirebase
+        then do
+            -- Firebase App Distribution builds never publish to Play, so a Play-resolved
+            -- version just REPEATS (Firebase doesn't advance Play's code). The unique
+            -- timestamp version (year.MMDD.HHMM) is stamped at CREATE (buildRow) so it's
+            -- visible immediately; here we KEEP that value (don't regenerate, so the row's
+            -- version never shifts under the operator) and only synthesize one as a
+            -- fallback for older rows created before create-time stamping. version_code
+            -- stays Nothing — the provider workflow computes its own.
+            now <- liftIO getCurrentTime
+            let existing = newVersion rt
+                ver =
+                    if T.null existing
+                        then T.pack (formatTime defaultTimeLocale "%Y.%-m%d.%H%M" now)
+                        else existing
+            logInfoIO $
+                "[ResolveVersion] " <> releaseId rt <> " Firebase build, version " <> ver
+            modify $ \s ->
+                let rt' = (releaseTracker s){newVersion = ver}
+                    ts' =
+                        applyMobileTarget s $ \mt ->
+                            mt
+                                { mbContext = (mbContext mt){mbcVersionCode = Nothing}
+                                , mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
+                                }
+                 in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
+            logEvent (releaseId rt) "VERSION_RESOLVED" $
+                object ["version_name" .= ver, "source" .= ("firebase_auto" :: T.Text)]
+            pure StageSuccess
         else do
             ac <- appCatalogForRow rt
             pkgName <- case acPackageName ac of
@@ -381,7 +419,7 @@ execResolveVersion = mobileStage "ResolveVersion" $ do
                         "AppCatalog row for "
                             <> appGroup rt
                             <> " has no package_name; cannot resolve next version"
-            res <- resolveNextVersion (acPlatform ac) pkgName
+            res <- resolveNextVersion (acStoreAccount ac) (acPlatform ac) pkgName
             case res of
                 Left err
                     | isConfigError err -> abort err
@@ -657,7 +695,28 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                     , "version_code" .= versionCode
                     ]
             pure StageSuccess
-        Left e -> retry ("dispatchWorkflow failed: " <> e)
+        -- A 4xx from GitHub means the request itself is rejected — unknown/extra
+        -- inputs (422, e.g. the dispatched ref's workflow declares a different input
+        -- schema), workflow or ref not found (404), malformed body (400). These NEVER
+        -- succeed on retry, so retrying just hangs the build at MBVersionResolved
+        -- forever (the symptom that motivated this branch). Abort to MBFailed with
+        -- GitHub's message surfaced so the operator sees the real cause immediately;
+        -- only genuinely transient failures (5xx / network) keep retrying.
+        Left e
+            | isPermanentDispatchError e -> abort ("workflow_dispatch rejected by GitHub (check the workflow inputs / source ref): " <> e)
+            | otherwise -> retry ("dispatchWorkflow failed: " <> e)
+
+-- | A 'dispatchWorkflow' error that will never succeed on retry — GitHub rejected
+-- the request, not a transient hiccup. Matched on the rendered HTTP error string.
+isPermanentDispatchError :: Text -> Bool
+isPermanentDispatchError e =
+    any
+        (`T.isInfixOf` e)
+        [ "HTTP 422"
+        , "HTTP 404"
+        , "HTTP 400"
+        , "Unexpected inputs"
+        ]
 
 {- | Stage 4: Resolve @external_run_id@ by polling GH for a recently-
 created @workflow_dispatch@ run.
@@ -723,13 +782,7 @@ execResolveRunId = do
                 Left e -> retry ("listWorkflowRuns failed: " <> e)
             now <- liftIO getCurrentTime
             let dispatchedAt = fromMaybe now (mbBuildStartedAt target)
-                lo = addUTCTime (-30) dispatchedAt
-                hi = addUTCTime 300 dispatchedAt
-                inWindow r =
-                    wrEvent r == "workflow_dispatch"
-                        && wrCreatedAt r >= lo
-                        && wrCreatedAt r <= hi
-                candidates = sortOn (Down . wrCreatedAt) (filter inWindow allRuns)
+                candidates = dispatchRunCandidates dispatchedAt allRuns
             case candidates of
                 (r : _) -> do
                     let runIdT = T.pack (show (wrId r))
@@ -1000,6 +1053,45 @@ reviewPollDue now mLastPolled intervalSec =
         Nothing -> True
         Just t -> diffUTCTime now t >= fromIntegral intervalSec
 
+{- | After a build is confirmed built+tagged (ConfirmTag → MBTagPushed), post the
+release changelog to the mobile Slack channel — but ONLY for releases that opted
+in at create time (the "Send changelog summary to Slack" tickbox).
+
+The opt-in + body live in @mbcChangelogSummary@ on the build context
+('release_context'), read straight off @target@: @Just body@ = opted in (send
+@body@; if blank, fall back to the typed changelog @mbcChangeLog@); 'Nothing' =
+not opted in (skip). Storing it in @release_context@ — not the shared @metadata@
+column — is what makes it reliable: store-sync / rollout passes overwrite
+@metadata@ between create and ConfirmTag, but never touch @release_context@.
+
+@mobile_slack_channel@ is the destination (not the gate). Exactly-once is
+provided by the ConfirmTag stage guard (skipped once MBTagPushed is reached).
+Best-effort: a Slack failure is logged, never aborts the stage.
+-}
+maybeSendChangelogSlack :: ReleaseTracker -> MobileBuildTargetState -> StateFlow ()
+maybeSendChangelogSlack rt target =
+    case mbcChangelogSummary (mbContext target) of
+        Nothing -> pure () -- this release did not opt in
+        Just bodyRaw -> do
+            mCh <- getMobileSlackChannel
+            case mCh of
+                Nothing ->
+                    logInfoIO $
+                        "[ConfirmTag] "
+                            <> releaseId rt
+                            <> " opted into changelog Slack but mobile_slack_channel is not set — skipping"
+                Just ch -> do
+                    let body = if T.null (T.strip bodyRaw) then mbcChangeLog (mbContext target) else bodyRaw
+                        versionLabel = "v" <> newVersion rt
+                    ok <- lift (sendMobileChangelogSlack ch (appGroup rt) (service rt) versionLabel body)
+                    if ok
+                        then
+                            logEvent (releaseId rt) "CHANGELOG_SLACK_SENT" $
+                                object ["channel" .= ch, "version" .= newVersion rt]
+                        else
+                            logInfoIO $
+                                "[ConfirmTag] " <> releaseId rt <> " changelog Slack send failed (see [SLACK] logs)"
+
 execConfirmTag :: forall m. (StageM ReleaseState m) => m StageOutcome
 execConfirmTag = mobileStage "ConfirmTag" $ do
     rs <- gets id
@@ -1028,6 +1120,9 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                     }
             logEvent (releaseId rt) "TAG_OBSERVED" $
                 object ["tag" .= ("debug-no-tag" :: Text), "source" .= ("debug_skip" :: Text)]
+            -- Debug builds: only posts if mobile_slack_channel is set; body falls
+            -- back to mbcChangeLog (debug create has no rich summary).
+            maybeSendChangelogSlack rt target
             pure StageSuccess
         else do
             ac <- appCatalogForRow rt
@@ -1116,6 +1211,10 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                             <> releaseId rt
                             <> " bound to tag="
                             <> tagName
+                    -- Build is fully successful and tagged: post the changelog to
+                    -- Slack if this release opted in. Exactly-once via the
+                    -- ConfirmTag stage guard (skipped once MBTagPushed is reached).
+                    maybeSendChangelogSlack rt target
                     pure StageSuccess
 
 {- | Stage 7: Map fine-grained @MobileBuildWFStatus@ to the user-facing
@@ -1129,6 +1228,7 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
 * anything else               → no-op (engine should not have called
   Finalize before a terminal mb status; defensive).
 -}
+
 {- | Stage 6.5: bounded, throttled poll of the store review state. Runs only when
 @mbWfStatus == MBInReview@. iOS advances to MBReviewApproved / MBReviewRejected via
 'getAscReviewState'; Android review is opaque, so the stage waits for the operator's
@@ -1162,7 +1262,7 @@ execPollReview = mobileStage "PollReview" $ do
                                 [ "message" .= ("App Store review pending beyond the soft timeout — check App Store Connect" :: Text)
                                 , "timeout_days" .= timeoutDays
                                 ]
-                    mCreds <- loadAscCreds
+                    mCreds <- loadAscCredsFor (acStoreAccount ac)
                     case mCreds of
                         Nothing -> do
                             logInfoIO $ "[PollReview] " <> releaseId rt <> " ASC creds missing; will retry"
@@ -1176,7 +1276,7 @@ execPollReview = mobileStage "PollReview" $ do
                                     logInfoIO $ "[PollReview] " <> releaseId rt <> " poll error (retry): " <> renderAscErr e
                                     pure StageWaiting
                                 Right AscApproved -> do
-                                    setReviewDecided (releaseId rt) "approved" now Nothing
+                                    setPhase now (releaseId rt) Approved
                                     advanceTo now MBReviewApproved
                                     logEvent (releaseId rt) "REVIEW_APPROVED" $ object ["store" .= ("asc" :: Text)]
                                     pure StageSuccess
@@ -1185,12 +1285,12 @@ execPollReview = mobileStage "PollReview" $ do
                                     -- review). Record the approval + advance so the poll stops; the
                                     -- Phase-7 rollout reconciler then adopts the live state
                                     -- (rolling_out for a phased release, else completed).
-                                    setReviewDecided (releaseId rt) "approved" now Nothing
+                                    setPhase now (releaseId rt) Approved
                                     advanceTo now MBReviewApproved
                                     logEvent (releaseId rt) "REVIEW_APPROVED" $ object ["store" .= ("asc" :: Text), "already_live" .= True]
                                     pure StageSuccess
                                 Right (AscRejected reason) -> do
-                                    setReviewDecided (releaseId rt) "rejected" now (Just reason)
+                                    setPhase now (releaseId rt) (Rejected reason)
                                     advanceTo now MBReviewRejected
                                     logEvent (releaseId rt) "REVIEW_REJECTED" $ object ["reason" .= reason]
                                     pure StageSuccess
@@ -1401,6 +1501,7 @@ applyMobileTarget rs f =
                             , mbcOtaNamespace = Nothing
                             , mbcTagPushed = Nothing
                             , mbcDestination = Nothing
+                            , mbcChangelogSummary = Nothing
                             }
                     , mbExternalRunId = Nothing
                     , mbMatrixJobStatus = Nothing

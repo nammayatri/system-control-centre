@@ -26,9 +26,9 @@ export type AppCatalogEntry = {
   createdAt: string;
   latestReleaseBuild?: LatestBuild | null;
   latestDebugBuild?: LatestBuild | null;
-  // Per-track latest builds (from store-sync metadata.tracks). Drive the
-  // create-page prod/internal badges + changelog base toggle. `track` on each
-  // is 'production' | 'internal' (iOS internal == TestFlight).
+  // Per-track latest builds (from the store_status cache — same source as the
+  // App Monitor). Drive the create-page prod/internal badges + changelog base
+  // toggle. `track` on each is 'production' | 'internal' (iOS internal == TestFlight).
   latestProdBuild?: LatestBuild | null;
   latestInternalBuild?: LatestBuild | null;
 };
@@ -46,6 +46,12 @@ export type CreateMobileReleasesItem = {
   appCatalogId: number;
   versionName: string | null;
   versionCode: number | null;
+  // when true, post the changelog to the mobile Slack channel after the build
+  // succeeds and its git tag is confirmed (backend ConfirmTag stage)
+  sendChangelogSlack?: boolean;
+  // changelog summary captured on the create page; backend falls back to
+  // the request-level changeLog when omitted
+  changelogSummary?: string;
 };
 
 // Store destination for provider (driver) PROD Android builds — mirrors the

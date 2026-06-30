@@ -10,8 +10,10 @@ import {
 import { Badge } from '../../../shared/ui/badge';
 import { cn } from '../../../lib/utils';
 import type { PlatformBlock, TrackCell } from '../api';
-import { deriveStoreBadge, formatRolloutPercent, activeRolloutOf } from './storeBadge';
+import { deriveStoreBadge, activeRolloutOf, type TrackKind } from './storeBadge';
+import { formatBuildCode, formatRolloutPercent } from '../utils';
 import { RolloutBar } from './RolloutBar';
+import { BrandLogo } from './BrandLogo';
 
 type PlatformName = 'android' | 'ios';
 
@@ -21,6 +23,8 @@ interface AppTrackModalProps {
   appLabel: string;
   /** "Consumer" | "Driver" — shown in the header subtitle. */
   surface?: string;
+  /** Surface key for picking the per-surface app logo (driver gets its own icon). */
+  surfaceKey?: 'consumer' | 'driver';
   platform: PlatformName;
   block: PlatformBlock;
 }
@@ -41,8 +45,8 @@ function PlatformIcon({ platform }: { platform: PlatformName }) {
     : <Cpu className="w-4 h-4 text-emerald-600" />;
 }
 
-function TrackBody({ cell }: { cell: TrackCell | null }) {
-  const badge = deriveStoreBadge(cell);
+function TrackBody({ cell, track }: { cell: TrackCell | null; track: TrackKind }) {
+  const badge = deriveStoreBadge(cell, track);
   const ar = activeRolloutOf(cell);
 
   return (
@@ -53,7 +57,7 @@ function TrackBody({ cell }: { cell: TrackCell | null }) {
           <div className="font-mono text-sm text-zinc-900">
             {cell?.version ?? '—'}
             {cell?.buildCode != null && (
-              <span className="text-zinc-400 ml-1">+{cell.buildCode}</span>
+              <span className="text-zinc-400 ml-1">{formatBuildCode(cell.buildCode)}</span>
             )}
           </div>
         </div>
@@ -104,9 +108,10 @@ function TrackBody({ cell }: { cell: TrackCell | null }) {
  * switch between Production and the platform's secondary track (TestFlight on
  * iOS, Internal Testing on Android).
  */
-export function AppTrackModal({ open, onClose, appLabel, surface, platform, block }: AppTrackModalProps) {
+export function AppTrackModal({ open, onClose, appLabel, surface, surfaceKey, platform, block }: AppTrackModalProps) {
   const [tab, setTab] = useState<TabKey>('production');
   const cell = tab === 'production' ? block.production : secondaryCell(platform, block);
+  const track: TrackKind = tab === 'production' ? 'production' : platform === 'ios' ? 'testflight' : 'internal';
 
   const tabs: { key: TabKey; label: string }[] = [
     { key: 'production', label: 'Production' },
@@ -118,6 +123,7 @@ export function AppTrackModal({ open, onClose, appLabel, surface, platform, bloc
       <DialogContent size="lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
+            <BrandLogo brand={appLabel} surface={surfaceKey} size="md" />
             <PlatformIcon platform={platform} />
             {appLabel}
           </DialogTitle>
@@ -159,7 +165,7 @@ export function AppTrackModal({ open, onClose, appLabel, surface, platform, bloc
             ))}
           </div>
 
-          <TrackBody cell={cell} />
+          <TrackBody cell={cell} track={track} />
         </DialogBody>
       </DialogContent>
     </Dialog>

@@ -27,6 +27,7 @@ import Data.Text (Text)
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Queries.AppCatalog
+import Products.Autopilot.Mobile.Queries.StoreStatus (listStoreStatus)
 import Products.Autopilot.Mobile.Types.Storage
 
 data LatestBuildResp = LatestBuildResp
@@ -59,8 +60,8 @@ data AppCatalogEntryResp = AppCatalogEntryResp
     , latestReleaseBuild :: Maybe LatestBuildResp
     , latestDebugBuild :: Maybe LatestBuildResp
     , latestProdBuild :: Maybe LatestBuildResp
-    -- ^ latest production-track build (from the store-sync @metadata.tracks@);
-    -- the default changelog base.
+    -- ^ latest production-track build (from the @store_status@ cache); the default
+    -- changelog base.
     , latestInternalBuild :: Maybe LatestBuildResp
     -- ^ latest internal-track build (Android internal testing / iOS TestFlight).
     }
@@ -112,30 +113,32 @@ toBuildResp b =
         , track = lbrStoreTrack b
         }
 
--- | Project one @metadata.tracks@ snapshot into a build response. @completedAt@ is
--- the leading store-sync row's timestamp (the snapshot has no own timestamp).
-toTrackResp :: UTCTime -> Text -> TrackSnapshot -> LatestBuildResp
-toTrackResp completed trk ts =
-    LatestBuildResp
-        { version = tsVersion ts
-        , versionCode = tsCode ts
-        , tagPushed = tsTag ts
-        , commitSha = Nothing
-        , completedAt = completed
-        , track = Just trk
-        }
+-- | Project a @store_status@ cell — the canonical per-track cache the App Monitor
+-- reads — into a build response. The single source for the live prod/internal build,
+-- shared by the create page, the monitor, and the changelog base.
+toStoreStatusResp :: StoreStatus -> Maybe LatestBuildResp
+toStoreStatusResp ss = do
+    v <- ssVersionName ss
+    pure
+        LatestBuildResp
+            { version = v
+            , versionCode = ssVersionCode ss
+            , tagPushed = Nothing
+            , commitSha = Nothing
+            , completedAt = ssSyncedAt ss
+            , track = Just (ssTrack ss)
+            }
 
--- | Build-map-aware projection from DB row to API response. The per-track
--- (production / internal) builds are derived from the leading "release" row's
--- @metadata.tracks@ snapshots.
-toResp :: Map.Map (Text, Text, Text, Text) LatestBuildRow -> AppCatalog -> AppCatalogEntryResp
-toResp buildMap r =
+-- | Projection from DB row to API response. The live per-track (production /
+-- internal) builds come from the @store_status@ cache — the SAME source the App
+-- Monitor reads — so the create page and the monitor agree by construction.
+toResp :: Map.Map (Int32, Text) StoreStatus -> Map.Map (Text, Text, Text, Text) LatestBuildRow -> AppCatalog -> AppCatalogEntryResp
+toResp storeMap buildMap r =
     let releaseRow = Map.lookup (acName r, acSurface r, acPlatform r, "release") buildMap
         debugRow = Map.lookup (acName r, acSurface r, acPlatform r, "debug") buildMap
-        trackBuild trk = do
-            rel <- releaseRow
-            ts <- Map.lookup trk (lbrTracks rel)
-            pure (toTrackResp (lbrCompletedAt rel) trk ts)
+        -- iOS internal distribution is TestFlight; Android uses the "internal" track.
+        internalTrack = if acPlatform r == "ios" then "testflight" else "internal"
+        storeBuild trk = Map.lookup (acId r, trk) storeMap >>= toStoreStatusResp
      in AppCatalogEntryResp
             { id = acId r
             , name = acName r
@@ -150,8 +153,8 @@ toResp buildMap r =
             , createdAt = acCreatedAt r
             , latestReleaseBuild = toBuildResp <$> releaseRow
             , latestDebugBuild = toBuildResp <$> debugRow
-            , latestProdBuild = trackBuild "production"
-            , latestInternalBuild = trackBuild "internal"
+            , latestProdBuild = storeBuild "production"
+            , latestInternalBuild = storeBuild internalTrack
             }
 
 -- | Simple projection without build info (for create/patch responses).
@@ -179,12 +182,14 @@ listAppsH :: AuthedPerson -> Flow [AppCatalogEntryResp]
 listAppsH _ap = do
     apps <- listAppCatalog
     builds <- fetchLatestBuildsPerApp
+    statuses <- listStoreStatus
     let buildMap =
             Map.fromList
                 [ ((lbrAppGroup b, lbrSurface b, lbrPlatform b, lbrBuildType b), b)
                 | b <- builds
                 ]
-    pure (map (toResp buildMap) apps)
+        storeMap = Map.fromList [((ssAppCatalogId s, ssTrack s), s) | s <- statuses]
+    pure (map (toResp storeMap buildMap) apps)
 
 createAppH :: AuthedPerson -> NewAppReq -> Flow AppCatalogEntryResp
 createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, workflowPath = w, packageName = pkg, displayLabel = d, firebaseProjectId = fbp, enabled = e} =

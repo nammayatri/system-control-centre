@@ -562,6 +562,8 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
                 , -- Inherit the bad release's store destination so a reverted
                   -- provider prod Android build re-targets the same place.
                   mbcDestination = badState >>= (mbcDestination . mbContext)
+                , -- A revert is system-initiated; it never opts into a changelog post.
+                  mbcChangelogSummary = Nothing
                 }
         targetState =
             MobileBuildTargetState
