@@ -21,6 +21,9 @@ module Products.Autopilot.Mobile.Queries.Tracker
     updateStoreSyncBuildCode,
     setProductionRolloutReflection,
     findExternalReviewRow,
+    findExternalReviewRowForVersion,
+    storeSyncRowExistsForVersion,
+    convergeStoreSyncRow,
     findMobileVersionRow,
     retireOlderHeldInternal,
     listIncomingMobileVersions,
@@ -421,6 +424,42 @@ findExternalReviewRow appGroup surface platform = withDb $ \db ->
           guard_ (isNothing_ (rtRolloutStatus rt))
           pure rt
 
+-- | The EXTERNAL_REVIEW row for an EXACT version (any status). The convergence
+-- target when a reviewed build goes live, so store-sync can transition it in place
+-- instead of minting a duplicate STORE_SYNC row.
+findExternalReviewRowForVersion :: (MonadFlow m) => Text -> Text -> Text -> Text -> m (Maybe ReleaseTrackerRow)
+findExternalReviewRowForVersion appGroup surface platform version = withDb $ \db ->
+  runDB db $
+    runSelectReturningOne $
+      select $
+        limit_ 1 $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtAppGroup rt ==. val_ appGroup)
+          guard_ (rtService rt ==. val_ surface)
+          guard_ (rtEnv rt ==. val_ platform)
+          guard_ (rtNewVersion rt ==. val_ version)
+          guard_ (rtMode rt ==. val_ (Just "EXTERNAL_REVIEW"))
+          pure rt
+
+-- | Whether a STORE_SYNC row already exists for this exact version. Guards the
+-- in-place external-review transition so flipping a row to STORE_SYNC can't create
+-- a second one and violate the partial unique index.
+storeSyncRowExistsForVersion :: (MonadFlow m) => Text -> Text -> Text -> Text -> m Bool
+storeSyncRowExistsForVersion appGroup surface platform version = withDb $ \db -> do
+  rows <-
+    runDB db $
+      runSelectReturningList $
+        select $
+          limit_ 1 $ do
+            rt <- all_ (releaseTrackers autopilotDb)
+            guard_ (rtAppGroup rt ==. val_ appGroup)
+            guard_ (rtService rt ==. val_ surface)
+            guard_ (rtEnv rt ==. val_ platform)
+            guard_ (rtNewVersion rt ==. val_ version)
+            guard_ (rtMode rt ==. val_ (Just "STORE_SYNC"))
+            pure (rtId rt)
+  pure (not (null rows))
+
 -- | The SINGLE mobile-build row for a version. With the version-keyed identity
 -- (migration 0034: one row per (app_group, service, env, new_version)) this is
 -- unique regardless of mode/origin — the convergence point every reconcile/merge
@@ -616,6 +655,37 @@ completeExternalReviewRow releaseId_ = withDb $ \db -> do
                       ]
                 )
                 (\rt -> rtId rt ==. val_ (rtId row))
+
+-- | Transition an external-review row into a live store-sync row IN PLACE: flip
+-- mode/status to a completed STORE_SYNC build, clear the review state, stamp the
+-- store track/version/state. Preserves date_created (only last_updated moves).
+convergeStoreSyncRow :: (MonadFlow m) => Text -> Text -> Maybe Int32 -> Text -> Text -> UTCTime -> m ()
+convergeStoreSyncRow rid track mCode encodedState meta now = withDb $ \db ->
+  runDB db $
+    runUpdate $
+      update
+        (releaseTrackers autopilotDb)
+        ( \rt ->
+            mconcat
+              [ rtMode rt <-. val_ (Just "STORE_SYNC")
+              , rtStatus rt <-. val_ "COMPLETED"
+              , rtReleaseWFStatus rt <-. val_ "COMPLETED"
+              , rtReviewStatus rt <-. val_ Nothing
+              , rtReviewSubmittedAt rt <-. val_ Nothing
+              , rtReviewDecidedAt rt <-. val_ Nothing
+              , rtReviewRejectReason rt <-. val_ Nothing
+              , rtStoreTrack rt <-. val_ (Just track)
+              , rtVersionCode rt <-. val_ mCode
+              , rtTargetState rt <-. val_ (Just encodedState)
+              , rtMetadata rt <-. val_ (Just meta)
+              , rtIsApproved rt <-. val_ (Just True)
+              , rtIsInfraApproved rt <-. val_ (Just True)
+              , rtEndTime rt <-. val_ (Just now)
+              , rtDescription rt <-. val_ (Just ("Imported from store (" <> track <> ")"))
+              , rtUpdatedAt rt <-. val_ now
+              ]
+        )
+        (\rt -> rtId rt ==. val_ rid)
 
 -- | Mobile releases in an active staged rollout (@rollout_status@ 'rolling_out'
 -- or 'halted') that are still INPROGRESS — the rows the Phase-7 reconciler keeps

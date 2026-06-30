@@ -5,6 +5,7 @@ import { useReleases, useDispatchMobileReleases } from '../../hooks';
 import { approveRelease } from '../../api';
 import { useAuth } from '../../../../core/auth/AuthContext';
 import { ReleaseStatusBadge } from '../../components/ReleaseStatusBadge';
+import { BrandLogo } from '../../components/BrandLogo';
 import { versionWithBuild } from '../../utils';
 import { Button } from '../../../../shared/ui/button';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
@@ -299,7 +300,12 @@ export default function ReleaseGroupDetail() {
                             className="rounded border-zinc-300 accent-zinc-900"
                           />
                         </td>
-                        <td className="py-3 px-4 font-medium text-zinc-800">{r.appGroup}</td>
+                        <td className="py-3 px-4 font-medium text-zinc-800">
+                          <span className="inline-flex items-center gap-2">
+                            <BrandLogo brand={r.appGroup} surface={r.service === 'driver' ? 'driver' : undefined} size="sm" />
+                            {r.appGroup}
+                          </span>
+                        </td>
                         <td className="py-3 px-4 text-xs text-zinc-600">{r.service}</td>
                         <td className="py-3 px-4">
                           <span className="inline-flex items-center gap-1.5 text-xs text-zinc-600">
@@ -346,8 +352,9 @@ export default function ReleaseGroupDetail() {
                         className="mt-1 rounded border-zinc-300 accent-zinc-900"
                       />
                       <div className="min-w-0 flex-1">
-                        <div className="text-sm font-medium text-zinc-900 truncate">
-                          {r.appGroup}
+                        <div className="flex items-center gap-2 text-sm font-medium text-zinc-900">
+                          <BrandLogo brand={r.appGroup} surface={r.service === 'driver' ? 'driver' : undefined} size="sm" />
+                          <span className="truncate">{r.appGroup}</span>
                         </div>
                         <div className="text-xs text-zinc-500 mt-0.5">
                           {r.service} ·{' '}

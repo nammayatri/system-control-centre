@@ -81,7 +81,6 @@ const backendProduct: ProductDefinition = {
   navItems: [
     { label: 'Releases',          path: '/backend/releases',          icon: 'List' },
     { label: 'Create Release',    path: '/backend/releases/new',      icon: 'Plus' },
-    { label: 'Live Releases',     path: '/backend/releases/live',     icon: 'Activity' },
     { label: 'Config Maps',       path: '/backend/configmap',         icon: 'FileText' },
     { label: 'Deployment Config', path: '/backend/deployment-config', icon: 'Layers' },
     { label: 'VS Editor',         path: '/backend/vs-editor',         icon: 'Settings' },
@@ -163,7 +162,6 @@ const mobileProduct: ProductDefinition = {
     { label: 'All Releases',   path: '/mobile/releases',      icon: 'List' },
     { label: 'Release Groups', path: '/mobile/groups',         icon: 'Layers' },
     { label: 'New Release',    path: '/mobile/releases/new',   icon: 'Plus' },
-    { label: 'Live Releases',  path: '/mobile/releases/live',  icon: 'Activity' },
     { label: 'App Release Monitor',  path: '/mobile/releases/monitor', icon: 'Gauge' },
     { label: 'Apps',           path: '/mobile/apps',           icon: 'Package',
       permission: 'MOBILE_APP_MANAGE' },

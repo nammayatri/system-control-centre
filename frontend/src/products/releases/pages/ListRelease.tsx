@@ -4,6 +4,7 @@ import { Search, Plus, RefreshCw, ChevronDown, Copy, Clipboard, Calendar, Chevro
 import { useReleases } from '../hooks';
 import { useRefreshAnimation } from '../../../shared/hooks';
 import { ReleaseStatusBadge } from '../components/ReleaseStatusBadge';
+import { BrandLogo } from '../components/BrandLogo';
 import { versionWithBuild } from '../utils';
 import { stageOf, lifecycleFromRelease } from '../components/mobileStage';
 import { PlatformBadge } from '../components/PlatformBadge';
@@ -649,7 +650,20 @@ const ListRelease: React.FC = () => {
                             {isMobile ? 'Mobile' : 'Backend'}
                           </span>
                         </td>
-                        <td className="py-3 px-4 text-xs text-zinc-600">{release.appGroup}</td>
+                        <td className="py-3 px-4 text-xs text-zinc-600">
+                          {isMobile ? (
+                            <span className="inline-flex items-center gap-2">
+                              <BrandLogo
+                                brand={release.appGroup}
+                                surface={release.service === 'driver' || release.service === 'provider' ? 'driver' : undefined}
+                                size="sm"
+                              />
+                              {release.appGroup}
+                            </span>
+                          ) : (
+                            release.appGroup
+                          )}
+                        </td>
                         <td className="py-3 px-4 font-medium text-zinc-800">{release.service}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">{versionWithBuild(release)}</td>
                         <td className="py-3 px-4">
@@ -799,8 +813,15 @@ const ListRelease: React.FC = () => {
                             {isMobile ? 'Mobile' : 'Backend'}
                           </span>
                         </div>
-                        <div className="text-sm font-medium text-zinc-900 truncate">
-                          {isMobile ? release.appGroup : release.service}
+                        <div className="flex items-center gap-2 text-sm font-medium text-zinc-900">
+                          {isMobile && (
+                            <BrandLogo
+                              brand={release.appGroup}
+                              surface={release.service === 'driver' || release.service === 'provider' ? 'driver' : undefined}
+                              size="sm"
+                            />
+                          )}
+                          <span className="truncate">{isMobile ? release.appGroup : release.service}</span>
                         </div>
                         <div className="text-xs text-zinc-500 mt-0.5 truncate flex items-center gap-1.5">
                           {isMobile ? (

@@ -6,6 +6,7 @@ import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { Button } from '../../../../shared/ui/button';
 import { formatDate } from '../../../../lib/utils';
 import type { APRelease } from '../../api';
+import { BrandLogo, normalizeBrand } from '../../components/BrandLogo';
 
 /**
  * All Release Groups — the listing page sibling to
@@ -200,7 +201,18 @@ export default function ReleaseGroupsList() {
                     </span>
                   </td>
                   <td className="py-3 px-4 text-xs text-zinc-700">
-                    {g.apps.join(', ') || '-'}
+                    {g.apps.length ? (
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                        {g.apps.map((a) => (
+                          <span key={a} className="inline-flex items-center gap-1.5">
+                            <BrandLogo brand={a} size="sm" />
+                            <span>{normalizeBrand(a) || a}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      '-'
+                    )}
                   </td>
                   <td className="py-3 px-4">
                     <div className="flex items-center gap-2">

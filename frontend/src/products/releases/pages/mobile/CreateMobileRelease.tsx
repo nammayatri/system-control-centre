@@ -28,6 +28,7 @@ import { Textarea } from '../../../../shared/ui/input';
 import { MobileChangelogAiSummary } from '../../components/MobileChangelogAiSummary';
 import { Skeleton } from '../../../../shared/ui/skeleton';
 import { CollapsibleGroup, groupAppsBySurface, useGroupCollapse } from '../../components/appGroups';
+import { BrandLogo } from '../../components/BrandLogo';
 import { cn } from '../../../../lib/utils';
 import { toast } from 'sonner';
 
@@ -536,8 +537,13 @@ export default function CreateMobileRelease() {
                                     )}
                                   >
                                     <div className="flex items-center justify-between gap-3">
-                                      <div className="text-sm font-medium text-zinc-900 truncate">
-                                        {label}
+                                      <div className="flex min-w-0 items-center gap-2">
+                                        <BrandLogo
+                                          brand={label}
+                                          surface={g.key === 'driver' ? 'driver' : undefined}
+                                          size="sm"
+                                        />
+                                        <div className="text-sm font-medium text-zinc-900 truncate">{label}</div>
                                       </div>
                                       <div className="flex items-center gap-1.5 shrink-0">
                                         {(['android', 'ios'] as const).map((plat) => {

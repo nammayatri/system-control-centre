@@ -6,6 +6,7 @@ import { Button } from '../../../shared/ui/button';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { cn } from '../../../lib/utils';
 import { formatBuildCode } from '../utils';
+import { BrandLogo } from '../components/BrandLogo';
 
 // MVP assumption: all mobile builds today come from this monorepo, so we can
 // hardcode the GH owner/repo for the tag link. Once multiple repos are wired
@@ -142,7 +143,16 @@ export default function LiveReleases() {
                         i % 2 === 1 ? 'bg-zinc-50' : 'bg-white',
                       )}
                     >
-                      <td className="py-3 px-4 text-zinc-700">{row.appGroup}</td>
+                      <td className="py-3 px-4 text-zinc-700">
+                        <span className="inline-flex items-center gap-2">
+                          <BrandLogo
+                            brand={row.appGroup}
+                            surface={row.service === 'driver' || row.service === 'provider' ? 'driver' : undefined}
+                            size="sm"
+                          />
+                          {row.appGroup}
+                        </span>
+                      </td>
                       <td className="py-3 px-4 font-medium text-zinc-800">{row.service}</td>
                       <td className="py-3 px-4">
                         <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-sky-700 text-white">
@@ -200,7 +210,16 @@ export default function LiveReleases() {
                           i % 2 === 1 ? 'bg-zinc-50' : 'bg-white',
                         )}
                       >
-                        <td className="py-3 px-4 font-medium text-zinc-800">{row.app}</td>
+                        <td className="py-3 px-4 font-medium text-zinc-800">
+                          <span className="inline-flex items-center gap-2">
+                            <BrandLogo
+                              brand={row.app}
+                              surface={row.surface === 'driver' || row.surface === 'provider' ? 'driver' : undefined}
+                              size="sm"
+                            />
+                            {row.app}
+                          </span>
+                        </td>
                         <td className="py-3 px-4 text-xs text-zinc-600">{row.surface}</td>
                         <td className="py-3 px-4">
                           <span className="inline-flex items-center gap-1.5 text-xs text-zinc-600">

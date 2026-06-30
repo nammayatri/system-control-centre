@@ -1,4 +1,4 @@
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, memo, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
@@ -10,6 +10,7 @@ import {
   MonitorSmartphone,
   Zap,
   Info,
+  AlertTriangle,
 } from 'lucide-react';
 import { useStoreMonitor } from '../../hooks';
 import type { PlatformBlock, StoreMonitorApp, TrackCell } from '../../api';
@@ -23,6 +24,7 @@ import { RolloutBar } from '../../components/RolloutBar';
 import { AppTrackModal } from '../../components/AppTrackModal';
 import { MobileBulkPanel } from '../../components/MobileBulkPanel';
 import { SURFACE_META, SURFACE_ORDER, surfaceKeyOf, type SurfaceKey } from '../../components/surfaces';
+import { BrandLogo } from '../../components/BrandLogo';
 import { useRepollMonitor } from '../../components/useRepollMonitor';
 
 type PlatformName = 'android' | 'ios';
@@ -237,6 +239,14 @@ function PlatformPanel({
         <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-700">
           <PlatformIcon platform={platform} />
           <span>{platform === 'ios' ? 'iOS' : 'Android'}</span>
+          {block.syncStatus && !block.syncStatus.ok && (
+            <span
+              title={block.syncStatus.message ?? 'Last store refresh failed'}
+              className="inline-flex items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700"
+            >
+              <AlertTriangle className="h-2.5 w-2.5" /> sync
+            </span>
+          )}
         </div>
         <ChevronRight className="h-4 w-4 text-zinc-300 transition-colors group-hover:text-zinc-500" />
       </div>
@@ -262,12 +272,12 @@ function SurfaceSection({
   card: StoreMonitorApp;
   onOpen: (platform: PlatformName, block: PlatformBlock) => void;
 }) {
-  const meta = SURFACE_META[surfaceKeyOf(card.surface)];
-  const Icon = meta.Icon;
+  const sk = surfaceKeyOf(card.surface);
+  const meta = SURFACE_META[sk];
   return (
     <div>
       <div className="mb-2 flex items-center gap-1.5">
-        <Icon className={cn('h-3.5 w-3.5', meta.tint)} />
+        <BrandLogo brand={brandOf(card.app)} surface={sk === 'other' ? undefined : sk} size="sm" />
         <span className="text-xs font-semibold text-zinc-600">{meta.label}</span>
         {anyRolling(card) && <RollingChip />}
       </div>
@@ -321,6 +331,7 @@ const BrandCard = memo(function BrandCard({
     <div className={cn('flex flex-col rounded-xl border bg-white', rolling ? 'border-indigo-200 shadow-sm' : 'border-zinc-200')}>
       <header className="flex items-center justify-between gap-3 border-b border-zinc-100 px-4 py-3">
         <div className="flex min-w-0 items-center gap-2">
+          <BrandLogo brand={group.brand} />
           <h3 className="truncate text-sm font-semibold text-zinc-900">{group.brand}</h3>
           {rolling && <RollingChip />}
         </div>
@@ -408,10 +419,9 @@ export default function StoreMonitor() {
   // drives the cold-start auto-refresh and, via context, the per-card "stale" amber.
   const staleMs = (data?.staleThresholdSeconds ?? 300) * 1000;
   const qc = useQueryClient();
-  const repoll = useRepollMonitor();
   const [search, setSearch] = useState('');
-  const [refreshingAll, setRefreshingAll] = useState(false);
-  const [refreshProgress, setRefreshProgress] = useState<{ done: number; total: number } | null>(null);
+  // Driven by the backend self-refresh: a sweep is running (or was just kicked by our read).
+  const refreshing = data?.refreshing ?? false;
   const [modal, setModal] = useState<
     { brand: string; surface: SurfaceKey; platform: PlatformName; block: PlatformBlock } | null
   >(null);
@@ -436,43 +446,12 @@ export default function StoreMonitor() {
     [],
   );
 
-  // Top-right Refresh → LIVE re-poll every app (not just re-read the cache, which is
-  // what a plain refetch does) via the shared bounded re-poll, surfacing per-app
-  // progress, then reconciling with one authoritative GET.
-  const refreshAll = async () => {
-    const ids = apps
-      .flatMap((a) => [a.platforms.android?.appCatalogId, a.platforms.ios?.appCatalogId])
-      .filter((id): id is number => id != null);
-    if (!ids.length || refreshingAll) return;
-    setRefreshingAll(true);
-    setRefreshProgress({ done: 0, total: ids.length });
-    try {
-      await repoll(ids, (done, total) => setRefreshProgress({ done, total }));
-      toast.success('Store data refreshed');
-    } finally {
-      setRefreshingAll(false);
-      setRefreshProgress(null);
-      void qc.invalidateQueries({ queryKey: ['store-monitor'] });
-    }
+  // Top-right Refresh → just re-read; the backend self-refreshes any stale app via a
+  // detached, cooldown-gated sweep (no FE fan-out), and the 'refreshing' status reflects
+  // it. Opening the page already triggers this server-side, so there's no cold-start here.
+  const refreshAll = () => {
+    void qc.invalidateQueries({ queryKey: ['store-monitor'] });
   };
-
-  // Cold-start: on first open auto-fire one full refresh ONLY when the cached data
-  // is stale (older than the cooldown). Fresh data is shown as-is — a quick re-open
-  // serves cache instead of spending Play/ASC edits. Fires once per mount.
-  const autoFired = useRef(false);
-  useEffect(() => {
-    if (autoFired.current || refreshingAll || apps.length === 0) return;
-    let latest: string | null = null;
-    for (const a of apps)
-      for (const blk of [a.platforms.android, a.platforms.ios])
-        if (blk)
-          for (const cell of [blk.production, blk.internal, blk.testflight])
-            if (cell?.syncedAt && (latest === null || cell.syncedAt > latest)) latest = cell.syncedAt;
-    if (latest === null || Date.now() - new Date(latest).getTime() > staleMs) {
-      autoFired.current = true;
-      void refreshAll();
-    }
-  }, [apps, refreshingAll, staleMs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <StaleMsContext.Provider value={staleMs}>
@@ -484,6 +463,11 @@ export default function StoreMonitor() {
           {!unavailable && (
             <span className="text-xs text-zinc-500">
               {groups.length} {groups.length === 1 ? 'app' : 'apps'} · {apps.length} variants
+            </span>
+          )}
+          {!unavailable && refreshing && (
+            <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-600">
+              <RefreshCw className="h-3 w-3 animate-spin" /> Refreshing store data…
             </span>
           )}
         </div>
@@ -502,12 +486,12 @@ export default function StoreMonitor() {
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => void refreshAll()}
-              loading={refreshingAll}
-              title="Live re-poll every app from the stores"
+              onClick={refreshAll}
+              loading={refreshing}
+              title="Refresh store data"
             >
-              {!refreshingAll && <RefreshCw className="h-4 w-4" />}
-              {refreshingAll && refreshProgress ? `Refreshing ${refreshProgress.done}/${refreshProgress.total}` : 'Refresh'}
+              {!refreshing && <RefreshCw className="h-4 w-4" />}
+              Refresh
             </Button>
           </div>
         )}
@@ -543,6 +527,7 @@ export default function StoreMonitor() {
           onClose={() => setModal(null)}
           appLabel={modal.brand}
           surface={SURFACE_META[modal.surface].label}
+          surfaceKey={modal.surface === 'other' ? undefined : modal.surface}
           platform={modal.platform}
           block={modal.block}
         />

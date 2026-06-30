@@ -21,6 +21,10 @@ module Products.Autopilot.Mobile.Queries.StoreStatus (
     listStoreStatus,
     secondsSinceLastSync,
     latestShippedVersionsPerApp,
+    recordStoreSyncOk,
+    recordStoreSyncError,
+    listStoreSyncStatus,
+    StoreSyncStatusRow,
     findStoreTracksForApp,
     findProductionStoreCell,
     findProductionLiveCell,
@@ -34,6 +38,7 @@ import Core.Environment (MonadFlow, withDb)
 import Data.Int (Int32)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import Data.Time (UTCTime)
 import Database.Beam
 import Database.PostgreSQL.Simple (Only (..), execute, query, query_)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
@@ -181,6 +186,43 @@ findStoreTracksForApp aid = withDb $ \db -> withConn db $ \conn ->
         "SELECT track, version_name, version_code FROM store_status \
         \ WHERE app_catalog_id = ? AND version_name IS NOT NULL"
         (Only aid)
+
+-- | One @store_sync_status@ row: (app_catalog_id, last_attempt_at, last_ok_at, last_error, error_code).
+type StoreSyncStatusRow = (Int32, UTCTime, Maybe UTCTime, Maybe Text, Maybe Text)
+
+-- | Record a SUCCESSFUL refresh: stamp last_ok_at = last_attempt_at = now, clear any error.
+recordStoreSyncOk :: (MonadFlow m) => Int32 -> m ()
+recordStoreSyncOk aid = withDb $ \db -> withConn db $ \conn -> do
+    _ <-
+        execute
+            conn
+            "INSERT INTO store_sync_status (app_catalog_id, last_attempt_at, last_ok_at) \
+            \ VALUES (?, now(), now()) \
+            \ ON CONFLICT (app_catalog_id) DO UPDATE SET \
+            \   last_attempt_at = now(), last_ok_at = now(), last_error = NULL, error_code = NULL"
+            (Only aid)
+    pure ()
+
+-- | Record a FAILED refresh: stamp last_attempt_at + error/code, but KEEP last_ok_at
+-- (the cells still hold last-good data — shown with an error overlay, never blanked).
+recordStoreSyncError :: (MonadFlow m) => Int32 -> Text -> Text -> m ()
+recordStoreSyncError aid code msg = withDb $ \db -> withConn db $ \conn -> do
+    _ <-
+        execute
+            conn
+            "INSERT INTO store_sync_status (app_catalog_id, last_attempt_at, last_error, error_code) \
+            \ VALUES (?, now(), ?, ?) \
+            \ ON CONFLICT (app_catalog_id) DO UPDATE SET \
+            \   last_attempt_at = now(), last_error = EXCLUDED.last_error, error_code = EXCLUDED.error_code"
+            (aid, msg, code)
+    pure ()
+
+-- | Every app's last refresh outcome, for the monitor to attach a per-app sync status.
+listStoreSyncStatus :: (MonadFlow m) => m [StoreSyncStatusRow]
+listStoreSyncStatus = withDb $ \db -> withConn db $ \conn ->
+    query_
+        conn
+        "SELECT app_catalog_id, last_attempt_at, last_ok_at, last_error, error_code FROM store_sync_status"
 
 {- | The production track's currently-synced @(version_name, version_code)@ for an app
 from the @store_status@ cache, or 'Nothing' when production hasn't been synced. Either
