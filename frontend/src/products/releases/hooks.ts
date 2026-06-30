@@ -431,7 +431,9 @@ export function useStoreMonitor() {
   return useQuery({
     queryKey: ['store-monitor'],
     queryFn: () => mobileApi.storeMonitor(),
-    refetchInterval: 60_000,
+    // The backend self-refreshes on read (stale → detached sweep). Poll faster while a
+    // sweep is in progress so the grid + the "Refreshing…" status update live.
+    refetchInterval: (q) => (q.state.data?.refreshing ? 4_000 : 60_000),
   });
 }
 

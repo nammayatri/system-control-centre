@@ -1275,6 +1275,16 @@ export interface TrackCell {
     displayVariant?: 'default' | 'success' | 'warning' | 'danger' | 'info' | 'muted' | 'purple' | 'blue' | null;
 }
 
+// Last store-refresh outcome for one app/platform. `ok:false` ⇒ message/code say why;
+// `lastOkAt` is the freshness of the cells (they keep last-good data even when the
+// latest attempt failed). `null` syncStatus = not yet attempted.
+export interface SyncStatus {
+    ok: boolean;
+    message: string | null;
+    code: string | null;            // no_creds | not_found | rate_limited | asc_unauthorized | api_error
+    lastAttemptAt: string;          // ISO
+    lastOkAt: string | null;        // ISO; null = never synced
+}
 export interface PlatformBlock {
     appCatalogId: number;
     bundleId: string | null;
@@ -1282,6 +1292,7 @@ export interface PlatformBlock {
     incoming: TrackCell | null;     // prod-incoming version in review/approved/rejected (null if none)
     internal: TrackCell | null;     // android only (null for ios)
     testflight: TrackCell | null;   // ios only (null for android)
+    syncStatus?: SyncStatus | null;
 }
 
 export interface StoreMonitorApp {
@@ -1300,6 +1311,8 @@ export interface StoreMonitorResult {
     // Single freshness threshold (= the backend refresh cooldown, `store_refresh_cooldown_seconds`).
     // Drives both the auto-refresh-on-open and the "stale" warning, so there's one source of truth.
     staleThresholdSeconds: number;
+    // A backend sweep is in progress (or was just kicked by this read) — show a spinner + poll faster.
+    refreshing: boolean;
 }
 
 export const mobileApi = {
@@ -1437,12 +1450,13 @@ export const mobileApi = {
         const { data } = await apiClient.get('/mobile/store-monitor');
         // Tolerate both the new {available,reason,apps} object and the old bare
         // array (until the backend redeploys).
-        if (Array.isArray(data)) return { available: true, reason: null, apps: data, staleThresholdSeconds: 300 };
+        if (Array.isArray(data)) return { available: true, reason: null, apps: data, staleThresholdSeconds: 300, refreshing: false };
         return {
             available: data?.available ?? true,
             reason: data?.reason ?? null,
             apps: Array.isArray(data?.apps) ? data.apps : [],
             staleThresholdSeconds: data?.staleThresholdSeconds ?? 300,
+            refreshing: data?.refreshing ?? false,
         };
     },
 

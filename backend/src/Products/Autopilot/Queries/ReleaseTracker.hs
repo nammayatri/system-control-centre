@@ -92,7 +92,7 @@ import Database.PostgreSQL.Simple.Types ((:.) (..))
 import Debug.Trace qualified as DT
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind, claimsStoreIdentity)
 import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), displayStatus, phaseFromFields, phaseSlug, variantSlug)
-import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), MobileBuildWFStatus (..), isFailedMBTerminal)
+import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), MobileBuildWFStatus (..), isFailedMBTerminal, releasesIdentitySlot)
 import Products.Autopilot.Types
 import Products.Autopilot.Types qualified as NT
 import Products.Autopilot.Types.Storage.Schema

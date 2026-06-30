@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw, AlertTriangle, Clock } from 'lucide-react';
 import { mobileApi } from '../api';
@@ -9,19 +9,6 @@ import { relativeAge } from '../utils';
 // Fallback freshness threshold (seconds) until the backend value loads — matches
 // the server default of `store_refresh_cooldown_seconds`.
 const DEFAULT_STALE_SECONDS = 300;
-
-// Run `worker` over `items` with at most `limit` in flight — bounded so a cold
-// start doesn't fire N parallel store reads at once (Play / ASC rate limits).
-async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
-  let cursor = 0;
-  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (cursor < items.length) {
-      const i = cursor++;
-      await worker(items[i]);
-    }
-  });
-  await Promise.all(runners);
-}
 
 // The latest sync time across every track cell of every app — the global
 // "store data last synced" timestamp.
@@ -38,12 +25,6 @@ function maxSyncedAt(apps: StoreMonitorApp[]): string | null {
   return max;
 }
 
-function appIds(apps: StoreMonitorApp[]): number[] {
-  return apps
-    .flatMap((a) => [a.platforms.android?.appCatalogId, a.platforms.ios?.appCatalogId])
-    .filter((x): x is number => x != null);
-}
-
 /**
  * Store freshness + on-demand refresh, shared by the monitor, the releases list,
  * and the create page. Reads the `store_status` cache (one GET) and exposes the
@@ -52,12 +33,14 @@ function appIds(apps: StoreMonitorApp[]): number[] {
  * spending edits). With `auto`, it triggers ONE refresh on mount when the cache is
  * cold (never synced) or stale, so the data populates and stays current on its own.
  */
-export function useStoreSync(opts?: { auto?: boolean }) {
+export function useStoreSync(_opts?: { auto?: boolean }) {
   const qc = useQueryClient();
   const { data } = useQuery<StoreMonitorResult>({
     queryKey: ['store-monitor'],
     queryFn: () => mobileApi.storeMonitor(),
-    refetchInterval: 60_000,
+    // The backend self-refreshes on read (a stale cache kicks a detached, coalesced
+    // sweep). Poll faster while a sweep is in progress so fresh cells land quickly.
+    refetchInterval: (q) => (q.state.data?.refreshing ? 4_000 : 60_000),
   });
   const apps = data?.apps ?? [];
   const available = data?.available ?? false;
@@ -65,49 +48,19 @@ export function useStoreSync(opts?: { auto?: boolean }) {
   const staleMs = (data?.staleThresholdSeconds ?? DEFAULT_STALE_SECONDS) * 1000;
   const cold = available && apps.length > 0 && lastSyncedAt === null;
   const stale = lastSyncedAt !== null && Date.now() - new Date(lastSyncedAt).getTime() > staleMs;
+  // Driven by the backend now — no FE fan-out. A sweep is running (or was just kicked
+  // by our read) when this is true.
+  const refreshing = data?.refreshing ?? false;
 
-  const [refreshing, setRefreshing] = useState(false);
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  // ↻ just re-reads (a stale cache re-kicks the sweep server-side) and invalidates the
+  // dependent views; the store-monitor poll renders fresh cells as the sweep lands them.
+  const refreshAll = useCallback(() => {
+    void qc.invalidateQueries({ queryKey: ['store-monitor'] });
+    void qc.invalidateQueries({ queryKey: ['releases'] });
+    void qc.invalidateQueries({ queryKey: ['mobile', 'apps'] });
+  }, [qc]);
 
-  const refreshAll = useCallback(async () => {
-    const ids = appIds(apps);
-    if (!ids.length || refreshing) return;
-    setRefreshing(true);
-    let done = 0;
-    setProgress({ done, total: ids.length });
-    try {
-      await runPool(ids, 4, async (id) => {
-        try {
-          await mobileApi.refreshStoreApp(id);
-        } catch {
-          // one app's store error shouldn't abort the rest
-        } finally {
-          done += 1;
-          setProgress({ done, total: ids.length });
-        }
-      });
-    } finally {
-      setRefreshing(false);
-      setProgress(null);
-      // A refresh updates store_status + the release_tracker synthetic rows.
-      // All three readers — monitor, releases list, and the create-page app list
-      // (its prod/internal chips now read store_status too) — invalidate together.
-      void qc.invalidateQueries({ queryKey: ['store-monitor'] });
-      void qc.invalidateQueries({ queryKey: ['releases'] });
-      void qc.invalidateQueries({ queryKey: ['mobile', 'apps'] });
-    }
-  }, [apps, refreshing, qc]);
-
-  // Cold-start: fire ONCE per mount when the cache is empty or stale.
-  const fired = useRef(false);
-  useEffect(() => {
-    if (opts?.auto && !fired.current && available && apps.length > 0 && (cold || stale) && !refreshing) {
-      fired.current = true;
-      void refreshAll();
-    }
-  }, [opts?.auto, available, apps.length, cold, stale, refreshing, refreshAll]);
-
-  return { available, hasApps: apps.length > 0, lastSyncedAt, cold, stale, refreshing, progress, refreshAll };
+  return { available, hasApps: apps.length > 0, lastSyncedAt, cold, stale, refreshing, refreshAll };
 }
 
 /**
@@ -118,7 +71,7 @@ export function useStoreSync(opts?: { auto?: boolean }) {
  * are known.
  */
 export function StoreSyncBanner({ className, auto = true }: { className?: string; auto?: boolean }) {
-  const { available, hasApps, lastSyncedAt, cold, stale, refreshing, progress, refreshAll } = useStoreSync({
+  const { available, hasApps, lastSyncedAt, cold, stale, refreshing, refreshAll } = useStoreSync({
     auto,
   });
   if (!available || !hasApps) return null;
@@ -134,7 +87,7 @@ export function StoreSyncBanner({ className, auto = true }: { className?: string
       <span className="flex items-center gap-1.5">
         {amber ? <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> : <Clock className="h-3.5 w-3.5 shrink-0" />}
         {refreshing
-          ? `Refreshing store data${progress ? ` ${progress.done}/${progress.total}` : ''}…`
+          ? 'Refreshing store data…'
           : cold
             ? 'Store data not synced yet — fetching the latest from the stores'
             : `Store data synced ${relativeAge(lastSyncedAt)}${stale ? ' — may be outdated' : ''}`}

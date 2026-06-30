@@ -7,6 +7,7 @@ import type { AppCatalogEntry, LatestBuild } from '../../types';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { cn } from '../../../../lib/utils';
 import { groupAppsBySurface, useGroupCollapse, GroupChevron } from '../../components/appGroups';
+import { BrandLogo } from '../../components/BrandLogo';
 import { AddAppButton } from '../../components/AddAppModal';
 import { formatBuildCode } from '../../utils';
 import { toast } from 'sonner';
@@ -199,8 +200,17 @@ export default function MobileAppsAdmin() {
                               />
                             </td>
                             <td className="py-3 px-4">
-                              <div className="font-medium text-zinc-800">{app.displayLabel || app.name}</div>
-                              <div className="text-[11px] text-zinc-500 mt-0.5">{app.surface}</div>
+                              <div className="flex items-center gap-2.5">
+                                <BrandLogo
+                                  brand={app.displayLabel || app.name}
+                                  surface={app.surface === 'driver' ? 'driver' : undefined}
+                                  size="sm"
+                                />
+                                <div className="min-w-0">
+                                  <div className="font-medium text-zinc-800 truncate">{app.displayLabel || app.name}</div>
+                                  <div className="text-[11px] text-zinc-500 mt-0.5">{app.surface}</div>
+                                </div>
+                              </div>
                             </td>
                             <td className="py-3 px-4">
                               <PlatformBadge platform={app.platform} />

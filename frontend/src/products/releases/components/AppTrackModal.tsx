@@ -13,6 +13,7 @@ import type { PlatformBlock, TrackCell } from '../api';
 import { deriveStoreBadge, activeRolloutOf, type TrackKind } from './storeBadge';
 import { formatBuildCode, formatRolloutPercent } from '../utils';
 import { RolloutBar } from './RolloutBar';
+import { BrandLogo } from './BrandLogo';
 
 type PlatformName = 'android' | 'ios';
 
@@ -22,6 +23,8 @@ interface AppTrackModalProps {
   appLabel: string;
   /** "Consumer" | "Driver" — shown in the header subtitle. */
   surface?: string;
+  /** Surface key for picking the per-surface app logo (driver gets its own icon). */
+  surfaceKey?: 'consumer' | 'driver';
   platform: PlatformName;
   block: PlatformBlock;
 }
@@ -105,7 +108,7 @@ function TrackBody({ cell, track }: { cell: TrackCell | null; track: TrackKind }
  * switch between Production and the platform's secondary track (TestFlight on
  * iOS, Internal Testing on Android).
  */
-export function AppTrackModal({ open, onClose, appLabel, surface, platform, block }: AppTrackModalProps) {
+export function AppTrackModal({ open, onClose, appLabel, surface, surfaceKey, platform, block }: AppTrackModalProps) {
   const [tab, setTab] = useState<TabKey>('production');
   const cell = tab === 'production' ? block.production : secondaryCell(platform, block);
   const track: TrackKind = tab === 'production' ? 'production' : platform === 'ios' ? 'testflight' : 'internal';
@@ -120,6 +123,7 @@ export function AppTrackModal({ open, onClose, appLabel, surface, platform, bloc
       <DialogContent size="lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
+            <BrandLogo brand={appLabel} surface={surfaceKey} size="md" />
             <PlatformIcon platform={platform} />
             {appLabel}
           </DialogTitle>

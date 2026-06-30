@@ -25,6 +25,7 @@ import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { AiReleasePanel } from '../components/AiReleasePanel';
 import { MobileRolloutPanel } from '../components/MobileRolloutPanel';
+import { BrandLogo } from '../components/BrandLogo';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import {
   Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap,
@@ -1121,6 +1122,13 @@ const ReleaseSummary: React.FC = () => {
 
       <div className="flex flex-col gap-3 mb-4 sm:mb-5">
         <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+          {isMobile && (
+            <BrandLogo
+              brand={release.appGroup || ''}
+              surface={release.service === 'driver' ? 'driver' : undefined}
+              size="lg"
+            />
+          )}
           <div className="flex flex-col">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Release Summary</span>
             <h1 className="text-lg sm:text-xl font-semibold text-zinc-900 flex items-baseline gap-2 flex-wrap">

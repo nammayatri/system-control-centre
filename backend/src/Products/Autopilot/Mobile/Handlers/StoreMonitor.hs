@@ -18,6 +18,7 @@ enabled or not — so the page shows releases for ALL apps.
 -}
 module Products.Autopilot.Mobile.Handlers.StoreMonitor (
     TrackCellResp (..),
+    SyncStatusResp (..),
     PlatformBlockResp (..),
     PlatformsResp (..),
     StoreMonitorAppResp (..),
@@ -26,22 +27,24 @@ module Products.Autopilot.Mobile.Handlers.StoreMonitor (
     refreshStoreAppH,
 ) where
 
+import Control.Monad (void, when)
 import Control.Monad.Catch (throwM)
+import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson)
-import Core.Environment (Flow)
+import Core.Environment (Flow, forkFlow)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Int (Int32)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isNothing, listToMaybe, mapMaybe)
 import Data.Text (Text)
-import Data.Time (UTCTime)
+import Data.Time (UTCTime, diffUTCTime, getCurrentTime)
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById, listAppCatalog)
-import Products.Autopilot.Mobile.Queries.StoreStatus (listStoreStatus)
+import Products.Autopilot.Mobile.Queries.StoreStatus (StoreSyncStatusRow, listStoreStatus, listStoreSyncStatus)
 import Products.Autopilot.Mobile.Queries.Tracker (listIncomingMobileVersions, parseMobileTargetState)
-import Products.Autopilot.Mobile.StoreSync (refreshStoreStatusOne)
+import Products.Autopilot.Mobile.StoreSync (isBulkRefreshing, refreshAllStale, refreshStoreStatusOne)
 import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), displayStatus, variantSlug)
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), isDebugBuildType)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..), StoreStatus, StoreStatusT (..))
@@ -69,6 +72,21 @@ data TrackCellResp = TrackCellResp
 instance ToJSON TrackCellResp
 instance FromJSON TrackCellResp
 
+-- | This app/platform's last store-refresh outcome, so every enabled app carries a
+-- status. @ok = false@ ⇒ @message@/@code@ explain why; @lastOkAt@ is the freshness of
+-- the cells (they hold last-good data even when the latest attempt failed).
+data SyncStatusResp = SyncStatusResp
+    { ok :: Bool
+    , message :: Maybe Text
+    , code :: Maybe Text
+    , lastAttemptAt :: UTCTime
+    , lastOkAt :: Maybe UTCTime
+    }
+    deriving (Generic, Show)
+
+instance ToJSON SyncStatusResp
+instance FromJSON SyncStatusResp
+
 -- | One platform's tracks for an app. @internal@ is Android-only, @testflight@
 -- iOS-only; the off-platform one is always 'Nothing'.
 data PlatformBlockResp = PlatformBlockResp
@@ -80,6 +98,8 @@ data PlatformBlockResp = PlatformBlockResp
       incoming :: Maybe TrackCellResp
     , internal :: Maybe TrackCellResp
     , testflight :: Maybe TrackCellResp
+    , -- | Last refresh outcome for this app/platform; 'Nothing' until first attempted.
+      syncStatus :: Maybe SyncStatusResp
     }
     deriving (Generic, Show)
 
@@ -118,6 +138,9 @@ data StoreMonitorResp = StoreMonitorResp
     -- ^ The single freshness threshold (= the backend refresh cooldown). The UI
     -- uses it to decide when to auto-refresh on open + warn that data is stale, so
     -- there's one source of truth instead of a separate hardcoded client value.
+    , refreshing :: Bool
+    -- ^ A backend sweep is in progress (or was just kicked by this read). The UI shows
+    -- a spinner and polls faster until it clears.
     }
     deriving (Generic, Show)
 
@@ -140,12 +163,23 @@ storeMonitorH _ap = do
     buildType <- getMobileBuildType
     cooldown <- getStoreRefreshCooldownSeconds
     if isDebugBuildType buildType
-        then pure (StoreMonitorResp False (Just debugUnavailableReason) [] cooldown)
+        then pure (StoreMonitorResp False (Just debugUnavailableReason) [] cooldown False)
         else do
             apps_ <- listAppCatalog
             statuses <- listStoreStatus
             incomings <- listIncomingMobileVersions
-            pure (StoreMonitorResp True Nothing (assembleCards apps_ statuses incomings) cooldown)
+            syncRows <- listStoreSyncStatus
+            now <- liftIO getCurrentTime
+            running <- isBulkRefreshing
+            let cellStale :: StoreStatus -> Bool
+                cellStale s = realToFrac (diffUTCTime now (ssSyncedAt s)) > (fromIntegral cooldown :: Double)
+                stale = null statuses || any cellStale statuses
+                kick = stale && not running
+            -- Self-refresh while viewed: when the cache is stale, kick a coalesced,
+            -- DETACHED sweep ('forkFlow' → survives this request; global single-flight
+            -- coalesces concurrent reads). The FE never fans out — it just GETs.
+            when kick $ void (forkFlow refreshAllStale)
+            pure (StoreMonitorResp True Nothing (assembleCards apps_ statuses incomings (syncStatusMap syncRows)) cooldown (running || kick))
 
 -- | Live re-poll one app, then return its fresh card. 404 on an unknown id. In a
 -- debug deployment it re-polls nothing and reads no @store_status@ (the table may
@@ -165,15 +199,30 @@ refreshStoreAppH _ap aid = do
                     else refreshStoreStatusOne row >> listStoreStatus
             apps <- listAppCatalog
             incomings <- listIncomingMobileVersions
+            syncRows <- if isDebugBuildType buildType then pure [] else listStoreSyncStatus
             let key = (acName row, acSurface row)
                 groupRows = filter (\a -> (acName a, acSurface a) == key) apps
-            pure (toCard (indexStatuses statuses) (indexIncoming incomings) key groupRows)
+            pure (toCard (indexStatuses statuses) (indexIncoming incomings) (syncStatusMap syncRows) key groupRows)
 
 -- ─── Assembly (pure) ───────────────────────────────────────────────
 
 -- | Index cache rows by (app_catalog_id, track) for O(1) cell lookup.
 indexStatuses :: [StoreStatus] -> Map.Map (Int32, Text) StoreStatus
 indexStatuses statuses = Map.fromList [((ssAppCatalogId s, ssTrack s), s) | s <- statuses]
+
+-- | Project a @store_sync_status@ row into the response shape (per app_catalog_id).
+toSyncStatus :: StoreSyncStatusRow -> SyncStatusResp
+toSyncStatus (_, lastAttempt, lastOk, mErr, mCode) =
+    SyncStatusResp
+        { ok = isNothing mErr
+        , message = mErr
+        , code = mCode
+        , lastAttemptAt = lastAttempt
+        , lastOkAt = lastOk
+        }
+
+syncStatusMap :: [StoreSyncStatusRow] -> Map.Map Int32 SyncStatusResp
+syncStatusMap rows = Map.fromList [(aid, toSyncStatus r) | r@(aid, _, _, _, _) <- rows]
 
 -- | Index the PROD-INCOMING rows by (app_group, service, env) = (name, surface,
 -- platform), the catalog join key — at most one incoming per app by the slot model.
@@ -182,27 +231,27 @@ indexIncoming rows = Map.fromList [((rtAppGroup r, rtService r, rtEnv r), r) | r
 
 -- | Group catalog rows by (name, surface) — each group has up to one android +
 -- one ios row — and project a card per group. Map keys give a stable A→Z order.
-assembleCards :: [AppCatalog] -> [StoreStatus] -> [ReleaseTrackerRow] -> [StoreMonitorAppResp]
-assembleCards apps statuses incomings =
+assembleCards :: [AppCatalog] -> [StoreStatus] -> [ReleaseTrackerRow] -> Map.Map Int32 SyncStatusResp -> [StoreMonitorAppResp]
+assembleCards apps statuses incomings syncMap =
     let idx = indexStatuses statuses
         incIdx = indexIncoming incomings
         groups = Map.toList $ Map.fromListWith (flip (++)) [((acName a, acSurface a), [a]) | a <- apps]
-     in [toCard idx incIdx k rows | (k, rows) <- groups]
+     in [toCard idx incIdx syncMap k rows | (k, rows) <- groups]
 
-toCard :: Map.Map (Int32, Text) StoreStatus -> Map.Map (Text, Text, Text) ReleaseTrackerRow -> (Text, Text) -> [AppCatalog] -> StoreMonitorAppResp
-toCard idx incIdx (nm, sfc) rows =
+toCard :: Map.Map (Int32, Text) StoreStatus -> Map.Map (Text, Text, Text) ReleaseTrackerRow -> Map.Map Int32 SyncStatusResp -> (Text, Text) -> [AppCatalog] -> StoreMonitorAppResp
+toCard idx incIdx syncMap (nm, sfc) rows =
     StoreMonitorAppResp
         { app = fromMaybe nm (listToMaybe (mapMaybe acDisplayLabel rows))
         , surface = sfc
         , platforms =
             PlatformsResp
-                { android = toBlock idx incIdx <$> find ((== "android") . acPlatform) rows
-                , ios = toBlock idx incIdx <$> find ((== "ios") . acPlatform) rows
+                { android = toBlock idx incIdx syncMap <$> find ((== "android") . acPlatform) rows
+                , ios = toBlock idx incIdx syncMap <$> find ((== "ios") . acPlatform) rows
                 }
         }
 
-toBlock :: Map.Map (Int32, Text) StoreStatus -> Map.Map (Text, Text, Text) ReleaseTrackerRow -> AppCatalog -> PlatformBlockResp
-toBlock idx incIdx r =
+toBlock :: Map.Map (Int32, Text) StoreStatus -> Map.Map (Text, Text, Text) ReleaseTrackerRow -> Map.Map Int32 SyncStatusResp -> AppCatalog -> PlatformBlockResp
+toBlock idx incIdx syncMap r =
     let cellFor trk = toCell <$> Map.lookup (acId r, trk) idx
      in PlatformBlockResp
             { appCatalogId = acId r
@@ -211,6 +260,7 @@ toBlock idx incIdx r =
             , incoming = incomingCell <$> Map.lookup (acName r, acSurface r, acPlatform r) incIdx
             , internal = if acPlatform r == "android" then cellFor "internal" else Nothing
             , testflight = if acPlatform r == "ios" then cellFor "testflight" else Nothing
+            , syncStatus = Map.lookup (acId r) syncMap
             }
 
 -- | Project a PROD-INCOMING release_tracker row into a monitor cell. Carries the

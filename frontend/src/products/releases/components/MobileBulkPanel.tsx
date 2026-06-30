@@ -15,7 +15,8 @@ import {
 } from './mobileStage';
 import { PlatformBadge } from './PlatformBadge';
 import { RolloutBar } from './RolloutBar';
-import { surfaceMeta } from './surfaces';
+import { surfaceKeyOf, surfaceMeta } from './surfaces';
+import { BrandLogo } from './BrandLogo';
 import { versionWithBuild } from '../utils';
 
 /**
@@ -327,8 +328,12 @@ function BulkSection({
                   aria-label={`Select ${humanizeAppName(e.r.appGroup)} ${meta.label} ${e.r.env}`}
                 />
                 <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                  <BrandLogo
+                    brand={humanizeAppName(e.r.appGroup)}
+                    surface={surfaceKeyOf(e.r.service) === 'driver' ? 'driver' : undefined}
+                    size="sm"
+                  />
                   <span className="truncate text-sm font-medium text-zinc-800">{humanizeAppName(e.r.appGroup)}</span>
-                  <meta.Icon className={`h-3.5 w-3.5 shrink-0 ${meta.tint}`} />
                   <span className="hidden shrink-0 text-xs text-zinc-500 sm:inline">{meta.label}</span>
                   <PlatformBadge platform={e.r.env} isMobile />
                 </span>

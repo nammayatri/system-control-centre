@@ -32,18 +32,23 @@ module Products.Autopilot.Mobile.StoreSync (
 
     -- * App Release Monitoring (store_status cache)
     refreshStoreStatusOne,
+    refreshAllStale,
+    isBulkRefreshing,
 
     -- * Version ordering (semver-ish component compare; unit-tested via callers)
     versionOlderThan,
 ) where
 
 import Control.Applicative ((<|>))
+import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
-import Control.Exception (SomeException)
+import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
+import Control.Exception (SomeException, bracket_)
 import Control.Monad (forM_, unless, when)
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (liftIO)
-import Core.Environment (Flow, MonadFlow, logError, logInfo, logWarning)
+import Control.Monad.Reader (ask)
+import Core.Environment (Flow, MonadFlow, logError, logInfo, logWarning, runFlow)
 import Data.Aeson (object, (.=))
 import Data.Int (Int32)
 import Data.List (find)
@@ -65,6 +70,8 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (
     StoreStatusUpsert (..),
     findActiveMobileState,
     latestShippedVersionsPerApp,
+    recordStoreSyncError,
+    recordStoreSyncOk,
     secondsSinceLastSync,
     setProductionRolloutStatus,
     upsertStoreStatus,
@@ -75,6 +82,9 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     completeExternalReviewRow,
     findActiveRolloutReleases,
     findExternalReviewRow,
+    findExternalReviewRowForVersion,
+    storeSyncRowExistsForVersion,
+    convergeStoreSyncRow,
     findMobileAwaitingRollout,
     findMobileVersionRow,
     logEvent,
@@ -174,11 +184,16 @@ safely label act =
             (\e -> logError $ "[STORE_MONITOR] " <> label <> " failed (continuing): " <> T.pack (show e))
             pure
 
--- | Extract a non-empty package / bundle id, or log-and-skip when absent.
-withPkg :: AppCatalog -> (Text -> Flow ()) -> Flow ()
-withPkg ac k = case acPackageName ac of
-    Just p | not (T.null p) -> k p
-    _ -> logWarning $ "[STORE_SYNC] No package/bundle id for " <> acName ac <> ", skipping"
+-- | Coarse error code from a rendered Play/ASC message (the message keeps the detail).
+classifyStoreErr :: Text -> Text
+classifyStoreErr msg
+    | anyIn ["429", "quota", "rate limit", "rate-limit", "ratelimit"] = "rate_limited"
+    | anyIn ["401", "403", "unauthor", "unauthenticat", "forbidden"] = "asc_unauthorized"
+    | anyIn ["404", "not found"] = "not_found"
+    | otherwise = "api_error"
+  where
+    lower = T.toLower msg
+    anyIn = any (`T.isInfixOf` lower)
 
 {- | Sync ONE app from a single store read.
 
@@ -200,57 +215,65 @@ syncAppUnified mPlayCreds buildMap expected ac = do
     let key = (acName ac, acSurface ac, acPlatform ac)
         existing = Map.lookup key buildMap
         mExpected = Map.lookup key expected
+        aid = acId ac
+        noPkg = recordStoreSyncError aid "not_found" "No package / bundle id configured for this app"
     case acPlatform ac of
         "android" -> case mPlayCreds of
-            Nothing -> logWarning $ "[STORE_SYNC] No Play Console creds — skipping " <> acName ac
-            Just creds -> withPkg ac $ \pkg ->
-                fetchPlayTrackBodies creds pkg >>= \case
-                    Left e -> logWarning $ "[STORE_SYNC] Play API error for " <> acName ac <> ": " <> renderPlayErr e
-                    Right bodies -> do
-                        let snaps = bodiesToSnapshots bodies
-                        -- Overlay each cell with ITS OWN version's lifecycle (review /
-                        -- rollout), scoped per cell so a promoted-to-review version on the
-                        -- internal track reads "In review" while the live production cell
-                        -- stays "Live" — no bleeding the incoming review onto the live cell.
-                        safely ("store_status " <> acName ac) $
-                            forM_ snaps $ \s -> do
-                                cellActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac) (stsVersion s)
-                                upsertStoreStatus (androidSnapToUpsert ac mExpected cellActive s)
-                        when (acEnabled ac) $ do
-                            let (internal, production) = bodiesToTracks bodies
-                            recordAndroidTracks ac existing internal production
-                            -- Mirror a production ramp of an OLDER version (newer build
-                            -- still on internal) onto its own row so the list matches
-                            -- the monitor — recordAndroidTracks only touches the leader.
-                            reflectProductionRollout ac (bodiesToSnapshots bodies)
-                            reconcileAndroidExternalReviewFrom ac (bodiesToProdReleases bodies)
-                        -- Rollout reconcile from the SAME fetch — no extra edit.
-                        reconcileAndroidRolloutsFrom ac (bodiesToProdReleases bodies)
-        -- Resolve the ASC key for THIS app's account (multi-account: Cumta /
-        -- YatriSathi live in different Apple teams). No fallback to the default key
-        -- for a tagged app — that would 403 against the wrong team.
+            Nothing -> do
+                recordStoreSyncError aid "no_creds" "No Play Console credentials configured"
+                logWarning $ "[STORE_SYNC] No Play Console creds — skipping " <> acName ac
+            Just creds -> case acPackageName ac of
+                Just pkg | not (T.null pkg) ->
+                    fetchPlayTrackBodies creds pkg >>= \case
+                        Left e -> do
+                            let msg = renderPlayErr e
+                            recordStoreSyncError aid (classifyStoreErr msg) msg
+                            logWarning $ "[STORE_SYNC] Play API error for " <> acName ac <> ": " <> msg
+                        Right bodies -> do
+                            let snaps = bodiesToSnapshots bodies
+                            -- Overlay each cell with ITS OWN version's lifecycle (review /
+                            -- rollout), scoped per cell so a promoted-to-review internal
+                            -- version reads "In review" while the live production cell stays "Live".
+                            safely ("store_status " <> acName ac) $
+                                forM_ snaps $ \s -> do
+                                    cellActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac) (stsVersion s)
+                                    upsertStoreStatus (androidSnapToUpsert ac mExpected cellActive s)
+                            when (acEnabled ac) $ do
+                                let (internal, production) = bodiesToTracks bodies
+                                recordAndroidTracks ac existing internal production
+                                reflectProductionRollout ac (bodiesToSnapshots bodies)
+                                reconcileAndroidExternalReviewFrom ac (bodiesToProdReleases bodies)
+                            reconcileAndroidRolloutsFrom ac (bodiesToProdReleases bodies)
+                            recordStoreSyncOk aid
+                _ -> noPkg >> logWarning ("[STORE_SYNC] No package id for " <> acName ac <> ", skipping")
+        -- Resolve the ASC key for THIS app's account (multi-account: different Apple
+        -- teams). No fallback to the default key for a tagged app — it'd 403.
         "ios" ->
             loadAscCredsFor (acStoreAccount ac) >>= \case
-                Nothing -> logWarning $ "[STORE_SYNC] No ASC creds for account '" <> fromMaybe "default" (acStoreAccount ac) <> "' — skipping " <> acName ac
-                Just creds -> withPkg ac $ \bundleId -> do
-                    safely ("store_status " <> acName ac) $
+                Nothing -> do
+                    recordStoreSyncError aid "no_creds" ("No App Store Connect credentials for account '" <> fromMaybe "default" (acStoreAccount ac) <> "'")
+                    logWarning $ "[STORE_SYNC] No ASC creds for account '" <> fromMaybe "default" (acStoreAccount ac) <> "' — skipping " <> acName ac
+                Just creds -> case acPackageName ac of
+                    Just bundleId | not (T.null bundleId) ->
                         fetchAscSnapshots creds bundleId >>= \case
-                            Left e -> logWarning $ "[STORE_MONITOR] ASC snapshot error for " <> acName ac <> ": " <> renderAscErr e
-                            Right snaps ->
-                                -- Per-cell lifecycle overlay (see the Android branch): each
-                                -- cell reads its OWN version's review state, so a promoted
-                                -- TestFlight build can read "In review" without mislabelling
-                                -- the live production cell.
-                                forM_ snaps $ \s -> do
-                                    cellActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac) (ascVersion s)
-                                    upsertStoreStatus (iosSnapToUpsert ac mExpected cellActive s)
-                    when (acEnabled ac) $ do
-                        syncIos creds ac existing
-                        -- Also surface an App Store review that was started outside SCC.
-                        syncIosExternalReview creds ac
-                    -- Rollout reconcile (ASC reads — no Play edit quota).
-                    reconcileIosRollouts creds ac
-        p -> logWarning $ "[STORE_SYNC] Unknown platform " <> p <> " for " <> acName ac
+                            Left e -> do
+                                let msg = renderAscErr e
+                                recordStoreSyncError aid (classifyStoreErr msg) msg
+                                logWarning $ "[STORE_MONITOR] ASC snapshot error for " <> acName ac <> ": " <> msg
+                            Right snaps -> do
+                                safely ("store_status " <> acName ac) $
+                                    forM_ snaps $ \s -> do
+                                        cellActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac) (ascVersion s)
+                                        upsertStoreStatus (iosSnapToUpsert ac mExpected cellActive s)
+                                when (acEnabled ac) $ do
+                                    syncIos creds ac existing
+                                    syncIosExternalReview creds ac
+                                reconcileIosRollouts creds ac
+                                recordStoreSyncOk aid
+                    _ -> noPkg >> logWarning ("[STORE_SYNC] No bundle id for " <> acName ac <> ", skipping")
+        p -> do
+            recordStoreSyncError aid "api_error" ("Unknown platform " <> p)
+            logWarning $ "[STORE_SYNC] Unknown platform " <> p <> " for " <> acName ac
 
 -- | True when this @release_tracker@ row belongs to the given app catalog entry.
 rowIsApp :: AppCatalog -> ReleaseTrackerRow -> Bool
@@ -882,34 +905,64 @@ insertSyntheticRelease ac version mCode track = do
                 , rtCreatedAt = now
                 , rtUpdatedAt = now
                 }
-    -- ON CONFLICT DO NOTHING against uq_release_tracker_store_sync: if a
-    -- concurrent pass / replica already recorded this app+version, skip cleanly.
-    inserted <- insertReleaseTrackerRowIfAbsent row
-    if not inserted
-        then
-            logInfo $
-                "[STORE_SYNC] Skipped duplicate synthetic release for "
-                    <> acName ac
-                    <> " v"
-                    <> version
-                    <> " (already recorded)"
-        else do
-            insertReleaseEvent rid "BUSINESS" "STORE_SYNC" $
+    -- A build leaving external review already has a row (mode=EXTERNAL_REVIEW) for
+    -- this exact version: transition THAT row in place — keep its date_created —
+    -- instead of minting a duplicate and orphaning the review row. Skip when a
+    -- STORE_SYNC row already exists (legacy dup) so the flip can't violate the index.
+    mReview <- findExternalReviewRowForVersion (acName ac) (acSurface ac) (acPlatform ac) version
+    canAdopt <- case mReview of
+        Just _ -> not <$> storeSyncRowExistsForVersion (acName ac) (acSurface ac) (acPlatform ac) version
+        Nothing -> pure False
+    case mReview of
+        Just r | canAdopt -> do
+            convergeStoreSyncRow (rtId r) track mCode encodedCtx (buildStoreMeta track) now
+            insertReleaseEvent (rtId r) "BUSINESS" "STORE_SYNC" $
                 object
                     [ "app" .= acName ac
                     , "platform" .= acPlatform ac
                     , "version" .= version
                     , "version_code" .= mCode
                     , "build_type" .= ("release" :: Text)
+                    , "transition" .= ("external_review->store_sync" :: Text)
                     ]
             logInfo $
-                "[STORE_SYNC] Inserted synthetic release "
-                    <> rid
-                    <> " for "
+                "[STORE_SYNC] Transitioned external-review row "
+                    <> rtId r
+                    <> " -> live ("
+                    <> track
+                    <> ") for "
                     <> acName ac
                     <> " v"
                     <> version
-                    <> maybe "" (\t -> " (tag: " <> t <> ")") derivedTag
+        -- No review row to adopt (or a STORE_SYNC row already owns this version):
+        -- mint as before. ON CONFLICT DO NOTHING dedupes a concurrent / legacy row.
+        _ -> do
+            inserted <- insertReleaseTrackerRowIfAbsent row
+            if not inserted
+                then
+                    logInfo $
+                        "[STORE_SYNC] Skipped duplicate synthetic release for "
+                            <> acName ac
+                            <> " v"
+                            <> version
+                            <> " (already recorded)"
+                else do
+                    insertReleaseEvent rid "BUSINESS" "STORE_SYNC" $
+                        object
+                            [ "app" .= acName ac
+                            , "platform" .= acPlatform ac
+                            , "version" .= version
+                            , "version_code" .= mCode
+                            , "build_type" .= ("release" :: Text)
+                            ]
+                    logInfo $
+                        "[STORE_SYNC] Inserted synthetic release "
+                            <> rid
+                            <> " for "
+                            <> acName ac
+                            <> " v"
+                            <> version
+                            <> maybe "" (\t -> " (tag: " <> t <> ")") derivedTag
 
 {- | The metadata JSON a store-sync row carries: the leading @store_track@, which
 drives the list/badge and marks the row as a store-sync snapshot. The live
@@ -1287,6 +1340,45 @@ refreshStoreStatusOne ac = do
                     -- + rollout reconcile, all for this app. ASC creds resolved per
                     -- store account inside.
                     syncAppUnified mPlayCreds buildMap expected ac
+
+{- | The backend fan-out for "refresh all": sweep every app through the per-app
+on-demand path ('refreshStoreStatusOne' — cooldown-gated, single-flight, records its
+own outcome), up to 'bulkRefreshConcurrency' apps in parallel. A process-global guard
+coalesces concurrent kicks onto ONE sweep, and it runs DETACHED ('forkFlow') so it
+outlives the triggering request (the operator navigating away).
+-}
+refreshAllStale :: Flow ()
+refreshAllStale = do
+    alreadyRunning <- liftIO $ modifyMVar bulkRefreshInflight (\b -> pure (True, b))
+    if alreadyRunning
+        then logInfo "[STORE_MONITOR] bulk refresh already running — coalescing"
+        else
+            ( do
+                appSt <- ask
+                apps <- listAppCatalog
+                -- Bounded concurrency: distinct apps don't share per-app quota (the
+                -- per-app cooldown + single-flight still cap each), so parallelising the
+                -- store round-trips is safe — ~Nx faster than a sequential sweep.
+                sem <- liftIO (newQSem bulkRefreshConcurrency)
+                liftIO $ Async.forConcurrently_ apps $ \ac ->
+                    bracket_ (waitQSem sem) (signalQSem sem) $
+                        runFlow appSt (safely ("bulk refresh " <> acName ac) (refreshStoreStatusOne ac))
+            )
+                `MC.finally` liftIO (modifyMVar_ bulkRefreshInflight (const (pure False)))
+
+-- | How many apps the bulk store-refresh sweep reads in parallel (distinct apps only —
+-- per-app quota is still capped by the cooldown + single-flight).
+bulkRefreshConcurrency :: Int
+bulkRefreshConcurrency = 5
+
+-- | Whether a bulk sweep is in progress (surfaced to the UI as a 'refreshing' hint).
+isBulkRefreshing :: Flow Bool
+isBulkRefreshing = liftIO (readMVar bulkRefreshInflight)
+
+-- | Process-global guard: at most one full sweep at a time (per instance).
+{-# NOINLINE bulkRefreshInflight #-}
+bulkRefreshInflight :: MVar Bool
+bulkRefreshInflight = unsafePerformIO (newMVar False)
 
 {- | Process-global in-flight registry for on-demand refreshes: @app_catalog_id →
 barrier@. Coalesces concurrent refreshes of the SAME app — without it, several
