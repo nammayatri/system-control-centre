@@ -119,9 +119,9 @@ chunksOf n xs = let (h, t) = splitAt n xs in h : chunksOf n t
 genChunk :: (MonadFlow m) => Text -> AiConfig -> [CommitItem] -> m [(Cat, Text)]
 genChunk createdBy cfg batch = go (2 :: Int)
   where
-    commitLines = T.unlines (map (\c -> "- " <> cgSubject c <> " (@" <> cgAuthor c <> ")") batch)
+    commitLines = T.unlines (map (\c -> "- " <> cgSubject c <> " (" <> cgAuthor c <> ")") batch)
     userMsg = fence "context" commitLines
-    fallback = map (\c -> (catOf c, T.strip (cgSubject c) <> " — @" <> cgAuthor c)) batch
+    fallback = map (\c -> (catOf c, T.strip (cgSubject c) <> " — " <> cgAuthor c)) batch
     -- Accept the AI output only if it is EXACTLY one line per commit — that is what
     -- keeps the final reconciliation exact (notable + internal = in-app total). On a
     -- mismatch, retry; if it still won't, fall back to a code categorization of the
@@ -161,8 +161,10 @@ genShort createdBy cfg grouped = do
     notable = [s | (c, s) <- grouped, isNotable c]
     -- Headline changes are enough for a synopsis; cap the slice so a huge release
     -- still makes one quick call. Fall back to the raw lines if nothing is notable.
-    -- Drop the "— @author" tail so the notes stay generic (no handles).
-    stripAuthor = T.strip . fst . T.breakOn " — @"
+    -- Drop the "— author" tail (LAST em-dash separator) so the notes stay generic.
+    stripAuthor t = case T.breakOnEnd " — " t of
+        (pre, _) | not (T.null pre) -> T.strip (T.dropEnd 3 pre)
+        _ -> T.strip t
     picked = map stripAuthor (take 40 (if null notable then map snd grouped else notable))
     userMsg = fence "context" (T.unlines (map ("- " <>) picked))
     fallback = deterministicShort grouped

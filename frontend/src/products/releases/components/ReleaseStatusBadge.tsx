@@ -49,17 +49,19 @@ export function ReleaseStatusBadge({
         </>
       );
     }
-    // The raw rt_status is misleading for a build sitting on the store — override it with
-    // the canonical backend displayStatus for the lifecycle phases (INPROGRESS review/
-    // approve, a rolling/halted/superseded snapshot, a promotable internal build). A still-
-    // building or terminal row keeps its truthful raw badge.
+    // The raw rt_status is misleading for a build with a store lifecycle — render the
+    // canonical backend displayStatus (§15: one label on every surface) for active AND
+    // terminal store phases, so the list can't drift from the monitor/detail (a live
+    // build reads "Released · 100%" everywhere, a rejected one "Rejected" — not a raw
+    // "Completed"/"Aborted"). Kept raw: still-building rows (CREATED/approval nuance),
+    // distributed builds (the Firebase/debug chip already labels them), and REVERTED
+    // releases (the revert verdict outranks the last store phase).
     const override =
       release.status === 'INPROGRESS' ||
-      phase === 'rolling_out' ||
-      phase === 'halted' ||
-      phase === 'superseded' ||
+      ['rolling_out', 'halted', 'superseded', 'live', 'rejected', 'aborted', 'build_failed'].includes(phase ?? '') ||
       promotable;
-    if (override && phase && phase !== 'building' && ctx?.display_label && ctx?.display_variant) {
+    const keepRaw = phase === 'building' || phase === 'distributed' || release.status === 'REVERTED';
+    if (override && phase && !keepRaw && ctx?.display_label && ctx?.display_variant) {
       return (
         <>
           {firebaseBadge}

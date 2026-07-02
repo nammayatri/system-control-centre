@@ -44,8 +44,9 @@ import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById, listAppCatalog)
 import Products.Autopilot.Mobile.Queries.StoreStatus (StoreSyncStatusRow, listStoreStatus, listStoreSyncStatus)
 import Products.Autopilot.Mobile.Queries.Tracker (listIncomingMobileVersions, parseMobileTargetState)
+import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe, reviewInferredOf)
 import Products.Autopilot.Mobile.StoreSync (isBulkRefreshing, refreshAllStale, refreshStoreStatusOne)
-import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), displayStatus, variantSlug)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), displayStatusInferred, variantSlug)
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), isDebugBuildType)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..), StoreStatus, StoreStatusT (..))
 import Products.Autopilot.Types.Storage.Schema (ReleaseTrackerRow, ReleaseTrackerT (..))
@@ -280,7 +281,9 @@ incomingCell r =
         , displayVariant = snd disp
         }
   where
-    disp = cellDisplay (Just "inProgress") (rtReviewStatus r) Nothing
+    -- Inference softening: an Android track-inferred verdict reads "Pending
+    -- review", not a confident "In review".
+    disp = cellDisplay (reviewInferredOf (parseJsonTextMaybe (rtMetadata r))) (Just "inProgress") (rtReviewStatus r) Nothing
 
 toCell :: StoreStatus -> TrackCellResp
 toCell ss =
@@ -289,7 +292,9 @@ toCell ss =
         , buildCode = ssVersionCode ss
         , status = ssStatus ss
         , rolloutPercent = ssRolloutPercent ss
-        , reviewStatus = ssReviewStatus ss
+        , -- Store cells carry no review (§16): a verdict is a decision on the
+          -- release row, surfaced by the Incoming cell — never by a track cell.
+          reviewStatus = Nothing
         , releaseNotes = ssReleaseNotes ss
         , -- Drift = the live PRODUCTION version differs from the last SCC-shipped
           -- one (an out-of-band release). Other tracks never flag drift.
@@ -302,7 +307,7 @@ toCell ss =
         }
   where
     isProd = ssTrack ss == "production"
-    disp = cellDisplay (ssStatus ss) (ssReviewStatus ss) (ssRolloutPercent ss)
+    disp = cellDisplay False (ssStatus ss) Nothing (ssRolloutPercent ss)
 
 -- | Map an observed production/incoming store cell to a lifecycle phase, mirroring
 -- the FE deriveStoreBadge precedence (review verdict before rollout; an active ramp
@@ -321,10 +326,12 @@ observedToPhase mStatus mReview mPct =
                     | mStatus == Just "live" || mStatus == Just "completed" -> Just Live
                     | otherwise -> Nothing
 
--- | The observed phase rendered as (display label, variant slug), or both Nothing.
-cellDisplay :: Maybe Text -> Maybe Text -> Maybe Double -> (Maybe Text, Maybe Text)
-cellDisplay s r p = case observedToPhase s r p of
-    Just ph -> let d = displayStatus ph in (Just (dLabel d), Just (variantSlug (dVariant d)))
+-- | The observed phase rendered as (display label, variant slug), or both
+-- Nothing. @inferred@ softens a track-inferred "In review" (Android) to
+-- "Pending review" — only the Incoming cell ever passes True.
+cellDisplay :: Bool -> Maybe Text -> Maybe Text -> Maybe Double -> (Maybe Text, Maybe Text)
+cellDisplay inferred s r p = case observedToPhase s r p of
+    Just ph -> let d = displayStatusInferred inferred ph in (Just (dLabel d), Just (variantSlug (dVariant d)))
     Nothing -> (Nothing, Nothing)
 
 driftsFromExpected :: StoreStatus -> Bool

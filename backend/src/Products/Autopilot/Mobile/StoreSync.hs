@@ -27,6 +27,9 @@ module Products.Autopilot.Mobile.StoreSync (
     externalReviewAction,
     reviewStateToStatus,
     pendingPublishRelease,
+    PendingOutcome (..),
+    pendingOutcome,
+    retireOutcome,
     detectConsoleRollout,
     detectIosRelease,
 
@@ -40,25 +43,26 @@ module Products.Autopilot.Mobile.StoreSync (
 ) where
 
 import Control.Applicative ((<|>))
-import qualified Control.Concurrent.Async as Async
+import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
 import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
 import Control.Exception (SomeException, bracket_)
 import Control.Monad (forM_, unless, when)
-import qualified Control.Monad.Catch as MC
+import Control.Monad.Catch qualified as MC
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
 import Core.Environment (Flow, MonadFlow, logError, logInfo, logWarning, runFlow)
 import Data.Aeson (object, (.=))
 import Data.Int (Int32)
 import Data.List (find)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.Text as T
-import Data.Time.Clock (getCurrentTime)
-import qualified Data.UUID as UUID
-import qualified Data.UUID.V4 as UUID
+import Data.Text qualified as T
+import Data.Time.Clock (diffUTCTime, getCurrentTime)
+import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUID
+import Products.Autopilot.Mobile.Lifecycle.Phase (ReleasePhase (..))
 import Products.Autopilot.Mobile.Queries.AppCatalog (
     LatestBuildRow (..),
     derivedStoreTag,
@@ -66,9 +70,8 @@ import Products.Autopilot.Mobile.Queries.AppCatalog (
     listAppCatalog,
  )
 import Products.Autopilot.Mobile.Queries.StoreStatus (
-    ActiveMobileState (..),
     StoreStatusUpsert (..),
-    findActiveMobileState,
+    findProductionLiveCell,
     latestShippedVersionsPerApp,
     recordStoreSyncError,
     recordStoreSyncOk,
@@ -76,15 +79,13 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (
     setProductionRolloutStatus,
     upsertStoreStatus,
  )
-import Products.Autopilot.Mobile.Lifecycle.Phase (ReleasePhase (..))
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
     completeExternalReviewRow,
+    convergeStoreSyncRow,
     findActiveRolloutReleases,
     findExternalReviewRow,
     findExternalReviewRowForVersion,
-    storeSyncRowExistsForVersion,
-    convergeStoreSyncRow,
     findMobileAwaitingRollout,
     findMobileVersionRow,
     logEvent,
@@ -92,9 +93,10 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     parseMobileTargetState,
     sccActiveReleaseExistsForVersion,
     setAscIds,
-    setExternalReviewState,
+    applyExternalReviewPhase,
+    closeExternalReviewRow,
     setPhase,
-    setProductionRolloutReflection,
+    storeSyncRowExistsForVersion,
     updateStoreSyncBuildCode,
  )
 import Products.Autopilot.Mobile.Types (
@@ -116,7 +118,7 @@ import Products.Autopilot.Mobile.Versioning.Apple (
     getAscReviewState,
     getInFlightReview,
     getIosVersionStateDump,
-    getLiveAppStoreVersion,
+    getLiveAppStoreVersionAndBuild,
     getPhasedReleaseId,
     getPhasedReleaseState,
     loadAscCreds,
@@ -223,28 +225,32 @@ syncAppUnified mPlayCreds buildMap expected ac = do
                 recordStoreSyncError aid "no_creds" "No Play Console credentials configured"
                 logWarning $ "[STORE_SYNC] No Play Console creds — skipping " <> acName ac
             Just creds -> case acPackageName ac of
-                Just pkg | not (T.null pkg) ->
-                    fetchPlayTrackBodies creds pkg >>= \case
-                        Left e -> do
-                            let msg = renderPlayErr e
-                            recordStoreSyncError aid (classifyStoreErr msg) msg
-                            logWarning $ "[STORE_SYNC] Play API error for " <> acName ac <> ": " <> msg
-                        Right bodies -> do
-                            let snaps = bodiesToSnapshots bodies
-                            -- Overlay each cell with ITS OWN version's lifecycle (review /
-                            -- rollout), scoped per cell so a promoted-to-review internal
-                            -- version reads "In review" while the live production cell stays "Live".
-                            safely ("store_status " <> acName ac) $
-                                forM_ snaps $ \s -> do
-                                    cellActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac) (stsVersion s)
-                                    upsertStoreStatus (androidSnapToUpsert ac mExpected cellActive s)
-                            when (acEnabled ac) $ do
-                                let (internal, production) = bodiesToTracks bodies
-                                recordAndroidTracks ac existing internal production
-                                reflectProductionRollout ac (bodiesToSnapshots bodies)
-                                reconcileAndroidExternalReviewFrom ac (bodiesToProdReleases bodies)
-                            reconcileAndroidRolloutsFrom ac (bodiesToProdReleases bodies)
-                            recordStoreSyncOk aid
+                Just pkg
+                    | not (T.null pkg) ->
+                        fetchPlayTrackBodies creds pkg >>= \case
+                            Left e -> do
+                                let msg = renderPlayErr e
+                                recordStoreSyncError aid (classifyStoreErr msg) msg
+                                logWarning $ "[STORE_SYNC] Play API error for " <> acName ac <> ": " <> msg
+                            Right bodies -> do
+                                let snaps = bodiesToSnapshots bodies
+                                -- Pure store truth per cell — review is never overlaid here;
+                                -- it lives on the release row (monitor Incoming / list badge).
+                                safely ("store_status " <> acName ac) $
+                                    forM_ snaps $ \s ->
+                                        upsertStoreStatus (androidSnapToUpsert ac mExpected s)
+                                when (acEnabled ac) $ do
+                                    let (internal, production) = bodiesToTracks bodies
+                                    -- Per-stage isolation (§16h-2): one failing stage
+                                    -- (e.g. an identity conflict) must not abort the rest.
+                                    safely ("record " <> acName ac) $
+                                        recordAndroidTracks ac existing internal production
+                                    safely ("prod-row " <> acName ac) $
+                                        ensureProductionRolloutRow ac (bodiesToSnapshots bodies)
+                                    safely ("external-review " <> acName ac) $
+                                        reconcileAndroidExternalReviewFrom ac (bodiesToProdReleases bodies)
+                                reconcileAndroidRolloutsFrom ac (bodiesToProdReleases bodies)
+                                recordStoreSyncOk aid
                 _ -> noPkg >> logWarning ("[STORE_SYNC] No package id for " <> acName ac <> ", skipping")
         -- Resolve the ASC key for THIS app's account (multi-account: different Apple
         -- teams). No fallback to the default key for a tagged app — it'd 403.
@@ -254,22 +260,22 @@ syncAppUnified mPlayCreds buildMap expected ac = do
                     recordStoreSyncError aid "no_creds" ("No App Store Connect credentials for account '" <> fromMaybe "default" (acStoreAccount ac) <> "'")
                     logWarning $ "[STORE_SYNC] No ASC creds for account '" <> fromMaybe "default" (acStoreAccount ac) <> "' — skipping " <> acName ac
                 Just creds -> case acPackageName ac of
-                    Just bundleId | not (T.null bundleId) ->
-                        fetchAscSnapshots creds bundleId >>= \case
-                            Left e -> do
-                                let msg = renderAscErr e
-                                recordStoreSyncError aid (classifyStoreErr msg) msg
-                                logWarning $ "[STORE_MONITOR] ASC snapshot error for " <> acName ac <> ": " <> msg
-                            Right snaps -> do
-                                safely ("store_status " <> acName ac) $
-                                    forM_ snaps $ \s -> do
-                                        cellActive <- findActiveMobileState (acName ac) (acSurface ac) (acPlatform ac) (ascVersion s)
-                                        upsertStoreStatus (iosSnapToUpsert ac mExpected cellActive s)
-                                when (acEnabled ac) $ do
-                                    syncIos creds ac existing
-                                    syncIosExternalReview creds ac
-                                reconcileIosRollouts creds ac
-                                recordStoreSyncOk aid
+                    Just bundleId
+                        | not (T.null bundleId) ->
+                            fetchAscSnapshots creds bundleId >>= \case
+                                Left e -> do
+                                    let msg = renderAscErr e
+                                    recordStoreSyncError aid (classifyStoreErr msg) msg
+                                    logWarning $ "[STORE_MONITOR] ASC snapshot error for " <> acName ac <> ": " <> msg
+                                Right snaps -> do
+                                    safely ("store_status " <> acName ac) $
+                                        forM_ snaps $ \s ->
+                                            upsertStoreStatus (iosSnapToUpsert ac mExpected s)
+                                    when (acEnabled ac) $ do
+                                        syncIos creds ac existing
+                                        syncIosExternalReview creds ac
+                                    reconcileIosRollouts creds ac
+                                    recordStoreSyncOk aid
                     _ -> noPkg >> logWarning ("[STORE_SYNC] No bundle id for " <> acName ac <> ", skipping")
         p -> do
             recordStoreSyncError aid "api_error" ("Unknown platform " <> p)
@@ -316,8 +322,11 @@ reconcileAndroidRolloutsFrom ac releases = do
         forM_ awaiting $ \row ->
             safely ("console-rollout " <> rtId row) $
                 forM_ (rowVersionCode row) $ \code ->
-                    forM_ (rolloutStateForCode code releases) $ \rst ->
-                        mapM_ (adoptExternalRollout (rtId row) "play") (detectConsoleRollout androidPendingFractionThreshold code rst)
+                    case rolloutStateForCode code releases of
+                        Just rst -> mapM_ (adoptExternalRollout (rtId row) "play") (detectConsoleRollout androidPendingFractionThreshold code rst)
+                        -- Our code is GONE from the track → classify the outcome
+                        -- (§16h-1) instead of zombie-ing at "In review".
+                        Nothing -> resolveVanishedSubmission row code releases
 
 {- | Retire a SUPERSEDED rollout: an actively-rolling version that has dropped off
 the production track because a newer build replaced it. setPhase Superseded sets
@@ -397,76 +406,61 @@ recordAndroidTracks ac existing internal production = do
             logInfo $ "[STORE_SYNC] New Play version for " <> acName ac <> " (" <> track <> "): " <> tagFor
             insertSyntheticRelease ac chosenVer chosenCode track
 
-{- | Reflect the live production track's staged rollout onto the matching store-sync
-row so the release list matches the App Monitor. 'recordAndroidTracks' badges only
-the LEADING version (highest build code), so a PREVIOUS version mid-rollout on
-production — while a newer build sits on internal — would never show the ramp.
-
-Only an in-flight ramp BELOW 100% is reflected: a parked ≈0 pending fraction
-(approved-but-held, below 'androidRolloutFloorPercent') and a completed 100% rollout
-are both excluded — at 100% the version IS the live production build, already badged
-"Production" by 'recordAndroidTracks'. Passing the active version (or 'Nothing') to
-'setProductionRolloutReflection' also CLEARS the reflection off any version that has
-since been superseded, so it stops showing "rolling out".
+{- | Ensure a mid-rollout production version has its own store-sync row so it appears
+in the list. 'recordAndroidTracks' rows only the LEADING version (highest build code),
+so a PREVIOUS version ramping on production — while a newer build sits on internal —
+would otherwise have no row. The rollout % is NOT copied onto the row: it's read from
+store_status (the SSOT) at response time. Only an in-flight ramp below 100% needs a row
+here (a 100% rollout IS the leading production build, already rowed by recordAndroidTracks).
 -}
-reflectProductionRollout :: AppCatalog -> [StoreTrackSnapshot] -> Flow ()
-reflectProductionRollout ac snaps = do
-    now <- liftIO getCurrentTime
-    let mProd = find ((== "production") . stsTrack) snaps
-        mActive = case mProd of
-            Just s
-                | stsVersion s /= "0.0.0"
-                , stsStatus s `elem` ["inProgress", "halted"]
-                , Just pct <- (* 100) <$> stsFraction s
-                , pct >= androidRolloutFloorPercent
-                , pct < 100 ->
-                    Just (stsVersion s, if stsStatus s == "halted" then "halted" else "rolling_out", pct)
-            _ -> Nothing
-    case (mActive, mProd) of
-        (Just _, Just s) -> insertSyntheticRelease ac (stsVersion s) (stsCode s) "production"
-        _ -> pure ()
-    setProductionRolloutReflection ac mActive now
+ensureProductionRolloutRow :: AppCatalog -> [StoreTrackSnapshot] -> Flow ()
+ensureProductionRolloutRow ac snaps =
+    forM_ (find ((== "production") . stsTrack) snaps) $ \s ->
+        when (isActiveRamp s) $ insertSyntheticRelease ac (stsVersion s) (stsCode s) "production"
+  where
+    isActiveRamp s =
+        stsVersion s /= "0.0.0"
+            && stsStatus s `elem` ["inProgress", "halted"]
+            && maybe False (\pct -> pct >= androidRolloutFloorPercent && pct < 100) ((* 100) <$> stsFraction s)
 
-{- | iOS counterpart of 'reflectProductionRollout': mirror an App Store PHASED
-production rollout onto the version's store-sync row so the list/detail show
-"Rolling out X%" / "Halted X%" instead of a stale TestFlight badge. This is the
-ONLY path that surfaces a phased release started in App Store Connect OUTSIDE SCC:
-the row was never promoted, so 'detectIosReleases' (which only adopts promoted,
-INPROGRESS rows) never touches it. Apple's % is derived from the phased current-day
-number ('applePhasedPercent' — 1/2/5/10/20/50/100). Ensures the row exists first
+{- | Write an App Store PHASED production rollout's % to store_status (the SSOT the
+list/detail read) so it shows "Rolling out X%" / "Halted X%", not a stale TestFlight
+badge. This is the ONLY path that surfaces a phased release started in App Store
+Connect OUTSIDE SCC: the row was never promoted, so 'detectIosReleases' (promoted,
+INPROGRESS rows only) never touches it. Apple's % is the phased current-day number
+('applePhasedPercent' — 1/2/5/10/20/50/100). Ensures the version has a row first
 (insert-if-absent), since a phased production version need not be the TestFlight
-leader 'recordIosSnapshot' records. A COMPLETE / INACTIVE (fully live) version, or a
-100% ramp, clears the reflection.
+leader 'recordIosSnapshot' records; retires rows superseded by a newer live version.
+
+Carries the live version's build number so both the minted row and the store_status
+cell keep full (version, code) identity — writing a NULL code here used to clobber
+the code the snapshot upsert had just recorded, breaking the (version, code) cell
+match for code-stamped rows.
 -}
-reflectIosPhasedRollout :: AscCreds -> AppCatalog -> Text -> Maybe Text -> Flow ()
+reflectIosPhasedRollout :: AscCreds -> AppCatalog -> Text -> Maybe (Text, Maybe Int32) -> Flow ()
 reflectIosPhasedRollout _ _ _ Nothing = pure ()
-reflectIosPhasedRollout creds ac bundleId (Just pv) = do
-    now <- liftIO getCurrentTime
+reflectIosPhasedRollout creds ac bundleId (Just (pv, mCode)) = do
     getPhasedReleaseState creds bundleId pv >>= \case
         Left e -> logWarning $ "[STORE_SYNC] iOS phased-state read error for " <> acName ac <> ": " <> renderAscErr e
         Right ps -> do
             let pct = maybe 0 applePhasedPercent (apsCurrentDay ps)
                 inRamp st
-                    | pct >= androidRolloutFloorPercent, pct < 100 = Just (pv, st, pct)
+                    | pct >= androidRolloutFloorPercent, pct < 100 = Just (st, pct)
                     | otherwise = Nothing
                 mActive = case apsState ps of
                     "ACTIVE" -> inRamp "rolling_out"
                     "PAUSED" -> inRamp "halted"
                     _ -> Nothing
-            -- Make sure the rolling version has a row to attach the reflection to —
-            -- but ONLY if it has none yet. The iOS reflection has no build number here,
-            -- so a blind insert would seed a NULL-code row; since (name, code) treats
-            -- NULLs as distinct (migration 0035), that spawns a fresh duplicate every
-            -- sync. When the snapshot row (with its real code) already exists, skip the
-            -- insert and let setProductionRolloutReflection attach to it by version.
+            -- Ensure the rolling version has a row (so it appears in the list) — but ONLY
+            -- if none exists yet (version-level check: a legacy code-less row also counts,
+            -- else we'd mint a duplicate beside it). The % lives in store_status, below.
             forM_ mActive $ \_ -> do
                 mExisting <- findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) pv Nothing
                 case mExisting of
                     Just _ -> pure ()
-                    Nothing -> insertSyntheticRelease ac pv Nothing "production"
-            setProductionRolloutReflection ac mActive now
-            forM_ mActive $ \(ver, rs, p) ->
-                setProductionRolloutStatus (acId ac) "ios" ver Nothing (if rs == "halted" then "halted" else "inProgress") p
+                    Nothing -> insertSyntheticRelease ac pv mCode "production"
+            forM_ mActive $ \(rs, p) ->
+                setProductionRolloutStatus (acId ac) "ios" pv mCode (if rs == "halted" then "halted" else "inProgress") p
     stale <- filter (\r -> rtNewVersion r `versionOlderThan` pv) . filter (rowIsApp ac) <$> findActiveRolloutReleases
     forM_ stale (retireSupersededRollout . rtId)
 
@@ -484,12 +478,14 @@ syncIos creds ac existing = do
                 Left e ->
                     logWarning $ "[STORE_SYNC] ASC API error for " <> acName ac <> ": " <> renderAscErr e
                 Right mBi -> do
-                    -- Read the live App Store (production) version INDEPENDENTLY of the
-                    -- TestFlight build. An app can be live on the App Store with no recent
-                    -- TestFlight build (the prod read must not be gated behind it, or the
-                    -- production version is never recorded for those apps).
-                    mProdVer <- either (const Nothing) id <$> liftIO (getLiveAppStoreVersion creds bundleId)
-                    let tfCode bi = abiBuildNumber bi >>= readMaybe . T.unpack :: Maybe Int32
+                    -- Read the live App Store (production) version + its build number
+                    -- INDEPENDENTLY of the TestFlight build. An app can be live on the App
+                    -- Store with no recent TestFlight build (the prod read must not be gated
+                    -- behind it, or the production version is never recorded for those apps).
+                    mProd <- either (const Nothing) id <$> liftIO (getLiveAppStoreVersionAndBuild creds bundleId)
+                    let mProdVer = fst <$> mProd
+                        mProdCode = readMaybe . T.unpack =<< (snd =<< mProd) :: Maybe Int32
+                        tfCode bi = abiBuildNumber bi >>= readMaybe . T.unpack :: Maybe Int32
                         tfDesc = maybe "none" (\bi -> abiVersion bi <> maybe "" (\c -> "+" <> T.pack (show c)) (tfCode bi)) mBi
                     logInfo $
                         "[STORE_SYNC] " <> acName ac <> " iOS → testflight=" <> tfDesc <> ", production=" <> fromMaybe "none" mProdVer
@@ -509,13 +505,11 @@ syncIos creds ac existing = do
                              in recordIosSnapshot ac existing storeVer mCode "testflight"
                         -- No TestFlight build → the live production version leads (if the app is live).
                         Nothing -> case mProdVer of
-                            Just pv -> recordIosSnapshot ac existing pv Nothing "production"
+                            Just pv -> recordIosSnapshot ac existing pv mProdCode "production"
                             Nothing -> logInfo $ "[STORE_SYNC] No ASC build or live version for " <> acName ac
-                    -- Reflect an App Store PHASED rollout (incl. one started in App
-                    -- Store Connect, outside SCC) onto the version's store-sync row so
-                    -- the list shows "Rolling out X%" not a stale TestFlight badge —
-                    -- the iOS counterpart of 'reflectProductionRollout'.
-                    reflectIosPhasedRollout creds ac bundleId mProdVer
+                    -- Write an App Store PHASED rollout's % (incl. one started outside
+                    -- SCC) to store_status so the list shows "Rolling out X%".
+                    reflectIosPhasedRollout creds ac bundleId (fmap (\v -> (v, mProdCode)) mProdVer)
 
 {- | Insert-or-update an iOS store-sync snapshot for whichever track leads —
 TestFlight when a build exists, else production. Factored out so the live
@@ -587,7 +581,7 @@ reconcileAndroidExternalReviewFrom ac releases = do
     let mPending = pendingPublishRelease androidPendingFractionThreshold releases
         -- Android can't distinguish in-review from approved-held, so a
         -- pending version always surfaces as MBInReview ("Pending review").
-        mMapped = (\(version, _) -> (version, "in_review", MBInReview)) <$> mPending
+        mMapped = (\(version, _) -> (version, "in_review")) <$> mPending
     reconcileExternalReviewMapped ac (snd <$> mPending) True existing mMapped
 
 {- | Below this production-rollout @userFraction@ a release is treated as "not yet
@@ -624,22 +618,77 @@ pendingPublishRelease threshold releases = case best of
     higher r Nothing = Just r
     higher r (Just a) = Just (if ptrCode r >= ptrCode a then r else a)
 
-{- | Reconcile the external-review row against the live iOS in-flight review state.
-iOS reads an authoritative review state from ASC, so @inferred = False@ and the
-version code is left unset (the release path self-heals the ASC ids).
+{- | The fate of a watched submission, read from the production track (§16h-1).
+Play never reports a review verdict; presence, serving state, and newer codes
+disambiguate every outcome the track can't say in words.
 -}
-reconcileExternalReview :: AppCatalog -> Maybe ReleaseTrackerRow -> Maybe (Text, AscReviewState) -> Flow ()
+data PendingOutcome
+    = -- | still on the track below the ramp floor — leave as-is
+      PendingParked
+    | -- | serving (completed) or ramping at/above the floor — it went live
+      PendingPublished
+    | -- | gone, and a newer code took the slot — superseded
+      PendingReplaced
+    | -- | gone without publishing — rejected or withdrawn in the console
+      PendingWithdrawn
+    deriving (Eq, Show)
+
+{- | Classify a watched build code against a SUCCESSFUL production-track read.
+'Nothing' on an empty read — a claim needs data, never absence of it. Pure —
+unit-tested.
+-}
+pendingOutcome :: Double -> Int32 -> [ProdTrackRelease] -> Maybe PendingOutcome
+pendingOutcome threshold code rels
+    | null rels = Nothing
+    | Just r <- find ((== code) . ptrCode) rels =
+        Just $
+            if ptrStatus r == "completed" || maybe False (>= threshold) (ptrUserFraction r)
+                then PendingPublished
+                else PendingParked
+    | any ((> code) . ptrCode) rels = Just PendingReplaced
+    | otherwise = Just PendingWithdrawn
+
+{- | Classify a RETIRED external submission from the just-synced production cell —
+platform-generic (the cell was written from this same pass's store read): if the
+serving cell now carries the watched build it PUBLISHED; else a new pending
+submission means it was REPLACED; else it left the store without publishing.
+Inputs: the production cell as @(version, code, status, pct)@, whether a new
+pending submission exists, and the watched build's identity. Pure — unit-tested.
+-}
+retireOutcome :: Maybe (Maybe Text, Maybe Int32, Maybe Text, Maybe Double) -> Bool -> Text -> Maybe Int32 -> PendingOutcome
+retireOutcome mServing hasNewPending ver mCode
+    | Just (sv, sc, sStatus, sPct) <- mServing
+    , sv == Just ver
+    , codeMatches sc
+    , sStatus `elem` [Just "completed", Just "live"] || sPct /= Nothing =
+        PendingPublished
+    | hasNewPending = PendingReplaced
+    | otherwise = PendingWithdrawn
+  where
+    -- Exact code match when both sides know it; a missing side degrades to the
+    -- version match (legacy code-less rows / cells).
+    codeMatches (Just s) | Just c <- mCode = s == c
+    codeMatches _ = True
+
+{- | Reconcile the external-review row against the live iOS in-flight review state.
+iOS reads an authoritative review state from ASC (@inferred = False@), including
+the attached build's number — so the surfaced row carries full (version, code)
+identity and the review can never converge onto a different build of the same
+version name.
+-}
+reconcileExternalReview :: AppCatalog -> Maybe ReleaseTrackerRow -> Maybe (Text, Maybe Int32, AscReviewState) -> Flow ()
 reconcileExternalReview ac existing mInFlight =
-    reconcileExternalReviewMapped ac Nothing False existing $
-        mInFlight >>= \(v, rs) -> (\(rstatus, wf) -> (v, rstatus, wf)) <$> reviewStateToStatus rs
+    reconcileExternalReviewMapped ac (mInFlight >>= \(_, c, _) -> c) False existing $
+        mInFlight >>= \(v, _, rs) -> (\rstatus -> (v, rstatus)) <$> reviewStateToStatus rs
 
 {- | Reconcile the external-review row against an already-mapped @(version,
-review_status, wf_status)@ ('Nothing' = nothing to surface). Shared by the iOS
+review_status)@ ('Nothing' = nothing to surface). Shared by the iOS
 (authoritative) and Android (inferred) detectors. The decision is pure
 ('externalReviewAction'); this runs the side effects.
 
-  * @mCode@     — version code stamped on a fresh row (Android needs it to drive
-                  a later rollout; iOS passes 'Nothing').
+  * @mCode@     — the reviewed build's code. Stamped on a fresh row and used to
+                  target the exact (version, code) row when converging (Android
+                  from the track release; iOS from the attached build).
   * @inferred@  — whether the review state is inferred from the track rather than
                   read authoritatively (Android), which softens the row's label.
 -}
@@ -648,11 +697,11 @@ reconcileExternalReviewMapped ::
     Maybe Int32 ->
     Bool ->
     Maybe ReleaseTrackerRow ->
-    Maybe (Text, Text, MobileBuildWFStatus) ->
+    Maybe (Text, Text) ->
     Flow ()
 reconcileExternalReviewMapped ac mCode inferred existing mMapped = do
     mVersionRow <- case mMapped of
-        Just (version, _, _) -> findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) version mCode
+        Just (version, _) -> findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) version mCode
         Nothing -> pure Nothing
     let target = mVersionRow <|> existing
         mTargetId = rtId <$> target
@@ -661,35 +710,58 @@ reconcileExternalReviewMapped ac mCode inferred existing mMapped = do
         mExisting = (\r -> (rtNewVersion r, fromMaybe "in_review" (rtReviewStatus r))) <$> target
     -- Only the dedup check needs a DB read, and only when there's a version to check.
     sccOwns <- case mMapped of
-        Just (version, _, _) -> sccActiveReleaseExistsForVersion (acName ac) (acSurface ac) (acPlatform ac) version
+        Just (version, _) -> sccActiveReleaseExistsForVersion (acName ac) (acSurface ac) (acPlatform ac) version
         Nothing -> pure False
+    -- Vanish rule (§16h-1): a retired watched submission is classified — not
+    -- assumed published. The serving cell says Published; a new pending says
+    -- Replaced; otherwise it left the store without publishing.
+    let retire hasNewPending = forM_ target $ \r -> do
+            serving <- findProductionLiveCell (acId ac) (acPlatform ac)
+            case retireOutcome serving hasNewPending (rtNewVersion r) (rtVersionCode r) of
+                PendingPublished -> completeExternalReviewRow (rtId r)
+                PendingReplaced -> do
+                    closeExternalReviewRow (rtId r) Superseded
+                    logInfo $ "[STORE_SYNC] External review " <> rtId r <> " replaced by a newer submission — superseded"
+                    logEvent (rtId r) "EXTERNAL_REVIEW_RETIRED" (object ["outcome" .= ("replaced" :: Text)])
+                PendingWithdrawn -> do
+                    closeExternalReviewRow (rtId r) (Rejected "Removed from the store before publishing (rejected or withdrawn in the store console)")
+                    logInfo $ "[STORE_SYNC] External review " <> rtId r <> " left the store before publishing — rejected/withdrawn"
+                    logEvent (rtId r) "EXTERNAL_REVIEW_RETIRED" (object ["outcome" .= ("rejected_or_withdrawn" :: Text)])
+                PendingParked -> pure ()
     case externalReviewAction inferred mExisting mMapped sccOwns of
         ExtNoop -> pure ()
-        ExtComplete -> mapM_ completeExternalReviewRow mTargetId
-        ExtUpdate reviewStatus wf -> mapM_ (\i -> setExternalReviewState i reviewStatus wf) mTargetId
-        ExtInsert version reviewStatus wf -> insertExternalReviewRow ac mCode inferred version reviewStatus wf
-        ExtRetireAndInsert version reviewStatus wf -> do
-            mapM_ completeExternalReviewRow mTargetId
-            insertExternalReviewRow ac mCode inferred version reviewStatus wf
+        -- SCC owns the version (it graduated to a rollout) → the external
+        -- duplicate simply completes; otherwise a true vanish → classify.
+        ExtComplete
+            | sccOwns -> mapM_ completeExternalReviewRow mTargetId
+            | otherwise -> retire False
+        -- State change through the single writer (§16e-2): fills a missing code,
+        -- advances a converged snapshot to INPROGRESS, setPhases the verdict.
+        ExtUpdate reviewStatus -> mapM_ (\i -> applyExternalReviewPhase i reviewStatus mCode) mTargetId
+        ExtInsert version reviewStatus -> insertExternalReviewRow ac mCode inferred version reviewStatus
+        ExtRetireAndInsert version reviewStatus -> do
+            retire True
+            insertExternalReviewRow ac mCode inferred version reviewStatus
 
--- | What to do with the external-review row this pass.
+-- | What to do with the external-review row this pass. The verdict string is the
+-- single source — the wf mirror is derived from it at the write site.
 data ExternalReviewAction
     = ExtNoop
     | -- | complete the existing row
       ExtComplete
-    | -- | update the existing row's (review_status, wf-status)
-      ExtUpdate Text MobileBuildWFStatus
-    | -- | insert a fresh row (version, review_status, wf-status)
-      ExtInsert Text Text MobileBuildWFStatus
+    | -- | update the existing row's verdict
+      ExtUpdate Text
+    | -- | insert a fresh row (version, verdict)
+      ExtInsert Text Text
     | -- | complete the existing row (different version) + insert the new one
-      ExtRetireAndInsert Text Text MobileBuildWFStatus
+      ExtRetireAndInsert Text Text
     deriving (Eq, Show)
 
 {- | Pure reconcile decision for the external-review row. Inputs: whether the
 review state is @inferred@ (Android) rather than authoritative (iOS); the existing
-row's @(version, review_status)@ (if any); the in-flight @(version, review_status,
-wf_status)@ we'd surface ('Nothing' = nothing to surface — draft/live/unknown);
-and whether an actual SCC release already owns that version. Unit-tested.
+row's @(version, review_status)@ (if any); the in-flight @(version, review_status)@
+we'd surface ('Nothing' = nothing to surface — draft/live/unknown); and whether an
+actual SCC release already owns that version. Unit-tested.
 
 The @inferred@ guard protects an Android operator decision. Store sync can only
 ever infer @"in_review"@ for Android, so once the operator has marked the row
@@ -700,37 +772,44 @@ state always wins (including a genuine rejected → resubmitted → in-review).
 externalReviewAction ::
     Bool ->
     Maybe (Text, Text) ->
-    Maybe (Text, Text, MobileBuildWFStatus) ->
+    Maybe (Text, Text) ->
     Bool ->
     ExternalReviewAction
 externalReviewAction inferred mExisting mMapped sccOwns = case mMapped of
     -- Nothing in review (only a live / draft version) → retire any stale row.
     Nothing -> retireExisting
-    Just (version, reviewStatus, mbStatus)
+    Just (version, reviewStatus)
         -- SCC already tracks this version → drop ours so it isn't double-shown.
         | sccOwns -> retireExisting
         | otherwise -> case mExisting of
-            Nothing -> ExtInsert version reviewStatus mbStatus
+            Nothing -> ExtInsert version reviewStatus
             Just (ev, eStatus)
-                | ev /= version -> ExtRetireAndInsert version reviewStatus mbStatus
+                | ev /= version -> ExtRetireAndInsert version reviewStatus
                 -- Never let an inferred "in_review" overwrite an operator's
                 -- approve/reject on the same version (Android persistence fix).
                 | inferred && isOperatorDecided eStatus && reviewStatus == "in_review" -> ExtNoop
-                | otherwise -> ExtUpdate reviewStatus mbStatus
+                | otherwise -> ExtUpdate reviewStatus
   where
     retireExisting = maybe ExtNoop (const ExtComplete) mExisting
     isOperatorDecided s = s == "approved" || s == "rejected"
 
-{- | Map a review state to @(review_status, mb_wf_status)@; 'Nothing' for states we
-don't surface (prepare-for-submission / live / unknown).
--}
-reviewStateToStatus :: AscReviewState -> Maybe (Text, MobileBuildWFStatus)
+-- | Map a review state to a verdict; 'Nothing' for states we don't surface
+-- (prepare-for-submission / live / unknown).
+reviewStateToStatus :: AscReviewState -> Maybe Text
 reviewStateToStatus = \case
-    AscWaitingForReview -> Just ("in_review", MBInReview)
-    AscInReview -> Just ("in_review", MBInReview)
-    AscApproved -> Just ("approved", MBReviewApproved)
-    AscRejected _ -> Just ("rejected", MBReviewRejected)
+    AscWaitingForReview -> Just "in_review"
+    AscInReview -> Just "in_review"
+    AscApproved -> Just "approved"
+    AscRejected _ -> Just "rejected"
     _ -> Nothing
+
+-- | The wf mirror for an external verdict — the same mapping 'phaseToWfStatus'
+-- projects, derived from the one verdict source.
+externalWf :: Text -> MobileBuildWFStatus
+externalWf = \case
+    "approved" -> MBReviewApproved
+    "rejected" -> MBReviewRejected
+    _ -> MBInReview
 
 {- | The human-readable description / changelog for an external-review row.
 @inferred@ (Android) softens it to "pending" because the review state is
@@ -747,12 +826,25 @@ externalRowDescription False reviewStatus = case reviewStatus of
 {- | Insert a fresh @EXTERNAL_REVIEW@ row reflecting an out-of-band store review.
 mode 'EXTERNAL_REVIEW' + no dispatch_id keeps it clear of the build runner, the
 rollout reconciler, and the store-sync version dedup index. @mCode@ stamps the
-version code (Android, for a later rollout); @inferred@ marks the review state
-as track-derived rather than authoritative (Android) — surfaced in metadata so
-the UI labels it "Pending review" instead of a confident "In review".
+build's version code (both platforms — identity is total, §16e-5); @inferred@
+marks the review state as track-derived rather than authoritative (Android) —
+surfaced in metadata so the UI labels it "Pending review", not "In review".
+
+Identity guard: with no build code resolved (a degraded ASC read), skip the mint
+and log — an identity-less row can't be converged/deduped correctly and caused
+the wrong-row review overlays. The next sync retries with a fresh read.
 -}
-insertExternalReviewRow :: AppCatalog -> Maybe Int32 -> Bool -> Text -> Text -> MobileBuildWFStatus -> Flow ()
-insertExternalReviewRow ac mCode inferred version reviewStatus mbStatus = do
+insertExternalReviewRow :: AppCatalog -> Maybe Int32 -> Bool -> Text -> Text -> Flow ()
+insertExternalReviewRow ac Nothing _ version reviewStatus =
+    logWarning $
+        "[STORE_SYNC] Skipping identity-less external-review row for "
+            <> acName ac
+            <> " v"
+            <> version
+            <> " ("
+            <> reviewStatus
+            <> "): no build code resolved; retrying next sync"
+insertExternalReviewRow ac mCode inferred version reviewStatus = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
     let desc = externalRowDescription inferred reviewStatus
@@ -770,7 +862,7 @@ insertExternalReviewRow ac mCode inferred version reviewStatus mbStatus = do
                 }
         targetState =
             MobileBuildTargetState
-                { mbWfStatus = mbStatus
+                { mbWfStatus = externalWf reviewStatus
                 , mbContext = ctx
                 , mbExternalRunId = Nothing
                 , mbMatrixJobStatus = Nothing
@@ -814,6 +906,10 @@ insertExternalReviewRow ac mCode inferred version reviewStatus mbStatus = do
 -- "release" build type. The @track@ records which store track this build is the
 -- current latest on ("production" | "internal" | "testflight") — surfaced as a
 -- badge in the UI via @metadata.store_track@.
+--
+-- Identity guard: with no build code resolved (a degraded store read), skip the
+-- mint and log — identity-less rows caused wrong-row convergence (§16e-5). The
+-- next sync retries with a fresh read.
 insertSyntheticRelease ::
     (MonadFlow m) =>
     AppCatalog ->
@@ -822,6 +918,15 @@ insertSyntheticRelease ::
     -- | store track: "production" | "internal" | "testflight"
     Text ->
     m ()
+insertSyntheticRelease ac version Nothing track =
+    logWarning $
+        "[STORE_SYNC] Skipping identity-less synthetic release for "
+            <> acName ac
+            <> " v"
+            <> version
+            <> " ("
+            <> track
+            <> "): no build code resolved; retrying next sync"
 insertSyntheticRelease ac version mCode track = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
@@ -902,6 +1007,7 @@ insertSyntheticRelease ac version mCode track = do
                 , rtAscPhasedId = Nothing
                 , rtStoreTrack = Just track
                 , rtVersionCode = mCode
+                , rtTerminalStatus = Nothing
                 , rtCreatedAt = now
                 , rtUpdatedAt = now
                 }
@@ -909,9 +1015,9 @@ insertSyntheticRelease ac version mCode track = do
     -- this exact version: transition THAT row in place — keep its date_created —
     -- instead of minting a duplicate and orphaning the review row. Skip when a
     -- STORE_SYNC row already exists (legacy dup) so the flip can't violate the index.
-    mReview <- findExternalReviewRowForVersion (acName ac) (acSurface ac) (acPlatform ac) version
+    mReview <- findExternalReviewRowForVersion (acName ac) (acSurface ac) (acPlatform ac) version mCode
     canAdopt <- case mReview of
-        Just _ -> not <$> storeSyncRowExistsForVersion (acName ac) (acSurface ac) (acPlatform ac) version
+        Just _ -> not <$> storeSyncRowExistsForVersion (acName ac) (acSurface ac) (acPlatform ac) version mCode
         Nothing -> pure False
     case mReview of
         Just r | canAdopt -> do
@@ -1036,10 +1142,40 @@ detectConsoleRolloutForRow creds row = do
                     -- Match OUR version's release on the track (not the newest), so a
                     -- genuine Console rollout of this version is detected even when a
                     -- newer review submission sits ahead of it on the track.
-                    Right releases ->
-                        forM_ (rolloutStateForCode code releases) $ \st ->
-                            mapM_ (adoptExternalRollout (rtId row) "play") (detectConsoleRollout androidPendingFractionThreshold code st)
+                    Right releases -> case rolloutStateForCode code releases of
+                        Just st -> mapM_ (adoptExternalRollout (rtId row) "play") (detectConsoleRollout androidPendingFractionThreshold code st)
+                        -- Our code is GONE from the track → classify the outcome
+                        -- (§16h-1) instead of zombie-ing at "In review".
+                        Nothing -> resolveVanishedSubmission row code releases
         _ -> pure ()
+
+{- | §16h-1 for SCC-promoted rows: the watched code VANISHED from a successful,
+non-empty track read — stamp the outcome instead of leaving the row at
+"In review" forever. Grace-guarded: a just-promoted row can postdate the track
+read (the promote may land between the read and this reconcile), so rows
+submitted <30 min ago are skipped; the next pass classifies them fresh.
+-}
+resolveVanishedSubmission :: ReleaseTrackerRow -> Int32 -> [ProdTrackRelease] -> Flow ()
+resolveVanishedSubmission row code releases = do
+    now <- liftIO getCurrentTime
+    let recent = maybe True (\t -> diffUTCTime now t < 1800) (rtReviewSubmittedAt row)
+        -- External rows have no runner Finalize — close their engine status too.
+        close ph
+            | rtMode row == Just "EXTERNAL_REVIEW" = closeExternalReviewRow (rtId row) ph
+            | otherwise = setPhase now (rtId row) ph
+    unless recent $
+        forM_ (pendingOutcome androidPendingFractionThreshold code releases) $ \case
+            PendingReplaced -> do
+                close Superseded
+                logInfo $ "[ROLLOUT_SYNC] " <> rtId row <> " submission replaced on the production track — superseded"
+                logEvent (rtId row) "SUBMISSION_RETIRED" (object ["outcome" .= ("replaced" :: Text)])
+            PendingWithdrawn -> do
+                close (Rejected "Removed from the production track before publishing (rejected or withdrawn in Play Console)")
+                logInfo $ "[ROLLOUT_SYNC] " <> rtId row <> " submission left the production track before publishing — rejected/withdrawn"
+                logEvent (rtId row) "SUBMISSION_RETIRED" (object ["outcome" .= ("rejected_or_withdrawn" :: Text)])
+            -- Parked/Published require the code to be PRESENT — unreachable from
+            -- the vanished arm; kept for totality.
+            _ -> pure ()
 
 {- | Detect an App Store Connect "Release" (not from SCC) on an iOS release SCC
 promoted but is still showing as in review / approved-held. Unlike Android, Apple
@@ -1110,8 +1246,10 @@ backfillPhasedId creds bundleId version rid =
 lifecycle (rollout columns + MBRollingOut/MBCompleted) so the active reconciler
 keeps it in sync from here on. @store@ is "play" | "asc" for the audit event.
 -}
--- | Store-observed rollout status → phase ("halted" → Halted, else RollingOut).
--- Inputs are only the canonical "rolling_out" / "halted" carried by SetRollout.
+
+{- | Store-observed rollout status → phase ("halted" → Halted, else RollingOut).
+Inputs are only the canonical "rolling_out" / "halted" carried by SetRollout.
+-}
 rolloutPhase :: Text -> Maybe Double -> ReleasePhase
 rolloutPhase status mPct
     | status == "halted" = Halted frac
@@ -1366,8 +1504,9 @@ refreshAllStale = do
             )
                 `MC.finally` liftIO (modifyMVar_ bulkRefreshInflight (const (pure False)))
 
--- | How many apps the bulk store-refresh sweep reads in parallel (distinct apps only —
--- per-app quota is still capped by the cooldown + single-flight).
+{- | How many apps the bulk store-refresh sweep reads in parallel (distinct apps only —
+per-app quota is still capped by the cooldown + single-flight).
+-}
 bulkRefreshConcurrency :: Int
 bulkRefreshConcurrency = 5
 
@@ -1420,14 +1559,13 @@ withRefreshSingleFlight aid live = do
                         putMVar barrier ()
                     )
 
-{- | Map a Play track snapshot → a @store_status@ upsert. Production carries the
-live staged-rollout % (the near-zero "pending" fraction reads as a tiny %, which
-the badge treats as not-yet-ramped) and overlays SCC's review state — Play never
-reports review, so this is the only way an Android "in review" surfaces; internal
-testing has neither rollout nor review.
+{- | Map a Play track snapshot → a @store_status@ upsert: pure store truth only.
+Production carries the live staged-rollout % (the near-zero "pending" fraction
+reads as a tiny %, which the badge treats as not-yet-ramped); internal testing
+has no rollout. Review is never written — it lives on the release row (§16).
 -}
-androidSnapToUpsert :: AppCatalog -> Maybe Text -> Maybe ActiveMobileState -> StoreTrackSnapshot -> StoreStatusUpsert
-androidSnapToUpsert ac mExpected mActive s =
+androidSnapToUpsert :: AppCatalog -> Maybe Text -> StoreTrackSnapshot -> StoreStatusUpsert
+androidSnapToUpsert ac mExpected s =
     let isProd = stsTrack s == "production"
         -- A production fraction below the rollout floor is the parked "pending"
         -- fraction (~1e-6) of a submitted / approved-held build under managed
@@ -1445,9 +1583,6 @@ androidSnapToUpsert ac mExpected mActive s =
             , ssuVersionCode = stsCode s
             , ssuStatus = Just (stsStatus s)
             , ssuRolloutPercent = if isProd then realRollout else Nothing
-            , -- Per-cell review state (any track): a promoted internal build reads its
-              -- own "in review" / "approved" / "rejected"; a plain build has none.
-              ssuReviewStatus = mActive >>= amsReviewStatus
             , ssuReleaseNotes = stsNotes s
             , ssuExpectedVersion = mExpected
             }
@@ -1459,27 +1594,25 @@ parked review/pending fraction, not a real ramp — the 0–100 mirror of
 androidRolloutFloorPercent :: Double
 androidRolloutFloorPercent = androidPendingFractionThreshold * 100
 
-{- | Map an ASC snapshot → a @store_status@ upsert. The snapshot carries neither
-rollout % nor review state, so production overlays SCC's phased % + review state;
-TestFlight is build-only.
+{- | Map an ASC snapshot → a @store_status@ upsert: pure store truth only. The
+snapshot carries no rollout % (Apple exposes the phased ramp separately), so the
+production cell's % is written right after by 'reflectIosPhasedRollout' in the
+same pass; between syncs an SCC rollout action mirrors its own edit. Review is
+never written — it lives on the release row (§16).
 -}
-iosSnapToUpsert :: AppCatalog -> Maybe Text -> Maybe ActiveMobileState -> AscSnapshot -> StoreStatusUpsert
-iosSnapToUpsert ac mExpected mActive s =
-    let isProd = ascTrack s == "production"
-     in StoreStatusUpsert
-            { ssuAppCatalogId = acId ac
-            , ssuPlatform = "ios"
-            , ssuTrack = ascTrack s
-            , ssuVersionName = nonEmptyVersion (ascVersion s)
-            , ssuVersionCode = ascCode s
-            , ssuStatus = Just (ascStatus s)
-            , ssuRolloutPercent = if isProd then mActive >>= amsRolloutPercent else Nothing
-            , -- Per-cell review state (any track): a promoted TestFlight build reads its
-              -- own review verdict; a plain build has none.
-              ssuReviewStatus = mActive >>= amsReviewStatus
-            , ssuReleaseNotes = ascNotes s
-            , ssuExpectedVersion = mExpected
-            }
+iosSnapToUpsert :: AppCatalog -> Maybe Text -> AscSnapshot -> StoreStatusUpsert
+iosSnapToUpsert ac mExpected s =
+    StoreStatusUpsert
+        { ssuAppCatalogId = acId ac
+        , ssuPlatform = "ios"
+        , ssuTrack = ascTrack s
+        , ssuVersionName = nonEmptyVersion (ascVersion s)
+        , ssuVersionCode = ascCode s
+        , ssuStatus = Just (ascStatus s)
+        , ssuRolloutPercent = Nothing
+        , ssuReleaseNotes = ascNotes s
+        , ssuExpectedVersion = mExpected
+        }
 
 -- | A snapshot's placeholder "no build on this track" markers → 'Nothing'.
 nonEmptyVersion :: Text -> Maybe Text

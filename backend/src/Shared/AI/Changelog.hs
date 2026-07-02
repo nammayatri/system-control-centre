@@ -13,6 +13,8 @@ app drops @consumer:@/@customer:@ commits; un-prefixed (shared) commits stay.
 -}
 module Shared.AI.Changelog (
     CommitItem (..),
+    dropAutomationCommits,
+    isAutomationCommit,
     filterCommitsForSurface,
     otherSideLabel,
     ownSideLabel,
@@ -37,6 +39,40 @@ data CommitItem = CommitItem
     , cgSubject :: Text
     , cgAuthor :: Text
     }
+
+-- ─── Automation filtering ───────────────────────────────────────────────────
+
+{- | Automation noise a changelog should not carry: commits AUTHORED by bots
+(@…[bot]@ logins, github-actions, dependabot) and pure release PLUMBING —
+version-bump \/ skip-ci commits that CI pushes under a human token. The message
+patterns are deliberately narrow (prefix-anchored) so a real change mentioning
+"bump" is never dropped.
+-}
+isAutomationCommit :: Text -> Text -> Bool
+isAutomationCommit author subject = botAuthor || plumbingSubject
+  where
+    la = T.toLower (T.strip author)
+    ls = T.toLower (T.strip subject)
+    botAuthor =
+        "[bot]" `T.isSuffixOf` la
+            || la `elem` ["github-actions", "github actions", "actions-user", "dependabot", "renovate"]
+    plumbingSubject =
+        "[skip ci]" `T.isInfixOf` ls
+            || any
+                (`T.isPrefixOf` ls)
+                [ "chore(release)"
+                , "chore: bump version"
+                , "chore: release"
+                , "bump version"
+                , "bump versioncode"
+                , "bump build number"
+                , "release: bump version"
+                ]
+
+-- | 'isAutomationCommit' over a commit list — the one filter the default
+-- (deterministic) changelog and the AI input both go through.
+dropAutomationCommits :: [CommitItem] -> [CommitItem]
+dropAutomationCommits = filter (\c -> not (isAutomationCommit (cgAuthor c) (cgSubject c)))
 
 -- ─── Surface (consumer / provider) filtering ────────────────────────────────
 
@@ -153,12 +189,12 @@ chunksOf n xs
 -- | AI input for one chunk: sha + subject + author, one per line.
 renderChunkForAi :: [CommitItem] -> Text
 renderChunkForAi cs =
-    T.unlines ["- " <> cgSha c <> " " <> cgSubject c <> " (@" <> cgAuthor c <> ")" | c <- cs]
+    T.unlines ["- " <> cgSha c <> " " <> cgSubject c <> " (" <> cgAuthor c <> ")" | c <- cs]
 
 -- | Deterministic bullets for a chunk.
 renderChunkDeterministic :: [CommitItem] -> Text
 renderChunkDeterministic cs =
-    T.intercalate "\n" ["- " <> cgSubject c <> "  — @" <> cgAuthor c | c <- cs]
+    T.intercalate "\n" ["- " <> cgSubject c <> "  — " <> cgAuthor c | c <- cs]
 
 {- | The long summary: every commit, grouped by type, with author. Deterministic
 (no AI) — always complete, instant.

@@ -58,6 +58,7 @@ module Products.Autopilot.Mobile.Handlers.Rollout (
     bulkRolloutH,
 ) where
 
+import Control.Applicative ((<|>))
 import Control.Exception (SomeException, displayException, fromException)
 import Control.Monad (forM_, unless, when)
 import Control.Monad.Catch (throwM)
@@ -78,15 +79,17 @@ import Products.Autopilot.Mobile.Queries.AppCatalog (storeTrackOf)
 import Products.Autopilot.Mobile.Queries.StoreStatus (
     findProductionLiveCell,
     findProductionStoreCell,
+    resolveStoreState,
     secondsSinceLastSync,
     setProductionReleased,
-    setProductionReviewStatus,
     setProductionRolloutStatus,
+    storeCellsForApp,
  )
 import Products.Autopilot.Mobile.Queries.Supersession (retireOlderIncoming, supersedePreviousLive)
 import Products.Autopilot.Mobile.StoreSync (versionOlderThan)
+import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe, reviewInferredOf)
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
-import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), displayStatus, phaseFromFields, phaseSlug, variantSlug)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), abortable, displayStatusInferred, phaseFromFields, phaseSlug, variantSlug)
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
     findMobileReleaseById,
@@ -223,6 +226,11 @@ data RolloutDetail = RolloutDetail
     -- stage (held at MBTagPushed, or an un-promoted internal/TestFlight snapshot) AND
     -- it isn't already live on production. The FE gates the promote UI on this instead
     -- of re-deriving it, so it never offers a promote the backend would reject.
+    , rdAbortable :: Bool
+    -- ^ BE truth for "can this build be aborted right now" — only while it's still
+    -- Building (no store artifact yet). A build that reached the store or went terminal
+    -- (rejected / superseded / live / failed) can't be un-shipped, so the FE hides Abort.
+    -- Derived from the phase, so a stale INPROGRESS status column can't resurrect Abort.
     , rdAppCatalogId :: Int32
     -- ^ The app's @app_catalog.id@ — lets the FE force a store-sync
     -- (@POST /mobile/store-monitor/:id/refresh@) before re-reading, so a just-published
@@ -443,8 +451,6 @@ promoteH ap rid PromoteReq{..} = do
             when isPrePromoteSnapshot $ markReleaseInProgress rid
             retireOlderIncomingFor row -- Rule B: newer incoming supersedes any older one
             retireOlderHeldInternalFor row -- Rule C: retire older held-on-internal builds
-            -- Reflect "in review" on the App Monitor immediately (it reads store_status).
-            mirrorProdReview ac row (Just "in_review")
             logEvent rid "REVIEW_SUBMITTED" $
                 object ["store" .= ("asc" :: Text), "actor" .= apEmail ap, "phased" .= (mPhasedId /= Nothing), "from_snapshot" .= isPrePromoteSnapshot]
             pure (PromoteResp "Success" phasedWarning)
@@ -464,7 +470,6 @@ promoteH ap rid PromoteReq{..} = do
             when isPrePromoteSnapshot $ markReleaseInProgress rid
             retireOlderIncomingFor row -- Rule B: newer incoming supersedes any older one
             retireOlderHeldInternalFor row -- Rule C: retire older held-on-internal builds
-            mirrorProdReview ac row (Just "submitted")
             logEvent rid "REVIEW_SUBMITTED" $
                 object ["store" .= ("play" :: Text), "actor" .= apEmail ap, "fraction" .= frac, "from_snapshot" .= isPrePromoteSnapshot]
             pure (PromoteResp "Success" Nothing)
@@ -496,25 +501,38 @@ rolloutDetailH _ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
     phasedId <- resolveDetailPhasedId ac row target
-    -- Promotable = in a promotable stage (held at MBTagPushed, or an un-promoted
-    -- internal/TestFlight snapshot with no review/rollout) AND not already live on
-    -- production. Same checks promoteH enforces, so the FE never offers a promote the
-    -- backend would reject.
-    let storeTrack = storeTrackOf (rtMetadata row)
+    -- review is the ROW's decision (setPhase-owned, immediate);
+    -- rollout / % / track presence are store truth from store_status for this
+    -- exact build, falling back to the row's columns when the build isn't on any
+    -- store track (superseded / pre-store).
+    cells <- storeCellsForApp (acId ac)
+    let review = rtReviewStatus row
+        (rollout, pct, storeTrack) =
+            case resolveStoreState cells (rtNewVersion row) (rtVersionCode row) of
+                Just derived -> derived
+                -- Track fallback: the AUTHORITATIVE column first (promote/setPhase move it;
+                -- the list reads the same one), the metadata mirror only as a legacy
+                -- last resort — it's stamped at snapshot-mint and never updated, so a
+                -- promoted row's mirror still says internal/testflight (stale).
+                Nothing -> (rtRolloutStatus row, rtRolloutPercent row, rtStoreTrack row <|> storeTrackOf (rtMetadata row))
+        -- Promotable = in a promotable stage (held at MBTagPushed, or an un-promoted
+        -- internal/TestFlight snapshot with no review/rollout) AND not already live on
+        -- production. Same checks promoteH enforces, so the FE never offers a promote the
+        -- backend would reject.
         isPrePromoteSnapshot =
-            rtReviewStatus row == Nothing
-                && rtRolloutStatus row == Nothing
+            review == Nothing
+                && rollout == Nothing
                 && storeTrack `elem` [Just "internal", Just "testflight"]
         promotableStage = mbWfStatus target == MBTagPushed || isPrePromoteSnapshot
         ph =
             phaseFromFields
                 (buildKind (mbContext target))
                 (mbWfStatus target)
-                (rtReviewStatus row)
-                (rtRolloutStatus row)
-                (rtRolloutPercent row)
-                (rtStoreTrack row)
-        disp = displayStatus ph
+                review
+                rollout
+                pct
+                storeTrack
+        disp = displayStatusInferred (reviewInferredOf (parseJsonTextMaybe (rtMetadata row))) ph
     notAhead <- atOrBelowProduction ac (rtNewVersion row) (rtVersionCode row)
     liveProd <- liveOnProduction ac (rtNewVersion row) (rtVersionCode row)
     syncedAgo <- secondsSinceLastSync (acId ac)
@@ -527,15 +545,16 @@ rolloutDetailH _ap rid = do
             , rdStatusLabel = dLabel disp
             , rdStatusVariant = variantSlug (dVariant disp)
             , rdPhase = phaseSlug ph
-            , rdReviewStatus = rtReviewStatus row
+            , rdReviewStatus = review
             , rdReviewRejectReason = rtReviewRejectReason row
             , rdReviewSubmittedAt = rtReviewSubmittedAt row
             , rdReviewDecidedAt = rtReviewDecidedAt row
-            , rdRolloutStatus = rtRolloutStatus row
-            , rdRolloutPercent = rtRolloutPercent row
+            , rdRolloutStatus = rollout
+            , rdRolloutPercent = pct
             , rdPhasedId = phasedId
             , rdStoreTrack = storeTrack
             , rdPromotable = promotableStage && not notAhead
+            , rdAbortable = abortable ph
             , rdAppCatalogId = acId ac
             , rdLiveOnProduction = liveProd
             , rdSyncedSecondsAgo = syncedAgo
@@ -745,7 +764,6 @@ markApprovedH ap rid = do
     ensureInReview (mbWfStatus target)
     now <- liftIO getCurrentTime
     setPhase now rid Approved
-    mirrorProdReview ac row (Just "approved")
     logEvent rid "REVIEW_APPROVED" (object ["store" .= ("play" :: Text), "manual" .= True, "actor" .= apEmail ap])
     pure Success
 
@@ -761,7 +779,6 @@ markRejectedH ap rid MarkRejectedReq{..} = do
     ensureInReview (mbWfStatus target)
     now <- liftIO getCurrentTime
     setPhase now rid (Rejected mrReason)
-    mirrorProdReview ac row (Just "rejected")
     logEvent rid "REVIEW_REJECTED" (object ["reason" .= mrReason, "manual" .= True, "actor" .= apEmail ap])
     pure Success
 
@@ -785,8 +802,6 @@ withdrawH ap rid = do
         >>= either (\e -> bad ("App Store withdraw failed: " <> renderAscErr e)) pure
     now <- liftIO getCurrentTime
     setPhase now rid Aborted
-    -- Review cancelled → clear the monitor's review overlay immediately.
-    mirrorProdReview ac row Nothing
     logEvent rid "REVIEW_WITHDRAWN" (object ["store" .= ("asc" :: Text), "actor" .= apEmail ap])
     pure Success
 
@@ -967,10 +982,6 @@ mirrorProdRollout ac row target status pct =
 mirrorProdReleased :: AppCatalog -> ReleaseTrackerRow -> MobileBuildTargetState -> Flow ()
 mirrorProdReleased ac row target =
     setProductionReleased (acId ac) (rtEnv row) (rtNewVersion row) (mbcVersionCode (mbContext target))
-
--- | Mirror a production review state (submit / approve / reject) onto the cache.
-mirrorProdReview :: AppCatalog -> ReleaseTrackerRow -> Maybe Text -> Flow ()
-mirrorProdReview ac row mReview = setProductionReviewStatus (acId ac) (rtEnv row) mReview
 
 -- | Rule A (migration 0034): @row@ just started rolling out, so freeze the previous
 -- live version of this app and move it to history as @superseded@.

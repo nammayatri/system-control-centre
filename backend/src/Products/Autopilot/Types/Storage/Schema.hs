@@ -102,6 +102,7 @@ data ReleaseTrackerT f = ReleaseTrackerT
     rtAscPhasedId :: Columnar f (Maybe Text),
     rtStoreTrack :: Columnar f (Maybe Text),
     rtVersionCode :: Columnar f (Maybe Int32),
+    rtTerminalStatus :: Columnar f (Maybe Text),
     rtCreatedAt :: Columnar f UTCTime,
     rtUpdatedAt :: Columnar f UTCTime
   }
@@ -223,6 +224,7 @@ autopilotDb =
                   rtAscPhasedId = fieldNamed "asc_phased_id",
                   rtStoreTrack = fieldNamed "store_track",
                   rtVersionCode = fieldNamed "version_code",
+                  rtTerminalStatus = fieldNamed "terminal_status",
                   rtCreatedAt = fieldNamed "date_created",
                   rtUpdatedAt = fieldNamed "last_updated"
                 },

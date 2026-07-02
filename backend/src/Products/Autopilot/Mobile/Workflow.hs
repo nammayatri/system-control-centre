@@ -41,10 +41,11 @@ module Products.Autopilot.Mobile.Workflow (
     reviewPollTimedOut,
     reviewPollDue,
     selectBuildTag,
+    codeFromTag,
 ) where
 
 import Control.Exception (Exception, SomeException, fromException, throwIO, try)
-import Control.Monad (when)
+import Control.Monad (forM_, when)
 import qualified Control.Monad.Catch as MC
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
@@ -97,7 +98,9 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     markReleaseRevertedBy,
     setExternalRunIdForDispatch,
     setPhase,
+    setReleaseVersionCode,
  )
+import Products.Autopilot.Mobile.Lifecycle.BuildKind (claimsStoreIdentity)
 import Products.Autopilot.Mobile.Lifecycle.Phase (ReleasePhase (..))
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
@@ -1020,6 +1023,21 @@ selectProviderBuildTag verPrefix mCode refs =
                 (t : _) -> Just t
                 [] -> Nothing
 
+{- | The build code embedded in the observed tag — the number the build itself
+assigned. Consumer tags end in @+{code}@; provider tags in the @{code}@ after
+@verPrefix@. 'Nothing' for a bare (codeless) tag. Lets ConfirmTag stamp version_code
+for iOS/provider builds, whose code SCC doesn't know until the tag lands.
+-}
+codeFromTag :: Bool -> Text -> Text -> Text -> Text -> Maybe Int32
+codeFromTag isProvider verPrefix prefix version tag =
+    let mDigits
+            | isProvider = T.stripPrefix verPrefix tag
+            | otherwise = T.stripPrefix (prefix <> version <> "+") tag
+     in mDigits >>= \d ->
+            if not (T.null d) && T.all isDigit d
+                then Just (T.foldl' (\acc c -> acc * 10 + fromIntegral (digitToInt c)) (0 :: Int32) d)
+                else Nothing
+
 {- | Pure predicate for the ConfirmTag wall-clock guard. Has the stage waited
 past @timeoutMin@ for the build's tag? Anchors on build-completion, falling back
 to build-start. If neither timestamp is set we can't measure elapsed time, so we
@@ -1192,6 +1210,11 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                                     <> expectedTag
                             pure StageWaiting
                 Just tagName -> do
+                    -- The build assigns the build number (esp. iOS, where SCC has no code
+                    -- at dispatch); it's embedded in the tag it pushed. Read it back so
+                    -- every store-bound row carries its identity code — version+code is the
+                    -- key the store_status join matches on.
+                    let observedCode = maybe (codeFromTag isProvider providerVerPrefix prefix version tagName) Just mCode
                     modify $ \s ->
                         s
                             { targetState =
@@ -1199,13 +1222,18 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                                     MobileBuildState
                                         ( applyMobileTarget s $ \mt ->
                                             mt
-                                                { mbContext = (mbContext target){mbcTagPushed = Just tagName}
+                                                { mbContext = (mbContext target){mbcTagPushed = Just tagName, mbcVersionCode = observedCode}
                                                 , mbWfStatus = bumpStatus (mbWfStatus mt) MBTagPushed
                                                 }
                                         )
                             }
+                    -- persistWorkflowState (insertReleaseTracker) doesn't write the
+                    -- version_code COLUMN, so stamp it explicitly for store-bound builds
+                    -- (toRow's gate) — the JSON above alone wouldn't reach the column.
+                    when (claimsStoreIdentity (mbContext target)) $
+                        forM_ observedCode (setReleaseVersionCode (releaseId rt))
                     logEvent (releaseId rt) "TAG_OBSERVED" $
-                        object ["tag" .= tagName, "expected" .= expectedTag, "prefix" .= prefix]
+                        object ["tag" .= tagName, "expected" .= expectedTag, "prefix" .= prefix, "version_code" .= observedCode]
                     logInfoIO $
                         "[ConfirmTag] "
                             <> releaseId rt

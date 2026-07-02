@@ -31,7 +31,9 @@ module Products.Autopilot.Mobile.Github.Compare (
     compareAllCommits,
 
     -- * Helpers (exposed for tests)
+    ciDisplayAuthor,
     extractPrNumber,
+    isBotCommit,
     shortSha,
 ) where
 
@@ -47,6 +49,7 @@ import Core.Types.Time (Seconds (..))
 import Data.Aeson (FromJSON (..), ToJSON (..), defaultOptions, genericToJSON, withObject, (.:), (.:?))
 import Data.Function (on)
 import Data.List (nubBy)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
@@ -78,6 +81,10 @@ data CommitInfo = CommitInfo
     -- commit author is not associated with a GH account (e.g.
     -- email-only commits, rebased commits where the original author
     -- can't be resolved).
+    , ciAuthorName :: Text
+    -- ^ Git author NAME (commit.author.name). CI commits often have no GH
+    -- account (login = "unknown") but a telltale name ("GitHub Actions"),
+    -- so bot filtering needs both identities.
     , ciHtmlUrl :: Text
     -- ^ Direct URL to the commit on github.com. Used for UI links.
     , ciPrNumber :: Maybe Int
@@ -99,6 +106,10 @@ instance FromJSON CommitInfo where
         login <- case mAuthor of
             Just authorObj -> authorObj .:? "login"
             Nothing -> pure Nothing
+        mGitAuthor <- commitObj .:? "author"
+        name <- case mGitAuthor of
+            Just gitAuthorObj -> gitAuthorObj .:? "name"
+            Nothing -> pure Nothing
         htmlUrl <- o .: "html_url"
         let subject = firstLine message
         pure
@@ -110,6 +121,7 @@ instance FromJSON CommitInfo where
                 , ciAuthorLogin = case login of
                     Just l | not (T.null l) -> l
                     _ -> "unknown"
+                , ciAuthorName = fromMaybe "" name
                 , ciHtmlUrl = htmlUrl
                 , ciPrNumber = extractPrNumber subject
                 }
@@ -280,6 +292,29 @@ extractPrNumber subject =
                     (numStr, _) = T.breakOn ")" afterHash
                  in readMaybe (T.unpack numStr)
         _ -> Nothing
+
+{- | The author a CHANGELOG displays: the human-readable git author name
+("Dev Vikram Singh"), falling back to the GH login when the commit carries no
+name. Handles read better than logins in release notes; logins remain on
+UI cards where they link to GitHub.
+-}
+ciDisplayAuthor :: CommitInfo -> Text
+ciDisplayAuthor c
+    | not (T.null (T.strip (ciAuthorName c))) = T.strip (ciAuthorName c)
+    | otherwise = ciAuthorLogin c
+
+{- | Automation noise a changelog should not list: GitHub bot accounts (the
+@…[bot]@ login convention — github-actions[bot], dependabot[bot], renovate[bot])
+and CI committers with no GH account but a telltale git author name. Version
+bumps / lockfile updates from these say nothing about what changed for users.
+-}
+isBotCommit :: CommitInfo -> Bool
+isBotCommit c = any botIdent [ciAuthorLogin c, ciAuthorName c]
+  where
+    botIdent t =
+        let l = T.toLower (T.strip t)
+         in "[bot]" `T.isSuffixOf` l
+                || l `elem` ["github-actions", "github actions", "actions-user", "dependabot", "renovate"]
 
 {- | First 7 characters of a SHA. Empty string in, empty string out
 (defensive; ResolveRunId already guards against empty SHAs upstream).

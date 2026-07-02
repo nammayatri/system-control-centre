@@ -46,9 +46,12 @@ import Products.Autopilot.Mobile.Github (
 import Products.Autopilot.Mobile.Github.Compare (
     CommitInfo (..),
     CompareResult (..),
+    ciDisplayAuthor,
     extractPrNumber,
+    isBotCommit,
     shortSha,
  )
+import qualified Shared.AI.Changelog as CL
 import Products.Autopilot.Mobile.RevertResolver (
     RevertCand (..),
     RollbackPlan (..),
@@ -57,16 +60,17 @@ import Products.Autopilot.Mobile.RevertResolver (
  )
 import Products.Autopilot.Mobile.Types
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (BuildKind (..), buildKind, claimsStoreIdentity, hasStoreIdentity)
-import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), Projection (..), ReleasePhase (..), canTransition, displayStatus, pEngineStatus, phaseFromFields, phaseToWfStatus, project)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), Projection (..), ReleasePhase (..), Variant (..), abortable, canTransition, displayStatus, displayStatusInferred, pEngineStatus, phaseFromFields, phaseToWfStatus, project)
 import Products.Autopilot.Mobile.Versioning (TrackInfo (..), computeNextVersion)
-import Products.Autopilot.Mobile.StoreSync (ExternalReviewAction (..), ReconcileAction (..), androidReconcileAction, detectConsoleRollout, detectIosRelease, externalReviewAction, iosPhasedReconcileAction, pendingPublishRelease, reviewStateToStatus)
+import Products.Autopilot.Mobile.StoreSync (ExternalReviewAction (..), PendingOutcome (..), ReconcileAction (..), androidReconcileAction, detectConsoleRollout, detectIosRelease, externalReviewAction, iosPhasedReconcileAction, pendingOutcome, pendingPublishRelease, retireOutcome, reviewStateToStatus)
 import Products.Autopilot.Mobile.Handlers.Release (resolveBaseFromTracks)
 import Products.Autopilot.Mobile.Queries.AppCatalog (TrackSnapshot (..))
+import Products.Autopilot.Mobile.Queries.StoreStatus (StoreCell (..), deriveStoreState, resolveStoreState)
 import qualified Data.Map.Strict as Map
-import Products.Autopilot.Mobile.Versioning.Apple (AscPhasedState (..), AscReviewState (..), AscVersion (..), BuildsResp (..), appStoreStateToReview, applePhasedPercent, computeNextIosVersion, firstWhatsNew, parseAscVersion, parseVersionStates, selectInFlightReview)
+import Products.Autopilot.Mobile.Versioning.Apple (AscPhasedState (..), AscReviewState (..), AscVersion (..), BuildsResp (..), appStoreStateToReview, applePhasedPercent, computeNextIosVersion, firstWhatsNew, parseAscVersion, parseVersionStatesWithBuild, selectInFlightReview)
 import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), ProdTrackRelease (..), StoreTrackSnapshot (..), parseProdReleaseNotes, parseProdTrackReleases, parseRolloutState, parseTrackSnapshot, userFractionInRange)
 import Products.Autopilot.Queries.ReleaseTracker (keepSnapshot)
-import Products.Autopilot.Mobile.Workflow (reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
+import Products.Autopilot.Mobile.Workflow (codeFromTag, reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
 import qualified Products.Autopilot.Types.Target
@@ -1071,6 +1075,12 @@ testReleasePhase = do
     -- displayStatus: one label per phase (the single deriver every surface uses).
     assertEqual "RollingOut 0.01 label" "Rolling out 1%" (dLabel (displayStatus (RollingOut 0.01)))
     assertEqual "Approved label" "Approved · held" (dLabel (displayStatus Approved))
+    assertEqual "Aborted is red" Danger (dVariant (displayStatus Aborted))
+    -- Inference softening: an Android track-inferred verdict reads "Pending
+    -- review"; authoritative rows and non-review phases are untouched.
+    assertEqual "inferred InReview softens" "Pending review" (dLabel (displayStatusInferred True InReview))
+    assertEqual "authoritative InReview unchanged" "In review" (dLabel (displayStatusInferred False InReview))
+    assertEqual "inferred Approved does NOT soften" "Approved · held" (dLabel (displayStatusInferred True Approved))
     -- phaseToWfStatus: the 1:1 wf-status mirror for store-lifecycle phases.
     assertEqual "InReview -> MBInReview" (Just MBInReview) (phaseToWfStatus InReview)
     assertEqual "Live -> MBCompleted" (Just MBCompleted) (phaseToWfStatus Live)
@@ -1088,6 +1098,12 @@ testReleasePhase = do
     -- InternalHeld→InReview is a legal transition (no spurious shadow-warning).
     assertEqual "MBTagPushed, null track -> InternalHeld" InternalHeld (phaseFromFields StoreBound MBTagPushed Nothing Nothing Nothing Nothing)
     assertEqual "TestFlight snapshot -> InternalHeld" InternalHeld (phaseFromFields StoreBound MBCompleted Nothing Nothing Nothing (Just "testflight"))
+    -- §16: review reaches phaseFromFields from the ROW's review_status (setPhase
+    -- writes the column and the wf mirror together) — there is no wf fallback for
+    -- review states. A review-wf row with no review column reads by its track.
+    assertEqual "review-wf with no review column reads by track" InternalHeld (phaseFromFields StoreBound MBInReview Nothing Nothing Nothing (Just "testflight"))
+    assertEqual "review column drives the phase" Approved (phaseFromFields StoreBound MBInReview (Just "approved") Nothing Nothing (Just "production"))
+    assertEqual "rollout still wins over an in-review row" (RollingOut 0.5) (phaseFromFields StoreBound MBInReview Nothing (Just "rolling_out") (Just 50) (Just "production"))
     -- Round-trip: project a store phase to columns, reconstruct the same tag back.
     let roundTrips ph =
             let Projection rv ro pp tk = project ph
@@ -1095,6 +1111,55 @@ testReleasePhase = do
     assertEqual "round-trip RollingOut 0.01" (RollingOut 0.01) (roundTrips (RollingOut 0.01))
     assertEqual "round-trip Approved" Approved (roundTrips Approved)
     assertEqual "round-trip InReview" InReview (roundTrips InReview)
+    -- deriveStoreState (§16): cells carry NO review — a verdict lives on the release
+    -- row (the Lynx rejected-TestFlight case now reads its verdict via the row's
+    -- review_status through phaseFromFields, covered above). Cells contribute only
+    -- (rollout, %, track); rollout/% are production-only concepts.
+    assertEqual
+        "plain TestFlight cell contributes only its track"
+        (Nothing, Nothing, Just "testflight")
+        (deriveStoreState (StoreCell "testflight" (Just "4.9.16") (Just 1) (Just "VALID") Nothing))
+    assertEqual
+        "internal cell with a % does not report rollout"
+        (Nothing, Nothing, Just "internal")
+        (deriveStoreState (StoreCell "internal" (Just "4.9.16") (Just 1) (Just "inProgress") (Just 50)))
+    assertEqual
+        "production cell mid-ramp reports rolling_out + %"
+        (Just "rolling_out", Just 25, Just "production")
+        (deriveStoreState (StoreCell "production" (Just "4.9.16") (Just 1) (Just "inProgress") (Just 25)))
+    -- resolveStoreState: production-precedence, but a version present ONLY on a pre-prod
+    -- track resolves to that track's cell (the Lynx 4.9.16 case: prod is 4.9.15).
+    let cells =
+            [ StoreCell "production" (Just "4.9.15") (Just 1) (Just "live") Nothing
+            , StoreCell "testflight" (Just "4.9.16") (Just 1) (Just "VALID") Nothing
+            ]
+    assertEqual
+        "resolveStoreState picks the TestFlight cell for 4.9.16"
+        (Just (Nothing, Nothing, Just "testflight"))
+        (resolveStoreState cells "4.9.16" (Just 1))
+    assertEqual
+        "resolveStoreState: unknown version -> Nothing (row fallback)"
+        Nothing
+        (resolveStoreState cells "9.9.9" (Just 1))
+    -- A promoted-and-live build shows on BOTH its TestFlight and production cells
+    -- (same code); production-precedence wins → live-on-production, not TestFlight.
+    let bothTracks =
+            [ StoreCell "testflight" (Just "9.9.14") (Just 2) (Just "VALID") Nothing
+            , StoreCell "production" (Just "9.9.14") (Just 2) (Just "live") Nothing
+            ]
+    assertEqual
+        "resolveStoreState: version on both tracks -> production (live) wins"
+        (Just (Just "completed", Nothing, Just "production"))
+        (resolveStoreState bothTracks "9.9.14" (Just 2))
+    -- abortable: only a still-Building mobile release can be aborted. A rejected /
+    -- on-store / terminal build can't be un-shipped, so the FE must not offer Abort.
+    assertBool "Building is abortable" (abortable Building)
+    assertBool "Rejected is NOT abortable" (not (abortable (Rejected "")))
+    assertBool "InReview (on store) is NOT abortable" (not (abortable InReview))
+    assertBool "RollingOut is NOT abortable" (not (abortable (RollingOut 0.5)))
+    assertBool "Live is NOT abortable" (not (abortable Live))
+    assertBool "Superseded is NOT abortable" (not (abortable Superseded))
+    assertBool "InternalHeld (on internal) is NOT abortable" (not (abortable InternalHeld))
 
 testMobileBuildContextJsonRoundTrip :: IO ()
 testMobileBuildContextJsonRoundTrip = do
@@ -1296,6 +1361,24 @@ testSelectBuildTag = do
             Nothing
             [ref "odishayatri/prod/ios/v3.3.73+1", ref "odishayatri/prod/ios/v3.3.73+2"]
         )
+    -- codeFromTag: read the build number back out of the observed tag so ConfirmTag can
+    -- stamp version_code (esp. iOS, where SCC has no code at dispatch).
+    assertEqual
+        "codeFromTag: consumer +code suffix"
+        (Just 3)
+        (codeFromTag False "" "odishayatri/prod/ios/v" "3.3.73" "odishayatri/prod/ios/v3.3.73+3")
+    assertEqual
+        "codeFromTag: multi-digit code"
+        (Just 460)
+        (codeFromTag False "" "app/prod/android/v" "1.2.3" "app/prod/android/v1.2.3+460")
+    assertEqual
+        "codeFromTag: provider -code suffix"
+        (Just 1)
+        (codeFromTag True "LynxDriver-v4.9.17-" "" "" "LynxDriver-v4.9.17-1")
+    assertEqual
+        "codeFromTag: bare (codeless) tag -> Nothing"
+        Nothing
+        (codeFromTag False "" "odishayatri/prod/ios/v" "3.3.17" "odishayatri/prod/ios/v3.3.17")
 
 -- ============================================================================
 -- [20] Mobile Version Bump (mirrors fastlane-android.yaml lines 124-189)
@@ -1533,38 +1616,47 @@ testStoreReleaseNotesParse = do
 testExternalReviewDetection :: IO ()
 testExternalReviewDetection = do
     putStrLn "external review: in-flight select / state map / reconcile decision"
-    -- selectInFlightReview: the in-review version is picked over the live one
+    -- selectInFlightReview: the in-review version is picked over the live one,
+    -- carrying the attached build number (the reviewed build's identity)
     assertEqual
         "in-flight: in-review over live"
-        (Just ("3.4.0", AscInReview))
-        (selectInFlightReview [("3.4.0", "IN_REVIEW"), ("3.3.9", "READY_FOR_SALE")])
-    assertEqual "in-flight: only live → nothing" Nothing (selectInFlightReview [("3.3.9", "READY_FOR_SALE")])
+        (Just ("3.4.0", Just 7, AscInReview))
+        (selectInFlightReview [("3.4.0", "IN_REVIEW", Just 7), ("3.3.9", "READY_FOR_SALE", Just 6)])
+    assertEqual "in-flight: only live → nothing" Nothing (selectInFlightReview [("3.3.9", "READY_FOR_SALE", Just 6)])
     assertEqual
         "in-flight: skips a superseded version"
-        (Just ("3.4.1", AscWaitingForReview))
-        (selectInFlightReview [("3.4.0", "REPLACED_WITH_NEW_VERSION"), ("3.4.1", "WAITING_FOR_REVIEW")])
+        (Just ("3.4.1", Just 9, AscWaitingForReview))
+        (selectInFlightReview [("3.4.0", "REPLACED_WITH_NEW_VERSION", Just 8), ("3.4.1", "WAITING_FOR_REVIEW", Just 9)])
     assertEqual
         "in-flight: pending-developer-release → approved"
-        (Just ("3.4.0", AscApproved))
-        (selectInFlightReview [("3.4.0", "PENDING_DEVELOPER_RELEASE")])
-    -- parseVersionStates: the appStoreVersions list body
+        (Just ("3.4.0", Just 7, AscApproved))
+        (selectInFlightReview [("3.4.0", "PENDING_DEVELOPER_RELEASE", Just 7)])
     assertEqual
-        "parse versions list"
-        [("3.4.0", "IN_REVIEW"), ("3.3.9", "READY_FOR_SALE")]
-        (parseVersionStates "{\"data\":[{\"id\":\"1\",\"attributes\":{\"versionString\":\"3.4.0\",\"appStoreState\":\"IN_REVIEW\"}},{\"id\":\"2\",\"attributes\":{\"versionString\":\"3.3.9\",\"appStoreState\":\"READY_FOR_SALE\"}}]}")
-    -- reviewStateToStatus: which states surface, and how
-    assertEqual "map: in-review" (Just ("in_review", MBInReview)) (reviewStateToStatus AscInReview)
-    assertEqual "map: waiting-for-review" (Just ("in_review", MBInReview)) (reviewStateToStatus AscWaitingForReview)
-    assertEqual "map: approved" (Just ("approved", MBReviewApproved)) (reviewStateToStatus AscApproved)
-    assertEqual "map: rejected" (Just ("rejected", MBReviewRejected)) (reviewStateToStatus (AscRejected "REJECTED"))
+        "in-flight: build number unknown still surfaces (identity guard decides downstream)"
+        (Just ("3.4.0", Nothing, AscInReview))
+        (selectInFlightReview [("3.4.0", "IN_REVIEW", Nothing)])
+    -- parseVersionStatesWithBuild: appStoreVersions?include=build — the attached
+    -- build's number resolves via the relationship id → included[] builds map
+    assertEqual
+        "parse versions list with builds"
+        [("3.4.0", "IN_REVIEW", Just 7), ("3.3.9", "READY_FOR_SALE", Nothing)]
+        ( parseVersionStatesWithBuild
+            "{\"data\":[{\"id\":\"v1\",\"attributes\":{\"versionString\":\"3.4.0\",\"appStoreState\":\"IN_REVIEW\"},\"relationships\":{\"build\":{\"data\":{\"type\":\"builds\",\"id\":\"b1\"}}}},{\"id\":\"v2\",\"attributes\":{\"versionString\":\"3.3.9\",\"appStoreState\":\"READY_FOR_SALE\"}}],\"included\":[{\"type\":\"builds\",\"id\":\"b1\",\"attributes\":{\"version\":\"7\"}}]}"
+        )
+    -- reviewStateToStatus: which states surface, and how (verdict is the single
+    -- source; the wf mirror is derived from it at the write site)
+    assertEqual "map: in-review" (Just "in_review") (reviewStateToStatus AscInReview)
+    assertEqual "map: waiting-for-review" (Just "in_review") (reviewStateToStatus AscWaitingForReview)
+    assertEqual "map: approved" (Just "approved") (reviewStateToStatus AscApproved)
+    assertEqual "map: rejected" (Just "rejected") (reviewStateToStatus (AscRejected "REJECTED"))
     assertEqual "map: prepare-for-submission not surfaced" Nothing (reviewStateToStatus AscPrepareForSubmission)
     assertEqual "map: live (READY_FOR_SALE) not surfaced as review" Nothing (reviewStateToStatus AscLive)
     -- externalReviewAction: the reconcile decision table (inferred, existing, proposed, sccOwns)
-    let inReview = Just ("3.4.0", "in_review", MBInReview)
+    let inReview = Just ("3.4.0", "in_review")
         existAt v = Just (v, "in_review")
-    assertEqual "decision: new → insert" (ExtInsert "3.4.0" "in_review" MBInReview) (externalReviewAction False Nothing inReview False)
-    assertEqual "decision: same version → update" (ExtUpdate "in_review" MBInReview) (externalReviewAction False (existAt "3.4.0") inReview False)
-    assertEqual "decision: different version → retire + insert" (ExtRetireAndInsert "3.4.0" "in_review" MBInReview) (externalReviewAction False (existAt "3.3.0") inReview False)
+    assertEqual "decision: new → insert" (ExtInsert "3.4.0" "in_review") (externalReviewAction False Nothing inReview False)
+    assertEqual "decision: same version → update" (ExtUpdate "in_review") (externalReviewAction False (existAt "3.4.0") inReview False)
+    assertEqual "decision: different version → retire + insert" (ExtRetireAndInsert "3.4.0" "in_review") (externalReviewAction False (existAt "3.3.0") inReview False)
     assertEqual "decision: scc owns + existing → complete" ExtComplete (externalReviewAction False (existAt "3.4.0") inReview True)
     assertEqual "decision: scc owns + no existing → noop" ExtNoop (externalReviewAction False Nothing inReview True)
     assertEqual "decision: no in-flight + existing → complete (went live)" ExtComplete (externalReviewAction False (existAt "3.4.0") Nothing False)
@@ -1574,9 +1666,9 @@ testExternalReviewDetection = do
     assertEqual "decision: android rejected not downgraded" ExtNoop (externalReviewAction True (Just ("3.4.0", "rejected")) inReview False)
     -- ...but an approved build that left the track still completes, and a new version supersedes it
     assertEqual "decision: android approved → went live completes" ExtComplete (externalReviewAction True (Just ("3.4.0", "approved")) Nothing False)
-    assertEqual "decision: android new version retires the approved one" (ExtRetireAndInsert "3.5.0" "in_review" MBInReview) (externalReviewAction True (Just ("3.4.0", "approved")) (Just ("3.5.0", "in_review", MBInReview)) False)
+    assertEqual "decision: android new version retires the approved one" (ExtRetireAndInsert "3.5.0" "in_review") (externalReviewAction True (Just ("3.4.0", "approved")) (Just ("3.5.0", "in_review")) False)
     -- iOS (authoritative): a genuine resubmit (rejected → in_review) DOES update
-    assertEqual "decision: ios rejected→in_review updates" (ExtUpdate "in_review" MBInReview) (externalReviewAction False (Just ("3.4.0", "rejected")) inReview False)
+    assertEqual "decision: ios rejected→in_review updates" (ExtUpdate "in_review") (externalReviewAction False (Just ("3.4.0", "rejected")) inReview False)
 
 -- | Android out-of-band "pending review/publish" detection: parsing the
 -- production track, then the pure pick rule (an inProgress release parked at a
@@ -1638,6 +1730,63 @@ testAndroidPendingPublish = do
             , live
             ]
         )
+    -- pendingOutcome (§16h-1): the vanish decision table for a watched code
+    assertEqual "vanish: empty read → no claim" Nothing (pendingOutcome thr 451 [])
+    assertEqual
+        "vanish: still parked → Parked"
+        (Just PendingParked)
+        (pendingOutcome thr 451 [ProdTrackRelease "3.4.0" 451 "inProgress" (Just 1.0e-6), live])
+    assertEqual
+        "vanish: our code is now serving (completed) → Published"
+        (Just PendingPublished)
+        (pendingOutcome thr 451 [ProdTrackRelease "3.4.0" 451 "completed" Nothing])
+    assertEqual
+        "vanish: our code ramping at a real fraction → Published"
+        (Just PendingPublished)
+        (pendingOutcome thr 451 [ProdTrackRelease "3.4.0" 451 "inProgress" (Just 0.1), live])
+    assertEqual
+        "vanish: gone, newer pending code → Replaced"
+        (Just PendingReplaced)
+        (pendingOutcome thr 451 [ProdTrackRelease "3.4.1" 452 "inProgress" (Just 1.0e-6), live])
+    assertEqual
+        "vanish: gone, newer code shipped entirely → Replaced"
+        (Just PendingReplaced)
+        (pendingOutcome thr 451 [ProdTrackRelease "3.4.1" 452 "completed" Nothing])
+    assertEqual
+        "vanish: gone, only the older live remains → Withdrawn (rejected)"
+        (Just PendingWithdrawn)
+        (pendingOutcome thr 451 [live])
+    -- retireOutcome (§16h-1): classify a retired external submission via the
+    -- just-synced production cell (platform-generic)
+    let servingCell v c = Just (Just v, Just c, Just "completed", Nothing)
+    assertEqual
+        "retire: serving cell carries the build → Published"
+        PendingPublished
+        (retireOutcome (servingCell "3.4.0" 451) False "3.4.0" (Just 451))
+    assertEqual
+        "retire: serving cell ramping (pct present) → Published"
+        PendingPublished
+        (retireOutcome (Just (Just "3.4.0", Just 451, Just "inProgress", Just 25)) False "3.4.0" (Just 451))
+    assertEqual
+        "retire: different serving + a new pending → Replaced"
+        PendingReplaced
+        (retireOutcome (servingCell "3.3.9" 450) True "3.4.0" (Just 451))
+    assertEqual
+        "retire: different serving, nothing pending → Withdrawn"
+        PendingWithdrawn
+        (retireOutcome (servingCell "3.3.9" 450) False "3.4.0" (Just 451))
+    assertEqual
+        "retire: same version, different code serving → not Published"
+        PendingWithdrawn
+        (retireOutcome (servingCell "3.4.0" 450) False "3.4.0" (Just 451))
+    assertEqual
+        "retire: code-less legacy row matches serving by version → Published"
+        PendingPublished
+        (retireOutcome (servingCell "3.4.0" 451) False "3.4.0" Nothing)
+    assertEqual
+        "retire: no production cell at all → Withdrawn"
+        PendingWithdrawn
+        (retireOutcome Nothing False "3.4.0" (Just 451))
 
 -- | The list-view dedup that hides a store-sync internal/TestFlight snapshot when
 -- an active EXTERNAL_REVIEW row already represents the same build (same identity
@@ -1880,6 +2029,7 @@ testRenderRevertChangelog = do
                 , ciMessage = "feat: add foo (#123)\n\nbody"
                 , ciSubject = "feat: add foo (#123)"
                 , ciAuthorLogin = "alice"
+                , ciAuthorName = "Alice"
                 , ciHtmlUrl = "https://github.com/x/y/commit/abc1234"
                 , ciPrNumber = Just 123
                 }
@@ -1890,6 +2040,7 @@ testRenderRevertChangelog = do
                 , ciMessage = "chore: bump deps"
                 , ciSubject = "chore: bump deps"
                 , ciAuthorLogin = "unknown"
+                , ciAuthorName = ""
                 , ciHtmlUrl = "https://github.com/x/y/commit/def5678"
                 , ciPrNumber = Nothing
                 }
@@ -1901,6 +2052,30 @@ testRenderRevertChangelog = do
         "two commits → label only"
         "Revert v1.2.3"
         (renderRevertChangelog "1.2.3" "1.2.2" "abc1234" "1.2.4" (Just 457) [c1, c2])
+    -- isBotCommit: bot logins ("…[bot]"), CI author names on account-less
+    -- commits, and known automation logins are changelog noise; humans pass.
+    let bot login name = c1{ciAuthorLogin = login, ciAuthorName = name}
+    assertBool "github-actions[bot] login is a bot" (isBotCommit (bot "github-actions[bot]" ""))
+    assertBool "dependabot[bot] login is a bot" (isBotCommit (bot "dependabot[bot]" ""))
+    assertBool "account-less CI commit by author name" (isBotCommit (bot "unknown" "GitHub Actions"))
+    assertBool "plain github-actions login" (isBotCommit (bot "github-actions" ""))
+    assertBool "human commit passes" (not (isBotCommit (bot "alice" "Alice")))
+    assertBool "unknown login with human name passes" (not (isBotCommit (bot "unknown" "Alice")))
+    -- CL.isAutomationCommit: the shared default-changelog/AI-input filter also
+    -- catches release PLUMBING pushed under a human token; narrow prefixes only.
+    assertBool "CL: bot author" (CL.isAutomationCommit "github-actions[bot]" "chore: whatever")
+    assertBool "CL: human version bump is plumbing" (CL.isAutomationCommit "alice" "chore(release): bump version to 3.3.27")
+    assertBool "CL: bump versionCode prefix" (CL.isAutomationCommit "alice" "Bump versionCode to 591")
+    assertBool "CL: [skip ci] plumbing" (CL.isAutomationCommit "alice" "update generated files [skip ci]")
+    assertBool "CL: real change mentioning bump passes" (not (CL.isAutomationCommit "alice" "fix: bump request timeout to 30s"))
+    assertBool "CL: plain feature passes" (not (CL.isAutomationCommit "alice" "feat: add SOS flow"))
+    -- Changelog display author: real name preferred, login fallback, no '@'.
+    assertEqual "display author prefers git name" "Dev Vikram Singh" (ciDisplayAuthor c1{ciAuthorLogin = "techtrigon", ciAuthorName = "Dev Vikram Singh"})
+    assertEqual "display author falls back to login" "PraveenGongada" (ciDisplayAuthor c1{ciAuthorLogin = "PraveenGongada", ciAuthorName = ""})
+    assertEqual
+        "deterministic bullet ends with the display name (no @)"
+        "- feat: add foo (#123)  — Alice"
+        (CL.renderChunkDeterministic [CL.CommitItem "abc1234" "feat: add foo (#123)" "Alice"])
     assertEqual
         "one commit → label only"
         "Revert v2.0.0"

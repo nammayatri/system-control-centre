@@ -1015,21 +1015,6 @@ const ReleaseSummary: React.FC = () => {
   // (rollout-runner) controls don't apply — the real action is Promote/Rollout in
   // the Store panel.
   const inMobileLifecycle = !!mobileStatus;
-  // Hide Abort once the build has a store artifact (uploaded to internal/TestFlight
-  // onward): Abort can't un-ship it and it re-surfaces via store-sync. Built-but-held
-  // builds are left to be superseded by the next promote (Rule C).
-  const hasStoreArtifact =
-    isMobile &&
-    !!rollout &&
-    [
-      'MBSubmittedToStore',
-      'MBTagPushed',
-      'MBSubmittingForReview',
-      'MBInReview',
-      'MBReviewApproved',
-      'MBRollingOut',
-      'MBCompleted',
-    ].includes(rollout.rdMbStatus);
 
   const matchedMobileApp = isMobile
     ? mobileApps.find(
@@ -1248,7 +1233,10 @@ const ReleaseSummary: React.FC = () => {
                 {!inMobileLifecycle && (
                   <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
                 )}
-                {!hasStoreArtifact && (
+                {/* Abort visibility is BE-driven (rdAbortable): shown only while the
+                    build is still Building. A rejected / on-store / terminal build can't
+                    be un-shipped, so Abort is hidden. Non-mobile keeps the INPROGRESS rule. */}
+                {(!isMobile || !!rollout?.rdAbortable) && (
                   <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
                 )}
               </PermissionGate>

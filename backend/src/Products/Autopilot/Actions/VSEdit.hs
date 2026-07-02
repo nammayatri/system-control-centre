@@ -192,6 +192,7 @@ mkVsEditRow tid product' service' env' vsName' createdBy' status' now =
         , rtAscPhasedId = Nothing
         , rtStoreTrack = Nothing
         , rtVersionCode = Nothing
+        , rtTerminalStatus = Nothing
         , rtCreatedAt = now
         , rtUpdatedAt = now
         }

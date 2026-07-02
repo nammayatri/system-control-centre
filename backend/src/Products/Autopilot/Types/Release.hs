@@ -215,6 +215,8 @@ data ReleaseTracker = ReleaseTracker
     rolloutHistory :: [RolloutHistory],
     oldVersion :: Text,
     newVersion :: Text,
+    versionCode :: Maybe Int32,
+    reviewStatus :: Maybe Text,
     info :: Maybe Text,
     description :: Maybe Text,
     changeLog :: Maybe Text,

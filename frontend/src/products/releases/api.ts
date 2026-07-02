@@ -80,6 +80,9 @@ export interface ReleaseContext {
     // metadata mirror) right after a successful set.
     rollout_status?: string | null;
     rollout_percent?: number | null;
+    // BE-derived live store track (production | internal | testflight) from store_status —
+    // the SSOT the track chip reads, not the stale metadata.store_track mirror.
+    store_track?: string | null;
     // Canonical backend displayStatus (the one definition): label + variant slug for the
     // badge, plus a machine phase tag for branching (e.g. cross-row promote suppression).
     display_label?: string;
@@ -436,6 +439,7 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         mb_wf_status:     (r.releaseContext as any)?.mb_wf_status,
         rollout_status:   (r.releaseContext as any)?.rollout_status,
         rollout_percent:  (r.releaseContext as any)?.rollout_percent,
+        store_track:      (r.releaseContext as any)?.store_track,
         // BE-injected promotability (higher than production). Must be passed through here
         // or it's dropped before the badge can read it.
         promotable:       (r.releaseContext as any)?.promotable,
@@ -1210,6 +1214,7 @@ export interface RolloutDetail {
     rdPhasedId: string | null; // iOS phased-release id (present ⇒ phased ramp on)
     rdStoreTrack: string | null; // production | internal | testflight (store-sync rows)
     rdPromotable: boolean; // BE truth: can be promoted now (promotable stage AND not already live on prod)
+    rdAbortable: boolean; // BE truth: can be aborted now (still Building, no store artifact) — else Abort is hidden
     rdAppCatalogId: number; // app_catalog.id — force a store sync (refreshStoreApp) before re-reading
     rdLiveOnProduction: boolean; // BE truth: is THIS build the version live on production (synced cache, code-first)
     rdSyncedSecondsAgo: number | null; // seconds since store_status last synced (null = never)

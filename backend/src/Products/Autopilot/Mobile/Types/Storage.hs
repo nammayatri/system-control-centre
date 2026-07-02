@@ -83,7 +83,6 @@ data StoreStatusT f = StoreStatus
     , ssVersionCode :: Columnar f (Maybe Int32)
     , ssStatus :: Columnar f (Maybe Text)
     , ssRolloutPercent :: Columnar f (Maybe Double)
-    , ssReviewStatus :: Columnar f (Maybe Text)
     , ssReleaseNotes :: Columnar f (Maybe Text)
     , ssExpectedVersion :: Columnar f (Maybe Text)
     , ssSyncedAt :: Columnar f UTCTime
@@ -115,7 +114,6 @@ storeStatus =
                 , ssVersionCode = fieldNamed "version_code"
                 , ssStatus = fieldNamed "status"
                 , ssRolloutPercent = fieldNamed "rollout_percent"
-                , ssReviewStatus = fieldNamed "review_status"
                 , ssReleaseNotes = fieldNamed "release_notes"
                 , ssExpectedVersion = fieldNamed "expected_version"
                 , ssSyncedAt = fieldNamed "synced_at"

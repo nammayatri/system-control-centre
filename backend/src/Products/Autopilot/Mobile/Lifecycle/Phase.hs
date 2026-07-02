@@ -14,6 +14,7 @@ module Products.Autopilot.Mobile.Lifecycle.Phase (
     Variant (..),
     Display (..),
     displayStatus,
+    displayStatusInferred,
     variantSlug,
     phaseSlug,
     pEngineStatus,
@@ -22,6 +23,7 @@ module Products.Autopilot.Mobile.Lifecycle.Phase (
     isFailedTerminal,
     holdsStoreIdentity,
     promotableStage,
+    abortable,
 ) where
 
 import Data.Text (Text)
@@ -123,6 +125,15 @@ data Variant = Amber | Zinc | Blue | Purple | Success | Info | Warning | Danger 
 data Display = Display {dLabel :: Text, dVariant :: Variant}
     deriving (Eq, Show)
 
+{- | 'displayStatus' with the Android inference softening: a verdict INFERRED from
+the Play track (Google exposes no review state) reads "Pending review", not a
+confident "In review". Only InReview softens — approved/rejected are
+operator-recorded verdicts even on inferred rows.
+-}
+displayStatusInferred :: Bool -> ReleasePhase -> Display
+displayStatusInferred True InReview = Display "Pending review" Purple
+displayStatusInferred _ ph = displayStatus ph
+
 -- | The single status deriver used by list, detail, and monitor.
 displayStatus :: ReleasePhase -> Display
 displayStatus = \case
@@ -138,7 +149,7 @@ displayStatus = \case
     Rejected _ -> Display "Rejected" Danger
     Superseded -> Display "Superseded" Default
     BuildFailed _ -> Display "Build failed" Danger
-    Aborted -> Display "Aborted" Default
+    Aborted -> Display "Aborted" Danger
     Building -> Display "Building" Default
 
 -- | A 0–1 fraction as a percent, trimmed to 1 decimal (0.01 → "1", 0.125 → "12.5").
@@ -214,6 +225,15 @@ promotableStage = \case
     InternalHeld -> True
     _ -> False
 
+-- | Whether Abort still applies. Only a build with no store/distributable artifact
+-- yet (still Building) can be cancelled. Once it's on a store track — or terminal
+-- (rejected / superseded / live / failed) — Abort can't un-ship it (it re-surfaces
+-- via store-sync), so the UI must not offer it. The BE truth for the FE's Abort gate.
+abortable :: ReleasePhase -> Bool
+abortable = \case
+    Building -> True
+    _ -> False
+
 -- | The mb_wf_status mirror for a phase. Just = setPhase writes it into the
 -- target-state JSON. Nothing = leave wf-status as the build pipeline set it
 -- (Building / InternalHeld / Superseded keep theirs).
@@ -259,6 +279,9 @@ phaseFromFields kind wf review rollout pct track =
                 _
                     -- debug/firebase: a terminal non-store build is Distributed; still building → Building
                     | not (hasStoreIdentity kind) -> if wf `elem` [MBCompleted, MBTagPushed] then Distributed kind else Building
+                    -- Review states need no wf fallback here: setPhase writes the
+                    -- review column and the wf mirror together, and every caller
+                    -- passes the ROW's review (§16) — already handled above.
                     | wf == MBTagPushed -> InternalHeld -- built, held, awaiting promote
                     | track `elem` [Just "internal", Just "testflight"] -> InternalHeld
                     | wf == MBCompleted -> Live

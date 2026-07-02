@@ -51,6 +51,7 @@ module Products.Autopilot.Queries.ReleaseTracker
     -- * Row conversion
     toRow,
     fromRow,
+    addMobileLifecycle,
 
     -- * Parsing / Encoding helpers
     parseReleaseCategory,
@@ -63,6 +64,7 @@ module Products.Autopilot.Queries.ReleaseTracker
     encodeJsonText,
     parseJsonTextOr,
     parseJsonTextMaybe,
+    reviewInferredOf,
 
     -- * Internal
     safeHead,
@@ -71,7 +73,6 @@ module Products.Autopilot.Queries.ReleaseTracker
   )
 where
 
-import Control.Applicative ((<|>))
 import Core.DB.Connection (runBeamLogged, runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
 import Data.Aeson (FromJSON, ToJSON, Value (..), fromJSON, toJSON)
@@ -87,11 +88,11 @@ import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Database.Beam
 import Database.Beam.Postgres ()
 import Database.Beam.Postgres.Full (anyConflict, insertReturning, onConflict, onConflictDoNothing, runPgInsertReturningList)
-import Database.PostgreSQL.Simple (Only (..), execute, execute_, query, withTransaction)
+import Database.PostgreSQL.Simple (Only (..), Query, ToRow, execute, execute_, query, withTransaction)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
 import Debug.Trace qualified as DT
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind, claimsStoreIdentity)
-import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), displayStatus, phaseFromFields, phaseSlug, variantSlug)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), displayStatusInferred, phaseFromFields, phaseSlug, variantSlug)
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), MobileBuildWFStatus (..), isFailedMBTerminal, releasesIdentitySlot)
 import Products.Autopilot.Types
 import Products.Autopilot.Types qualified as NT
@@ -168,113 +169,81 @@ insertReleaseTracker rt mts = withDb $ \db -> do
         )
     pure ()
 
--- | Atomically update a release tracker only if its current status matches the expected value.
--- Uses DELETE ... WHERE id = ? AND status = ? to prevent concurrent modifications.
--- Returns True if the update succeeded, False if the status was changed by another thread.
+{- | Atomically update a release tracker only if its current status matches the
+expected value (CAS: @UPDATE ... WHERE id = ? AND status = ?@). Returns True if
+the update succeeded, False if the status was changed by another thread.
+
+Column-scoped ('casUpdateWorkflowCols'): the former DELETE+re-INSERT rebuilt the
+whole row from 'toRow', which blanked every setPhase-owned lifecycle column
+(review_*, rollout_*, store_track, terminal_status, asc ids) on the workflow's
+completion/abort persist — erasing a release's just-stamped outcome.
+-}
 conditionalUpdateTracker :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> Text -> m Bool
-conditionalUpdateTracker rt mts expectedStatus = withDb $ \db -> do
-  now <- getCurrentTime
+conditionalUpdateTracker rt mts expectedStatus = do
+  now <- liftIO getCurrentTime
   let created = fromMaybe now (dateCreated rt)
       row = toRow created now rt mts
-  withConn db $ \conn ->
-    withTransaction conn $ do
-      -- Preserve slack_thread_ts, dispatch_id, external_run_id: the
-      -- in-memory `rt` doesn't carry these (mobile workflow reads them
-      -- via raw SQL, not through the domain type), so read live values
-      -- inside the txn before DELETE+INSERT wipes them.
-      preserved <-
-        query
-          conn
-          "SELECT slack_thread_ts, dispatch_id, external_run_id \
-          \  FROM release_tracker WHERE id = ?"
-          (Only (releaseId rt))
-      let mergedRow = applyPreservedFields row preserved
-      rowsDeleted <-
-        execute
-          conn
-          "DELETE FROM release_tracker WHERE id = ? AND status = ?"
-          (releaseId rt, expectedStatus)
-      if rowsDeleted == 0
-        then pure False
-        else do
-          runBeamLogged conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
-          pure True
+  casUpdateWorkflowCols row "WHERE id = ? AND status = ?" (rtId row, expectedStatus)
 
 -- | Atomic approve. Precondition is @is_approved=false AND status='CREATED'@,
--- enforced in SQL so concurrent approve handlers can't both win.
+-- enforced in SQL so concurrent approve handlers can't both win. Column-scoped
+-- like 'conditionalUpdateTracker'.
 conditionalUpdateApprove :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m Bool
-conditionalUpdateApprove rt mts = withDb $ \db -> do
-  now <- getCurrentTime
+conditionalUpdateApprove rt mts = do
+  now <- liftIO getCurrentTime
   let created = fromMaybe now (dateCreated rt)
       row = toRow created now rt mts
-  withConn db $ \conn ->
-    withTransaction conn $ do
-      -- Preserve slack_thread_ts, dispatch_id, external_run_id;
-      -- see conditionalUpdateTracker.
-      preserved <-
-        query
-          conn
-          "SELECT slack_thread_ts, dispatch_id, external_run_id \
-          \  FROM release_tracker WHERE id = ?"
-          (Only (releaseId rt))
-      let mergedRow = applyPreservedFields row preserved
-      rowsDeleted <-
-        execute
-          conn
-          "DELETE FROM release_tracker WHERE id = ? AND status = 'CREATED' AND is_approved = false"
-          (Only (releaseId rt))
-      if rowsDeleted == 0
-        then pure False
-        else do
-          runBeamLogged conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
-          pure True
+  casUpdateWorkflowCols row "WHERE id = ? AND status = 'CREATED' AND is_approved = false" (Only (rtId row))
+
+{- | Shared CAS executor: ONE atomic UPDATE of the workflow-owned columns, with
+the caller's WHERE precondition. Deliberately NOT in the SET list — so their
+live values always survive a workflow persist:
+
+  * the 'setPhase'-owned lifecycle columns: @review_*@, @rollout_status@,
+    @rollout_percent@, @store_rollout_history@, @store_track@, @asc_version_id@,
+    @asc_phased_id@, @terminal_status@;
+  * the externally-stamped @dispatch_id@ / @external_run_id@ (the old
+    read-then-reinsert "preserved fields", now preserved for free).
+
+@version_code@ IS written: 'toRow' derives it from the target state, including
+the failed-terminal identity-slot release (a build aborted before uploading
+frees its (version, code) for a rebuild). @slack_thread_ts@ keeps COALESCE
+semantics: a Nothing in the row never erases a thread id another path stamped.
+-}
+casUpdateWorkflowCols :: (ToRow w, MonadFlow m) => ReleaseTrackerRow -> Query -> w -> m Bool
+casUpdateWorkflowCols row whereSql whereParams = withDb $ \db ->
+  withConn db $ \conn -> do
+    n <-
+      execute
+        conn
+        ( "UPDATE release_tracker SET \
+          \  old_version = ?, new_version = ?, app_group = ?, service = ?, priority = ?, env = ? \
+          \ , category = ?, status = ?, release_wf_status = ?, mode = ?, release_manager = ?, approved_by = ? \
+          \ , is_approved = ?, is_infra_approved = ?, release_tag = ?, schedule_time = ?, start_time = ?, end_time = ? \
+          \ , rollout_strategy = ?, rollout_history = ?, release_context = ?, info = ?, description = ?, change_log = ? \
+          \ , metadata = ?, global_id = ?, sync_enabled = ?, env_override_data = ?, slack_thread_ts = COALESCE(?, slack_thread_ts), commit_sha = ? \
+          \ , source_ref = ?, reverts_release_id = ?, ab_validation_status = ?, ab_validation = ?, version_code = ?, date_created = ? \
+          \ , last_updated = ? "
+            <> whereSql
+        )
+        ( (rtOldVersion row, rtNewVersion row, rtAppGroup row, rtService row, rtPriority row, rtEnv row)
+            :. (rtCategory row, rtStatus row, rtReleaseWFStatus row, rtMode row, rtCreatedBy row, rtApprovedBy row)
+            :. (rtIsApproved row, rtIsInfraApproved row, rtReleaseTag row, rtScheduleTime row, rtStartTime row, rtEndTime row)
+            :. (rtRolloutStrategy row, rtRolloutHistory row, rtTargetState row, rtInfo row, rtDescription row, rtChangeLog row)
+            :. (rtMetadata row, rtGlobalId row, rtSyncEnabled row, rtEnvOverrideData row, rtSlackThreadTs row, rtCommitSha row)
+            :. (rtSourceRef row, rtRevertsReleaseId row, rtAbValidationStatus row, rtAbValidation row, rtVersionCode row, rtCreatedAt row)
+            :. Only (rtUpdatedAt row)
+            :. whereParams
+        )
+    pure (n > 0)
 
 -- | Like 'conditionalUpdateTracker' but accepts a raw 'ReleaseTrackerRow'.
--- Returns True if the update succeeded, False if the status was changed by another thread.
+-- Returns True if the update succeeded, False if the status was changed by
+-- another thread. Column-scoped: the lifecycle columns keep their live DB
+-- values rather than the possibly-stale values of the read this row came from.
 conditionalUpdateTrackerRow :: (MonadFlow m) => ReleaseTrackerRow -> Text -> m Bool
-conditionalUpdateTrackerRow row expectedStatus = withDb $ \db ->
-  withConn db $ \conn ->
-    withTransaction conn $ do
-      -- Preserve slack_thread_ts, dispatch_id, external_run_id;
-      -- see conditionalUpdateTracker.
-      preserved <-
-        query
-          conn
-          "SELECT slack_thread_ts, dispatch_id, external_run_id \
-          \  FROM release_tracker WHERE id = ?"
-          (Only (rtId row))
-      let mergedRow = applyPreservedFields row preserved
-      rowsDeleted <-
-        execute
-          conn
-          "DELETE FROM release_tracker WHERE id = ? AND status = ?"
-          (rtId row, expectedStatus)
-      if rowsDeleted == 0
-        then pure False
-        else do
-          runBeamLogged conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
-          pure True
-
--- | Merge live DB values for fields that the in-memory row doesn't carry,
--- preserving them across DELETE+INSERT. Called inside the read-then-write
--- txn used by conditionalUpdate*. The query argument must be exactly:
---
--- > SELECT slack_thread_ts, dispatch_id, external_run_id FROM release_tracker WHERE id = ?
---
--- Returns @row@ patched with whichever fields were present in the DB row.
--- If the query returned no rows (id not found), returns @row@ unchanged.
-applyPreservedFields ::
-  ReleaseTrackerRow ->
-  [(Maybe Text, Maybe Text, Maybe Text)] ->
-  ReleaseTrackerRow
-applyPreservedFields row preserved = case preserved of
-  [(mSlack, mDispatch, mExtRun)] ->
-    row
-      { rtSlackThreadTs = mSlack <|> rtSlackThreadTs row,
-        rtDispatchId = mDispatch <|> rtDispatchId row,
-        rtExternalRunId = mExtRun <|> rtExternalRunId row
-      }
-  _ -> row
+conditionalUpdateTrackerRow row expectedStatus =
+  casUpdateWorkflowCols row "WHERE id = ? AND status = ?" (rtId row, expectedStatus)
 
 findReleaseTracker :: (MonadFlow m) => Text -> m (Maybe TrackerWithTarget)
 findReleaseTracker rid = withDb $ \db -> do
@@ -380,9 +349,9 @@ hideExternalReviewSnapshots rows =
     keyOf r = (rtAppGroup r, rtService r, rtEnv r, rtNewVersion r)
     inReviewKeys =
       [ keyOf r
-      | r <- rows,
-        rtMode r == Just "EXTERNAL_REVIEW",
-        rtStatus r == "INPROGRESS"
+        | r <- rows,
+          rtMode r == Just "EXTERNAL_REVIEW",
+          rtStatus r == "INPROGRESS"
       ]
 
 -- | Pure core of 'hideExternalReviewSnapshots': keep a row unless it is a
@@ -438,7 +407,7 @@ findRunnableReleaseTrackers now = withDb $ \db -> do
                   ||. ( rtStatus rt
                           ==. val_ "INPROGRESS"
                           &&. rtCategory rt
-                          ==. val_ "MobileBuild"
+                            ==. val_ "MobileBuild"
                       )
               )
             guard_ (rtIsApproved rt ==. val_ (Just True))
@@ -663,7 +632,7 @@ insertReleaseEvent rid category label payload = withDb $ \db -> do
           ]
 
 toRow :: UTCTime -> UTCTime -> ReleaseTracker -> Maybe TargetState -> ReleaseTrackerRow
-toRow createdAt updatedAt ReleaseTracker {..} mts =
+toRow createdAt updatedAt ReleaseTracker{..} mts =
   ReleaseTrackerT
     { rtId = releaseId,
       rtOldVersion = oldVersion,
@@ -720,12 +689,13 @@ toRow createdAt updatedAt ReleaseTracker {..} mts =
           | claimsStoreIdentity (mbContext s) && not (releasesIdentitySlot s) ->
               mbcVersionCode (mbContext s)
         _ -> Nothing,
+      rtTerminalStatus = Nothing,
       rtCreatedAt = createdAt,
       rtUpdatedAt = updatedAt
     }
 
 fromRow :: ReleaseTrackerRow -> TrackerWithTarget
-fromRow ReleaseTrackerT {..} =
+fromRow ReleaseTrackerT{..} =
   let mTargetState = case parseJsonTextMaybe rtTargetState :: Maybe Value of
         Nothing -> Nothing
         Just v -> case fromJSON v :: Aeson.Result TargetState of
@@ -743,7 +713,7 @@ fromRow ReleaseTrackerT {..} =
         -- matches the rollout endpoint's rdMbStatus (tshow (mbWfStatus …)).
         Just (MobileBuildState mb) ->
           let ph = phaseFromFields (buildKind (mbContext mb)) (mbWfStatus mb) rtReviewStatus rtRolloutStatus rtRolloutPercent rtStoreTrack
-              disp = displayStatus ph
+              disp = displayStatusInferred (reviewInferredOf (parseJsonTextMaybe rtMetadata)) ph
            in Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent rtStoreTrack (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) (toJSON (mbContext mb)))
         _ -> Nothing
       tracker =
@@ -770,6 +740,8 @@ fromRow ReleaseTrackerT {..} =
             rolloutHistory = parseJsonTextOr [] rtRolloutHistory,
             oldVersion = rtOldVersion,
             newVersion = rtNewVersion,
+            versionCode = rtVersionCode,
+            reviewStatus = rtReviewStatus,
             info = rtInfo,
             description = rtDescription,
             changeLog = rtChangeLog,
@@ -811,6 +783,13 @@ addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack dispLabel dispVaria
     . KM.insert "display_phase" (toJSON dispPhase)
     $ o
 addMobileLifecycle _ _ _ _ _ _ _ v = v
+
+-- | Whether metadata flags the review verdict as track-INFERRED (Android
+-- out-of-band detection, Google exposes no review state) rather than
+-- authoritative — softens "In review" to "Pending review" in the deriver.
+reviewInferredOf :: Maybe Value -> Bool
+reviewInferredOf (Just (Object o)) = KM.lookup "review_inferred" o == Just (Bool True)
+reviewInferredOf _ = False
 
 parseReleaseCategory :: Text -> ReleaseCategory
 parseReleaseCategory t =
@@ -989,7 +968,7 @@ insertReleaseTrackerRow row = withDb $ \db ->
       let preservedTs = case existingTs of
             [Only (Just ts)] -> Just ts
             _ -> rtSlackThreadTs row
-          mergedRow = row {rtSlackThreadTs = preservedTs}
+          mergedRow = row{rtSlackThreadTs = preservedTs}
       _ <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (rtId row))
       runBeamLogged conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
 
@@ -1091,7 +1070,7 @@ sweepStaleDiscardingTrackers ageMinutes = withDb $ \db -> do
                 rtStatus rt
                   ==. val_ "DISCARDING"
                   &&. rtUpdatedAt rt
-                  <=. val_ cutoff
+                    <=. val_ cutoff
             )
       pure (length stuckIds)
 
@@ -1129,9 +1108,9 @@ sweepAutoCompleteVsTrackers ageMinutes = withDb $ \db -> do
                 rtCategory rt
                   ==. val_ "VSEdit"
                   &&. rtStatus rt
-                  ==. val_ "APPLIED"
+                    ==. val_ "APPLIED"
                   &&. rtUpdatedAt rt
-                  <=. val_ cutoff
+                    <=. val_ cutoff
             )
       pure (length stuckIds)
 

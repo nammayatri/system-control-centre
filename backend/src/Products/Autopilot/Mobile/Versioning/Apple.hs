@@ -43,7 +43,7 @@ module Products.Autopilot.Mobile.Versioning.Apple (
     AscSnapshot (..),
     fetchAscSnapshots,
     BuildsResp (..),
-    getLiveAppStoreVersion,
+    getLiveAppStoreVersionAndBuild,
     getIosVersionStateDump,
     getLiveReleaseNotes,
     firstWhatsNew,
@@ -72,7 +72,7 @@ module Products.Autopilot.Mobile.Versioning.Apple (
     getPhasedReleaseId,
     getInFlightReview,
     selectInFlightReview,
-    parseVersionStates,
+    parseVersionStatesWithBuild,
 
     -- * Dispatcher entry points
     resolve,
@@ -1159,16 +1159,9 @@ getLiveAppStoreVersionString token appId =
         "asc-live-version"
         >>? \b -> pure (Right (decode b >>= \(LiveVersionResp v) -> v))
 
-{- | Mint a token + resolve the appId for @bundleId@, then read the live
-(READY_FOR_SALE) App Store version string. Used by store sync to record the
-production-track snapshot alongside the TestFlight (internal) one.
--}
-getLiveAppStoreVersion :: AscCreds -> Text -> IO (Either AscError (Maybe Text))
-getLiveAppStoreVersion creds bundleId =
-    withAscApp creds bundleId getLiveAppStoreVersionString
-
 -- | The live App Store version string + its build number (CFBundleVersion), in ONE
--- call via @include=build@. Powers the production iOS cell's @+code@ on the monitor.
+-- call via @include=build@. Powers the production iOS cell's @+code@ on the monitor
+-- and store sync's production snapshot / phased-rollout identity.
 getLiveAppStoreVersionAndBuild :: AscCreds -> Text -> IO (Either AscError (Maybe (Text, Maybe Text)))
 getLiveAppStoreVersionAndBuild creds bundleId =
     withAscApp creds bundleId $ \token appId ->
@@ -1515,44 +1508,63 @@ getPhasedReleaseId creds bundleId versionString = liftIO $ withAscApp creds bund
         getExistingPhasedReleaseId token (avId ver)
 
 {- | Detect an App Store version that is in flight (not the live one) and report
-its @(versionString, reviewState)@ — used by store sync to surface a review that
-was submitted OUTSIDE SCC. Returns 'Nothing' when there's no in-flight version
-(only a live @READY_FOR_SALE@ one) or none could be read. Picks the newest
-non-live, non-superseded version; the caller decides which states to surface.
+its @(versionString, buildNumber, reviewState)@ — used by store sync to surface a
+review that was submitted OUTSIDE SCC. The build number is the attached build's
+CFBundleVersion (via @include=build@): the review belongs to that exact build, so
+the surfaced row carries full (version, code) identity. Returns 'Nothing' when
+there's no in-flight version (only a live @READY_FOR_SALE@ one) or none could be
+read. Picks the newest non-live, non-superseded version; the caller decides which
+states to surface.
 -}
-getInFlightReview :: (MonadFlow m) => AscCreds -> Text -> m (Either AscError (Maybe (Text, AscReviewState)))
+getInFlightReview :: (MonadFlow m) => AscCreds -> Text -> m (Either AscError (Maybe (Text, Maybe Int32, AscReviewState)))
 getInFlightReview creds bundleId = liftIO $ withAscApp creds bundleId $ \token appId ->
     ascGet
-        (ascBase <> "/apps/" <> appId <> "/appStoreVersions?filter%5Bplatform%5D=IOS&limit=5")
+        (ascBase <> "/apps/" <> appId <> "/appStoreVersions?filter%5Bplatform%5D=IOS&include=build&fields%5Bbuilds%5D=version&limit=5")
         token
         "asc-inflight-review"
-        >>? \b -> pure (Right (selectInFlightReview (parseVersionStates b)))
+        >>? \b -> pure (Right (selectInFlightReview (parseVersionStatesWithBuild b)))
 
-{- | Pick the in-flight (non-live, non-superseded) version + its review state from
-a parsed @appStoreVersions@ list. Exposed for testing.
+{- | Pick the in-flight (non-live, non-superseded) version + its attached build
+number + review state from a parsed @appStoreVersions@ list. Exposed for testing.
 -}
-selectInFlightReview :: [(Text, Text)] -> Maybe (Text, AscReviewState)
+selectInFlightReview :: [(Text, Text, Maybe Int32)] -> Maybe (Text, Maybe Int32, AscReviewState)
 selectInFlightReview infos =
     listToMaybe
-        [ (v, appStoreStateToReview s)
-        | (v, s) <- infos
+        [ (v, code, appStoreStateToReview s)
+        | (v, s, code) <- infos
         , s /= "READY_FOR_SALE"
         , s /= "REPLACED_WITH_NEW_VERSION"
         ]
 
--- | Parse an @appStoreVersions@ list body into @[(versionString, appStoreState)]@.
-parseVersionStates :: LBS.ByteString -> [(Text, Text)]
-parseVersionStates bs = maybe [] (\(VersionStates xs) -> xs) (decode bs)
+{- | Parse an @appStoreVersions?include=build@ list body into
+@[(versionString, appStoreState, attached build number)]@. Items missing a
+version/state are dropped; a missing or non-numeric build resolves to 'Nothing'.
+-}
+parseVersionStatesWithBuild :: LBS.ByteString -> [(Text, Text, Maybe Int32)]
+parseVersionStatesWithBuild bs =
+    maybe [] (\(VersionStatesResp xs) -> xs) (decode bs)
 
-newtype VersionStates = VersionStates [(Text, Text)]
+-- | One appStoreVersions data[] item: (versionString, appStoreState, build rel id).
+data VsStateRel = VsStateRel (Maybe Text) (Maybe Text) (Maybe Text)
 
-instance FromJSON VersionStates where
-    parseJSON = withObject "VersionStates" $ \o ->
-        VersionStates <$> (o .: "data" >>= mapM pv)
-      where
-        pv = withObject "version" $ \d ->
-            d .: "attributes"
-                >>= withObject "attrs" (\a -> (,) <$> a .: "versionString" <*> a .: "appStoreState")
+instance FromJSON VsStateRel where
+    parseJSON = withObject "VsStateRel" $ \o -> do
+        mAttrs <- o .:? "attributes"
+        (v, s) <- case mAttrs :: Maybe Object of
+            Nothing -> pure (Nothing, Nothing)
+            Just a -> (,) <$> a .:? "versionString" <*> a .:? "appStoreState"
+        bid <- parseBuildRelId o
+        pure (VsStateRel v s bid)
+
+newtype VersionStatesResp = VersionStatesResp [(Text, Text, Maybe Int32)]
+
+instance FromJSON VersionStatesResp where
+    parseJSON = withObject "VersionStatesResp" $ \o -> do
+        items <- fromMaybe [] <$> o .:? "data"
+        included <- fromMaybe [] <$> o .:? "included"
+        let buildById = Map.fromList [(bid, mv) | IncludedBuild bid mv <- included]
+            numOf mRel = readMaybe . T.unpack =<< ((mRel >>= (`Map.lookup` buildById)) >>= id)
+        pure $ VersionStatesResp [(v, s, numOf bid) | VsStateRel (Just v) (Just s) bid <- items]
 
 -- ─── Server-config helper ──────────────────────────────────────────
 

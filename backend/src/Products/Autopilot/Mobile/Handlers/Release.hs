@@ -68,7 +68,7 @@ import qualified Data.UUID.V4 as UUID
 import Database.Beam
 import Products.Autopilot.Mobile.Github (BranchInfo (..), listBranches, searchBranches)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
-import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), CompareResult (..), compareAllCommits, compareRefs)
+import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), CompareResult (..), ciDisplayAuthor, compareAllCommits, compareRefs, isBotCommit)
 import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), TrackSnapshot (..), derivedStoreTag, fetchLatestBuildsForApp, findAppCatalogByIds, listAppCatalog, listEnabledAppCatalog)
 import Products.Autopilot.Mobile.Queries.StoreStatus (findStoreTracksForApp)
 import Products.Autopilot.Mobile.Queries.Tracker (
@@ -584,7 +584,9 @@ changelogPreviewH _ap appName surface platform branch mBase = do
                                     else pure (reverse (crCommits cr))
                             pure
                                 ChangelogPreviewResp
-                                    { cpCommits = commits
+                                    { -- Bot/CI commits + release plumbing (version bumps,
+                                      -- lockfiles) say nothing about what changed — drop them.
+                                      cpCommits = filter (\c -> not (isBotCommit c) && not (CL.isAutomationCommit (ciAuthorLogin c) (ciSubject c))) commits
                                     , cpAheadBy = crTotalCommits cr
                                     , cpStatus = crStatus cr
                                     , cpBaseTag = baseTag
@@ -717,10 +719,10 @@ aiUnavailable r =
 renderCommitsForAi :: [CommitInfo] -> Text
 renderCommitsForAi cs =
     T.unlines
-        ["- " <> ciShortSha c <> " " <> ciSubject c <> " (@" <> ciAuthorLogin c <> ")" | c <- cs]
+        ["- " <> ciShortSha c <> " " <> ciSubject c <> " (" <> ciDisplayAuthor c <> ")" | c <- cs]
 
 toCommitItem :: CommitInfo -> CL.CommitItem
-toCommitItem c = CL.CommitItem (ciShortSha c) (ciSubject c) (ciAuthorLogin c)
+toCommitItem c = CL.CommitItem (ciShortSha c) (ciSubject c) (ciDisplayAuthor c)
 
 {- | Build the response for a lifecycle state. @summaryLong@ always carries
 something to render — AI when @ready@, the deterministic changelog while
@@ -756,10 +758,10 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
                     case result of
                         Left e -> pure (aiUnavailable ("changelog fetch failed: " <> e))
                         Right cr -> do
-                            let commits = crCommits cr
-                                -- Scope to the selected app's surface (drop the
-                                -- other side's commits; keep this side + shared).
-                                items = CL.filterCommitsForSurface surface (map toCommitItem commits)
+                            let commits = filter (not . isBotCommit) (crCommits cr)
+                                -- Drop automation plumbing, then scope to the selected
+                                -- app's surface (drop the other side; keep this + shared).
+                                items = CL.filterCommitsForSurface surface (CL.dropAutomationCommits (map toCommitItem commits))
                                 detLong = CL.renderLongSummary items
                                 n = length items
                                 excluded = length commits - n
@@ -777,7 +779,7 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
                                 -- prompt/format changes so cached rows invalidate.
                                 contentKey =
                                     computePromptHash $
-                                        T.intercalate "\US" ["rn4", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
+                                        T.intercalate "\US" ["rn6", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
                             mRow <- lookupReleaseSummary contentKey
                             case mRow of
                                 -- Done → return the AI (or cached deterministic) result.

@@ -33,24 +33,37 @@ const mobileTrackBadge = (release: APRelease): { label: string; cls: string; tit
   // store-sync track fallback below would mislabel them "Production"/"TestFlight"
   // (implying live), so suppress the track chip here.
   if ((release.metadata as { external?: boolean } | null | undefined)?.external) return null;
+  // A build that never shipped (aborted / failed) sits on NO track — the status
+  // badge tells the story. Without this, the where-it-would-land fallback below
+  // labels an aborted iOS build "App Store" / an Android one "Internal".
+  const phase = release.release_context?.display_phase;
+  if (phase === 'aborted' || phase === 'build_failed') return null;
   const live = 'bg-emerald-700 text-white';   // serving real users
   const staged = 'bg-sky-600 text-white';     // built / uploaded, not live
 
-  const meta = release.metadata as
-    | { store_track?: string; rollout_status?: string; rollout_percent?: number }
-    | null
-    | undefined;
+  // BE-derived SSOT: release_context carries the live store_track + rollout_status,
+  // re-derived from store_status at response time (not the stale metadata mirror).
+  const meta = release.release_context;
   // A production track mid-rollout (<100%) is NOT fully live. The ReleaseStatusBadge
-  // already shows "Rolling out X%" for these rows (driven by the same reflected
-  // rollout_status), so suppress the track chip here to avoid a duplicate badge and
-  // a misleading green "Production" (which implies fully live). A completed/absent
-  // rollout falls through to the plain track badge below ("Production" at 100%).
+  // already shows "Rolling out X%" for these rows, so suppress the track chip here to
+  // avoid a duplicate badge and a misleading green "Production" (implying fully live).
   if (meta?.rollout_status === 'rolling_out' || meta?.rollout_status === 'halted') return null;
 
-  // Store-sync rows carry the exact track they were read from (StoreSync writes
-  // metadata.store_track = production | internal | testflight). Prefer it.
+  // The exact track this build resolves to in store_status (production | internal |
+  // testflight) — the same value the detail page shows.
   const storeTrack = meta?.store_track;
-  if (storeTrack === 'production') return { label: 'Production', cls: live, title: 'Live on the production track (fully rolled out)' };
+  if (storeTrack === 'production') {
+    const phase = meta?.display_phase;
+    // Green = ACTUALLY serving users (fully rolled out).
+    if (phase === 'live') return { label: 'Production', cls: live, title: 'Live on the production track (fully rolled out)' };
+    // Production-BOUND: in review / approved-held / rejected carry
+    // store_track='production' (the review projection) without serving anyone —
+    // show the track staged-colored; the status badge carries the verdict.
+    if (phase === 'in_review' || phase === 'approved' || phase === 'rejected')
+      return { label: 'Production', cls: staged, title: 'Submitted to the production track — not serving users (see status)' };
+    // Superseded / aborted history on production: the status badge tells the story.
+    return null;
+  }
   if (storeTrack === 'internal') return { label: 'Internal', cls: staged, title: 'Latest build on the Play internal-testing track (ahead of production, not live)' };
   if (storeTrack === 'testflight') return { label: 'TestFlight', cls: staged, title: 'Latest TestFlight build — App Store live version is not tracked' };
 
@@ -600,7 +613,7 @@ const ListRelease: React.FC = () => {
 
         <div className="hidden md:block overflow-x-auto">
           {isLoading ? (
-            <TableSkeleton rows={8} cols={7} />
+            <TableSkeleton rows={8} cols={8} />
           ) : (
             <table className="w-full text-left whitespace-nowrap">
               <thead>
@@ -608,6 +621,7 @@ const ListRelease: React.FC = () => {
                   <th className="py-3 px-4 w-12">#</th>
                   <th className="py-3 px-4 w-24">Category</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('appGroup')}>App / Group</th>
+                  <th className="py-3 px-4 w-28 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('env')}>Platform</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('service')}>Service / Surface</th>
                   <th className="py-3 px-4 cursor-pointer hover:text-zinc-700 transition-colors" onClick={() => handleSort('new_version')}>Version</th>
                   <th className="py-3 px-4">Status</th>
@@ -618,7 +632,7 @@ const ListRelease: React.FC = () => {
               </thead>
               <tbody className="text-sm">
                 {filteredReleases.length === 0 ? (
-                  <tr><td colSpan={9} className="py-16 text-center text-zinc-400">No releases found</td></tr>
+                  <tr><td colSpan={10} className="py-16 text-center text-zinc-400">No releases found</td></tr>
                 ) : (
                   paginatedReleases.map((release, index) => {
                     const isRevert = release.release_context?.revert === 1 || !!release.revertsReleaseId;
@@ -664,14 +678,18 @@ const ListRelease: React.FC = () => {
                             release.appGroup
                           )}
                         </td>
+                        <td className="py-3 px-4">
+                          {release.env ? (
+                            <PlatformBadge platform={release.env} isMobile={isMobile} />
+                          ) : (
+                            <span className="text-zinc-300">—</span>
+                          )}
+                        </td>
                         <td className="py-3 px-4 font-medium text-zinc-800">{release.service}</td>
                         <td className="py-3 px-4 font-mono text-xs text-zinc-600">{versionWithBuild(release)}</td>
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <ReleaseStatusBadge release={release} suppressPromote={supersededPromoteIds.has(release.id)} />
-                            {release.env && (
-                              <PlatformBadge platform={release.env} isMobile={isMobile} />
-                            )}
                             {track && (
                               <span
                                 title={track.title}
