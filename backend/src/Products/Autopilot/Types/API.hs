@@ -59,6 +59,7 @@ data UpsertProductReq = UpsertProductReq
     , syncCluster :: Maybe Text
     , needInfraApproval :: Maybe Bool
     , slackChannel :: Maybe Text
+    , repoName :: Maybe Text
     }
     deriving (Show, Generic)
 
@@ -76,6 +77,7 @@ instance FromJSON UpsertProductReq where
             <*> (v .:? "syncCluster" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "sync_cluster")
             <*> (v .:? "needInfraApproval" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "need_infra_approval")
             <*> (v .:? "slackChannel" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "slack_channel")
+            <*> (v .:? "repoName" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "repo_name")
 
 instance ToJSON UpsertProductReq where
     toJSON = genericToJSON defaultOptions{omitNothingFields = True}
@@ -540,6 +542,7 @@ data ProductConfigResponse = ProductConfigResponse
     , syncCluster :: Maybe Text
     , vsLockedBy :: Maybe Text
     , slackChannel :: Maybe Text
+    , repoName :: Maybe Text
     }
     deriving (Show, Generic)
 

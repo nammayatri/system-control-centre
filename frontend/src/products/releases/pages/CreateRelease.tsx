@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
@@ -26,6 +26,31 @@ const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
   'DISCARDED': ['DISCARDED'],
 };
 
+// Normalise whatever an admin typed into the product config's repo field into a
+// bare "owner/repo" slug. Tolerates a full GitHub URL and a trailing ".git" so
+// the compare link below is always well-formed.
+const normalizeRepo = (raw?: string): string =>
+  (raw || '')
+    .trim()
+    .replace(/^https?:\/\/github\.com\//i, '')
+    .replace(/\.git$/i, '')
+    .replace(/^\/+|\/+$/g, '');
+
+// Build a GitHub link that shows what shipped in this release. Prefer a
+// compare view (old...new) so reviewers see the exact diff; fall back to the
+// new ref's commit history when there's no old version to diff against.
+// Returns '' when we lack a repo or a new version — caller then leaves the
+// changelog untouched.
+const buildDiffLink = (repo: string, oldV: string, newV: string): string => {
+  const r = normalizeRepo(repo);
+  const o = (oldV || '').trim();
+  const n = (newV || '').trim();
+  if (!r || !n) return '';
+  return o
+    ? `https://github.com/${r}/compare/${o}...${n}`
+    : `https://github.com/${r}/commits/${n}`;
+};
+
 const CreateRelease: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -44,6 +69,35 @@ const CreateRelease: React.FC = () => {
     cronjob_suspend: false, description: '', schedule_time: '',
   });
   const isNewService = false;
+
+  // GitHub repo ("owner/repo") configured for the selected app group, if any.
+  // Prefer a config row that actually carries a repo (service-level rows don't).
+  const selectedRepo = useMemo(
+    () => productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup && c.repo_name)?.repo_name || '',
+    [productConfigs, formData.appGroup],
+  );
+  // Tracks the last changelog value we auto-filled, so we only overwrite the
+  // field while it still holds our generated link — never a changelog the user
+  // has typed themselves.
+  const autoChangelogRef = useRef('');
+
+  // Prefill the changelog with a GitHub diff link whenever the app group's repo
+  // and the versions are known, so reviewers get a click-through to the diff and
+  // nobody has to hand-write a throwaway changelog. Only on create (never touch
+  // an existing release's changelog), and only while the field is empty or still
+  // holds our previously generated link.
+  useEffect(() => {
+    if (isUpdate) return;
+    const link = buildDiffLink(selectedRepo, formData.old_version, formData.new_version);
+    if (!link) return;
+    setFormData(prev => {
+      if (prev.change_log === '' || prev.change_log === autoChangelogRef.current) {
+        autoChangelogRef.current = link;
+        return { ...prev, change_log: link };
+      }
+      return prev;
+    });
+  }, [isUpdate, selectedRepo, formData.old_version, formData.new_version]);
   const [error, setError] = useState('');
   const [isEnvSwitch, setIsEnvSwitch] = useState(false);
   const [envData, setEnvData] = useState('');
@@ -613,7 +667,15 @@ const CreateRelease: React.FC = () => {
               <div>
                 <FieldLabel required={!isUpdate}>Change Log</FieldLabel>
                 <input type="text" name="change_log" value={formData.change_log} onChange={handleInputChange}
-                  required={!isUpdate} placeholder="v1.0.0" disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} />
+                  required={!isUpdate} placeholder="Diff link or a short description of what changed"
+                  disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} />
+                {!isUpdate && (
+                  selectedRepo ? (
+                    <p className="text-[10px] text-zinc-400 mt-0.5">Auto-filled with a GitHub diff link — edit if you want a description instead.</p>
+                  ) : formData.appGroup ? (
+                    <p className="text-[10px] text-zinc-400 mt-0.5">Set a GitHub repo for this app group in Config to auto-fill a diff link.</p>
+                  ) : null
+                )}
               </div>
             </div>
           </div>

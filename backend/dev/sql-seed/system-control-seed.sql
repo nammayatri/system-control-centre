@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS deployment_config (
   namespace TEXT,
   vs_name TEXT,
   product_acronym TEXT,
+  repo_name TEXT,
   product_type TEXT,
   sync_cluster TEXT,
   need_infra_approval BOOLEAN,
