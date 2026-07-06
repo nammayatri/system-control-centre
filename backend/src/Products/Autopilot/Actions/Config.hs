@@ -62,6 +62,7 @@ toProductConfigResponse p =
         , syncCluster = S.dcSyncCluster p
         , vsLockedBy = S.dcVsLockedBy p
         , slackChannel = S.dcSlackChannel p
+        , repoName = S.dcRepoName p
         }
 
 createProductConfigH :: AuthedPerson -> UpsertProductReq -> Flow APIResponse
@@ -75,7 +76,7 @@ getProductConfigH _ap pid = do
         Just p -> pure $ toJSON (toProductConfigResponse p)
 
 updateProductConfigH :: AuthedPerson -> Int32 -> UpsertProductReq -> Flow APIResponse
-updateProductConfigH ap pathId UpsertProductReq{appGroup = appGroup', cluster = cluster', namespace = namespace', vsName = vsName', productType = productType', productAcronym = productAcronym', syncCluster = syncCluster', needInfraApproval = needInfraApproval', slackChannel = slackChannel'} =
+updateProductConfigH ap pathId UpsertProductReq{appGroup = appGroup', cluster = cluster', namespace = namespace', vsName = vsName', productType = productType', productAcronym = productAcronym', syncCluster = syncCluster', needInfraApproval = needInfraApproval', slackChannel = slackChannel', repoName = repoName'} =
     upsertProductH
         ap
         UpsertProductReq
@@ -89,6 +90,7 @@ updateProductConfigH ap pathId UpsertProductReq{appGroup = appGroup', cluster = 
             , syncCluster = syncCluster'
             , needInfraApproval = needInfraApproval'
             , slackChannel = slackChannel'
+            , repoName = repoName'
             }
 
 deleteProductConfigH :: AuthedPerson -> Int32 -> Flow APIResponse

@@ -173,8 +173,9 @@ upsertProduct ::
     Maybe Text ->
     Maybe Bool ->
     Maybe Text ->
+    Maybe Text ->
     m ()
-upsertProduct productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval slackChannel' = withDb $ \db -> do
+upsertProduct productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval slackChannel' repoName' = withDb $ \db -> do
     withConn db $ \conn ->
         withTransaction conn $ do
             runBeamLogged conn $
@@ -192,6 +193,7 @@ upsertProduct productName' cluster' namespace' vsName' productType' productAcron
                                 , dcNamespace = val_ (Just namespace')
                                 , dcVsName = val_ (Just vsName')
                                 , dcAppGroupAcronym = val_ (Just productAcronym')
+                                , dcRepoName = val_ repoName'
                                 , dcAppGroupType = val_ (Just productType')
                                 , dcSyncCluster = val_ syncCluster'
                                 , dcNeedInfraApproval = val_ needInfraApproval
@@ -235,6 +237,7 @@ upsertService rolloutStrategy decisionConfig serviceName' product' sType service
                                 , dcNamespace = val_ Nothing
                                 , dcVsName = val_ Nothing
                                 , dcAppGroupAcronym = val_ Nothing
+                                , dcRepoName = val_ Nothing
                                 , dcAppGroupType = val_ Nothing
                                 , dcSyncCluster = val_ Nothing
                                 , dcNeedInfraApproval = val_ Nothing

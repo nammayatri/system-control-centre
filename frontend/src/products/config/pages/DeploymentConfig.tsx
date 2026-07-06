@@ -28,6 +28,7 @@ interface GroupWithServices {
 const EMPTY_GROUP_FORM: Partial<ProductConfig> = {
   appGroup: '', cluster: '', namespace: '', vs_name: '',
   product_acronym: '', product_type: 'BackendService', sync_cluster: '', need_infra_approval: 0,
+  repo_name: '',
 };
 
 const EMPTY_SERVICE_FORM: Partial<ReleaseConfig> = {
@@ -649,6 +650,17 @@ const DeploymentConfig: React.FC = () => {
                     placeholder="e.g. some-channel"
                     className={inputClass}
                   />
+                </div>
+                <div>
+                  <label className="text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5 block">GitHub Repo</label>
+                  <input
+                    type="text"
+                    value={groupForm.repo_name || ''}
+                    onChange={e => setGroupForm(prev => ({ ...prev, repo_name: e.target.value }))}
+                    placeholder="e.g. nammayatri/nammayatri"
+                    className={inputClass}
+                  />
+                  <p className="text-[10px] text-zinc-400 mt-1">owner/repo — used to prefill release changelogs with a GitHub diff link</p>
                 </div>
               </div>
               <label className="flex items-center gap-2.5 cursor-pointer">
