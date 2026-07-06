@@ -30,6 +30,7 @@ module Products.Autopilot.Actions.Release
     logsLinkH,
     decisionWebhookH,
     staggerInfoH,
+    rolloutRestartDeploymentH,
 
     -- * Product/Service Handlers (used in Routes wiring)
     listProductsH,
@@ -89,6 +90,13 @@ import Products.Autopilot.Types qualified as NT
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Storage.Schema qualified as S
 import Products.Autopilot.Types.Target (TargetState (..))
+import Products.Autopilot.Mobile.Types (mbContext, mbWfStatus)
+import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), displayStatusInferred, phaseFromFields, phaseSlug, variantSlug)
+import Products.Autopilot.Mobile.Queries.StoreStatus (StoreCell, productionVersionsByApp, resolveStoreState, storeCellsByApp)
+import Products.Autopilot.Mobile.StoreSync (versionOlderThan)
+import Data.Map.Strict qualified as Map
+import Data.Int (Int32)
 import Products.Autopilot.Types.Target.Kubernetes
 import Products.Autopilot.Types.Target.Kubernetes qualified as K8s
 import Products.Autopilot.Workflow.Helpers (captureDeploymentPreview, captureDeploymentSnapshot)
@@ -228,16 +236,19 @@ upsertServiceH _ap req = do
 listReleasesH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow [ReleaseTracker]
 listReleasesH _ap mFrom mTo mCategory = do
   let mWhitelist = categoryWhitelist mCategory
+  prodCodes <- productionVersionsByApp
+  cells <- storeCellsByApp
+  let enrich = fst . injectStoreState cells . injectPromotable prodCodes
   case (mFrom >>= parseISO, mTo >>= parseISO) of
     (Just fromTime, Just toTime) -> do
       pairs <- listReleaseTrackersByDateRangeAndCategory fromTime toTime mWhitelist
-      pure (map fst pairs)
+      pure (map enrich pairs)
     _ -> do
       -- No valid date range -- default to last 30 days as safety limit
       now <- liftIO getCurrentTime
       let thirtyDaysAgo = addUTCTime (-30 * 86400) now
       pairs <- listReleaseTrackersByDateRangeAndCategory thirtyDaysAgo now mWhitelist
-      pure (map fst pairs)
+      pure (map enrich pairs)
   where
     parseISO :: Text -> Maybe UTCTime
     parseISO t =
@@ -254,6 +265,58 @@ listReleasesH _ap mFrom mTo mCategory = do
     categoryWhitelist (Just "backend") =
       Just ["BackendService", "BackendScheduler", "BackendConfig"]
     categoryWhitelist _ = Nothing
+
+{- | Inject a per-row @promotable@ flag (BE truth) into a mobile release's release_context:
+True when the build is ahead of production — a NEWER marketing version, or the same version
+with a HIGHER build number. Mirrors the promote handler's gate (and is version-first so iOS,
+whose build number resets per marketing version, isn't wrongly marked superseded). Non-mobile
+rows are left untouched (no flag → the FE keeps its own stage logic); an app with no synced
+production is promotable by default.
+-}
+injectPromotable :: Map.Map (Text, Text, Text) (Text, Maybe Int32) -> TrackerWithTarget -> TrackerWithTarget
+injectPromotable prods pair@(tracker, mts) =
+  case mts of
+    Just (MobileBuildState _) ->
+      let key = (NT.appGroup tracker, NT.service tracker, NT.env tracker)
+          buildVer = NT.newVersion tracker
+          bCode = NT.versionCode tracker
+          promotable = case Map.lookup key prods of
+            Just (pVer, mpCode) ->
+              not (buildVer `versionOlderThan` pVer || (buildVer == pVer && codeAtOrBelow bCode mpCode))
+            Nothing -> True -- no synced production → ahead by default
+          rc' = case NT.releaseContext tracker of
+            Just (Object o) -> Just (Object (KM.insert (K.fromText "promotable") (Bool promotable) o))
+            other -> other
+       in (tracker {releaseContext = rc'}, mts)
+    _ -> pair
+  where
+    codeAtOrBelow (Just b) (Just p) = b <= p
+    codeAtOrBelow _ _ = False
+
+{- | §16 read model for the list: REVIEW comes from the ROW (the setPhase-owned
+decision, immediate); rollout / % / track presence come from store_status (the
+per-track live truth), matched by (version, code) with production-precedence.
+A build not currently on any track is left as serialized — 'fromRow' already
+derived its baseline from the row's own columns (terminal / SCC state).
+Non-mobile rows are untouched.
+-}
+injectStoreState :: Map.Map (Text, Text, Text) [StoreCell] -> TrackerWithTarget -> TrackerWithTarget
+injectStoreState cellsByApp pair@(tracker, mts) =
+  case mts of
+    Just (MobileBuildState s) ->
+      let key = (NT.appGroup tracker, NT.service tracker, NT.env tracker)
+          cells = Map.findWithDefault [] key cellsByApp
+       in case resolveStoreState cells (NT.newVersion tracker) (NT.versionCode tracker) of
+            Nothing -> pair
+            Just (rollout, pct, track) ->
+              let ph = phaseFromFields (buildKind (mbContext s)) (mbWfStatus s) (NT.reviewStatus tracker) rollout pct track
+                  disp = displayStatusInferred (reviewInferredOf (NT.metadata tracker)) ph
+                  rc' =
+                    fmap
+                      (addMobileLifecycle (T.pack (show (mbWfStatus s))) rollout pct track (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph))
+                      (NT.releaseContext tracker)
+               in (tracker {releaseContext = rc'}, mts)
+    _ -> pair
 
 createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseH ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq {..} = do
@@ -659,6 +722,8 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq 
             rolloutHistory = [],
             oldVersion = resolvedOldVersion,
             newVersion = newVersion,
+            versionCode = Nothing,
+            reviewStatus = Nothing,
             info = info,
             description = description,
             changeLog = changeLog,
@@ -1991,6 +2056,68 @@ restartReleaseH _ap rid req = do
                           notifyReleaseRestarted restartedTracker
                           pure $ APIResponse "SUCCESS" ("Restart created: " <> newRid)
 
+rolloutRestartDeploymentH :: AuthedPerson -> Text -> RestartReleaseReq -> Flow APIResponse
+rolloutRestartDeploymentH _ap rid req = do
+  cfg <- getConfig
+  m <- findReleaseTracker rid
+  case m of
+    Nothing -> pure $ APIResponse "ERROR" "Release not found"
+    Just (tracker, mTargetState) -> do
+      let currentStatus = NT.status tracker
+      if currentStatus /= COMPLETED
+        then
+          pure $
+            APIResponse
+              "ERROR"
+              ( "Rollout restart requires status=COMPLETED (current: "
+                  <> T.pack (show currentStatus)
+                  <> ")"
+              )
+        else case mTargetState of
+          Just (K8sState k8s) -> do
+            let ctx = context k8s
+                K8s.K8sReleaseContext {K8s.namespace = ns} = ctx
+                nsQ = shellQuote ns
+                depName = deploymentName ctx
+                depQ = shellQuote depName
+                restartCmd =
+                  unwords
+                    [ kubectlBin cfg,
+                      "rollout",
+                      "restart",
+                      "deployment/" <> depQ,
+                      "-n",
+                      nsQ
+                    ]
+            restartResult <- liftIO $ executeWithRetry cfg restartCmd
+            case restartResult of
+              Left (K8sError err) -> do
+                logInfo $ "[rolloutRestartDeploymentH] rollout restart failed for " <> rid <> ": " <> err
+                insertReleaseEvent
+                  rid
+                  "BUSINESS"
+                  "DEPLOYMENT_RESTART_FAILED"
+                  ( object
+                      [ "requestedBy" .= (req :: RestartReleaseReq).requestedBy,
+                        "deployment" .= depName,
+                        "error" .= err
+                      ]
+                  )
+                pure $ APIResponse "ERROR" ("Rollout restart failed: " <> err)
+              Right _ -> do
+                insertReleaseEvent
+                  rid
+                  "BUSINESS"
+                  "DEPLOYMENT_RESTARTED"
+                  ( object
+                      [ "requestedBy" .= (req :: RestartReleaseReq).requestedBy,
+                        "deployment" .= depName
+                      ]
+                  )
+                pure $ APIResponse "SUCCESS" ("Rollout restart initiated for deployment/" <> depName)
+          _ ->
+            pure $ APIResponse "ERROR" "No K8s context available for this release"
+
 -- ============================================================================
 -- Fast Forward (POST /releases/:id/fast-forward)
 -- ============================================================================
@@ -2107,21 +2234,21 @@ isValidK8sVersion ver
 -- time is the release start time.  Falls back to 0 / epoch on missing data.
 staggerInfoH :: Text -> Flow Value
 staggerInfoH rid = do
-    m <- findReleaseTracker rid
-    case m of
-        Nothing -> pure $ object ["percentage" .= (0.0 :: Double), "time" .= ("1970-01-01T00:00:00Z" :: Text)]
-        Just (rt, mts) -> do
-            let pct :: Double
-                pct = case mts of
-                    Just ts -> case A.fromJSON (toJSON ts) of
-                        A.Success (Object o) ->
-                            case KM.lookup (K.fromText "trafficPercentage") o of
-                                Just (Number n) -> realToFrac n
-                                _ -> 0
-                        _ -> 0
-                    Nothing -> 0
-                startIso = maybe "1970-01-01T00:00:00Z" (T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ") (NT.startTime rt)
-            pure $ object ["percentage" .= pct, "time" .= startIso]
+  m <- findReleaseTracker rid
+  case m of
+    Nothing -> pure $ object ["percentage" .= (0.0 :: Double), "time" .= ("1970-01-01T00:00:00Z" :: Text)]
+    Just (rt, mts) -> do
+      let pct :: Double
+          pct = case mts of
+            Just ts -> case A.fromJSON (toJSON ts) of
+              A.Success (Object o) ->
+                case KM.lookup (K.fromText "trafficPercentage") o of
+                  Just (Number n) -> realToFrac n
+                  _ -> 0
+              _ -> 0
+            Nothing -> 0
+          startIso = maybe "1970-01-01T00:00:00Z" (T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ") (NT.startTime rt)
+      pure $ object ["percentage" .= pct, "time" .= startIso]
 
 -- | Extract just the data section from a K8s ConfigMap YAML as JSON.
 -- Input: full K8s YAML like "apiVersion: v1\ndata:\n  app.conf: |-\n    ...\nkind: ..."

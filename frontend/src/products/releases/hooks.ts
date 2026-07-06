@@ -17,6 +17,7 @@ import {
   restartRelease,
   fastForwardRelease,
   immediateRevertRelease,
+  rolloutRestartDeployment,
   fetchReleaseDiff,
   fetchPodHealth,
   fetchResources,
@@ -272,6 +273,21 @@ export function useRestartRelease() {
   });
 }
 
+export function useRolloutRestartDeployment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ releaseId, requestedBy }: { releaseId: string; requestedBy?: string }) =>
+      rolloutRestartDeployment(releaseId, requestedBy),
+    onSuccess: (_, { releaseId }) => {
+      toast.success('Deployment rollout restart initiated');
+      qc.invalidateQueries({ queryKey: ['release', releaseId] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err.message || 'Rollout restart failed');
+    },
+  });
+}
+
 export function useFastForwardRelease() {
   const qc = useQueryClient();
   return useMutation({
@@ -415,7 +431,9 @@ export function useStoreMonitor() {
   return useQuery({
     queryKey: ['store-monitor'],
     queryFn: () => mobileApi.storeMonitor(),
-    refetchInterval: 60_000,
+    // The backend self-refreshes on read (stale → detached sweep). Poll faster while a
+    // sweep is in progress so the grid + the "Refreshing…" status update live.
+    refetchInterval: (q) => (q.state.data?.refreshing ? 4_000 : 60_000),
   });
 }
 

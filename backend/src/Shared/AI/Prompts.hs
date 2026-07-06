@@ -31,10 +31,12 @@ directive TaskChangelogSummary =
     \Group changes under themed headings (Features, Fixes, Infra/CI, Chores/Refactors, Risky/Reverted). \
     \Cover EVERY change — do not drop or over-merge commits; QA cross-checks this list against the commits, \
     \so favour completeness over brevity. \
-    \End each item with its author exactly as shown in the context, e.g. '(@login)'; \
+    \End each item with its author exactly as shown in the context, e.g. '(Dev Vikram Singh)'; \
     \if you combine commits, keep all their authors. \
     \Do NOT derive a release or version number from commit messages — a 'bump version' commit is just a \
     \change, not the release version, so never put a version number in a heading or title. \
+    \Commits from automation (bot authors like github-actions[bot]/dependabot, CI version bumps, \
+    \[skip ci] plumbing) belong under Chores — never under Features or Fixes. \
     \Call out anything risky or reverted."
 directive TaskReleaseRisk =
     "TASK: Assess deployment risk from <context>. One line risk level (low/medium/high), then \
@@ -52,9 +54,10 @@ longChunkSystem =
     systemPreamble
         <> "TASK: Rewrite the commits in <context> as a concise, polished changelog for a \
            \release. One markdown bullet ('- ') per change; merge obviously-duplicate commits. \
-           \END EACH BULLET with the author exactly as given, e.g. '(@login)'. \
+           \END EACH BULLET with the author exactly as given in parentheses, e.g. '— Dev Vikram Singh'. \
            \Do NOT add headings, a title, a category name, or a version number — output ONLY \
-           \the bullets. Keep every change; this is one slice of a larger changelog."
+           \the bullets. Skip automation noise (bot-authored commits, CI version bumps, \
+           \[skip ci] plumbing); keep every real change — this is one slice of a larger changelog."
 
 {- | Release-notes generator: one call over the (surface-filtered) commit list,
 producing a categorized, completeness-reconciled Slack changelog. The commit list
@@ -85,14 +88,20 @@ releaseNotesSystem =
         , "  TOTAL; if not, recount before responding."
         , "- If a commit is ambiguous, place it somewhere and note it — never omit it."
         , ""
+        , "AUTOMATION:"
+        , "- Commits from automation (bot authors like github-actions[bot]/dependabot, CI"
+        , "  version bumps, [skip ci] plumbing) are NEVER notable and NEVER in Top changes —"
+        , "  list them under Internal so the counts still reconcile."
+        , ""
         , "CATEGORIZATION RULES:"
         , "1. Group notable changes into these categories (omit empty ones):"
         , "   ✨ Features, 🐛 Fixes, ⚡ Performance, ⚠️ Breaking Changes,"
         , "   🔍 Needs attention (anything touching auth, payments, permissions, or data"
         , "   migration — flag for manual verification)."
         , "2. Rewrite EVERY commit (notable AND internal) as a clear one-line summary that"
-        , "   ENDS WITH the author as '— @login' (from the commit's trailing '(@login)'). No"
-        , "   commit hashes. You may merge duplicate/related commits into one line — keep ALL"
+        , "   ENDS WITH the author as '— Author Name' (from the commit's trailing"
+        , "   '(Author Name)', verbatim — never invent or translate names). No commit"
+        , "   hashes. You may merge duplicate/related commits into one line — keep ALL"
         , "   their authors, and the count must still reflect all merged commits."
         , "3. Order each group by impact (most significant first)."
         , ""
@@ -116,7 +125,7 @@ releaseNotesSystem =
         ]
 
 {- | System prompt for ONE CHUNK of the release changelog. The model categorizes a
-small SLICE of commits (~40) and emits one @CATEGORY|summary — \@author@ line per
+small SLICE of commits (~40) and emits one @CATEGORY|summary — author@ line per
 commit; the handler ('Shared.AI.ReleaseSummary') groups the lines from all chunks
 into the final changelog. This is the unit that makes "every commit, reliably"
 possible: a single 200+-commit call makes glm-flash run away into repetition, but a
@@ -132,7 +141,7 @@ chunkCategorizeSystem =
         , ""
         , "Output EXACTLY ONE line per commit, in input order, in EXACTLY this format and"
         , "nothing else:"
-        , "  CATEGORY|one-line summary — @author"
+        , "  CATEGORY|one-line summary — author"
         , ""
         , "The number of output lines MUST EQUAL the number of commits in <context>. Do"
         , "NOT merge, combine, drop, reorder, or add commits — one line in, one line out,"
@@ -141,9 +150,10 @@ chunkCategorizeSystem =
         , "CATEGORY is one of: FEATURE, FIX, PERF, BREAKING, ATTENTION, INTERNAL."
         , "- ATTENTION = touches auth, payments, permissions, or data migration."
         , "- INTERNAL  = chore, ci, build, test, docs, style, refactor, dependency bump,"
-        , "  or merge."
-        , "- summary   = a clear rewrite ending with the author as '— @login' (taken from"
-        , "  the commit's trailing '(@login)'). No commit hashes."
+        , "  merge, or ANY automation commit (bot authors like github-actions[bot], CI"
+        , "  version bumps, [skip ci] plumbing)."
+        , "- summary   = a clear rewrite ending with the author as '— Author Name' (taken"
+        , "  verbatim from the commit's trailing '(Author Name)'). No commit hashes."
         , ""
         , "Output ONLY these lines, one per commit. No headers, no preamble, no blank"
         , "lines, no commentary."
@@ -158,7 +168,8 @@ synopsisSystem :: Text
 synopsisSystem =
     systemPreamble
         <> "TASK: Write 1-2 sentences of release notes for an app-store review submission, \
-           \summarizing the changes in <context>. Lead with what the release delivers for users \
+           \summarizing the changes in <context>. Ignore automation noise (bot commits, CI \
+           \version bumps) when judging the release. Lead with what the release delivers for users \
            \— headline integrations, new features and enhancements — then the notable fixes \
            \(grouped by area), and close with the overall risk profile (low / medium / high). \
            \Generic product prose a reviewer can read: do NOT mention the app name, commit \

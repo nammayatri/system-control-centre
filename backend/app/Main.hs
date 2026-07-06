@@ -4,11 +4,10 @@ import Control.Concurrent.Async (concurrently_)
 import Control.Exception (bracket)
 import Core.Config (Config (..), loadConfig)
 import Core.DB.Connection (mkDBEnv)
-import Core.Environment (AppState (..), forkFlow, runFlow)
+import Core.Environment (AppState (..), runFlow)
 import Core.Logging (LoggerConfig (..), loadLoggerConfigFromDhall, logInfoIO, prepareLoggerEnv, releaseLoggerEnv, setGlobalLoggerEnv)
 import Core.Server (serverLoop)
 import qualified Data.Text as T
-import Products.Autopilot.Mobile.StoreSync (storeSyncLoop)
 import Products.Autopilot.Runner (runnerLoop, runnerPollLoop, runnerStartupRecovery)
 import Products.Autopilot.SyncWatcher (syncWatcherPollLoop)
 
@@ -39,7 +38,9 @@ main = do
             -- complete with the server still closed to new connections.
             "SERVER" -> do
                 runnerStartupRecovery st
-                _ <- runFlow st $ forkFlow storeSyncLoop
+                -- Store sync runs on-demand (UI ↻ refresh per app, cooldown-gated) — no
+                -- background fork here. The review poll lives in the workflow runner
+                -- below (ASC-only, no Play edits).
                 concurrently_
                     (concurrently_ (serverLoop st) (runnerPollLoop st))
                     (runFlow st syncWatcherPollLoop)

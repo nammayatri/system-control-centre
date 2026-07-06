@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | Handler for @POST /mobile/versions/preview@.
@@ -36,10 +37,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById)
-import Products.Autopilot.Mobile.Types.Storage (AppCatalogT (..))
+import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..))
 import Products.Autopilot.Mobile.Versioning (
     VersionResolution (..),
-    loadAscCreds,
+    loadAscCredsFor,
     mintAscToken,
     resolveNextVersionWithToken,
  )
@@ -96,28 +97,25 @@ previewVersionsH _ap req = do
     if not enabled
         then pure PreviewVersionsResp{previews = []}
         else do
-            mAscToken <- mintAscTokenOnce
-            items <- mapM (previewOne mAscToken) (appCatalogIds req)
+            items <- mapM previewOne (appCatalogIds req)
             pure PreviewVersionsResp{previews = items}
 
-mintAscTokenOnce :: Flow (Maybe Text)
-mintAscTokenOnce = do
-    mCreds <- loadAscCreds
-    case mCreds of
+{- | Mint an ASC token for this app's store account (cached per key id, so apps in
+the same account reuse it). 'Nothing' when that account has no creds configured.
+-}
+ascTokenForApp :: AppCatalog -> Flow (Maybe Text)
+ascTokenForApp app_ =
+    loadAscCredsFor (acStoreAccount app_) >>= \case
         Nothing -> pure Nothing
-        Just creds -> do
-            eToken <- liftIO (mintAscToken creds)
-            case eToken of
-                Left _ -> pure Nothing
-                Right token -> pure (Just token)
+        Just creds -> either (const Nothing) Just <$> liftIO (mintAscToken creds)
 
 {- | Per-app preview. Catches every recoverable failure into 'err' so
-one bad app never poisons the whole batch. Uses a shared ASC token for
-all iOS apps to avoid Apple rejecting duplicate JWTs minted in the
-same second.
+one bad app never poisons the whole batch. The ASC token is resolved per app's
+store account (multi-account: Cumta / YatriSathi live in different Apple teams);
+the token cache reuses one per account, so this no longer churns JWTs.
 -}
-previewOne :: Maybe Text -> Int32 -> Flow VersionPreviewItem
-previewOne mAscToken aid = do
+previewOne :: Int32 -> Flow VersionPreviewItem
+previewOne aid = do
     mApp <- findAppCatalogById aid
     case mApp of
         Nothing -> pure (errorItem aid "app_not_found")
@@ -125,6 +123,7 @@ previewOne mAscToken aid = do
             Nothing -> pure (errorItem aid "no_package_name")
             Just "" -> pure (errorItem aid "no_package_name")
             Just pkg -> do
+                mAscToken <- if acPlatform app_ == "ios" then ascTokenForApp app_ else pure Nothing
                 res <- resolveNextVersionWithToken mAscToken (acPlatform app_) pkg
                 pure $ case res of
                     Left e -> errorItem aid e

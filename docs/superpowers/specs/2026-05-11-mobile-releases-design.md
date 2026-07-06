@@ -308,7 +308,7 @@ MBInit
                                 └─▶ MBCompleted
 
   Failure paths from each step → MBFailed <reason> → ReleaseStatus = ABORTED
-  User-abort path: MBAborting → MBAborted (calls GH /runs/:id/cancel)
+  User-abort path: MBAborting → MBAborted (cancels the GH run; resolves its run id first if unbound)
 ```
 
 Identical shape for Android and iOS. The duration of `MBBuilding` may differ depending on what the iOS workflow does — whether fastlane blocks on ASC processing or returns right after upload is the workflow author's choice, not SCC's. Either way, SCC just watches the matrix job; the poll interval (`mobile_run_poll_seconds`, default 30) is fine for both. Note: if the iOS workflow does NOT wait for ASC, `MBCompleted` for iOS means "uploaded to ASC, processing pending" — see §2 iOS-4.
@@ -422,7 +422,7 @@ GET  /releases?category=mobile         list, optionally filtered
 GET  /releases/:id                     single release detail (any category)
 GET  /releases/:id/events              event log (any category)
 POST /releases/:id/approve             single-row approve (existing)
-POST /releases/:id/abort               single-row abort (for mobile, calls GH /runs/:id/cancel)
+POST /releases/:id/abort               single-row abort (mobile: cancels the GH run, resolving its id if unbound)
 POST /releases/:id/discard             discard a draft (existing)
 ```
 

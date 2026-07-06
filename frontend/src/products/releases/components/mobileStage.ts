@@ -10,6 +10,7 @@ export type Stage =
   | 'approved'
   | 'rollout'
   | 'rejected'
+  | 'superseded'
   | 'completed'
   | 'none';
 
@@ -44,17 +45,26 @@ export function lifecycleFromRollout(d: RolloutDetail): MobileLifecycle {
 // columns) — enough to derive the stage. Shared by the status badge and the
 // releases-list mobile status filter so they bucket a row identically.
 export function lifecycleFromRelease(release: {
-  release_context?: { mb_wf_status?: string } | null;
+  release_context?: {
+    mb_wf_status?: string;
+    // Authoritative columns injected by the backend serializer (migration 0034).
+    rollout_status?: string | null;
+    rollout_percent?: number | null;
+    store_track?: string | null;
+  } | null;
   metadata?: unknown;
 }): MobileLifecycle {
-  const meta = release.metadata as
-    | { store_track?: string; review_inferred?: boolean }
-    | null
-    | undefined;
+  const ctx = release.release_context;
+  // metadata is consulted ONLY for review_inferred (a metadata-only flag). The
+  // store_track / rollout COLUMNS are authoritative — fromRow flattens the live
+  // value into release_context, so the stale rollout mirror is no longer read.
+  const meta = release.metadata as { review_inferred?: boolean } | null | undefined;
   return {
-    mbStatus: release.release_context?.mb_wf_status ?? '',
-    storeTrack: meta?.store_track ?? null,
+    mbStatus: ctx?.mb_wf_status ?? '',
+    storeTrack: ctx?.store_track ?? null,
     reviewInferred: meta?.review_inferred ?? null,
+    rolloutStatus: ctx?.rollout_status ?? null,
+    rolloutPercent: ctx?.rollout_percent ?? null,
   };
 }
 
@@ -73,13 +83,19 @@ export function stageOf(d: MobileLifecycle): Stage {
   )
     return 'promote';
   if (mb === 'MBReviewRejected' || d.reviewStatus === 'rejected') return 'rejected';
-  if (mb === 'MBCompleted' || d.rolloutStatus === 'completed') return 'completed';
+  // A previous live version overtaken by a newer rollout (Rule A, migration 0034):
+  // frozen at its last % as history. Checked before the rolling/completed states.
+  if (d.rolloutStatus === 'superseded') return 'superseded';
+  // An active rollout outranks a "completed" build status: a store-sync snapshot
+  // row stays mb=MBCompleted even while store-sync mirrors a live production ramp
+  // onto it (rollout_status from metadata), so check rolling-out BEFORE completed.
   if (
     mb === 'MBRollingOut' ||
     d.rolloutStatus === 'rolling_out' ||
     d.rolloutStatus === 'halted'
   )
     return 'rollout';
+  if (mb === 'MBCompleted' || d.rolloutStatus === 'completed') return 'completed';
   if (mb === 'MBReviewApproved' || d.reviewStatus === 'approved') return 'approved';
   if (
     mb === 'MBInReview' ||
@@ -92,47 +108,6 @@ export function stageOf(d: MobileLifecycle): Stage {
   return 'none'; // build not finished yet → nothing to show
 }
 
-type BadgeVariant = 'default' | 'success' | 'warning' | 'danger' | 'info' | 'purple' | 'blue';
-
-/**
- * Operator-facing display status for a release status badge.
- *
- * The persisted `rt_status` (e.g. INPROGRESS) is a *mechanical* state — it tells
- * the runner the row is still its to drive. It is the wrong thing to surface once
- * a build is sitting on the store waiting for a human: nothing is "in progress",
- * and it is NOT "paused" (that's an operator-initiated suspend with a Resume).
- * This projects the lifecycle into what the operator should understand/do.
- *
- * Returns `null` while the build itself is still running (stage 'none') — the
- * caller falls back to the raw engine status (which correctly reads BUILDING /
- * INPROGRESS there).
- */
-export function mobileDisplayStatus(
-  d: MobileLifecycle,
-): { label: string; variant: BadgeVariant } | null {
-  const stage = stageOf(d);
-  const pct = d.rolloutPercent;
-  const pctSuffix = pct != null ? ` · ${pct}%` : '';
-  switch (stage) {
-    case 'promote':
-      return { label: 'Ready to promote', variant: 'blue' };
-    case 'review':
-      // Android can't confirm in-review vs approved-held from the API, so an
-      // inferred review surfaces as the honest "Pending review".
-      return d.reviewInferred
-        ? { label: 'Pending review', variant: 'purple' }
-        : { label: 'In review', variant: 'purple' };
-    case 'approved':
-      return { label: 'Approved · held', variant: 'success' };
-    case 'rollout':
-      return d.rolloutStatus === 'halted'
-        ? { label: `Halted${pctSuffix}`, variant: 'warning' }
-        : { label: `Rolling out${pctSuffix}`, variant: 'info' };
-    case 'rejected':
-      return { label: 'Review rejected', variant: 'danger' };
-    case 'completed':
-      return { label: 'Released · 100%', variant: 'success' };
-    default:
-      return null; // build not done → caller shows the raw engine status
-  }
-}
+// mobileDisplayStatus was removed — the badge is now the backend displayStatus,
+// rendered from release_context.display_label/variant (list/bulk) and rdStatusLabel
+// (detail/summary). stageOf above stays for sort/filter + control-logic only.

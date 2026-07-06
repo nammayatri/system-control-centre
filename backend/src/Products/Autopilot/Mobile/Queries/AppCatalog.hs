@@ -18,18 +18,21 @@ module Products.Autopilot.Mobile.Queries.AppCatalog (
     fetchLatestBuildsForApp,
     storeTrackOf,
     TrackSnapshot (..),
-    tracksOf,
+    derivedStoreTag,
+    normalizeAppSegment,
 ) where
 
 import Control.Monad.Catch (throwM)
 import Core.AppError (DBError (..))
 import Core.DB.Connection (runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), withObject, (.:?))
+import Data.Char (isAlphaNum)
 import Data.Int (Int32)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Time.Clock (UTCTime)
 import Database.Beam
 import Database.Beam.Postgres (Pg)
@@ -42,9 +45,9 @@ import Database.Beam.Postgres.Full (
  )
 import Database.PostgreSQL.Simple (query, query_)
 import Products.Autopilot.Mobile.Queries.Tracker (parseMobileTargetState)
-import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe)
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..))
 import Products.Autopilot.Mobile.Types.Storage
+import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe)
 import Products.Autopilot.Types.Storage.Schema (AutopilotDb (..), autopilotDb)
 
 -- | Fields needed to INSERT a row. @id@ and @created_at@ are DB-generated.
@@ -137,6 +140,7 @@ insertAppCatalog NewAppCatalogRow{..} = withDb $ \db -> do
                             , acDisplayLabel = val_ nacDisplayLabel
                             , acFirebaseProjectId = val_ nacFirebaseProjectId
                             , acEnabled = val_ enabled'
+                            , acStoreAccount = val_ Nothing
                             , acCreatedAt = default_
                             }
                         ]
@@ -216,11 +220,8 @@ data LatestBuildRow = LatestBuildRow
     , lbrCompletedAt :: UTCTime
     , lbrStoreTrack :: Maybe Text
     -- ^ store track from @metadata.store_track@ ("production" | "internal" |
-    -- "testflight"), set on store-sync rows; 'Nothing' for SCC-built rows.
-    , lbrTracks :: Map.Map Text TrackSnapshot
-    -- ^ per-track latest-build snapshots from @metadata.tracks@ ("production" /
-    -- "internal"), recorded by store-sync so the create page can show — and diff
-    -- against — both tracks. Empty for SCC-built rows / rows synced before this.
+    -- "testflight"), set on store-sync rows; 'Nothing' for SCC-built rows. Its
+    -- presence marks a store-sync snapshot row (the dedup tiebreaker).
     }
 
 -- | Tolerant extractor for @metadata.store_track@ (skips absent/malformed metadata).
@@ -232,11 +233,12 @@ instance FromJSON StoreTrackMeta where
 storeTrackOf :: Maybe Text -> Maybe Text
 storeTrackOf mMeta = (parseJsonTextMaybe mMeta :: Maybe StoreTrackMeta) >>= \(StoreTrackMeta t) -> t
 
-{- | One store track's latest-build snapshot, written by store-sync into
-@metadata.tracks.{production,internal}@. Carries enough to label the build (the
-version + code) and to use it as a changelog base (the git @tag@). 'tsTag' may be
-'Nothing' when the build code is unknown (e.g. the live iOS App Store version),
-in which case it can label the track but not seed a commit diff.
+{- | One store track's latest build as a changelog base: the version + code and
+the derived git @tag@ to diff against. Built on demand from the @store_status@
+cache ('Products.Autopilot.Mobile.Queries.StoreStatus.findStoreTracksForApp') by
+the resolver in @Handlers.Release@. 'tsTag' is 'Nothing' when the build code is
+unknown (e.g. the live iOS App Store version) — then it labels the track but can't
+seed a commit diff.
 -}
 data TrackSnapshot = TrackSnapshot
     { tsVersion :: Text
@@ -244,24 +246,6 @@ data TrackSnapshot = TrackSnapshot
     , tsTag :: Maybe Text
     }
     deriving (Show, Eq)
-
-instance ToJSON TrackSnapshot where
-    toJSON ts = object ["version" .= tsVersion ts, "code" .= tsCode ts, "tag" .= tsTag ts]
-
-instance FromJSON TrackSnapshot where
-    parseJSON = withObject "TrackSnapshot" $ \o ->
-        TrackSnapshot <$> o .: "version" <*> o .:? "code" <*> o .:? "tag"
-
--- | Tolerant extractor for the @metadata.tracks@ map (empty when absent/malformed).
-newtype TracksMeta = TracksMeta (Map.Map Text TrackSnapshot)
-
-instance FromJSON TracksMeta where
-    parseJSON = withObject "TracksMeta" $ \o -> TracksMeta . fromMaybe Map.empty <$> o .:? "tracks"
-
-tracksOf :: Maybe Text -> Map.Map Text TrackSnapshot
-tracksOf mMeta = case (parseJsonTextMaybe mMeta :: Maybe TracksMeta) of
-    Just (TracksMeta m) -> m
-    Nothing -> Map.empty
 
 {- | For every unique (app_group, service, env, build_type) combination
 in @release_tracker@ where @category = 'MobileBuild'@ and
@@ -292,7 +276,7 @@ fetchLatestBuildsPerApp = withDb $ \db ->
                 "SELECT app_group, service, env, new_version, commit_sha, \
                 \  date_created, release_context, metadata \
                 \FROM release_tracker \
-                \WHERE category = 'MobileBuild' AND status = 'COMPLETED' \
+                \WHERE category = 'MobileBuild' AND status IN ('COMPLETED', 'INPROGRESS') \
                 \  AND release_context IS NOT NULL \
                 \ORDER BY date_created DESC"
         pure (latestBuildsFromRows rows)
@@ -311,7 +295,7 @@ fetchLatestBuildsForApp appGroup surface platform = withDb $ \db ->
                 "SELECT app_group, service, env, new_version, commit_sha, \
                 \  date_created, release_context, metadata \
                 \FROM release_tracker \
-                \WHERE category = 'MobileBuild' AND status = 'COMPLETED' \
+                \WHERE category = 'MobileBuild' AND status IN ('COMPLETED', 'INPROGRESS') \
                 \  AND release_context IS NOT NULL \
                 \  AND app_group = ? AND service = ? AND env = ? \
                 \ORDER BY date_created DESC"
@@ -326,9 +310,17 @@ latestBuildsFromRows :: [(Text, Text, Text, Text, Maybe Text, UTCTime, Text, May
 latestBuildsFromRows rows =
     let parsed = mapMaybe toLatestBuildRow rows
         keyOf r = (lbrAppGroup r, lbrSurface r, lbrPlatform r, lbrBuildType r)
-        -- newest-first input ⇒ keep the first row seen per key (the existing
-        -- value in the map), so insertWith returns the existing one.
-        latest = Map.fromListWith (\_incoming existing -> existing) [(keyOf r, r) | r <- parsed]
+        isStoreSync = isJust . lbrStoreTrack
+        -- newest-first input. Keep the newest row per key, BUT prefer the store-sync
+        -- snapshot row (marked by store_track): a version can be INPROGRESS (in review /
+        -- rolling) while still being the snapshot that anchors the app's store builds, so
+        -- a newer trackless pure-external-review row must not displace it. fromListWith
+        -- calls (f incoming existing); `existing` is newest-so-far, `incoming` oldest-last.
+        preferStoreSync incoming existing
+            | isStoreSync existing = existing
+            | isStoreSync incoming = incoming
+            | otherwise = existing
+        latest = Map.fromListWith preferStoreSync [(keyOf r, r) | r <- parsed]
      in Map.elems latest
 
 {- | Parse one raw row into a 'LatestBuildRow'. Returns 'Nothing' when the
@@ -351,5 +343,36 @@ toLatestBuildRow (ag, suf, plt, ver, sha, ca, ctxText, mMeta) = do
             , lbrCommitSha = sha
             , lbrCompletedAt = ca
             , lbrStoreTrack = storeTrackOf mMeta
-            , lbrTracks = tracksOf mMeta
             }
+
+{- | The git tag for a store build, matching the CI tag scheme
+(see Workflow.execConfirmTag):
+  consumer: {normalize(app)}/prod/{platform}/v{version}+{code}
+  provider: {acName}-v{version}-{code}
+'Nothing' when there's no build code (then the build has no changelog baseline).
+Pure in @(app, version, code)@, so store-sync and the changelog-base resolver
+derive the same tag from one definition.
+-}
+derivedStoreTag :: AppCatalog -> Text -> Maybe Int32 -> Maybe Text
+derivedStoreTag ac version mCode = case mCode of
+    Just code
+        | acSurface ac == "driver" ->
+            Just (acName ac <> "-v" <> version <> "-" <> T.pack (show code))
+        | otherwise ->
+            Just (normalizeAppSegment (acName ac) <> "/prod/" <> acPlatform ac <> "/v" <> version <> "+" <> T.pack (show code))
+    Nothing -> Nothing
+
+-- | Lowercase, non-alphanumerics → dashes, runs collapsed — the app segment of a
+-- consumer store tag.
+normalizeAppSegment :: Text -> Text
+normalizeAppSegment = collapseDashes . T.map step . T.toLower
+  where
+    step c
+        | isAlphaNum c = c
+        | otherwise = '-'
+    collapseDashes :: Text -> Text
+    collapseDashes t =
+        T.dropWhile (== '-') $
+            T.dropWhileEnd (== '-') $
+                T.intercalate "-" $
+                    filter (not . T.null) (T.splitOn "-" t)

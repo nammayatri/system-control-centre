@@ -33,6 +33,10 @@ data AppCatalogT f = AppCatalog
     , acDisplayLabel :: Columnar f (Maybe Text)
     , acFirebaseProjectId :: Columnar f (Maybe Text)
     , acEnabled :: Columnar f Bool
+    , acStoreAccount :: Columnar f (Maybe Text)
+    -- ^ Which App Store Connect account/team this app lives in. NULL = the default
+    -- (unsuffixed) ASC key; a value (e.g. "cumta") selects @SC_ASC_*_<ACCOUNT>@. Lets
+    -- one SCC instance read apps that span multiple Apple accounts.
     , acCreatedAt :: Columnar f UTCTime
     }
     deriving (Generic, Beamable)
@@ -63,6 +67,7 @@ appCatalog =
                 , acDisplayLabel = fieldNamed "display_label"
                 , acFirebaseProjectId = fieldNamed "firebase_project_id"
                 , acEnabled = fieldNamed "enabled"
+                , acStoreAccount = fieldNamed "store_account"
                 , acCreatedAt = fieldNamed "created_at"
                 }
 
@@ -78,7 +83,6 @@ data StoreStatusT f = StoreStatus
     , ssVersionCode :: Columnar f (Maybe Int32)
     , ssStatus :: Columnar f (Maybe Text)
     , ssRolloutPercent :: Columnar f (Maybe Double)
-    , ssReviewStatus :: Columnar f (Maybe Text)
     , ssReleaseNotes :: Columnar f (Maybe Text)
     , ssExpectedVersion :: Columnar f (Maybe Text)
     , ssSyncedAt :: Columnar f UTCTime
@@ -110,7 +114,6 @@ storeStatus =
                 , ssVersionCode = fieldNamed "version_code"
                 , ssStatus = fieldNamed "status"
                 , ssRolloutPercent = fieldNamed "rollout_percent"
-                , ssReviewStatus = fieldNamed "review_status"
                 , ssReleaseNotes = fieldNamed "release_notes"
                 , ssExpectedVersion = fieldNamed "expected_version"
                 , ssSyncedAt = fieldNamed "synced_at"

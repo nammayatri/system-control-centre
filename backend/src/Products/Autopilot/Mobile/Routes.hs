@@ -31,12 +31,17 @@ import Products.Autopilot.Mobile.Handlers.Revert (
     verifyCommitH,
  )
 import Products.Autopilot.Mobile.Handlers.Rollout (
+    BulkActionResp,
+    BulkPromoteReq,
+    BulkRolloutReq,
     MarkRejectedReq,
     PromoteForm,
     PromoteReq,
     PromoteResp,
     RolloutDetail,
     RolloutSetReq,
+    bulkPromoteH,
+    bulkRolloutH,
     markApprovedH,
     markRejectedH,
     promoteFormH,
@@ -47,6 +52,7 @@ import Products.Autopilot.Mobile.Handlers.Rollout (
     rolloutReleaseAllH,
     rolloutResumeH,
     rolloutSetH,
+    withdrawH,
  )
 import Products.Autopilot.Mobile.Handlers.StoreMonitor (
     StoreMonitorAppResp,
@@ -209,6 +215,11 @@ type MobileAPI =
             :> Protected 'AP_RELEASE_PROMOTE
             :> ReqBody '[JSON] MarkRejectedReq
             :> Post '[JSON] APISuccess
+        :<|> "releases"
+            :> Capture "releaseId" Text
+            :> "withdraw"
+            :> Protected 'AP_RELEASE_PROMOTE
+            :> Post '[JSON] APISuccess
         -- ── App Release Monitoring (store-monitor) ──
         :<|> "mobile"
             :> "store-monitor"
@@ -220,6 +231,21 @@ type MobileAPI =
             :> "refresh"
             :> Protected 'AP_RELEASE_VIEW
             :> Post '[JSON] StoreMonitorAppResp
+        -- ── Bulk promote / rollout (one action over many apps) ──
+        -- Under the `mobile/bulk/*` literal namespace so they never collide with
+        -- the `releases/:releaseId/*` capture routes above.
+        :<|> "mobile"
+            :> "bulk"
+            :> "promote"
+            :> Protected 'AP_RELEASE_PROMOTE
+            :> ReqBody '[JSON] BulkPromoteReq
+            :> Post '[JSON] BulkActionResp
+        :<|> "mobile"
+            :> "bulk"
+            :> "rollout"
+            :> Protected 'AP_RELEASE_ROLLOUT
+            :> ReqBody '[JSON] BulkRolloutReq
+            :> Post '[JSON] BulkActionResp
 
 mobileServer :: ServerT MobileAPI Flow
 mobileServer =
@@ -248,6 +274,10 @@ mobileServer =
         :<|> (\rid ap -> rolloutReleaseAllH ap rid)
         :<|> (\rid ap -> markApprovedH ap rid)
         :<|> (\rid ap req -> markRejectedH ap rid req)
+        :<|> (\rid ap -> withdrawH ap rid)
         -- ── App Release Monitoring (store-monitor) ──
         :<|> storeMonitorH
         :<|> (\aid ap -> refreshStoreAppH ap aid)
+        -- ── Bulk promote / rollout ──
+        :<|> (\ap req -> bulkPromoteH ap req)
+        :<|> (\ap req -> bulkRolloutH ap req)

@@ -5,7 +5,6 @@ import { apiClient } from '../../../lib/api-client';
 import { Button } from '../../../shared/ui/button';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
-import { useAuth } from '../../../core/auth/AuthContext';
 import { Badge } from '../../../shared/ui/badge';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { Save, X, RefreshCw, Search, ChevronDown, ChevronRight, Info } from 'lucide-react';
@@ -13,7 +12,7 @@ import { toast } from 'sonner';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { cn } from '../../../lib/utils';
 import { useRefreshAnimation } from '../../../shared/hooks';
-import { isMobileServerConfig, isHiddenServerConfig, isReleaseOnlyServerConfig, MOBILE_CONFIG_CATEGORIES } from '../../server-config-filter';
+import { isMobileServerConfig, isSharedServerConfig, isHiddenServerConfig, MOBILE_CONFIG_CATEGORIES } from '../../server-config-filter';
 
 interface ConfigItem {
   key: string;
@@ -38,10 +37,6 @@ interface GroupedResponse {
 const Configurations: React.FC = () => {
   const queryClient = useQueryClient();
   const location = useLocation();
-  const { buildType } = useAuth();
-  // Debug deployment (mobile_build_type='debug'); release-only configs (store
-  // sync, version preview) are no-ops here, so hide them.
-  const debugEnv = buildType === 'debug';
   const filter: 'backend' | 'mobile' = location.pathname.startsWith('/mobile') ? 'mobile' : 'backend';
   const [search, setSearch] = useState('');
   const [selectedConfig, setSelectedConfig] = useState<ConfigItem | null>(null);
@@ -66,8 +61,10 @@ const Configurations: React.FC = () => {
         ...g,
         configs: g.configs.filter(c =>
           !isHiddenServerConfig(c.key) &&
-          !(debugEnv && isReleaseOnlyServerConfig(c.key)) &&
-          (filter === 'mobile' ? isMobileServerConfig(c.key) : !isMobileServerConfig(c.key))
+          // Shared configs (e.g. slack_enabled) appear on BOTH tabs.
+          (filter === 'mobile'
+            ? (isMobileServerConfig(c.key) || isSharedServerConfig(c.key))
+            : (!isMobileServerConfig(c.key) || isSharedServerConfig(c.key)))
         ),
       }))
       .filter(g => g.configs.length > 0);
@@ -86,7 +83,7 @@ const Configurations: React.FC = () => {
       return other.length > 0 ? [...catGroups, { name: 'Other', configs: other }] : catGroups;
     }
     return filtered;
-  }, [data, filter, debugEnv]);
+  }, [data, filter]);
 
   const saveMut = useMutation({
     mutationFn: async (params: { name: string; value: string; enabled: string }) => {

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Sparkles, ShieldAlert, MessageSquare, Loader2 } from 'lucide-react';
+import { Sparkles, ShieldAlert, MessageSquare, Loader2, Copy, Check } from 'lucide-react';
 import { Button } from '../../../shared/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../../../shared/ui/card';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
@@ -18,9 +18,24 @@ export function AiReleasePanel({ releaseId }: { releaseId: string }) {
   const ask = useReleaseAiAsk(releaseId);
   const [result, setResult] = useState<AiResp | null>(null);
   const [question, setQuestion] = useState('');
+  const [copied, setCopied] = useState(false);
 
   const busy = summary.isPending || risk.isPending || ask.isPending;
-  const onSuccess = (data: AiResp) => setResult(data);
+  // Reset the "copied" tick whenever a new result arrives so it isn't stale.
+  const onSuccess = (data: AiResp) => {
+    setResult(data);
+    setCopied(false);
+  };
+
+  const copySummary = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked (insecure context / permissions) — silently ignore */
+    }
+  };
 
   return (
     <PermissionGate product="autopilot" permission="AI_SUMMARIZE">
@@ -87,8 +102,17 @@ export function AiReleasePanel({ releaseId }: { releaseId: string }) {
           )}
 
           {result && result.available && result.summary && (
-            <div className="whitespace-pre-wrap rounded-md bg-zinc-50 p-3 text-sm leading-relaxed text-zinc-800">
-              {result.summary}
+            <div className="group relative rounded-md bg-zinc-50 p-3 pr-10 text-sm leading-relaxed text-zinc-800">
+              <button
+                type="button"
+                onClick={() => copySummary(result.summary!)}
+                title={copied ? 'Copied' : 'Copy to clipboard'}
+                aria-label={copied ? 'Copied' : 'Copy summary to clipboard'}
+                className="absolute right-2 top-2 rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-700"
+              >
+                {copied ? <Check size={14} className="text-emerald-600" /> : <Copy size={14} />}
+              </button>
+              <div className="whitespace-pre-wrap">{result.summary}</div>
             </div>
           )}
 

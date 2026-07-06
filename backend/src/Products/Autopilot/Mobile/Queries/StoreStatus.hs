@@ -4,32 +4,52 @@
 {- | Queries for the @store_status@ cache (migration 0030) — the per-track live
 store-state table behind the App Release Monitoring dashboard.
 
-The poller / refresh writes via 'upsertStoreStatus'; the monitor reads the whole
-table in one shot via 'listStoreStatus'. Two small @release_tracker@ reads enrich
-the cache: 'latestShippedVersionsPerApp' (the last SCC-shipped version, for drift)
-and 'findActiveMobileState' (an active review/rollout to overlay on the live
-production cell — Play never exposes review state, so this is the only way an
-Android "in review" surfaces). Polymorphic in 'MonadFlow' per the codebase
-convention.
+The on-demand refresh writes via 'upsertStoreStatus'; the monitor reads the whole
+table in one shot via 'listStoreStatus'. One small @release_tracker@ read enriches
+the cache: 'latestShippedVersionsPerApp' (the last SCC-shipped version, for drift).
+
+ this table holds ONLY what the stores report — version, code, track
+status, rollout %. It never carries review state: a review verdict is a decision
+about a build, owned by the build's @release_tracker@ row (the monitor's Incoming
+chip and the list/detail badge read it from there). Polymorphic in 'MonadFlow'
+per the codebase convention.
 -}
 module Products.Autopilot.Mobile.Queries.StoreStatus (
     StoreStatusUpsert (..),
     upsertStoreStatus,
+    setProductionRolloutStatus,
+    setProductionReleased,
     listStoreStatus,
+    secondsSinceLastSync,
     latestShippedVersionsPerApp,
-    ActiveMobileState (..),
-    findActiveMobileState,
+    recordStoreSyncOk,
+    recordStoreSyncError,
+    listStoreSyncStatus,
+    StoreSyncStatusRow,
+    findStoreTracksForApp,
+    findProductionStoreCell,
+    findProductionLiveCell,
+    productionVersionsByApp,
+    StoreCell (..),
+    storeCellsByApp,
+    storeCellsForApp,
+    resolveStoreState,
+    deriveStoreState,
 ) where
 
+import Control.Applicative ((<|>))
 import Core.DB.Connection (runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
 import Data.Int (Int32)
+import Data.List (find)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
+import Data.Time (UTCTime)
 import Database.Beam
-import Database.PostgreSQL.Simple (execute, query, query_)
+import Database.PostgreSQL.Simple (Only (..), execute, query, query_)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
-import Products.Autopilot.Mobile.Types.Storage (StoreStatus, StoreStatusT (..))
+import Products.Autopilot.Mobile.Types.Storage (StoreStatus, StoreStatusT)
 import Products.Autopilot.Types.Storage.Schema (AutopilotDb (..), autopilotDb)
 
 -- | Fields written on a poll. @synced_at@ is stamped @now()@ by the upsert.
@@ -41,15 +61,13 @@ data StoreStatusUpsert = StoreStatusUpsert
     , ssuVersionCode :: Maybe Int32
     , ssuStatus :: Maybe Text
     , ssuRolloutPercent :: Maybe Double
-    , ssuReviewStatus :: Maybe Text
     , ssuReleaseNotes :: Maybe Text
     , ssuExpectedVersion :: Maybe Text
     }
 
 {- | Upsert one track's live state. ON CONFLICT (app_catalog_id, platform, track)
 overwrites every value column and re-stamps @synced_at@, so a re-poll always
-reflects the latest store read. Raw SQL keeps the multi-column DO UPDATE readable
-(the 10 params are split with @(:.)@ to stay within tuple ToRow limits).
+reflects the latest store read. Raw SQL keeps the multi-column DO UPDATE readable.
 -}
 upsertStoreStatus :: (MonadFlow m) => StoreStatusUpsert -> m ()
 upsertStoreStatus u = withDb $ \db -> withConn db $ \conn -> do
@@ -58,20 +76,56 @@ upsertStoreStatus u = withDb $ \db -> withConn db $ \conn -> do
             conn
             "INSERT INTO store_status \
             \ (app_catalog_id, platform, track, version_name, version_code, status, \
-            \  rollout_percent, review_status, release_notes, expected_version, synced_at) \
-            \ VALUES (?,?,?,?,?,?,?,?,?,?, now()) \
+            \  rollout_percent, release_notes, expected_version, synced_at) \
+            \ VALUES (?,?,?,?,?,?,?,?,?, now()) \
             \ ON CONFLICT (app_catalog_id, platform, track) DO UPDATE SET \
             \  version_name = EXCLUDED.version_name, \
             \  version_code = EXCLUDED.version_code, \
             \  status = EXCLUDED.status, \
             \  rollout_percent = EXCLUDED.rollout_percent, \
-            \  review_status = EXCLUDED.review_status, \
             \  release_notes = EXCLUDED.release_notes, \
             \  expected_version = EXCLUDED.expected_version, \
             \  synced_at = now()"
             ( (ssuAppCatalogId u, ssuPlatform u, ssuTrack u, ssuVersionName u, ssuVersionCode u, ssuStatus u)
-                :. (ssuRolloutPercent u, ssuReviewStatus u, ssuReleaseNotes u, ssuExpectedVersion u)
+                :. (ssuRolloutPercent u, ssuReleaseNotes u, ssuExpectedVersion u)
             )
+    pure ()
+
+{- | Optimistically reflect a just-applied production rollout state into the
+@store_status@ cache (the App Monitor's source) so the monitor matches the release
+list right after a rollout action — without spending a Play/ASC edit to re-read.
+
+Targets only the production track and only the rollout-relevant columns (version,
+code, %, status), preserving notes. @status@ carries the value the next sync would
+compute — @"inProgress"@ while ramping/resumed, @"halted"@ while paused — so the
+monitor badge derives the same label ("Rolling out X%" / "Halted @ X%") immediately.
+A no-op if the app has no production row yet (the next real store refresh fills it).
+The Phase-7 reconciler reconciles it to the true live value on the next refresh.
+-}
+setProductionRolloutStatus :: (MonadFlow m) => Int32 -> Text -> Text -> Maybe Int32 -> Text -> Double -> m ()
+setProductionRolloutStatus aid platform version mCode status pct = withDb $ \db -> withConn db $ \conn -> do
+    _ <-
+        execute
+            conn
+            "UPDATE store_status SET rollout_percent = ?, status = ?, \
+            \  version_name = ?, version_code = ? \
+            \ WHERE app_catalog_id = ? AND platform = ? AND track = 'production'"
+            (pct, status, version, mCode, aid, platform)
+    pure ()
+
+{- | Mirror a COMPLETED production release (100%, fully live) onto the production
+row — the value the next sync would read, shown immediately. Used by
+@/rollout/release-all@, @/rollout/set@ at 100, and a non-phased iOS release.
+-}
+setProductionReleased :: (MonadFlow m) => Int32 -> Text -> Text -> Maybe Int32 -> m ()
+setProductionReleased aid platform version mCode = withDb $ \db -> withConn db $ \conn -> do
+    _ <-
+        execute
+            conn
+            "UPDATE store_status SET rollout_percent = 100, status = 'completed', \
+            \  version_name = ?, version_code = ? \
+            \ WHERE app_catalog_id = ? AND platform = ? AND track = 'production'"
+            (version, mCode, aid, platform)
     pure ()
 
 -- | All cached rows (~40). The monitor groups these by app_catalog_id in Haskell.
@@ -81,12 +135,200 @@ listStoreStatus = withDb $ \db ->
         runSelectReturningList $
             select (all_ (storeStatuses autopilotDb))
 
+{- | Seconds since this app's most recent track was synced (the freshest
+@synced_at@ across its @store_status@ rows). 'Nothing' when the app has no cached
+row yet (never synced). Backs the on-demand refresh cooldown: a Play track read
+costs a daily-quota'd edit, so a manual ↻ within the cooldown serves cache
+instead of re-polling.
+-}
+secondsSinceLastSync :: (MonadFlow m) => Int32 -> m (Maybe Double)
+secondsSinceLastSync aid = withDb $ \db -> withConn db $ \conn -> do
+    rows <-
+        query
+            conn
+            "SELECT EXTRACT(EPOCH FROM (now() - max(synced_at)))::double precision \
+            \ FROM store_status WHERE app_catalog_id = ?"
+            (Only aid)
+    pure $ case rows of
+        (Only ms : _) -> ms
+        [] -> Nothing
+
 {- | The last version SCC itself shipped, per @(app_group, service, env)@ — i.e.
 the newest @MobileBuild@ release NOT created by store-sync. Stamped into
 @expected_version@ so the monitor can flag a live store version SCC didn't ship
 as out-of-band drift. Excluding store-sync rows avoids flagging our own imports
 (edge case #7). 'Nothing' for an app SCC has never released → no drift claim.
 -}
+{- | An app's synced store cells as @(track, version_name, version_code)@, restricted
+to cells that carry a version. The changelog-base resolver reads this — the same
+@store_status@ cache the monitor reads — so the base diff sources its prod/internal
+version from one place instead of a duplicate metadata snapshot.
+-}
+findStoreTracksForApp :: (MonadFlow m) => Int32 -> m [(Text, Text, Maybe Int32)]
+findStoreTracksForApp aid = withDb $ \db -> withConn db $ \conn ->
+    query
+        conn
+        "SELECT track, version_name, version_code FROM store_status \
+        \ WHERE app_catalog_id = ? AND version_name IS NOT NULL"
+        (Only aid)
+
+-- | One @store_sync_status@ row: (app_catalog_id, last_attempt_at, last_ok_at, last_error, error_code).
+type StoreSyncStatusRow = (Int32, UTCTime, Maybe UTCTime, Maybe Text, Maybe Text)
+
+-- | Record a SUCCESSFUL refresh: stamp last_ok_at = last_attempt_at = now, clear any error.
+recordStoreSyncOk :: (MonadFlow m) => Int32 -> m ()
+recordStoreSyncOk aid = withDb $ \db -> withConn db $ \conn -> do
+    _ <-
+        execute
+            conn
+            "INSERT INTO store_sync_status (app_catalog_id, last_attempt_at, last_ok_at) \
+            \ VALUES (?, now(), now()) \
+            \ ON CONFLICT (app_catalog_id) DO UPDATE SET \
+            \   last_attempt_at = now(), last_ok_at = now(), last_error = NULL, error_code = NULL"
+            (Only aid)
+    pure ()
+
+-- | Record a FAILED refresh: stamp last_attempt_at + error/code, but KEEP last_ok_at
+-- (the cells still hold last-good data — shown with an error overlay, never blanked).
+recordStoreSyncError :: (MonadFlow m) => Int32 -> Text -> Text -> m ()
+recordStoreSyncError aid code msg = withDb $ \db -> withConn db $ \conn -> do
+    _ <-
+        execute
+            conn
+            "INSERT INTO store_sync_status (app_catalog_id, last_attempt_at, last_error, error_code) \
+            \ VALUES (?, now(), ?, ?) \
+            \ ON CONFLICT (app_catalog_id) DO UPDATE SET \
+            \   last_attempt_at = now(), last_error = EXCLUDED.last_error, error_code = EXCLUDED.error_code"
+            (aid, msg, code)
+    pure ()
+
+-- | Every app's last refresh outcome, for the monitor to attach a per-app sync status.
+listStoreSyncStatus :: (MonadFlow m) => m [StoreSyncStatusRow]
+listStoreSyncStatus = withDb $ \db -> withConn db $ \conn ->
+    query_
+        conn
+        "SELECT app_catalog_id, last_attempt_at, last_ok_at, last_error, error_code FROM store_sync_status"
+
+{- | The production track's currently-synced @(version_name, version_code)@ for an app
+from the @store_status@ cache, or 'Nothing' when production hasn't been synced. Either
+field may be NULL. Used by the promote guard to reject re-promoting a build that is
+already live on production.
+-}
+findProductionStoreCell :: (MonadFlow m) => Int32 -> Text -> m (Maybe (Maybe Text, Maybe Int32))
+findProductionStoreCell appCatalogId platform = withDb $ \db -> withConn db $ \conn -> do
+    rows <-
+        query
+            conn
+            "SELECT version_name, version_code FROM store_status \
+            \ WHERE app_catalog_id = ? AND platform = ? AND track = 'production' LIMIT 1"
+            (appCatalogId, platform)
+    pure $ case rows of
+        (r : _) -> Just r
+        [] -> Nothing
+
+{- | The production track's serving release as @(version_name, version_code, status,
+rollout_percent)@ — the publish gate's "is this build actually live" source. Builds on the
+fact that @androidSnapToUpsert@ only writes a @rollout_percent@ when the fraction is at/above
+the 1% floor (a real ramp), and stamps @status='completed'@ for a fully-live version: so a
+version that is parked below 1% (held/staged) has a NULL @rollout_percent@ and a non-completed
+@status@. 'liveOnProduction' reads this to require a serving release (completed OR ramping
+>1%), not merely a version present on the track. 'Nothing' when production hasn't synced.
+-}
+findProductionLiveCell ::
+    (MonadFlow m) => Int32 -> Text -> m (Maybe (Maybe Text, Maybe Int32, Maybe Text, Maybe Double))
+findProductionLiveCell appCatalogId platform = withDb $ \db -> withConn db $ \conn -> do
+    rows <-
+        query
+            conn
+            "SELECT version_name, version_code, status, rollout_percent FROM store_status \
+            \ WHERE app_catalog_id = ? AND platform = ? AND track = 'production' LIMIT 1"
+            (appCatalogId, platform)
+    pure $ case rows of
+        (r : _) -> Just r
+        [] -> Nothing
+
+{- | Production-track @(version_name, version_code)@ per app @(app_group, service, env)@ from
+the store_status cache (joined to app_catalog for the name/surface/platform the release rows
+key on). Powers the release list's per-row @promotable@ flag — which compares by version
+THEN code — without an N+1 store read. Only cells with a known version are included; the code
+may still be NULL.
+-}
+productionVersionsByApp :: (MonadFlow m) => m (Map.Map (Text, Text, Text) (Text, Maybe Int32))
+productionVersionsByApp = withDb $ \db -> withConn db $ \conn -> do
+    rows <-
+        query_
+            conn
+            "SELECT a.name, a.surface, a.platform, ss.version_name, ss.version_code \
+            \ FROM store_status ss JOIN app_catalog a ON a.id = ss.app_catalog_id \
+            \ WHERE ss.track = 'production' AND ss.version_name IS NOT NULL"
+    pure $ Map.fromList [((n, s, p), (vn, vc)) | (n, s, p, vn, vc) <- rows]
+
+-- | Every store_status cell (all tracks) keyed by app (name, surface, platform).
+-- The join source for deriving a release row's live rollout / track presence from
+-- store_status at response time. Review is NOT here — it's a decision on the
+-- release row, not a store observation (§16).
+data StoreCell = StoreCell
+    { scTrack :: Text
+    , scVersion :: Maybe Text
+    , scCode :: Maybe Int32
+    , scStatus :: Maybe Text
+    , scRolloutPercent :: Maybe Double
+    }
+
+storeCellsByApp :: (MonadFlow m) => m (Map.Map (Text, Text, Text) [StoreCell])
+storeCellsByApp = withDb $ \db -> withConn db $ \conn -> do
+    rows <-
+        query_
+            conn
+            "SELECT a.name, a.surface, a.platform, ss.track, ss.version_name, ss.version_code, ss.status, ss.rollout_percent \
+            \ FROM store_status ss JOIN app_catalog a ON a.id = ss.app_catalog_id"
+    pure $
+        Map.fromListWith
+            (++)
+            [ ((n, s, p), [StoreCell trk vn vc st rp])
+            | ((n, s, p, trk) :. (vn, vc, st, rp)) <- rows
+            ]
+
+-- | The store_status cells (all tracks) for ONE app, by app_catalog_id — the
+-- single-release counterpart of 'storeCellsByApp' for the rollout-detail endpoint.
+storeCellsForApp :: (MonadFlow m) => Int32 -> m [StoreCell]
+storeCellsForApp aid = withDb $ \db -> withConn db $ \conn -> do
+    rows <-
+        query
+            conn
+            "SELECT ss.track, ss.version_name, ss.version_code, ss.status, ss.rollout_percent \
+            \ FROM store_status ss WHERE ss.app_catalog_id = ?"
+            (Only aid)
+    pure [StoreCell trk vn vc st rp | (trk, vn, vc, st, rp) <- rows]
+
+-- | Resolve a build's live (rollout, pct, track) from its store_status cells
+-- (production-precedence). 'Nothing' when the build isn't on any track — the caller
+-- then falls back to the row's own lifecycle columns (terminal / SCC state).
+-- Review is deliberately absent: the caller reads it from the release row.
+resolveStoreState :: [StoreCell] -> Text -> Maybe Int32 -> Maybe (Maybe Text, Maybe Double, Maybe Text)
+resolveStoreState cells version mCode =
+    let mine = filter (\c -> scVersion c == Just version && fromMaybe (-1) (scCode c) == fromMaybe (-1) mCode) cells
+        mCell = find ((== "production") . scTrack) mine <|> listToMaybe mine
+     in deriveStoreState <$> mCell
+
+-- | Map a store_status cell to phaseFromFields inputs (rollout, pct, track).
+-- rollout / % are production-only concepts; a pre-prod cell contributes only its
+-- track (→ InternalHeld when the row carries no review/rollout of its own).
+-- Rolling only counts at 1–99% — a parked ~0 (Android pending fraction) or a
+-- finished 100% is not a ramp.
+deriveStoreState :: StoreCell -> (Maybe Text, Maybe Double, Maybe Text)
+deriveStoreState c =
+    let isProd = scTrack c == "production"
+        pct = scRolloutPercent c
+        rolling = maybe False (\p -> p >= 1 && p < 100) pct
+        rollout
+            | not isProd = Nothing
+            | scStatus c == Just "halted" = Just "halted"
+            | scStatus c `elem` [Just "inProgress", Just "rolling_out"] && rolling = Just "rolling_out"
+            | scStatus c `elem` [Just "completed", Just "live"] = Just "completed"
+            | otherwise = Nothing
+     in (rollout, if isProd then pct else Nothing, Just (scTrack c))
+
 latestShippedVersionsPerApp :: (MonadFlow m) => m (Map.Map (Text, Text, Text) Text)
 latestShippedVersionsPerApp = withDb $ \db -> withConn db $ \conn -> do
     rows <-
@@ -100,29 +342,3 @@ latestShippedVersionsPerApp = withDb $ \db -> withConn db $ \conn -> do
     -- (the newer row) and drop the later (older) one.
     pure $ Map.fromListWith (\_older keep -> keep) [((ag, svc, env), ver) | (ag, svc, env, ver) <- rows]
 
-{- | The review / rollout state of the most recent ACTIVE (@INPROGRESS@)
-@MobileBuild@ release for an app, overlaid onto the live production cell. This is
-how an Android "in review" reaches the monitor at all (the Play track is opaque),
-and how an iOS phased % shows before the next reconcile. 'Nothing' when nothing
-is in flight → the cell shows pure live store state.
--}
-data ActiveMobileState = ActiveMobileState
-    { amsReviewStatus :: Maybe Text
-    , amsRolloutStatus :: Maybe Text
-    , amsRolloutPercent :: Maybe Double
-    }
-
-findActiveMobileState :: (MonadFlow m) => Text -> Text -> Text -> m (Maybe ActiveMobileState)
-findActiveMobileState ag svc env = withDb $ \db -> withConn db $ \conn -> do
-    rows <-
-        query
-            conn
-            "SELECT review_status, rollout_status, rollout_percent \
-            \ FROM release_tracker \
-            \ WHERE category = 'MobileBuild' AND status = 'INPROGRESS' \
-            \   AND app_group = ? AND service = ? AND env = ? \
-            \ ORDER BY date_created DESC LIMIT 1"
-            (ag, svc, env)
-    pure $ case rows of
-        ((rs, rost, rp) : _) -> Just (ActiveMobileState rs rost rp)
-        [] -> Nothing

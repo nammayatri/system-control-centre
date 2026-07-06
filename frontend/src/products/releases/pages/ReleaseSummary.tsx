@@ -10,20 +10,22 @@ import {
   useFastForwardRelease, useImmediateRevertWithSync,
   useReleaseDiff, usePodHealth, useResources, useUpdateTracker,
   useMobileApps, useDispatchMobileReleases, useMobileRollout,
+  useRolloutRestartDeployment,
 } from '../hooks';
-import { mobileDisplayStatus, lifecycleFromRollout } from '../components/mobileStage';
-import { versionWithBuild } from '../versionLabel';
+import { formatBuildCode, versionWithBuild } from '../utils';
 import type { RolloutHistoryEvent, RolloutEvent, RolloutStrategyEvent, PodInfo, ABValidationStatus } from '../api';
 import { AB_STATUS_LABELS, AB_STATUS_COLORS } from '../api';
 import type { LatestBuild } from '../types';
 import { ABValidationModal } from '../components/ABValidationModal';
 import { Badge } from '../../../shared/ui/badge';
 import { StatusBadge } from '../components/StatusBadge';
+import { isFirebaseInternal, FirebaseInternalBadge } from '../components/FirebaseBadge';
 import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { AiReleasePanel } from '../components/AiReleasePanel';
 import { MobileRolloutPanel } from '../components/MobileRolloutPanel';
+import { BrandLogo } from '../components/BrandLogo';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import {
   Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap,
@@ -665,7 +667,7 @@ const PrevBuildBadge = ({ build, label, platform }: { build: LatestBuild; label:
       <span className="uppercase">{display}</span>
       <span className="font-mono">v{build.version}</span>
       {build.versionCode != null && (
-        <span className="text-[9px] opacity-70">+{build.versionCode}</span>
+        <span className="text-[9px] opacity-70">{formatBuildCode(build.versionCode)}</span>
       )}
       {build.completedAt && (
         <span className="opacity-60">{formatShortDate(build.completedAt)}</span>
@@ -889,6 +891,7 @@ const ReleaseSummary: React.FC = () => {
   const immRevertMut = useImmediateRevert();
   const deleteMut = useDeleteRelease();
   const restartMut = useRestartRelease();
+  const rolloutRestartMut = useRolloutRestartDeployment();
   const fastForwardMut = useFastForwardRelease();
   // Mobile promote→rollout detail, used to derive the top-level status badge +
   // gate the rollout-runner action buttons. `enabled` is read off the (possibly
@@ -995,15 +998,22 @@ const ReleaseSummary: React.FC = () => {
   // genuinely-building release keep their truthful raw StatusBadge, so an aborted
   // row left at MBTagPushed never reads "Ready to promote".
   const rollout = isMobile ? rolloutQ.data : undefined;
+  // An internal/TestFlight snapshot is only "promotable" when the BACKEND says so
+  // (rdPromotable) — i.e. not already live on production. Otherwise it's not offered the
+  // promote flow and the header doesn't read "Ready to promote".
   const isPromotableSnapshot =
-    rollout?.rdStoreTrack === 'internal' || rollout?.rdStoreTrack === 'testflight';
+    (rollout?.rdStoreTrack === 'internal' || rollout?.rdStoreTrack === 'testflight') &&
+    !!rollout?.rdPromotable;
+  // The one canonical backend displayStatus (rollout.rdStatusLabel) — null while the
+  // build is still 'building' so the generic runner controls stay shown until it's
+  // sitting on the store (same behaviour the old mobileDisplayStatus null gave).
   const mobileStatus =
-    rollout && (s === 'INPROGRESS' || isPromotableSnapshot)
-      ? mobileDisplayStatus(lifecycleFromRollout(rollout))
+    rollout && (s === 'INPROGRESS' || isPromotableSnapshot) && rollout.rdPhase !== 'building'
+      ? { label: rollout.rdStatusLabel, variant: rollout.rdStatusVariant }
       : null;
   // While the build sits in a lifecycle stage, the generic Pause / Fast-Forward
   // (rollout-runner) controls don't apply — the real action is Promote/Rollout in
-  // the Store panel. Abort still applies (cancel the release).
+  // the Store panel.
   const inMobileLifecycle = !!mobileStatus;
 
   const matchedMobileApp = isMobile
@@ -1097,12 +1107,48 @@ const ReleaseSummary: React.FC = () => {
 
       <div className="flex flex-col gap-3 mb-4 sm:mb-5">
         <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-          <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Release Summary</h1>
+          {isMobile && (
+            <BrandLogo
+              brand={release.appGroup || ''}
+              surface={release.service === 'driver' ? 'driver' : undefined}
+              size="lg"
+            />
+          )}
+          <div className="flex flex-col">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Release Summary</span>
+            <h1 className="text-lg sm:text-xl font-semibold text-zinc-900 flex items-baseline gap-2 flex-wrap">
+              <span>{release.appGroup || 'Release'}</span>
+              {release.service && <span className="text-sm font-normal text-zinc-400">{release.service}</span>}
+              {versionWithBuild(release) && (
+                <span className="font-mono text-base font-medium text-zinc-500">v{versionWithBuild(release)}</span>
+              )}
+            </h1>
+          </div>
           {mobileStatus ? (
             <Badge variant={mobileStatus.variant} dot>{mobileStatus.label}</Badge>
           ) : (
             <StatusBadge status={release.status} />
           )}
+          {/* Store track (Internal / TestFlight / Production) — surfaces which track the
+              build sits on, e.g. an un-promotable internal build below production. */}
+          {isMobile && rollout?.rdStoreTrack && (
+            <Badge
+              variant={
+                rollout.rdStoreTrack === 'production'
+                  ? 'success'
+                  : rollout.rdStoreTrack === 'testflight'
+                    ? 'info'
+                    : 'blue'
+              }
+            >
+              {rollout.rdStoreTrack === 'production'
+                ? 'Production'
+                : rollout.rdStoreTrack === 'testflight'
+                  ? 'TestFlight'
+                  : 'Internal'}
+            </Badge>
+          )}
+          {isFirebaseInternal(release) && <FirebaseInternalBadge />}
           {(release.release_context?.revert === 1 || revertsTarget) && <Badge variant="purple" dot>REVERT</Badge>}
           {isMobile && release.release_context?.build_type === 'debug' && (
             <Badge variant="warning" dot>DEBUG</Badge>
@@ -1187,7 +1233,12 @@ const ReleaseSummary: React.FC = () => {
                 {!inMobileLifecycle && (
                   <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
                 )}
-                <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
+                {/* Abort visibility is BE-driven (rdAbortable): shown only while the
+                    build is still Building. A rejected / on-store / terminal build can't
+                    be un-shipped, so Abort is hidden. Non-mobile keeps the INPROGRESS rule. */}
+                {(!isMobile || !!rollout?.rdAbortable) && (
+                  <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
+                )}
               </PermissionGate>
               {!isMobile && (
                 <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
@@ -1208,7 +1259,13 @@ const ReleaseSummary: React.FC = () => {
                 <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: actor, isRevertSync: revertSyncChecked }), true)}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
               </PermissionGate>
               <PermissionGate product="autopilot" permission="RELEASE_REVERT">
-                <Button size="sm" variant="danger" loading={immRevertSyncMut.isPending} onClick={doImmediateRevert}><Zap className="w-3.5 h-3.5" /> Immediate Revert</Button>
+                {release.env_override_data ? (
+                  <SimpleTooltip content="Immediate Revert is disabled when the release has env changes. Use normal Revert to restore env + image together.">
+                    <Button size="sm" variant="danger" disabled><Zap className="w-3.5 h-3.5" /> Immediate Revert</Button>
+                  </SimpleTooltip>
+                ) : (
+                  <Button size="sm" variant="danger" loading={immRevertSyncMut.isPending} onClick={doImmediateRevert}><Zap className="w-3.5 h-3.5" /> Immediate Revert</Button>
+                )}
               </PermissionGate>
               {/* Single shared "Also revert in other cloud" checkbox — applies to both
                   Revert and Immediate Revert. Only meaningful when the original
@@ -1219,6 +1276,11 @@ const ReleaseSummary: React.FC = () => {
                   <input type="checkbox" checked={revertSyncChecked} onChange={(e) => setRevertSyncChecked(e.target.checked)} className="rounded border-zinc-300 accent-zinc-900" />
                   Also revert in other cloud
                 </label>
+              </PermissionGate>
+              <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+                <Button size="sm" variant="outline" className="border-blue-300 text-blue-700 hover:bg-blue-50" loading={rolloutRestartMut.isPending} onClick={() => doAction('restart deployment', () => rolloutRestartMut.mutateAsync({ releaseId: id!, requestedBy: actor }), false, 'This will perform a kubectl rollout restart on the current deployment, bouncing all pods. Use this to pick up new secrets/configmaps or recover from pod crashes.')}>
+                  <RotateCw className="w-3.5 h-3.5" /> Restart Deployment
+                </Button>
               </PermissionGate>
             </>
           )}

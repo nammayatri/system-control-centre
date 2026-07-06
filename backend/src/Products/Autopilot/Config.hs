@@ -132,6 +132,12 @@ autopilotConfigs =
         NotificationGroup
         "Enable Slack notifications for release events"
         (Just "autopilot")
+    , ConfigEntry
+        "mobile_slack_channel"
+        (TextConfig "")
+        NotificationGroup
+        "Slack channel for mobile release changelogs (e.g. #mobile-releases). Empty = off."
+        (Just "autopilot")
     , -- Decision engine / AB / HS (grouped under ABTestingGroup)
       ConfigEntry
         "ab_decision_enabled"
@@ -286,16 +292,10 @@ autopilotConfigs =
         "Fetch next-version suggestions from Play Console / App Store Connect on the create-release form. Disable in debug-only envs."
         (Just "autopilot")
     , ConfigEntry
-        "store_sync_enabled"
-        (BoolConfig False)
+        "store_refresh_cooldown_seconds"
+        (IntConfig 300)
         MobileGroup
-        "Periodically poll production stores (Play Console / App Store Connect) and record live versions as synthetic COMPLETED releases."
-        (Just "autopilot")
-    , ConfigEntry
-        "store_sync_interval_minutes"
-        (IntConfig 30)
-        MobileGroup
-        "How often the store-sync background loop polls the stores (minutes)."
+        "Seconds the on-demand store refresh serves cache before re-polling a given app — the Play edit-quota guard, and the threshold the UI uses to auto-refresh on open + warn that data is stale. Keep above ~180s."
         (Just "autopilot")
     , ConfigEntry
         "mobile_dispatch_enabled"

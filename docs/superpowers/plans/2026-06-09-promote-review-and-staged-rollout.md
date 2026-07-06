@@ -1,10 +1,17 @@
 # Promote to Review → Staged Rollout — Implementation Plan
 
+> **⚠️ Note (2026-06-18) — store sync is now on-demand.** Where this plan references the
+> `storeSyncLoop` background poller / `store_sync_*` flags, those were **removed**: store
+> sync (and the rollout reconcile it carried) now runs **on demand** via
+> `refreshStoreStatusOne`, bounded by `store_refresh_cooldown_seconds`. The staged-rollout
+> logic itself is unchanged. Current behaviour: `CLAUDE.md` § "Mobile store sync
+> (on-demand)" and `docs/scc-deployment.md` §7.
+
 > **Status:** Design locked, ready to build.
 > **Date:** 2026-06-09 · **Branch base:** `mobile-release-features`
-> **Supersedes:** `2026-05-20-staged-rollout.md` (that plan is stale — it references a
-> removed `MobileDestination` ADT, Play write-functions that don't exist, and the wrong
-> migration number. Use this document instead.)
+> **Supersedes:** the earlier `2026-05-20-staged-rollout.md` plan (since **removed** — it was
+> stale: a removed `MobileDestination` ADT, Play write-functions that didn't exist, and the
+> wrong migration number). This document is the as-built record.
 
 ---
 
@@ -285,6 +292,8 @@ it at submit time.
 | POST | `/releases/:id/rollout/release-all` | `AP_RELEASE_ROLLOUT` | Jump to 100% (both platforms) |
 | POST | `/releases/:id/review/mark-rejected` | `AP_RELEASE_PROMOTE` | **Android** — operator records a store rejection + reason (review is opaque, can't auto-detect) |
 | POST | `/releases/:id/review/mark-approved` | `AP_RELEASE_PROMOTE` | **Android** — operator confirms Google approved it. *(2026-06-16: now **required** before a rollout — the implicit "first rollout implies approval" shortcut was removed.)* |
+| POST | `/mobile/bulk/promote` | `AP_RELEASE_PROMOTE` | *(2026-06-18)* Promote MANY apps in one click — a thin loop over `promoteH`, per-app `try`-isolated (partial failures reported per app), run sequentially to respect Play's one-edit-per-app quota |
+| POST | `/mobile/bulk/rollout` | `AP_RELEASE_ROLLOUT` | *(2026-06-18)* Set the Android rollout % for many apps at once (same or per-app %) — a thin loop over `rolloutSetH`, same isolation/sequencing |
 | ~~PUT~~ | ~~`/apps/:id/store-config`~~ | `AP_MOBILE_APP_MANAGE` | **Deferred to Phase 2** (§6a) — set per-app reviewer info / demo account |
 
 Two **new permissions** to add to the `AutopilotPermission` ADT:
@@ -379,7 +388,7 @@ Rules:
 | `Versioning/Apple.hs` | extend | Fill metadata, submit for review, poll `appStoreState`, phased-release control, manual release |
 | `Mobile/Types.hs` | extend | New workflow statuses + `ReviewStatus` / `RolloutStatus` / `RolloutStage` types |
 | `Mobile/Workflow.hs` | extend | New stages: submit-for-review, poll-review (bounded) |
-| `Mobile/Handlers/Rollout.hs` | **new** | Promote, release, set %, halt, resume, release-all, get detail |
+| `Mobile/Handlers/Rollout.hs` | **new** | Promote, release, set %, halt, resume, release-all, get detail. *(2026-06-18)* + bulk promote/rollout (thin loops over the single-item handlers). *(2026-06-18)* Observed-rollout **adoption**: a store-sync snapshot SCC only saw rolling out in the Console (`STORE_SYNC` + `MBCompleted` + `rollout_status` rolling/halted) is taken into SCC's lifecycle by `/rollout/set` without the approval gate (`isObservedRollout`). *(2026-06-19)* Every action **mirrors** its new production state into `store_status` so the App Monitor matches the release list immediately — see the monitoring plan §10 |
 | ~~`Mobile/Handlers/AppCatalog.hs`~~ | extend | Store-config endpoint (reviewer info) — **Phase 2** (§6a), not v1 |
 | `Mobile/Queries/Tracker.hs` | extend | Update review/rollout columns, append rollout history |
 | `Mobile/StoreSync.hs` | extend | Background reconciler: keep SCC in sync if someone changes things in the Console |
@@ -414,6 +423,22 @@ On the **release detail page** (`ReleaseSummary.tsx`):
 On the **app admin page**: a form to set the per-app reviewer info / demo account once — **deferred to Phase 2** (§6a).
 
 On the **releases list**: a small badge ("In review", "↗ 5%", "Halted").
+
+On the **App Release Monitor page** *(2026-06-19)* — a **Bulk actions panel** (`MobileBulkPanel.tsx`)
+above the cards: select many apps and promote / set rollout % in one click (calls the bulk
+endpoints). Two clearly-labelled sections (Promote = internal/TestFlight; Rolling out = Android %),
+grouped by app, two-per-row and responsive (single column < `xl`). Each row's right side shows the
+**same status badge as the list/detail** — driven by the shared `mobileDisplayStatus` projection, so
+"Halted · X%" / "Rolling out · X%" / "Approved · held" read identically everywhere — plus a halt-aware
+(amber) progress bar. Partial failures are surfaced per app, mapped failed release-id → app label.
+After a bulk action it invalidates `['releases']`, `['release']`, `['mobile-rollout']` **and**
+`['store-monitor']`. *(Bulk promote is currently feature-flagged off in the UI; bulk rollout is live.)*
+
+> **Badge consistency:** the promote→review→rollout→completed lifecycle is projected to a UI
+> stage/badge in one place — `components/mobileStage.ts` (`lifecycleFromRelease` / `stageOf` /
+> `mobileDisplayStatus`). The list badge, the detail panel, and the bulk panel all read it, so they
+> can't drift. A row's authoritative `rollout_status` / `rollout_percent` ride in `release_context`
+> (injected by the tracker serializer) with the store-sync metadata as fallback.
 
 ---
 
@@ -549,12 +574,38 @@ Phases 2 and 3 are independent and can be done in parallel.
   release** or **release to all users**, driven by `rdPhasedId`; `rolloutDetailH` live-reads the
   phased id when `asc_phased_id` is null (e.g. an externally-configured phased release) so the
   label matches App Store Connect and what `/release` will actually do.
-- **UI** — the version shows the **build number** (`3.3.17 (460)`) everywhere it renders
+- **UI** — the version shows the **build number** (`3.3.17 +460`) everywhere it renders
   (`versionWithBuild`); the releases list's **mobile status filter** uses lifecycle buckets
   (Building / In review / Approved · held / Rolling out / Rejected / Completed / Aborted /
   Reverted) instead of backend raw statuses, and "Groups" reads "Apps".
 - Tests `[40]`–`[44]` cover the pure decisions (external-review reconcile, pending-publish
   pick, list dedup, console-rollout adoption, iOS-release adoption).
+
+**Post-roadmap extensions (built 2026-06-18 / 19):**
+- **Bulk promote / rollout** — one operator action over many apps. `POST /mobile/bulk/promote`
+  and `/mobile/bulk/rollout` are **thin loops** over the single-item `promoteH` / `rolloutSetH`
+  (every state guard, store call, audit event and RBAC check reused verbatim, so the bulk path
+  can't drift). Each item is `try`-isolated → a partial failure is recorded per app and the
+  batch continues; items run **sequentially** to respect Play's one-edit-per-app quota and reuse
+  the cached ASC token. UI: `MobileBulkPanel.tsx` on the App Release Monitor page (§11). Bulk
+  promote is feature-flagged off in the UI for now; bulk rollout is live.
+- **Observed-rollout adoption from `/rollout/set`** — a store-sync snapshot SCC only *saw*
+  rolling out in the Play Console (`mode=STORE_SYNC` + `MBCompleted` + `rollout_status`
+  rolling/halted) can be **adopted** by `/rollout/set` — flips `INPROGRESS` + `MBRollingOut` so
+  the Phase-7 reconciler tracks it — *without* the `ensureAndroidRollable` approval gate (the
+  Play review already happened out of band). Mirrors `promoteH`'s pre-promote-snapshot adoption.
+  Fixes "Cannot set rollout from state MBCompleted" when bulk-setting % on Console-started
+  rollouts. `isObservedRollout` in `Handlers/Rollout.hs`.
+- **App Monitor reflects every action immediately** — the monitor reads the `store_status`
+  cache, not `release_tracker`, so it used to lag the release list after an action (a **halt**
+  showed on the list but not the monitor). Now every handler (set / halt / resume / release-all /
+  promote / mark-approved / mark-rejected / withdraw, both platforms) **mirrors** its new
+  production state into `store_status` with no extra store edit, and the FE invalidates
+  `['store-monitor']`. Full mechanism + rationale (why mirror, not re-poll): monitoring plan §10.
+- **Authoritative rollout columns end-to-end** — `release_tracker`'s `rollout_status` /
+  `rollout_percent` are injected into the list/detail `release_context` (`fromRow`) and carried
+  through FE `normalizeRelease`, so the list, detail and bulk panel read the live % off the row
+  (store-sync metadata only as fallback) instead of a stale snapshot.
 
 ---
 

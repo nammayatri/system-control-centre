@@ -48,7 +48,7 @@ module Products.Autopilot.Mobile.Handlers.Release (
     changelogAiSummaryH,
 ) where
 
-import Control.Monad (unless, void, when)
+import Control.Monad (forM_, unless, void, when)
 import Control.Monad.Catch (throwM)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..))
@@ -62,16 +62,19 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Database.Beam
 import Products.Autopilot.Mobile.Github (BranchInfo (..), listBranches, searchBranches)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
-import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), CompareResult (..), compareAllCommits, compareRefs)
-import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), TrackSnapshot (..), fetchLatestBuildsForApp, findAppCatalogByIds, listAppCatalog, listEnabledAppCatalog)
+import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), CompareResult (..), ciDisplayAuthor, compareAllCommits, compareRefs, isBotCommit)
+import Products.Autopilot.Mobile.Queries.AppCatalog (LatestBuildRow (..), TrackSnapshot (..), derivedStoreTag, fetchLatestBuildsForApp, findAppCatalogByIds, listAppCatalog, listEnabledAppCatalog)
+import Products.Autopilot.Mobile.Queries.StoreStatus (findStoreTracksForApp)
 import Products.Autopilot.Mobile.Queries.Tracker (
     ReleaseTrackerRow,
     appCatalogByKey,
+    findMobileVersionRow,
     gitOwner,
     gitRepo,
     logEvent,
@@ -89,10 +92,6 @@ import Products.Autopilot.Mobile.Types.Storage (
  )
 import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch)
 import Products.Autopilot.RuntimeConfig (getMobileBuildType)
-import qualified Shared.AI.Changelog as CL
-import Shared.AI.Config (loadAiConfig)
-import Shared.AI.Queries (claimReleaseSummary, computePromptHash, lookupReleaseSummary, upsertReleaseSummary)
-import Shared.AI.ReleaseSummary (generateWithFallback)
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
     ReleaseTracker (..),
@@ -104,6 +103,10 @@ import Products.Autopilot.Types.Storage.Schema (
     autopilotDb,
  )
 import Products.Autopilot.Types.Target (TargetState (..))
+import qualified Shared.AI.Changelog as CL
+import Shared.AI.Config (loadAiConfig)
+import Shared.AI.Queries (claimReleaseSummary, computePromptHash, lookupReleaseSummary, upsertReleaseSummary)
+import Shared.AI.ReleaseSummary (generateWithFallback)
 import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 
 -- ─── Create: request / response types ──────────────────────────────
@@ -112,6 +115,12 @@ data CreateMobileReleasesItem = CreateMobileReleasesItem
     { appCatalogId :: Int32
     , versionName :: Maybe Text
     , versionCode :: Maybe Int32
+    , -- | when True, post the changelog to the mobile Slack channel after the
+      -- build succeeds and its tag is confirmed (ConfirmTag → MBTagPushed)
+      sendChangelogSlack :: Maybe Bool
+    , -- | the changelog summary captured on the create page; falls back to the
+      -- request-level changeLog when absent
+      changelogSummary :: Maybe Text
     }
     deriving (Generic, Show)
 
@@ -193,6 +202,27 @@ createMobileReleasesH ap CreateMobileReleasesReq{..} = do
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
     built <- mapM (buildRow ap appById groupId changeLog buildType destination sourceRef now) items
+    -- Friendly duplicate check: a build is identified by (version name + build number)
+    -- (migration 0035). If that exact pair already exists, reject with a clear message
+    -- instead of letting the unique index throw a raw 23505 / INTERNAL_ERROR. Only checks
+    -- rows that carry a code (provider builds get theirs from CI later — no collision yet).
+    forM_ (map fst built) $ \row ->
+        forM_ (rtVersionCode row) $ \_ -> do
+            mDup <- findMobileVersionRow (rtAppGroup row) (rtService row) (rtEnv row) (rtNewVersion row) (rtVersionCode row)
+            case mDup of
+                Just _ ->
+                    throwM $
+                        BadRequest $
+                            rtAppGroup row
+                                <> " "
+                                <> rtService row
+                                <> " ("
+                                <> rtEnv row
+                                <> ") "
+                                <> rtNewVersion row
+                                <> maybe "" (\c -> "+" <> T.pack (show c)) (rtVersionCode row)
+                                <> " already exists — use a new build number, or promote the existing build."
+                Nothing -> pure ()
     insertReleaseTrackerRowsBatch (map fst built)
     pure
         CreateMobileReleasesResp
@@ -210,14 +240,14 @@ buildRow ::
     Text ->
     Text ->
     Text ->
+    -- | destination (provider prod Android only)
     Maybe Text ->
-    -- ^ destination (provider prod Android only)
+    -- | source ref
     Maybe Text ->
-    -- ^ source ref
     UTCTime ->
     CreateMobileReleasesItem ->
     Flow (ReleaseTrackerRow, CreatedReleaseSummary)
-buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode} = do
+buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode, sendChangelogSlack = mSendSlack, changelogSummary = mSummary} = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     -- safe: createMobileReleasesH validated that every id is present in appById
     let app_ = appById Map.! aid
@@ -228,9 +258,17 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
             acSurface app_ == "driver"
                 && acPlatform app_ == "android"
                 && not (isDebugBuildType buildType)
+        -- Firebase App Distribution build: its version is arbitrary (never reaches Play),
+        -- so stamp a UNIQUE timestamp version (year.MMDD.HHMM, UTC) right here at create —
+        -- not deferred to ResolveVersion — so the version is populated and visible on the
+        -- release row the instant it's created (and even if the build later gets stuck
+        -- before dispatch). version_code stays Nothing for these.
+        isFirebase = isProviderProdAndroid && mDestination == Just "Firebase"
+        firebaseVer = T.pack (formatTime defaultTimeLocale "%Y.%-m%d.%H%M" now)
+        mVerFinal = if isFirebase then Just firebaseVer else mVer
         ctx =
             MobileBuildContext
-                { mbcVersionCode = mCode
+                { mbcVersionCode = if isFirebase then Nothing else mCode
                 , mbcChangeLog = changeLog_
                 , mbcBuildType = buildType
                 , mbcReleaseGroupId = groupId
@@ -238,6 +276,15 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                 , mbcOtaNamespace = Nothing
                 , mbcTagPushed = Nothing
                 , mbcDestination = if isProviderProdAndroid then mDestination else Nothing
+                , -- Per-release opt-in for the post-build changelog Slack post. Store
+                  -- it in the build context (release_context) — NOT release_tracker.metadata,
+                  -- which store-sync/rollout overwrite before ConfirmTag runs. @Just body@
+                  -- means "send"; the body is the captured rich summary, falling back to
+                  -- the typed changelog. ConfirmTag reads this straight off the target.
+                  mbcChangelogSummary =
+                    if mSendSlack == Just True
+                        then Just (maybe changeLog_ (\s -> if T.null (T.strip s) then changeLog_ else s) mSummary)
+                        else Nothing
                 }
         target =
             MobileBuildTargetState
@@ -251,7 +298,7 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                 , mbReviewSubmittedAt = Nothing
                 , mbReviewLastPolledAt = Nothing
                 }
-        row = mkMobileTrackerRow rid app_ target mVer mSourceRef (apEmail ap) now
+        row = mkMobileTrackerRow rid app_ target mVerFinal mSourceRef (apEmail ap) now
     pure
         ( row
         , CreatedReleaseSummary
@@ -513,7 +560,7 @@ changelogPreviewH _ap appName surface platform branch mBase = do
         Nothing ->
             pure emptyPreview
         Just lb -> do
-            let (baseRef, baseTag, baseVersion) = resolveChangelogBase mBase lb
+            (baseRef, baseTag, baseVersion) <- resolveChangelogBase mBase ac lb
             if T.null baseRef
                 then pure emptyPreview
                 else do
@@ -537,7 +584,9 @@ changelogPreviewH _ap appName surface platform branch mBase = do
                                     else pure (reverse (crCommits cr))
                             pure
                                 ChangelogPreviewResp
-                                    { cpCommits = commits
+                                    { -- Bot/CI commits + release plumbing (version bumps,
+                                      -- lockfiles) say nothing about what changed — drop them.
+                                      cpCommits = filter (\c -> not (isBotCommit c) && not (CL.isAutomationCommit (ciAuthorLogin c) (ciSubject c))) commits
                                     , cpAheadBy = crTotalCommits cr
                                     , cpStatus = crStatus cr
                                     , cpBaseTag = baseTag
@@ -581,15 +630,29 @@ findLastReleaseBuild builds appName surface platform =
 {- | Resolve the changelog base for the requested track ("production" |
 "internal"; default "production"), returning @(baseRef, baseTag, baseVersion)@.
 
-Prefers the chosen track's snapshot tag from @metadata.tracks@ (written by
-store-sync). Falls back to the leading store-sync row's own tag/commit when the
-track — or its tag — is absent: rows synced before this carried no tracks, and an
-iOS production version is recorded without a build code (so no tag). This keeps
-the preview working in every case, defaulting to a sensible (leading-track) diff.
+Sources the chosen track's version/code from the @store_status@ cache (the same
+single source the App Monitor and create page read) and derives its git tag with
+'derivedStoreTag'. Falls back to the leading store-sync row's own tag/commit when
+the track — or its tag — is absent: an app not yet synced has no cell, and an iOS
+production version is recorded without a build code (so no tag). This keeps the
+preview working in every case, defaulting to a sensible (leading-track) diff.
 -}
-resolveChangelogBase :: Maybe Text -> LatestBuildRow -> (Text, Maybe Text, Maybe Text)
-resolveChangelogBase mBase lb =
-    resolveBaseFromTracks mBase (lbrTracks lb) (lbrTagPushed lb) (lbrCommitSha lb) (lbrVersion lb)
+resolveChangelogBase :: Maybe Text -> AppCatalog -> LatestBuildRow -> Flow (Text, Maybe Text, Maybe Text)
+resolveChangelogBase mBase ac lb = do
+    cells <- findStoreTracksForApp (acId ac)
+    -- iOS internal distribution is TestFlight, so its cell maps to the "internal" base.
+    let baseKeyOf t = case t of
+            "production" -> Just "production"
+            "internal" -> Just "internal"
+            "testflight" -> Just "internal"
+            _ -> Nothing
+        tracks =
+            Map.fromList
+                [ (bk, TrackSnapshot ver code (derivedStoreTag ac ver code))
+                | (trk, ver, code) <- cells
+                , Just bk <- [baseKeyOf trk]
+                ]
+    pure (resolveBaseFromTracks mBase tracks (lbrTagPushed lb) (lbrCommitSha lb) (lbrVersion lb))
 
 {- | Pure core of 'resolveChangelogBase' (exported for testing). Given the
 requested track, the per-track snapshots, and the leading row's tag / commit /
@@ -656,10 +719,10 @@ aiUnavailable r =
 renderCommitsForAi :: [CommitInfo] -> Text
 renderCommitsForAi cs =
     T.unlines
-        ["- " <> ciShortSha c <> " " <> ciSubject c <> " (@" <> ciAuthorLogin c <> ")" | c <- cs]
+        ["- " <> ciShortSha c <> " " <> ciSubject c <> " (" <> ciDisplayAuthor c <> ")" | c <- cs]
 
 toCommitItem :: CommitInfo -> CL.CommitItem
-toCommitItem c = CL.CommitItem (ciShortSha c) (ciSubject c) (ciAuthorLogin c)
+toCommitItem c = CL.CommitItem (ciShortSha c) (ciSubject c) (ciDisplayAuthor c)
 
 {- | Build the response for a lifecycle state. @summaryLong@ always carries
 something to render — AI when @ready@, the deterministic changelog while
@@ -687,7 +750,7 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
     case findLastReleaseBuild builds appName surface platform of
         Nothing -> pure (aiUnavailable "no prior release build to compare against")
         Just lb -> do
-            let (baseRef, _, _) = resolveChangelogBase mBase lb
+            (baseRef, _, _) <- resolveChangelogBase mBase ac lb
             if T.null baseRef
                 then pure (aiUnavailable "no base ref to compare against")
                 else do
@@ -695,10 +758,10 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
                     case result of
                         Left e -> pure (aiUnavailable ("changelog fetch failed: " <> e))
                         Right cr -> do
-                            let commits = crCommits cr
-                                -- Scope to the selected app's surface (drop the
-                                -- other side's commits; keep this side + shared).
-                                items = CL.filterCommitsForSurface surface (map toCommitItem commits)
+                            let commits = filter (not . isBotCommit) (crCommits cr)
+                                -- Drop automation plumbing, then scope to the selected
+                                -- app's surface (drop the other side; keep this + shared).
+                                items = CL.filterCommitsForSurface surface (CL.dropAutomationCommits (map toCommitItem commits))
                                 detLong = CL.renderLongSummary items
                                 n = length items
                                 excluded = length commits - n
@@ -716,7 +779,7 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
                                 -- prompt/format changes so cached rows invalidate.
                                 contentKey =
                                     computePromptHash $
-                                        T.intercalate "\US" ["rn4", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
+                                        T.intercalate "\US" ["rn6", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
                             mRow <- lookupReleaseSummary contentKey
                             case mRow of
                                 -- Done → return the AI (or cached deterministic) result.

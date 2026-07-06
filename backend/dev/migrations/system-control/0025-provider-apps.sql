@@ -45,7 +45,7 @@ VALUES
   ('YatriSathiDriver',     'driver', 'android', 'nammayatri/ny-react-native', '.github/workflows/provider-debug-apk-gen.yaml', 'in.juspay.jatrisaathidriver',    'Yatri Sathi (Driver Android)',   true),
   -- YatriPartner has NO android_debug entry in provider/catalyst.yaml (prod only),
   -- so a debug build would yield an empty matrix → disabled for debug.
-  -- ('YatriPartner',         'driver', 'android', 'nammayatri/ny-react-native', '.github/workflows/provider-debug-apk-gen.yaml', 'net.openkochi.yatripartner',     'Yatri (Driver Android)',         false),
+  -- ('YatriPartner',         'driver', 'android', 'nammayatri/ny-react-native', '.github/workflows/provider-debug-apk-gen.yaml', 'net.openkochi.yatripartner',     'Yatri (Driver Android)',         true),
   ('MarutiSuzuki',         'driver', 'android', 'nammayatri/ny-react-native', '.github/workflows/provider-debug-apk-gen.yaml', 'com.maruti.smartride',           'Maruti Suzuki (Driver Android)', true),
   ('BharatTaxiPartner',    'driver', 'android', 'nammayatri/ny-react-native', '.github/workflows/provider-debug-apk-gen.yaml', 'in.mobility.bharattaxidriver',   'Bharat Taxi (Driver Android)',   true)
 ON CONFLICT (name, surface, platform) DO NOTHING;

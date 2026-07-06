@@ -7,6 +7,9 @@ import type { AppCatalogEntry, LatestBuild } from '../../types';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { cn } from '../../../../lib/utils';
 import { groupAppsBySurface, useGroupCollapse, GroupChevron } from '../../components/appGroups';
+import { BrandLogo } from '../../components/BrandLogo';
+import { AddAppButton } from '../../components/AddAppModal';
+import { formatBuildCode } from '../../utils';
 import { toast } from 'sonner';
 
 const AndroidIcon = ({ className }: { className?: string }) => (
@@ -80,7 +83,7 @@ const BuildCell = ({ build, label }: { build?: LatestBuild | null; label: string
           : 'bg-emerald-50 text-emerald-700 border border-emerald-200',
       )}>
         <span className="font-mono">v{build.version}</span>
-        {build.versionCode != null && <span className="opacity-70">+{build.versionCode}</span>}
+        {build.versionCode != null && <span className="opacity-70">{formatBuildCode(build.versionCode)}</span>}
       </span>
       {build.completedAt && (
         <div className="text-[10px] text-zinc-400">{formatShortDate(build.completedAt)}</div>
@@ -135,8 +138,7 @@ export default function MobileAppsAdmin() {
             </h1>
             <span className="text-xs text-zinc-500">{apps.length}</span>
           </div>
-          {/* Add-app modal deferred — entries can be seeded via SQL or a
-              future modal hooked to mobileApi.createApp. */}
+          <AddAppButton />
         </header>
 
         {error ? (
@@ -198,8 +200,17 @@ export default function MobileAppsAdmin() {
                               />
                             </td>
                             <td className="py-3 px-4">
-                              <div className="font-medium text-zinc-800">{app.displayLabel || app.name}</div>
-                              <div className="text-[11px] text-zinc-500 mt-0.5">{app.surface}</div>
+                              <div className="flex items-center gap-2.5">
+                                <BrandLogo
+                                  brand={app.displayLabel || app.name}
+                                  surface={app.surface === 'driver' ? 'driver' : undefined}
+                                  size="sm"
+                                />
+                                <div className="min-w-0">
+                                  <div className="font-medium text-zinc-800 truncate">{app.displayLabel || app.name}</div>
+                                  <div className="text-[11px] text-zinc-500 mt-0.5">{app.surface}</div>
+                                </div>
+                              </div>
                             </td>
                             <td className="py-3 px-4">
                               <PlatformBadge platform={app.platform} />

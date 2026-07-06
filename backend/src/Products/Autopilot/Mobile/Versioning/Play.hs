@@ -52,11 +52,19 @@ module Products.Autopilot.Mobile.Versioning.Play (
     fetchTrackSnapshots,
     parseTrackSnapshot,
 
+    -- * Consolidated single-edit read (quota-friendly)
+    PlayTrackBodies (..),
+    fetchPlayTrackBodies,
+    bodiesToTracks,
+    bodiesToSnapshots,
+    bodiesToProdReleases,
+    bodiesToRolloutState,
+
     -- * Dispatcher entry point
     resolve,
 ) where
 
-import Control.Exception (Exception, SomeException, try)
+import Control.Exception (Exception, SomeException, finally, try)
 import Control.Monad.IO.Class (liftIO)
 import Core.Environment (MonadFlow, logError)
 import Core.Http.Client (
@@ -88,7 +96,7 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int32)
-import Data.List (find)
+import Data.List (find, foldl')
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
@@ -220,19 +228,13 @@ runFetch sa packageName = do
     eToken <- mintAndExchange sa
     case eToken of
         Left err -> pure (Left err)
-        Right token -> do
-            eEdit <- createEdit token packageName
-            case eEdit of
-                Left err -> pure (Left err)
-                Right editId -> do
-                    eInternal <- fetchTrack token packageName editId "internal"
-                    eProd <- fetchTrack token packageName editId "production"
-                    -- Best-effort cleanup; ignore failures.
-                    _ <- try @SomeException (deleteEdit token packageName editId)
-                    case (eInternal, eProd) of
-                        (Right i, Right p) -> pure (Right (i, p))
-                        (Left e, _) -> pure (Left e)
-                        (_, Left e) -> pure (Left e)
+        Right token -> withEdit token packageName $ \editId -> do
+            eInternal <- fetchTrack token packageName editId "internal"
+            eProd <- fetchTrack token packageName editId "production"
+            pure $ case (eInternal, eProd) of
+                (Right i, Right p) -> Right (i, p)
+                (Left e, _) -> Left e
+                (_, Left e) -> Left e
 
 -- ─── JWT minting + OAuth exchange ──────────────────────────────────
 
@@ -339,7 +341,7 @@ fetchTrack token packageName editId trackName = do
     pure $ case resp of
         Right HttpResponse{respStatus = s, respBody = b}
             | s == 200 -> case decode b :: Maybe TrackBody of
-                Just tb -> Right (pickRelease tb)
+                Just tb -> Right (trackInfoFrom trackName tb)
                 Nothing -> Left (PlayHttpError s "could not decode track body")
             | s == 401 -> Left PlayUnauthorized
             | s == 403 -> Left PlayUnauthorized
@@ -360,6 +362,26 @@ deleteEdit token packageName editId = do
                 }
     _ <- httpRaw req
     pure ()
+
+{- | Acquire a transient edit, run a read against it, and ALWAYS abandon it —
+even if the read throws. The daily quota counts edit /creation/, and a read that
+crashed before our explicit delete would otherwise orphan the draft (Google
+penalises accumulated uncommitted drafts too). 'finally' guarantees the abandon
+runs on every exit path; the abandon is itself best-effort ('try', failures
+ignored — a cleanup error must not mask the read result).
+
+For a MUTATING edit use 'commitEdit' instead — a committed edit must NOT be
+deleted, so it deliberately doesn't go through here.
+-}
+withEdit ::
+    Text -> Text -> (Text -> IO (Either PlayApiError a)) -> IO (Either PlayApiError a)
+withEdit token packageName k = do
+    eEdit <- createEdit token packageName
+    case eEdit of
+        Left err -> pure (Left err)
+        Right editId ->
+            k editId
+                `finally` (try @SomeException (deleteEdit token packageName editId) :: IO (Either SomeException ()))
 
 -- ─── Track body decoding ───────────────────────────────────────────
 
@@ -394,28 +416,19 @@ instance FromJSON Release where
         notes <- o .:? "releaseNotes" .!= []
         pure (Release n s uf (fromMaybe [] (codes :: Maybe [Text])) (mapMaybe (\(RNote t) -> t) notes))
 
-{- | Pick the release used for the next-version computation:
-
-* Prefer the first release whose @status == "completed"@.
-* Else fall back to the first release in the array.
-* If no releases at all, return the @0.0.0@ / @0@ baseline.
-
-The version code is the maximum across @versionCodes[]@ (Play stores a
-list because a single release can ship multiple ABIs). Names default to
-@0.0.0@ if missing — the bump algorithm handles that case explicitly.
+{- | A track's 'TrackInfo' (version + max code) via 'representativeRelease' — the same
+pick the monitor cell uses, so next-version and the cell agree. Version code = max across
+@versionCodes[]@ (Play lists multiple for multi-ABI). Empty → @0.0.0@/@0@ baseline.
 -}
-pickRelease :: TrackBody -> TrackInfo
-pickRelease (TrackBody []) = TrackInfo "0.0.0" 0
-pickRelease (TrackBody rels) =
-    let chosen = case filter (\r -> rStatus r == Just "completed") rels of
-            (r : _) -> r
-            [] -> head rels
-        name = fromMaybe "0.0.0" (rName chosen)
-     in TrackInfo name (maxVersionCode (rVersionCodes chosen))
+trackInfoFrom :: Text -> TrackBody -> TrackInfo
+trackInfoFrom track (TrackBody rels) = case representativeRelease track rels of
+    Just r -> TrackInfo (fromMaybe "0.0.0" (rName r)) (maxVersionCode (rVersionCodes r))
+    Nothing -> TrackInfo "0.0.0" 0
 
 {- | The highest parseable @versionCodes[]@ entry (Play lists multiple codes when
 a release ships several ABIs). 0 when none parse. Shared by the next-version
-read and the pending-publish detection. -}
+read and the pending-publish detection.
+-}
 maxVersionCode :: [Text] -> Int32
 maxVersionCode codes =
     case [n | t <- codes, [(n, "")] <- [reads (T.unpack t) :: [(Int32, String)]]] of
@@ -531,30 +544,19 @@ applyProductionRelease creds pkg pr
 -- | Read the current production rollout state (status + fraction + version codes).
 getTrackRolloutState ::
     (MonadFlow m) => PlayCreds -> Text -> m (Either PlayApiError PlayRolloutState)
-getTrackRolloutState creds pkg = liftIO $ withPlayToken creds $ \token -> do
-    eEdit <- createEdit token pkg
-    case eEdit of
-        Left e -> pure (Left e)
-        Right editId -> do
-            res <- getProductionTrack token pkg editId
-            _ <- try @SomeException (deleteEdit token pkg editId) -- read-only: discard edit
-            pure res
+getTrackRolloutState creds pkg = liftIO $ withPlayToken creds $ \token ->
+    withEdit token pkg $ \editId -> getProductionTrack token pkg editId
 
 {- | Read the current production-track "What's New" / release notes (first
 non-empty locale text of the live/last release). Used to pre-fill the promote
 dialog for a store-synced release, where SCC has no changelog of its own.
 'Nothing' when the track has no release with notes. Read-only: the throwaway
-edit is abandoned. -}
+edit is abandoned.
+-}
 getProductionReleaseNotes ::
     (MonadFlow m) => PlayCreds -> Text -> m (Either PlayApiError (Maybe Text))
-getProductionReleaseNotes creds pkg = liftIO $ withPlayToken creds $ \token -> do
-    eEdit <- createEdit token pkg
-    case eEdit of
-        Left e -> pure (Left e)
-        Right editId -> do
-            res <- getProductionTrackNotes token pkg editId
-            _ <- try @SomeException (deleteEdit token pkg editId) -- read-only: discard edit
-            pure res
+getProductionReleaseNotes creds pkg = liftIO $ withPlayToken creds $ \token ->
+    withEdit token pkg $ \editId -> getProductionTrackNotes token pkg editId
 
 -- | GET the production track and parse the first non-empty release-notes text.
 getProductionTrackNotes :: Text -> Text -> Text -> IO (Either PlayApiError (Maybe Text))
@@ -576,8 +578,9 @@ getProductionTrackNotes token pkg editId = do
             | otherwise -> Left (PlayHttpError s (TE.decodeUtf8 (LBS.toStrict b)))
         Left e -> Left (PlayHttpError 0 (T.pack (show e)))
 
--- | First non-empty release-notes text from a production-track GET body. Prefers
--- the @completed@ release, else the first release. Exposed for unit testing.
+{- | First non-empty release-notes text from a production-track GET body. Prefers
+the @completed@ release, else the first release. Exposed for unit testing.
+-}
 parseProdReleaseNotes :: LBS.ByteString -> Maybe Text
 parseProdReleaseNotes bs = do
     TrackBody rels <- decode bs
@@ -594,7 +597,8 @@ its name, highest version code, raw Play @status@ (@inProgress@ | @halted@ |
 
 Unlike 'PlayRolloutState' (which collapses the track to a single chosen
 release), this keeps every release so the caller can compare an in-flight
-submission against the live (@completed@) one. -}
+submission against the live (@completed@) one.
+-}
 data ProdTrackRelease = ProdTrackRelease
     { ptrName :: Text
     , ptrCode :: Int32
@@ -608,17 +612,12 @@ instance FromJSON ProdTrackRelease
 
 {- | Read every release on the production track (name, code, status, fraction).
 Read-only: the throwaway edit is abandoned, like 'getProductionReleaseNotes'.
-404 (no production track yet) → an empty list. -}
+404 (no production track yet) → an empty list.
+-}
 getProductionReleases ::
     (MonadFlow m) => PlayCreds -> Text -> m (Either PlayApiError [ProdTrackRelease])
-getProductionReleases creds pkg = liftIO $ withPlayToken creds $ \token -> do
-    eEdit <- createEdit token pkg
-    case eEdit of
-        Left e -> pure (Left e)
-        Right editId -> do
-            res <- getProductionTrackReleases token pkg editId
-            _ <- try @SomeException (deleteEdit token pkg editId) -- read-only: discard edit
-            pure res
+getProductionReleases creds pkg = liftIO $ withPlayToken creds $ \token ->
+    withEdit token pkg $ \editId -> getProductionTrackReleases token pkg editId
 
 -- | GET the production track and parse all of its releases.
 getProductionTrackReleases :: Text -> Text -> Text -> IO (Either PlayApiError [ProdTrackRelease])
@@ -642,7 +641,8 @@ getProductionTrackReleases token pkg editId = do
 
 {- | Pure parse of a production-track GET body into every release it lists.
 Missing @name@ → "0.0.0"; missing @status@ → "draft". Exposed for unit testing.
-A body that doesn't decode → an empty list (no releases). -}
+A body that doesn't decode → an empty list (no releases).
+-}
 parseProdTrackReleases :: LBS.ByteString -> [ProdTrackRelease]
 parseProdTrackReleases bs = case decode bs :: Maybe TrackBody of
     Nothing -> []
@@ -660,7 +660,8 @@ parseProdTrackReleases bs = case decode bs :: Maybe TrackBody of
 
 {- | A single store track's current state for the release-monitoring dashboard:
 the leading release's version / code / status / staged-rollout fraction, plus the
-first non-empty "What's New" note. -}
+first non-empty "What's New" note.
+-}
 data StoreTrackSnapshot = StoreTrackSnapshot
     { stsTrack :: Text
     -- ^ "production" | "internal"
@@ -678,7 +679,8 @@ instance ToJSON StoreTrackSnapshot
 instance FromJSON StoreTrackSnapshot
 
 {- | Fetch the production + internal track snapshots for a Play package in one edit
-round-trip (create edit → GET both tracks → discard edit). Read-only. -}
+round-trip (create edit → GET both tracks → discard edit). Read-only.
+-}
 fetchTrackSnapshots ::
     (MonadFlow m) => PlayCreds -> Text -> m (Either PlayApiError [StoreTrackSnapshot])
 fetchTrackSnapshots (PlayCreds saJson) packageName =
@@ -693,21 +695,17 @@ runFetchSnapshots sa packageName = do
     eToken <- mintAndExchange sa
     case eToken of
         Left err -> pure (Left err)
-        Right token -> do
-            eEdit <- createEdit token packageName
-            case eEdit of
-                Left err -> pure (Left err)
-                Right editId -> do
-                    eInternal <- fetchTrackBody token packageName editId "internal"
-                    eProd <- fetchTrackBody token packageName editId "production"
-                    _ <- try @SomeException (deleteEdit token packageName editId)
-                    pure $
-                        (\i p -> [parseTrackSnapshot "internal" i, parseTrackSnapshot "production" p])
-                            <$> eInternal
-                            <*> eProd
+        Right token -> withEdit token packageName $ \editId -> do
+            eInternal <- fetchTrackBody token packageName editId "internal"
+            eProd <- fetchTrackBody token packageName editId "production"
+            pure $
+                (\i p -> [parseTrackSnapshot "internal" i, parseTrackSnapshot "production" p])
+                    <$> eInternal
+                    <*> eProd
 
--- | GET a track and return the raw body (404 → "{}" so it parses to the "none"
--- snapshot). Like 'fetchTrack', but defers parsing to 'parseTrackSnapshot'.
+{- | GET a track and return the raw body (404 → "{}" so it parses to the "none"
+snapshot). Like 'fetchTrack', but defers parsing to 'parseTrackSnapshot'.
+-}
 fetchTrackBody :: Text -> Text -> Text -> Text -> IO (Either PlayApiError LBS.ByteString)
 fetchTrackBody token packageName editId trackName = do
     let url = playBase <> packageName <> "/edits/" <> editId <> "/tracks/" <> trackName
@@ -730,20 +728,91 @@ fetchTrackBody token packageName editId trackName = do
 {- | Parse a track GET body into a 'StoreTrackSnapshot' — the leading release
 (active staged rollout if any, else the latest) with its version / code / status /
 fraction / first non-empty note. Empty / undecodable → the "none" snapshot.
-Exposed for unit testing. -}
+Exposed for unit testing.
+-}
 parseTrackSnapshot :: Text -> LBS.ByteString -> StoreTrackSnapshot
-parseTrackSnapshot track bs = case decode bs :: Maybe TrackBody of
-    Just (TrackBody rels)
-        | Just r <- pickRolloutRelease rels ->
-            StoreTrackSnapshot
-                { stsTrack = track
-                , stsVersion = fromMaybe "0.0.0" (rName r)
-                , stsCode = case maxVersionCode (rVersionCodes r) of 0 -> Nothing; n -> Just n
-                , stsStatus = fromMaybe "draft" (rStatus r)
-                , stsFraction = rUserFraction r
-                , stsNotes = find (not . T.null . T.strip) (rReleaseNotes r)
-                }
-    _ -> StoreTrackSnapshot track "0.0.0" Nothing "none" Nothing Nothing
+parseTrackSnapshot track bs =
+    -- One representative-release pick per track (shared with 'trackInfoFrom', so the
+    -- monitor cell and release list can't diverge): production = serving version,
+    -- internal/testflight = latest build by code.
+    let pick = representativeRelease track
+     in case decode bs :: Maybe TrackBody of
+            Just (TrackBody rels)
+                | Just r <- pick rels ->
+                    StoreTrackSnapshot
+                        { stsTrack = track
+                        , stsVersion = fromMaybe "0.0.0" (rName r)
+                        , stsCode = case maxVersionCode (rVersionCodes r) of 0 -> Nothing; n -> Just n
+                        , stsStatus = fromMaybe "draft" (rStatus r)
+                        , stsFraction = rUserFraction r
+                        , stsNotes = find (not . T.null . T.strip) (rReleaseNotes r)
+                        }
+            _ -> StoreTrackSnapshot track "0.0.0" Nothing "none" Nothing Nothing
+
+-- ─── Consolidated single-edit read (quota-friendly) ────────────────────────
+
+{- | Both raw track GET bodies (internal, production) read under ONE Play edit.
+
+The Play Developer API has no edit-free way to read a track, and Google caps
+edit /creation/ per day (the @"Daily edit creation quota exceeded"@ 403). So on a
+refresh, every consumer that needs an app's Play track state — next-version tracks,
+the production-release list, the monitor snapshots — derives from this single fetch
+via the pure @bodiesTo*@ projections below, instead of each minting its own
+throwaway edit. That collapses ~3 edits/app to 1. A 404 on a track yields @"{}"@
+(parses to the "none"/baseline release), so a brand-new app still returns
+successfully.
+-}
+data PlayTrackBodies = PlayTrackBodies
+    { ptbInternal :: LBS.ByteString
+    , ptbProduction :: LBS.ByteString
+    }
+
+fetchPlayTrackBodies ::
+    (MonadFlow m) => PlayCreds -> Text -> m (Either PlayApiError PlayTrackBodies)
+fetchPlayTrackBodies (PlayCreds saJson) packageName =
+    case parseServiceAccount saJson of
+        Left e -> do
+            logError $ "[play-console] bad service-account JSON: " <> T.pack e
+            pure (Left PlayUnauthorized)
+        Right sa -> liftIO (runFetchBodies sa packageName)
+
+runFetchBodies :: ServiceAccount -> Text -> IO (Either PlayApiError PlayTrackBodies)
+runFetchBodies sa packageName = do
+    eToken <- mintAndExchange sa
+    case eToken of
+        Left err -> pure (Left err)
+        Right token -> withEdit token packageName $ \editId -> do
+            eInternal <- fetchTrackBody token packageName editId "internal"
+            eProd <- fetchTrackBody token packageName editId "production"
+            pure (PlayTrackBodies <$> eInternal <*> eProd)
+
+{- | (internal, production) 'TrackInfo' from the cached bodies — the
+'fetchPlayTracks' result without a second edit.
+-}
+bodiesToTracks :: PlayTrackBodies -> (TrackInfo, TrackInfo)
+bodiesToTracks (PlayTrackBodies i p) = (decodeTrackInfo "internal" i, decodeTrackInfo "production" p)
+  where
+    decodeTrackInfo trk b = trackInfoFrom trk (fromMaybe (TrackBody []) (decode b))
+
+{- | The per-track monitor snapshots from the cached bodies — the
+'fetchTrackSnapshots' result without a second edit.
+-}
+bodiesToSnapshots :: PlayTrackBodies -> [StoreTrackSnapshot]
+bodiesToSnapshots (PlayTrackBodies i p) =
+    [parseTrackSnapshot "internal" i, parseTrackSnapshot "production" p]
+
+{- | Every production-track release from the cached body — the
+'getProductionReleases' result without a second edit.
+-}
+bodiesToProdReleases :: PlayTrackBodies -> [ProdTrackRelease]
+bodiesToProdReleases (PlayTrackBodies _ p) = parseProdTrackReleases p
+
+{- | The production-track rollout state from the cached body — the
+'getTrackRolloutState' result without a second edit. Lets the rollout reconciler
+run off the same single read instead of minting its own edit.
+-}
+bodiesToRolloutState :: PlayTrackBodies -> PlayRolloutState
+bodiesToRolloutState (PlayTrackBodies _ p) = fromMaybe emptyRolloutState (parseRolloutState p)
 
 -- ── IO helpers ──
 
@@ -853,6 +922,58 @@ pickRolloutRelease rels =
         [] -> case rels of
             (r : _) -> Just r
             [] -> Nothing
+
+{- | Production staged-rollout floor (fraction). At/below this a @userFraction@ is the
+parked review/pending fraction (~1e-6), not a real ramp. Mirrors StoreSync's
+@androidPendingFractionThreshold@ (kept local to avoid a circular import).
+-}
+productionRolloutFloor :: Double
+productionRolloutFloor = 0.01
+
+{- | Pick the release that represents the CURRENT production activity for the monitor
+cell + rollout reflection. Priority:
+
+  1. the ACTIVE staged rollout — an @inProgress@/@halted@ release ramping at/above the
+     rollout floor (a real rollout, NOT a parked near-zero review fraction); highest
+     @userFraction@ wins;
+  2. else the live baseline — the highest @completed@ release;
+  3. else the first release.
+
+This is the key fix for staged rollouts: a new version rolling out on production (e.g.
+5%) sits ALONGSIDE the previous @completed@ baseline, so picking "completed first" (the
+old behavior) hid the ramp and mis-badged the row as Internal/Completed. It also still
+ignores a freshly-submitted near-zero review release, so that can't masquerade as the
+rollout either.
+-}
+pickLiveRelease :: [Release] -> Maybe Release
+pickLiveRelease rels =
+    case filter ramping rels of
+        (r : rs) -> Just (foldl' higherFrac r rs)
+        [] -> case filter isCompleted rels of
+            (r : rs) -> Just (foldl' higherCode r rs)
+            [] -> listToMaybe rels
+  where
+    ramping r =
+        rStatus r `elem` [Just "inProgress", Just "halted"]
+            && maybe False (>= productionRolloutFloor) (rUserFraction r)
+    isCompleted r = rStatus r == Just "completed"
+    higherFrac a b = if fromMaybe 0 (rUserFraction a) >= fromMaybe 0 (rUserFraction b) then a else b
+    higherCode a b = if maxVersionCode (rVersionCodes a) >= maxVersionCode (rVersionCodes b) then a else b
+
+-- | Latest build by version code, any status or array order (internal / TestFlight).
+pickLatestByCode :: [Release] -> Maybe Release
+pickLatestByCode [] = Nothing
+pickLatestByCode rs = Just (foldl1 higherCode rs)
+  where
+    higherCode a b = if maxVersionCode (rVersionCodes a) >= maxVersionCode (rVersionCodes b) then a else b
+
+{- | The representative release for a track — one pick shared by the monitor cell and the
+next-version reads so they can't diverge. Production = what's SERVING ('pickLiveRelease');
+internal / testflight = the latest build by code ('pickLatestByCode').
+-}
+representativeRelease :: Text -> [Release] -> Maybe Release
+representativeRelease "production" = pickLiveRelease
+representativeRelease _ = pickLatestByCode
 
 -- ─── Server-config helper ──────────────────────────────────────────
 

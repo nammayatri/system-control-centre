@@ -66,7 +66,7 @@ import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Changelog (bumpPatch, renderRevertChangelog)
 import Products.Autopilot.Mobile.Github (CommitDetail (..), createGitRef, getCommitInfo)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
-import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), compareRefs, crCommits, crStatus, crTotalCommits, shortSha)
+import Products.Autopilot.Mobile.Github.Compare (CommitInfo (..), compareRefs, crCommits, crStatus, crTotalCommits, isBotCommit, shortSha)
 import Products.Autopilot.Mobile.Queries.AppCatalog (
     LatestBuildRow (..),
     fetchLatestBuildsForApp,
@@ -294,10 +294,13 @@ mobileRevertDiffH _ap releaseId' source = do
                         <> e
                     )
         Right cr ->
-            pure
+            -- Bot/CI commits get rolled back too, but listing them buys nothing —
+            -- show (and count) the human changes being reverted.
+            let humans = filter (not . isBotCommit) (crCommits cr)
+             in pure
                 RevertDiffResp
-                    { rdfCommits = map toRevertCommit (crCommits cr)
-                    , rdfCommitCount = crTotalCommits cr
+                    { rdfCommits = map toRevertCommit humans
+                    , rdfCommitCount = crTotalCommits cr - (length (crCommits cr) - length humans)
                     , rdfBaseRef = src
                     , rdfHeadRef = headRef
                     , rdfStatus = crStatus cr
@@ -396,7 +399,7 @@ draftForSCCRevert bad badState storeVersion storeVersionCode = do
                 compareRes <- compareRefs creds (gitOwner ac) (gitRepo ac) srcTag badTag
                 case compareRes of
                     Right cr ->
-                        let cs = crCommits cr
+                        let cs = filter (not . isBotCommit) (crCommits cr)
                             cl =
                                 renderRevertChangelog
                                     (rtNewVersion bad)
@@ -562,6 +565,8 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
                 , -- Inherit the bad release's store destination so a reverted
                   -- provider prod Android build re-targets the same place.
                   mbcDestination = badState >>= (mbcDestination . mbContext)
+                , -- A revert is system-initiated; it never opts into a changelog post.
+                  mbcChangelogSummary = Nothing
                 }
         targetState =
             MobileBuildTargetState

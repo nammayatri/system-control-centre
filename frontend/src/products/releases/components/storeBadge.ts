@@ -25,11 +25,6 @@ export interface StoreBadge {
 // backend's androidRolloutFloorPercent so the two never disagree.
 const ROLLOUT_FLOOR = 1;
 
-/** A rollout %, trimmed to 1 decimal (10 → "10", 12.5 → "12.5"). */
-export function formatRolloutPercent(pct: number): string {
-  return `${Math.round(pct * 10) / 10}`;
-}
-
 export interface ActiveRollout {
   pct: number;
   halted: boolean;
@@ -49,38 +44,50 @@ export function activeRolloutOf(cell: TrackCell | null): ActiveRollout | null {
   return null;
 }
 
+/** Which store track a cell belongs to — drives the testing-track badges. */
+export type TrackKind = 'production' | 'internal' | 'testflight';
+
 /**
  * Derive the lifecycle badge for a single track cell. `null`/`none` tracks
  * collapse to an em-dash so empty rows read as "nothing here" rather than a
  * misleading status.
  *
- * Precedence: a terminal review verdict (rejected / in-review) first, then the
- * LIVE rollout state (halted / actively ramping) — an active ramp outranks the
- * prior "approved", so a build approved AND rolling out at 10% reads "Rolling
- * out 10%", while one approved but still parked at the pending fraction reads
- * "Approved · held".
+ * The TESTING tracks (internal / testflight) are never "live to users", so they
+ * badge by track — an internal build reads "Internal", not "Live". (A review /
+ * rollout is a production-track concept and is mirrored onto the production cell,
+ * so the testing cell only ever reports the build sitting on that testing track.)
+ *
+ * Production precedence: a terminal review verdict (rejected / in-review) first,
+ * then the LIVE rollout state (halted / actively ramping) — an active ramp
+ * outranks the prior "approved", so a build approved AND rolling out at 10% reads
+ * "Rolling out 10%", while one approved but still parked at the pending fraction
+ * reads "Approved · held".
  */
-export function deriveStoreBadge(cell: TrackCell | null): StoreBadge {
+export function deriveStoreBadge(cell: TrackCell | null, track: TrackKind = 'production'): StoreBadge {
   if (!cell) return { label: '—', variant: 'muted' };
 
-  const { status, reviewStatus, rolloutPercent: pct } = cell;
+  const { status } = cell;
 
-  if (reviewStatus === 'rejected') return { label: 'Rejected', variant: 'danger' };
-  if (reviewStatus === 'in_review') return { label: 'In review', variant: 'purple' };
-
-  // Live rollout state beats "approved" — once it's moving (or halted mid-ramp)
-  // that's the headline, not the approval that preceded it.
-  const ar = activeRolloutOf(cell);
-  if (ar?.halted) return { label: `Halted @ ${formatRolloutPercent(ar.pct)}%`, variant: 'warning' };
-  if (ar) return { label: `Rolling out ${formatRolloutPercent(ar.pct)}%`, variant: 'info' };
-
-  // Approved but not yet ramping (parked at the pending fraction / held).
-  if (reviewStatus === 'approved') return { label: 'Approved · held', variant: 'success' };
-
-  if (status === 'live' || status === 'completed') {
-    return { label: pct === 100 ? 'Live · 100%' : 'Live', variant: 'success' };
+  // Testing tracks: badge purely by track (an internal/TestFlight build is "available
+  // for testing", never "Live"). The production-review verdict (In review / Approved ·
+  // held / Rejected) is NOT shown here — it belongs to the dedicated Incoming cell, so
+  // surfacing it on the testing row too would double-show the same state.
+  if (track === 'internal' || track === 'testflight') {
+    if (status == null || status === 'none') return { label: '—', variant: 'muted' };
+    return track === 'internal'
+      ? { label: 'Internal', variant: 'blue' }
+      : { label: 'TestFlight', variant: 'info' };
   }
 
+  // Production cell: render the ONE canonical backend displayStatus when present.
+  // The BE maps the cell through the SAME phase the release list uses (observedToPhase
+  // → displayStatus), so the monitor and the list can't drift. The precedence ladder
+  // (review verdict vs rollout vs approved) now lives there, not here.
+  if (cell.displayLabel && cell.displayVariant) {
+    return { label: cell.displayLabel, variant: cell.displayVariant };
+  }
+
+  // No lifecycle phase: an iOS TestFlight-VALID build on the production query, or empty.
   if (status === 'VALID') return { label: 'TestFlight', variant: 'info' };
 
   return { label: '—', variant: 'muted' };
