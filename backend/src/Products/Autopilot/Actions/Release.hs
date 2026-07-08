@@ -48,7 +48,7 @@ import Control.Monad (void, when)
 import Control.Monad.Catch (throwM, try)
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..))
-import Core.Auth.Protected (AuthedPerson (..))
+import Core.Auth.Protected (AuthedPerson (..), requireDeploymentPermission)
 import Core.Config (Config (..))
 import Core.DB.Connection (withConn)
 import Core.Environment (Flow, forkFlow, getConfig, getDBEnv, logInfo)
@@ -60,8 +60,11 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Char8 qualified as B
 import Data.ByteString.Lazy.Char8 qualified as LBS
 import Data.Foldable qualified as F
+import Data.Int (Int32)
 import Data.List (find)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
+import Data.Proxy (Proxy (..))
 import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -78,6 +81,11 @@ import Products.Autopilot.EventLog (logStatusUpdated)
 import Products.Autopilot.K8s.Deployment (buildPatchDeploymentEnvsCommand, deploymentExists, getRunningSchedulerVersion)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
+import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), displayStatusInferred, phaseFromFields, phaseSlug, variantSlug)
+import Products.Autopilot.Mobile.Queries.StoreStatus (StoreCell, productionVersionsByApp, resolveStoreState, storeCellsByApp)
+import Products.Autopilot.Mobile.StoreSync (versionOlderThan)
+import Products.Autopilot.Mobile.Types (mbContext, mbWfStatus)
 import Products.Autopilot.Notifications
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ReleaseTracker
@@ -88,15 +96,9 @@ import Products.Autopilot.Sync (triggerImmediateRevertSync)
 import Products.Autopilot.Types
 import Products.Autopilot.Types qualified as NT
 import Products.Autopilot.Types.API
+import Products.Autopilot.Types.Permission (AutopilotPermission (..))
 import Products.Autopilot.Types.Storage.Schema qualified as S
 import Products.Autopilot.Types.Target (TargetState (..))
-import Products.Autopilot.Mobile.Types (mbContext, mbWfStatus)
-import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
-import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), displayStatusInferred, phaseFromFields, phaseSlug, variantSlug)
-import Products.Autopilot.Mobile.Queries.StoreStatus (StoreCell, productionVersionsByApp, resolveStoreState, storeCellsByApp)
-import Products.Autopilot.Mobile.StoreSync (versionOlderThan)
-import Data.Map.Strict qualified as Map
-import Data.Int (Int32)
 import Products.Autopilot.Types.Target.Kubernetes
 import Products.Autopilot.Types.Target.Kubernetes qualified as K8s
 import Products.Autopilot.Workflow.Helpers (captureDeploymentPreview, captureDeploymentSnapshot)
@@ -123,7 +125,8 @@ applyMaybe (Just x) f acc = f x acc
 -- ============================================================================
 
 upsertProductH :: AuthedPerson -> UpsertProductReq -> Flow APIResponse
-upsertProductH _ap req =
+upsertProductH ap req = do
+  requireDeploymentPermission (Proxy :: Proxy 'AP_PRODUCT_CONFIG_EDIT) ap req.appGroup
   case normalizeProductType req.productType of
     Left err -> pure $ APIResponse "ERROR" err
     Right canonical -> do
@@ -225,7 +228,8 @@ listServicesH _ap productName' = do
               | otherwise -> pure $ map toResponse hosts
 
 upsertServiceH :: AuthedPerson -> UpsertServiceReq -> Flow APIResponse
-upsertServiceH _ap req = do
+upsertServiceH ap req = do
+  requireDeploymentPermission (Proxy :: Proxy 'AP_PRODUCT_CONFIG_EDIT) ap req.appGroup
   upsertService req.rolloutStrategyText req.decisionConfigText req.service req.appGroup req.serviceType req.serviceHost req.revertStrategyText
   pure $ APIResponse "SUCCESS" "release_config upserted"
 
@@ -266,13 +270,12 @@ listReleasesH _ap mFrom mTo mCategory = do
       Just ["BackendService", "BackendScheduler", "BackendConfig"]
     categoryWhitelist _ = Nothing
 
-{- | Inject a per-row @promotable@ flag (BE truth) into a mobile release's release_context:
-True when the build is ahead of production — a NEWER marketing version, or the same version
-with a HIGHER build number. Mirrors the promote handler's gate (and is version-first so iOS,
-whose build number resets per marketing version, isn't wrongly marked superseded). Non-mobile
-rows are left untouched (no flag → the FE keeps its own stage logic); an app with no synced
-production is promotable by default.
--}
+-- | Inject a per-row @promotable@ flag (BE truth) into a mobile release's release_context:
+-- True when the build is ahead of production — a NEWER marketing version, or the same version
+-- with a HIGHER build number. Mirrors the promote handler's gate (and is version-first so iOS,
+-- whose build number resets per marketing version, isn't wrongly marked superseded). Non-mobile
+-- rows are left untouched (no flag → the FE keeps its own stage logic); an app with no synced
+-- production is promotable by default.
 injectPromotable :: Map.Map (Text, Text, Text) (Text, Maybe Int32) -> TrackerWithTarget -> TrackerWithTarget
 injectPromotable prods pair@(tracker, mts) =
   case mts of
@@ -293,13 +296,12 @@ injectPromotable prods pair@(tracker, mts) =
     codeAtOrBelow (Just b) (Just p) = b <= p
     codeAtOrBelow _ _ = False
 
-{- | §16 read model for the list: REVIEW comes from the ROW (the setPhase-owned
-decision, immediate); rollout / % / track presence come from store_status (the
-per-track live truth), matched by (version, code) with production-precedence.
-A build not currently on any track is left as serialized — 'fromRow' already
-derived its baseline from the row's own columns (terminal / SCC state).
-Non-mobile rows are untouched.
--}
+-- | §16 read model for the list: REVIEW comes from the ROW (the setPhase-owned
+-- decision, immediate); rollout / % / track presence come from store_status (the
+-- per-track live truth), matched by (version, code) with production-precedence.
+-- A build not currently on any track is left as serialized — 'fromRow' already
+-- derived its baseline from the row's own columns (terminal / SCC state).
+-- Non-mobile rows are untouched.
 injectStoreState :: Map.Map (Text, Text, Text) [StoreCell] -> TrackerWithTarget -> TrackerWithTarget
 injectStoreState cellsByApp pair@(tracker, mts) =
   case mts of
@@ -320,6 +322,7 @@ injectStoreState cellsByApp pair@(tracker, mts) =
 
 createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseH ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq {..} = do
+  requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_CREATE) ap appGroup
   -- System-triggered (cross-cluster sync) requests already carry the real
   -- release manager's email in the payload; only stamp the authenticated
   -- caller's email for direct, user-initiated creates.
@@ -807,11 +810,12 @@ getReleaseH _ap rid = do
   pure (fmap fst m)
 
 approveReleaseH :: AuthedPerson -> Text -> ApproveReleaseReq -> Flow (Maybe ReleaseTracker)
-approveReleaseH _ap rid req = do
+approveReleaseH ap rid req = do
   m <- findReleaseTracker rid
   case m of
     Nothing -> throwM $ NotFound ("Release not found: " <> rid)
     Just (tracker, mTargetState) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_APPROVE) ap (NT.appGroup tracker)
       -- Pre-check (cheap, friendly errors)
       if NT.status tracker /= CREATED
         then throwM $ BadRequest ("Cannot approve release in status " <> T.pack (show (NT.status tracker)) <> ". Only CREATED releases can be approved.")
@@ -840,11 +844,12 @@ approveReleaseH _ap rid req = do
                   pure (Just updated)
 
 triggerReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
-triggerReleaseH _ap rid TriggerReleaseReq {..} = do
+triggerReleaseH ap rid TriggerReleaseReq {..} = do
   m <- findReleaseTracker rid
   case m of
     Nothing -> pure $ APIResponse "ERROR" "Release not found"
     Just (tracker, mTargetState) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_CREATE) ap (NT.appGroup tracker)
       let oldStatus = NT.status tracker
       if isTerminalStatus oldStatus
         then pure $ APIResponse "ERROR" ("Cannot trigger from terminal status: " <> T.pack (show oldStatus))
@@ -859,11 +864,12 @@ triggerReleaseH _ap rid TriggerReleaseReq {..} = do
             else pure staleTrackerError
 
 rollbackReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
-rollbackReleaseH _ap rid TriggerReleaseReq {..} = do
+rollbackReleaseH ap rid TriggerReleaseReq {..} = do
   m <- findReleaseTracker rid
   case m of
     Nothing -> pure $ APIResponse "ERROR" "Release not found"
     Just (tracker, mTargetState) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_REVERT) ap (NT.appGroup tracker)
       let oldStatus = NT.status tracker
       if not (validateStatusTransition oldStatus ABORTING)
         then pure $ APIResponse "ERROR" ("Cannot rollback from status: " <> T.pack (show oldStatus))
@@ -877,12 +883,13 @@ rollbackReleaseH _ap rid TriggerReleaseReq {..} = do
             else pure staleTrackerError
 
 revertReleaseH :: AuthedPerson -> Text -> RevertReleaseReq -> Flow APIResponse
-revertReleaseH _ap rid req = do
+revertReleaseH ap rid req = do
   cfg <- getConfig
   m <- findReleaseTracker rid
   case m of
     Nothing -> pure $ APIResponse "ERROR" "Release not found"
     Just (tracker, mTargetState) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_REVERT) ap (NT.appGroup tracker)
       let oldCtx = case mTargetState of
             Just (K8sState k8s) -> context k8s
             _ -> defaultK8sReleaseContext
@@ -1039,11 +1046,12 @@ immediateRevertByGlobalIdH ap gid = do
     Just (tracker, _) -> revertReleaseH ap (releaseId tracker) (RevertReleaseReq Nothing Nothing (Just True) Nothing)
 
 discardReleaseH :: AuthedPerson -> Text -> DiscardReleaseReq -> Flow APIResponse
-discardReleaseH _ap rid DiscardReleaseReq {..} = do
+discardReleaseH ap rid DiscardReleaseReq {..} = do
   m <- findReleaseTracker rid
   case m of
     Nothing -> pure $ APIResponse "ERROR" "Release not found"
     Just (tracker, mTargetState) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_DISCARD) ap (NT.appGroup tracker)
       let oldStatus = NT.status tracker
       if not (validateStatusTransition oldStatus DISCARDED)
         then pure $ APIResponse "ERROR" ("Cannot discard from status: " <> T.pack (show oldStatus))
@@ -1060,12 +1068,13 @@ discardReleaseH _ap rid DiscardReleaseReq {..} = do
             else pure staleTrackerError
 
 deleteReleaseH :: AuthedPerson -> Text -> Flow APIResponse
-deleteReleaseH _ap rid = do
+deleteReleaseH ap rid = do
   db <- getDBEnv
   mTracker <- findReleaseTracker rid
   case mTracker of
     Nothing -> pure $ APIResponse "ERROR" "Release not found"
     Just (tracker, _) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_DELETE) ap (NT.appGroup tracker)
       -- Block deletion of active releases (INPROGRESS, ABORTING, REVERTING, PAUSED, RESTARTING)
       let activeStatuses = [INPROGRESS, ABORTING, REVERTING, PAUSED, RESTARTING]
       if NT.status tracker `elem` activeStatuses
@@ -1078,11 +1087,12 @@ deleteReleaseH _ap rid = do
           pure $ APIResponse "SUCCESS" ("Release deleted: " <> rid)
 
 updateTrackerH :: AuthedPerson -> Text -> K8sUpdateTrackerReq -> Flow APIResponse
-updateTrackerH _ap rid req = do
+updateTrackerH ap rid req = do
   m <- findReleaseTracker rid
   case m of
     Nothing -> pure $ APIResponse "ERROR" "Release not found"
     Just (tracker, mTargetState) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_UPDATE) ap (NT.appGroup tracker)
       let oldStatus = NT.status tracker
           oldStatusText = releaseStatusToText oldStatus
       -- Validate the update request against rollout-strategy invariants
@@ -1654,12 +1664,13 @@ getTxt' key obj = case KM.lookup (K.fromText key) obj of Just (String t) -> Just
 --    the tracker history should not be rewritten. Operators see the in-place
 --    image swap via the IMMEDIATE_REVERT audit event on the same tracker.
 immediateRevertH :: AuthedPerson -> Text -> ImmediateRevertReq -> Flow APIResponse
-immediateRevertH _ap rid req@ImmediateRevertReq {isRevertSync = mIsRevertSync} = do
+immediateRevertH ap rid req@ImmediateRevertReq {isRevertSync = mIsRevertSync} = do
   cfg <- getConfig
   m <- findReleaseTracker rid
   case m of
     Nothing -> pure $ APIResponse "ERROR" "Release not found"
     Just (tracker, mTargetState) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_REVERT) ap (NT.appGroup tracker)
       let hasEnvChange = maybe False (not . T.null) (NT.envOverrideData tracker)
           currentStatus = NT.status tracker
       -- Block immediate revert when the release carried env changes.
@@ -1884,12 +1895,13 @@ immediateRevertH _ap rid req@ImmediateRevertReq {isRevertSync = mIsRevertSync} =
 -- new-version deployment must still exist in k8s (otherwise the workflow
 -- has nothing to scale up).
 restartReleaseH :: AuthedPerson -> Text -> RestartReleaseReq -> Flow APIResponse
-restartReleaseH _ap rid req = do
+restartReleaseH ap rid req = do
   cfg <- getConfig
   m <- findReleaseTracker rid
   case m of
     Nothing -> pure $ APIResponse "ERROR" "Release not found"
     Just (tracker, mTargetState) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_CREATE) ap (NT.appGroup tracker)
       let currentStatus = NT.status tracker
       if currentStatus /= ABORTED && currentStatus /= USER_ABORTED && currentStatus /= REVERTED && currentStatus /= DISCARDED
         then pure $ APIResponse "ERROR" ("Cannot restart from status: " <> T.pack (show currentStatus) <> ". Valid: ABORTED, USER_ABORTED, REVERTED, DISCARDED")
@@ -2061,12 +2073,13 @@ restartReleaseH _ap rid req = do
                           pure $ APIResponse "SUCCESS" ("Restart created: " <> newRid)
 
 rolloutRestartDeploymentH :: AuthedPerson -> Text -> RestartReleaseReq -> Flow APIResponse
-rolloutRestartDeploymentH _ap rid req = do
+rolloutRestartDeploymentH ap rid req = do
   cfg <- getConfig
   m <- findReleaseTracker rid
   case m of
     Nothing -> pure $ APIResponse "ERROR" "Release not found"
     Just (tracker, mTargetState) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_UPDATE) ap (NT.appGroup tracker)
       let currentStatus = NT.status tracker
       if currentStatus /= COMPLETED
         then
@@ -2132,6 +2145,7 @@ fastForwardH ap rid req = do
   case m of
     Nothing -> pure $ APIResponse "ERROR" "Release not found"
     Just (tracker, mTargetState) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_UPDATE) ap (NT.appGroup tracker)
       let currentStatus = NT.status tracker
       if currentStatus /= INPROGRESS
         then pure $ APIResponse "ERROR" ("Cannot fast-forward from status: " <> T.pack (show currentStatus) <> ". Must be INPROGRESS")
