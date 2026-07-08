@@ -26,8 +26,9 @@ def buildAndPushFrontend(String registryTag, String apiBaseUrl) {
   sh "docker push ${registryTag}"
 }
 
+
 def buildAndPushBackend(String registryTag) {
-  sh "docker build --platform=linux/amd64 -t ${registryTag} ./backend"
+  sh "DOCKER_BUILDKIT=1 docker build --platform=linux/amd64 -t ${registryTag} ./backend"
   sh "docker push ${registryTag}"
 }
 
