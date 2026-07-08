@@ -7,6 +7,8 @@ export {
   deactivateUser,
   assignRole,
   revokeProductAccess,
+  assignDeploymentRole,
+  revokeDeploymentAccess,
   addPermissionOverride,
   removePermissionOverride,
   fetchAdminProducts,

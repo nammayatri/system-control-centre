@@ -103,6 +103,26 @@ export async function revokeProductAccess(userId: string, productSlug: string): 
   return data;
 }
 
+
+export async function assignDeploymentRole(
+  userId: string,
+  payload: { productSlug: string; appGroup: string; roleId: string }
+): Promise<any> {
+  const { data } = await apiClient.post(`/admin/users/${userId}/assign-deployment-role`, payload);
+  return data;
+}
+
+export async function revokeDeploymentAccess(
+  userId: string,
+  productSlug: string,
+  appGroup: string
+): Promise<any> {
+  const { data } = await apiClient.delete(
+    `/admin/users/${userId}/deployment-access/${productSlug}/${appGroup}`
+  );
+  return data;
+}
+
 // ─── Admin: Permission Overrides ─────────────────────────────────
 
 export async function addPermissionOverride(

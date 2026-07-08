@@ -7,12 +7,15 @@ import {
   deactivateUser,
   assignRole,
   revokeProductAccess,
+  assignDeploymentRole,
+  revokeDeploymentAccess,
   addPermissionOverride,
   removePermissionOverride,
   fetchAdminProducts,
   fetchProductPermissions,
   fetchProductRoles,
 } from '../api';
+import { fetchProducts as fetchAppGroups } from '../../../products/releases/api';
 import { Button } from '../../../shared/ui/button';
 import { Badge } from '../../../shared/ui/badge';
 import { Input, SelectInput } from '../../../shared/ui/input';
@@ -38,6 +41,7 @@ const UserDetail: React.FC = () => {
   // Dialog states
   const [editOpen, setEditOpen] = useState(false);
   const [assignOpen, setAssignOpen] = useState(false);
+  const [assignDeploymentOpen, setAssignDeploymentOpen] = useState(false);
   const [overrideOpen, setOverrideOpen] = useState(false);
   const [deactivateOpen, setDeactivateOpen] = useState(false);
 
@@ -47,6 +51,10 @@ const UserDetail: React.FC = () => {
   // Assign role form
   const [assignProduct, setAssignProduct] = useState('');
   const [assignRoleId, setAssignRoleId] = useState('');
+
+  const [assignDeployProduct, setAssignDeployProduct] = useState('');
+  const [assignDeployAppGroup, setAssignDeployAppGroup] = useState('');
+  const [assignDeployRoleId, setAssignDeployRoleId] = useState('');
 
   // Override form — multi-select
   const [overrideProduct, setOverrideProduct] = useState('');
@@ -62,16 +70,28 @@ const UserDetail: React.FC = () => {
   const user = userData?.user;
   const userProducts = userData?.products || [];
   const userOverrides = userData?.overrides || [];
+  const userDeploymentAccess = userData?.deploymentAccess || [];
 
   const { data: products = [] } = useQuery({
     queryKey: ['admin-products'],
     queryFn: fetchAdminProducts,
   });
 
+  const { data: appGroups = [] } = useQuery({
+    queryKey: ['app-groups'],
+    queryFn: fetchAppGroups,
+  });
+
   const { data: productRoles = [] } = useQuery({
     queryKey: ['admin-product-roles', assignProduct],
     queryFn: () => fetchProductRoles(assignProduct),
     enabled: !!assignProduct,
+  });
+
+  const { data: deployProductRoles = [] } = useQuery({
+    queryKey: ['admin-product-roles', assignDeployProduct],
+    queryFn: () => fetchProductRoles(assignDeployProduct),
+    enabled: !!assignDeployProduct,
   });
 
   const { data: productPermissions = [] } = useQuery({
@@ -82,6 +102,7 @@ const UserDetail: React.FC = () => {
 
   // Selected role details for display
   const selectedRole = productRoles.find((r: any) => String(r.id) === String(assignRoleId));
+  const selectedDeployRole = deployProductRoles.find((r: any) => String(r.id) === String(assignDeployRoleId));
 
   // Mutations
   const updateMut = useMutation({
@@ -127,6 +148,34 @@ const UserDetail: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: ['admin-user', id] });
     },
     onError: (err: any) => toast.error(err?.response?.data?.error || err.message || 'Failed to revoke access'),
+  });
+
+  const assignDeploymentMut = useMutation({
+    mutationFn: () =>
+      assignDeploymentRole(id!, {
+        productSlug: assignDeployProduct,
+        appGroup: assignDeployAppGroup,
+        roleId: assignDeployRoleId,
+      }),
+    onSuccess: () => {
+      toast.success('Deployment access assigned successfully');
+      queryClient.invalidateQueries({ queryKey: ['admin-user', id] });
+      setAssignDeploymentOpen(false);
+      setAssignDeployProduct('');
+      setAssignDeployAppGroup('');
+      setAssignDeployRoleId('');
+    },
+    onError: (err: any) => toast.error(err?.response?.data?.error || err.message || 'Failed to assign deployment access'),
+  });
+
+  const revokeDeploymentMut = useMutation({
+    mutationFn: ({ productSlug, appGroup }: { productSlug: string; appGroup: string }) =>
+      revokeDeploymentAccess(id!, productSlug, appGroup),
+    onSuccess: () => {
+      toast.success('Deployment access revoked');
+      queryClient.invalidateQueries({ queryKey: ['admin-user', id] });
+    },
+    onError: (err: any) => toast.error(err?.response?.data?.error || err.message || 'Failed to revoke deployment access'),
   });
 
   const addOverrideMut = useMutation({
@@ -286,78 +335,164 @@ const UserDetail: React.FC = () => {
         </div>
         {userProducts && userProducts.length > 0 ? (
           <>
-          <div className="hidden md:block overflow-x-auto">
-            <table className="w-full text-sm text-left">
-              <thead>
-                <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
-                  <th className="px-4 py-2">Product</th>
-                  <th className="px-4 py-2">Role</th>
-                  <th className="px-4 py-2">Permissions</th>
-                  <th className="px-4 py-2 w-24 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {userProducts.map((p: any, i: number) => (
-                  <tr key={p.slug || i} className={cn('border-b border-zinc-100', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
-                    <td className="px-4 py-2.5 font-medium text-zinc-800">{p.slug}</td>
-                    <td className="px-4 py-2.5">
-                      <Badge variant="info" size="sm">{p.role || p.roleName || '-'}</Badge>
-                    </td>
-                    <td className="px-4 py-2.5 text-zinc-500 font-mono text-xs">
-                      {(p.permissions || []).length} permissions
-                    </td>
-                    <td className="px-4 py-2.5 text-right">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-red-600 hover:text-red-700 hover:bg-red-50"
-                        onClick={() => {
-                          if (window.confirm(`Remove access to ${p.slug}?`)) {
-                            revokeMut.mutate(p.slug);
-                          }
-                        }}
-                        loading={revokeMut.isPending}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        Remove
-                      </Button>
-                    </td>
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead>
+                  <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+                    <th className="px-4 py-2">Product</th>
+                    <th className="px-4 py-2">Role</th>
+                    <th className="px-4 py-2">Permissions</th>
+                    <th className="px-4 py-2 w-24 text-right">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {/* Mobile cards */}
-          <div className="md:hidden space-y-2">
-            {userProducts.map((p: any, i: number) => (
-              <div key={p.slug || i} className="border border-zinc-200 rounded-lg p-3">
-                <div className="flex items-start justify-between gap-2 mb-1.5">
-                  <div className="text-sm font-medium text-zinc-800 min-w-0 flex-1 break-all">{p.slug}</div>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    className="text-red-600 hover:text-red-700 hover:bg-red-50 shrink-0"
-                    onClick={() => {
-                      if (window.confirm(`Remove access to ${p.slug}?`)) {
-                        revokeMut.mutate(p.slug);
-                      }
-                    }}
-                    loading={revokeMut.isPending}
-                    aria-label="Remove access"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
+                </thead>
+                <tbody>
+                  {userProducts.map((p: any, i: number) => (
+                    <tr key={p.slug || i} className={cn('border-b border-zinc-100', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
+                      <td className="px-4 py-2.5 font-medium text-zinc-800">{p.slug}</td>
+                      <td className="px-4 py-2.5">
+                        <Badge variant="info" size="sm">{p.role || p.roleName || '-'}</Badge>
+                      </td>
+                      <td className="px-4 py-2.5 text-zinc-500 font-mono text-xs">
+                        {(p.permissions || []).length} permissions
+                      </td>
+                      <td className="px-4 py-2.5 text-right">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                          onClick={() => {
+                            if (window.confirm(`Remove access to ${p.slug}?`)) {
+                              revokeMut.mutate(p.slug);
+                            }
+                          }}
+                          loading={revokeMut.isPending}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Remove
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {/* Mobile cards */}
+            <div className="md:hidden space-y-2">
+              {userProducts.map((p: any, i: number) => (
+                <div key={p.slug || i} className="border border-zinc-200 rounded-lg p-3">
+                  <div className="flex items-start justify-between gap-2 mb-1.5">
+                    <div className="text-sm font-medium text-zinc-800 min-w-0 flex-1 break-all">{p.slug}</div>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="text-red-600 hover:text-red-700 hover:bg-red-50 shrink-0"
+                      onClick={() => {
+                        if (window.confirm(`Remove access to ${p.slug}?`)) {
+                          revokeMut.mutate(p.slug);
+                        }
+                      }}
+                      loading={revokeMut.isPending}
+                      aria-label="Remove access"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </Button>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Badge variant="info" size="sm">{p.role || p.roleName || '-'}</Badge>
+                    <span className="text-xs text-zinc-500 font-mono">{(p.permissions || []).length} perms</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <Badge variant="info" size="sm">{p.role || p.roleName || '-'}</Badge>
-                  <span className="text-xs text-zinc-500 font-mono">{(p.permissions || []).length} perms</span>
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
           </>
         ) : (
           <p className="text-sm text-zinc-400">No product access assigned.</p>
+        )}
+      </div>
+
+      {/* Deployment Access */}
+      <div className="bg-white rounded-xl border border-zinc-200 p-4 sm:p-5 mb-4 sm:mb-5">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+          <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">
+            Deployment Access
+          </h2>
+          <Button size="sm" variant="secondary" onClick={() => setAssignDeploymentOpen(true)}>
+            <Plus className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Add Deployment Access</span>
+            <span className="sm:hidden">Add Access</span>
+          </Button>
+        </div>
+        {userDeploymentAccess && userDeploymentAccess.length > 0 ? (
+          <>
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead>
+                  <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+                    <th className="px-4 py-2">Product</th>
+                    <th className="px-4 py-2">App Group</th>
+                    <th className="px-4 py-2">Role</th>
+                    <th className="px-4 py-2 w-24 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {userDeploymentAccess.map((d: any, i: number) => (
+                    <tr key={d.id || i} className={cn('border-b border-zinc-100', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
+                      <td className="px-4 py-2.5 font-medium text-zinc-800">{d.productSlug}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs text-zinc-700">{d.appGroup}</td>
+                      <td className="px-4 py-2.5">
+                        <Badge variant="info" size="sm">{d.roleName || '-'}</Badge>
+                      </td>
+                      <td className="px-4 py-2.5 text-right">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                          onClick={() => {
+                            if (window.confirm(`Remove deployment access to ${d.appGroup}?`)) {
+                              revokeDeploymentMut.mutate({ productSlug: d.productSlug, appGroup: d.appGroup });
+                            }
+                          }}
+                          loading={revokeDeploymentMut.isPending}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Remove
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {/* Mobile cards */}
+            <div className="md:hidden space-y-2">
+              {userDeploymentAccess.map((d: any, i: number) => (
+                <div key={d.id || i} className="border border-zinc-200 rounded-lg p-3">
+                  <div className="flex items-start justify-between gap-2 mb-1.5">
+                    <div className="text-sm font-medium text-zinc-800 min-w-0 flex-1 break-all">
+                      {d.productSlug} <span className="text-zinc-400 font-normal">/</span> {d.appGroup}
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="text-red-600 hover:text-red-700 hover:bg-red-50 shrink-0"
+                      onClick={() => {
+                        if (window.confirm(`Remove deployment access to ${d.appGroup}?`)) {
+                          revokeDeploymentMut.mutate({ productSlug: d.productSlug, appGroup: d.appGroup });
+                        }
+                      }}
+                      loading={revokeDeploymentMut.isPending}
+                      aria-label="Remove deployment access"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </Button>
+                  </div>
+                  <Badge variant="info" size="sm">{d.roleName || '-'}</Badge>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-zinc-400">No deployment-level access assigned. Product-level role applies to all deployments.</p>
         )}
       </div>
 
@@ -374,77 +509,77 @@ const UserDetail: React.FC = () => {
         </div>
         {userOverrides && userOverrides.length > 0 ? (
           <>
-          <div className="hidden md:block overflow-x-auto">
-            <table className="w-full text-sm text-left">
-              <thead>
-                <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
-                  <th className="px-4 py-2">Product</th>
-                  <th className="px-4 py-2">Permission</th>
-                  <th className="px-4 py-2">Type</th>
-                  <th className="px-4 py-2 w-24 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {userOverrides.map((o: any, i: number) => (
-                  <tr key={o.id || i} className={cn('border-b border-zinc-100', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
-                    <td className="px-4 py-2.5 text-zinc-800">{o.productSlug}</td>
-                    <td className="px-4 py-2.5 font-mono text-xs">
-                      {o.permissionAction || o.permission}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <Badge variant={o.overrideType === 'GRANT' || o.type === 'GRANT' ? 'success' : 'danger'} size="sm">
-                        {o.overrideType || o.type}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-2.5 text-right">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-red-600 hover:text-red-700 hover:bg-red-50"
-                        onClick={() => {
-                          if (window.confirm('Remove this permission override?')) {
-                            removeOverrideMut.mutate(o.id);
-                          }
-                        }}
-                        loading={removeOverrideMut.isPending}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        Remove
-                      </Button>
-                    </td>
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead>
+                  <tr className="bg-zinc-50 border-b border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
+                    <th className="px-4 py-2">Product</th>
+                    <th className="px-4 py-2">Permission</th>
+                    <th className="px-4 py-2">Type</th>
+                    <th className="px-4 py-2 w-24 text-right">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {/* Mobile cards */}
-          <div className="md:hidden space-y-2">
-            {userOverrides.map((o: any, i: number) => (
-              <div key={o.id || i} className="border border-zinc-200 rounded-lg p-3">
-                <div className="flex items-start justify-between gap-2 mb-1.5">
-                  <div className="text-sm font-medium text-zinc-800 break-all min-w-0 flex-1">{o.productSlug}</div>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    className="text-red-600 hover:text-red-700 hover:bg-red-50 shrink-0"
-                    onClick={() => {
-                      if (window.confirm('Remove this permission override?')) {
-                        removeOverrideMut.mutate(o.id);
-                      }
-                    }}
-                    loading={removeOverrideMut.isPending}
-                    aria-label="Remove override"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
+                </thead>
+                <tbody>
+                  {userOverrides.map((o: any, i: number) => (
+                    <tr key={o.id || i} className={cn('border-b border-zinc-100', i % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
+                      <td className="px-4 py-2.5 text-zinc-800">{o.productSlug}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs">
+                        {o.permissionAction || o.permission}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <Badge variant={o.overrideType === 'GRANT' || o.type === 'GRANT' ? 'success' : 'danger'} size="sm">
+                          {o.overrideType || o.type}
+                        </Badge>
+                      </td>
+                      <td className="px-4 py-2.5 text-right">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                          onClick={() => {
+                            if (window.confirm('Remove this permission override?')) {
+                              removeOverrideMut.mutate(o.id);
+                            }
+                          }}
+                          loading={removeOverrideMut.isPending}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Remove
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {/* Mobile cards */}
+            <div className="md:hidden space-y-2">
+              {userOverrides.map((o: any, i: number) => (
+                <div key={o.id || i} className="border border-zinc-200 rounded-lg p-3">
+                  <div className="flex items-start justify-between gap-2 mb-1.5">
+                    <div className="text-sm font-medium text-zinc-800 break-all min-w-0 flex-1">{o.productSlug}</div>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="text-red-600 hover:text-red-700 hover:bg-red-50 shrink-0"
+                      onClick={() => {
+                        if (window.confirm('Remove this permission override?')) {
+                          removeOverrideMut.mutate(o.id);
+                        }
+                      }}
+                      loading={removeOverrideMut.isPending}
+                      aria-label="Remove override"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </Button>
+                  </div>
+                  <div className="text-xs text-zinc-600 font-mono break-all mb-1.5">{o.permissionAction || o.permission}</div>
+                  <Badge variant={o.overrideType === 'GRANT' || o.type === 'GRANT' ? 'success' : 'danger'} size="sm">
+                    {o.overrideType || o.type}
+                  </Badge>
                 </div>
-                <div className="text-xs text-zinc-600 font-mono break-all mb-1.5">{o.permissionAction || o.permission}</div>
-                <Badge variant={o.overrideType === 'GRANT' || o.type === 'GRANT' ? 'success' : 'danger'} size="sm">
-                  {o.overrideType || o.type}
-                </Badge>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
           </>
         ) : (
           <p className="text-sm text-zinc-400">No permission overrides.</p>
@@ -581,6 +716,93 @@ const UserDetail: React.FC = () => {
                 Cancel
               </Button>
               <Button type="submit" loading={assignMut.isPending}>
+                Assign
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={assignDeploymentOpen} onOpenChange={setAssignDeploymentOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add Deployment Access</DialogTitle>
+            <DialogDescription>
+              Grant a role scoped to a single deployment (app group), e.g. Admin on BECKN.
+              This overrides the product-level role for that deployment only; other deployments
+              keep falling back to the product-level role.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!assignDeployProduct || !assignDeployAppGroup || !assignDeployRoleId) {
+                toast.error('Select a product, app group, and role');
+                return;
+              }
+              assignDeploymentMut.mutate();
+            }}
+          >
+            <DialogBody className="space-y-4">
+              <SelectInput
+                label="Product"
+                required
+                placeholder="Select a product"
+                value={assignDeployProduct}
+                onChange={(e) => {
+                  setAssignDeployProduct(e.target.value);
+                  setAssignDeployRoleId('');
+                }}
+                options={products.map((p: any) => ({
+                  value: p.slug || p,
+                  label: p.name || p.slug || p,
+                }))}
+              />
+              <SelectInput
+                label="App Group (Deployment)"
+                required
+                placeholder="Select an app group"
+                value={assignDeployAppGroup}
+                onChange={(e) => setAssignDeployAppGroup(e.target.value)}
+                options={appGroups.map((ag: string) => ({
+                  value: ag,
+                  label: ag,
+                }))}
+              />
+              <SelectInput
+                label="Role"
+                required
+                placeholder={assignDeployProduct ? 'Select a role' : 'Select a product first'}
+                disabled={!assignDeployProduct}
+                value={assignDeployRoleId}
+                onChange={(e) => setAssignDeployRoleId(e.target.value)}
+                options={deployProductRoles.map((r: any) => ({
+                  value: String(r.id),
+                  label: r.name,
+                }))}
+              />
+              {selectedDeployRole && selectedDeployRole.permissions && selectedDeployRole.permissions.length > 0 && (
+                <div>
+                  <span className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-2">
+                    Role Permissions
+                  </span>
+                  <div className="max-h-40 overflow-y-auto border border-zinc-200 rounded-lg p-3 bg-zinc-50">
+                    <div className="flex flex-wrap gap-1.5">
+                      {selectedDeployRole.permissions.map((perm: string) => (
+                        <Badge key={perm} variant="default" size="sm">
+                          {perm}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </DialogBody>
+            <DialogFooter>
+              <Button variant="secondary" type="button" onClick={() => setAssignDeploymentOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" loading={assignDeploymentMut.isPending}>
                 Assign
               </Button>
             </DialogFooter>
