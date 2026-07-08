@@ -603,6 +603,20 @@ export async function fetchSecondaryEnvs(appGroup: string, env: string, service:
     }
 }
 
+// Resolve the currently-deployed ("old") version of a service from k8s, so the
+// create form can pre-fill the Old Version field on service select. Returns ''
+// when nothing can be resolved (no repo/deployment/error) — caller leaves the
+// field untouched.
+export async function resolveOldVersion(appGroup: string, service: string): Promise<string> {
+    if (!appGroup || !service) return '';
+    try {
+        const { data } = await apiClient.get('/running-version', { params: { product: appGroup, service } });
+        return (data?.oldVersion as string) || '';
+    } catch {
+        return '';
+    }
+}
+
 export async function fetchAPConfigMaps(from: string, to: string): Promise<APConfigMap[]> {
     const { data } = await apiClient.get('/tracker/configmap/list', { params: { from, to } });
     // Backend returns either {list: [...]} or a plain array depending on the handler.

@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import { useProductConfigs, useServices } from '../useProducts';
 import { useCreateRelease, useUpdateTracker } from '../hooks';
-import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources } from '../api';
+import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources, resolveOldVersion } from '../api';
 import type { ProductConfig } from '../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
@@ -80,6 +80,9 @@ const CreateRelease: React.FC = () => {
   // field while it still holds our generated link — never a changelog the user
   // has typed themselves.
   const autoChangelogRef = useRef('');
+  // Tracks the last old_version we auto-filled from k8s, so switching services
+  // updates the field but a value the user typed themselves is never clobbered.
+  const autoOldVersionRef = useRef('');
 
   // Prefill the changelog with a GitHub diff link whenever the app group's repo
   // and the versions are known, so reviewers get a click-through to the diff and
@@ -140,6 +143,32 @@ const CreateRelease: React.FC = () => {
       setIsResourcesSwitch(false);
     }
   }, [selectedServices]);
+
+  // Pre-fill Old Version with the currently-deployed version resolved from k8s
+  // when exactly one service is selected on a create — so the changelog diff
+  // link (buildDiffLink) becomes a proper compare/<old>...<new>. Only fills while
+  // the field is empty or still holds our last auto value (never a manual entry).
+  // With multiple services selected, a single old_version can't represent them
+  // all, so we clear our auto value and let the backend resolve per-service on submit.
+  useEffect(() => {
+    if (isUpdate) return;
+    if (selectedServices.length !== 1) {
+      setFormData(prev => (prev.old_version === autoOldVersionRef.current ? { ...prev, old_version: '' } : prev));
+      return;
+    }
+    const svc = selectedServices[0];
+    if (!formData.appGroup || !svc) return;
+    resolveOldVersion(formData.appGroup, svc).then(ver => {
+      if (!ver) return;
+      setFormData(prev => {
+        if (prev.old_version === '' || prev.old_version === autoOldVersionRef.current) {
+          autoOldVersionRef.current = ver;
+          return { ...prev, old_version: ver };
+        }
+        return prev;
+      });
+    }).catch(() => {});
+  }, [isUpdate, formData.appGroup, selectedServices]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {

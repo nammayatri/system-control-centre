@@ -54,6 +54,7 @@ type CoreAPI =
     :<|> "server-config" :> Protected 'AP_SERVICE_CONFIG_EDIT :> Capture "id" Int32 :> Delete '[JSON] APIResponse
     :<|> "envs" :> Protected 'AP_RELEASE_VIEW :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
     :<|> "envs" :> Protected 'AP_RELEASE_VIEW :> "secondary" :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
+    :<|> "running-version" :> Protected 'AP_RELEASE_VIEW :> QueryParam "product" Text :> QueryParam "service" Text :> Get '[JSON] Value
     -- New endpoints
     :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "diff" :> QueryParam "type" Text :> Get '[JSON] DiffResponse
     :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "pods" :> "health" :> Get '[JSON] PodHealthResponse
@@ -141,6 +142,7 @@ coreServer =
     -- Envs
     :<|> K8sResource.fetchEnvsH
     :<|> K8sResource.fetchSecondaryEnvsH
+    :<|> K8sResource.resolveRunningVersionH
     -- New endpoints
     :<|> Release.releaseDiffH
     :<|> Release.podHealthH
