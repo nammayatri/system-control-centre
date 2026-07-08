@@ -13,7 +13,7 @@ interface ProtectedRouteProps {
 
 export function ProtectedRoute({ product, permission, requireAdmin, children }: ProtectedRouteProps) {
   const { isAuthenticated, loading } = useAuth();
-  const { isAdmin, hasPermission, userPermissions } = usePermissions();
+  const { isAdmin, hasPermission, hasAnyDeploymentPermission, userPermissions } = usePermissions();
 
   if (loading) {
     return (
@@ -49,7 +49,13 @@ export function ProtectedRoute({ product, permission, requireAdmin, children }: 
     );
   }
 
-  if (product && permission && !isAdmin && !hasPermission(product, permission)) {
+  if (
+    product &&
+    permission &&
+    !isAdmin &&
+    !hasPermission(product, permission) &&
+    !hasAnyDeploymentPermission(product, permission)
+  ) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center py-20">
         <ShieldAlert className="w-12 h-12 text-zinc-300 mb-4" />

@@ -17,6 +17,13 @@ export interface ProductAccess {
   permissions: string[];
 }
 
+export interface DeploymentAccess {
+  productSlug: string;
+  appGroup: string;
+  role: string;
+  permissions: string[];
+}
+
 export interface AppConfig {
   env: string;
 }
@@ -25,6 +32,7 @@ export interface LoginResponse {
   token: string;
   person: AuthUser;
   products: ProductAccess[];
+  deploymentAccess?: DeploymentAccess[];
   config?: AppConfig;
 }
 

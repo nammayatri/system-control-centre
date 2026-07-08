@@ -72,6 +72,7 @@ loginH body = do
               insertToken (personId person) tok expiresAt
               -- Get product access with permissions
               products <- findAllProductsForPerson person
+              deploymentAccess <- findAllDeploymentPermsForPerson person
               -- Same deployment descriptor the frontend gets at /auth/me,
               -- returned here too so the SPA has it immediately after login.
               cfg <- resolveDeploymentConfig
@@ -96,6 +97,17 @@ loginH body = do
                               ]
                         )
                         products,
+                    "deploymentAccess"
+                      .= map
+                        ( \PersonDeploymentPerms {..} ->
+                            object
+                              [ "productSlug" .= pdpProductSlug,
+                                "appGroup" .= pdpAppGroup,
+                                "role" .= pdpRoleName,
+                                "permissions" .= pdpPermissions
+                              ]
+                        )
+                        deploymentAccess,
                     "config" .= cfg
                   ]
 
@@ -145,6 +157,7 @@ meH mAuth = do
                       throwM $ Unauthorized "Account deactivated"
                 Just person -> do
                   products <- findAllProductsForPerson person
+                  deploymentAccess <- findAllDeploymentPermsForPerson person
                   cfg <- resolveDeploymentConfig
                   pure $
                     object
@@ -166,6 +179,17 @@ meH mAuth = do
                                   ]
                             )
                             products,
+                        "deploymentAccess"
+                          .= map
+                            ( \PersonDeploymentPerms {..} ->
+                                object
+                                  [ "productSlug" .= pdpProductSlug,
+                                    "appGroup" .= pdpAppGroup,
+                                    "role" .= pdpRoleName,
+                                    "permissions" .= pdpPermissions
+                                  ]
+                            )
+                            deploymentAccess,
                         "config" .= cfg
                       ]
 

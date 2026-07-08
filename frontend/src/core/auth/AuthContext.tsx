@@ -1,12 +1,13 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { login as loginApi, getProfile, logout as logoutApi } from './api';
-import type { AuthUser, ProductAccess } from './api';
+import type { AuthUser, ProductAccess, DeploymentAccess } from './api';
 import { TOKEN_KEY } from '../../lib/constants';
 
 interface AuthContextType {
   user: AuthUser | null;
   token: string | null;
   products: ProductAccess[];
+  deploymentAccess: DeploymentAccess[];
   // Cosmetic deployment env label from SC_ENV (display only — do NOT branch on it).
   env: string;
   // Deployment build type — 'debug' or 'release'. Sourced from the
@@ -24,10 +25,11 @@ const AuthContext = createContext<AuthContextType>({
   user: null,
   token: null,
   products: [],
+  deploymentAccess: [],
   env: 'UAT',
   buildType: 'release',
-  login: async () => {},
-  logout: () => {},
+  login: async () => { },
+  logout: () => { },
   isAuthenticated: false,
   loading: true,
 });
@@ -36,15 +38,16 @@ type BuildType = 'debug' | 'release';
 const asBuildType = (v: unknown): BuildType => (v === 'debug' ? 'debug' : 'release');
 
 // Hydrate from localStorage so the app paints an authed UI before the profile request returns.
-function loadCached(): { user: AuthUser | null; products: ProductAccess[]; env: string; buildType: BuildType } {
+function loadCached(): { user: AuthUser | null; products: ProductAccess[]; deploymentAccess: DeploymentAccess[]; env: string; buildType: BuildType } {
   try {
     const user = JSON.parse(localStorage.getItem('auth_user') || 'null');
     const products = JSON.parse(localStorage.getItem('auth_products') || '[]');
+    const deploymentAccess = JSON.parse(localStorage.getItem('auth_deployment_access') || '[]');
     const env = localStorage.getItem('auth_env') || 'UAT';
     const buildType = asBuildType(localStorage.getItem('auth_build_type'));
-    return { user, products, env, buildType };
+    return { user, products, deploymentAccess, env, buildType };
   } catch {
-    return { user: null, products: [], env: 'UAT', buildType: 'release' };
+    return { user: null, products: [], deploymentAccess: [], env: 'UAT', buildType: 'release' };
   }
 }
 
@@ -54,6 +57,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(storedToken ? cached.user : null);
   const [token, setToken] = useState<string | null>(storedToken);
   const [products, setProducts] = useState<ProductAccess[]>(storedToken ? cached.products : []);
+  const [deploymentAccess, setDeploymentAccess] = useState<DeploymentAccess[]>(storedToken ? cached.deploymentAccess : []);
   const [env, setEnv] = useState<string>(cached.env);
   const [buildType, setBuildType] = useState<BuildType>(cached.buildType);
   const [loading, setLoading] = useState(!cached.user && !!storedToken);
@@ -62,9 +66,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
     setToken(null);
     setProducts([]);
+    setDeploymentAccess([]);
     localStorage.removeItem('sc_token');
     localStorage.removeItem('auth_user');
     localStorage.removeItem('auth_products');
+    localStorage.removeItem('auth_deployment_access');
     localStorage.removeItem('auth_env');
     localStorage.removeItem('auth_build_type');
   }, []);
@@ -80,6 +86,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .then((data: any) => {
         setUser(data.person);
         setProducts(data.products || []);
+        setDeploymentAccess(data.deploymentAccess || []);
         setToken(storedToken);
         const newEnv = data.config?.env || 'UAT';
         const newBuildType = asBuildType(data.config?.buildType);
@@ -87,6 +94,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setBuildType(newBuildType);
         localStorage.setItem('auth_user', JSON.stringify(data.person));
         localStorage.setItem('auth_products', JSON.stringify(data.products || []));
+        localStorage.setItem('auth_deployment_access', JSON.stringify(data.deploymentAccess || []));
         localStorage.setItem('auth_env', newEnv);
         localStorage.setItem('auth_build_type', newBuildType);
       })
@@ -105,6 +113,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(data.person);
     setToken(data.token);
     setProducts(data.products || []);
+    setDeploymentAccess(data.deploymentAccess || []);
     const newEnv = data.config?.env || 'UAT';
     const newBuildType = asBuildType(data.config?.buildType);
     setEnv(newEnv);
@@ -112,6 +121,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem('sc_token', data.token);
     localStorage.setItem('auth_user', JSON.stringify(data.person));
     localStorage.setItem('auth_products', JSON.stringify(data.products || []));
+    localStorage.setItem('auth_deployment_access', JSON.stringify(data.deploymentAccess || []));
     localStorage.setItem('auth_env', newEnv);
     localStorage.setItem('auth_build_type', newBuildType);
   }, []);
@@ -128,6 +138,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         user,
         token,
         products,
+        deploymentAccess,
         env,
         buildType,
         login,

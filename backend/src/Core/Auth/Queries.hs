@@ -13,6 +13,7 @@ module Core.Auth.Queries
     computeEffectivePermissions,
     computeEffectivePermissionsForAppGroup,
     findAllProductsForPerson,
+    findAllDeploymentPermsForPerson,
     resetPasswordByEmail,
     TokenRow (..),
   )
@@ -328,6 +329,16 @@ findAllProductsForPerson person = withDb $ \db -> do
     ( \pa -> do
         perms <- computeEffectivePermissionsIO db person (paProductSlug pa) (paRoleId pa)
         pure $ PersonProductPerms (paProductSlug pa) (paRoleName pa) perms
+    )
+    accesses
+
+findAllDeploymentPermsForPerson :: (MonadFlow m) => PersonAuth -> m [PersonDeploymentPerms]
+findAllDeploymentPermsForPerson person = withDb $ \db -> do
+  accesses <- findDeploymentAccessForPersonIO db (personId person)
+  mapM
+    ( \da -> do
+        perms <- computeEffectivePermissionsForAppGroupIO db (personId person) (daProductSlug da) (daAppGroup da)
+        pure $ PersonDeploymentPerms (daProductSlug da) (daAppGroup da) (daRoleName da) perms
     )
     accesses
 

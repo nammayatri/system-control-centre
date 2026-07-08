@@ -7,6 +7,7 @@ module Core.Auth.Types
     ProductAccess (..),
     DeploymentAccess (..),
     PersonProductPerms (..),
+    PersonDeploymentPerms (..),
   )
 where
 
@@ -85,3 +86,15 @@ data PersonProductPerms = PersonProductPerms
 instance ToJSON PersonProductPerms
 
 instance FromJSON PersonProductPerms
+
+data PersonDeploymentPerms = PersonDeploymentPerms
+  { pdpProductSlug :: Text,
+    pdpAppGroup :: Text,
+    pdpRoleName :: Text,
+    pdpPermissions :: [Text]
+  }
+  deriving (Show, Generic)
+
+instance ToJSON PersonDeploymentPerms
+
+instance FromJSON PersonDeploymentPerms
