@@ -98,7 +98,7 @@ fetchSecondaryEnvsH _ap mProduct mEnv mService = do
                         auth =
                             if null baseAuth
                                 then []
-                                else [("Authorization", "Basic " <> T.pack baseAuth)]
+                                else [("Authorization", "Bearer " <> T.pack baseAuth)]
                         getUrl = normalised <> "envs?product=" <> product' <> "&env=" <> env' <> "&service=" <> service'
                         getReq = (defaultReq getUrl){reqHeaders = auth, reqTimeout = Seconds 15, reqRetries = 0, reqLogTag = "sync-env"}
                     logInfo $ "[SYNC-ENV] Fetching secondary envs from: " <> getUrl

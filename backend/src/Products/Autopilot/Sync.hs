@@ -60,7 +60,7 @@ buildAuthHeaders cfg mCtx =
       jwt = case mJwt of Just t | not (T.null (T.strip t)) -> [("x-pomerium-jwt-assertion", t)]; _ -> []
       forwarded = xfe <> jwt
    in if not (null baseAuth)
-        then (("Authorization", "Basic " <> T.pack baseAuth) : forwarded, "basic_auth")
+        then (("Authorization", "Bearer " <> T.pack baseAuth) : forwarded, "bearer_auth")
         else
           if not (null forwarded)
             then (forwarded, "forwarded_headers")

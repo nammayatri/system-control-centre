@@ -311,7 +311,7 @@ fetchSecondaryConfigMapH _ap mProduct mName = do
             let u = if "http" `T.isPrefixOf` T.pack rawUrl then rawUrl else "http://" <> rawUrl
              in if not (null u) && Prelude.last u == '/' then u else u <> "/"
           baseAuth = syncClusterBaseAuth cfg
-          authArgs = if null baseAuth then [] else ["-H", "Authorization: Basic " <> baseAuth]
+          authArgs = if null baseAuth then [] else ["-H", "Authorization: Bearer " <> baseAuth]
           queryParams = case (mProduct, mName) of
             (Just p, Just n) -> "?PRODUCT=" <> T.unpack p <> "&NAME=" <> T.unpack n
             (Just p, Nothing) -> "?PRODUCT=" <> T.unpack p
@@ -337,7 +337,7 @@ syncCompletedConfigMap cfg rt = do
       auth =
         if null baseAuth
           then []
-          else [("Authorization", "Basic " <> T.pack baseAuth)]
+          else [("Authorization", "Bearer " <> T.pack baseAuth)]
       meta = case NT.metadata rt of
         Just (Object o) -> o
         _ -> KM.empty
