@@ -1,8 +1,9 @@
 // ---------------------------------------------------------------------------
 // System Control Centre — Multibranch Pipeline
 //
-// Builds autopilot-frontend / autopilot-haskell via buildx (linux/amd64,
-// built + pushed in one step) and ships to all four registries:
+// Builds autopilot-frontend / autopilot-haskell (linux/amd64, plain `docker
+// build` — this Jenkins agent has no buildx plugin) and ships to all four
+// registries:
 //   AWS Master   (463356420488, beckn-uat)
 //   AWS Prod     (147728078333)
 //   GCP Master   (ny-sandbox)
@@ -19,13 +20,15 @@
 // ---------------------------------------------------------------------------
 
 def buildAndPushFrontend(String registryTag, String apiBaseUrl) {
-  sh "docker buildx build --platform=linux/amd64 --push" +
+  sh "docker build --platform=linux/amd64" +
      " --build-arg VITE_API_BASE_URL=${apiBaseUrl}" +
      " -t ${registryTag} ./frontend"
+  sh "docker push ${registryTag}"
 }
 
 def buildAndPushBackend(String registryTag) {
-  sh "docker buildx build --platform=linux/amd64 --push -t ${registryTag} ./backend"
+  sh "docker build --platform=linux/amd64 -t ${registryTag} ./backend"
+  sh "docker push ${registryTag}"
 }
 
 def ecrLogin(String accountId, String region) {
@@ -75,9 +78,6 @@ pipeline {
       steps {
         script {
           env.TAG = sh(script: 'git rev-parse HEAD', returnStdout: true).trim().substring(0, 7)
-          // Buildx needs a builder that supports --push; the default docker
-          // driver doesn't always have one wired up on dind agents.
-          sh 'docker buildx create --name ci-builder --use || docker buildx use ci-builder'
           echo "Building ${params.app} @ ${env.TAG}"
         }
       }

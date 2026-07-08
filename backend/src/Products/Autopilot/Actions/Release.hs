@@ -320,7 +320,12 @@ injectStoreState cellsByApp pair@(tracker, mts) =
 
 createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseH ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq {..} = do
-  let req' = req {createdBy = apEmail ap} :: K8sCreateReleaseReq
+  requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_CREATE) ap appGroup
+  -- System-triggered (cross-cluster sync) requests already carry the real
+  -- release manager's email in the payload; only stamp the authenticated
+  -- caller's email for direct, user-initiated creates.
+  let stampedReq = req {createdBy = apEmail ap} :: K8sCreateReleaseReq
+      req' = if fromMaybe False isSystemTriggered then req else stampedReq
   case globalId of
     Just gid | not (T.null gid) -> do
       existing <- findReleaseTrackerByGlobalId gid
