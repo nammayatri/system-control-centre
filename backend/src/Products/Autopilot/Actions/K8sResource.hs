@@ -6,6 +6,7 @@ module Products.Autopilot.Actions.K8sResource (
     fetchResourcesH,
     fetchEnvsH,
     fetchSecondaryEnvsH,
+    resolveRunningVersionH,
 )
 where
 
@@ -24,9 +25,10 @@ import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import Products.Autopilot.K8s.Deployment (getDeploymentEnvs)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
-import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
+import Products.Autopilot.K8s.Kubectl (runningVersionFromK8s)
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Types.API (ResourcesResponse (..))
+import qualified Products.Autopilot.Types.Storage.Schema as S
 
 fetchResourcesH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow ResourcesResponse
 fetchResourcesH _ap mProduct mService = do
@@ -44,11 +46,10 @@ fetchResourcesH _ap mProduct mService = do
                             Nothing -> serviceName'
                         ns = getProductNamespace pCfg
                         vsName' = getProductVsName pCfg
-                    versionResult <- liftIO $ getPrimarySubsetFromVirtualService cfg ns vsName' svcHost
-                    case versionResult of
-                        Left _ -> pure emptyResources
-                        Right Nothing -> pure emptyResources
-                        Right (Just runningVersion) -> do
+                    mVersion <- liftIO $ runningVersionFromK8s cfg ns vsName' svcHost False
+                    case mVersion of
+                        Nothing -> pure emptyResources
+                        Just runningVersion -> do
                             let fullDepName = svcHost <> "-" <> runningVersion
                             resResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", T.unpack ns, "get deployment", T.unpack fullDepName, "-o jsonpath='{.spec.template.spec.containers[0].resources}'"])
                             case resResult of
@@ -59,6 +60,34 @@ fetchResourcesH _ap mProduct mService = do
                                             Just v -> pure v
                                             Nothing -> pure emptyResources
         _ -> pure emptyResources
+
+{- | Resolve the currently-deployed ("old") version of a service from k8s, so
+the release-create form can pre-fill the Old Version field on service select.
+Returns @{"oldVersion": "<ver>"}@, or @{"oldVersion": null}@ when the product /
+service / deployment can't be resolved. Uses the same resolution as the create
+handler via 'runningVersionFromK8s' (VS subset for services, deployment for
+schedulers).
+-}
+resolveRunningVersionH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow Value
+resolveRunningVersionH _ap mProduct mService = do
+    cfg <- getConfig
+    let noVersion = object ["oldVersion" .= (Nothing :: Maybe Text)]
+    case (mProduct, mService) of
+        (Just productName, Just serviceName') -> do
+            p <- findProductByName productName
+            case p of
+                Nothing -> pure noVersion
+                Just pCfg -> do
+                    svc <- findServiceByProductAndName productName serviceName'
+                    let svcHost = case svc of
+                            Just s -> fromMaybe serviceName' (getServiceHost s)
+                            Nothing -> serviceName'
+                        ns = getProductNamespace pCfg
+                        vsName' = getProductVsName pCfg
+                        isScheduler = (svc >>= S.dcServiceType) == Just "SCHEDULER"
+                    mVersion <- liftIO $ runningVersionFromK8s cfg ns vsName' svcHost isScheduler
+                    pure $ object ["oldVersion" .= mVersion]
+        _ -> pure noVersion
 
 fetchEnvsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
 fetchEnvsH _ap mProduct _mEnv mService = do
