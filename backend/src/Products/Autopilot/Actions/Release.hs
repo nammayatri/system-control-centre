@@ -320,7 +320,6 @@ injectStoreState cellsByApp pair@(tracker, mts) =
 
 createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseH ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq {..} = do
-  requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_CREATE) ap appGroup
   -- System-triggered (cross-cluster sync) requests already carry the real
   -- release manager's email in the payload; only stamp the authenticated
   -- caller's email for direct, user-initiated creates.
