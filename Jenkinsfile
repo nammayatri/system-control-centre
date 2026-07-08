@@ -1,9 +1,8 @@
 // ---------------------------------------------------------------------------
 // System Control Centre — Multibranch Pipeline
 //
-// Builds autopilot-frontend / autopilot-haskell (linux/amd64, plain `docker
-// build` — this Jenkins agent has no buildx plugin) and ships to all four
-// registries:
+// Builds autopilot-frontend / autopilot-haskell (linux/amd64) and ships to
+// all four registries:
 //   AWS Master   (463356420488, beckn-uat)
 //   AWS Prod     (147728078333)
 //   GCP Master   (ny-sandbox)
@@ -18,7 +17,9 @@
 // per target here to keep this pipeline a straight match for the commands
 // this was modeled on.
 // ---------------------------------------------------------------------------
-
+// Plain `docker build` + `docker push` — no buildx/BuildKit dependency.
+// backend/Dockerfile no longer uses --mount=type=cache (legacy builder
+// can't do BuildKit-only syntax), so this works on the agent as-is.
 def buildAndPushFrontend(String registryTag, String apiBaseUrl) {
   sh "docker build --platform=linux/amd64" +
      " --build-arg VITE_API_BASE_URL=${apiBaseUrl}" +
@@ -26,9 +27,8 @@ def buildAndPushFrontend(String registryTag, String apiBaseUrl) {
   sh "docker push ${registryTag}"
 }
 
-
 def buildAndPushBackend(String registryTag) {
-  sh "DOCKER_BUILDKIT=1 docker build --platform=linux/amd64 -t ${registryTag} ./backend"
+  sh "docker build --platform=linux/amd64 -t ${registryTag} ./backend"
   sh "docker push ${registryTag}"
 }
 

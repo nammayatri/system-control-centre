@@ -31,17 +31,12 @@ ENV BOOTSTRAP_HASKELL_NONINTERACTIVE=1 \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
 ENV PATH="/root/.ghcup/bin:${PATH}"
 
-# Cache deps separately so source changes don't bust the dependency layer
 COPY cabal.project scc.cabal ./
-RUN --mount=type=cache,target=/root/.cabal \
-    --mount=type=cache,target=/root/.ghc \
-    cabal update && cabal build --only-dependencies -j4
+RUN cabal update && cabal build --only-dependencies -j4
 
 # Build the app
 COPY . .
-RUN --mount=type=cache,target=/root/.cabal \
-    --mount=type=cache,target=/root/.ghc \
-    cabal build exe:scc -j4 && \
+RUN cabal build exe:scc -j4 && \
     find dist-newstyle -type f -name scc -path "*/build/scc/scc" | head -1 | xargs -I{} cp {} /usr/local/bin/scc && \
     test -f /usr/local/bin/scc
 RUN strip /usr/local/bin/scc || true
