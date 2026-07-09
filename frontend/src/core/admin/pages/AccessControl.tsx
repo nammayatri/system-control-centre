@@ -1,4 +1,5 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { motion, useReducedMotion } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   fetchDeploymentAccessRoster,
@@ -15,7 +16,7 @@ import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
-import { ChevronDown, Search, Plus, X, GripVertical } from 'lucide-react';
+import { ChevronDown, Search, UserPlus, X, GripVertical } from 'lucide-react';
 
 // Fixed left→right swim lanes. Custom (non-system) roles land in an extra
 // read-only "Other" lane rendered only when such grants exist.
@@ -35,6 +36,102 @@ type Board = Record<string, Record<string, string>>;
 type PendingChange =
   | { type: 'assign'; personId: string; roleName: string }
   | { type: 'revoke'; personId: string };
+
+// Physical slide between lanes. Kept module-level so the reference is stable.
+const CARD_SPRING = { type: 'spring', stiffness: 500, damping: 40 } as const;
+
+// A single draggable / keyboard-movable user card.
+//
+// Module-level (not inline) on purpose: an inline component is a fresh type on
+// every parent render, so React would unmount/remount every card each render —
+// which would break framer-motion's layout animation (constant exit/enter) and
+// thrash keyboard focus. Here unchanged cards persist and only the moved card
+// relocates, letting `layoutId` slide it between lanes.
+interface UserCardProps {
+  personKey: string; // `${ag}:${personId}` — also the shared layout id
+  info: { name: string; email: string };
+  role: string; // current lane/role name, for the aria-label
+  isDragging: boolean;
+  roleBadge?: string; // shown for custom-role ("Other") cards
+  reducedMotion: boolean;
+  pendingFocusRef: React.MutableRefObject<string | null>;
+  onDragStart: (e: React.DragEvent) => void;
+  onDragEnd: () => void;
+  onRemove: () => void;
+  onKeyDown: (e: React.KeyboardEvent) => void;
+}
+
+const UserCard: React.FC<UserCardProps> = ({
+  personKey,
+  info,
+  role,
+  isDragging,
+  roleBadge,
+  reducedMotion,
+  pendingFocusRef,
+  onDragStart,
+  onDragEnd,
+  onRemove,
+  onKeyDown,
+}) => {
+  // Restore focus to exactly the card that just moved (it remounts in the new
+  // lane, losing focus). Only fires right after a keyboard move — never steals
+  // focus on unrelated re-renders (e.g. typing in a lane's search).
+  const setFocusRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      if (node && pendingFocusRef.current === personKey) {
+        node.focus();
+        pendingFocusRef.current = null;
+      }
+    },
+    [personKey, pendingFocusRef]
+  );
+
+  // Outer wrapper owns native HTML5 drag; framer-motion overrides
+  // onDragStart/onDragEnd typings on `motion.div`, so we keep native DnD off it.
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      className="cursor-grab active:cursor-grabbing"
+    >
+      <motion.div
+        layout
+        layoutId={personKey}
+        transition={reducedMotion ? { duration: 0 } : CARD_SPRING}
+        ref={setFocusRef}
+        tabIndex={0}
+        role="button"
+        aria-label={`${info.name} — ${role}. Use left and right arrow keys to change lane.`}
+        onKeyDown={onKeyDown}
+        className={cn(
+          'group flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-2.5 py-2 transition-shadow hover:shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-offset-1',
+          isDragging && 'opacity-40'
+        )}
+      >
+        <GripVertical className="w-3.5 h-3.5 text-zinc-300 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-zinc-800 truncate">{info.name}</div>
+          <div className="text-[11px] text-zinc-400 font-mono truncate">{info.email}</div>
+          {roleBadge && (
+            <Badge variant="warning" size="sm" className="mt-1">
+              {roleBadge}
+            </Badge>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="shrink-0 w-6 h-6 flex items-center justify-center rounded text-zinc-300 hover:text-red-600 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100 cursor-pointer"
+          aria-label="Remove from deployment"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </motion.div>
+    </div>
+  );
+};
 
 const AccessControl: React.FC = () => {
   const queryClient = useQueryClient();
@@ -119,15 +216,30 @@ const AccessControl: React.FC = () => {
   }, [original]);
 
   // ── UI state ────────────────────────────────────────────────────────
+  const reducedMotion = useReducedMotion() ?? false;
   const [search, setSearch] = useState('');
   const [openAgs, setOpenAgs] = useState<Record<string, boolean>>({});
-  const [addOpenAg, setAddOpenAg] = useState<string | null>(null);
+  // Which lane (deployment + role) has its "add user" search open. At most one.
+  const [addOpen, setAddOpen] = useState<{ ag: string; role: LaneRole } | null>(null);
   const [addSearch, setAddSearch] = useState('');
   const [draggingKey, setDraggingKey] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<{ ag: string; role: string } | null>(null);
   const dragRef = useRef<{ ag: string; personId: string } | null>(null);
+  // Key (`${ag}:${personId}`) of a card that should grab focus once it remounts
+  // in its new lane after a keyboard move. Consumed by UserCard's ref callback.
+  const pendingFocusRef = useRef<string | null>(null);
 
   const toggleAg = (ag: string) => setOpenAgs((s) => ({ ...s, [ag]: !s[ag] }));
+
+  // Close an open lane search on outside click (Escape is handled on the input).
+  useEffect(() => {
+    if (!addOpen) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest('[data-add-panel]')) setAddOpen(null);
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [addOpen]);
 
   // ── Draft mutators ──────────────────────────────────────────────────
   const setRole = (ag: string, personId: string, role: string) =>
@@ -209,42 +321,58 @@ const AccessControl: React.FC = () => {
     setRole(ag, d.personId, role);
   };
 
+  // ── Keyboard lane-shift (← / →) ─────────────────────────────────────
+  // Shift a focused card to the adjacent system lane. Clamps at the ends.
+  // A custom-role ("Other") card isn't in SYSTEM_LANES — mirror the drag-out
+  // capability: ArrowRight brings it into Viewer, ArrowLeft is a no-op.
+  const shiftRole = (ag: string, personId: string, dir: 1 | -1) => {
+    const current = draft[ag]?.[personId];
+    if (!current) return;
+    const idx = SYSTEM_LANES.indexOf(current as LaneRole);
+    let next: LaneRole;
+    if (idx === -1) {
+      if (dir === -1) return;
+      next = SYSTEM_LANES[0];
+    } else {
+      const ni = Math.min(Math.max(idx + dir, 0), SYSTEM_LANES.length - 1);
+      if (ni === idx) return; // already at the end — nothing to do
+      next = SYSTEM_LANES[ni];
+    }
+    pendingFocusRef.current = `${ag}:${personId}`;
+    setRole(ag, personId, next);
+  };
+  const onCardKeyDown = (ag: string, personId: string) => (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      shiftRole(ag, personId, 1);
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      shiftRole(ag, personId, -1);
+    }
+  };
+
   // ── Render helpers ──────────────────────────────────────────────────
   const sortByName = (a: string, b: string) =>
     (personInfoById[a]?.name || '').localeCompare(personInfoById[b]?.name || '');
 
-  const UserCard = ({ ag, personId, roleBadge }: { ag: string; personId: string; roleBadge?: string }) => {
-    const info = personInfoById[personId] || { name: personId, email: '' };
+  // Bridge the module-level UserCard to this deployment's handlers/lookups.
+  const renderCard = (ag: string, personId: string, role: string, roleBadge?: string) => {
     const key = `${ag}:${personId}`;
     return (
-      <div
-        draggable
+      <UserCard
+        key={personId}
+        personKey={key}
+        info={personInfoById[personId] || { name: personId, email: '' }}
+        role={role}
+        isDragging={draggingKey === key}
+        roleBadge={roleBadge}
+        reducedMotion={reducedMotion}
+        pendingFocusRef={pendingFocusRef}
         onDragStart={onDragStart(ag, personId)}
         onDragEnd={onDragEnd}
-        className={cn(
-          'group flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-2.5 py-2 cursor-grab active:cursor-grabbing transition-shadow hover:shadow-sm',
-          draggingKey === key && 'opacity-40'
-        )}
-      >
-        <GripVertical className="w-3.5 h-3.5 text-zinc-300 shrink-0" />
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-zinc-800 truncate">{info.name}</div>
-          <div className="text-[11px] text-zinc-400 font-mono truncate">{info.email}</div>
-          {roleBadge && (
-            <Badge variant="warning" size="sm" className="mt-1">
-              {roleBadge}
-            </Badge>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={() => removeUser(ag, personId)}
-          className="shrink-0 w-6 h-6 flex items-center justify-center rounded text-zinc-300 hover:text-red-600 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100 cursor-pointer"
-          aria-label="Remove from deployment"
-        >
-          <X className="w-3.5 h-3.5" />
-        </button>
-      </div>
+        onRemove={() => removeUser(ag, personId)}
+        onKeyDown={onCardKeyDown(ag, personId)}
+      />
     );
   };
 
@@ -277,8 +405,9 @@ const AccessControl: React.FC = () => {
         </div>
       </div>
       <p className="text-sm text-zinc-500 mb-4 sm:mb-5">
-        Drag a user between Viewer, Manager and Admin to restage their role for a deployment, then
-        Confirm to save. Only explicit deployment-level grants are shown.
+        Drag a user — or select a card and press ← / → — to move them between Viewer, Manager and
+        Admin and restage their role, then Confirm to save. Add a user to a lane with the ＋ icon in
+        its header. Only explicit deployment-level grants are shown.
       </p>
 
       {visibleAgs.length === 0 ? (
@@ -329,95 +458,37 @@ const AccessControl: React.FC = () => {
 
                 {isOpen && (
                   <div className="border-t border-zinc-100 p-3 sm:p-4 bg-zinc-50/50">
-                    {/* Toolbar: add user + confirm/discard */}
-                    <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                      <div className="relative">
+                    {/* Toolbar: confirm/discard (adding users is now per-lane) */}
+                    {changes.length > 0 && (
+                      <div className="flex flex-wrap items-center justify-end gap-2 mb-3">
+                        <span className="text-xs text-amber-600 font-medium">
+                          {changes.length} unsaved change{changes.length > 1 ? 's' : ''}
+                        </span>
                         <Button
                           size="sm"
-                          variant="secondary"
-                          onClick={() => {
-                            setAddSearch('');
-                            setAddOpenAg(addOpenAg === ag ? null : ag);
-                          }}
+                          variant="ghost"
+                          onClick={() => discard(ag)}
+                          disabled={savingThis}
                         >
-                          <Plus className="w-3.5 h-3.5" />
-                          Add user
+                          Discard
                         </Button>
-                        {addOpenAg === ag && (
-                          <div className="absolute z-20 mt-1 w-72 max-w-[80vw] bg-white border border-zinc-200 rounded-lg shadow-lg">
-                            <div className="p-2 border-b border-zinc-100">
-                              <input
-                                autoFocus
-                                type="text"
-                                placeholder="Search users"
-                                value={addSearch}
-                                onChange={(e) => setAddSearch(e.target.value)}
-                                className="w-full h-8 px-2 border border-zinc-200 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-zinc-300"
-                              />
-                            </div>
-                            <div className="max-h-56 overflow-y-auto py-1">
-                              {availableUsers.length === 0 ? (
-                                <div className="px-3 py-3 text-xs text-zinc-400 text-center">
-                                  No users available
-                                </div>
-                              ) : (
-                                availableUsers.map((u) => (
-                                  <button
-                                    key={u.id}
-                                    type="button"
-                                    onClick={() => {
-                                      setRole(ag, u.id, 'Viewer');
-                                      setAddOpenAg(null);
-                                    }}
-                                    className="w-full flex flex-col items-start px-3 py-1.5 text-left hover:bg-zinc-50 transition-colors cursor-pointer"
-                                  >
-                                    <span className="text-sm text-zinc-800 truncate w-full">
-                                      {u.name || `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email}
-                                    </span>
-                                    <span className="text-[11px] text-zinc-400 font-mono truncate w-full">
-                                      {u.email}
-                                    </span>
-                                  </button>
-                                ))
-                              )}
-                            </div>
-                            <div className="p-1.5 border-t border-zinc-100 text-center">
-                              <span className="text-[11px] text-zinc-400">Added users start as Viewer</span>
-                            </div>
-                          </div>
-                        )}
+                        <Button
+                          size="sm"
+                          variant="success"
+                          loading={savingThis}
+                          onClick={() => confirmMut.mutate({ ag, changes })}
+                        >
+                          Confirm
+                        </Button>
                       </div>
-
-                      {changes.length > 0 && (
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-amber-600 font-medium">
-                            {changes.length} unsaved change{changes.length > 1 ? 's' : ''}
-                          </span>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => discard(ag)}
-                            disabled={savingThis}
-                          >
-                            Discard
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="success"
-                            loading={savingThis}
-                            onClick={() => confirmMut.mutate({ ag, changes })}
-                          >
-                            Confirm
-                          </Button>
-                        </div>
-                      )}
-                    </div>
+                    )}
 
                     {/* Board: swim lanes */}
                     <div className="flex gap-3 overflow-x-auto pb-1">
                       {SYSTEM_LANES.map((role) => {
                         const laneIds = memberIds.filter((pid) => cur[pid] === role).sort(sortByName);
                         const isDragTarget = dragOver?.ag === ag && dragOver.role === role;
+                        const isAddHere = addOpen?.ag === ag && addOpen.role === role;
                         return (
                           <div
                             key={role}
@@ -435,17 +506,78 @@ const AccessControl: React.FC = () => {
                               <Badge variant={LANE_BADGE[role]} size="sm">
                                 {role}
                               </Badge>
-                              <span className="text-xs text-zinc-400">{laneIds.length}</span>
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-xs text-zinc-400">{laneIds.length}</span>
+                                <button
+                                  type="button"
+                                  data-add-panel
+                                  onClick={() => {
+                                    setAddSearch('');
+                                    setAddOpen(isAddHere ? null : { ag, role });
+                                  }}
+                                  className={cn(
+                                    'w-5 h-5 flex items-center justify-center rounded transition-colors cursor-pointer',
+                                    isAddHere
+                                      ? 'text-emerald-600 bg-emerald-50'
+                                      : 'text-zinc-400 hover:text-emerald-600 hover:bg-emerald-50'
+                                  )}
+                                  aria-label={`Add user to ${role}`}
+                                >
+                                  <UserPlus className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
+                            {isAddHere && (
+                              <div
+                                data-add-panel
+                                className="mb-2 rounded-md border border-zinc-200 bg-white shadow-sm"
+                              >
+                                <div className="p-1.5 border-b border-zinc-100">
+                                  <input
+                                    autoFocus
+                                    type="text"
+                                    placeholder={`Add to ${role}…`}
+                                    value={addSearch}
+                                    onChange={(e) => setAddSearch(e.target.value)}
+                                    onKeyDown={(e) => e.key === 'Escape' && setAddOpen(null)}
+                                    className="w-full h-7 px-2 border border-zinc-200 rounded text-xs focus:outline-none focus:ring-2 focus:ring-zinc-300"
+                                  />
+                                </div>
+                                <div className="max-h-40 overflow-y-auto py-1">
+                                  {availableUsers.length === 0 ? (
+                                    <div className="px-2 py-2 text-[11px] text-zinc-400 text-center">
+                                      No users available
+                                    </div>
+                                  ) : (
+                                    availableUsers.map((u) => (
+                                      <button
+                                        key={u.id}
+                                        type="button"
+                                        onClick={() => {
+                                          setRole(ag, u.id, role);
+                                          setAddOpen(null);
+                                        }}
+                                        className="w-full flex flex-col items-start px-2 py-1 text-left hover:bg-zinc-50 transition-colors cursor-pointer"
+                                      >
+                                        <span className="text-xs text-zinc-800 truncate w-full">
+                                          {u.name || `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email}
+                                        </span>
+                                        <span className="text-[10px] text-zinc-400 font-mono truncate w-full">
+                                          {u.email}
+                                        </span>
+                                      </button>
+                                    ))
+                                  )}
+                                </div>
+                              </div>
+                            )}
                             <div className="space-y-2 min-h-[60px]">
                               {laneIds.length === 0 ? (
                                 <div className="text-[11px] text-zinc-300 text-center py-4 select-none">
                                   Drop here
                                 </div>
                               ) : (
-                                laneIds.map((pid) => (
-                                  <UserCard key={pid} ag={ag} personId={pid} />
-                                ))
+                                laneIds.map((pid) => renderCard(ag, pid, role))
                               )}
                             </div>
                           </div>
@@ -462,9 +594,7 @@ const AccessControl: React.FC = () => {
                             <span className="text-xs text-zinc-400">{otherIds.length}</span>
                           </div>
                           <div className="space-y-2 min-h-[60px]">
-                            {otherIds.map((pid) => (
-                              <UserCard key={pid} ag={ag} personId={pid} roleBadge={cur[pid]} />
-                            ))}
+                            {otherIds.map((pid) => renderCard(ag, pid, cur[pid], cur[pid]))}
                           </div>
                         </div>
                       )}
