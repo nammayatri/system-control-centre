@@ -14,6 +14,7 @@ module Core.Admin.Queries
     assignDeploymentAccess,
     revokeDeploymentAccess,
     listDeploymentAccessForPerson,
+    listAllDeploymentAccess,
     -- Permission overrides
     addPermissionOverride,
     removePermissionOverride,
@@ -36,7 +37,7 @@ import Data.Text (Text)
 import Data.UUID (UUID)
 import Database.Beam
 import Database.Beam.Postgres ()
-import Database.PostgreSQL.Simple (Only (..), execute, query)
+import Database.PostgreSQL.Simple (Only (..), execute, query, query_)
 import Database.PostgreSQL.Simple.FromRow (FromRow (..), field)
 import Database.PostgreSQL.Simple.Types (PGArray (..))
 import Products.Types (defaultPermissionsText)
@@ -220,6 +221,41 @@ listDeploymentAccessForPerson personId = withDb $ \db -> withConn db $ \conn -> 
   pure $
     map
       (\DeploymentAccessRow {..} -> DeploymentAccessDetail ddrId ddrProductSlug ddrAppGroup ddrRoleId ddrRoleName)
+      rows
+
+data DeploymentRosterRow = DeploymentRosterRow
+  { drrProductSlug :: Text,
+    drrAppGroup :: Text,
+    drrPersonId :: UUID,
+    drrFirstName :: Text,
+    drrLastName :: Text,
+    drrEmail :: Text,
+    drrRoleId :: UUID,
+    drrRoleName :: Text
+  }
+  deriving (Show)
+
+instance FromRow DeploymentRosterRow where
+  fromRow = DeploymentRosterRow <$> field <*> field <*> field <*> field <*> field <*> field <*> field <*> field
+
+-- | Every deployment-level grant, joined with its person and role. This is the
+-- reverse of listDeploymentAccessForPerson — grouped by deployment on the
+-- frontend to build the Access Control board.
+listAllDeploymentAccess :: (MonadFlow m) => m [DeploymentRosterEntry]
+listAllDeploymentAccess = withDb $ \db -> withConn db $ \conn -> do
+  rows <-
+    query_
+      conn
+      "SELECT pda.product_slug, pda.app_group, p.id, p.first_name, p.last_name, p.email, r.id, r.name \
+      \FROM sc_person_deployment_access pda \
+      \JOIN sc_person p ON p.id = pda.person_id \
+      \JOIN sc_role r ON r.id = pda.role_id \
+      \WHERE p.is_active = true \
+      \ORDER BY pda.app_group, r.name, p.first_name" ::
+      IO [DeploymentRosterRow]
+  pure $
+    map
+      (\DeploymentRosterRow {..} -> DeploymentRosterEntry drrProductSlug drrAppGroup drrPersonId drrFirstName drrLastName drrEmail drrRoleId drrRoleName)
       rows
 
 -- ── Permission Overrides ────────────────────────────────────────────

@@ -9,6 +9,7 @@ import UserList from '../core/admin/pages/UserList';
 import UserDetail from '../core/admin/pages/UserDetail';
 import RoleList from '../core/admin/pages/RoleList';
 import RoleDetail from '../core/admin/pages/RoleDetail';
+import AccessControl from '../core/admin/pages/AccessControl';
 // Product registry
 import { PRODUCT_REGISTRY } from '../products/registry';
 
@@ -36,6 +37,7 @@ function App() {
           <Route path="/admin/users/:id" element={<UserDetail />} />
           <Route path="/admin/roles" element={<RoleList />} />
           <Route path="/admin/roles/:id" element={<RoleDetail />} />
+          <Route path="/admin/access-control" element={<AccessControl />} />
         </Route>
 
         {/* Product workspaces — each gets its own layout route with product as prop */}

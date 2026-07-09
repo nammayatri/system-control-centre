@@ -15,6 +15,7 @@ module Core.Admin.Types
     ProductDetail (..),
     OverrideDetail (..),
     DeploymentAccessDetail (..),
+    DeploymentRosterEntry (..),
   )
 where
 
@@ -168,3 +169,20 @@ data DeploymentAccessDetail = DeploymentAccessDetail
   deriving (Show, Generic)
 
 instance ToJSON DeploymentAccessDetail
+
+-- | One deployment-level grant, joined with the person and role it points at.
+-- Powers the Access Control board's reverse lookup ("who has access to
+-- deployment X"), which the per-user endpoints can't answer directly.
+data DeploymentRosterEntry = DeploymentRosterEntry
+  { drProductSlug :: Text,
+    drAppGroup :: Text,
+    drPersonId :: UUID,
+    drFirstName :: Text,
+    drLastName :: Text,
+    drEmail :: Text,
+    drRoleId :: UUID,
+    drRoleName :: Text
+  }
+  deriving (Show, Generic)
+
+instance ToJSON DeploymentRosterEntry

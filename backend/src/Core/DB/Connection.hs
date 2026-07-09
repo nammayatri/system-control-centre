@@ -11,7 +11,7 @@ import Core.Environment (DBEnv (..))
 import Core.Logging (logDebugG)
 import qualified Data.ByteString.Char8 as BS
 import Data.Pool (defaultPoolConfig, newPool, withResource)
-import Data.Text (pack)
+import Data.Text (Text)
 import Database.Beam.Postgres (Pg, runBeamPostgresDebug)
 import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 
@@ -30,8 +30,8 @@ always invoked but 'logDebugG' drops it otherwise).
 runBeamLogged :: Connection -> Pg a -> IO a
 runBeamLogged conn = runBeamPostgresDebug logSql conn
   where
-    logSql :: String -> IO ()
-    logSql s = logDebugG ("[SQL] " <> pack s)
+    logSql :: Text -> IO ()
+    logSql s = logDebugG ("[SQL] " <> s)
 
 withConn :: DBEnv -> (Connection -> IO a) -> IO a
 withConn DBEnv{..} = withResource dbPool

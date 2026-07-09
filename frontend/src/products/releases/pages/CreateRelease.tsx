@@ -101,6 +101,23 @@ const CreateRelease: React.FC = () => {
       return prev;
     });
   }, [isUpdate, selectedRepo, formData.old_version, formData.new_version]);
+
+  // Once the old version has resolved and the app group has a repo, the changelog
+  // becomes a read-only GitHub compare link (see changelogLocked below). Unlike the
+  // prefill above, this forces the field to the link even over a value the user
+  // typed earlier — because the field is then non-editable, so what's shown must
+  // equal what's submitted.
+  useEffect(() => {
+    if (isUpdate) return;
+    const link = buildDiffLink(selectedRepo, formData.old_version, formData.new_version);
+    const locked = !!selectedRepo && !!formData.old_version.trim() && !!link;
+    if (!locked) return;
+    setFormData(prev => {
+      if (prev.change_log === link) return prev;
+      autoChangelogRef.current = link;
+      return { ...prev, change_log: link };
+    });
+  }, [isUpdate, selectedRepo, formData.old_version, formData.new_version]);
   const [error, setError] = useState('');
   const [isEnvSwitch, setIsEnvSwitch] = useState(false);
   const [envData, setEnvData] = useState('');
@@ -547,6 +564,13 @@ const CreateRelease: React.FC = () => {
     ? (updateMutation.isPending ? 'Updating...' : 'Update Release')
     : (createMutation.isPending ? 'Creating...' : selectedServices.length > 1 ? `Create ${selectedServices.length} Releases` : 'Create Release');
 
+  // On create, once the old version resolves and the app group has a GitHub repo,
+  // the changelog IS a compare link — lock the field to a read-only link so it
+  // can't be accidentally overwritten. With no repo (no link to show) it stays
+  // editable so a manual description is still possible.
+  const changelogDiffLink = buildDiffLink(selectedRepo, formData.old_version, formData.new_version);
+  const changelogLocked = !isUpdate && !isMidFlight && !!selectedRepo && !!formData.old_version.trim() && !!changelogDiffLink;
+
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
       <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-6">
@@ -695,15 +719,34 @@ const CreateRelease: React.FC = () => {
               <div><FieldLabel>Cluster</FieldLabel><input type="text" disabled value={formData.cluster} className={disabledInputClass} /></div>
               <div>
                 <FieldLabel required={!isUpdate}>Change Log</FieldLabel>
-                <input type="text" name="change_log" value={formData.change_log} onChange={handleInputChange}
-                  required={!isUpdate} placeholder="Diff link or a short description of what changed"
-                  disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} />
-                {!isUpdate && (
-                  selectedRepo ? (
-                    <p className="text-[10px] text-zinc-400 mt-0.5">Auto-filled with a GitHub diff link — edit if you want a description instead.</p>
-                  ) : formData.appGroup ? (
-                    <p className="text-[10px] text-zinc-400 mt-0.5">Set a GitHub repo for this app group in Config to auto-fill a diff link.</p>
-                  ) : null
+                {changelogLocked ? (
+                  <>
+                    <div className={cn(disabledInputClass, 'flex items-center cursor-default')}>
+                      <a
+                        href={changelogDiffLink}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={changelogDiffLink}
+                        className="text-sky-600 hover:text-sky-800 underline truncate"
+                      >
+                        View GitHub diff ↗
+                      </a>
+                    </div>
+                    <p className="text-[10px] text-zinc-400 mt-0.5">Change log is a GitHub diff link (read-only).</p>
+                  </>
+                ) : (
+                  <>
+                    <input type="text" name="change_log" value={formData.change_log} onChange={handleInputChange}
+                      required={!isUpdate} placeholder="Diff link or a short description of what changed"
+                      disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} />
+                    {!isUpdate && (
+                      selectedRepo ? (
+                        <p className="text-[10px] text-zinc-400 mt-0.5">Auto-filled with a GitHub diff link — edit if you want a description instead.</p>
+                      ) : formData.appGroup ? (
+                        <p className="text-[10px] text-zinc-400 mt-0.5">Set a GitHub repo for this app group in Config to auto-fill a diff link.</p>
+                      ) : null
+                    )}
+                  </>
                 )}
               </div>
             </div>

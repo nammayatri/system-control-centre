@@ -16,7 +16,7 @@ import Core.AppError (APIError (..), AuthError (..))
 import Core.Auth.Queries (TokenRow (..), findAllProductsForPerson, findPersonById, findTokenByValue)
 import Core.Auth.Types (PersonAuth (..), PersonProductPerms (..))
 import Core.Environment (Flow)
-import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson (Value (..), object, toJSON, (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.Foldable (toList)
@@ -49,6 +49,8 @@ type AdminAPI =
     :<|> "products" :> Capture "slug" Text :> "roles" :> Header "Authorization" Text :> ReqBody '[JSON] Value :> Post '[JSON] Value
     :<|> "products" :> Capture "slug" Text :> "roles" :> Capture "roleId" UUID :> Header "Authorization" Text :> ReqBody '[JSON] Value :> Put '[JSON] APIResponse
     :<|> "products" :> Capture "slug" Text :> "permissions" :> Header "Authorization" Text :> Get '[JSON] Value
+    -- Deployment access roster (reverse lookup: grants grouped by deployment)
+    :<|> "deployment-access" :> Header "Authorization" Text :> Get '[JSON] Value
 
 adminServer :: ServerT AdminAPI Flow
 adminServer =
@@ -69,6 +71,7 @@ adminServer =
     :<|> createRoleH
     :<|> updateRoleH
     :<|> listPermissionsH
+    :<|> listDeploymentAccessRosterH
 
 -- ── Helpers ─────────────────────────────────────────────────────────
 
@@ -373,6 +376,18 @@ listPermissionsH slug mAuth = do
       let perms = allPermissionsText slug
       pure $ object ["permissions" .= map (\p -> object ["action" .= p]) perms]
 
+-- | Reverse lookup for the Access Control board: every deployment-level grant
+-- with its person + role, returned as a flat array and grouped by deployment
+-- on the frontend.
+listDeploymentAccessRosterH :: Maybe Text -> Flow Value
+listDeploymentAccessRosterH mAuth = do
+  mAdmin <- requireAdmin mAuth
+  case mAdmin of
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
+    Just _ -> do
+      entries <- listAllDeploymentAccess
+      pure $ toJSON (map deploymentRosterEntryToJson entries)
+
 -- ── JSON serializers ────────────────────────────────────────────────
 
 personDetailToJson :: PersonDetail -> Value
@@ -414,4 +429,17 @@ deploymentAccessToJson DeploymentAccessDetail {..} =
       "appGroup" .= ddAppGroup,
       "roleId" .= ddRoleId,
       "roleName" .= ddRoleName
+    ]
+
+deploymentRosterEntryToJson :: DeploymentRosterEntry -> Value
+deploymentRosterEntryToJson DeploymentRosterEntry {..} =
+  object
+    [ "productSlug" .= drProductSlug,
+      "appGroup" .= drAppGroup,
+      "personId" .= drPersonId,
+      "firstName" .= drFirstName,
+      "lastName" .= drLastName,
+      "email" .= drEmail,
+      "roleId" .= drRoleId,
+      "roleName" .= drRoleName
     ]
