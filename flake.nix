@@ -15,12 +15,6 @@
 
     # Pinned to NammaYatri-compatible rev (newer versions break with common's process-compose-flake)
     services-flake.url = "github:juspay/services-flake/b93a612aa7057fbb395c79a915672f9b6567ffea";
-
-    euler-hs = {
-      url = "github:nammayatri/euler-hs";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.haskell-flake.follows = "haskell-flake";
-    };
   };
 
   outputs = inputs:
@@ -30,19 +24,24 @@
           pkgsLatest = import inputs.nixpkgs-latest { inherit system; };
         in
         {
+          # NOTE: the backend does NOT depend on euler-hs. It was previously imported
+          # here (euler-hs.haskellFlakeProjectModules.output), which pulled in a forked
+          # beam (arjunkathuria/beam, Text-callback runBeamPostgresDebug) and diverged the
+          # dev shell from CI, which builds against upstream Hackage beam (String callback).
+          # We resolve beam from the base nixpkgs so `nix develop`/`sc-build` matches CI.
           haskellProjects.default = {
             projectRoot = ./backend;
-            imports = [
-              inputs.euler-hs.haskellFlakeProjectModules.output
-            ];
             settings = {
               int-cast.broken = false;
-              euler-hs = {
-                check = false;
-                jailbreak = true;
-                haddock = false;
-                libraryProfiling = false;
-              };
+              # These deps come from base nixpkgs (no longer from euler-hs's curated
+              # set). nixpkgs builds them with their test suites, which pin an older
+              # hspec (servant) or need a live postgres (beam) — skip the tests so the
+              # dev shell builds against the same upstream beam-postgres as CI.
+              servant.check = false;
+              servant-server.check = false;
+              beam-core.check = false;
+              beam-postgres.check = false;
+              beam-migrate.check = false;
             };
             autoWire = [ "packages" "checks" "apps" ];
           };
