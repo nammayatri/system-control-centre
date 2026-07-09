@@ -11,7 +11,7 @@ import Core.Environment (DBEnv (..))
 import Core.Logging (logDebugG)
 import qualified Data.ByteString.Char8 as BS
 import Data.Pool (defaultPoolConfig, newPool, withResource)
-import Data.Text (Text)
+import Data.Text (pack)
 import Database.Beam.Postgres (Pg, runBeamPostgresDebug)
 import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 
@@ -30,8 +30,12 @@ always invoked but 'logDebugG' drops it otherwise).
 runBeamLogged :: Connection -> Pg a -> IO a
 runBeamLogged conn = runBeamPostgresDebug logSql conn
   where
-    logSql :: Text -> IO ()
-    logSql s = logDebugG ("[SQL] " <> s)
+    -- Keep this callback typed as String, not Text: the CI/Docker image builds
+    -- beam-postgres from Hackage, whose runBeamPostgresDebug takes (String -> IO ()).
+    -- (A local nix shell may resolve a Text-callback fork, but the shipping build
+    -- is String — retyping this to Text breaks the CI build.)
+    logSql :: String -> IO ()
+    logSql s = logDebugG ("[SQL] " <> pack s)
 
 withConn :: DBEnv -> (Connection -> IO a) -> IO a
 withConn DBEnv{..} = withResource dbPool
