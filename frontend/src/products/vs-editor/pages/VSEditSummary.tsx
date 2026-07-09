@@ -140,7 +140,7 @@ const VSEditSummary: React.FC = () => {
         </div>
         <div className="flex items-center gap-2 flex-wrap sm:justify-end">
           {edit.status === 'LOCKED' && (
-            <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+            <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={edit.appGroup}>
               <Button size="sm" variant="outline" loading={unlockMut.isPending}
                 onClick={() => doAction('Unlock', () => unlockMut.mutateAsync())}>
                 <Unlock className="w-3.5 h-3.5" /> Unlock
@@ -149,7 +149,7 @@ const VSEditSummary: React.FC = () => {
           )}
 
           {edit.status === 'CREATED' && !edit.approved_by && (
-            <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+            <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={edit.appGroup}>
               <Button size="sm" variant="success" loading={approveMut.isPending}
                 onClick={() => doAction('Approve', () => approveMut.mutateAsync())}>
                 <Check className="w-3.5 h-3.5" /> Approve
@@ -163,7 +163,7 @@ const VSEditSummary: React.FC = () => {
           )}
 
           {edit.status === 'CREATED' && edit.approved_by && (
-            <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+            <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={edit.appGroup}>
               <Button size="sm" variant="success" loading={applyMut.isPending}
                 onClick={() => doAction('Apply', () => applyMut.mutateAsync())}>
                 <Play className="w-3.5 h-3.5" /> Apply

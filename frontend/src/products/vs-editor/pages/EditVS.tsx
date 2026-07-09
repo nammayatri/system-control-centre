@@ -158,14 +158,14 @@ const EditVS: React.FC = () => {
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               {!isLocked && (
-                <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={appGroup}>
                   <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" loading={lockMut.isPending} onClick={handleLock}>
                     <Lock className="w-3.5 h-3.5" /> Lock & Edit
                   </Button>
                 </PermissionGate>
               )}
               {isLocked && trackerId && (
-                <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={appGroup}>
                   <Button size="sm" variant="success" loading={saveMut.isPending} onClick={handleSave}>
                     <Save className="w-3.5 h-3.5" /> Save Changes
                   </Button>

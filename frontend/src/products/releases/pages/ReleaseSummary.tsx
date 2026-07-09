@@ -431,7 +431,8 @@ const RolloutStrategyTab: React.FC<{
   strategy: RolloutStrategyEvent[];
   historyLength: number;
   status: string;
-}> = ({ releaseId, strategy, historyLength, status }) => {
+  appGroup: string;
+}> = ({ releaseId, strategy, historyLength, status, appGroup }) => {
   const [stages, setStages] = useState<RolloutStrategyEvent[]>([]);
   const [isEditing, setIsEditing] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
@@ -500,7 +501,7 @@ const RolloutStrategyTab: React.FC<{
         <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">Rollout Strategy</h3>
         <div className="flex items-center gap-2 flex-wrap">
           {canEdit && !isEditing && (
-            <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+            <PermissionGate product="autopilot" permission="RELEASE_UPDATE" appGroup={appGroup}>
               <Button size="sm" variant="outline" onClick={() => setIsEditing(true)}>
                 <Pencil className="w-3.5 h-3.5" /> Update Stages
               </Button>
@@ -1054,7 +1055,7 @@ const ReleaseSummary: React.FC = () => {
         <ChevronRightIcon className="w-4 h-4 mx-1 text-zinc-300 shrink-0" />
         <span className="font-mono text-xs text-zinc-800 truncate max-w-[150px] sm:max-w-[200px]">{release.release_tag || id}</span>
         {!isMobile && (s === 'CREATED' || s === 'INPROGRESS' || s === 'PAUSED') && (
-          <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+          <PermissionGate product="autopilot" permission="RELEASE_UPDATE" appGroup={release.appGroup}>
             <button
               onClick={() => navigate(`/backend/releases/${id}/edit`)}
               className="p-1 ml-1 rounded text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors duration-150 cursor-pointer"
@@ -1164,7 +1165,7 @@ const ReleaseSummary: React.FC = () => {
                   {AB_STATUS_LABELS[release.abValidationStatus as ABValidationStatus] ?? release.abValidationStatus}
                 </span>
               )}
-              <PermissionGate product="autopilot" permission="AB_VALIDATION_EDIT">
+              <PermissionGate product="autopilot" permission="AB_VALIDATION_EDIT" appGroup={release.appGroup}>
                 <button
                   onClick={() => setShowABModal(true)}
                   className="text-xs text-zinc-500 border border-zinc-200 rounded px-2 py-1 hover:bg-zinc-50"
@@ -1209,23 +1210,23 @@ const ReleaseSummary: React.FC = () => {
         </div>
         <div className="flex items-center gap-2 flex-wrap sm:justify-end">
           {s === 'CREATED' && release.is_approved === 0 && (
-            <PermissionGate product="autopilot" permission="RELEASE_APPROVE">
+            <PermissionGate product="autopilot" permission="RELEASE_APPROVE" appGroup={release.appGroup}>
               <Button size="sm" variant="success" loading={approveMut.isPending} onClick={() => doAction('approve', () => approveMut.mutateAsync({ releaseId: id!, approvedBy: actor }))}><Check className="w-3.5 h-3.5" /> Approve</Button>
             </PermissionGate>
           )}
           {s === 'CREATED' && isMobile && !!release.is_approved && (
-            <PermissionGate product="autopilot" permission="MOBILE_DISPATCH">
+            <PermissionGate product="autopilot" permission="MOBILE_DISPATCH" appGroup={release.appGroup}>
               <Button size="sm" variant="outline" className="border-emerald-300 text-emerald-700 hover:bg-emerald-50" loading={dispatchMobileMut.isPending} onClick={() => doAction('dispatch', () => dispatchMobileMut.mutateAsync([id!]), false, 'This will dispatch the GitHub workflow for this release. The runner will pick it up and start the build.')}><Send className="w-3.5 h-3.5" /> Dispatch</Button>
             </PermissionGate>
           )}
           {s === 'CREATED' && (
-            <PermissionGate product="autopilot" permission="RELEASE_DISCARD">
+            <PermissionGate product="autopilot" permission="RELEASE_DISCARD" appGroup={release.appGroup}>
               <Button size="sm" variant="outline" className="border-red-300 text-red-700 hover:bg-red-50" loading={discardMut.isPending} onClick={() => doAction('discard', () => discardMut.mutateAsync({ releaseId: id! }), true)}><X className="w-3.5 h-3.5" /> Discard</Button>
             </PermissionGate>
           )}
           {(s === 'INPROGRESS') && (
             <>
-              <PermissionGate product="autopilot" permission="RELEASE_PAUSE">
+              <PermissionGate product="autopilot" permission="RELEASE_PAUSE" appGroup={release.appGroup}>
                 {/* Pause/Fast-Forward are rollout-runner controls. They don't apply
                     to a mobile build held on the store awaiting Promote — the real
                     action lives in the Store release panel below. Abort stays
@@ -1241,24 +1242,24 @@ const ReleaseSummary: React.FC = () => {
                 )}
               </PermissionGate>
               {!isMobile && (
-                <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+                <PermissionGate product="autopilot" permission="RELEASE_UPDATE" appGroup={release.appGroup}>
                   <Button size="sm" variant="outline" className="border-amber-300 bg-amber-600 text-white hover:bg-amber-700" loading={fastForwardMut.isPending} onClick={() => doAction('fast forward', () => fastForwardMut.mutateAsync(id!), false, 'Skip the current cooloff and advance to the next rollout step. The runner will pick up the change on its next poll.')}><FastForward className="w-3.5 h-3.5" /> Fast Forward</Button>
                 </PermissionGate>
               )}
             </>
           )}
           {s === 'PAUSED' && (
-            <PermissionGate product="autopilot" permission="RELEASE_RESUME">
+            <PermissionGate product="autopilot" permission="RELEASE_RESUME" appGroup={release.appGroup}>
               <Button size="sm" className="bg-blue-600 text-white hover:bg-blue-700" loading={resumeMut.isPending} onClick={() => doAction('resume', () => resumeMut.mutateAsync(id!))}><Play className="w-3.5 h-3.5" /> Resume</Button>
               <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
             </PermissionGate>
           )}
           {s === 'COMPLETED' && !isMobile && (
             <>
-              <PermissionGate product="autopilot" permission="RELEASE_REVERT">
+              <PermissionGate product="autopilot" permission="RELEASE_REVERT" appGroup={release.appGroup}>
                 <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" loading={revertMut.isPending} onClick={() => doAction('revert', () => revertMut.mutateAsync({ releaseId: id!, requestedBy: actor, isRevertSync: revertSyncChecked }), true)}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
               </PermissionGate>
-              <PermissionGate product="autopilot" permission="RELEASE_REVERT">
+              <PermissionGate product="autopilot" permission="RELEASE_REVERT" appGroup={release.appGroup}>
                 {release.env_override_data ? (
                   <SimpleTooltip content="Immediate Revert is disabled when the release has env changes. Use normal Revert to restore env + image together.">
                     <Button size="sm" variant="danger" disabled><Zap className="w-3.5 h-3.5" /> Immediate Revert</Button>
@@ -1271,13 +1272,13 @@ const ReleaseSummary: React.FC = () => {
                   Revert and Immediate Revert. Only meaningful when the original
                   release had sync_enabled, but always shown so operators can opt in
                   consistently across the two buttons. */}
-              <PermissionGate product="autopilot" permission="RELEASE_REVERT">
+              <PermissionGate product="autopilot" permission="RELEASE_REVERT" appGroup={release.appGroup}>
                 <label className="flex items-center gap-1.5 text-xs text-zinc-500 cursor-pointer">
                   <input type="checkbox" checked={revertSyncChecked} onChange={(e) => setRevertSyncChecked(e.target.checked)} className="rounded border-zinc-300 accent-zinc-900" />
                   Also revert in other cloud
                 </label>
               </PermissionGate>
-              <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+              <PermissionGate product="autopilot" permission="RELEASE_UPDATE" appGroup={release.appGroup}>
                 <Button size="sm" variant="outline" className="border-blue-300 text-blue-700 hover:bg-blue-50" loading={rolloutRestartMut.isPending} onClick={() => doAction('restart deployment', () => rolloutRestartMut.mutateAsync({ releaseId: id!, requestedBy: actor }), false, 'This will perform a kubectl rollout restart on the current deployment, bouncing all pods. Use this to pick up new secrets/configmaps or recover from pod crashes.')}>
                   <RotateCw className="w-3.5 h-3.5" /> Restart Deployment
                 </Button>
@@ -1293,7 +1294,7 @@ const ReleaseSummary: React.FC = () => {
           {s === 'COMPLETED' && isMobile && !revertedByTarget
             && !revertsTarget
             && release.release_context?.build_type !== 'debug' && (
-            <PermissionGate product="autopilot" permission="RELEASE_REVERT">
+            <PermissionGate product="autopilot" permission="RELEASE_REVERT" appGroup={release.appGroup}>
               <Button
                 size="sm"
                 variant="outline"
@@ -1309,13 +1310,13 @@ const ReleaseSummary: React.FC = () => {
               for them — hide it until a mobile restart (re-dispatch) is built.
               See docs/MOBILE_RELEASE_FUTURE_SCOPE.md → "Mobile build restart". */}
           {!isMobile && (s === 'ABORTED' || s === 'USER_ABORTED' || s === 'GCLT_ABORTED' || s === 'REVERTED') && (
-            <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+            <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={release.appGroup}>
               <Button size="sm" variant="outline" className="border-blue-300 text-blue-700 hover:bg-blue-50" loading={restartMut.isPending} onClick={() => doAction('restart', () => restartMut.mutateAsync(id!))}><RotateCw className="w-3.5 h-3.5" /> Restart</Button>
             </PermissionGate>
           )}
 
           <div className="w-px h-6 bg-zinc-200 mx-1" />
-          <PermissionGate product="autopilot" permission="RELEASE_DELETE">
+          <PermissionGate product="autopilot" permission="RELEASE_DELETE" appGroup={release.appGroup}>
             <SimpleTooltip content="Delete"><Button size="icon" variant="ghost" className="text-red-500 hover:bg-red-50" loading={deleteMut.isPending} onClick={() => doAction('delete', async () => { await deleteMut.mutateAsync(id!); navigate(isMobile ? '/mobile/releases' : '/backend/releases'); }, true, 'Delete this release tracker permanently. This removes the audit trail and cannot be undone.')}><Trash2 className="w-4 h-4" /></Button></SimpleTooltip>
           </PermissionGate>
           {!isMobile && <SimpleTooltip content="Clone"><Button size="icon" variant="ghost" onClick={() => navigate(`/backend/releases/${id}/clone`)}><Copy className="w-4 h-4" /></Button></SimpleTooltip>}
@@ -1434,6 +1435,7 @@ const ReleaseSummary: React.FC = () => {
                   strategy={release.rollout_strategy}
                   historyLength={release.rollout_history?.length || 0}
                   status={s}
+                  appGroup={release.appGroup}
                 />
               </>
             )}

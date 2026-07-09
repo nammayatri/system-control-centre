@@ -3,7 +3,7 @@ import { useAuth } from './AuthContext';
 
 interface PermissionsContextType {
   hasPermission: (product: string, action: string, appGroup?: string) => boolean;
-  hasAnyPermission: (product: string, actions: string[]) => boolean;
+  hasAnyPermission: (product: string, actions: string[], appGroup?: string) => boolean;
   hasAnyDeploymentPermission: (product: string, action: string) => boolean;
   isAdmin: boolean;
   userPermissions: Record<string, string[]>;
@@ -57,8 +57,8 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
     return perms.includes(action) || perms.includes('*');
   };
 
-  const hasAnyPermission = (product: string, actions: string[]): boolean => {
-    return actions.some((a) => hasPermission(product, a));
+  const hasAnyPermission = (product: string, actions: string[], appGroup?: string): boolean => {
+    return actions.some((a) => hasPermission(product, a, appGroup));
   };
 
   const hasAnyDeploymentPermission = (product: string, action: string): boolean => {

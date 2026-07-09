@@ -173,30 +173,30 @@ const ConfigMapSummary: React.FC = () => {
         </div>
         <div className="flex items-center gap-2 flex-wrap sm:justify-end">
           {data.status === 'CREATED' && data.is_approved === 0 && (
-            <PermissionGate product="autopilot" permission="RELEASE_UPDATE">
+            <PermissionGate product="autopilot" permission="RELEASE_UPDATE" appGroup={data.appGroup}>
               <Button size="sm" variant="success" onClick={() => handleAction('Approve')} loading={actionMut.isPending}><Check className="w-3.5 h-3.5" /> Approve</Button>
             </PermissionGate>
           )}
           {data.status === 'INPROGRESS' && (
-            <PermissionGate product="autopilot" permission="CONFIG_EDIT">
+            <PermissionGate product="autopilot" permission="CONFIG_EDIT" appGroup={data.appGroup}>
               <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" onClick={() => handleAction('Pause')} loading={actionMut.isPending}><Pause className="w-3.5 h-3.5" /> Pause</Button>
               <Button size="sm" variant="outline" className="border-amber-300 bg-amber-600 text-white hover:bg-amber-700" onClick={() => handleAction('Fast Forward')} loading={actionMut.isPending}><FastForward className="w-3.5 h-3.5" /> Fast Forward</Button>
               <Button size="sm" variant="danger" onClick={() => handleAction('Abort')} loading={actionMut.isPending}><Square className="w-3.5 h-3.5" /> Abort</Button>
             </PermissionGate>
           )}
           {data.status === 'PAUSED' && (
-            <PermissionGate product="autopilot" permission="CONFIG_EDIT">
+            <PermissionGate product="autopilot" permission="CONFIG_EDIT" appGroup={data.appGroup}>
               <Button size="sm" className="bg-blue-600 text-white hover:bg-blue-700" onClick={() => handleAction('Resume')} loading={actionMut.isPending}><Play className="w-3.5 h-3.5" /> Resume</Button>
               <Button size="sm" variant="danger" onClick={() => handleAction('Abort')} loading={actionMut.isPending}><Square className="w-3.5 h-3.5" /> Abort</Button>
             </PermissionGate>
           )}
           {data.status === 'CREATED' && (
-            <PermissionGate product="autopilot" permission="CONFIG_DISCARD">
+            <PermissionGate product="autopilot" permission="CONFIG_DISCARD" appGroup={data.appGroup}>
               <Button size="sm" variant="outline" className="border-red-300 text-red-700 hover:bg-red-50" onClick={() => handleAction('Discard')} loading={actionMut.isPending}><X className="w-3.5 h-3.5" /> Discard</Button>
             </PermissionGate>
           )}
           {data.status === 'COMPLETED' && (
-            <PermissionGate product="autopilot" permission="CONFIG_REVERT">
+            <PermissionGate product="autopilot" permission="CONFIG_REVERT" appGroup={data.appGroup}>
               <Button size="sm" variant="outline" className="border-violet-300 text-violet-700 hover:bg-violet-50" onClick={() => handleAction('Revert')} loading={actionMut.isPending}><RotateCcw className="w-3.5 h-3.5" /> Revert</Button>
             </PermissionGate>
           )}

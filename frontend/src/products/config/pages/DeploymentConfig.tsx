@@ -341,7 +341,7 @@ const DeploymentConfig: React.FC = () => {
                         </td>
                         <td className="py-3 px-4 text-center">
                           <div className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
-                            <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                            <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={group.appGroup}>
                               <button
                                 onClick={() => openEditGroup(group)}
                                 className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 cursor-pointer transition-colors duration-150"
@@ -404,7 +404,7 @@ const DeploymentConfig: React.FC = () => {
                           <td className="py-2.5 px-4" colSpan={4}></td>
                           <td className="py-2.5 px-4 text-center">
                             <div className="flex items-center justify-center gap-1">
-                              <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                              <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={group.appGroup}>
                                 <button
                                   onClick={() => openEditService(svc)}
                                   className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 cursor-pointer transition-colors duration-150"
@@ -429,7 +429,7 @@ const DeploymentConfig: React.FC = () => {
                           <td className="py-2 px-4" colSpan={11}>
                             <div className="flex items-center">
                               <div className="border-l-2 border-zinc-200 h-5 mr-3"></div>
-                              <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                              <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={group.appGroup}>
                                 <button
                                   onClick={() => openCreateService(group.appGroup)}
                                   className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-600 transition-colors duration-150 cursor-pointer"
@@ -471,7 +471,7 @@ const DeploymentConfig: React.FC = () => {
                         </span>
                       </div>
                       <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
-                        <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                        <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={group.appGroup}>
                           <button
                             onClick={() => openEditGroup(group)}
                             className="w-9 h-9 flex items-center justify-center rounded-lg text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer"
@@ -510,7 +510,7 @@ const DeploymentConfig: React.FC = () => {
                           <div className="flex items-start justify-between gap-2 mb-1">
                             <div className="text-sm font-medium text-zinc-800 break-all min-w-0 flex-1">{svc.service}</div>
                             <div className="flex items-center gap-1 shrink-0">
-                              <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                              <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={group.appGroup}>
                                 <button
                                   onClick={() => openEditService(svc)}
                                   className="w-9 h-9 flex items-center justify-center rounded-lg text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer"
@@ -535,7 +535,7 @@ const DeploymentConfig: React.FC = () => {
                         </div>
                       ))}
                       <div className="p-3 pl-8">
-                        <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                        <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={group.appGroup}>
                           <button
                             onClick={() => openCreateService(group.appGroup)}
                             className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-700 transition-colors cursor-pointer h-9"
