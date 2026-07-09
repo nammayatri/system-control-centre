@@ -37,6 +37,7 @@ import Core.Auth.Queries
     findPersonById,
     findProductAccessForPerson,
     findTokenByValue,
+    hasAnyDeploymentPermission,
     trExpiresAt,
     trPersonId,
   )
@@ -149,12 +150,22 @@ checkPermission prodSlug permText req = do
                             }
                   | otherwise -> do
                       accesses <- findProductAccessForPerson (personId person)
-                      case find (\pa -> paProductSlug pa == prodSlug) accesses of
-                        Nothing ->
-                          pure $ Left (err403, "No access to product: " <> prodSlug)
-                        Just pa -> do
-                          perms <- computeEffectivePermissions person prodSlug (paRoleId pa)
-                          if permText `elem` perms
+                      productGranted <- case find (\pa -> paProductSlug pa == prodSlug) accesses of
+                        Nothing -> pure False
+                        Just pa -> (permText `elem`) <$> computeEffectivePermissions person prodSlug (paRoleId pa)
+                      if productGranted
+                        then
+                          pure $
+                            Right
+                              AuthedPerson
+                                { apPersonId = personId person,
+                                  apEmail = personEmail person,
+                                  apIsSuperadmin = False,
+                                  apProductAccesses = accesses
+                                }
+                        else do
+                          deploymentGranted <- hasAnyDeploymentPermission (personId person) prodSlug permText
+                          if deploymentGranted
                             then
                               pure $
                                 Right
@@ -164,7 +175,10 @@ checkPermission prodSlug permText req = do
                                       apIsSuperadmin = False,
                                       apProductAccesses = accesses
                                     }
-                            else pure $ Left (err403, "Permission denied: " <> permText)
+                            else
+                              if any (\pa -> paProductSlug pa == prodSlug) accesses
+                                then pure $ Left (err403, "Permission denied: " <> permText)
+                                else pure $ Left (err403, "No access to product: " <> prodSlug)
 
 requireDeploymentPermission ::
   (KnownPermission perm, MonadFlow m) =>

@@ -21,7 +21,7 @@ where
 import Control.Exception (SomeException, try)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
-import Core.Auth.Protected (AuthedPerson (..))
+import Core.Auth.Protected (AuthedPerson (..), requireDeploymentPermission)
 import Core.Config (Config (..))
 import Core.Environment (Flow, forkFlow, getConfig, logInfo)
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
@@ -34,6 +34,7 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy.Char8 qualified as LBS
 import Data.List (find)
 import Data.Maybe (fromMaybe)
+import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
@@ -49,6 +50,7 @@ import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.Types
 import Products.Autopilot.Types qualified as NT
 import Products.Autopilot.Types.API
+import Products.Autopilot.Types.Permission (AutopilotPermission (..))
 import Products.Autopilot.Types.Storage.Schema qualified as S
 import Products.Autopilot.Types.Target (TargetState (..), emptyConfigState)
 import Products.Autopilot.Workflow.Helpers (captureConfigMapSnapshot)
@@ -80,6 +82,7 @@ createConfigMapH ap body = do
   case extractCmFields body of
     Left err -> pure $ APIResponse "ERROR" err
     Right (product', service', env', cluster', desc, changeLog', config', _releaseManager', priority', _scheduleTime', name') -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_CREATE) ap product'
       let isSync = case body of
             Object o -> isTruthy "isSync" o
             _ -> False
@@ -154,11 +157,12 @@ createConfigMapH ap body = do
       pure $ APIResponse "SUCCESS" ("ConfigMap tracker created: " <> rid)
 
 updateConfigMapH :: AuthedPerson -> Text -> Value -> Flow APIResponse
-updateConfigMapH _ap cmId' body = do
+updateConfigMapH ap cmId' body = do
   m <- findReleaseTracker cmId'
   case m of
     Nothing -> pure $ APIResponse "ERROR" "ConfigMap tracker not found"
     Just (rt, mts) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_UPDATE) ap (NT.appGroup rt)
       let isRevert = case body of
             Object obj -> getStrM "status" obj == Just "revert"
             _ -> False

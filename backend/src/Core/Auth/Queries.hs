@@ -14,6 +14,7 @@ module Core.Auth.Queries
     computeEffectivePermissionsForAppGroup,
     findAllProductsForPerson,
     findAllDeploymentPermsForPerson,
+    hasAnyDeploymentPermission,
     resetPasswordByEmail,
     TokenRow (..),
   )
@@ -218,6 +219,20 @@ findDeploymentAccessForPersonIO db pid = withConn db $ \conn -> do
 
 findDeploymentAccessForPerson :: (MonadFlow m) => UUID -> m [DeploymentAccess]
 findDeploymentAccessForPerson pid = withDb $ \db -> findDeploymentAccessForPersonIO db pid
+
+hasAnyDeploymentPermissionIO :: DBEnv -> UUID -> Text -> Text -> IO Bool
+hasAnyDeploymentPermissionIO db pid productSlug permText = do
+  accesses <- findDeploymentAccessForPersonIO db pid
+  let relevant = filter (\da -> daProductSlug da == productSlug) accesses
+  results <-
+    mapM
+      (\da -> elem permText <$> computeEffectivePermissionsForAppGroupIO db pid productSlug (daAppGroup da))
+      relevant
+  pure (or results)
+
+hasAnyDeploymentPermission :: (MonadFlow m) => UUID -> Text -> Text -> m Bool
+hasAnyDeploymentPermission pid productSlug permText =
+  withDb $ \db -> hasAnyDeploymentPermissionIO db pid productSlug permText
 
 -- ── Permission Computation (uses code-derived defaults) ─────────────
 

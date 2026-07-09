@@ -10,7 +10,7 @@ module Products.Autopilot.Actions.ABValidation
 where
 
 import Control.Monad.IO.Class (liftIO)
-import Core.Auth.Protected (AuthedPerson (..))
+import Core.Auth.Protected (AuthedPerson (..), requireDeploymentPermission)
 import Core.Environment (Flow)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import Data.Aeson qualified as A
@@ -18,6 +18,7 @@ import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.List (nub)
 import Data.Maybe (fromMaybe)
+import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time.Clock (addUTCTime, getCurrentTime)
@@ -31,6 +32,7 @@ import Products.Autopilot.Queries.ReleaseTracker
   )
 import Products.Autopilot.Types qualified as NT
 import Products.Autopilot.Types.ABValidation
+import Products.Autopilot.Types.Permission (AutopilotPermission (..))
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..), isTerminalStatus)
 import Products.Autopilot.Types.Target (TargetState)
 import Shared.API.Response (APIResponse (..))
@@ -95,7 +97,8 @@ updateABValidationH ap rid body = do
   m <- findReleaseTracker rid
   case m of
     Nothing -> pure $ APIResponse "ERROR" "Release not found"
-    Just (rt, mts) ->
+    Just (rt, mts) -> do
+      requireDeploymentPermission (Proxy :: Proxy 'AP_AB_VALIDATION_EDIT) ap (NT.appGroup rt)
       case body of
         Object obj -> do
           -- Gate: only terminal releases can be AB-validated.
