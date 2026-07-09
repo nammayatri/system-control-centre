@@ -36,15 +36,26 @@ const normalizeRepo = (raw?: string): string =>
     .replace(/\.git$/i, '')
     .replace(/^\/+|\/+$/g, '');
 
+// Release versions look like "a1b2c3-v2": a 6-char commit SHA prefix, sometimes
+// followed by a suffix (-v1/-v2) that is NOT part of any git ref. GitHub's compare
+// view needs the bare commit, so take the first 6 chars and confirm they're a
+// short SHA (hex) before using them; otherwise treat the ref as unavailable.
+const COMMIT_ID_RE = /^[0-9a-f]{6}$/i;
+const toCommitId = (version: string): string => {
+  const id = (version || '').trim().slice(0, 6);
+  return COMMIT_ID_RE.test(id) ? id : '';
+};
+
 // Build a GitHub link that shows what shipped in this release. Prefer a
 // compare view (old...new) so reviewers see the exact diff; fall back to the
 // new ref's commit history when there's no old version to diff against.
-// Returns '' when we lack a repo or a new version — caller then leaves the
-// changelog untouched.
+// Each version is reduced to its commit-ID prefix (see toCommitId) so suffixes
+// like "-v1" don't produce a broken ref. Returns '' when we lack a repo or a
+// valid new commit — caller then leaves the changelog untouched.
 const buildDiffLink = (repo: string, oldV: string, newV: string): string => {
   const r = normalizeRepo(repo);
-  const o = (oldV || '').trim();
-  const n = (newV || '').trim();
+  const o = toCommitId(oldV);
+  const n = toCommitId(newV);
   if (!r || !n) return '';
   return o
     ? `https://github.com/${r}/compare/${o}...${n}`
