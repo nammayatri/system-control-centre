@@ -131,6 +131,27 @@ export async function revokeDeploymentAccess(
   return data;
 }
 
+// One flat deployment-level grant, joined with its person + role. The Access
+// Control board groups these by appGroup (deployment) into role swim lanes.
+export interface DeploymentRosterEntry {
+  productSlug: string;
+  appGroup: string;
+  personId: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  roleId: string;
+  roleName: string;
+}
+
+// Reverse lookup for the Access Control board: every deployment grant across
+// all users, grouped by deployment on the frontend. (Per-user endpoints can't
+// answer "who has access to deployment X".)
+export async function fetchDeploymentAccessRoster(): Promise<DeploymentRosterEntry[]> {
+  const { data } = await apiClient.get('/admin/deployment-access');
+  return Array.isArray(data) ? data : data.deploymentAccess || [];
+}
+
 // ─── Admin: Permission Overrides ─────────────────────────────────
 
 export async function addPermissionOverride(

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Users, Shield, ChevronLeft,
+  Users, Shield, KeyRound, ChevronLeft,
   PanelLeftClose, PanelLeft, X,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
@@ -11,6 +11,7 @@ import TopBar from './TopBar';
 const adminNavItems = [
   { label: 'Users', path: '/admin/users', icon: <Users className="w-4 h-4" /> },
   { label: 'Roles', path: '/admin/roles', icon: <Shield className="w-4 h-4" /> },
+  { label: 'Access Control', path: '/admin/access-control', icon: <KeyRound className="w-4 h-4" /> },
 ];
 
 interface NavBodyProps {

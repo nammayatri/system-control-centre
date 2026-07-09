@@ -9,6 +9,7 @@ export {
   revokeProductAccess,
   assignDeploymentRole,
   revokeDeploymentAccess,
+  fetchDeploymentAccessRoster,
   addPermissionOverride,
   removePermissionOverride,
   fetchAdminProducts,
@@ -17,3 +18,5 @@ export {
   createRole,
   updateRole,
 } from '../auth/api';
+
+export type { DeploymentRosterEntry } from '../auth/api';
