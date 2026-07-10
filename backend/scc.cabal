@@ -52,6 +52,7 @@ library
       Core.Server
       Products.Autopilot.Config
       Products.Autopilot.DecisionEngine
+      Products.Autopilot.DiffLink
       Products.Autopilot.Discovery
       Products.Autopilot.EventLog
       Products.Autopilot.K8s.Deployment
