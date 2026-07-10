@@ -141,6 +141,7 @@ library:
     - Products.Autopilot.K8s.HPA
     - Products.Autopilot.K8s.Kubectl
     - Products.Autopilot.Notifications
+    - Products.Autopilot.ReleaseChangelog
     - Products.Autopilot.K8s.VirtualService
     - Products.Autopilot.Mobile.Types
     - Products.Autopilot.Mobile.Types.Storage

@@ -135,6 +135,9 @@ const CreateRelease: React.FC = () => {
     { rollout: 100, cooloff: 10, pods: 2 },
   ]);
   const [isReleaseSync, setIsReleaseSync] = useState(false);
+  // Opt-in (default OFF): post AI changelog notes to the release's Slack thread
+  // once it completes. Backend acts on it only for BackendService releases.
+  const [postChangelogSlack, setPostChangelogSlack] = useState(false);
   const [isSecondaryEnvSwitch, setIsSecondaryEnvSwitch] = useState(false);
   const [secondaryEnvData, setSecondaryEnvData] = useState('');
   const [secondaryEnvLoading, setSecondaryEnvLoading] = useState(false);
@@ -523,6 +526,8 @@ const CreateRelease: React.FC = () => {
       syncClusterEnvOverrideData: isReleaseSync && isSecondaryEnvSwitch ? secondaryEnvData : null,
       syncClusterRolloutStrategy: isReleaseSync ? secondaryStages.map(s => ({ rolloutPercent: s.rollout, cooloffMinutes: s.cooloff, podCount: s.pods })) : null,
       release_manager: user?.email || 'local_admin', release_tag: generateReleaseTag(svc), trackerType,
+      // Only meaningful for BackendService; backend ignores it otherwise.
+      post_changelog_slack: postChangelogSlack,
     });
 
     try {
@@ -585,6 +590,11 @@ const CreateRelease: React.FC = () => {
   // changelog is never handwritten).
   const changelogDiffLink = buildDiffLink(selectedRepo, formData.old_version, formData.new_version);
   const changelogLocked = !isUpdate && !isMidFlight && !multiService && !!selectedRepo && !!formData.old_version.trim() && !!changelogDiffLink;
+
+  // The AI-changelog-to-Slack toggle only applies to BackendService releases.
+  const currentTrackerType = normalizeProductType(
+    productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup)?.product_type
+  );
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
@@ -833,6 +843,23 @@ const CreateRelease: React.FC = () => {
           </div>
 
         </div>
+
+        {!isUpdate && currentTrackerType === 'BackendService' && (
+          <div className="bg-white rounded-xl border border-zinc-200">
+            <div className="px-4 py-3 sm:px-6 sm:py-4 flex items-center gap-3 flex-wrap">
+              <h2 className="text-base sm:text-lg font-semibold text-zinc-900">AI Changelog to Slack</h2>
+              <Toggle checked={postChangelogSlack} onChange={() => setPostChangelogSlack(!postChangelogSlack)} />
+              <span className="text-sm text-zinc-500">
+                {postChangelogSlack ? 'Post on completion' : 'Off'}
+              </span>
+            </div>
+            {postChangelogSlack && (
+              <p className="px-4 pb-3 sm:px-6 sm:pb-4 text-[11px] text-zinc-400">
+                After this release is marked completed, AI-generated changelog notes (changes grouped by type, each with its GitHub author) are posted as a reply in the release's Slack thread. Needs a GitHub repo configured for this app group and AI enabled — otherwise nothing is posted.
+              </p>
+            )}
+          </div>
+        )}
 
         <div className="bg-white rounded-xl border border-zinc-200">
           <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
