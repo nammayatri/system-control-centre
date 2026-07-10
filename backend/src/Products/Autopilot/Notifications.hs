@@ -64,13 +64,17 @@ import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Encoding qualified as TLE
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
-import Products.Autopilot.Queries.ProductService (findProductByName, getSlackChannelDirect)
+import Products.Autopilot.Queries.ProductService (findProductByName, getRepoNameDirect, getSlackChannelDirect)
 import Products.Autopilot.Queries.ReleaseTracker qualified as RTQ
+import Products.Autopilot.ReleaseChangelog (generateBackendChangelog)
 import Products.Autopilot.RuntimeConfig (getDecisionNotificationDedupMinutes, isSlackEnabled)
 import Products.Autopilot.Sync (triggerSyncIfEnabled)
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
 import Products.Autopilot.Types.Storage.Schema (rePayload)
-import Products.Autopilot.Types.Target (TargetState)
+import Products.Autopilot.Types.Target (TargetState (..))
+-- Narrow field imports so 'K8sReleaseContext'/'K8sDeploymentState' selectors
+-- (oldVersion/newVersion/cluster/…) don't clash with 'ReleaseTracker (..)'.
+import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (context), K8sReleaseContext (changelogSlackOptIn))
 import Products.Autopilot.Types.Workflow (ReleaseCategory (..))
 import System.Environment (lookupEnv)
 import Prelude
@@ -351,7 +355,63 @@ notifyReleaseCompleted tracker mts = do
             ]
       _ <- sendSlackRich channel "COMPLETED" colorCompleted blocks threadTs
       pure ()
+  -- Opt-in AI changelog notes, threaded under the same message. Runs in its own
+  -- 'whenSlackEnabled' fork so the multi-second GitHub+AI work never blocks the
+  -- COMPLETED post; it lands in the thread a few seconds after COMPLETED.
+  whenSlackEnabled $ maybePostBackendChangelog tracker mts
   triggerSyncIfEnabled tracker mts
+
+-- | release_event label marking the changelog was posted (exactly-once guard).
+changelogSentLabel :: Text
+changelogSentLabel = "CHANGELOG_SLACK_SENT"
+
+{- | Post opt-in AI changelog notes to a completed BackendService release's Slack
+thread. A no-op (posts nothing) unless: the release is 'BackendService', the
+create-time opt-in was set, no changelog was already posted, the app group has a
+@repo_name@, and the AI generator returns notes (AI enabled + commits in range).
+-}
+maybePostBackendChangelog :: ReleaseTracker -> Maybe TargetState -> Flow ()
+maybePostBackendChangelog tracker mts
+  | category tracker /= BackendService = pure ()
+  | optIn mts /= Just True = pure ()
+  | otherwise = do
+      already <- RTQ.findEventByLabel (releaseId tracker) changelogSentLabel
+      case already of
+        Just _ -> logInfoG ("[CHANGELOG] already posted for " <> releaseId tracker <> ", skipping")
+        Nothing -> do
+          mProd <- findProductByName (appGroup tracker)
+          case mProd >>= getRepoNameDirect of
+            Nothing -> logInfoG ("[CHANGELOG] no repo_name for " <> appGroup tracker <> ", skipping changelog")
+            Just repo -> do
+              mNotes <-
+                generateBackendChangelog
+                  repo
+                  (oldVersion tracker)
+                  (newVersion tracker)
+                  (service tracker)
+                  (createdBy tracker)
+              case mNotes of
+                Nothing -> pure () -- AI off / no commits / generation failed → post nothing
+                Just notes -> postBackendChangelog tracker notes
+  where
+    optIn (Just (K8sState k8s)) = changelogSlackOptIn (context k8s)
+    optIn _ = Nothing
+
+-- | Post the generated changelog as a threaded reply, then record the
+-- 'changelogSentLabel' event so a repeated completion can't double-post.
+postBackendChangelog :: ReleaseTracker -> Text -> Flow ()
+postBackendChangelog tracker notes =
+  withChannel (appGroup tracker) (service tracker) $ \channel -> do
+    threadTs <- resolveThreadTs tracker
+    let header = ":memo: *Changelog* — `" <> oldVersion tracker <> "` → `" <> newVersion tracker <> "`"
+        bodyChunks = case chunkForSlack (T.strip notes) of
+          [] -> ["_No changelog._"]
+          cs -> cs
+        blocks = sectionBlock header : map sectionBlock bodyChunks
+    mTs <- sendSlackRich channel "Changelog" colorCompleted blocks threadTs
+    case mTs of
+      Just _ -> RTQ.insertReleaseEvent (releaseId tracker) "BUSINESS" changelogSentLabel (String (newVersion tracker))
+      Nothing -> pure ()
 
 notifyReleaseAborted :: ReleaseTracker -> Flow ()
 notifyReleaseAborted tracker = whenSlackEnabled $

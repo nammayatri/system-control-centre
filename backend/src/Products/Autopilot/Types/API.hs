@@ -135,6 +135,7 @@ data K8sCreateReleaseReq = K8sCreateReleaseReq
     , isSystemTriggered :: Maybe Bool
     , syncClusterEnvOverrideData :: Maybe Text
     , syncClusterRolloutStrategy :: Maybe Value
+    , postChangelogSlack :: Maybe Bool
     }
     deriving (Show, Generic)
 
@@ -175,6 +176,7 @@ instance FromJSON K8sCreateReleaseReq where
         isSystemTriggered <- o .:? "isSystemTriggered"
         syncClusterEnvOverrideData <- (o .:? "syncClusterEnvOverrideData" >>= maybe (o .:? "syncClusterUdf2") (pure . Just))
         syncClusterRolloutStrategy <- o .:? "syncClusterRolloutStrategy"
+        postChangelogSlack <- (o .:? "postChangelogSlack" >>= maybe (o .:? "post_changelog_slack") pure)
         pure K8sCreateReleaseReq{..}
       where
         parseService obj = do

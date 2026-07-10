@@ -99,6 +99,10 @@ data K8sReleaseContext = K8sReleaseContext
     , syncClusterRolloutStrategy :: Maybe Text
     , syncXForwardedEmail :: Maybe Text
     , syncXPomeriumJwt :: Maybe Text
+    , changelogSlackOptIn :: Maybe Bool
+    -- ^ Opt-in (set at create): post AI changelog notes to the release's Slack
+    -- thread once COMPLETED. 'Nothing'/'Just False' = off. Rides in
+    -- @release_context@; older rows without the key decode as 'Nothing'.
     }
     deriving (Eq, Show, Generic)
 
@@ -142,6 +146,7 @@ defaultK8sReleaseContext =
         , syncClusterRolloutStrategy = Nothing
         , syncXForwardedEmail = Nothing
         , syncXPomeriumJwt = Nothing
+        , changelogSlackOptIn = Nothing
         }
 
 -- | K8s-specific product config, stored as JSON in @product_config.target_config@.

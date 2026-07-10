@@ -701,7 +701,8 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq 
             syncClusterEnvOverrideData = syncClusterEnvOverrideData,
             syncClusterRolloutStrategy = fmap (\v -> T.pack (LBS.unpack (A.encode v))) syncClusterRolloutStrategy,
             syncXForwardedEmail = mXForwardedEmail,
-            syncXPomeriumJwt = mXPomeriumJwt
+            syncXPomeriumJwt = mXPomeriumJwt,
+            changelogSlackOptIn = postChangelogSlack
           }
       reqMode = case mode of
         Just "MANUAL" -> MANUAL

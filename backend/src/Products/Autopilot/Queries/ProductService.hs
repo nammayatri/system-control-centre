@@ -55,6 +55,11 @@ getServiceHost = dcServiceHost
 getSlackChannelDirect :: DeploymentConfig -> Maybe Text
 getSlackChannelDirect = dcSlackChannel
 
+-- | The app group's configured GitHub repo (@repo_name@ column), used to build
+-- changelog diff links and fetch commits. 'Nothing' when unset.
+getRepoNameDirect :: DeploymentConfig -> Maybe Text
+getRepoNameDirect = dcRepoName
+
 findProductByName :: (MonadFlow m) => Text -> m (Maybe DeploymentConfig)
 findProductByName pName = withDb $ \db -> do
     rows <-

@@ -682,6 +682,7 @@ export async function createRelease(isNewService: boolean, payload: any): Promis
         isReleaseSync: payload.isReleaseSync || false,
         syncClusterEnvOverrideData: payload.syncClusterEnvOverrideData || null,
         syncClusterRolloutStrategy: payload.syncClusterRolloutStrategy || null,
+        post_changelog_slack: payload.post_changelog_slack || false,
     };
     const { data } = await apiClient.post('/releases/create', requestBody);
     return data;
