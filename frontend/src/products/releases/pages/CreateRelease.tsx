@@ -89,6 +89,12 @@ const CreateRelease: React.FC = () => {
     cronjob_suspend: false, description: '', schedule_time: '',
   });
   const isNewService = false;
+  const [selectedServices, setSelectedServices] = useState<string[]>([]);
+  // A multi-service create fans out one POST per service; a single old_version /
+  // changelog form value can't represent N services, so those fields go read-only
+  // and the backend resolves the old version and generates the diff link per
+  // service (see the Old Version / Change Log fields and buildPayload below).
+  const multiService = selectedServices.length > 1;
 
   // GitHub repo ("owner/repo") configured for the selected app group, if any.
   // Prefer a config row that actually carries a repo (service-level rows don't).
@@ -96,54 +102,27 @@ const CreateRelease: React.FC = () => {
     () => productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup && c.repo_name)?.repo_name || '',
     [productConfigs, formData.appGroup],
   );
-  // Tracks the last changelog value we auto-filled, so we only overwrite the
-  // field while it still holds our generated link — never a changelog the user
-  // has typed themselves.
-  const autoChangelogRef = useRef('');
   // Tracks the last old_version we auto-filled from k8s, so switching services
   // updates the field but a value the user typed themselves is never clobbered.
   const autoOldVersionRef = useRef('');
 
-  // Prefill the changelog with a GitHub diff link whenever the app group's repo
-  // and the versions are known, so reviewers get a click-through to the diff and
-  // nobody has to hand-write a throwaway changelog. Only on create (never touch
-  // an existing release's changelog), and only while the field is empty or still
-  // holds our previously generated link.
+  // The changelog is always a generated GitHub diff link, never handwritten. On a
+  // single-service create, once the old version resolves and the app group has a
+  // repo, force the field to the compare link so what's shown (read-only) equals
+  // what's submitted. Multi-service creates send nothing and the backend builds
+  // the link per service. Never touches an existing release's changelog.
   useEffect(() => {
-    if (isUpdate) return;
-    const link = buildDiffLink(selectedRepo, formData.old_version, formData.new_version);
-    if (!link) return;
-    setFormData(prev => {
-      if (prev.change_log === '' || prev.change_log === autoChangelogRef.current) {
-        autoChangelogRef.current = link;
-        return { ...prev, change_log: link };
-      }
-      return prev;
-    });
-  }, [isUpdate, selectedRepo, formData.old_version, formData.new_version]);
-
-  // Once the old version has resolved and the app group has a repo, the changelog
-  // becomes a read-only GitHub compare link (see changelogLocked below). Unlike the
-  // prefill above, this forces the field to the link even over a value the user
-  // typed earlier — because the field is then non-editable, so what's shown must
-  // equal what's submitted.
-  useEffect(() => {
-    if (isUpdate) return;
+    if (isUpdate || multiService) return;
     const link = buildDiffLink(selectedRepo, formData.old_version, formData.new_version);
     const locked = !!selectedRepo && !!formData.old_version.trim() && !!link;
     if (!locked) return;
-    setFormData(prev => {
-      if (prev.change_log === link) return prev;
-      autoChangelogRef.current = link;
-      return { ...prev, change_log: link };
-    });
-  }, [isUpdate, selectedRepo, formData.old_version, formData.new_version]);
+    setFormData(prev => (prev.change_log === link ? prev : { ...prev, change_log: link }));
+  }, [isUpdate, multiService, selectedRepo, formData.old_version, formData.new_version]);
   const [error, setError] = useState('');
   const [isEnvSwitch, setIsEnvSwitch] = useState(false);
   const [envData, setEnvData] = useState('');
   const [isResourcesSwitch, setIsResourcesSwitch] = useState(false);
   const [resourcesData, setResourcesData] = useState('');
-  const [selectedServices, setSelectedServices] = useState<string[]>([]);
   const [showServiceDropdown, setShowServiceDropdown] = useState(false);
   const [showAppGroupDropdown, setShowAppGroupDropdown] = useState(false);
   const [showPriorityDropdown, setShowPriorityDropdown] = useState(false);
@@ -435,15 +414,9 @@ const CreateRelease: React.FC = () => {
     e.preventDefault();
     setError('');
 
-    if (/^[0-9a-fA-F]{6,40}$/.test(formData.change_log.trim())) {
-      toast.error('Change log cannot be a git commit ID. Please provide a descriptive changelog.');
-      return;
-    }
-    if (formData.change_log.trim() && formData.new_version.trim() && formData.change_log.trim() === formData.new_version.trim()) {
-      toast.error('Change log cannot be the same as the version. Please provide a descriptive changelog.');
-      return;
-    }
-
+    // The changelog is always a generated diff link (FE for single-service,
+    // backend per service for multi) — never handwritten — so there is nothing
+    // to validate here anymore.
     if (!isUpdate && formData.new_version) {
       if (/[A-Z]/.test(formData.new_version)) {
         toast.error('New version cannot contain uppercase letters');
@@ -483,10 +456,11 @@ const CreateRelease: React.FC = () => {
 
     if (isUpdate && id) {
       // Backend allows only these fields mid-flight: status, mode,
-      // rolloutStrategy (future stages must match history byte-for-byte),
-      // and changeLog. Anything else returns 4xx. Before mid-flight
-      // (CREATED) the backend accepts a wider set, but we still only
-      // surface the editable subset in this form.
+      // rolloutStrategy (future stages must match history byte-for-byte).
+      // Anything else returns 4xx. Before mid-flight (CREATED) the backend
+      // accepts a wider set, but we still only surface the editable subset in
+      // this form. The changelog is a generated diff link and read-only, so it
+      // is never sent from here.
       const updates: Record<string, unknown> = {
         mode: formData.mode,
         rolloutStrategy: stages.map(s => ({
@@ -497,7 +471,6 @@ const CreateRelease: React.FC = () => {
       };
       if (!isMidFlight) {
         updates.description = formData.description;
-        updates.changeLog = formData.change_log;
         updates.priority = parseInt(formData.priority, 10) || 0;
         updates.scheduleTime = formData.schedule_time || null;
         updates.dockerImage = formData.docker_image;
@@ -528,9 +501,17 @@ const CreateRelease: React.FC = () => {
 
     const buildPayload = (svc: string) => ({
       appGroup: formData.appGroup, service: [svc], env: formData.env,
-      old_version: formData.old_version || 'unknown',
+      // Multi-service: a single old_version can't represent N services, so send
+      // "unknown" and let the backend resolve each per service (this also stops a
+      // manually typed single-service value from being fanned out to every svc).
+      old_version: multiService ? 'unknown' : (formData.old_version || 'unknown'),
       new_version: formData.new_version, docker_image: formData.docker_image,
-      change_log: formData.change_log, status: formData.status, mode: formData.mode,
+      // Send the FE link only when the field is the locked generated compare link
+      // (changelogLocked). Otherwise send '' — multi-service, missing repo, an
+      // unresolved old version, or a stale cloned changelog all defer to the
+      // backend, which resolves the old version per service and generates the
+      // link. api.ts maps '' -> null, which is what triggers backend generation.
+      change_log: changelogLocked ? formData.change_log : '', status: formData.status, mode: formData.mode,
       priority: parseInt(formData.priority, 10) || 0, info: formData.info,
       cronjob_suspend: formData.cronjob_suspend,
       description: formData.description, schedule_time: formData.schedule_time,
@@ -597,12 +578,13 @@ const CreateRelease: React.FC = () => {
     ? (updateMutation.isPending ? 'Updating...' : 'Update Release')
     : (createMutation.isPending ? 'Creating...' : selectedServices.length > 1 ? `Create ${selectedServices.length} Releases` : 'Create Release');
 
-  // On create, once the old version resolves and the app group has a GitHub repo,
-  // the changelog IS a compare link — lock the field to a read-only link so it
-  // can't be accidentally overwritten. With no repo (no link to show) it stays
-  // editable so a manual description is still possible.
+  // On a single-service create, once the old version resolves and the app group
+  // has a GitHub repo, the changelog IS a compare link — show it as a read-only
+  // link. Multi-service and missing-repo cases can't build a link here, so the
+  // backend generates it per service (the field is read-only in every case; the
+  // changelog is never handwritten).
   const changelogDiffLink = buildDiffLink(selectedRepo, formData.old_version, formData.new_version);
-  const changelogLocked = !isUpdate && !isMidFlight && !!selectedRepo && !!formData.old_version.trim() && !!changelogDiffLink;
+  const changelogLocked = !isUpdate && !isMidFlight && !multiService && !!selectedRepo && !!formData.old_version.trim() && !!changelogDiffLink;
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
@@ -658,9 +640,13 @@ const CreateRelease: React.FC = () => {
               </div>
               <div>
                 <FieldLabel>Old Version</FieldLabel>
-                <input type="text" name="old_version" value={formData.old_version} onChange={handleInputChange}
-                  placeholder="Auto-resolved from K8s if empty"
-                  disabled={isUpdate} className={isUpdate ? disabledInputClass : inputClass} />
+                <input type="text" name="old_version"
+                  value={multiService ? '' : formData.old_version} onChange={handleInputChange}
+                  placeholder={multiService ? 'Resolved per service by the backend' : 'Auto-resolved from K8s if empty'}
+                  disabled={isUpdate || multiService} className={(isUpdate || multiService) ? disabledInputClass : inputClass} />
+                {multiService && (
+                  <p className="text-[10px] text-zinc-400 mt-0.5">Multiple services selected — the currently-deployed version is resolved per service from K8s at creation.</p>
+                )}
               </div>
               <div>
                 <FieldLabel>Mode</FieldLabel>
@@ -797,17 +783,36 @@ const CreateRelease: React.FC = () => {
               <div><FieldLabel>Schedule Time</FieldLabel><input type="text" name="schedule_time" value={formData.schedule_time} onChange={handleInputChange} placeholder="2022-11-01T19:39:35" disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} /></div>
               <div><FieldLabel>Cluster</FieldLabel><input type="text" disabled value={formData.cluster} className={disabledInputClass} /></div>
               <div>
-                <FieldLabel required={!isUpdate}>Change Log</FieldLabel>
-                {changelogLocked ? (
+                <FieldLabel>Change Log</FieldLabel>
+                {/* Read-only in every mode — the changelog is always a generated
+                    GitHub diff link, never handwritten. */}
+                {isUpdate ? (
                   <>
                     <div className={cn(disabledInputClass, 'flex items-center cursor-default')}>
-                      <a
-                        href={changelogDiffLink}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title={changelogDiffLink}
-                        className="text-sky-600 hover:text-sky-800 underline truncate"
-                      >
+                      {formData.change_log.startsWith('http') ? (
+                        <a href={formData.change_log} target="_blank" rel="noopener noreferrer" title={formData.change_log}
+                          className="text-sky-600 hover:text-sky-800 underline truncate">
+                          View GitHub diff ↗
+                        </a>
+                      ) : (
+                        <span className="truncate text-zinc-500">{formData.change_log || '—'}</span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-zinc-400 mt-0.5">Change log is a generated diff link (read-only).</p>
+                  </>
+                ) : multiService ? (
+                  <>
+                    <input type="text" value="" disabled placeholder="Auto-generated per service" className={disabledInputClass} />
+                    <p className="text-[10px] text-zinc-400 mt-0.5">
+                      Multiple services selected — a GitHub diff link (compare old…new) is backfilled per service at creation.
+                      {!selectedRepo && ' Set a GitHub repo for this app group in Config to get compare links.'}
+                    </p>
+                  </>
+                ) : changelogLocked ? (
+                  <>
+                    <div className={cn(disabledInputClass, 'flex items-center cursor-default')}>
+                      <a href={changelogDiffLink} target="_blank" rel="noopener noreferrer" title={changelogDiffLink}
+                        className="text-sky-600 hover:text-sky-800 underline truncate">
                         View GitHub diff ↗
                       </a>
                     </div>
@@ -815,16 +820,12 @@ const CreateRelease: React.FC = () => {
                   </>
                 ) : (
                   <>
-                    <input type="text" name="change_log" value={formData.change_log} onChange={handleInputChange}
-                      required={!isUpdate} placeholder="Diff link or a short description of what changed"
-                      disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} />
-                    {!isUpdate && (
-                      selectedRepo ? (
-                        <p className="text-[10px] text-zinc-400 mt-0.5">Auto-filled with a GitHub diff link — edit if you want a description instead.</p>
-                      ) : formData.appGroup ? (
-                        <p className="text-[10px] text-zinc-400 mt-0.5">Set a GitHub repo for this app group in Config to auto-fill a diff link.</p>
-                      ) : null
-                    )}
+                    <input type="text" value="" disabled placeholder="Auto-generated GitHub diff link" className={disabledInputClass} />
+                    <p className="text-[10px] text-zinc-400 mt-0.5">
+                      {!selectedRepo
+                        ? 'Set a GitHub repo for this app group in Config — without it releases are created without a changelog link.'
+                        : 'A GitHub diff link is generated at creation once the versions resolve.'}
+                    </p>
                   </>
                 )}
               </div>

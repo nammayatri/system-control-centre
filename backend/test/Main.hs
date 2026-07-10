@@ -31,6 +31,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (addUTCTime, getCurrentTime)
 import Products.Autopilot.Config (autopilotConfigs)
+import Products.Autopilot.DiffLink (buildDiffLink, normalizeRepo, toCommitId)
 import Products.Autopilot.K8s.Execute (shellQuote)
 import Products.Autopilot.Mobile.Changelog (
     bumpPatch,
@@ -165,6 +166,7 @@ main = do
     section "[46] claimsStoreIdentity (store-identity gate — single source of truth)" testClaimsStoreIdentity
     section "[47] ReleasePhase (canonical lifecycle: project / transition / display)" testReleasePhase
     section "[48] dispatchRunCandidates (abort-cancel run match: window + newest-first)" testDispatchRunCandidates
+    section "[49] Changelog diff link (server-side generation, mirrors frontend)" testDiffLink
 
     putStrLn ""
     putStrLn "==========================================="
@@ -2137,3 +2139,35 @@ testDispatchRunCandidates = do
     -- boundaries inclusive (-30s lower, +300s upper); result is newest-first
     assertEqual "boundaries inclusive, newest-first" [6, 5] (ids [mkRun 5 "workflow_dispatch" (-30), mkRun 6 "workflow_dispatch" 300])
     assertEqual "multiple in-window sorted newest-first" [8, 7] (ids [mkRun 7 "workflow_dispatch" 10, mkRun 8 "workflow_dispatch" 200])
+
+-- Server-side changelog diff-link generation. MUST stay a byte-for-byte
+-- semantic match with the frontend (CreateRelease.tsx normalizeRepo/toCommitId/
+-- buildDiffLink) so a release gets the same link whichever path created it.
+testDiffLink :: IO ()
+testDiffLink = do
+    -- toCommitId: first 6 chars of the trimmed version, valid iff 6 hex chars
+    assertEqual "toCommitId strips -v suffix" (Just "a1b2c3") (toCommitId "a1b2c3-v2")
+    assertEqual "toCommitId 'unknown' -> Nothing" Nothing (toCommitId "unknown")
+    assertEqual "toCommitId 'new' -> Nothing" Nothing (toCommitId "new")
+    assertEqual "toCommitId too-short -> Nothing" Nothing (toCommitId "abc")
+    assertEqual "toCommitId trims whitespace" (Just "a1b2c3") (toCommitId "  a1b2c3 ")
+    assertEqual "toCommitId preserves case" (Just "A1B2C3") (toCommitId "A1B2C3-v1")
+
+    -- normalizeRepo: bare owner/repo slug
+    assertEqual "normalizeRepo strips URL + .git" "owner/repo" (normalizeRepo "https://github.com/owner/repo.git")
+    assertEqual "normalizeRepo strips trailing slash" "owner/repo" (normalizeRepo "owner/repo/")
+    assertEqual "normalizeRepo trims whitespace" "owner/repo" (normalizeRepo "  owner/repo  ")
+    assertEqual "normalizeRepo case-insensitive scheme" "owner/repo" (normalizeRepo "HTTPS://GitHub.com/owner/repo")
+
+    -- buildDiffLink: compare when both valid, /commits fallback, Nothing otherwise
+    assertEqual
+        "buildDiffLink both valid -> compare"
+        (Just "https://github.com/owner/repo/compare/a1b2c3...d4e5f6")
+        (buildDiffLink (Just "owner/repo") "a1b2c3-v1" "d4e5f6-v2")
+    assertEqual
+        "buildDiffLink unknown old -> commits"
+        (Just "https://github.com/owner/repo/commits/d4e5f6")
+        (buildDiffLink (Just "owner/repo") "unknown" "d4e5f6")
+    assertEqual "buildDiffLink no repo -> Nothing" Nothing (buildDiffLink Nothing "a1b2c3" "d4e5f6")
+    assertEqual "buildDiffLink empty repo -> Nothing" Nothing (buildDiffLink (Just "") "a1b2c3" "d4e5f6")
+    assertEqual "buildDiffLink non-hex new -> Nothing" Nothing (buildDiffLink (Just "owner/repo") "a1b2c3" "release-x")

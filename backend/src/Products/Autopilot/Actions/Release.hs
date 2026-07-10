@@ -76,6 +76,7 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import Data.Yaml qualified as Yaml
 import Database.PostgreSQL.Simple (Only (..), SqlError (..), execute, withTransaction)
+import Products.Autopilot.DiffLink (buildDiffLink)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
 import Products.Autopilot.EventLog (logStatusUpdated)
 import Products.Autopilot.K8s.Deployment (buildPatchDeploymentEnvsCommand, deploymentExists, getRunningSchedulerVersion)
@@ -651,6 +652,21 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq 
                 Right (Just subset) -> subset
                 _ -> oldVersion
           else pure oldVersion
+  -- Changelog is always a generated GitHub diff link. Single-service creates
+  -- build the link on the frontend and send it; multi-service creates (and any
+  -- client that sends nothing) get it built here from the just-resolved old
+  -- version. The keep-if-present guard only avoids rebuilding a link the
+  -- frontend or a cross-cluster sync already produced — no case carries a
+  -- handwritten changelog. Degrades to a /commits/<new> link when the old
+  -- version couldn't be resolved, and to no link when the app group has no
+  -- repo_name configured.
+  let requestChangeLog = case changeLog of
+        Just cl | not (T.null (T.strip cl)) -> Just cl
+        _ -> Nothing
+      resolvedChangeLog = requestChangeLog <|> buildDiffLink (S.dcRepoName pCfg) resolvedOldVersion newVersion
+  case (requestChangeLog, resolvedChangeLog) of
+    (Nothing, Just link) -> logInfo $ "[createReleaseH] generated changelog diff link: " <> link
+    _ -> pure ()
   let derivedContext =
         K8sReleaseContext
           { cluster = getProductCluster pCfg,
@@ -733,7 +749,7 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq 
             reviewStatus = Nothing,
             info = info,
             description = description,
-            changeLog = changeLog,
+            changeLog = resolvedChangeLog,
             metadata = metadata,
             priority = fromMaybe 0 priority,
             globalId = globalId,
