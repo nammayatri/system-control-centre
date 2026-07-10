@@ -10,7 +10,7 @@ import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
 import { normalizeProductType } from '../../../lib/constants';
 import { useAuth } from '../../../core/auth/AuthContext';
-import { Trash2, Lock, ChevronDown, Info } from 'lucide-react';
+import { Trash2, Lock, ChevronDown, Check, Info } from 'lucide-react';
 import { toast } from 'sonner';
 
 const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
@@ -67,11 +67,20 @@ const CreateRelease: React.FC = () => {
   const location = useLocation();
   const { id } = useParams<{ id?: string }>();
   const isClone = location.pathname.endsWith('/clone') && !!id;
-  const { env: deploymentEnv, user } = useAuth();
+  const { env: deploymentEnv, user, products: productAccess, deploymentAccess } = useAuth();
   const isUpdate = !!id && location.pathname.endsWith('/edit');
 
   const { data: productConfigs = [] } = useProductConfigs();
-  const products = [...new Set(productConfigs.map((c: ProductConfig) => c.appGroup).filter(Boolean))];
+  // Access is granted per app group; only autopilot Admins and superadmins see every group.
+  const canSeeAllAppGroups =
+    !!user?.isSuperadmin ||
+    productAccess.some(p => p.slug === 'autopilot' && ['admin', 'superadmin'].includes(p.role?.toLowerCase()));
+  const accessibleAppGroups = new Set(
+    deploymentAccess.filter(d => d.productSlug === 'autopilot').map(d => d.appGroup)
+  );
+  const products = [...new Set(productConfigs.map((c: ProductConfig) => c.appGroup).filter(Boolean))]
+    .filter(g => canSeeAllAppGroups || accessibleAppGroups.has(g))
+    .sort((a, b) => a.localeCompare(b));
 
   const [formData, setFormData] = useState({
     appGroup: '', service: '', env: deploymentEnv, old_version: '', new_version: '', docker_image: '', change_log: '',
@@ -136,6 +145,8 @@ const CreateRelease: React.FC = () => {
   const [resourcesData, setResourcesData] = useState('');
   const [selectedServices, setSelectedServices] = useState<string[]>([]);
   const [showServiceDropdown, setShowServiceDropdown] = useState(false);
+  const [showAppGroupDropdown, setShowAppGroupDropdown] = useState(false);
+  const [showPriorityDropdown, setShowPriorityDropdown] = useState(false);
   const [clonedService, setClonedService] = useState('');
   const [stages, setStages] = useState([
     { rollout: 5, cooloff: 10, pods: 2 },
@@ -203,10 +214,16 @@ const CreateRelease: React.FC = () => {
       if (showServiceDropdown && !(e.target as HTMLElement).closest('.service-dropdown')) {
         setShowServiceDropdown(false);
       }
+      if (showAppGroupDropdown && !(e.target as HTMLElement).closest('.app-group-dropdown')) {
+        setShowAppGroupDropdown(false);
+      }
+      if (showPriorityDropdown && !(e.target as HTMLElement).closest('.priority-dropdown')) {
+        setShowPriorityDropdown(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showServiceDropdown]);
+  }, [showServiceDropdown, showAppGroupDropdown, showPriorityDropdown]);
 
   // Disable polling on edit: useRelease's 10s poll would overwrite typed form fields otherwise.
   const { data: existingRelease } = useQuery({
@@ -496,6 +513,11 @@ const CreateRelease: React.FC = () => {
       return;
     }
 
+    if (!formData.appGroup) {
+      toast.error('Select an app group');
+      return;
+    }
+
     if (selectedServices.length === 0) {
       toast.error('Select at least one service');
       return;
@@ -656,17 +678,63 @@ const CreateRelease: React.FC = () => {
                 {isUpdate ? (
                   <input type="text" value={formData.appGroup} disabled className={disabledInputClass} />
                 ) : (
-                  <select name="appGroup" value={formData.appGroup} onChange={handleInputChange} required className={cn(inputClass, 'cursor-pointer')}>
-                    <option value="">Select Product</option>
-                    {products.map(p => <option key={p} value={p}>{p}</option>)}
-                  </select>
+                  <div className="app-group-dropdown relative">
+                    <div
+                      onClick={() => setShowAppGroupDropdown(!showAppGroupDropdown)}
+                      className={cn(inputClass, 'cursor-pointer flex items-center justify-between')}
+                    >
+                      <span className={formData.appGroup ? 'text-zinc-900' : 'text-zinc-400'}>
+                        {formData.appGroup || 'Select App Group'}
+                      </span>
+                      <ChevronDown className="w-4 h-4 text-zinc-400" />
+                    </div>
+                    {showAppGroupDropdown && (
+                      <div className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto bg-white border border-zinc-200 rounded-lg shadow-lg">
+                        {products.length === 0 ? (
+                          <div className="px-3 py-2 text-sm text-zinc-400">No app groups accessible</div>
+                        ) : (
+                          products.map(p => (
+                            <button key={p} type="button"
+                              onClick={() => { setFormData(prev => ({ ...prev, appGroup: p })); setShowAppGroupDropdown(false); }}
+                              className="w-full px-3 py-2 text-left text-sm hover:bg-zinc-50 flex items-center justify-between">
+                              {p}
+                              {formData.appGroup === p && <Check className="w-4 h-4 text-zinc-900" />}
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
               <div>
                 <FieldLabel>Env</FieldLabel>
                 <input type="text" value={formData.env} disabled className={disabledInputClass} />
               </div>
-              <div><FieldLabel>Priority</FieldLabel><select name="priority" value={formData.priority} onChange={handleInputChange} disabled={isMidFlight} className={cn(isMidFlight ? disabledInputClass : inputClass, !isMidFlight && 'cursor-pointer')}>{[0,1,2,3,4,5,6,7,8,9].map(d => <option key={d} value={d}>{d}</option>)}</select></div>
+              <div>
+                <FieldLabel>Priority</FieldLabel>
+                <div className="priority-dropdown relative">
+                  <div
+                    onClick={() => !isMidFlight && setShowPriorityDropdown(!showPriorityDropdown)}
+                    className={cn(isMidFlight ? disabledInputClass : inputClass, 'flex items-center justify-between', !isMidFlight && 'cursor-pointer')}
+                  >
+                    <span className={isMidFlight ? '' : 'text-zinc-900'}>{formData.priority}</span>
+                    <ChevronDown className="w-4 h-4 text-zinc-400" />
+                  </div>
+                  {showPriorityDropdown && !isMidFlight && (
+                    <div className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto bg-white border border-zinc-200 rounded-lg shadow-lg">
+                      {[0,1,2,3,4,5,6,7,8,9].map(d => (
+                        <button key={d} type="button"
+                          onClick={() => { setFormData(prev => ({ ...prev, priority: String(d) })); setShowPriorityDropdown(false); }}
+                          className="w-full px-3 py-2 text-left text-sm hover:bg-zinc-50 flex items-center justify-between">
+                          {d}
+                          {formData.priority === String(d) && <Check className="w-4 h-4 text-zinc-900" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
               <div><FieldLabel>Description</FieldLabel><input type="text" name="description" value={formData.description} onChange={handleInputChange} placeholder="Deploying webhook Hotfix" disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} /></div>
               <div>
                 <FieldLabel required={!isUpdate}>Docker Image</FieldLabel>
