@@ -238,7 +238,8 @@ docker build --platform=linux/amd64 -t scc-backend:latest .
 | `SLACK_BOT_TOKEN` | no | Slack bot token for release notifications |
 | `DASHBOARD_URL` | no | Frontend URL embedded in Slack messages |
 | `SC_KUBECTL_BIN` | no (default `kubectl`) | Path to kubectl binary inside the container |
-| `SYNC_CLUSTER_URL` / `SYNC_CLUSTER_BASE_AUTH` | no | Secondary cluster sync endpoint + basic auth |
+| `SYNC_CLUSTER_URL` / `SYNC_CLUSTER_API_KEY` | no | Secondary cluster sync endpoint + shared API key (sent as `X-Sync-Api-Key` header) |
+| `SYNC_RELEASE_MANAGER` | no (default `sync-service`) | `release_manager`/`createdBy` stamped on records created via the API key, when the request itself doesn't carry a real requester's email |
 
 The first run on a fresh DB needs schema bootstrap. Either:
 1. Mount the host's `dev/sql-seed/` and `dev/migrations/system-control/` into the postgres init dir, OR
@@ -275,7 +276,9 @@ stringData:
   # Bootstrap env vars — read directly by the Haskell binary
   SC_DATABASE_URL: "postgres://scc:strong-password@scc-pg.svc:5432/system_control?sslmode=require"
   SLACK_BOT_TOKEN: "xoxb-real-token"
-  SYNC_CLUSTER_BASE_AUTH: "Basic dXNlcjpwYXNz"
+  SYNC_CLUSTER_API_KEY: "a-long-random-shared-secret-same-value-on-both-clusters"
+  # Optional — defaults to "sync-service" if omitted
+  SYNC_RELEASE_MANAGER: "gcp-prod-sync"
 ```
 
 **Step 3**: Wire it into the Deployment. Every key in the Secret becomes an env var via `envFrom`.
@@ -599,7 +602,7 @@ Sync behavior:
 - **Idempotent receive**: the receive endpoints look up by `global_id`. The DB enforces uniqueness via the partial unique index `uq_release_tracker_global_id ON release_tracker (global_id) WHERE global_id IS NOT NULL`, making sync replay safe.
 - **Loop prevention**: the receiving cluster sets `isSystemTriggered` on the inbound tracker so it does not sync back to its source.
 - **Auto-approve**: the inbound payload may carry `is_approved = true` so the receiver runs without re-approval.
-- **Auth**: Pomerium JWT (`x-pomerium-jwt-assertion` header) is preferred; falls back to Basic auth (`SYNC_CLUSTER_BASE_AUTH` env var) if no forwarded headers are present.
+- **Auth**: shared API key (`SYNC_CLUSTER_API_KEY` env var) is sent as `X-Sync-Api-Key`; the receiving cluster checks it before falling back to the normal bearer-token/session flow. Forwarded headers (`X-Forwarded-Email`, `x-pomerium-jwt-assertion`) ride alongside it for display/business logic, not auth. When authenticated via the API key, the request's `AuthedPerson` email defaults to `SYNC_RELEASE_MANAGER` (env var, default `sync-service`) — release create already prefers the payload's own `release_manager`/`createdBy` when `isSystemTriggered` is set, so this default only surfaces where a route stamps the caller's email directly (e.g. configmap tracker create).
 - **Retry**: 2 attempts with event logging (`SYNC_REQUEST`, `SYNC_RESPONSE`, `SYNC_FAILED`, `SYNC_FAILED_RETRY`, `SYNC_FAILED_FINAL`).
 
 ### Slack Notifications
@@ -1025,7 +1028,7 @@ so you don't need to set anything.
 | SC_POSTGRES_PASSWORD | postgres | PostgreSQL password |
 | SC_POSTGRES_DB | system_control | PostgreSQL database name |
 | SYNC_CLUSTER_URL | (empty) | Secondary cluster API URL for multi-cloud sync |
-| SYNC_CLUSTER_BASE_AUTH | (empty) | Basic auth credentials for secondary cluster |
+| SYNC_CLUSTER_API_KEY | (empty) | Shared API key for secondary cluster (sent/checked as `X-Sync-Api-Key` header; must match on both clusters) |
 | SLACK_BOT_TOKEN | (empty) | Slack bot token for release notifications |
 | DASHBOARD_URL | http://localhost:5173 | Frontend URL for clickable links in Slack notifications |
 

@@ -123,11 +123,11 @@ fetchSecondaryEnvsH _ap mProduct mEnv mService = do
                     let normalised =
                             let u = if "http" `T.isPrefixOf` T.pack rawUrl then T.pack rawUrl else "http://" <> T.pack rawUrl
                              in if T.null u || T.last u == '/' then u else u <> "/"
-                        baseAuth = syncClusterBaseAuth cfg
+                        apiKey = syncClusterApiKey cfg
                         auth =
-                            if null baseAuth
+                            if null apiKey
                                 then []
-                                else [("Authorization", "Bearer " <> T.pack baseAuth)]
+                                else [("X-Sync-Api-Key", T.pack apiKey)]
                         getUrl = normalised <> "envs?product=" <> product' <> "&env=" <> env' <> "&service=" <> service'
                         getReq = (defaultReq getUrl){reqHeaders = auth, reqTimeout = Seconds 15, reqRetries = 0, reqLogTag = "sync-env"}
                     logInfo $ "[SYNC-ENV] Fetching secondary envs from: " <> getUrl

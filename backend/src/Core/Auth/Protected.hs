@@ -21,6 +21,7 @@
 -- product so Core never imports Products.
 module Core.Auth.Protected
   ( Protected,
+    ServiceProtected,
     KnownPermission (..),
     AuthedPerson (..),
     requireDeploymentPermission,
@@ -45,7 +46,8 @@ import Core.Auth.Types
   ( PersonAuth (..),
     ProductAccess (..),
   )
-import Core.Environment (AppState, MonadFlow, runFlow)
+import Core.Config (Config (..))
+import Core.Environment (AppState, MonadFlow, getConfig, runFlow)
 import Data.Aeson (object, (.=))
 import Data.Aeson qualified as A
 import Data.ByteString qualified as B
@@ -55,7 +57,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time.Clock (getCurrentTime)
-import Data.UUID (UUID)
+import Data.UUID (UUID, nil)
 import GHC.Generics (Generic)
 import Network.HTTP.Types (hContentType)
 import Network.Wai (Request, requestHeaders)
@@ -111,6 +113,61 @@ instance
         case result of
           Right ap -> pure ap
           Left (status, msg) -> delayedFailFatal (jsonError status msg)
+
+data ServiceProtected (perm :: k)
+
+instance
+  ( KnownPermission perm,
+    HasServer api context,
+    HasContextEntry context AppState
+  ) =>
+  HasServer (ServiceProtected (perm :: k) :> api) context
+  where
+  type ServerT (ServiceProtected perm :> api) m = AuthedPerson -> ServerT api m
+
+  hoistServerWithContext _ pc nt s =
+    \p -> hoistServerWithContext (Proxy :: Proxy api) pc nt (s p)
+
+  route _ context subserver =
+    route (Proxy :: Proxy api) context (subserver `addAuthCheck` check)
+    where
+      st :: AppState
+      st = getContextEntry context
+      prodSlug :: Text
+      prodSlug = permissionProduct (Proxy :: Proxy perm)
+      permText :: Text
+      permText = permissionName (Proxy :: Proxy perm)
+
+      check :: DelayedIO AuthedPerson
+      check = withRequest $ \req -> do
+        result <- liftIO (runFlow st (checkServiceOrUser prodSlug permText req))
+        case result of
+          Right ap -> pure ap
+          Left (status, msg) -> delayedFailFatal (jsonError status msg)
+
+checkServiceOrUser ::
+  (MonadFlow m) =>
+  Text ->
+  Text ->
+  Request ->
+  m (Either (ServerError, Text) AuthedPerson)
+checkServiceOrUser prodSlug permText req =
+  case lookup "X-Sync-Api-Key" (requestHeaders req) of
+    Nothing -> checkPermission prodSlug permText req
+    Just provided -> do
+      cfg <- getConfig
+      let configured = T.pack (syncClusterApiKey cfg)
+      if not (T.null configured) && TE.decodeUtf8 provided == configured
+        then
+          pure $
+            Right
+              AuthedPerson
+                { apPersonId = nil,
+                  apEmail = T.pack (syncReleaseManager cfg),
+                  apIsSuperadmin = True,
+                  apProductAccesses = []
+                }
+        else pure $ Left (err401, "Invalid API key")
 
 -- | Validate the bearer token and check @permText@ for @prodSlug@.
 -- Returns Right on success, Left @(status, msg)@ for 401/403 JSON.

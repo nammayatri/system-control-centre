@@ -55,12 +55,12 @@ buildAuthHeaders :: Config -> Maybe K8sReleaseContext -> ([(Text, Text)], Text)
 buildAuthHeaders cfg mCtx =
   let mXfe = mCtx >>= syncXForwardedEmail
       mJwt = mCtx >>= syncXPomeriumJwt
-      baseAuth = syncClusterBaseAuth cfg
+      apiKey = syncClusterApiKey cfg
       xfe = case mXfe of Just t | not (T.null (T.strip t)) -> [("X-Forwarded-Email", t)]; _ -> []
       jwt = case mJwt of Just t | not (T.null (T.strip t)) -> [("x-pomerium-jwt-assertion", t)]; _ -> []
       forwarded = xfe <> jwt
-   in if not (null baseAuth)
-        then (("Authorization", "Bearer " <> T.pack baseAuth) : forwarded, "bearer_auth")
+   in if not (null apiKey)
+        then (("X-Sync-Api-Key", T.pack apiKey) : forwarded, "api_key_auth")
         else
           if not (null forwarded)
             then (forwarded, "forwarded_headers")

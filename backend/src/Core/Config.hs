@@ -13,7 +13,7 @@ Runtime-tunable configs live in server_config DB table (see RuntimeConfig.hs).
 == Layer policy note (task #24 V4)
 
 A few fields here (prometheusUrl, abEngineUrl, abHsUrl, syncClusterUrl,
-syncClusterBaseAuth) are only read by Products.Autopilot today —
+syncClusterApiKey, syncReleaseManager) are only read by Products.Autopilot today —
 specifically by the decision engine and the cross-cluster sync. They live
 in 'Core.Config' rather than 'Products.Autopilot.Config' because:
 
@@ -48,7 +48,8 @@ data Config = Config
     , databaseUrl :: Maybe String
     , -- Cross-cluster sync endpoint (secrets). See V4 layer note above.
       syncClusterUrl :: String
-    , syncClusterBaseAuth :: String
+    , syncClusterApiKey :: String
+    , syncReleaseManager :: String
     , -- Decision engine URLs (metrics + A/B + health score). See V4 layer note.
       prometheusUrl :: String
     , abEngineUrl :: String
@@ -74,7 +75,8 @@ loadConfig = do
     databaseUrl <- lookupSetting "SC_DATABASE_URL"
 
     syncClusterUrl <- envOr "SYNC_CLUSTER_URL" ""
-    syncClusterBaseAuth <- envOr "SYNC_CLUSTER_BASE_AUTH" ""
+    syncClusterApiKey <- envOr "SYNC_CLUSTER_API_KEY" ""
+    syncReleaseManager <- envOr "SYNC_RELEASE_MANAGER" "sync-service"
 
     prometheusUrl <- envOr "PROMETHEUS_URL" ""
     abEngineUrl <- envOr "AB_ENGINE_URL" ""

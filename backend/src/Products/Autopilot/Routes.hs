@@ -5,7 +5,7 @@
 
 module Products.Autopilot.Routes (CoreAPI, coreServer) where
 
-import Core.Auth.Protected (Protected)
+import Core.Auth.Protected (Protected, ServiceProtected)
 import Core.Environment (Flow)
 import Data.Aeson (Value)
 import Data.Text (Text)
@@ -33,26 +33,26 @@ type CoreAPI =
     :<|> "products" :> Protected 'AP_PRODUCT_CONFIG_VIEW :> Capture "product" Text :> "services" :> Get '[JSON] [ServiceResponse]
     :<|> "services" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> ReqBody '[JSON] UpsertServiceReq :> Post '[JSON] APIResponse
     :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> QueryParam "from" Text :> QueryParam "to" Text :> QueryParam "category" Text :> Get '[JSON] [ReleaseTracker]
-    :<|> "releases" :> Protected 'AP_RELEASE_CREATE :> "create" :> Header "X-Forwarded-Email" Text :> Header "x-pomerium-jwt-assertion" Text :> ReqBody '[JSON] K8sCreateReleaseReq :> Post '[JSON] APIResponse
-    :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> Get '[JSON] (Maybe ReleaseTracker)
+    :<|> "releases" :> ServiceProtected 'AP_RELEASE_CREATE :> "create" :> Header "X-Forwarded-Email" Text :> Header "x-pomerium-jwt-assertion" Text :> ReqBody '[JSON] K8sCreateReleaseReq :> Post '[JSON] APIResponse
+    :<|> "releases" :> ServiceProtected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> Get '[JSON] (Maybe ReleaseTracker)
     :<|> "releases" :> Protected 'AP_RELEASE_APPROVE :> Capture "releaseId" Text :> "approve" :> ReqBody '[JSON] ApproveReleaseReq :> Post '[JSON] (Maybe ReleaseTracker)
     :<|> "releases" :> Protected 'AP_RELEASE_CREATE :> Capture "releaseId" Text :> "trigger" :> ReqBody '[JSON] TriggerReleaseReq :> Post '[JSON] APIResponse
     :<|> "releases" :> Protected 'AP_RELEASE_REVERT :> Capture "releaseId" Text :> "rollback" :> ReqBody '[JSON] TriggerReleaseReq :> Post '[JSON] APIResponse
     :<|> "releases" :> Protected 'AP_RELEASE_REVERT :> Capture "releaseId" Text :> "revert" :> ReqBody '[JSON] RevertReleaseReq :> Post '[JSON] APIResponse
-    :<|> "release" :> Protected 'AP_RELEASE_REVERT :> "revert" :> "global" :> Capture "globalId" Text :> Put '[JSON] APIResponse
-    :<|> "release" :> Protected 'AP_RELEASE_REVERT :> "revert" :> "immediate" :> "global" :> Capture "globalId" Text :> Put '[JSON] APIResponse
+    :<|> "release" :> ServiceProtected 'AP_RELEASE_REVERT :> "revert" :> "global" :> Capture "globalId" Text :> Put '[JSON] APIResponse
+    :<|> "release" :> ServiceProtected 'AP_RELEASE_REVERT :> "revert" :> "immediate" :> "global" :> Capture "globalId" Text :> Put '[JSON] APIResponse
     :<|> "releases" :> Protected 'AP_RELEASE_DISCARD :> Capture "releaseId" Text :> "discard" :> ReqBody '[JSON] DiscardReleaseReq :> Post '[JSON] APIResponse
     :<|> "releases" :> Protected 'AP_RELEASE_UPDATE :> Capture "releaseId" Text :> "update" :> ReqBody '[JSON] K8sUpdateTrackerReq :> Post '[JSON] APIResponse
     :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "events" :> Get '[JSON] [ReleaseEventResponse]
     :<|> "releases" :> Protected 'AP_RELEASE_DELETE :> Capture "releaseId" Text :> "delete" :> Post '[JSON] APIResponse
     :<|> "tracker" :> Protected 'AP_RELEASE_VIEW :> "configmap" :> "list" :> QueryParam "from" Text :> QueryParam "to" Text :> Get '[JSON] ConfigMapListResponse
     :<|> "tracker" :> Protected 'AP_RELEASE_VIEW :> "configmap" :> Capture "id" Text :> Get '[JSON] Value
-    :<|> "tracker" :> Protected 'AP_RELEASE_CREATE :> "configmap" :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
+    :<|> "tracker" :> ServiceProtected 'AP_RELEASE_CREATE :> "configmap" :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
     :<|> "tracker" :> Protected 'AP_RELEASE_UPDATE :> "configmap" :> Capture "id" Text :> ReqBody '[JSON] Value :> Put '[JSON] APIResponse
     :<|> "server-config" :> Protected 'AP_SERVICE_CONFIG_VIEW :> QueryParam "product" Text :> Get '[JSON] ServerConfigResponse
     :<|> "server-config" :> Protected 'AP_SERVICE_CONFIG_EDIT :> ReqBody '[JSON] UpsertServerConfigReq :> Post '[JSON] APIResponse
     :<|> "server-config" :> Protected 'AP_SERVICE_CONFIG_EDIT :> Capture "id" Int32 :> Delete '[JSON] APIResponse
-    :<|> "envs" :> Protected 'AP_RELEASE_VIEW :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
+    :<|> "envs" :> ServiceProtected 'AP_RELEASE_VIEW :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
     :<|> "envs" :> Protected 'AP_RELEASE_VIEW :> "secondary" :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
     :<|> "running-version" :> Protected 'AP_RELEASE_VIEW :> QueryParam "product" Text :> QueryParam "service" Text :> Get '[JSON] Value
     -- New endpoints
@@ -88,7 +88,7 @@ type CoreAPI =
     :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_VIEW :> Capture "id" Text :> Get '[JSON] Value
     :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_UPDATE :> Capture "id" Text :> ReqBody '[JSON] UpdateVsEditTrackerReq :> Put '[JSON] APIResponse
     -- K8s ConfigMap lookup
-    :<|> "configmap" :> Protected 'AP_CONFIG_EDIT :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] Value
+    :<|> "configmap" :> ServiceProtected 'AP_CONFIG_EDIT :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] Value
     :<|> "configmap" :> Protected 'AP_CONFIG_EDIT :> "secondary" :> QueryParam "PRODUCT" Text :> QueryParam "NAME" Text :> Get '[JSON] Value
     -- Decision-engine post-monitoring webhook. UNAUTHENTICATED — trusts
     -- the run_id (releaseId-post) as the auth token; caller is the AB engine.
