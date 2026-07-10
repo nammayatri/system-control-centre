@@ -29,17 +29,17 @@ pipeline {
     AWS_REGION = 'ap-south-1'
 
     AWS_ACCOUNT_MASTER = '463356420488'
-    API_URL_AWS_MASTER  = 'https://namma-ap.sso.integ.internal.svc.movingtech.net/api'
+    API_URL_AWS_MASTER  = '/api'   // relative → same-origin as serving host (avoids cross-origin CORS/401)
 
     AWS_ACCOUNT_PROD = '147728078333'
-    API_URL_AWS_PROD = 'https://namma-ap.sso.internal.svc.movingtech.net/api'
+    API_URL_AWS_PROD = '/api'   // relative → same-origin as serving host
 
     GCP_PROJECT_MASTER = 'ny-sandbox'
     GCP_AR_MASTER       = "asia-south1-docker.pkg.dev/${GCP_PROJECT_MASTER}"
-    API_URL_GCP_MASTER  = 'https://namma-ap.sso.c2.integ.internal.svc.movingtech.net/api'
+    API_URL_GCP_MASTER  = '/api'   // relative → same-origin as serving host
     GCP_PROJECT_PROD = 'ny-prod'
     GCP_AR_PROD       = "asia-south1-docker.pkg.dev/${GCP_PROJECT_PROD}"
-    API_URL_GCP_PROD  = 'https://namma-ap.c2.sso.internal.svc.movingtech.net/api'
+    API_URL_GCP_PROD  = '/api'   // relative → same-origin as serving host
   }
 
   stages {
