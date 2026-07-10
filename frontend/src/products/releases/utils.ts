@@ -35,3 +35,22 @@ export function relativeAge(iso: string | null): string {
   if (h < 24) return `${h}h ago`;
   return `${Math.round(h / 24)}d ago`;
 }
+
+// An INPROGRESS tracker row spans build → store review → rollout; label it by
+// the backend phase tag (release_context.display_phase) instead of "in progress".
+const PHASE_LABELS: Record<string, string> = {
+  building: 'building',
+  internal_held: 'internal (held)',
+  in_review: 'in review',
+  approved: 'approved (held)',
+  rolling_out: 'rolling out',
+  halted: 'halted',
+  live: 'live',
+};
+
+/** Human phase label for an in-flight row ("in flight" when the tag is unknown). */
+export function inFlightPhaseLabel(release: {
+  release_context?: { display_phase?: string } | null;
+}): string {
+  return PHASE_LABELS[release.release_context?.display_phase ?? ''] ?? 'in flight';
+}

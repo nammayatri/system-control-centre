@@ -79,7 +79,7 @@ import Data.Aeson (FromJSON, ToJSON, Value (..), fromJSON, toJSON)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Text qualified as AesonText
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -681,18 +681,28 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
       rtAscVersionId = Nothing,
       rtAscPhasedId = Nothing,
       rtStoreTrack = Nothing,
-      -- Identity: a store build holds its (version, code) slot unless it aborted/failed
-      -- before uploading an artifact ('releasesIdentitySlot') — only then NULL the column
-      -- to free it for a rebuild. A built-then-aborted build keeps its slot (it's on the store).
+      -- Identity: a store build holds its (version, code) slot unless it ended WITHOUT
+      -- uploading an artifact — then NULL the column so (version, code) can be rebuilt.
+      -- A built-then-aborted build keeps its slot (it's on the store — tag pushed).
       rtVersionCode = case mts of
         Just (MobileBuildState s)
-          | claimsStoreIdentity (mbContext s) && not (releasesIdentitySlot s) ->
+          | claimsStoreIdentity (mbContext s) && not (slotReleased s) ->
               mbcVersionCode (mbContext s)
         _ -> Nothing,
       rtTerminalStatus = Nothing,
       rtCreatedAt = createdAt,
       rtUpdatedAt = updatedAt
     }
+  where
+    -- Discard / abort flip only the tracker status column, so the wf-status-based
+    -- 'releasesIdentitySlot' never sees them and the slot stayed stuck. A never-shipped
+    -- terminal status frees it too, gated on "no artifact (tag) uploaded" so a
+    -- built-then-aborted build (already on the store) still keeps its slot.
+    neverShippedStatus =
+      releaseStatusToText status `elem` ["DISCARDED", "ABORTED", "USER_ABORTED"]
+    slotReleased s =
+      releasesIdentitySlot s
+        || (neverShippedStatus && isNothing (mbcTagPushed (mbContext s)))
 
 fromRow :: ReleaseTrackerRow -> TrackerWithTarget
 fromRow ReleaseTrackerT{..} =
@@ -714,7 +724,7 @@ fromRow ReleaseTrackerT{..} =
         Just (MobileBuildState mb) ->
           let ph = phaseFromFields (buildKind (mbContext mb)) (mbWfStatus mb) rtReviewStatus rtRolloutStatus rtRolloutPercent rtStoreTrack
               disp = displayStatusInferred (reviewInferredOf (parseJsonTextMaybe rtMetadata)) ph
-           in Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent rtStoreTrack (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) (toJSON (mbContext mb)))
+           in Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent rtStoreTrack (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) rtDispatchId (toJSON (mbContext mb)))
         _ -> Nothing
       tracker =
         ReleaseTracker
@@ -766,8 +776,8 @@ fromRow ReleaseTrackerT{..} =
 -- This lets the releases list/detail read the live rollout % straight off the row
 -- (the same source the rollout endpoint uses), instead of a stale metadata mirror.
 -- No-op if the value isn't an object.
-addMobileLifecycle :: Text -> Maybe Text -> Maybe Double -> Maybe Text -> Text -> Text -> Text -> Value -> Value
-addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack dispLabel dispVariant dispPhase (Object o) =
+addMobileLifecycle :: Text -> Maybe Text -> Maybe Double -> Maybe Text -> Text -> Text -> Text -> Maybe Text -> Value -> Value
+addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack dispLabel dispVariant dispPhase mDispatchId (Object o) =
   Object
     . KM.insert "mb_wf_status" (toJSON st)
     . KM.insert "rollout_status" (toJSON mRolloutStatus)
@@ -781,8 +791,12 @@ addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack dispLabel dispVaria
     . KM.insert "display_label" (toJSON dispLabel)
     . KM.insert "display_variant" (toJSON dispVariant)
     . KM.insert "display_phase" (toJSON dispPhase)
+    -- Dispatch-group id: rows dispatched together share one GH run — the group
+    -- page renders its "shared run" chip off this. Insert only when known, so a
+    -- re-application over already-built JSON (injectStoreState) can't clobber it.
+    . maybe id (\d -> KM.insert "dispatch_id" (toJSON d)) mDispatchId
     $ o
-addMobileLifecycle _ _ _ _ _ _ _ v = v
+addMobileLifecycle _ _ _ _ _ _ _ _ v = v
 
 -- | Whether metadata flags the review verdict as track-INFERRED (Android
 -- out-of-band detection, Google exposes no review state) rather than

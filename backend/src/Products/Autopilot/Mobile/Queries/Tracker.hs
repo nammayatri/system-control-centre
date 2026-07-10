@@ -14,6 +14,7 @@
 -- module deliberately does not redefine them.
 module Products.Autopilot.Mobile.Queries.Tracker
   ( findSiblingsByDispatchId,
+    findRunSiblingsStillBuilding,
     setExternalRunIdForDispatch,
     setPhase,
     setAscIds,
@@ -140,6 +141,32 @@ findSiblingsByDispatchId dispatchId = withDb $ \db -> do
             guard_ (acPlatform ac ==. rtEnv rt)
             pure (rt, ac)
   pure (map (\(rt, ac) -> (rowToDomain rt, ac)) rows)
+
+-- | App names of OTHER rows in a dispatch group whose build is still running
+-- (non-terminal status, wf before MBSubmittedToStore — nothing uploaded yet).
+-- Aborting any row cancels the group's shared GH run, so these builds die
+-- with it; the FE lists them in the abort confirm. Already-uploaded siblings
+-- (MBSubmittedToStore+) are safe from a run-cancel and excluded.
+findRunSiblingsStillBuilding :: (MonadFlow m) => Text -> Text -> m [Text]
+findRunSiblingsStillBuilding dispatchId excludeRid = do
+  rows <- withDb $ \db ->
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtDispatchId rt ==. val_ (Just dispatchId))
+          guard_ (rtId rt /=. val_ excludeRid)
+          guard_ (rtStatus rt `in_` [val_ "CREATED", val_ "INPROGRESS"])
+          pure (rtAppGroup rt, rtTargetState rt)
+  pure
+    [ ag
+    | (ag, mCtx) <- rows
+    , Just st <- [parseMobileTargetState mCtx]
+    , stillBuilding (mbWfStatus st)
+    ]
+  where
+    stillBuilding wf =
+      wf `elem` [MBInit, MBVersionResolved, MBDispatched, MBRunIdResolved, MBBuilding]
 
 -- | Set @external_run_id@ and @commit_sha@ on every tracker row in the
 -- dispatch group. A single SQL UPDATE so siblings can never disagree on

@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, CheckCircle2, Send, Smartphone, Apple, Cpu, Info } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Link2, Send, Smartphone, Apple, Cpu, Info } from 'lucide-react';
 import { useReleases, useDispatchMobileReleases } from '../../hooks';
 import { approveRelease } from '../../api';
 import { useAuth } from '../../../../core/auth/AuthContext';
 import { ReleaseStatusBadge } from '../../components/ReleaseStatusBadge';
 import { BrandLogo } from '../../components/BrandLogo';
-import { versionWithBuild } from '../../utils';
+import { versionWithBuild, inFlightPhaseLabel } from '../../utils';
 import { Button } from '../../../../shared/ui/button';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { cn } from '../../../../lib/utils';
@@ -20,6 +20,15 @@ const PlatformIcon = ({ platform }: { platform: string }) =>
   platform === 'ios'
     ? <Apple className="w-4 h-4 text-zinc-500" />
     : <Cpu className="w-4 h-4 text-emerald-600" />;
+
+// Mirrors the backend dispatch grouping (Handlers/Release.hs): consumer rows
+// share one GH run per (surface, platform); provider (driver) rows additionally
+// split by (version, destination) — their workflow takes one version_name per run.
+function runKeyOf(r: APRelease): string {
+  return r.service === 'driver'
+    ? `${r.service}|${r.env}|${r.new_version}|${r.release_context?.destination ?? ''}`
+    : `${r.service}|${r.env}`;
+}
 
 // Pull the release_group_id out of the normalized release_context, with a
 // metadata fallback for any older rows where the field was stashed elsewhere.
@@ -89,10 +98,29 @@ export default function ReleaseGroupDetail() {
       return { label: 'Failed', tone: 'red', sub: `${completed}/${total} completed` };
     }
     if (inProgress > 0) {
+      // Word in-flight rows by their store phase, not "in progress" — a row
+      // stays INPROGRESS through review/rollout until it goes live.
+      const buckets = new Map<string, number>();
+      for (const r of groupReleases) {
+        if (r.status !== 'INPROGRESS') continue;
+        const label = inFlightPhaseLabel(r);
+        buckets.set(label, (buckets.get(label) ?? 0) + 1);
+      }
+      // Every in-flight row in the same phase (and nothing else pending) →
+      // the phase IS the group state; mixed phases fall back to "In progress".
+      if (buckets.size === 1 && inProgress + completed === total) {
+        const phase = Array.from(buckets.keys())[0];
+        return {
+          label: phase.charAt(0).toUpperCase() + phase.slice(1),
+          tone: 'blue',
+          sub: completed > 0 ? `${inProgress} in flight · ${completed} done` : `${inProgress}/${total}`,
+        };
+      }
+      const parts = Array.from(buckets.entries()).map(([label, n]) => `${n} ${label}`);
       return {
         label: 'In progress',
         tone: 'blue',
-        sub: `${inProgress} dispatching · ${completed} done`,
+        sub: `${parts.join(' · ')} · ${completed} done`,
       };
     }
     if (created === total && approved === total) {
@@ -118,11 +146,27 @@ export default function ReleaseGroupDetail() {
     zinc: 'bg-zinc-50 text-zinc-700 border-zinc-200',
   };
 
+  // Only CREATED rows can be approved/dispatched (mirrors the backend
+  // validateForDispatch guard) — dispatched rows are monitor-only here.
+  const isActionable = (r: APRelease) => r.status === 'CREATED';
+  const actionableRows = useMemo(() => groupReleases.filter(isActionable), [groupReleases]);
+  const hasActionable = actionableRows.length > 0;
+
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const allChecked = groupReleases.length > 0 && groupReleases.every((r) => selectedIds.has(r.id));
+  const allChecked = hasActionable && actionableRows.every((r) => selectedIds.has(r.id));
+
+  // The 5s poll can move a selected row past CREATED — drop it from the
+  // selection so the buttons never target a row the backend would reject.
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      const valid = new Set(actionableRows.map((r) => r.id));
+      const next = new Set(Array.from(prev).filter((id) => valid.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [actionableRows]);
 
   const toggleAll = () => {
-    setSelectedIds(allChecked ? new Set() : new Set(groupReleases.map((r) => r.id)));
+    setSelectedIds(allChecked ? new Set() : new Set(actionableRows.map((r) => r.id)));
   };
 
   const toggleOne = (id: string) => {
@@ -132,6 +176,38 @@ export default function ReleaseGroupDetail() {
       else next.add(id);
       return next;
     });
+  };
+
+  // Live preview of what THIS selection dispatches as ("3 apps → 1 build run"),
+  // so the one-vs-many-runners consequence is visible BEFORE the click.
+  const dispatchPreview = useMemo(() => {
+    if (selectedIds.size === 0) return null;
+    const rows = groupReleases.filter((r) => selectedIds.has(r.id));
+    const runs = new Map<string, APRelease[]>();
+    for (const r of rows) {
+      const k = runKeyOf(r);
+      runs.set(k, [...(runs.get(k) ?? []), r]);
+    }
+    const parts = Array.from(runs.entries()).map(([k, rs]) => {
+      const platform = k.split('|')[1];
+      return rs.length > 1 ? `${platform} ×${rs.length} shared` : `${platform} ×1`;
+    });
+    return { apps: rows.length, runs: runs.size, parts };
+  }, [groupReleases, selectedIds]);
+
+  // Rows dispatched together carry the same dispatch_id = one shared GH run.
+  // Count the company per run so the chip explains the abort blast radius.
+  const runMates = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const r of groupReleases) {
+      const did = r.release_context?.dispatch_id;
+      if (did) counts.set(did, (counts.get(did) ?? 0) + 1);
+    }
+    return counts;
+  }, [groupReleases]);
+  const sharedRunCount = (r: APRelease) => {
+    const did = r.release_context?.dispatch_id;
+    return did ? runMates.get(did) ?? 0 : 0;
   };
 
   const dispatchMutation = useDispatchMobileReleases();
@@ -163,8 +239,9 @@ export default function ReleaseGroupDetail() {
     if (ids.length === 0) return;
     try {
       const resp = await dispatchMutation.mutateAsync(ids);
+      const nRuns = resp.dispatches.length;
       toast.success(
-        `Dispatched ${resp.dispatches.length} workflow${resp.dispatches.length === 1 ? '' : 's'}`,
+        `Dispatched ${ids.length} app${ids.length === 1 ? '' : 's'} in ${nRuns} build run${nRuns === 1 ? '' : 's'}`,
       );
       void refetch();
     } catch {
@@ -220,26 +297,47 @@ export default function ReleaseGroupDetail() {
             </h1>
             <p className="text-xs text-zinc-500 mt-0.5 font-mono truncate">{groupId}</p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={onApproveSelected}
-              loading={approving}
-              disabled={selectedIds.size === 0}
-            >
-              <CheckCircle2 className="w-4 h-4" /> Approve selected ({selectedIds.size})
-            </Button>
-            <Button
-              size="sm"
-              onClick={onDispatchSelected}
-              loading={dispatchMutation.isPending}
-              disabled={selectedIds.size === 0}
-            >
-              <Send className="w-4 h-4" /> Dispatch selected ({selectedIds.size})
-            </Button>
-          </div>
+          {/* Bulk actions only exist while something is still dispatchable —
+              a fully dispatched group is monitor-only. */}
+          {hasActionable && (
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onApproveSelected}
+                loading={approving}
+                disabled={selectedIds.size === 0}
+              >
+                <CheckCircle2 className="w-4 h-4" /> Approve selected ({selectedIds.size})
+              </Button>
+              <Button
+                size="sm"
+                onClick={onDispatchSelected}
+                loading={dispatchMutation.isPending}
+                disabled={selectedIds.size === 0}
+              >
+                <Send className="w-4 h-4" /> Dispatch selected ({selectedIds.size})
+              </Button>
+            </div>
+          )}
         </header>
+
+        {/* Dispatch preview: teaches the one-vs-many-runs semantics at selection
+            time — apps selected TOGETHER share one GitHub run per platform. */}
+        {dispatchPreview && (
+          <div className="px-4 py-2.5 sm:px-6 border-b border-blue-100 bg-blue-50/60 text-xs text-blue-900 flex flex-wrap items-center gap-x-2 gap-y-1">
+            <Send className="w-3.5 h-3.5 shrink-0" />
+            <span className="font-semibold">
+              {dispatchPreview.apps} app{dispatchPreview.apps === 1 ? '' : 's'} selected →{' '}
+              {dispatchPreview.runs} build run{dispatchPreview.runs === 1 ? '' : 's'}
+            </span>
+            <span className="text-blue-700">({dispatchPreview.parts.join(' · ')})</span>
+            <span className="text-blue-700/80">
+              — apps in a shared run build together, each at its own version;
+              un-selected apps stay here and dispatch later as a separate run.
+            </span>
+          </div>
+        )}
 
         {groupingMissing && (
           <div className="px-4 py-3 sm:px-6 border-b border-amber-200 bg-amber-50 text-amber-800 text-xs flex gap-2 items-start">
@@ -266,12 +364,14 @@ export default function ReleaseGroupDetail() {
                 <thead>
                   <tr className="bg-zinc-50 border-b border-zinc-200 text-[11px] text-zinc-500 font-medium uppercase tracking-wider">
                     <th className="py-3 px-4 w-10">
-                      <input
-                        type="checkbox"
-                        checked={allChecked}
-                        onChange={toggleAll}
-                        className="rounded border-zinc-300 accent-zinc-900"
-                      />
+                      {hasActionable && (
+                        <input
+                          type="checkbox"
+                          checked={allChecked}
+                          onChange={toggleAll}
+                          className="rounded border-zinc-300 accent-zinc-900"
+                        />
+                      )}
                     </th>
                     <th className="py-3 px-4">App</th>
                     <th className="py-3 px-4">Surface</th>
@@ -293,12 +393,14 @@ export default function ReleaseGroupDetail() {
                         )}
                       >
                         <td className="py-3 px-4">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleOne(r.id)}
-                            className="rounded border-zinc-300 accent-zinc-900"
-                          />
+                          {isActionable(r) && (
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleOne(r.id)}
+                              className="rounded border-zinc-300 accent-zinc-900"
+                            />
+                          )}
                         </td>
                         <td className="py-3 px-4 font-medium text-zinc-800">
                           <span className="inline-flex items-center gap-2">
@@ -319,6 +421,14 @@ export default function ReleaseGroupDetail() {
                             {r.is_approved === 1 && (
                               <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-emerald-700 text-white">
                                 APPROVED
+                              </span>
+                            )}
+                            {sharedRunCount(r) > 1 && (
+                              <span
+                                className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700"
+                                title="Dispatched together: these apps build in ONE GitHub run — aborting one cancels the run for every app still building."
+                              >
+                                <Link2 className="w-3 h-3" /> shared run · {sharedRunCount(r)}
                               </span>
                             )}
                           </div>
@@ -345,12 +455,14 @@ export default function ReleaseGroupDetail() {
                 return (
                   <div key={r.id} className="p-4">
                     <div className="flex items-start gap-3">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => toggleOne(r.id)}
-                        className="mt-1 rounded border-zinc-300 accent-zinc-900"
-                      />
+                      {isActionable(r) && (
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleOne(r.id)}
+                          className="mt-1 rounded border-zinc-300 accent-zinc-900"
+                        />
+                      )}
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 text-sm font-medium text-zinc-900">
                           <BrandLogo brand={r.appGroup} surface={r.service === 'driver' ? 'driver' : undefined} size="sm" />
@@ -367,6 +479,14 @@ export default function ReleaseGroupDetail() {
                           {r.is_approved === 1 && (
                             <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-emerald-700 text-white">
                               APPROVED
+                            </span>
+                          )}
+                          {sharedRunCount(r) > 1 && (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700"
+                              title="Dispatched together: these apps build in ONE GitHub run — aborting one cancels the run for every app still building."
+                            >
+                              <Link2 className="w-3 h-3" /> shared run · {sharedRunCount(r)}
                             </span>
                           )}
                         </div>

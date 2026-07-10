@@ -5,6 +5,7 @@ import { useReleases } from '../../hooks';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { Button } from '../../../../shared/ui/button';
 import { formatDate } from '../../../../lib/utils';
+import { inFlightPhaseLabel } from '../../utils';
 import type { APRelease } from '../../api';
 import { BrandLogo, normalizeBrand } from '../../components/BrandLogo';
 
@@ -91,7 +92,10 @@ export default function ReleaseGroupsList() {
       g.releaseCount += 1;
       if (r.appGroup && !g.apps.includes(r.appGroup)) g.apps.push(r.appGroup);
       if (r.env === 'android' || r.env === 'ios') g.platforms.add(r.env);
-      const status = r.status || 'UNKNOWN';
+      // INPROGRESS rows read by store phase ("approved (held)", "in review"),
+      // not the raw tracker status — they stay INPROGRESS until live.
+      const status =
+        r.status === 'INPROGRESS' ? inFlightPhaseLabel(r).toUpperCase() : r.status || 'UNKNOWN';
       g.statuses[status] = (g.statuses[status] ?? 0) + 1;
       if (r.date_created && r.date_created < g.earliestCreated) {
         g.earliestCreated = r.date_created;
@@ -110,7 +114,14 @@ export default function ReleaseGroupsList() {
   // the most useful states first.
   const STATUS_ORDER = [
     'CREATED',
-    'INPROGRESS',
+    'BUILDING',
+    'IN FLIGHT',
+    'INTERNAL (HELD)',
+    'IN REVIEW',
+    'APPROVED (HELD)',
+    'ROLLING OUT',
+    'HALTED',
+    'LIVE',
     'COMPLETED',
     'ABORTED',
     'USER_ABORTED',

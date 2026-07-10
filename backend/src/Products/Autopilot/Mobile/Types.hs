@@ -155,6 +155,11 @@ data MobileBuildTargetState = MobileBuildTargetState
     , mbReviewLastPolledAt :: Maybe UTCTime
     -- ^ When the review-poll stage last hit the store. Throttle anchor
     -- (@review_poll_interval_sec@). Backward-compatible Maybe (old rows → Nothing).
+    , mbBatchDispatch :: Maybe Bool
+    -- ^ Just True = dispatched in a multi-app run WITHOUT version inputs (each
+    -- matrix job auto-versions; ConfirmTag adopts the code from the pushed tag).
+    -- Nothing / Just False = single dispatch with explicit version inputs.
+    -- Backward-compatible Maybe (old rows → Nothing).
     }
     deriving (Eq, Show, Generic)
 

@@ -71,7 +71,7 @@ import qualified Data.Map.Strict as Map
 import Products.Autopilot.Mobile.Versioning.Apple (AscPhasedState (..), AscReviewState (..), AscVersion (..), BuildsResp (..), appStoreStateToReview, applePhasedPercent, computeNextIosVersion, firstWhatsNew, parseAscVersion, parseVersionStatesWithBuild, selectInFlightReview)
 import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), ProdTrackRelease (..), StoreTrackSnapshot (..), parseProdReleaseNotes, parseProdTrackReleases, parseRolloutState, parseTrackSnapshot, userFractionInRange)
 import Products.Autopilot.Queries.ReleaseTracker (keepSnapshot)
-import Products.Autopilot.Mobile.Workflow (codeFromTag, reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
+import Products.Autopilot.Mobile.Workflow (codeFromTag, electDispatchLeader, reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
 import qualified Products.Autopilot.Types.Target
@@ -159,6 +159,7 @@ main = do
     section "[39] Store release-notes parsing (Play track + iOS whatsNew)" testStoreReleaseNotesParse
     section "[40] Out-of-band review detection (in-flight select / map / reconcile)" testExternalReviewDetection
     section "[41] Android pending-publish detection (track parse / pick rule)" testAndroidPendingPublish
+    section "[49] Dispatch-group leader election (first living sibling)" testElectDispatchLeader
     section "[42] List dedup (hide store-sync snapshot when external review owns build)" testListDedup
     section "[43] Console rollout detection (approved android adopts a Console-set %)" testConsoleRolloutDetect
     section "[44] iOS release detection (adopt an out-of-band App Store Connect release)" testIosReleaseDetect
@@ -1153,15 +1154,17 @@ testReleasePhase = do
         "resolveStoreState: version on both tracks -> production (live) wins"
         (Just (Just "completed", Nothing, Just "production"))
         (resolveStoreState bothTracks "9.9.14" (Just 2))
-    -- abortable: only a still-Building mobile release can be aborted. A rejected /
-    -- on-store / terminal build can't be un-shipped, so the FE must not offer Abort.
-    assertBool "Building is abortable" (abortable Building)
-    assertBool "Rejected is NOT abortable" (not (abortable (Rejected "")))
-    assertBool "InReview (on store) is NOT abortable" (not (abortable InReview))
-    assertBool "RollingOut is NOT abortable" (not (abortable (RollingOut 0.5)))
-    assertBool "Live is NOT abortable" (not (abortable Live))
-    assertBool "Superseded is NOT abortable" (not (abortable Superseded))
-    assertBool "InternalHeld (on internal) is NOT abortable" (not (abortable InternalHeld))
+    -- abortable: only while the build job can still be killed (nothing uploaded).
+    -- From MBSubmittedToStore the artifact is on the store — no un-ship, no Abort.
+    assertBool "Building (job running) is abortable" (abortable MBBuilding Building)
+    assertBool "Building (pre-dispatch) is abortable" (abortable MBVersionResolved Building)
+    assertBool "Building but already uploaded is NOT abortable" (not (abortable MBSubmittedToStore Building))
+    assertBool "Rejected is NOT abortable" (not (abortable MBReviewRejected (Rejected "")))
+    assertBool "InReview (on store) is NOT abortable" (not (abortable MBInReview InReview))
+    assertBool "RollingOut is NOT abortable" (not (abortable MBRollingOut (RollingOut 0.5)))
+    assertBool "Live is NOT abortable" (not (abortable MBCompleted Live))
+    assertBool "Superseded is NOT abortable" (not (abortable MBTagPushed Superseded))
+    assertBool "InternalHeld (on internal) is NOT abortable" (not (abortable MBTagPushed InternalHeld))
 
 testMobileBuildContextJsonRoundTrip :: IO ()
 testMobileBuildContextJsonRoundTrip = do
@@ -1383,6 +1386,35 @@ testSelectBuildTag = do
         (codeFromTag False "" "odishayatri/prod/ios/v" "3.3.17" "odishayatri/prod/ios/v3.3.17")
 
 -- ============================================================================
+-- [49] Dispatch-group leader election (Workflow.electDispatchLeader)
+-- ============================================================================
+
+testElectDispatchLeader :: IO ()
+testElectDispatchLeader = do
+    putStrLn "Leader = first NON-TERMINAL sibling by id (id-ascending input)"
+    -- (id, isTerminal) pairs, id-ascending — the shape findSiblingsByDispatchId yields.
+    assertEqual
+        "all living -> first id leads"
+        "a"
+        (electDispatchLeader "c" [("a", False), ("b", False), ("c", False)])
+    assertEqual
+        "singleton group (today's flow) -> self leads"
+        "a"
+        (electDispatchLeader "a" [("a", False)])
+    assertEqual
+        "dead ex-leader -> leadership slides to the next living sibling"
+        "b"
+        (electDispatchLeader "b" [("a", True), ("b", False), ("c", False)])
+    assertEqual
+        "leadership skips every terminal row, not just the first"
+        "c"
+        (electDispatchLeader "d" [("a", True), ("b", True), ("c", False), ("d", False)])
+    assertEqual
+        "all terminal (mid-tick external flip) -> falls back to self"
+        "d"
+        (electDispatchLeader "d" [("a", True), ("b", True)])
+
+-- ============================================================================
 -- [20] Mobile Version Bump (mirrors fastlane-android.yaml lines 124-189)
 -- ============================================================================
 
@@ -1529,8 +1561,12 @@ testAscBuildInfoParse = do
 testIosVersionBumpRule :: IO ()
 testIosVersionBumpRule = do
     putStrLn "iOS next-version: bump when TestFlight==prod, reuse when TestFlight ahead"
-    assertEqual "no TestFlight history -> 1.0.0" "1.0.0" (computeNextIosVersion Nothing Nothing)
-    assertEqual "no TestFlight, prod present -> 1.0.0" "1.0.0" (computeNextIosVersion Nothing (Just "3.3.10"))
+    assertEqual "no TestFlight history, no live version -> 1.0.0" "1.0.0" (computeNextIosVersion Nothing Nothing)
+    -- TestFlight builds expire after 90 days: an app that hasn't built recently
+    -- reads TF-empty while live on the store — next must come from the live
+    -- version, never 1.0.0 (the KeralaSavaari/Yatri regression).
+    assertEqual "TF expired/empty but app LIVE -> bump live patch" "3.3.107" (computeNextIosVersion Nothing (Just "3.3.106"))
+    assertEqual "TF expired/empty, live 3.0.27 -> 3.0.28" "3.0.28" (computeNextIosVersion Nothing (Just "3.0.27"))
     assertEqual "TF == prod -> bump patch" "3.3.74" (computeNextIosVersion (Just "3.3.73") (Just "3.3.73"))
     assertEqual "TF ahead of prod -> reuse TF verbatim" "3.3.73" (computeNextIosVersion (Just "3.3.73") (Just "3.3.70"))
     assertEqual "TF present, no live prod yet -> reuse TF" "3.3.73" (computeNextIosVersion (Just "3.3.73") Nothing)

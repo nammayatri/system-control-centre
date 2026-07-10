@@ -297,6 +297,7 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                 , mbResolveAttempts = Nothing
                 , mbReviewSubmittedAt = Nothing
                 , mbReviewLastPolledAt = Nothing
+                , mbBatchDispatch = Nothing
                 }
         row = mkMobileTrackerRow rid app_ target mVerFinal mSourceRef (apEmail ap) now
     pure
@@ -376,7 +377,30 @@ dispatchMobileReleasesH _ap DispatchMobileReleasesReq{releaseIds = rids} = do
     -- matrix job set.
     let groups :: [(GroupKey, [(ReleaseTracker, AppCatalog, Maybe TargetState)])]
         groups = Map.toList $ Map.fromListWith (<>) [(groupKey ac, [triple]) | triple@(_, ac, _) <- loaded]
-    infos <- mapM dispatchOne groups
+        -- Provider prod workflows take ONE required version_name for the whole
+        -- run (no per-app auto-detect step) — but every provider row already
+        -- carries its store-resolved next version, stamped at create from the
+        -- preview. So provider apps share a run exactly when their versions
+        -- agree: sub-group by (version, destination). A drifted or version-less
+        -- row dispatches alone; destination is in the key so a GooglePlay and a
+        -- DownloadAAB build of the same version never share a run.
+        providerCohortKey (rt, _, mTs) =
+            ( newVersion rt
+            , case mTs of
+                Just (MobileBuildState s) -> mbcDestination (mbContext s)
+                _ -> Nothing
+            )
+        splitProvider (key@(_, _, surface, _), triples)
+            | surface == "driver" =
+                concat
+                    [ if T.null ver
+                        then [(key, [t]) | t <- ts] -- no version (debug / API edge): keep singletons
+                        else [(key, ts)]
+                    | ((ver, _dest), ts) <-
+                        Map.toList (Map.fromListWith (<>) [(providerCohortKey t, [t]) | t <- triples])
+                    ]
+            | otherwise = [(key, triples)]
+    infos <- mapM dispatchOne (concatMap splitProvider groups)
     pure DispatchMobileReleasesResp{dispatches = infos}
 
 -- | Composite grouping key for one workflow_dispatch.

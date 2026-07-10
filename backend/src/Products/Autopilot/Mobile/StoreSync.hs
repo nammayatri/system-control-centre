@@ -871,6 +871,7 @@ insertExternalReviewRow ac mCode inferred version reviewStatus = do
                 , mbResolveAttempts = Nothing
                 , mbReviewSubmittedAt = Just now
                 , mbReviewLastPolledAt = Just now
+                , mbBatchDispatch = Nothing
                 }
         base = mkMobileTrackerRow rid ac targetState (Just version) Nothing "store-sync" now
         row =
@@ -955,6 +956,7 @@ insertSyntheticRelease ac version mCode track = do
                 , mbResolveAttempts = Nothing
                 , mbReviewSubmittedAt = Nothing
                 , mbReviewLastPolledAt = Nothing
+                , mbBatchDispatch = Nothing
                 }
         encodedCtx = encodeJsonText (MobileBuildState targetState)
         row =

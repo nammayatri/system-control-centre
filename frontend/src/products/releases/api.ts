@@ -88,6 +88,9 @@ export interface ReleaseContext {
     display_label?: string;
     display_variant?: 'default' | 'success' | 'warning' | 'danger' | 'info' | 'purple' | 'blue';
     display_phase?: string;
+    // Dispatch-group id: rows dispatched together share ONE GitHub run. The group
+    // page renders its "shared run" chip off this. Absent until dispatched.
+    dispatch_id?: string | null;
 }
 
 // ── All statuses (UPPERCASE — canonical) ─────
@@ -1229,7 +1232,8 @@ export interface RolloutDetail {
     rdPhasedId: string | null; // iOS phased-release id (present ⇒ phased ramp on)
     rdStoreTrack: string | null; // production | internal | testflight (store-sync rows)
     rdPromotable: boolean; // BE truth: can be promoted now (promotable stage AND not already live on prod)
-    rdAbortable: boolean; // BE truth: can be aborted now (still Building, no store artifact) — else Abort is hidden
+    rdAbortable: boolean; // BE truth: can be aborted now (job still killable, nothing uploaded) — else Abort is hidden
+    rdRunSiblings: string[]; // other apps still building in the SAME shared GH run — abort cancels their builds too
     rdAppCatalogId: number; // app_catalog.id — force a store sync (refreshStoreApp) before re-reading
     rdLiveOnProduction: boolean; // BE truth: is THIS build the version live on production (synced cache, code-first)
     rdSyncedSecondsAgo: number | null; // seconds since store_status last synced (null = never)

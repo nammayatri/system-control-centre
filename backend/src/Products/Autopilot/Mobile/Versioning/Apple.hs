@@ -143,7 +143,10 @@ import Text.Read (readMaybe)
 'Products.Autopilot.Mobile.Versioning.Play.computeNextVersion'. Given the latest
 TestFlight version and the live App Store (READY_FOR_SALE) version:
 
-  * no TestFlight history                  → @"1.0.0"@.
+  * no TestFlight history, no live version → @"1.0.0"@ (first-ever release).
+  * no TestFlight history, app LIVE        → bump the live version's patch —
+    TestFlight builds expire after 90 days, so an app that hasn't built recently
+    reads as TF-empty while very much shipped; 1.0.0 here would be nonsense.
   * TestFlight __==__ live App Store version → bump the patch — the current build
     is already in production, so a new release needs a fresh version.
   * TestFlight __ahead__ of production (≠, or no live version yet) → __reuse__ the
@@ -156,7 +159,8 @@ The iOS build number is still NOT computed here — the workflow's
 pushed tag's @+NNN@ suffix.
 -}
 computeNextIosVersion :: Maybe Text -> Maybe Text -> Text
-computeNextIosVersion Nothing _ = "1.0.0"
+computeNextIosVersion Nothing Nothing = "1.0.0"
+computeNextIosVersion Nothing (Just prod) = bumpPatch prod -- TF expired/empty but app is live
 computeNextIosVersion (Just tf) mProd
     | mProd == Just tf = bumpPatch tf -- TestFlight in sync with production → bump
     | otherwise = tf -- TestFlight ahead (or no live prod) → reuse the existing build
@@ -218,9 +222,9 @@ instance Exception AscError
 Steps:
 
 1. Mint an ES256-signed JWT (20-minute expiry).
-2. @GET \/v1\/apps?filter[bundleId]=<bundle_id>@ → take @data[0].id@
-   as the numeric ASC app id. Errors with 'AscAppNotFound' if the list
-   is empty.
+2. @GET \/v1\/apps?filter[bundleId]=<bundle_id>@ → the entry whose
+   @bundleId@ matches exactly (the filter also returns sibling bundles,
+   e.g. \".debug\"). Errors with 'AscAppNotFound' when none matches.
 3. @GET \/v1\/builds?filter[app]=<asc_id>&sort=-uploadedDate&limit=1
    &include=preReleaseVersion@ → take the included
    @preReleaseVersion.attributes.version@.
@@ -646,9 +650,14 @@ fetchAppIdByBundleId token bundleId = do
     pure $ case resp of
         Right HttpResponse{respStatus = s, respBody = b}
             | s == 200 -> case decode b :: Maybe AppsListResp of
-                Just (AppsListResp refs) -> case listToMaybe refs of
-                    Just (AppRef appId) -> Right appId
-                    Nothing -> Left (AscAppNotFound bundleId)
+                -- filter[bundleId] can return sibling bundles too (e.g. the
+                -- ".debug" variant), in unstable order — match exactly, never data[0].
+                Just (AppsListResp refs) ->
+                    let exact = [arId r | r <- refs, arBundleId r == bundleId]
+                        ci = [arId r | r <- refs, T.toLower (arBundleId r) == T.toLower bundleId]
+                     in case exact <> ci of
+                            (appId : _) -> Right appId
+                            [] -> Left (AscAppNotFound bundleId)
                 Nothing -> Left (AscHttpError s "could not decode /v1/apps response")
             | s == 401 -> Left AscUnauthorized
             | s == 403 -> Left AscUnauthorized
@@ -684,10 +693,13 @@ fetchLatestBuildInfo token appId = do
 -- ─── Response decoding ─────────────────────────────────────────────
 
 -- | One element of @data[]@ in @/v1/apps?filter[bundleId]=…@.
-newtype AppRef = AppRef {arId :: Text}
+data AppRef = AppRef {arId :: Text, arBundleId :: Text}
 
 instance FromJSON AppRef where
-    parseJSON = withObject "AppRef" $ \o -> AppRef <$> o .: "id"
+    parseJSON = withObject "AppRef" $ \o ->
+        AppRef
+            <$> o .: "id"
+            <*> (o .: "attributes" >>= (.: "bundleId"))
 
 -- | Wrapper for @{"data": [...]}@.
 newtype AppsListResp = AppsListResp [AppRef]

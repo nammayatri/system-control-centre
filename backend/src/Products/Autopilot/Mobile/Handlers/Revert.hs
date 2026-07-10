@@ -579,6 +579,7 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
                 , mbResolveAttempts = Nothing
                 , mbReviewSubmittedAt = Nothing
                 , mbReviewLastPolledAt = Nothing
+                , mbBatchDispatch = Nothing
                 }
     sourceRefStr <- case rrSourceCommit of
         Just commitSha | not (T.null commitSha) -> do

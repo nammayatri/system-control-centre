@@ -93,6 +93,7 @@ import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
     findMobileReleaseById,
+    findRunSiblingsStillBuilding,
     logEvent,
     markReleaseInProgress,
     retireOlderHeldInternal,
@@ -227,10 +228,14 @@ data RolloutDetail = RolloutDetail
     -- it isn't already live on production. The FE gates the promote UI on this instead
     -- of re-deriving it, so it never offers a promote the backend would reject.
     , rdAbortable :: Bool
-    -- ^ BE truth for "can this build be aborted right now" — only while it's still
-    -- Building (no store artifact yet). A build that reached the store or went terminal
-    -- (rejected / superseded / live / failed) can't be un-shipped, so the FE hides Abort.
-    -- Derived from the phase, so a stale INPROGRESS status column can't resurrect Abort.
+    -- ^ BE truth for "can this build be aborted right now" — only while the build job
+    -- can still be killed (wf before MBSubmittedToStore: nothing uploaded yet). A build
+    -- whose artifact reached the store or that went terminal can't be un-shipped, so
+    -- the FE hides Abort. Phase+wf derived; a stale status column can't resurrect it.
+    , rdRunSiblings :: [Text]
+    -- ^ OTHER apps still building in the same shared GH run (dispatch group). Aborting
+    -- this row cancels the whole run — these builds die with it, so the FE lists them
+    -- in the abort confirm. Empty for solo runs / already-uploaded siblings.
     , rdAppCatalogId :: Int32
     -- ^ The app's @app_catalog.id@ — lets the FE force a store-sync
     -- (@POST /mobile/store-monitor/:id/refresh@) before re-reading, so a just-published
@@ -533,10 +538,19 @@ rolloutDetailH _ap rid = do
                 pct
                 storeTrack
         disp = displayStatusInferred (reviewInferredOf (parseJsonTextMaybe (rtMetadata row))) ph
+        canAbort = abortable (mbWfStatus target) ph
     notAhead <- atOrBelowProduction ac (rtNewVersion row) (rtVersionCode row)
     liveProd <- liveOnProduction ac (rtNewVersion row) (rtVersionCode row)
     syncedAgo <- secondsSinceLastSync (acId ac)
     cooldown <- fromIntegral <$> getStoreRefreshCooldownSeconds
+    -- Shared-run blast radius: aborting cancels the whole GH run, so surface
+    -- the sibling apps still building in it. Only fetched while Abort is live.
+    runSiblings <-
+        if canAbort
+            then case rtDispatchId row of
+                Just did | not (T.null did) -> findRunSiblingsStillBuilding did rid
+                _ -> pure []
+            else pure []
     pure
         RolloutDetail
             { rdReleaseId = rid
@@ -554,7 +568,8 @@ rolloutDetailH _ap rid = do
             , rdPhasedId = phasedId
             , rdStoreTrack = storeTrack
             , rdPromotable = promotableStage && not notAhead
-            , rdAbortable = abortable ph
+            , rdAbortable = canAbort
+            , rdRunSiblings = runSiblings
             , rdAppCatalogId = acId ac
             , rdLiveOnProduction = liveProd
             , rdSyncedSecondsAgo = syncedAgo
