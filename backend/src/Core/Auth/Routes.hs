@@ -14,15 +14,17 @@ import Control.Monad.Catch (throwM)
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..), AuthError (..))
 import Core.Auth.Queries
+import Core.Auth.Schema (McpPatKey, McpPatKeyT (..))
 import Core.Auth.Types
 import Core.Environment (Flow)
-import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson (Result (..), Value (..), fromJSON, object, toJSON, (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time.Clock (addUTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
+import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import Servant hiding (Unauthorized)
@@ -37,6 +39,9 @@ type AuthAPI =
     :<|> "me" :> Header "Authorization" Text :> Get '[JSON] Value
     :<|> "verify" :> ReqBody '[JSON] Value :> Post '[JSON] Value
     :<|> "reset-password" :> Header "X-Forwarded-Email" Text :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
+    :<|> "mcp-keys" :> Header "Authorization" Text :> Get '[JSON] Value
+    :<|> "mcp-keys" :> Header "Authorization" Text :> ReqBody '[JSON] Value :> Post '[JSON] Value
+    :<|> "mcp-keys" :> Capture "keyId" UUID :> Header "Authorization" Text :> Delete '[JSON] APIResponse
 
 authServer :: ServerT AuthAPI Flow
 authServer =
@@ -45,6 +50,9 @@ authServer =
     :<|> meH
     :<|> verifyH
     :<|> resetPasswordH'
+    :<|> listMcpKeysH
+    :<|> createMcpKeyH
+    :<|> revokeMcpKeyH
 
 -- | POST /auth/login
 loginH :: Value -> Flow Value
@@ -291,6 +299,86 @@ parseResetPasswordBody (Object obj) =
     (Just (String e), Just (String p)) -> Just (e, p)
     _ -> Nothing
 parseResetPasswordBody _ = Nothing
+
+requireSessionPerson :: Maybe Text -> Flow PersonAuth
+requireSessionPerson mAuth =
+  case extractToken mAuth of
+    Nothing -> throwM $ Unauthorized "Missing Authorization header"
+    Just tok -> do
+      mToken <- findTokenByValue tok
+      case mToken of
+        Nothing -> throwM $ InvalidToken "Invalid or expired token"
+        Just tokenRow -> do
+          now <- liftIO getCurrentTime
+          if trExpiresAt tokenRow < now
+            then throwM TokenExpired
+            else do
+              mPerson <- findPersonById (trPersonId tokenRow)
+              case mPerson of
+                Nothing -> throwM $ NotFound "Person not found"
+                Just person
+                  | not (personIsActive person) -> throwM $ Unauthorized "Account deactivated"
+                  | otherwise -> pure person
+
+listMcpKeysH :: Maybe Text -> Flow Value
+listMcpKeysH mAuth = do
+  person <- requireSessionPerson mAuth
+  keys <- listPatKeysForPerson (personId person)
+  pure . toJSON $ map patKeyToJson keys
+
+createMcpKeyH :: Maybe Text -> Value -> Flow Value
+createMcpKeyH mAuth body = do
+  person <- requireSessionPerson mAuth
+  case parseCreatePatKeyBody body of
+    Nothing -> throwM $ BadRequest "label and expiresAt are required"
+    Just (label, requestedExpiry) -> do
+      now <- liftIO getCurrentTime
+      let maxExpiry = addUTCTime patMaxValiditySeconds now
+          expiresAt = min requestedExpiry maxExpiry
+      if expiresAt <= now
+        then throwM $ BadRequest "expiresAt must be in the future"
+        else do
+          (token, key) <- createPatKey (personId person) label expiresAt
+          pure $
+            object
+              [ "id" .= mpkId key,
+                "token" .= token,
+                "label" .= mpkLabel key,
+                "prefix" .= mpkTokenPrefix key,
+                "createdAt" .= mpkCreatedAt key,
+                "expiresAt" .= mpkExpiresAt key
+              ]
+
+revokeMcpKeyH :: UUID -> Maybe Text -> Flow APIResponse
+revokeMcpKeyH keyId mAuth = do
+  person <- requireSessionPerson mAuth
+  ok <- revokePatKey (personId person) keyId
+  if ok
+    then pure $ APIResponse "SUCCESS" "Key revoked"
+    else throwM $ NotFound "Key not found"
+
+patKeyToJson :: McpPatKey -> Value
+patKeyToJson McpPatKeyT {..} =
+  object
+    [ "id" .= mpkId,
+      "label" .= mpkLabel,
+      "prefix" .= mpkTokenPrefix,
+      "createdAt" .= mpkCreatedAt,
+      "expiresAt" .= mpkExpiresAt,
+      "lastUsedAt" .= mpkLastUsedAt,
+      "revoked" .= isJust mpkRevokedAt
+    ]
+
+parseCreatePatKeyBody :: Value -> Maybe (Text, UTCTime)
+parseCreatePatKeyBody (Object obj) =
+  case (KM.lookup (K.fromText "label") obj, KM.lookup (K.fromText "expiresAt") obj) of
+    (Just (String l), Just expiresVal)
+      | not (T.null (T.strip l)) ->
+          case fromJSON expiresVal of
+            Success t -> Just (l, t)
+            Error _ -> Nothing
+    _ -> Nothing
+parseCreatePatKeyBody _ = Nothing
 
 -- | Simple password verification.
 -- Compares against the stored hash. In production use bcrypt.

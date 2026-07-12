@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
-import { ChevronRight, LogOut, Menu } from 'lucide-react';
+import { ChevronRight, LogOut, Menu, KeyRound } from 'lucide-react';
 import { PRODUCT_REGISTRY, type Crumb } from '../../products/registry';
 import { cn } from '../../lib/utils';
 
@@ -118,6 +118,14 @@ const TopBar: React.FC<TopBarProps> = ({ onOpenMobileNav }) => {
               <div className="text-sm font-medium text-zinc-800 truncate">{user?.name || 'User'}</div>
               <div className="text-xs text-zinc-500 truncate">{user?.email}</div>
             </div>
+            <Link
+              to="/profile"
+              onClick={() => setShowMenu(false)}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors duration-150 cursor-pointer"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              Profile & MCP keys
+            </Link>
             <button
               onClick={logout}
               className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors duration-150 cursor-pointer"

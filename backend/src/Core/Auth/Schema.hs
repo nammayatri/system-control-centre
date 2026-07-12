@@ -15,7 +15,7 @@
 --  * 'ScPersonDeploymentAccessT'    — sc_person_deployment_access
 --  * 'ScPersonPermissionOverrideT'  — sc_person_permission_override
 --  * 'ScAuditLogT'                  — sc_audit_log
---  * 'CoreDb'                       — Beam Database binding all seven tables
+--  * 'CoreDb'                       — Beam Database binding all eight tables
 module Core.Auth.Schema where
 
 import Data.Aeson (Value)
@@ -151,6 +151,27 @@ instance Table ScPersonPermissionOverrideT where
   data PrimaryKey ScPersonPermissionOverrideT f = ScPersonPermissionOverrideId (Columnar f UUID) deriving (Generic, Beamable)
   primaryKey = ScPersonPermissionOverrideId . sppoId
 
+data McpPatKeyT f = McpPatKeyT
+  { mpkId :: Columnar f UUID,
+    mpkPersonId :: Columnar f UUID,
+    mpkLabel :: Columnar f Text,
+    mpkTokenPrefix :: Columnar f Text,
+    mpkTokenHash :: Columnar f Text,
+    mpkCreatedAt :: Columnar f UTCTime,
+    mpkExpiresAt :: Columnar f UTCTime,
+    mpkLastUsedAt :: Columnar f (Maybe UTCTime),
+    mpkRevokedAt :: Columnar f (Maybe UTCTime)
+  }
+  deriving (Generic, Beamable)
+
+type McpPatKey = McpPatKeyT Identity
+
+deriving instance Show McpPatKey
+
+instance Table McpPatKeyT where
+  data PrimaryKey McpPatKeyT f = McpPatKeyId (Columnar f UUID) deriving (Generic, Beamable)
+  primaryKey = McpPatKeyId . mpkId
+
 -- ── sc_audit_log ───────────────────────────────────────────────────
 
 data ScAuditLogT f = ScAuditLogT
@@ -181,7 +202,8 @@ data CoreDb f = CoreDb
     scPersonProductAccess :: f (TableEntity ScPersonProductAccessT),
     scPersonDeploymentAccess :: f (TableEntity ScPersonDeploymentAccessT),
     scPersonPermissionOverride :: f (TableEntity ScPersonPermissionOverrideT),
-    scAuditLog :: f (TableEntity ScAuditLogT)
+    scAuditLog :: f (TableEntity ScAuditLogT),
+    mcpPatKeys :: f (TableEntity McpPatKeyT)
   }
   deriving (Generic, Database be)
 
@@ -272,5 +294,19 @@ coreDb =
                   salEntityId = fieldNamed "entity_id",
                   salDetails = fieldNamed "details",
                   salCreatedAt = fieldNamed "created_at"
+                },
+        mcpPatKeys =
+          setEntityName "mcp_pat_keys"
+            <> modifyTableFields
+              tableModification
+                { mpkId = fieldNamed "id",
+                  mpkPersonId = fieldNamed "person_id",
+                  mpkLabel = fieldNamed "label",
+                  mpkTokenPrefix = fieldNamed "token_prefix",
+                  mpkTokenHash = fieldNamed "token_hash",
+                  mpkCreatedAt = fieldNamed "created_at",
+                  mpkExpiresAt = fieldNamed "expires_at",
+                  mpkLastUsedAt = fieldNamed "last_used_at",
+                  mpkRevokedAt = fieldNamed "revoked_at"
                 }
       }

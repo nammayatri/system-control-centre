@@ -4,6 +4,7 @@ import LoginPage from '../core/auth/LoginPage';
 import LauncherPage from '../core/layout/LauncherPage';
 import ProductLayout from '../core/layout/ProductLayout';
 import AdminLayout from '../core/layout/AdminLayout';
+import ProfilePage from '../core/profile/ProfilePage';
 // Admin pages
 import UserList from '../core/admin/pages/UserList';
 import UserDetail from '../core/admin/pages/UserDetail';
@@ -26,6 +27,15 @@ function App() {
           element={
             <ProtectedRoute>
               <LauncherPage />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/profile"
+          element={
+            <ProtectedRoute>
+              <ProfilePage />
             </ProtectedRoute>
           }
         />

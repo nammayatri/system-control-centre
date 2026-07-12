@@ -15,6 +15,7 @@ import Core.Auth.Routes (AuthAPI, authServer)
 import Core.Config (port)
 import Core.Environment (AppState (..), Flow)
 import Core.Logging (logErrorIO, logInfoIO)
+import Core.Mcp.Server (McpAPI, mcpServer)
 import Core.Middleware.RequestId (requestIdMiddleware)
 import Data.Aeson (Value, object, (.=))
 import Data.Aeson qualified as A
@@ -42,6 +43,7 @@ type FullAPI =
       :> Header "X-Forwarded-Email" Text
       :> Header "x-pomerium-jwt-assertion" Text
       :> Get '[JSON] Value
+    :<|> "mcp" :> McpAPI
     :<|> CoreAPI
 
 fullApi :: Proxy FullAPI
@@ -76,7 +78,7 @@ mkApp st =
               }
 
 fullServer :: ServerT FullAPI Flow
-fullServer = authServer :<|> adminServer :<|> pomeriumEmailH :<|> coreServer
+fullServer = authServer :<|> adminServer :<|> pomeriumEmailH :<|> mcpServer :<|> coreServer
 
 pomeriumEmailH :: Maybe Text -> Maybe Text -> Flow Value
 pomeriumEmailH mXFE mJwt =

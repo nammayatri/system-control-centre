@@ -60,6 +60,34 @@ export async function getProfile(): Promise<LoginResponse> {
   return data;
 }
 
+export interface McpPatKey {
+  id: string;
+  label: string;
+  prefix: string;
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  revoked: boolean;
+}
+
+export interface CreatedMcpPatKey extends McpPatKey {
+  token: string; // plaintext — only ever present in the create response
+}
+
+export async function listMcpKeys(): Promise<McpPatKey[]> {
+  const { data } = await apiClient.get('/auth/mcp-keys');
+  return Array.isArray(data) ? data : [];
+}
+
+export async function createMcpKey(label: string, expiresAt: string): Promise<CreatedMcpPatKey> {
+  const { data } = await apiClient.post('/auth/mcp-keys', { label, expiresAt });
+  return data;
+}
+
+export async function revokeMcpKey(id: string): Promise<void> {
+  await apiClient.delete(`/auth/mcp-keys/${id}`);
+}
+
 // ─── Admin: Users ────────────────────────────────────────────────
 
 export async function fetchUsers(): Promise<any[]> {

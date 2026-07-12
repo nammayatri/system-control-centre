@@ -17,17 +17,31 @@ module Core.Auth.Queries
     hasAnyDeploymentPermission,
     resetPasswordByEmail,
     TokenRow (..),
+    createPatKey,
+    listPatKeysForPerson,
+    revokePatKey,
+    findPatKeyByHash,
+    touchPatKeyLastUsed,
+    patMaxValiditySeconds,
+    hashPatToken,
   )
 where
 
+import Control.Monad.IO.Class (liftIO)
 import Core.Auth.Schema
 import Core.Auth.Types
 import Core.DB.Connection (runDB, withConn)
 import Core.Environment (DBEnv (..), MonadFlow, withDb)
+import Crypto.Hash (Digest, SHA256, hash)
+import Crypto.Random (getRandomBytes)
+import qualified Data.ByteString.Base64.URL as B64U
 import Data.List (find)
 import Data.Text (Text)
-import Data.Time.Clock (UTCTime)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import Data.Time.Clock (NominalDiffTime, UTCTime, getCurrentTime)
 import Data.UUID (UUID)
+import qualified Data.UUID.V4 as UUIDV4
 import Database.Beam
 import Database.Beam.Postgres ()
 import Database.PostgreSQL.Simple (Only (..), execute, query)
@@ -367,3 +381,84 @@ resetPasswordByEmail email newPassword = withDb $ \db -> withConn db $ \conn -> 
       "UPDATE sc_person SET password_hash = ?, updated_at = now() WHERE email = ? AND is_active = true"
       (newPassword, email)
   pure (n > 0)
+
+patMaxValiditySeconds :: NominalDiffTime
+patMaxValiditySeconds = 60 * 24 * 60 * 60
+
+hashPatToken :: Text -> Text
+hashPatToken t = T.pack (show (hash (TE.encodeUtf8 t) :: Digest SHA256))
+
+generatePatToken :: IO Text
+generatePatToken = do
+  raw <- getRandomBytes 32
+  let encoded = TE.decodeUtf8 (B64U.encode raw)
+  pure ("scc_pat_" <> T.dropWhileEnd (== '=') encoded)
+
+patTokenPrefix :: Text -> Text
+patTokenPrefix = T.take 16
+
+createPatKey :: (MonadFlow m) => UUID -> Text -> UTCTime -> m (Text, McpPatKey)
+createPatKey personId label expiresAt = withDb $ \db -> do
+  token <- liftIO generatePatToken
+  keyId <- liftIO UUIDV4.nextRandom
+  createdAt <- liftIO getCurrentTime
+  let row =
+        McpPatKeyT
+          { mpkId = keyId,
+            mpkPersonId = personId,
+            mpkLabel = label,
+            mpkTokenPrefix = patTokenPrefix token,
+            mpkTokenHash = hashPatToken token,
+            mpkCreatedAt = createdAt,
+            mpkExpiresAt = expiresAt,
+            mpkLastUsedAt = Nothing,
+            mpkRevokedAt = Nothing
+          }
+  runDB db $
+    runInsert $
+      insert (mcpPatKeys coreDb) $
+        insertValues [row]
+  pure (token, row)
+
+listPatKeysForPerson :: (MonadFlow m) => UUID -> m [McpPatKey]
+listPatKeysForPerson pid = withDb $ \db ->
+  runDB db $
+    runSelectReturningList $
+      select $
+        orderBy_ (desc_ . mpkCreatedAt) $ do
+          k <- all_ (mcpPatKeys coreDb)
+          guard_ (mpkPersonId k ==. val_ pid)
+          pure k
+
+revokePatKey :: (MonadFlow m) => UUID -> UUID -> m Bool
+revokePatKey pid keyId = withDb $ \db -> withConn db $ \conn -> do
+  n <-
+    execute
+      conn
+      "UPDATE mcp_pat_keys SET revoked_at = now() \
+      \WHERE id = ? AND person_id = ? AND revoked_at IS NULL"
+      (keyId, pid)
+  pure (n > 0)
+
+findPatKeyByHash :: (MonadFlow m) => Text -> m (Maybe McpPatKey)
+findPatKeyByHash tokenHash = withDb $ \db -> do
+  rows <-
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          k <- all_ (mcpPatKeys coreDb)
+          guard_ (mpkTokenHash k ==. val_ tokenHash)
+          pure k
+  pure $ case rows of
+    [k] -> Just k
+    _ -> Nothing
+
+touchPatKeyLastUsed :: (MonadFlow m) => UUID -> m ()
+touchPatKeyLastUsed keyId = withDb $ \db -> do
+  now <- liftIO getCurrentTime
+  runDB db $
+    runUpdate $
+      update
+        (mcpPatKeys coreDb)
+        (\k -> mpkLastUsedAt k <-. val_ (Just now))
+        (\k -> mpkId k ==. val_ keyId)

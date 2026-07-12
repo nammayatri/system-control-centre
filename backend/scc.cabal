@@ -36,6 +36,9 @@ library
       Core.Config
       Core.Secrets
       Core.Http.Client
+      Core.Mcp.Auth
+      Core.Mcp.Server
+      Core.Mcp.Tools
       Core.Logging
       Core.Types.Id
       Core.Types.Time

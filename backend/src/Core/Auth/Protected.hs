@@ -25,6 +25,7 @@ module Core.Auth.Protected
     KnownPermission (..),
     AuthedPerson (..),
     requireDeploymentPermission,
+    checkPersonPermission,
   )
 where
 
@@ -192,50 +193,58 @@ checkPermission prodSlug permText req = do
               mPerson <- findPersonById (trPersonId tokRow)
               case mPerson of
                 Nothing -> pure $ Left (err401, "Person not found")
-                Just person
-                  | not (personIsActive person) ->
-                      pure $ Left (err401, "Account deactivated")
-                  | personIsSuperadmin person -> do
-                      accesses <- findProductAccessForPerson (personId person)
-                      pure $
-                        Right
-                          AuthedPerson
-                            { apPersonId = personId person,
-                              apEmail = personEmail person,
-                              apIsSuperadmin = True,
-                              apProductAccesses = accesses
-                            }
-                  | otherwise -> do
-                      accesses <- findProductAccessForPerson (personId person)
-                      productGranted <- case find (\pa -> paProductSlug pa == prodSlug) accesses of
-                        Nothing -> pure False
-                        Just pa -> (permText `elem`) <$> computeEffectivePermissions person prodSlug (paRoleId pa)
-                      if productGranted
-                        then
-                          pure $
-                            Right
-                              AuthedPerson
-                                { apPersonId = personId person,
-                                  apEmail = personEmail person,
-                                  apIsSuperadmin = False,
-                                  apProductAccesses = accesses
-                                }
-                        else do
-                          deploymentGranted <- hasAnyDeploymentPermission (personId person) prodSlug permText
-                          if deploymentGranted
-                            then
-                              pure $
-                                Right
-                                  AuthedPerson
-                                    { apPersonId = personId person,
-                                      apEmail = personEmail person,
-                                      apIsSuperadmin = False,
-                                      apProductAccesses = accesses
-                                    }
-                            else
-                              if any (\pa -> paProductSlug pa == prodSlug) accesses
-                                then pure $ Left (err403, "Permission denied: " <> permText)
-                                else pure $ Left (err403, "No access to product: " <> prodSlug)
+                Just person -> checkPersonPermission prodSlug permText person
+
+checkPersonPermission ::
+  (MonadFlow m) =>
+  Text ->
+  Text ->
+  PersonAuth ->
+  m (Either (ServerError, Text) AuthedPerson)
+checkPersonPermission prodSlug permText person
+  | not (personIsActive person) =
+      pure $ Left (err401, "Account deactivated")
+  | personIsSuperadmin person = do
+      accesses <- findProductAccessForPerson (personId person)
+      pure $
+        Right
+          AuthedPerson
+            { apPersonId = personId person,
+              apEmail = personEmail person,
+              apIsSuperadmin = True,
+              apProductAccesses = accesses
+            }
+  | otherwise = do
+      accesses <- findProductAccessForPerson (personId person)
+      productGranted <- case find (\pa -> paProductSlug pa == prodSlug) accesses of
+        Nothing -> pure False
+        Just pa -> (permText `elem`) <$> computeEffectivePermissions person prodSlug (paRoleId pa)
+      if productGranted
+        then
+          pure $
+            Right
+              AuthedPerson
+                { apPersonId = personId person,
+                  apEmail = personEmail person,
+                  apIsSuperadmin = False,
+                  apProductAccesses = accesses
+                }
+        else do
+          deploymentGranted <- hasAnyDeploymentPermission (personId person) prodSlug permText
+          if deploymentGranted
+            then
+              pure $
+                Right
+                  AuthedPerson
+                    { apPersonId = personId person,
+                      apEmail = personEmail person,
+                      apIsSuperadmin = False,
+                      apProductAccesses = accesses
+                    }
+            else
+              if any (\pa -> paProductSlug pa == prodSlug) accesses
+                then pure $ Left (err403, "Permission denied: " <> permText)
+                else pure $ Left (err403, "No access to product: " <> prodSlug)
 
 requireDeploymentPermission ::
   (KnownPermission perm, MonadFlow m) =>
