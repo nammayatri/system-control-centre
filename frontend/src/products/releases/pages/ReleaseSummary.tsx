@@ -195,9 +195,14 @@ const DeploymentStatusCard: React.FC<{ release: any; pods: PodInfo[] }> = ({ rel
   const oldVersion = release.old_version;
   const newVersion = release.new_version;
 
+  const isRunning = (p: PodInfo) => p.status.toLowerCase() === 'running';
+
   const oldPods = pods.filter(p => p.version === oldVersion);
   const newPods = pods.filter(p => p.version === newVersion);
   const otherPods = pods.filter(p => p.version !== oldVersion && p.version !== newVersion);
+
+  const oldRunning = oldPods.filter(isRunning).length;
+  const newRunning = newPods.filter(isRunning).length;
 
   return (
     <div className="border border-zinc-200 rounded-lg p-4 mb-6">
@@ -210,8 +215,8 @@ const DeploymentStatusCard: React.FC<{ release: any; pods: PodInfo[] }> = ({ rel
             <div className="text-sm font-mono font-medium text-zinc-800 truncate">{oldVersion || '-'}</div>
           </div>
           <div className="ml-auto text-right flex-shrink-0">
-            <span className="text-lg font-bold text-zinc-900">{oldPods.length}</span>
-            <span className="text-xs text-zinc-500 ml-1">{oldPods.length === 1 ? 'pod' : 'pods'} running</span>
+            <span className="text-lg font-bold text-zinc-900">{oldRunning}</span>
+            <span className="text-xs text-zinc-500 ml-1">/ {oldPods.length} {oldPods.length === 1 ? 'pod' : 'pods'} running</span>
           </div>
         </div>
         <div className="flex items-center gap-3 border border-zinc-100 rounded-lg px-4 py-3">
@@ -221,8 +226,8 @@ const DeploymentStatusCard: React.FC<{ release: any; pods: PodInfo[] }> = ({ rel
             <div className="text-sm font-mono font-medium text-zinc-800 truncate">{newVersion || '-'}</div>
           </div>
           <div className="ml-auto text-right flex-shrink-0">
-            <span className="text-lg font-bold text-zinc-900">{newPods.length}</span>
-            <span className="text-xs text-zinc-500 ml-1">{newPods.length === 1 ? 'pod' : 'pods'} running</span>
+            <span className="text-lg font-bold text-zinc-900">{newRunning}</span>
+            <span className="text-xs text-zinc-500 ml-1">/ {newPods.length} {newPods.length === 1 ? 'pod' : 'pods'} running</span>
           </div>
         </div>
       </div>
