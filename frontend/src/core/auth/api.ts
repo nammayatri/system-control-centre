@@ -72,6 +72,7 @@ export interface McpPatKey {
 
 export interface CreatedMcpPatKey extends McpPatKey {
   token: string; // plaintext — only ever present in the create response
+  baseUrl: string;
 }
 
 export async function listMcpKeys(): Promise<McpPatKey[]> {

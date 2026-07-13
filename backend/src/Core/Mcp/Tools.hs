@@ -22,6 +22,7 @@ import Products.Autopilot.Actions.ConfigMap qualified as ConfigMap
 import Products.Autopilot.Actions.Release qualified as Release
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Permission (AutopilotPermission (..))
+import Products.Autopilot.Types.Release (ReleaseTracker (..))
 
 data McpTool = McpTool
   { mtName :: Text,
@@ -75,6 +76,24 @@ boolP desc = object ["type" .= ("boolean" :: Text), "description" .= desc]
 intP :: Text -> Value
 intP desc = object ["type" .= ("integer" :: Text), "description" .= desc]
 
+rolloutStrategyP :: Text -> Value
+rolloutStrategyP desc =
+  object
+    [ "type" .= ("array" :: Text),
+      "description" .= desc,
+      "items"
+        .= object
+          [ "type" .= ("object" :: Text),
+            "properties"
+              .= object
+                [ "rolloutPercent" .= intP "Percentage of pods on the new version at this stage",
+                  "cooloffMinutes" .= intP "Minutes to wait after this stage before proceeding to the next",
+                  "podCount" .= intP "Number of pods to roll at this stage"
+                ],
+            "required" .= (["rolloutPercent", "cooloffMinutes", "podCount"] :: [Text])
+          ]
+    ]
+
 rid :: Value
 rid = strP "The releaseId of the tracker to act on"
 
@@ -120,17 +139,60 @@ releaseCreateTool =
             ("trackerType", strP "Release category, e.g. BackendService"),
             ("oldVersion", strP "Current version"),
             ("newVersion", strP "Target version"),
+            ("rolloutStrategy", rolloutStrategyP "Rollout stages (at least one required), e.g. [{\"rolloutPercent\":100,\"cooloffMinutes\":0,\"podCount\":1}]"),
             ("releaseTag", strP "Optional release tag"),
             ("description", strP "Optional description"),
             ("priority", intP "Optional priority")
           ]
-          ["appGroup", "service"],
+          ["appGroup", "service", "rolloutStrategy"],
       mtPermission = AP_RELEASE_CREATE,
       mtRun = \ap args -> do
         req <- decodeArg args :: Flow K8sCreateReleaseReq
         result <- Release.createReleaseH ap Nothing Nothing req
         auditMcp ap "release_create" "release" Nothing
         pure (toJSON result)
+    }
+
+releaseCloneTool :: McpTool
+releaseCloneTool =
+  McpTool
+    { mtName = "release_clone",
+      mtDescription = "Clone an existing release tracker as the template for a new one — copies appGroup, service, env, category, rolloutStrategy, priority, mode, and envOverrideData from the source release. Only releaseId and newVersion are required; oldVersion defaults to the source release's newVersion. Mirrors the dashboard's \"Clone\" action.",
+      mtInputSchema =
+        objSchema
+          [ ("releaseId", strP "releaseId of the release tracker to clone from"),
+            ("newVersion", strP "Target version for the new release"),
+            ("oldVersion", strP "Optional: defaults to the source release's newVersion"),
+            ("env", strP "Optional environment override (defaults to the source release's env)"),
+            ("priority", intP "Optional priority override"),
+            ("description", strP "Optional description"),
+            ("releaseTag", strP "Optional release tag")
+          ]
+          ["releaseId", "newVersion"],
+      mtPermission = AP_RELEASE_CREATE,
+      mtRun = \ap args -> do
+        srcId <- requireTextArg "releaseId" args
+        mSrc <- Release.getReleaseH ap srcId
+        case mSrc of
+          Nothing -> throwM (NotFound ("Release tracker not found: " <> srcId))
+          Just ReleaseTracker {..} -> do
+            let base =
+                  object
+                    [ "appGroup" .= appGroup,
+                      "service" .= service,
+                      "env" .= env,
+                      "trackerType" .= category,
+                      "oldVersion" .= newVersion,
+                      "rolloutStrategy" .= rolloutStrategy,
+                      "priority" .= priority,
+                      "mode" .= mode,
+                      "envOverrideData" .= envOverrideData
+                    ]
+                merged = Object (KM.union (asObject args) (asObject base))
+            req <- decodeArg merged :: Flow K8sCreateReleaseReq
+            result <- Release.createReleaseH ap Nothing Nothing req
+            auditMcp ap "release_clone" "release" (Just srcId)
+            pure (toJSON result)
     }
 
 releaseApproveTool :: McpTool
@@ -199,7 +261,8 @@ releaseRevertTool =
           [ ("releaseId", rid),
             ("requestedBy", strP "Requester identity (defaults to the caller's email)"),
             ("info", strP "Optional info/reason"),
-            ("immediate", boolP "Whether to revert immediately")
+            ("immediate", boolP "Whether to revert immediately"),
+            ("isRevertSync", boolP "Whether to also sync the revert to the secondary cluster")
           ]
           ["releaseId"],
       mtPermission = AP_RELEASE_REVERT,
@@ -236,7 +299,8 @@ releaseUpdateStatusTool =
           [ ("releaseId", rid),
             ("status", strP "One of PAUSED | INPROGRESS | ABORTING | RESTARTING"),
             ("priority", intP "Optional new priority"),
-            ("description", strP "Optional new description")
+            ("description", strP "Optional new description"),
+            ("rolloutStrategy", rolloutStrategyP "Optional: replace the rollout stages")
           ]
           ["releaseId"],
       mtPermission = AP_RELEASE_UPDATE,
@@ -271,7 +335,8 @@ releaseImmediateRevertTool =
         objSchema
           [ ("releaseId", rid),
             ("requestedBy", strP "Requester identity (defaults to the caller's email)"),
-            ("info", strP "Optional info/reason")
+            ("info", strP "Optional info/reason"),
+            ("isRevertSync", boolP "Whether to also sync the revert to the secondary cluster")
           ]
           ["releaseId"],
       mtPermission = AP_RELEASE_REVERT,
@@ -429,6 +494,7 @@ mcpTools =
   [ releaseListTool,
     releaseGetTool,
     releaseCreateTool,
+    releaseCloneTool,
     releaseApproveTool,
     releaseTriggerTool,
     releaseRollbackTool,

@@ -112,9 +112,8 @@ const ProfilePage: React.FC = () => {
     }
     createMut.mutate();
   };
-
   const mcpCommand = revealed
-    ? `claude mcp add scc -- npx -y mcp-remote ${API_BASE_URL.replace(/\/$/, '')}/mcp --header "Authorization:ApiKey ${revealed.token}"`
+    ? `claude mcp add scc -- npx -y mcp-remote ${(revealed.baseUrl || API_BASE_URL).replace(/\/$/, '')}/mcp --allow-http --header "Authorization:ApiKey ${revealed.token}"`
     : '';
 
   const copy = (text: string, which: 'token' | 'command') => {

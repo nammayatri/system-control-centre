@@ -16,7 +16,8 @@ import Core.AppError (APIError (..), AuthError (..))
 import Core.Auth.Queries
 import Core.Auth.Schema (McpPatKey, McpPatKeyT (..))
 import Core.Auth.Types
-import Core.Environment (Flow)
+import Core.Config (Config (..))
+import Core.Environment (Flow, getConfig)
 import Data.Aeson (Result (..), Value (..), fromJSON, object, toJSON, (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
@@ -339,6 +340,7 @@ createMcpKeyH mAuth body = do
         then throwM $ BadRequest "expiresAt must be in the future"
         else do
           (token, key) <- createPatKey (personId person) label expiresAt
+          cfg <- getConfig
           pure $
             object
               [ "id" .= mpkId key,
@@ -346,7 +348,8 @@ createMcpKeyH mAuth body = do
                 "label" .= mpkLabel key,
                 "prefix" .= mpkTokenPrefix key,
                 "createdAt" .= mpkCreatedAt key,
-                "expiresAt" .= mpkExpiresAt key
+                "expiresAt" .= mpkExpiresAt key,
+                "baseUrl" .= mcpBaseUrl cfg
               ]
 
 revokeMcpKeyH :: UUID -> Maybe Text -> Flow APIResponse
