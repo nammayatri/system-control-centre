@@ -76,6 +76,66 @@ boolP desc = object ["type" .= ("boolean" :: Text), "description" .= desc]
 intP :: Text -> Value
 intP desc = object ["type" .= ("integer" :: Text), "description" .= desc]
 
+numP :: Text -> Value
+numP desc = object ["type" .= ("number" :: Text), "description" .= desc]
+
+objP :: Text -> Value
+objP desc = object ["type" .= ("object" :: Text), "description" .= desc]
+
+enumP :: Text -> [Text] -> Value
+enumP desc vals = object ["type" .= ("string" :: Text), "description" .= desc, "enum" .= vals]
+
+releaseCategoryEnum :: [Text]
+releaseCategoryEnum = ["BackendService", "BackendScheduler", "BackendConfig", "VSEdit", "MobileBuild"]
+
+releaseStatusEnum :: [Text]
+releaseStatusEnum =
+  [ "CREATED",
+    "INPROGRESS",
+    "COMPLETED",
+    "ABORTED",
+    "USER_ABORTED",
+    "DISCARDED",
+    "DISCARDING",
+    "PAUSED",
+    "ABORTING",
+    "REVERTING",
+    "REVERTED",
+    "RESTARTING",
+    "GCLT_ABORTED",
+    "LOCKED",
+    "UNLOCKED",
+    "APPLIED"
+  ]
+
+k8sCreateReleaseOptionalFields :: [(Text, Value)]
+k8sCreateReleaseOptionalFields =
+  [ ("metadata", objP "Optional metadata, e.g. {\"docker-image\": \"master-<sha>\"} to pin the exact image tag/reference to deploy. If omitted, the deployment falls back to splicing newVersion into the previous image tag, which breaks when newVersion is a \"vN\" suffix used only to distinguish redeploys of the same commit (no such registry tag exists) rather than a real build tag."),
+    ("info", strP "Optional info/reason text"),
+    ("approvedBy", strP "Optional: pre-approve the release as this identity"),
+    ("is_approved", boolP "Optional: mark the release pre-approved"),
+    ("is_infra_approved", boolP "Optional: mark the release pre-infra-approved"),
+    ("requestedCluster", strP "Optional cluster override"),
+    ("scheduleTime", strP "Optional ISO8601 time to schedule the release for"),
+    ("deployFilePath", strP "Optional deployment manifest path override"),
+    ("serviceFilePath", strP "Optional service manifest path override"),
+    ("drFilePath", strP "Optional DR manifest path override"),
+    ("vsFilePath", strP "Optional VirtualService manifest path override"),
+    ("mode", strP "Optional release mode (e.g. AUTO/MANUAL)"),
+    ("globalId", strP "Optional idempotency key for the release"),
+    ("new_service", boolP "Optional: true if this is the first-ever release for a new service"),
+    ("cronjob_suspend", boolP "Optional: suspend the cronjob instead of a normal rollout"),
+    ("change_log", strP "Optional changelog text/URL"),
+    ("syncEnabled", strP "Optional secondary-cluster sync flag"),
+    ("envOverrideData", strP "Optional environment override data"),
+    ("slackThreadTs", strP "Optional Slack thread timestamp to post updates to"),
+    ("isReleaseSync", boolP "Optional: sync this release to the secondary cluster"),
+    ("isSystemTriggered", boolP "Optional: mark the release as system-triggered rather than user-triggered"),
+    ("syncClusterEnvOverrideData", strP "Optional environment override data for the secondary cluster"),
+    ("syncClusterRolloutStrategy", objP "Optional rollout strategy override for the secondary cluster"),
+    ("postChangelogSlack", boolP "Optional: post the changelog to Slack on completion")
+  ]
+
 rolloutStrategyP :: Text -> Value
 rolloutStrategyP desc =
   object
@@ -133,17 +193,19 @@ releaseCreateTool =
       mtDescription = "Create a new release for a service (appGroup/product + service + version bump). Triggers the release workflow.",
       mtInputSchema =
         objSchema
-          [ ("appGroup", strP "App group / product slug (alias: product)"),
-            ("service", strP "Service name"),
-            ("env", strP "Environment, e.g. UAT/PROD (defaults to UAT)"),
-            ("trackerType", strP "Release category, e.g. BackendService"),
-            ("oldVersion", strP "Current version"),
-            ("newVersion", strP "Target version"),
-            ("rolloutStrategy", rolloutStrategyP "Rollout stages (at least one required), e.g. [{\"rolloutPercent\":100,\"cooloffMinutes\":0,\"podCount\":1}]"),
-            ("releaseTag", strP "Optional release tag"),
-            ("description", strP "Optional description"),
-            ("priority", intP "Optional priority")
-          ]
+          ( [ ("appGroup", strP "App group / product slug (alias: product)"),
+              ("service", strP "Service name"),
+              ("env", strP "Environment, e.g. UAT/PROD (defaults to UAT)"),
+              ("trackerType", enumP "Release category" releaseCategoryEnum),
+              ("oldVersion", strP "Current version"),
+              ("newVersion", strP "Target version"),
+              ("rolloutStrategy", rolloutStrategyP "Rollout stages (at least one required), e.g. [{\"rolloutPercent\":100,\"cooloffMinutes\":0,\"podCount\":1}]"),
+              ("releaseTag", strP "Optional release tag"),
+              ("description", strP "Optional description"),
+              ("priority", intP "Optional priority")
+            ]
+              ++ k8sCreateReleaseOptionalFields
+          )
           ["appGroup", "service", "rolloutStrategy"],
       mtPermission = AP_RELEASE_CREATE,
       mtRun = \ap args -> do
@@ -157,17 +219,19 @@ releaseCloneTool :: McpTool
 releaseCloneTool =
   McpTool
     { mtName = "release_clone",
-      mtDescription = "Clone an existing release tracker as the template for a new one — copies appGroup, service, env, category, rolloutStrategy, priority, mode, and envOverrideData from the source release. Only releaseId and newVersion are required; oldVersion defaults to the source release's newVersion. Mirrors the dashboard's \"Clone\" action.",
+      mtDescription = "Clone an existing release tracker as the template for a new one — copies appGroup, service, env, category, rolloutStrategy, priority, mode, envOverrideData, and metadata (including the docker image reference) from the source release. Only releaseId and newVersion are required; oldVersion defaults to the source release's newVersion. Any field can be overridden by passing it explicitly. Mirrors the dashboard's \"Clone\" action.",
       mtInputSchema =
         objSchema
-          [ ("releaseId", strP "releaseId of the release tracker to clone from"),
-            ("newVersion", strP "Target version for the new release"),
-            ("oldVersion", strP "Optional: defaults to the source release's newVersion"),
-            ("env", strP "Optional environment override (defaults to the source release's env)"),
-            ("priority", intP "Optional priority override"),
-            ("description", strP "Optional description"),
-            ("releaseTag", strP "Optional release tag")
-          ]
+          ( [ ("releaseId", strP "releaseId of the release tracker to clone from"),
+              ("newVersion", strP "Target version for the new release"),
+              ("oldVersion", strP "Optional: defaults to the source release's newVersion"),
+              ("env", strP "Optional environment override (defaults to the source release's env)"),
+              ("priority", intP "Optional priority override"),
+              ("description", strP "Optional description"),
+              ("releaseTag", strP "Optional release tag")
+            ]
+              ++ k8sCreateReleaseOptionalFields
+          )
           ["releaseId", "newVersion"],
       mtPermission = AP_RELEASE_CREATE,
       mtRun = \ap args -> do
@@ -186,7 +250,8 @@ releaseCloneTool =
                       "rolloutStrategy" .= rolloutStrategy,
                       "priority" .= priority,
                       "mode" .= mode,
-                      "envOverrideData" .= envOverrideData
+                      "envOverrideData" .= envOverrideData,
+                      "metadata" .= metadata
                     ]
                 merged = Object (KM.union (asObject args) (asObject base))
             req <- decodeArg merged :: Flow K8sCreateReleaseReq
@@ -293,14 +358,26 @@ releaseUpdateStatusTool :: McpTool
 releaseUpdateStatusTool =
   McpTool
     { mtName = "release_update_status",
-      mtDescription = "Update a release tracker — this is how you pause, resume, or abort an in-progress release: pass status=\"PAUSED\" to pause, \"INPROGRESS\" to resume, \"ABORTING\" to abort, or \"RESTARTING\" to restart. Other tracker fields (priority, description, ...) can be updated the same way.",
+      mtDescription = "Update a release tracker — this is how you pause, resume, or abort an in-progress release: pass status=\"PAUSED\" to pause, \"INPROGRESS\" to resume, \"ABORTING\" to abort, or \"RESTARTING\" to restart (actual transition legality is validated server-side against the tracker's current status). Also the only way to correct a bad dockerImage on an existing tracker. Other tracker fields (priority, description, ...) can be updated the same way.",
       mtInputSchema =
         objSchema
           [ ("releaseId", rid),
-            ("status", strP "One of PAUSED | INPROGRESS | ABORTING | RESTARTING"),
+            ("status", enumP "New status to transition to (legality depends on current status)" releaseStatusEnum),
             ("priority", intP "Optional new priority"),
             ("description", strP "Optional new description"),
-            ("rolloutStrategy", rolloutStrategyP "Optional: replace the rollout stages")
+            ("rolloutStrategy", rolloutStrategyP "Optional: replace the rollout stages"),
+            ("dockerImage", strP "Optional: correct/override the docker image tag/reference used for this tracker's deployment"),
+            ("mode", strP "Optional release mode override"),
+            ("releaseManager", strP "Optional release manager override"),
+            ("scheduleTime", strP "Optional ISO8601 time to (re)schedule the release for"),
+            ("info", strP "Optional info/reason"),
+            ("changeLog", strP "Optional changelog text/URL"),
+            ("isApproved", boolP "Optional approval flag override"),
+            ("isInfraApproved", boolP "Optional infra-approval flag override"),
+            ("syncEnabled", strP "Optional secondary-cluster sync flag"),
+            ("envOverrideData", strP "Optional environment override data"),
+            ("slackThreadTs", strP "Optional Slack thread timestamp to post updates to"),
+            ("podsScaleDownDelay", numP "Optional delay (seconds) before scaling down old pods")
           ]
           ["releaseId"],
       mtPermission = AP_RELEASE_UPDATE,
@@ -445,7 +522,23 @@ configMapCreateTool =
   McpTool
     { mtName = "configmap_create",
       mtDescription = "Create a new ConfigMap edit release. Body shape matches the dashboard's ConfigMap create form.",
-      mtInputSchema = objSchema [] [],
+      mtInputSchema =
+        objSchema
+          [ ("appGroup", strP "App group / product slug (alias: product)"),
+            ("service", strP "Service name"),
+            ("env", strP "Environment, e.g. UAT/PROD (defaults to UAT)"),
+            ("cluster", strP "Optional cluster override"),
+            ("name", strP "ConfigMap name"),
+            ("file", strP "The new ConfigMap contents (YAML/JSON) to deploy (alias: config)"),
+            ("description", strP "Optional description"),
+            ("change_log", strP "Optional changelog text/URL"),
+            ("release_manager", strP "Optional release manager (defaults to caller)"),
+            ("priority", intP "Optional priority"),
+            ("isSync", boolP "Optional: also sync this ConfigMap to the secondary cluster"),
+            ("secondary_file", strP "Optional secondary-cluster ConfigMap contents override"),
+            ("is_approved", boolP "Optional: mark pre-approved")
+          ]
+          ["appGroup", "service", "name", "file"],
       mtPermission = AP_RELEASE_CREATE,
       mtRun = \ap args -> do
         result <- ConfigMap.createConfigMapH ap args
@@ -457,8 +550,20 @@ configMapUpdateTool :: McpTool
 configMapUpdateTool =
   McpTool
     { mtName = "configmap_update",
-      mtDescription = "Update a ConfigMap tracker — this is how you pause, resume, abort, or discard a ConfigMap release: pass status=\"PAUSED\"/\"RESUMED\"/\"ABORTED\"/\"DISCARDED\".",
-      mtInputSchema = objSchema [("id", strP "ConfigMap tracker id"), ("status", strP "One of PAUSED | RESUMED | ABORTED | DISCARDED")] ["id"],
+      mtDescription = "Update a ConfigMap tracker — this is how you pause, resume, abort, or discard a ConfigMap release: pass status=\"PAUSED\"/\"RESUMED\"/\"ABORTED\"/\"DISCARDED\", or status=\"revert\" to revert to the previous ConfigMap contents.",
+      mtInputSchema =
+        objSchema
+          [ ("id", strP "ConfigMap tracker id"),
+            ("status", strP "One of PAUSED | RESUMED | ABORTED | DISCARDED | revert"),
+            ("description", strP "Optional new description"),
+            ("change_log", strP "Optional changelog text/URL"),
+            ("is_approved", boolP "Optional: mark approved"),
+            ("is_infra_approved", boolP "Optional: mark infra-approved"),
+            ("file", strP "Optional: replace the ConfigMap contents (alias: config)"),
+            ("commit", strP "Optional commit reference"),
+            ("current_cool_off", strP "Optional: set to \"0\" to fast-forward the cooloff")
+          ]
+          ["id"],
       mtPermission = AP_RELEASE_UPDATE,
       mtRun = \ap args -> do
         i <- requireTextArg "id" args
