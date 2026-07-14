@@ -53,7 +53,8 @@ data Config = Config
     prometheusUrl :: String,
     abEngineUrl :: String,
     abHsUrl :: String,
-    mcpBaseUrl :: Text
+    mcpBaseUrl :: Text,
+    cloudProvider :: Text
   }
   deriving (Show)
 
@@ -83,6 +84,8 @@ loadConfig = do
   abHsUrl <- envOr "AB_HS_URL" ""
 
   mcpBaseUrl <- pack <$> envOr "SC_MCP_BASE_URL" ""
+
+  cloudProvider <- pack <$> envOr "SC_CLOUD_PROVIDER" "GCP"
 
   pure Config {..}
 

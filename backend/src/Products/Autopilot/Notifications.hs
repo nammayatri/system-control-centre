@@ -51,7 +51,8 @@ where
 
 import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (liftIO)
-import Core.Environment (Flow, forkFlow)
+import Core.Config (Config (..))
+import Core.Environment (Flow, forkFlow, getConfig)
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Logging (logErrorG, logInfoG, logWarningG)
 import Core.Types.Time (Seconds (..))
@@ -439,10 +440,11 @@ notifyReleaseCreated tracker = do
     then logInfoG "[SLACK] Disabled, skipping create"
     else withChannel (appGroup tracker) (service tracker) $ \channel -> do
       link <- liftIO $ releaseLink tracker
+      cloud <- cloudProvider <$> getConfig
       let clBlocks = case changeLog tracker of
             Just cl | not (T.null (T.strip cl)) -> [contextBlock [cl]]
             _ -> []
-          blocks = [sectionBlock link, sectionBlock (versionLine tracker)] <> clBlocks
+          blocks = [sectionBlock link, sectionBlock (versionLine tracker), contextBlock ["Cloud: " <> cloud]] <> clBlocks
       mTs <- sendSlackRich channel (appGroup tracker <> " | " <> service tracker) colorCreated blocks Nothing
       case mTs of
         Just ts -> saveThreadTs (releaseId tracker) ts
