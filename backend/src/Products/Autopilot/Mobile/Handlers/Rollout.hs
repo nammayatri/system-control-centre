@@ -161,6 +161,10 @@ data PromoteForm = PromoteForm
     , pfIsStoreSync :: Bool
     -- ^ True when this release was synced from the store (notes already default
     -- to the live production notes) → the FE must NOT swap in the AI summary.
+    , pfAiShort :: Maybe Text
+    -- ^ The AI short synopsis captured at CREATE time — describes the commits
+    -- that went into this build (a live AI re-query would diff the branch
+    -- head, which may have moved). The FE prefers this as the AI source.
     }
     deriving (Eq, Show, Generic)
 
@@ -299,6 +303,7 @@ promoteFormH _ap rid = do
             , pfLocked = isPostPromote (mbWfStatus target)
             , pfPhasedSupported = platform == "ios"
             , pfIsStoreSync = isStoreSync
+            , pfAiShort = mbcChangelogSummaryShort (mbContext target)
             }
 
 {- | Best-effort fetch of the current production "What's New" from the store
@@ -319,20 +324,17 @@ fetchProdReleaseNotes ac platform = case (platform, acPackageName ac) of
             Nothing -> pure Nothing
     _ -> pure Nothing
 
-{- | The default release notes for a promote: for a store-synced release SCC has no
-changelog of its own (the synthetic row reads "Synced from store"), so default to
-the current production "What's New" pulled from the store. SCC-built releases keep
-their changelog (the FE may swap in the AI short summary). Best-effort — any store
-read failure falls back to the changelog. Shared by the promote form and bulk
-promote (where the operator supplies no per-app notes).
+{- | The default release notes for a promote: the current production "What's New"
+pulled from the store, for EVERY row — store notes address users, not the build
+pipeline, so the workflow changelog is only the last resort (store read failed /
+nothing live yet). SCC-built rows may still get the AI short summary swapped in
+by the FE. Shared by the promote form and bulk promote (where the operator
+supplies no per-app notes).
 -}
 promoteDefaultNotes :: ReleaseTrackerRow -> MobileBuildTargetState -> AppCatalog -> Flow Text
 promoteDefaultNotes row target ac = do
     let changelog = mbcChangeLog (mbContext target)
-        isStoreSync = rtMode row == Just "STORE_SYNC"
-    if isStoreSync
-        then fromMaybe changelog <$> fetchProdReleaseNotes ac (rtEnv row)
-        else pure changelog
+    fromMaybe changelog <$> fetchProdReleaseNotes ac (rtEnv row)
 
 {- | POST /releases/:id/promote — fill the release notes and submit the app for
 review. iOS: set What's New on every locale + releaseType MANUAL + submit, then

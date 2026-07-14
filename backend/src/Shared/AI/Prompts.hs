@@ -176,9 +176,10 @@ synopsisSystem =
            \noise (bot commits, CI version bumps) when judging the release. Mention only the \
            \categories actually present, leading with the dominant one. No risk assessment. \
            \Do NOT mention the app name, commit counts, version numbers, or author/@handles. \
-           \No bullet list, no headings, no preamble. \
-           \Example tone: \"This release brings new features and UI improvements, along with \
-           \several bug fixes and performance enhancements.\""
+           \No bullet list, no headings, no preamble. Start DIRECTLY with the content — \
+           \never open with \"This release brings/includes/contains\" or similar filler. \
+           \Example tone: \"New features and UI improvements, along with several bug fixes \
+           \and performance enhancements.\""
 
 {- | Wrap untrusted text as a labelled data block, stripping our own delimiters
 from the body so injected content cannot forge a tag boundary.

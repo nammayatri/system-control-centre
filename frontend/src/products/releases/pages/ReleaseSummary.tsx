@@ -19,6 +19,7 @@ import type { LatestBuild } from '../types';
 import { ABValidationModal } from '../components/ABValidationModal';
 import { Badge } from '../../../shared/ui/badge';
 import { StatusBadge } from '../components/StatusBadge';
+import { ReleaseStatusBadge } from '../components/ReleaseStatusBadge';
 import { isFirebaseInternal, FirebaseInternalBadge } from '../components/FirebaseBadge';
 import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
@@ -1134,6 +1135,10 @@ const ReleaseSummary: React.FC = () => {
           </div>
           {mobileStatus ? (
             <Badge variant={mobileStatus.variant} dot>{mobileStatus.label}</Badge>
+          ) : isMobile ? (
+            // The ONE shared mobile badge (Failed / User aborted / phase labels)
+            // — never a raw engine status that drifts from the other surfaces.
+            <ReleaseStatusBadge release={release} />
           ) : (
             <StatusBadge status={release.status} />
           )}

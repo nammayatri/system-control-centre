@@ -25,6 +25,8 @@ module Products.Autopilot.Mobile.Queries.Tracker
     findExternalReviewRowForVersion,
     storeSyncRowExistsForVersion,
     convergeStoreSyncRow,
+    findAdoptableDraft,
+    adoptDraftAsStoreBuild,
     findMobileVersionRow,
     retireOlderHeldInternal,
     listIncomingMobileVersions,
@@ -686,6 +688,67 @@ closeExternalReviewRow releaseId_ ph = do
 -- | Transition an external-review row into a live store-sync row IN PLACE: flip
 -- mode/status to a completed STORE_SYNC build, clear the review state, stamp the
 -- store track/version/state. Preserves date_created (only last_updated moves).
+{- | The SCC draft that already claimed an identity now seen on a store track:
+MANUAL, still CREATED, and never dispatched — the row store-sync ADOPTS
+('adoptDraftAsStoreBuild') instead of leaving a stale draft whose build stages
+can never legitimately run (the artifact exists; rebuilding would collide on
+the version code).
+-}
+findAdoptableDraft :: (MonadFlow m) => Text -> Text -> Text -> Text -> Int32 -> m (Maybe ReleaseTrackerRow)
+findAdoptableDraft appGroup surface platform version code = do
+  rows <- withDb $ \db ->
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtAppGroup rt ==. val_ appGroup)
+          guard_ (rtService rt ==. val_ surface)
+          guard_ (rtEnv rt ==. val_ platform)
+          guard_ (rtNewVersion rt ==. val_ version)
+          guard_ (rtVersionCode rt ==. val_ (Just code))
+          guard_ (rtCategory rt ==. val_ "MobileBuild")
+          guard_ (rtMode rt ==. val_ (Just "MANUAL"))
+          guard_ (rtStatus rt ==. val_ "CREATED")
+          guard_ (isNothing_ (rtDispatchId rt))
+          pure rt
+  pure (safeHeadT rows)
+  where
+    safeHeadT (x : _) = Just x
+    safeHeadT [] = Nothing
+
+{- | Flip an adoptable draft to build-complete: the out-of-band upload IS the
+build, so the row skips straight to the held-at-@MBTagPushed@ state the normal
+pipeline would reach — approve/dispatch become ineligible (no longer CREATED)
+and promote becomes genuinely valid. CAS on CREATED + undispatched so a
+concurrent operator dispatch wins over adoption.
+-}
+adoptDraftAsStoreBuild :: (MonadFlow m) => Text -> Text -> Text -> UTCTime -> UTCTime -> m Bool
+adoptDraftAsStoreBuild rid track encodedState startTime now = withDb $ \db -> do
+  runDB db $
+    runUpdate $
+      update
+        (releaseTrackers autopilotDb)
+        ( \rt ->
+            mconcat
+              [ rtStatus rt <-. val_ "INPROGRESS",
+                rtReleaseWFStatus rt <-. val_ "INPROGRESS",
+                rtStoreTrack rt <-. val_ (Just track),
+                rtTargetState rt <-. val_ (Just encodedState),
+                rtStartTime rt <-. val_ (Just startTime),
+                rtUpdatedAt rt <-. val_ now
+              ]
+        )
+        (\rt -> rtId rt ==. val_ rid &&. rtStatus rt ==. val_ "CREATED" &&. isNothing_ (rtDispatchId rt))
+  -- Beam's runUpdate has no row count: read back to learn whether WE flipped
+  -- it (a concurrent dispatch keeps status CREATED and wins).
+  rows <- runDB db $
+    runSelectReturningList $
+      select $ do
+        rt <- all_ (releaseTrackers autopilotDb)
+        guard_ (rtId rt ==. val_ rid)
+        pure (rtStatus rt)
+  pure (rows == ["INPROGRESS"])
+
 convergeStoreSyncRow :: (MonadFlow m) => Text -> Text -> Maybe Int32 -> Text -> Text -> UTCTime -> m ()
 convergeStoreSyncRow rid track mCode encodedState meta now = withDb $ \db ->
   runDB db $
@@ -983,9 +1046,20 @@ mkMobileTrackerRow rid ac targetState mVersionName mSourceRef createdBy_ created
               then mbcVersionCode (mbContext targetState)
               else Nothing,
           rtTerminalStatus = Nothing,
+          -- Queryable copy of the context's group id (migration 0042); the
+          -- guard drops the empty-string placeholder some persists carry.
+          rtReleaseGroupId = groupIdColumn targetState,
+          rtReleaseGroupLabel = Nothing,
           rtCreatedAt = createdAt,
           rtUpdatedAt = createdAt
         }
+
+-- | The context's release_group_id as a column value — Nothing for the
+-- empty-string placeholder so blank ids never form an accidental group.
+groupIdColumn :: MobileBuildTargetState -> Maybe Text
+groupIdColumn ts =
+  let gid = mbcReleaseGroupId (mbContext ts)
+   in if T.null (T.strip gid) then Nothing else Just gid
 
 -- ─── Internal helpers ──────────────────────────────────────────────
 
@@ -1256,6 +1330,10 @@ insertMobileRevertTracker rid ac targetState versionName changeLog_ sourceRef_ r
               then mbcVersionCode (mbContext targetState)
               else Nothing,
           rtTerminalStatus = Nothing,
+          -- Inherited from the bad release via the context (Revert handler),
+          -- so the revert shows up beside its siblings on the group page.
+          rtReleaseGroupId = groupIdColumn targetState,
+          rtReleaseGroupLabel = Nothing,
           rtCreatedAt = createdAt,
           rtUpdatedAt = createdAt
         }

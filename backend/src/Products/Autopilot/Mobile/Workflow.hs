@@ -69,6 +69,7 @@ import Data.Char (digitToInt, isAlphaNum, isDigit)
 import Data.Int (Int32)
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
+import Text.Read (readMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -89,7 +90,7 @@ import Products.Autopilot.Mobile.Github (
     listTags,
     listWorkflowRuns,
  )
-import Products.Autopilot.Mobile.Github.Auth (GhAppCreds (..), loadGhCreds)
+import Products.Autopilot.Mobile.Github.Auth (GhAppCreds (..), getInstallationToken, loadGhCreds)
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRow,
     findSiblingsByDispatchId,
@@ -123,9 +124,8 @@ import Products.Autopilot.Mobile.Versioning.Apple (
     loadAscCredsFor,
     renderAscErr,
  )
-import Products.Autopilot.Notifications (sendMobileChangelogSlack)
+import Products.Autopilot.Notifications (sendGroupChangelogSlackIfSettled)
 import Products.Autopilot.RuntimeConfig (
-    getMobileSlackChannel,
     getMobileTagConfirmTimeoutMinutes,
     getReviewPollIntervalSeconds,
     getReviewPollTimeoutDays,
@@ -181,7 +181,9 @@ stageResolveVersion
     , stageFinalize ::
         Stage ReleaseState
 
--- | Stage 1 — Play Console lookup → next version_name + version_code.
+-- | Stage 1 — store lookup → version floor. An operator-typed version at or
+-- above the floor is KEPT (source "operator"); below it, the resolved value
+-- wins and the bump is audited (source "store_floor_bump").
 stageResolveVersion =
     (mkStage "ResolveVersion" execResolveVersion)
         { stageGuard = mbStatusReached MBVersionResolved
@@ -434,39 +436,65 @@ execResolveVersion = mobileStage "ResolveVersion" $ do
                     | isConfigError err -> abort err
                     | otherwise -> retry err
                 Right (AndroidVersion nextName nextCode) -> do
+                    -- The store result is a FLOOR, not a replacement. Play enforces
+                    -- only CODE monotonicity, so a typed version NAME is always kept;
+                    -- a typed code at/above the floor is kept, below it we bump.
+                    let typedName = T.strip (newVersion rt)
+                        typedCode = mobileTarget rs >>= mbcVersionCode . mbContext
+                        finalName = if T.null typedName then nextName else typedName
+                        (finalCode, source) = case typedCode of
+                            Just c
+                                | c > nextCode -> (c, "operator" :: T.Text)
+                                | c == nextCode -> (c, "play_console")
+                                | otherwise -> (nextCode, "store_floor_bump")
+                            Nothing -> (nextCode, "play_console")
                     logInfoIO $
                         "[ResolveVersion] "
                             <> releaseId rt
-                            <> " resolved Android version "
-                            <> nextName
+                            <> " Android version "
+                            <> finalName
                             <> " (code "
-                            <> T.pack (show nextCode)
+                            <> T.pack (show finalCode)
+                            <> ", source "
+                            <> source
                             <> ")"
                     modify $ \s ->
-                        let rt' = (releaseTracker s){newVersion = nextName}
+                        let rt' = (releaseTracker s){newVersion = finalName}
                             ts' =
                                 applyMobileTarget s $ \mt ->
                                     mt
-                                        { mbContext = (mbContext mt){mbcVersionCode = Just nextCode}
+                                        { mbContext = (mbContext mt){mbcVersionCode = Just finalCode}
                                         , mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
                                         }
                          in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
                     logEvent (releaseId rt) "VERSION_RESOLVED" $
-                        object
-                            [ "version_name" .= nextName
-                            , "version_code" .= nextCode
-                            , "source" .= ("play_console" :: T.Text)
+                        object $
+                            [ "version_name" .= finalName
+                            , "version_code" .= finalCode
+                            , "source" .= source
                             ]
+                                <> ["typed_code" .= c | source == "store_floor_bump", Just c <- [typedCode]]
+                                <> ["floor_code" .= nextCode | source /= "play_console"]
                     pure StageSuccess
                 Right (IosVersion nextNumber) -> do
+                    -- ASC enforces version_number > live, so the resolved value is
+                    -- the floor: a typed number at/above it is kept, below it bumps.
+                    let typed = T.strip (newVersion rt)
+                        (finalVer, source)
+                            | T.null typed = (nextNumber, "app_store_connect" :: T.Text)
+                            | versionLt typed nextNumber = (nextNumber, "store_floor_bump")
+                            | typed == nextNumber = (nextNumber, "app_store_connect")
+                            | otherwise = (typed, "operator")
                     logInfoIO $
                         "[ResolveVersion] "
                             <> releaseId rt
-                            <> " resolved iOS version_number "
-                            <> nextNumber
-                            <> " (build number computed by workflow)"
+                            <> " iOS version_number "
+                            <> finalVer
+                            <> " (source "
+                            <> source
+                            <> "; build number computed by workflow)"
                     modify $ \s ->
-                        let rt' = (releaseTracker s){newVersion = nextNumber}
+                        let rt' = (releaseTracker s){newVersion = finalVer}
                             ts' =
                                 applyMobileTarget s $ \mt ->
                                     mt
@@ -474,11 +502,21 @@ execResolveVersion = mobileStage "ResolveVersion" $ do
                                         }
                          in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
                     logEvent (releaseId rt) "VERSION_RESOLVED" $
-                        object
-                            [ "version_number" .= nextNumber
-                            , "source" .= ("app_store_connect" :: T.Text)
+                        object $
+                            [ "version_number" .= finalVer
+                            , "source" .= source
                             ]
+                                <> ["typed_version" .= typed | source == "store_floor_bump"]
+                                <> ["floor_version" .= nextNumber | source /= "app_store_connect"]
                     pure StageSuccess
+
+-- | Dotted numeric version ordering ("3.3.107" < "3.3.108"); non-numeric parts
+-- compare as 0. Local mirror of StoreSync.versionOlderThan (same duplication
+-- idiom as Play/Apple bumpPatch).
+versionLt :: T.Text -> T.Text -> Bool
+versionLt a b = comps a < comps b
+  where
+    comps = map (\p -> fromMaybe 0 (readMaybe (T.unpack p)) :: Int) . T.splitOn "."
 
 {- | Stage 2: Acquire the dispatch-group advisory lock.
 
@@ -536,20 +574,24 @@ lockForDispatch rt dispatchId = do
                             <> " advisory lock busy; waiting"
                     pure StageWaiting
 
-{- | Stage 3: POST @workflow_dispatch@ with the assembled inputs.
+{- | Stage 3: POST @workflow_dispatch@ — exactly ONE GitHub run per dispatch
+group, via the leader gate ('electDispatchLeader'): the first non-terminal
+sibling dispatches, everyone else waits and then adopts the leader's run id
+('adoptGroupRun').
 
-Inputs are built from siblings (sorted by service for stability) joined
-to the AppCatalog so the GHA workflow knows which apps to build:
+Inputs are built from the LIVING (non-terminal) siblings joined to the
+AppCatalog so the GHA workflow knows which apps to build:
 
-* @selected_apps@ — comma-separated CSV of @AppCatalog.surface@ values
-  for every sibling in the dispatch group.
-* @version_name@ — the resolved name from stage 1.
-* @version_code@ — the resolved code from stage 1.
-* @change_log@   — from @mbContext.changeLog@.
-* @payload@      — JSON envelope with a fresh nonce so we can (in
-  principle) match a run later. Note: GitHub's @\/runs@ endpoint does
-  NOT echo @inputs@ back, so the nonce is best-effort observability
-  only — see stage 4 for the actual matching strategy.
+* @selected_apps@ — comma-separated CSV of @AppCatalog.name@ values; the
+  workflow expands it into one matrix job per app.
+* version\/changelog inputs vary by surface\/platform (see
+  'dispatchFreshRun'); a batched consumer run sends NO version inputs —
+  each matrix job auto-versions and ConfirmTag adopts the code from the
+  pushed tag ('mbBatchDispatch').
+* We deliberately do NOT send the workflow's @payload@ input — a non-empty
+  payload makes its Set-Matrix step bypass @selected_apps@. GitHub's
+  @\/runs@ endpoint doesn't echo inputs anyway, so stage 4 matches the run
+  by actor + created-at window (+ job-name verification when ambiguous).
 
 Failure modes:
 
@@ -1279,30 +1321,6 @@ column — is what makes it reliable: store-sync / rollout passes overwrite
 provided by the ConfirmTag stage guard (skipped once MBTagPushed is reached).
 Best-effort: a Slack failure is logged, never aborts the stage.
 -}
-maybeSendChangelogSlack :: ReleaseTracker -> MobileBuildTargetState -> StateFlow ()
-maybeSendChangelogSlack rt target =
-    case mbcChangelogSummary (mbContext target) of
-        Nothing -> pure () -- this release did not opt in
-        Just bodyRaw -> do
-            mCh <- getMobileSlackChannel
-            case mCh of
-                Nothing ->
-                    logInfoIO $
-                        "[ConfirmTag] "
-                            <> releaseId rt
-                            <> " opted into changelog Slack but mobile_slack_channel is not set — skipping"
-                Just ch -> do
-                    let body = if T.null (T.strip bodyRaw) then mbcChangeLog (mbContext target) else bodyRaw
-                        versionLabel = "v" <> newVersion rt
-                    ok <- lift (sendMobileChangelogSlack ch (appGroup rt) (service rt) versionLabel body)
-                    if ok
-                        then
-                            logEvent (releaseId rt) "CHANGELOG_SLACK_SENT" $
-                                object ["channel" .= ch, "version" .= newVersion rt]
-                        else
-                            logInfoIO $
-                                "[ConfirmTag] " <> releaseId rt <> " changelog Slack send failed (see [SLACK] logs)"
-
 execConfirmTag :: forall m. (StageM ReleaseState m) => m StageOutcome
 execConfirmTag = mobileStage "ConfirmTag" $ do
     rs <- gets id
@@ -1331,9 +1349,9 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                     }
             logEvent (releaseId rt) "TAG_OBSERVED" $
                 object ["tag" .= ("debug-no-tag" :: Text), "source" .= ("debug_skip" :: Text)]
-            -- Debug builds: only posts if mobile_slack_channel is set; body falls
-            -- back to mbcChangeLog (debug create has no rich summary).
-            maybeSendChangelogSlack rt target
+            -- This row just settled (debug tag). Re-check the group barrier: the
+            -- changelog posts ONCE per group when every member has settled.
+            lift (sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext target)) (Just (releaseId rt)))
             pure StageSuccess
         else do
             ac <- appCatalogForRow rt
@@ -1445,10 +1463,10 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                             <> releaseId rt
                             <> " bound to tag="
                             <> tagName
-                    -- Build is fully successful and tagged: post the changelog to
-                    -- Slack if this release opted in. Exactly-once via the
-                    -- ConfirmTag stage guard (skipped once MBTagPushed is reached).
-                    maybeSendChangelogSlack rt target
+                    -- This row just settled (tag observed). Re-check the group
+                    -- barrier: the changelog posts ONCE per group, when every
+                    -- member has settled (shipped or failed) and ≥1 shipped.
+                    lift (sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext target)) (Just (releaseId rt)))
                     pure StageSuccess
 
 {- | Stage 7: Map fine-grained @MobileBuildWFStatus@ to the user-facing
@@ -1676,14 +1694,25 @@ retry msg = liftIO (throwIO (MobileRetry msg))
 logInfoIO :: Text -> StateFlow ()
 logInfoIO = liftIO . logInfoG
 
-{- | 'loadGhCreds' variant for post-dispatch polling stages. If the token
-refresh fails (clock drift, transient 401, etc.) we retry on the next
-tick instead of killing the release — the creds already worked for
-dispatch, so the failure is transient.
+{- | 'loadGhCreds' variant for post-dispatch polling stages. Retries on the
+next tick instead of killing the release when GitHub auth fails transiently
+(clock drift, transient 401, GitHub 5xx, network blip) — the creds already
+worked for dispatch, so the failure is transient.
+
+Critically, this FORCES the installation-token exchange here, inside the try.
+'loadGhCreds' only reads the env secrets; the token is minted lazily on the
+first API call ('getInstallationToken' inside 'listJobs' etc.), whose 'throwM'
+would otherwise escape that call's 'Left' handling and reach 'mobileStage' as
+an UNCAUGHT exception — turning a transient blip into a fatal build abort even
+while the GitHub job is building fine. Pre-warming the (cached) token here means
+the later API calls reuse it and never do the exchange themselves.
 -}
 loadGhCredsSafe :: StateFlow GhAppCreds
 loadGhCredsSafe = do
-    eCreds <- MC.try @_ @SomeException loadGhCreds
+    eCreds <- MC.try @_ @SomeException $ do
+        c <- loadGhCreds
+        _ <- getInstallationToken c -- force + cache the token so poll calls can't throw
+        pure c
     case eCreds of
         Right c -> pure c
         Left ex -> retry ("GH auth refresh failed (will retry): " <> T.pack (show ex))
@@ -1736,6 +1765,7 @@ applyMobileTarget rs f =
                             , mbcTagPushed = Nothing
                             , mbcDestination = Nothing
                             , mbcChangelogSummary = Nothing
+                , mbcChangelogSummaryShort = Nothing
                             }
                     , mbExternalRunId = Nothing
                     , mbMatrixJobStatus = Nothing

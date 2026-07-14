@@ -29,7 +29,7 @@ import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
 import Products.Autopilot.Mobile.Queries.Tracker (appCatalogForRow, gitOwner, gitRepo)
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), MobileBuildWFStatus (..))
 import Products.Autopilot.Mobile.Types.Storage (acWorkflowPath)
-import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
+import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted, sendGroupChangelogSlackIfSettled)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks, releaseService)
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getMaxCleanupRetries, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
@@ -494,6 +494,14 @@ runReleaseWorkflow _cfg rtNew mts = do
                             scheduleNewDeploymentCleanup abortedTracker mts
                             notifyReleaseAborted abortedTracker
                             releaseService (NT.appGroup abortedTracker) (NT.service abortedTracker)
+                            -- Fleet changelog: a build failing may be the LAST
+                            -- group member to settle — re-check the group barrier
+                            -- so the one Slack post still fires for whatever shipped.
+                            case mts of
+                                Just (MobileBuildState s)
+                                    | isJust (mbcChangelogSummary (mbContext s)) ->
+                                        sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext s)) Nothing
+                                _ -> pure ()
         Right _ -> do
             -- The workflow persists state via persistWorkflowState in each cprV2
             -- stage, but the Recorded monad's bind may short-circuit the final
@@ -756,6 +764,13 @@ handleAbortingRelease cfg rt mts = do
             insertReleaseEvent (releaseId rt) "BUSINESS" "ABORT_HANDLED" (toJSON ("User abort processed" :: String))
             notifyReleaseAborted aborted
             releaseService (NT.appGroup aborted) (NT.service aborted)
+            -- Fleet changelog: a user abort may settle the last group member —
+            -- re-check the group barrier so the one Slack post still fires.
+            case mts of
+                Just (MobileBuildState s)
+                    | isJust (mbcChangelogSummary (mbContext s)) ->
+                        sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext s)) Nothing
+                _ -> pure ()
 
 {- | Best-effort cancel of a mobile release's in-flight GitHub run on abort. If
 @external_run_id@ isn't resolved yet, it locates the dispatched run via the same

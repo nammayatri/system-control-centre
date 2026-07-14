@@ -433,6 +433,7 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         version_code:     (r.releaseContext as any)?.version_code,
         tag_pushed:       (r.releaseContext as any)?.tag_pushed,
         matrix_job_name:  (r.releaseContext as any)?.matrix_job_name,
+        dispatch_id:      (r.releaseContext as any)?.dispatch_id,
         build_type:       (r.releaseContext as any)?.build_type,
         // Provider Android store destination ("GooglePlay" | "Firebase") — drives the
         // "Firebase internal" badge. Must be passed through here or it's dropped.
@@ -786,6 +787,12 @@ export interface RevertDraft {
     rdIsStoreSyncRevert: boolean;
     rdStoreVersion: string | null;
     rdStoreVersionCode: number | null;
+    // Rollback plan (RevertResolver): which version we return to and how the
+    // artifact is sourced. 'manual_required' needs the full revert page.
+    rdTargetReleaseId?: string;
+    rdTargetVersion?: string;
+    rdBuildSourceKind?: 'tag' | 'rebuild_lower' | 'manual_required' | string;
+    rdWarnings?: string[];
 }
 
 export interface RevertCreateReq {
@@ -1181,6 +1188,9 @@ export interface ChangelogSummaryResp {
     summaryLong?: string | null;
     summaryShort?: string | null;
     model?: string | null;
+    // Combined only: # of selected apps that had a comparable last release.
+    // < the selected count ⇒ some apps had no base; the summary names them.
+    usableCount?: number | null;
 }
 
 export async function releaseAiSummary(id: string, force = false): Promise<AiResp> {
@@ -1214,6 +1224,9 @@ export interface PromoteForm {
     pfLocked: boolean; // true once submitted (iOS notes can't change mid-review)
     pfPhasedSupported: boolean; // iOS only
     pfIsStoreSync: boolean; // store-synced → notes are the live prod notes; don't swap in AI
+    // AI short synopsis stored at CREATE time — describes this build's commits;
+    // preferred over a live AI re-query (branch head may have moved since).
+    pfAiShort?: string | null;
 }
 
 export interface RolloutDetail {
@@ -1397,6 +1410,21 @@ export const mobileApi = {
 
     // Create-time changelog summary of the commit range (before the release
     // exists). Generated async server-side; poll while status === 'pending'.
+    // Where does an existing (app, version, code) build live? Powers the
+    // "open existing build" link on the create page's duplicate error.
+    buildLocation: async (
+        app: string,
+        surface: string,
+        platform: string,
+        version: string,
+        code?: number | null,
+    ): Promise<{ found: boolean; releaseId?: string; groupId?: string }> => {
+        const params: Record<string, string> = { app, surface, platform, version };
+        if (code != null) params.code = String(code);
+        const { data } = await apiClient.get('/mobile/build-location', { params });
+        return data;
+    },
+
     changelogAiSummary: async (
         app: string,
         surface: string,
@@ -1411,6 +1439,21 @@ export const mobileApi = {
         if (versionName) params.versionName = versionName;
         if (versionCode) params.versionCode = versionCode;
         const { data } = await apiClient.get('/mobile/changelog-ai-summary', { params });
+        return data;
+    },
+
+    // One combined changelog for a multi-app selection: common changes across
+    // every app + labeled per-app extras. Same response shape as the per-app call.
+    changelogAiSummaryCombined: async (
+        apps: { app: string; surface: string; platform: string; version?: string }[],
+        branch: string,
+        base = '',
+    ): Promise<ChangelogSummaryResp> => {
+        const { data } = await apiClient.post('/mobile/changelog-ai-summary-combined', {
+            apps,
+            branch,
+            ...(base ? { base } : {}),
+        });
         return data;
     },
 
@@ -1500,4 +1543,95 @@ export const mobileApi = {
         const { data } = await apiClient.post('/mobile/bulk/rollout', { brItems: items });
         return data;
     },
+
+    // ── Release groups (fleet read model) ──
+    // Server-derived groups + stage summaries. `since` bounds only finished
+    // groups — active ones always come back (no 24h cliff).
+    groups: async (sinceIso?: string): Promise<MobileGroupsResp> => {
+        const { data } = await apiClient.get('/mobile/groups', {
+            params: sinceIso ? { since: sinceIso } : {},
+        });
+        return data;
+    },
+    // One group: members arrive in the same row shape as GET /releases and are
+    // normalized here so every consumer sees ordinary APRelease objects.
+    groupDetail: async (groupId: string): Promise<MobileGroupDetail> => {
+        const { data } = await apiClient.get(`/mobile/groups/${encodeURIComponent(groupId)}`);
+        return { ...data, members: (data.members ?? []).map(normalizeRelease) };
+    },
+    // Manually (re)send the group's combined changelog to Slack — recovery for a
+    // failed post. Returns the resulting state (sent | failed | pending | none).
+    resendGroupChangelog: async (groupId: string): Promise<MobileChangelogSlackState> => {
+        const { data } = await apiClient.post(
+            `/mobile/groups/${encodeURIComponent(groupId)}/changelog-slack/resend`,
+        );
+        return data as MobileChangelogSlackState;
+    },
 };
+
+// ── Release groups: response types ──────────────────────────────────
+
+export interface MobileGroupMemberLite {
+    releaseId: string;
+    app: string;
+    surface: string;
+    platform: string;
+    version: string;
+    versionCode?: number | null;
+    phase: string;
+    status: string;
+    approved: boolean;
+    rolloutPercent?: number | null;
+    displayLabel?: string | null; // canonical badge label, e.g. "Rolling out · 50%"
+}
+
+export interface MobileGroupSummary {
+    stage: string; // approval | dispatch | building | promote | in_review | releasing | rolling_out | done
+    counts: Record<string, number>; // phase slug -> member count
+    attention: MobileGroupMemberLite[]; // rejected / build_failed / aborted / halted members
+    primaryVerb?: string | null; // approve | dispatch | promote | release_or_rollout | rollout_controls
+}
+
+export interface MobileGroupListItem {
+    groupId: string;
+    label?: string | null;
+    createdAt: string;
+    createdBy: string;
+    summary: MobileGroupSummary;
+    members: MobileGroupMemberLite[];
+}
+
+export interface MobileGroupsResp {
+    groups: MobileGroupListItem[];
+    since: string;
+}
+
+export interface MobileGroupAppFreshness {
+    app: string;
+    surface: string;
+    platform: string;
+    syncedSecondsAgo?: number | null;
+}
+
+// Group-level changelog→Slack outcome for the console header.
+export interface MobileChangelogSlackState {
+    state: 'none' | 'pending' | 'sent' | 'failed';
+    error?: string | null; // Slack reason when state === 'failed'
+}
+
+export interface MobileGroupDetail {
+    groupId: string;
+    label?: string | null;
+    createdAt: string;
+    createdBy: string;
+    summary: MobileGroupSummary;
+    members: APRelease[];
+    eligible: Record<string, string[]>; // verb -> member release ids
+    freshness: MobileGroupAppFreshness[];
+    cooldownSeconds: number;
+    // android_review_rollout_fraction — promote dialog prefills its % input.
+    androidReviewFraction?: number;
+    // whether the fleet's combined changelog reached Slack (drives the
+    // "Slack failed / Resend" control on the console header).
+    changelogSlack?: MobileChangelogSlackState;
+}

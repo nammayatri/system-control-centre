@@ -793,15 +793,19 @@ appStoreStateToReview = \case
     "DEVELOPER_REJECTED" -> AscRejected "DEVELOPER_REJECTED"
     other -> AscOther other
 
--- | Apple's fixed 7-day phased-release schedule: day 0–6 → cumulative %.
+-- | Apple's fixed 7-day phased-release schedule. @currentDayNumber@ is
+-- 1-BASED (1–7) — verified against a live ACTIVE release (started Jul 6,
+-- reported day 6 on Jul 11 ≈ 50%). Day 7 serves 100% until Apple
+-- auto-completes. 0 is defensive (never observed) and reads as day 1.
 applePhasedPercent :: Int -> Double
 applePhasedPercent d = case d of
     0 -> 1
-    1 -> 2
-    2 -> 5
-    3 -> 10
-    4 -> 20
-    5 -> 50
+    1 -> 1
+    2 -> 2
+    3 -> 5
+    4 -> 10
+    5 -> 20
+    6 -> 50
     _ -> 100
 
 -- | Phased-release snapshot.

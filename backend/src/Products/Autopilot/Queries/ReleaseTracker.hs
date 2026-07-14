@@ -7,13 +7,21 @@ module Products.Autopilot.Queries.ReleaseTracker
     conditionalUpdateTracker,
     conditionalUpdateApprove,
     conditionalUpdateTrackerRow,
+    claimChangelogSlackForGroup,
+    markChangelogSlackSent,
+    markChangelogSlackFailed,
+    getChangelogSlackState,
     insertReleaseTrackerRow,
     insertReleaseTrackerRowsBatch,
     insertReleaseTrackerRowIfAbsent,
 
     -- * Queries
     findReleaseTracker,
+    findDispatchedReleaseIds,
     findReleaseTrackersByIds,
+    findReleaseTrackersByGroupId,
+    findMobileGroupTrackersSince,
+    GroupedTracker,
     listReleaseEvents,
     listReleaseEventsByCategory,
     listReleaseTrackers,
@@ -73,13 +81,14 @@ module Products.Autopilot.Queries.ReleaseTracker
   )
 where
 
+import Control.Monad (void)
 import Core.DB.Connection (runBeamLogged, runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
 import Data.Aeson (FromJSON, ToJSON, Value (..), fromJSON, toJSON)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Text qualified as AesonText
-import Data.Maybe (fromMaybe, isNothing)
+import Data.Maybe (fromMaybe, isNothing, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -109,7 +118,12 @@ insertReleaseTracker rt mts = withDb $ \db -> do
       row = toRow created now rt mts
   -- Every non-PK column must appear in BOTH the INSERT list AND the DO
   -- UPDATE SET clause, otherwise it silently retains its old value on
-  -- conflict and corrupts rollout state.
+  -- conflict and corrupts rollout state. EXCEPTIONS (deliberately absent
+  -- from both lists so this writer can never clobber them): the
+  -- setPhase-owned lifecycle columns (review_*, rollout_*, store_track,
+  -- asc ids, terminal_status), the externally-stamped dispatch_id /
+  -- external_run_id / version_code, and the creation-stamped
+  -- release_group_id / release_group_label (migration 0042).
   withConn db $ \conn -> do
     _ <-
       execute
@@ -271,6 +285,154 @@ findReleaseTrackersByIds rids = withDb $ \db -> do
           guard_ (rtId rt `in_` map val_ rids)
           pure rt
   pure (map fromRow rows)
+
+{- | Of the given ids, those already stamped with a dispatch_id. A second
+dispatch call would re-stamp a FRESH group id — splitting the original run
+group — so the dispatch handler rejects these up front (the runner picks a
+stamped row up on its next tick; there is nothing to retry).
+-}
+findDispatchedReleaseIds :: (MonadFlow m) => [Text] -> m [Text]
+findDispatchedReleaseIds [] = pure []
+findDispatchedReleaseIds rids = withDb $ \db ->
+  runDB db $
+    runSelectReturningList $
+      select $ do
+        rt <- all_ (releaseTrackers autopilotDb)
+        guard_ (rtId rt `in_` map val_ rids)
+        guard_ (isJust_ (rtDispatchId rt))
+        pure (rtId rt)
+
+{- | All operator-created mobile group rows for the groups LIST: rows with a
+group id whose mode is not a store-sync mint (those are one-row pseudo-groups —
+design doc §5), and that are either still active (CREATED/INPROGRESS — always
+returned regardless of window, or the 24h-cliff bug returns in new clothes) or
+created within the @since@ window.
+-}
+findMobileGroupTrackersSince :: (MonadFlow m) => UTCTime -> m [GroupedTracker]
+findMobileGroupTrackersSince since = withDb $ \db -> do
+  rows <-
+    runDB db $
+      runSelectReturningList $
+        select $
+          orderBy_ (\rt -> (asc_ (rtCreatedAt rt), asc_ (rtId rt))) $ do
+            rt <- all_ (releaseTrackers autopilotDb)
+            guard_ (rtCategory rt ==. val_ "MobileBuild")
+            guard_ (isJust_ (rtReleaseGroupId rt))
+            guard_ (not_ (fromMaybe_ (val_ "MANUAL") (rtMode rt) `in_` [val_ "STORE_SYNC", val_ "EXTERNAL_REVIEW"]))
+            guard_
+              ( rtStatus rt `in_` [val_ "CREATED", val_ "INPROGRESS"]
+                  ||. rtCreatedAt rt >=. val_ since
+              )
+            pure rt
+  pure (mapMaybe toGrouped rows)
+
+-- | (release_group_id, release_group_label, row) — the two group columns the
+-- domain 'ReleaseTracker' deliberately doesn't carry.
+type GroupedTracker = (Text, Maybe Text, TrackerWithTarget)
+
+toGrouped :: ReleaseTrackerRow -> Maybe GroupedTracker
+toGrouped r = (\gid -> (gid, rtReleaseGroupLabel r, fromRow r)) <$> rtReleaseGroupId r
+
+-- | All members of a mobile release group, oldest first (creation order).
+-- Uses the indexed @release_group_id@ column (migration 0042) — the SQL access
+-- path the fleet-release group endpoints build on.
+findReleaseTrackersByGroupId :: (MonadFlow m) => Text -> m [GroupedTracker]
+findReleaseTrackersByGroupId gid = withDb $ \db -> do
+  rows <-
+    runDB db $
+      runSelectReturningList $
+        select $
+          orderBy_ (\rt -> (asc_ (rtCreatedAt rt), asc_ (rtId rt))) $ do
+            rt <- all_ (releaseTrackers autopilotDb)
+            guard_ (rtReleaseGroupId rt ==. val_ (Just gid))
+            pure rt
+  pure (mapMaybe toGrouped rows)
+
+{- | Atomically CLAIM the group's "changelog posted to Slack" marker so the
+release changelog is posted ONCE per @release_group_id@, not once per app. One
+conditional UPDATE stamps @changelog_slack_sent_at@ on every group row, but only
+while still NULL — the row write-lock + READ COMMITTED predicate recheck make it
+a compare-and-swap. Returns True for the single caller whose UPDATE flipped the
+group (rows > 0); every sibling reaching it after the commit matches 0 rows and
+returns False. Durable, so the claim also survives a runner restart.
+-}
+claimChangelogSlackForGroup :: (MonadFlow m) => Text -> m Bool
+claimChangelogSlackForGroup gid
+  | T.null (T.strip gid) = pure False
+  | otherwise = withDb $ \db ->
+      withConn db $ \conn -> do
+        n <-
+          execute
+            conn
+            -- Exactly-once per GROUP, not per row: the second predicate makes a
+            -- group that ALREADY has any stamped row un-re-claimable. Without it,
+            -- a late NULL row (a revert inherits the group_id; its raw-SQL columns
+            -- default NULL) would re-win the claim and re-post the changelog — or,
+            -- on a failed repost, markChangelogSlackFailed would wipe the whole
+            -- group's genuine 'sent' state. A failed send RESETS every row to NULL,
+            -- so retry (next settle / resend) still re-claims correctly.
+            "UPDATE release_tracker SET changelog_slack_sent_at = now() \
+            \WHERE release_group_id = ? AND changelog_slack_sent_at IS NULL \
+            \AND NOT EXISTS (SELECT 1 FROM release_tracker r2 \
+            \WHERE r2.release_group_id = ? AND r2.changelog_slack_sent_at IS NOT NULL)"
+            (gid, gid)
+        pure (n > 0)
+
+{- | Record a SUCCESSFUL group changelog-Slack post. The claim already stamped
+@changelog_slack_sent_at@; we only clear any prior error so the group reads
+"sent" (sent_at set + error NULL). -}
+markChangelogSlackSent :: (MonadFlow m) => Text -> m ()
+markChangelogSlackSent gid
+  | T.null (T.strip gid) = pure ()
+  | otherwise = withDb $ \db ->
+      withConn db $ \conn ->
+        void $
+          execute
+            conn
+            "UPDATE release_tracker SET changelog_slack_error = NULL \
+            \WHERE release_group_id = ?"
+            (Only gid)
+
+{- | Record a FAILED group changelog-Slack post: store the Slack error AND
+RELEASE the claim (@changelog_slack_sent_at@ -> NULL) so the next build-settle
+or a manual resend can re-win the CAS and retry. Leaves the group in the
+"failed" state (sent_at NULL + error set). -}
+markChangelogSlackFailed :: (MonadFlow m) => Text -> Text -> m ()
+markChangelogSlackFailed gid err
+  | T.null (T.strip gid) = pure ()
+  | otherwise = withDb $ \db ->
+      withConn db $ \conn ->
+        void $
+          execute
+            conn
+            "UPDATE release_tracker SET changelog_slack_error = ?, changelog_slack_sent_at = NULL \
+            \WHERE release_group_id = ?"
+            (err, gid)
+
+{- | Read the group's changelog-Slack state for the UI: @(sentAt, error, optedIn)@.
+Columns are group-uniform, so MAX picks the (single) non-null value; @optedIn@ is
+true iff any member opted into the Slack post (its stored MobileBuildContext
+carries a @changelog_summary@ body). The jsonb dig is guarded so a non-JSON /
+empty release_context never aborts the read. Returns 'Nothing' for an unknown
+group. -}
+getChangelogSlackState :: (MonadFlow m) => Text -> m (Maybe (Maybe UTCTime, Maybe Text, Bool))
+getChangelogSlackState gid
+  | T.null (T.strip gid) = pure Nothing
+  | otherwise = withDb $ \db ->
+      withConn db $ \conn -> do
+        rows <-
+          query
+            conn
+            "SELECT MAX(changelog_slack_sent_at), MAX(changelog_slack_error), \
+            \COALESCE(bool_or( \
+            \  CASE WHEN release_context ~ '^\\s*\\{' \
+            \  THEN (release_context::jsonb #>> '{contents,mbContext,changelog_summary}') IS NOT NULL \
+            \  ELSE false END), false) \
+            \FROM release_tracker WHERE release_group_id = ?"
+            (Only gid)
+        pure $ case rows of
+          [(mSent, mErr, optedIn)] -> Just (mSent, mErr, optedIn)
+          _ -> Nothing
 
 listReleaseEvents :: (MonadFlow m) => Text -> m [ReleaseEvent]
 listReleaseEvents rid = withDb $ \db ->
@@ -690,6 +852,10 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
               mbcVersionCode (mbContext s)
         _ -> Nothing,
       rtTerminalStatus = Nothing,
+      -- Creation-stamped (mkMobileTrackerRow); this row only feeds the raw-SQL
+      -- writers above, whose column lists exclude both — never written here.
+      rtReleaseGroupId = Nothing,
+      rtReleaseGroupLabel = Nothing,
       rtCreatedAt = createdAt,
       rtUpdatedAt = updatedAt
     }

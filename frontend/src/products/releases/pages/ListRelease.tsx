@@ -88,9 +88,9 @@ const mobileTrackBadge = (release: APRelease): { label: string; cls: string; tit
   return null;
 };
 
-type TimeRange = 'last_30_mins' | 'last_1_hour' | 'last_6_hours' | 'today' | 'yesterday' | 'last_2_days' | 'last_7_days' | 'last_30_days' | 'this_month' | 'last_month' | 'custom';
+export type TimeRange = 'last_30_mins' | 'last_1_hour' | 'last_6_hours' | 'today' | 'yesterday' | 'last_2_days' | 'last_7_days' | 'last_30_days' | 'this_month' | 'last_month' | 'custom';
 
-const TIME_RANGE_OPTIONS = [
+export const TIME_RANGE_OPTIONS = [
   { value: 'last_30_mins' as TimeRange, label: 'Last 30 mins' },
   { value: 'last_1_hour' as TimeRange, label: 'Last 1 hour' },
   { value: 'last_6_hours' as TimeRange, label: 'Last 6 hours' },
@@ -114,7 +114,7 @@ const STATUS_FILTER_OPTIONS: ReleaseStatus[] = [
 // statuses like DISCARDING / GCLT_ABORTED / RESTARTING don't apply to mobile, and
 // raw INPROGRESS would lump in-review / approved / rolling-out together — so the
 // mobile dropdown uses these buckets instead, matched by `mobileStatusCategory`.
-const MOBILE_STATUS_OPTIONS: { value: string; label: string }[] = [
+export const MOBILE_STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: 'building', label: 'Building' },
   { value: 'promote', label: 'Ready to promote' },
   { value: 'review', label: 'In review' },
@@ -142,7 +142,7 @@ function mobileStatusCategory(r: APRelease): string {
   return r.status.toLowerCase();
 }
 
-const getDateRange = (range: TimeRange, customFrom: string, customTo: string): { from: Date; to: Date } => {
+export const getDateRange = (range: TimeRange, customFrom: string, customTo: string): { from: Date; to: Date } => {
   const now = new Date();
   let to = new Date();
   let from = new Date();
@@ -183,12 +183,29 @@ const formatISODate = (isoString?: string) => {
 
 type CategoryFilter = 'all' | 'backend' | 'mobile';
 
-const ListRelease: React.FC = () => {
+// Filters injected by the group home's FIXED toolbar when this table renders
+// as the in-page History view — they replace the internal filter bar entirely.
+export interface SlimFilters {
+  search: string;
+  app: string;
+  platform: string;
+  surface: string;
+  status: string;
+  fromIso: string;
+  toIso: string;
+}
+
+// `slim` (mobile History view): drop the All/Backend/Mobile chips, KPI cards,
+// store banner, Create buttons and the internal filter bars — the group home's
+// shell provides all of that; `slimFilters` drives the filtering instead.
+const ListRelease: React.FC<{ slim?: boolean; slimFilters?: SlimFilters }> = ({ slim = false, slimFilters }) => {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(10);
-  const [timeRange, setTimeRange] = useState<TimeRange>('today');
+  // Mobile History defaults to the last 7 days of builds (matches the group
+  // home's default window); the standalone backend page keeps Today.
+  const [timeRange, setTimeRange] = useState<TimeRange>(slim ? 'last_7_days' : 'today');
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
@@ -213,7 +230,19 @@ const ListRelease: React.FC = () => {
     return () => clearTimeout(t);
   }, [search]);
 
-  const dateRange = useMemo(() => getDateRange(timeRange, customFrom, customTo), [timeRange, customFrom, customTo, refreshTick]);
+  // Injected fixed-toolbar filters (History view) take precedence over the
+  // internal filter-bar state, which isn't rendered in slim mode.
+  const effSearch = slimFilters ? slimFilters.search : debouncedSearch;
+  const effStatus = slimFilters ? slimFilters.status : statusFilter;
+  const effProduct = slimFilters ? slimFilters.app : productFilter;
+  const effPlatform = slimFilters ? slimFilters.platform : platformFilter;
+
+  const dateRange = useMemo(() => {
+    if (slimFilters) {
+      return { from: new Date(slimFilters.fromIso), to: new Date(slimFilters.toIso) };
+    }
+    return getDateRange(timeRange, customFrom, customTo);
+  }, [timeRange, customFrom, customTo, refreshTick, slimFilters?.fromIso, slimFilters?.toIso]);
   const { data: releases = [], isLoading, isFetching, refetch } = useReleases(
     dateRange.from.toISOString(),
     dateRange.to.toISOString(),
@@ -235,7 +264,7 @@ const ListRelease: React.FC = () => {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  useEffect(() => { setCurrentPage(1); }, [debouncedSearch, statusFilter, productFilter, platformFilter, category]);
+  useEffect(() => { setCurrentPage(1); }, [effSearch, effStatus, effProduct, effPlatform, slimFilters?.surface, slimFilters?.fromIso, category]);
   // Status buckets differ by category (mobile stages vs backend raw statuses), so
   // clear the status filter on a category switch to avoid a stale, no-match value.
   useEffect(() => { setStatusFilter(''); if (category === 'backend') setPlatformFilter(''); }, [category]);
@@ -273,14 +302,15 @@ const ListRelease: React.FC = () => {
 
   const filteredReleases = useMemo(() => {
     let list = releases.filter(r => {
-      const q = debouncedSearch.toLowerCase();
-      const matchesSearch = !q || r.service?.toLowerCase().includes(q) || r.new_version?.toLowerCase().includes(q) || r.id?.toLowerCase().includes(q) || r.status?.toLowerCase().includes(q);
+      const q = effSearch.toLowerCase();
+      const matchesSearch = !q || r.service?.toLowerCase().includes(q) || r.appGroup?.toLowerCase().includes(q) || r.new_version?.toLowerCase().includes(q) || r.id?.toLowerCase().includes(q) || r.status?.toLowerCase().includes(q);
       const matchesStatus =
-        !statusFilter ||
-        (category === 'mobile' ? mobileStatusCategory(r) === statusFilter : r.status === statusFilter);
-      const matchesProduct = !productFilter || r.appGroup === productFilter;
-      const matchesPlatform = !platformFilter || r.env === platformFilter;
-      return matchesSearch && matchesStatus && matchesProduct && matchesPlatform;
+        !effStatus ||
+        (category === 'mobile' ? mobileStatusCategory(r) === effStatus : r.status === effStatus);
+      const matchesProduct = !effProduct || r.appGroup === effProduct;
+      const matchesPlatform = !effPlatform || r.env === effPlatform;
+      const matchesSurface = !slimFilters?.surface || r.service === slimFilters.surface;
+      return matchesSearch && matchesStatus && matchesProduct && matchesPlatform && matchesSurface;
     });
 
     list.sort((a, b) => {
@@ -298,7 +328,7 @@ const ListRelease: React.FC = () => {
     });
 
     return list;
-  }, [releases, debouncedSearch, statusFilter, productFilter, platformFilter, sortField, sortDir, category]);
+  }, [releases, effSearch, effStatus, effProduct, effPlatform, slimFilters?.surface, sortField, sortDir, category]);
 
   // Among an app's builds pending promotion (stage 'promote' — internal / TestFlight),
   // only the LATEST by (version name, build code) is actually the one to promote; older
@@ -374,6 +404,7 @@ const ListRelease: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 w-full">
+      {!slim && (
       <div className="flex items-center gap-1.5 mb-4 sm:mb-5 flex-wrap" role="tablist" aria-label="Release category">
         {categoryChips.map(chip => (
           <button
@@ -394,9 +425,11 @@ const ListRelease: React.FC = () => {
           </button>
         ))}
       </div>
+      )}
 
-      {category === 'mobile' && <StoreSyncBanner className="mb-4 sm:mb-5" />}
+      {!slim && category === 'mobile' && <StoreSyncBanner className="mb-4 sm:mb-5" />}
 
+      {!slim && (
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-4 sm:mb-6">
         {kpiCards.map((kpi, i) => (
           <div
@@ -411,9 +444,10 @@ const ListRelease: React.FC = () => {
           </div>
         ))}
       </div>
+      )}
 
       <div className="bg-white border border-zinc-200 rounded-xl">
-        <div className="md:hidden p-3 border-b border-zinc-100 space-y-2">
+        <div className={cn('md:hidden p-3 border-b border-zinc-100 space-y-2', slim && 'hidden')}>
           <div className="flex gap-2">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
@@ -522,6 +556,7 @@ const ListRelease: React.FC = () => {
               )}
             </div>
           )}
+          {!slim && (
           <PermissionGate product="autopilot" permission="RELEASE_CREATE">
             <Link to={category === 'mobile' ? '/mobile/releases/new' : '/backend/releases/new'} className="block">
               <Button size="md" fullWidth>
@@ -529,9 +564,10 @@ const ListRelease: React.FC = () => {
               </Button>
             </Link>
           </PermissionGate>
+          )}
         </div>
 
-        <div className="hidden md:flex p-4 items-center gap-3 border-b border-zinc-100 flex-wrap">
+        <div className={cn('hidden p-4 items-center gap-3 border-b border-zinc-100 flex-wrap', !slim && 'md:flex')}>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
             <input
@@ -604,11 +640,13 @@ const ListRelease: React.FC = () => {
             <RefreshCw className={`h-4 w-4 ${refreshSpinning ? 'animate-spin' : ''}`} />
           </button>
 
+          {!slim && (
           <PermissionGate product="autopilot" permission="RELEASE_CREATE">
             <Link to={category === 'mobile' ? '/mobile/releases/new' : '/backend/releases/new'}>
               <Button size="sm"><Plus className="w-4 h-4" /> Create Release</Button>
             </Link>
           </PermissionGate>
+          )}
         </div>
 
         <div className="hidden md:block overflow-x-auto">

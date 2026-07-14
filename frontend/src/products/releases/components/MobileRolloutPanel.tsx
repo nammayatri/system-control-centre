@@ -19,6 +19,7 @@ import { Button } from '../../../shared/ui/button';
 import { Badge } from '../../../shared/ui/badge';
 import { usePermissions } from '../../../core/auth/PermissionsContext';
 import { mobileApi, type RolloutDetail } from '../api';
+import { cn } from '../../../lib/utils';
 import { stageOf, lifecycleFromRollout } from './mobileStage';
 
 function errMsg(e: any): string {
@@ -90,6 +91,12 @@ export function MobileRolloutPanel({
     const [syncing, setSyncing] = useState(false);
     const [showPromote, setShowPromote] = useState(false);
     const [notes, setNotes] = useState('');
+    // Note sources for the promote form: AI short summary (default) vs the
+    // store's current production "What's New", switchable via a toggle.
+    const [noteSource, setNoteSource] = useState<'ai' | 'prod'>('ai');
+    const [aiText, setAiText] = useState<string | null>(null);
+    const [prodText, setProdText] = useState<string | null>(null);
+    const [notesLoading, setNotesLoading] = useState(false);
     const [phased, setPhased] = useState(true);
     const [pct, setPct] = useState('');
     const [showReject, setShowReject] = useState(false);
@@ -155,41 +162,51 @@ export function MobileRolloutPanel({
 
     const openPromote = async () => {
         setShowPromote(true);
-        let formNotes = '';
-        let isStoreSync = false;
-        try {
-            const form = await mobileApi.getPromoteForm(releaseId);
-            formNotes = form.pfReleaseNotes || '';
-            isStoreSync = form.pfIsStoreSync;
-            setNotes(formNotes); // show the default immediately (prod notes or changelog)
-        } catch {
-            return; // leave notes empty — operator can type their own
-        }
-        // Then best-effort upgrade to the AI "what's new" short summary (store-
-        // facing, polished) — diffing against production, since store notes
-        // describe what's new vs the live version. Only swap if the operator
-        // hasn't started editing (notes still equal the changelog default); on a
-        // cache miss / AI off the changelog default simply stays.
-        // Store-sync releases are skipped: the backend already fills the notes
-        // with the current production "What's New" pulled from the store.
-        if (!aiNotes || isStoreSync) return;
-        try {
-            const ai = await mobileApi.changelogAiSummary(
-                aiNotes.app,
-                aiNotes.surface,
-                aiNotes.platform,
-                aiNotes.branch,
-                'production',
-                aiNotes.versionName,
-                aiNotes.versionCode,
-            );
-            if (ai.status === 'ready' && ai.summaryShort?.trim()) {
-                const aiShort = ai.summaryShort.trim();
-                setNotes((prev) => (prev === formNotes ? aiShort : prev));
-            }
-        } catch {
-            /* keep the changelog default */
-        }
+        // The box stays EMPTY until both sources settle — no text swapping
+        // mid-read. Then: AI short summary (default) > prod notes > nothing.
+        setNotes('');
+        setNoteSource('ai');
+        setAiText(null);
+        setProdText(null);
+        setNotesLoading(true);
+        // One promote-form call carries BOTH sources: the current production
+        // "What's New" and the AI short synopsis STORED at create time (which
+        // describes this build's commits — a live re-query would diff the
+        // branch head, which may have moved since the build).
+        const form = await mobileApi.getPromoteForm(releaseId).catch(() => null);
+        const p = (form?.pfReleaseNotes || '').trim() || null;
+        const stored = (form?.pfAiShort || '').trim() || null;
+        // Live AI only as a fallback for rows created before the short was stored.
+        const a =
+            stored ??
+            (await (async (): Promise<string | null> => {
+                if (!aiNotes) return null;
+                try {
+                    for (let attempt = 0; attempt < 15; attempt++) {
+                        const ai = await mobileApi.changelogAiSummary(
+                            aiNotes.app,
+                            aiNotes.surface,
+                            aiNotes.platform,
+                            aiNotes.branch,
+                            'production',
+                            aiNotes.versionName,
+                            aiNotes.versionCode,
+                        );
+                        if (ai.status === 'ready') return ai.summaryShort?.trim() || null;
+                        if (ai.status !== 'pending') return null;
+                        await new Promise((r) => setTimeout(r, 4000));
+                    }
+                } catch {
+                    /* fall through */
+                }
+                return null;
+            })());
+        setProdText(p);
+        setAiText(a);
+        setNotesLoading(false);
+        setNoteSource(a ? 'ai' : 'prod');
+        // Fill only if the operator hasn't typed meanwhile.
+        setNotes((prev) => (prev === '' ? (a ?? p ?? '') : prev));
     };
 
     // Not via `run`: the review submission can succeed while the best-effort
@@ -280,14 +297,69 @@ export function MobileRolloutPanel({
                         </Button>
                     ) : (
                         <div className="space-y-2 rounded-md border border-indigo-200 bg-white/70 p-3">
-                            <label className="block text-[11px] font-medium uppercase tracking-wider text-zinc-600">
-                                Release notes (What&apos;s New)
-                            </label>
+                            <div className="flex items-center justify-between gap-2">
+                                <label className="block text-[11px] font-medium uppercase tracking-wider text-zinc-600">
+                                    Release notes (What&apos;s New)
+                                </label>
+                                {/* Source toggle: clicking REPLACES the textarea with that source. */}
+                                <div className="inline-flex overflow-hidden rounded-md border border-zinc-200 text-[11px] font-medium">
+                                    <button
+                                        type="button"
+                                        disabled={!aiText}
+                                        title={
+                                            aiText
+                                                ? 'AI summary of what changed in this build'
+                                                : notesLoading
+                                                  ? 'AI summary is generating…'
+                                                  : 'No AI summary available'
+                                        }
+                                        onClick={() => {
+                                            if (!aiText) return;
+                                            setNoteSource('ai');
+                                            setNotes(aiText);
+                                        }}
+                                        className={cn(
+                                            'px-2.5 py-1 transition-colors disabled:opacity-40',
+                                            noteSource === 'ai'
+                                                ? 'bg-indigo-600 text-white'
+                                                : 'bg-white text-zinc-500 hover:text-zinc-700',
+                                        )}
+                                    >
+                                        AI summary{notesLoading && !aiText ? '…' : ''}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        disabled={!prodText}
+                                        title={
+                                            prodText
+                                                ? 'Current production "What\'s New" from the store'
+                                                : 'No production notes found'
+                                        }
+                                        onClick={() => {
+                                            if (!prodText) return;
+                                            setNoteSource('prod');
+                                            setNotes(prodText);
+                                        }}
+                                        className={cn(
+                                            'border-l border-zinc-200 px-2.5 py-1 transition-colors disabled:opacity-40',
+                                            noteSource === 'prod'
+                                                ? 'bg-indigo-600 text-white'
+                                                : 'bg-white text-zinc-500 hover:text-zinc-700',
+                                        )}
+                                    >
+                                        Prod notes
+                                    </button>
+                                </div>
+                            </div>
                             <textarea
                                 value={notes}
                                 onChange={(e) => setNotes(e.target.value)}
                                 rows={5}
-                                placeholder="What changed in this release…"
+                                placeholder={
+                                    notesLoading
+                                        ? 'Loading AI summary and production notes…'
+                                        : 'What changed in this release…'
+                                }
                                 className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-indigo-400"
                             />
                             {isIos && (

@@ -30,7 +30,7 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import Servant hiding (Unauthorized)
 import Shared.API.Response (APIResponse (..))
-import Shared.Config.Runtime (getConfigTextForProduct)
+import Shared.Config.Runtime (getConfigBoolForProduct, getConfigTextForProduct)
 import System.Environment (lookupEnv)
 
 -- | Auth API type
@@ -129,10 +129,14 @@ resolveDeploymentConfig :: Flow Value
 resolveDeploymentConfig = do
   envVal <- liftIO (fromMaybe "UAT" <$> lookupEnv "SC_ENV")
   buildType <- getConfigTextForProduct "mobile_build_type" (Just "autopilot") "release"
+  -- Mirrors isSlackEnabled; the mobile create form hides its "Send changelog to
+  -- Slack" opt-in when this is false (no point offering a post that can't send).
+  slackEnabled <- getConfigBoolForProduct "slack_enabled" (Just "autopilot") False
   pure $
     object
       [ "env" .= T.pack envVal,
-        "buildType" .= buildType
+        "buildType" .= buildType,
+        "slackEnabled" .= slackEnabled
       ]
 
 -- | POST /auth/logout

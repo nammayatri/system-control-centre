@@ -44,11 +44,12 @@ module Products.Autopilot.Notifications
     notifyGenericThreadMessage,
     notifyDecisionThreadMessage,
     sendMobileChangelogSlack,
+    sendGroupChangelogSlackIfSettled,
     chunkForSlack,
   )
 where
 
-import Control.Monad (void)
+import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Core.Environment (Flow, forkFlow)
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
@@ -57,7 +58,7 @@ import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value (..), decode, encode, object, (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as TL
@@ -67,15 +68,17 @@ import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import Products.Autopilot.Queries.ProductService (findProductByName, getRepoNameDirect, getSlackChannelDirect)
 import Products.Autopilot.Queries.ReleaseTracker qualified as RTQ
 import Products.Autopilot.ReleaseChangelog (generateBackendChangelog)
-import Products.Autopilot.RuntimeConfig (getDecisionNotificationDedupMinutes, isSlackEnabled)
+import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), isFailedMBTerminal)
+import Products.Autopilot.RuntimeConfig (getDecisionNotificationDedupMinutes, getMobileSlackChannel, isSlackEnabled)
 import Products.Autopilot.Sync (triggerSyncIfEnabled)
-import Products.Autopilot.Types.Release (ReleaseTracker (..))
+import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
 import Products.Autopilot.Types.Storage.Schema (rePayload)
 import Products.Autopilot.Types.Target (TargetState (..))
 -- Narrow field imports so 'K8sReleaseContext'/'K8sDeploymentState' selectors
 -- (oldVersion/newVersion/cluster/…) don't clash with 'ReleaseTracker (..)'.
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (context), K8sReleaseContext (changelogSlackOptIn))
 import Products.Autopilot.Types.Workflow (ReleaseCategory (..))
+import Shared.AI.Changelog (ownSideLabel)
 import System.Environment (lookupEnv)
 import Prelude
 
@@ -114,13 +117,22 @@ truncateT n t
   | otherwise = T.take n t <> "..."
 
 -- | Post a Block Kit message; returns the message ts (thread ID) on success.
+-- Thin wrapper over 'sendSlackRichE' for callers that only need success/None.
 sendSlackRich :: Text -> Text -> Text -> [Value] -> Maybe Text -> Flow (Maybe Text)
-sendSlackRich channel fallbackText color blocks mThreadTs = do
+sendSlackRich channel fallbackText color blocks mThreadTs =
+  either (const Nothing) Just <$> sendSlackRichE channel fallbackText color blocks mThreadTs
+
+-- | Post a Block Kit message, surfacing the failure reason: @Right ts@ on a
+-- real send (a "ts" in the response), @Left err@ otherwise — the Slack logical
+-- error ("account_inactive", "not_in_channel", …), an HTTP status, or a
+-- transport failure. Lets callers persist WHY a post failed.
+sendSlackRichE :: Text -> Text -> Text -> [Value] -> Maybe Text -> Flow (Either Text Text)
+sendSlackRichE channel fallbackText color blocks mThreadTs = do
   mToken <- liftIO getSlackToken
   case mToken of
     Nothing -> do
       logWarningG "[SLACK] No SLACK_BOT_TOKEN env var set, skipping"
-      pure Nothing
+      pure (Left "no_slack_bot_token")
     Just token -> do
       let attachment = object ["color" .= color, "blocks" .= blocks]
           baseBody =
@@ -153,7 +165,7 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
                 <> channel
                 <> ": "
                 <> truncateT 200 (T.pack (show err))
-          pure Nothing
+          pure (Left ("http_failure: " <> truncateT 120 (T.pack (show err))))
         Right HttpResponse {respStatus = s, respBody = b}
           | s >= 400 -> do
               liftIO $
@@ -164,7 +176,7 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
                     <> channel
                     <> ": "
                     <> truncateT 200 (TL.toStrict (TLE.decodeUtf8 b))
-              pure Nothing
+              pure (Left ("http_" <> T.pack (show s)))
           | otherwise -> do
               -- chat.postMessage returns HTTP 200 even on logical
               -- failures (e.g. not_in_channel / channel_not_found):
@@ -181,7 +193,7 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
               case mTs of
                 Just ts -> do
                   logInfoG $ "[SLACK] Sent to #" <> channel <> " (ts=" <> ts <> ")"
-                  pure (Just ts)
+                  pure (Right ts)
                 Nothing -> do
                   -- ok:false (or an unexpected body) — surface
                   -- Slack's error so this never looks like a send.
@@ -193,7 +205,7 @@ sendSlackRich channel fallbackText color blocks mThreadTs = do
                       <> err
                       <> "): "
                       <> truncateT 200 (TL.toStrict (TLE.decodeUtf8 b))
-                  pure Nothing
+                  pure (Left err)
 
 sectionBlock :: Text -> Value
 sectionBlock txt =
@@ -235,23 +247,135 @@ chunkForSlack input =
         then chunks
         else take maxChunks chunks <> ["_…changelog truncated._"]
 
--- | Post a mobile release changelog to a Slack channel as a TOP-LEVEL message
--- (not threaded). Header line + chunked body. Returns whether a message was sent.
--- Reuses 'sendSlackRich'; the channel is resolved by the caller via
--- 'getMobileSlackChannel'.
-sendMobileChangelogSlack :: Text -> Text -> Text -> Text -> Text -> Flow Bool
-sendMobileChangelogSlack channel app surface versionLabel summaryLong = do
-  let surfaceSuffix = if T.null (T.strip surface) then "" else " (" <> surface <> ")"
-      header = ":rocket: *" <> app <> "*" <> surfaceSuffix <> " — " <> versionLabel
+-- | Post a release-group changelog to Slack as ONE top-level message (not
+-- threaded) for the WHOLE group. @members@ are the apps that shipped, each
+-- @(app, surface, version)@; the header enumerates them, the body is the one
+-- combined summary. A single member renders exactly the old single-app header,
+-- so single-app releases are unchanged. @Right ()@ = sent, @Left err@ = the
+-- Slack failure reason (persisted so the UI can show it + offer a resend).
+sendMobileChangelogSlack :: Text -> [(Text, Text, Text)] -> Text -> Flow (Either Text ())
+sendMobileChangelogSlack channel members summaryLong = do
+  let sfx s = if T.null (T.strip s) then "" else " (" <> s <> ")"
+      ver v = if T.null (T.strip v) then "_building…_" else "v" <> v
+      memberLine (app, surface, v) = "• *" <> app <> "*" <> sfx surface <> " — " <> ver v
+      header = case members of
+        [(app, surface, v)] -> ":rocket: *" <> app <> "*" <> sfx surface <> " — " <> ver v
+        _ -> ":rocket: *Mobile fleet release* — " <> T.pack (show (length members)) <> " apps"
+      -- Per-app lines only when there is more than one (the header already names a lone app).
+      memberBlock = [sectionBlock (T.intercalate "\n" (map memberLine members)) | length members > 1]
       bodyChunks = case chunkForSlack (T.strip summaryLong) of
         [] -> ["_No changelog summary._"]
         cs -> cs
-      blocks = sectionBlock header : map sectionBlock bodyChunks
-      fallback = app <> surfaceSuffix <> " — " <> versionLabel
-  mTs <- sendSlackRich channel fallback colorCreated blocks Nothing
-  case mTs of
-    Just _ -> pure True
-    Nothing -> pure False
+      blocks = sectionBlock header : memberBlock <> map sectionBlock bodyChunks
+      fallback = case members of
+        [(app, surface, v)] -> app <> sfx surface <> " — " <> ver v
+        _ -> "Mobile fleet release — " <> T.pack (show (length members)) <> " apps"
+  eTs <- sendSlackRichE channel fallback colorCreated blocks Nothing
+  pure (void eTs)
+
+{- | Strip the parts of the combined changelog that belong to apps whose build
+FAILED, so the group post advertises only what actually shipped. The body is
+deterministic scaffolding (see 'renderCombined'): sections open with 🧩 (global
+common / per-surface common), 📌 (per-app "Only in"), and close with a ✅
+reconciliation line. We drop:
+
+  * a 📌 "Only in <app> <platform>" block whose label is in @failedLabels@; and
+  * a 🧩 "Common in <surface> apps" block whose surface has NO shipped app
+    (its commits are shared only within that surface, so if every app of the
+    surface failed they shipped nowhere).
+
+The 🧩 GLOBAL "Common changes — in …" block always stays: it is the intersection
+across ALL apps, hence a subset of every surviving app. The ✅ line is dropped once
+anything is filtered (its counts no longer add up). Matching the FAILED app label
+(not the shipped one) fails safe — an unmatched label keeps the section rather
+than hiding a shipped app's changes.
+-}
+dropFailedAppSections :: [Text] -> [Text] -> Text -> Text
+dropFailedAppSections failedLabels shippedSurfaces body
+  | not anyDropped = body
+  | otherwise = T.unlines keptLines
+  where
+    norm = T.toCaseFold . T.strip
+    failed = map norm failedLabels
+    shippedSurf = map norm shippedSurfaces
+    -- "📌 *Only in NammaYatri Android* (5)" -> Just "NammaYatri Android"
+    onlyInLabel ln = T.strip . fst . T.breakOn "*" <$> T.stripPrefix "📌 *Only in " (T.stripStart ln)
+    -- "🧩 *Common in provider apps* (3)" -> Just "provider" (NOT the global
+    -- "🧩 *Common changes — in …*", which lacks this exact prefix).
+    surfaceLabel ln =
+      (norm . fromMaybe "" . T.stripSuffix " apps" . T.strip . fst . T.breakOn "*")
+        <$> T.stripPrefix "🧩 *Common in " (T.stripStart ln)
+    isSectionStart ln = any (`T.isPrefixOf` T.stripStart ln) ["🧩", "📌", "✅"]
+    step (acc, drp, dd) ln
+      | Just lbl <- onlyInLabel ln, norm lbl `elem` failed = (acc, True, True)
+      | Just sl <- surfaceLabel ln, sl `notElem` shippedSurf = (acc, True, True)
+      | isSectionStart ln = (ln : acc, False, dd)
+      | drp = (acc, True, dd)
+      | otherwise = (ln : acc, False, dd)
+    (revAcc, _, anyDropped) = foldl step ([], False, False) (T.lines body)
+    keptLines = reverse (filter (not . ("✅" `T.isPrefixOf`) . T.stripStart) revAcc)
+
+{- | Post the release-group changelog to Slack ONCE, when the group's builds have
+all SETTLED — every member either shipped (tag observed) or failed (status
+ABORTED/USER_ABORTED/GCLT_ABORTED/DISCARDED) — and at least one shipped. Called at
+each build-settle transition (ConfirmTag success + the runner's failure/abort
+paths); the LAST member to settle wins the atomic claim and posts. A no-op when
+the group didn't opt in, isn't fully settled yet, nothing shipped, or a sibling
+already claimed. @mKnownShipped@ counts a release as shipped even if its
+MBTagPushed hasn't been persisted yet — the ConfirmTag caller passes its own id,
+since it fires before the engine persists. Best-effort: at most once, never twice.
+-}
+sendGroupChangelogSlackIfSettled :: Text -> Maybe Text -> Flow ()
+sendGroupChangelogSlackIfSettled gid mKnownShipped
+  | T.null (T.strip gid) = pure ()
+  | otherwise = do
+      rows <- RTQ.findReleaseTrackersByGroupId gid
+      let members = [(rt, s) | (_, _, (rt, Just (MobileBuildState s))) <- rows]
+          optedInBodies = [body | (_, s) <- members, Just body <- [mbcChangelogSummary (mbContext s)]]
+          shippedRow rt s = isJust (mbcTagPushed (mbContext s)) || Just (releaseId rt) == mKnownShipped
+          settledRow rt s =
+            shippedRow rt s
+              || status rt `elem` [ABORTED, USER_ABORTED, GCLT_ABORTED, DISCARDED]
+              || isFailedMBTerminal (mbWfStatus s)
+          allSettled = all (\(rt, s) -> settledRow rt s) members
+          anyShipped = any (\(rt, s) -> shippedRow rt s) members
+      if null members || null optedInBodies || not (allSettled && anyShipped)
+        then pure ()
+        else do
+          mCh <- getMobileSlackChannel
+          case mCh of
+            Nothing ->
+              logInfoG $
+                "[changelog-slack] group " <> gid <> " opted in but mobile_slack_channel is not set — skipping"
+            Just ch -> do
+              -- Atomic per-group claim: exactly one settling sibling wins and posts.
+              won <- RTQ.claimChangelogSlackForGroup gid
+              if not won
+                then pure ()
+                else do
+                  let body0 = fromMaybe "" (listToMaybe optedInBodies)
+                      failedLabels = [appGroup rt <> " " <> env rt | (rt, s) <- members, not (shippedRow rt s)]
+                      shippedSurfaces = [ownSideLabel (service rt) | (rt, s) <- members, shippedRow rt s]
+                      body = dropFailedAppSections failedLabels shippedSurfaces body0
+                      shipped = [(appGroup rt, service rt, newVersion rt) | (rt, s) <- members, shippedRow rt s]
+                  when (body /= body0) $
+                    logInfoG $
+                      "[changelog-slack] group " <> gid <> " dropped changelog sections for failed apps: " <> T.intercalate ", " failedLabels
+                  res <- sendMobileChangelogSlack ch shipped body
+                  case res of
+                    Right () -> do
+                      RTQ.markChangelogSlackSent gid
+                      forM_ (listToMaybe [releaseId rt | (rt, s) <- members, shippedRow rt s]) $ \rid ->
+                        RTQ.insertReleaseEvent rid "BUSINESS" "CHANGELOG_SLACK_SENT" $
+                          object ["channel" .= ch, "group_id" .= gid, "apps" .= length shipped]
+                    Left err -> do
+                      -- Persist the reason + RELEASE the claim so the next settle
+                      -- or a manual resend can re-win the CAS and retry.
+                      RTQ.markChangelogSlackFailed gid err
+                      forM_ (listToMaybe [releaseId rt | (rt, s) <- members, shippedRow rt s]) $ \rid ->
+                        RTQ.insertReleaseEvent rid "BUSINESS" "CHANGELOG_SLACK_FAILED" $
+                          object ["channel" .= ch, "group_id" .= gid, "error" .= err]
+                      logInfoG $ "[changelog-slack] group " <> gid <> " send failed: " <> err
 
 -- | Run the notification body async iff Slack is enabled.
 whenSlackEnabled :: Flow () -> Flow ()

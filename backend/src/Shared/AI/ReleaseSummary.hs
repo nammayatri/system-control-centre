@@ -15,10 +15,16 @@ each call coherent; assembly in code keeps the whole reliable. A chunk whose AI 
 fails (after a retry) falls back to a code categorization of its commits, so the
 commit still appears. The call is audited.
 -}
-module Shared.AI.ReleaseSummary (generateReleaseSummaries, generateWithFallback) where
+module Shared.AI.ReleaseSummary (
+    generateReleaseSummaries,
+    generateWithFallback,
+    generateCombinedWithFallback,
+    renderCombinedDeterministic,
+) where
 
 import Control.Monad.IO.Class (liftIO)
 import Core.Environment (MonadFlow)
+import Data.Char (toUpper)
 import Data.Int (Int32)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
@@ -169,12 +175,30 @@ genShort createdBy cfg grouped = do
     userMsg = fence "context" (T.unlines (map ("- " <>) picked))
     fallback = deterministicShort grouped
 
--- | Tidy the model's synopsis: drop leading bullet/markdown noise, collapse to one
--- prose blob, and cap the length so the UI summary box stays small.
+-- | Tidy the model's synopsis: drop leading bullet/markdown noise, strip the
+-- "This release brings…" filler opener (the prompt forbids it, models still slip),
+-- collapse to one prose blob, and cap the length so the UI summary box stays small.
 cleanShort :: Text -> Text
 cleanShort t =
-    let s = T.strip . T.dropWhile (\c -> c `elem` ['-', '*', '\8226', ' ']) . T.unwords . T.words $ t
+    let s0 = T.strip . T.dropWhile (\c -> c `elem` ['-', '*', '\8226', ' ']) . T.unwords . T.words $ t
+        s = stripBoiler s0
      in if T.length s <= 320 then s else T.take 319 s <> "\8230"
+  where
+    openers =
+        [ "this release brings "
+        , "this release includes "
+        , "this release contains "
+        , "this release adds "
+        , "this release features "
+        , "this release delivers "
+        ]
+    stripBoiler s =
+        case [T.drop (T.length p) s | p <- openers, p `T.isPrefixOf` T.toLower s] of
+            (r : _) -> capitalizeT r
+            [] -> s
+    capitalizeT x = case T.uncons x of
+        Just (c, rest) -> T.cons (toUpper c) rest
+        Nothing -> x
 
 -- | Deterministic synopsis from the category counts — the floor when the synopsis AI
 -- call fails. Generic (no app name, no totals), so it too can serve as store release
@@ -196,8 +220,8 @@ deterministicShort grouped =
             , k > 0
             ]
      in case parts of
-            [] -> "This release contains maintenance and internal changes."
-            ps -> "This release includes " <> T.intercalate ", " ps <> "."
+            [] -> "Maintenance and internal changes."
+            ps -> T.intercalate ", " ps <> "."
 
 -- | Assemble grouped @(category, summary)@ lines into the Slack-mrkdwn changelog.
 renderChangelog :: Text -> Text -> Int -> Int -> Text -> [(Cat, Text)] -> Text
@@ -232,6 +256,145 @@ renderChangelog appLabel version inApp excluded excludedSide grouped =
             <> tshow internalCount
             <> " internal"
             <> exclPart
+            <> " = "
+            <> tshow grandTotal
+            <> " commits"
+
+-- ─── Combined multi-app changelog ────────────────────────────────────────────
+
+{- | Combined changelog for a fleet selection: categorize the UNION of commits
+ONCE (one AI line per commit, via the same chunk machinery), then assemble in
+code — a "common — in every app" section, per-SURFACE common sections
+(@surfaceCommons@, e.g. "Common in consumer apps"), then per-app "only in …".
+@common@ = commits in every app; @surfaceCommons@ = shared within one surface
+but not across all; @extras@ = per-app leftovers. The three are disjoint.
+Returns @(long, short, model)@; 'Nothing' only when there are no commits at all.
+-}
+generateCombinedWithFallback ::
+    (MonadFlow m) =>
+    Text ->
+    AiConfig ->
+    [(Text, Maybe Text)] ->
+    Text ->
+    Int ->
+    [CommitItem] ->
+    [(Text, [CommitItem])] ->
+    [(Text, [CommitItem])] ->
+    m (Maybe (Text, Text, Text))
+generateCombinedWithFallback createdBy cfg apps branch excluded common surfaceCommons extras
+    | null allCommits = pure Nothing
+    | otherwise = do
+        -- genChunk yields EXACTLY one line per commit, in order (AI validated by
+        -- count, code fallback otherwise) — so positions map back losslessly:
+        -- common block, then each surface-common group, then each extras group.
+        grouped <- concat <$> mapM (genChunk createdBy cfg) (chunksOf chunkSize allCommits)
+        let (commonLines, rest) = splitAt (length common) grouped
+            groups2 = splitGroups (map (length . snd) surfaceCommons ++ map (length . snd) extras) rest
+            surfaceLines = take (length surfaceCommons) groups2
+            extraLines = drop (length surfaceCommons) groups2
+            shortSrc = if null commonLines then grouped else commonLines
+        short <- genShort createdBy cfg shortSrc
+        pure $
+            Just
+                ( renderCombined
+                    apps
+                    branch
+                    excluded
+                    commonLines
+                    (zip (map fst surfaceCommons) surfaceLines)
+                    (zip (map fst extras) extraLines)
+                , short
+                , aiModel cfg
+                )
+  where
+    allCommits = common ++ concatMap snd surfaceCommons ++ concatMap snd extras
+    splitGroups [] _ = []
+    splitGroups (k : ks) xs = let (h, t) = splitAt k xs in h : splitGroups ks t
+
+-- | Instant no-AI combined changelog ('catOf' categorization) — the pending
+-- placeholder and the AI-off/all-models-failed result.
+renderCombinedDeterministic :: [(Text, Maybe Text)] -> Text -> Int -> [CommitItem] -> [(Text, [CommitItem])] -> [(Text, [CommitItem])] -> Text
+renderCombinedDeterministic apps branch excluded common surfaceCommons extras =
+    renderCombined apps branch excluded (det common) (map (fmap det) surfaceCommons) (map (fmap det) extras)
+  where
+    det = map (\c -> (catOf c, T.strip (cgSubject c) <> " — " <> cgAuthor c))
+
+-- | "a", "a and b", "a, b and c" — for prose that names the selected apps.
+joinAnd :: [Text] -> Text
+joinAnd [] = ""
+joinAnd [x] = x
+joinAnd xs = T.intercalate ", " (init xs) <> " and " <> last xs
+
+-- | Assemble the combined document: header (app + its release version), the
+-- all-apps common section (categorized), then per-SURFACE common sections
+-- ("Common in consumer apps"), then per-app "Only in <app>" sections, and an
+-- exact reconciliation line. @apps@ pairs each label with its version string.
+renderCombined :: [(Text, Maybe Text)] -> Text -> Int -> [(Cat, Text)] -> [(Text, [(Cat, Text)])] -> [(Text, [(Cat, Text)])] -> Text
+renderCombined apps branch excluded commonLines surfaceCommons extraGroups =
+    T.unlines
+        ( header
+            : ""
+            : commonSection
+            ++ concatMap surfaceSection surfaceNonEmpty
+            ++ concatMap extraSection nonEmpty
+            ++ [acctLine]
+        )
+  where
+    tshow = T.pack . show
+    bullet s = "• " <> s
+    appLabels = map fst apps
+    surfaceNonEmpty = [(l, ls) | (l, ls) <- surfaceCommons, not (null ls)]
+    surfaceCount = sum (map (length . snd) surfaceNonEmpty)
+    nonEmpty = [(l, ls) | (l, ls) <- extraGroups, not (null ls)]
+    specificCount = sum (map (length . snd) nonEmpty)
+    grandTotal = length commonLines + surfaceCount + specificCount + excluded
+    exclNote =
+        if excluded > 0
+            then " (" <> tshow excluded <> " out-of-scope commits excluded)"
+            else ""
+    withVersion (lbl, mv) = lbl <> maybe "" (" " <>) mv
+    header =
+        "📱 "
+            <> T.intercalate ", " (map withVersion apps)
+            <> " — "
+            <> branch
+            <> " — "
+            <> tshow grandTotal
+            <> " commits"
+            <> exclNote
+    -- Category sections (same buckets as the per-app changelog).
+    catSections ls =
+        concatMap
+            ( \(c, label) ->
+                let xs = [s | (c', s) <- ls, c' == c]
+                 in if null xs then [] else ("*" <> label <> "*") : map bullet xs ++ [""]
+            )
+            cats
+    commonSection
+        | null commonLines = ["_No changes common to " <> joinAnd appLabels <> "._", ""]
+        | otherwise =
+            ("🧩 *Common changes — in " <> joinAnd appLabels <> "* (" <> tshow (length commonLines) <> ")")
+                : ""
+                : catSections commonLines
+    -- Shared across all apps of ONE surface (consumer / provider) but not all
+    -- apps — only emitted when a surface has ≥2 apps with commits in common.
+    surfaceSection (label, ls) =
+        ("🧩 *Common in " <> label <> "* (" <> tshow (length ls) <> ")")
+            : ""
+            : catSections ls
+    extraSection (label, ls) =
+        ("📌 *Only in " <> label <> "* (" <> tshow (length ls) <> ")")
+            : ""
+            : catSections ls
+    acctLine =
+        "✅ Accounted for: "
+            <> tshow (length commonLines)
+            <> " common"
+            <> (if surfaceCount > 0 then " + " <> tshow surfaceCount <> " surface-common" else "")
+            <> " + "
+            <> tshow specificCount
+            <> " app-specific"
+            <> (if excluded > 0 then " + " <> tshow excluded <> " excluded" else "")
             <> " = "
             <> tshow grandTotal
             <> " commits"

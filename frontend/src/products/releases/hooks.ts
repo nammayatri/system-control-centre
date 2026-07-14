@@ -378,9 +378,31 @@ export function useCreateMobileReleases() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['releases'] });
     },
-    onError: (err: any) => {
-      toast.error(err?.response?.data?.message || err.message || 'Failed to create mobile releases');
-    },
+    // The create page owns error toasting (it enriches a duplicate-version
+    // error with an "open existing build" action). Only caller of this hook.
+  });
+}
+
+/** Release groups list (fleet home). Active groups always included; `since`
+ * bounds only finished ones server-side. */
+export function useMobileGroups(sinceIso?: string) {
+  return useQuery({
+    queryKey: ['mobile-groups', sinceIso ?? 'default'],
+    queryFn: () => mobileApi.groups(sinceIso),
+    refetchInterval: 60_000,
+  });
+}
+
+/** One release group: enriched members + derived summary + eligibility.
+ * The GET also kicks the backend's cooldown-gated store refresh for stale
+ * member apps, so polling it keeps the console's store numbers honest. */
+export function useMobileGroup(groupId: string | undefined) {
+  return useQuery({
+    queryKey: ['mobile-group', groupId],
+    queryFn: () => mobileApi.groupDetail(groupId!),
+    enabled: !!groupId,
+    refetchInterval: 15_000,
+    retry: false,
   });
 }
 

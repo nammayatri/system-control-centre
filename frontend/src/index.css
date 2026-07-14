@@ -91,6 +91,25 @@ tr.hoverable:hover td {
   50% { opacity: 0.55; }
 }
 
+/* ── Expandable table row: smooth height via grid-template-rows ── */
+.expand-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 220ms ease;
+}
+.expand-panel.open {
+  grid-template-rows: 1fr;
+}
+.expand-panel > * {
+  overflow: hidden;
+  min-height: 0;
+}
+/* Collapsed content stays in the DOM for the animation, but must be
+   invisible to assistive tech / find-in-page and unfocusable. */
+.expand-panel:not(.open) > * {
+  visibility: hidden;
+}
+
 /* ── Status dot pulse for active items ── */
 @keyframes statusPulse {
   0%, 100% { opacity: 1; }

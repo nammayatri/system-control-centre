@@ -64,8 +64,8 @@ import VSEditSummary from './vs-editor/pages/VSEditSummary';
 
 // ── Product: Mobile Releases ──────────────────────────────────────
 import CreateMobileRelease from './releases/pages/mobile/CreateMobileRelease';
+import GroupsHome, { GroupsHomeRedirect, MobileReleaseHistory } from './releases/pages/mobile/GroupsHome';
 import ReleaseGroupDetail from './releases/pages/mobile/ReleaseGroupDetail';
-import ReleaseGroupsList from './releases/pages/mobile/ReleaseGroupsList';
 import MobileAppsAdmin from './releases/pages/mobile/MobileAppsAdmin';
 import MobileRevert from './releases/pages/mobile/MobileRevert';
 import StoreMonitor from './releases/pages/mobile/StoreMonitor';
@@ -159,8 +159,7 @@ const mobileProduct: ProductDefinition = {
   basePath: '/mobile',
   viewPermission: 'RELEASE_VIEW',
   navItems: [
-    { label: 'All Releases',   path: '/mobile/releases',      icon: 'List' },
-    { label: 'Release Groups', path: '/mobile/groups',         icon: 'Layers' },
+    { label: 'Releases',       path: '/mobile/releases',      icon: 'List' },
     { label: 'New Release',    path: '/mobile/releases/new',   icon: 'Plus' },
     { label: 'App Release Monitor',  path: '/mobile/releases/monitor', icon: 'Gauge' },
     { label: 'Apps',           path: '/mobile/apps',           icon: 'Package',
@@ -170,13 +169,15 @@ const mobileProduct: ProductDefinition = {
       icon: 'Flame', external: true },
   ],
   routes: [
-    { path: 'releases',            component: ListRelease },
+    { path: 'releases',            component: GroupsHome },
+    { path: 'releases/history',    component: MobileReleaseHistory },
     { path: 'releases/new',        component: CreateMobileRelease, permission: 'RELEASE_CREATE' },
     { path: 'releases/:id',        component: ReleaseSummary },
     { path: 'releases/:id/revert', component: MobileRevert,        permission: 'RELEASE_REVERT' },
     { path: 'releases/live',       component: LiveReleases },
     { path: 'releases/monitor',    component: StoreMonitor },
-    { path: 'groups',              component: ReleaseGroupsList },
+    // Old groups list retired — the home page IS groups now; bookmarks survive.
+    { path: 'groups',              component: GroupsHomeRedirect },
     { path: 'groups/:groupId',     component: ReleaseGroupDetail },
     { path: 'apps',                component: MobileAppsAdmin,     permission: 'MOBILE_APP_MANAGE' },
     { path: 'server-config',       component: Configurations },
@@ -192,6 +193,8 @@ const mobileProduct: ProductDefinition = {
         crumbs.push({ label: 'Live Releases' });
       } else if (parts[2] === 'monitor') {
         crumbs.push({ label: 'App Release Monitor' });
+      } else if (parts[2] === 'history') {
+        crumbs.push({ label: 'History' });
       } else if (parts.length >= 3) {
         crumbs.push({ label: parts[2], to: `/mobile/releases/${parts[2]}` });
         if (parts[3] === 'revert') {
@@ -203,9 +206,9 @@ const mobileProduct: ProductDefinition = {
       return crumbs;
     }
     if (parts[1] === 'groups') {
-      crumbs.push({ label: 'Release Groups', to: '/mobile/groups' });
+      crumbs.push({ label: 'Releases', to: '/mobile/releases' });
       if (parts.length >= 3) {
-        crumbs.push({ label: 'Group Details' });
+        crumbs.push({ label: 'Release Group' });
       }
       return crumbs;
     }

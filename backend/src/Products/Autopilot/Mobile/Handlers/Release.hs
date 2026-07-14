@@ -43,22 +43,32 @@ module Products.Autopilot.Mobile.Handlers.Release (
     changelogPreviewH,
     resolveBaseFromTracks,
 
+    -- * Build location (duplicate-error "open existing build")
+    BuildLocationResp (..),
+    buildLocationH,
+
     -- * Create-time AI changelog summary
     AiSummaryResp (..),
     changelogAiSummaryH,
+
+    -- * Combined multi-app AI changelog summary
+    CombinedAiSummaryReq (..),
+    CombinedAppKey (..),
+    changelogAiSummaryCombinedH,
 ) where
 
-import Control.Monad (forM_, unless, void, when)
+import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Catch (throwM)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..))
 import Core.DB.Connection (runDB)
 import Core.Environment (Flow, forkFlow, withDb)
-import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericToJSON, object, (.=))
+import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericParseJSON, genericToJSON, object, (.=))
 import Data.Int (Int32)
 import Data.List (nub, partition, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
@@ -90,7 +100,7 @@ import Products.Autopilot.Mobile.Types.Storage (
     AppCatalog,
     AppCatalogT (..),
  )
-import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch)
+import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, findDispatchedReleaseIds, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch)
 import Products.Autopilot.RuntimeConfig (getMobileBuildType)
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
@@ -106,7 +116,8 @@ import Products.Autopilot.Types.Target (TargetState (..))
 import qualified Shared.AI.Changelog as CL
 import Shared.AI.Config (loadAiConfig)
 import Shared.AI.Queries (claimReleaseSummary, computePromptHash, lookupReleaseSummary, upsertReleaseSummary)
-import Shared.AI.ReleaseSummary (generateWithFallback)
+import Shared.AI.ReleaseSummary (generateCombinedWithFallback, generateWithFallback, renderCombinedDeterministic)
+import Shared.JSON (stripPrefixOptions)
 import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 
 -- ─── Create: request / response types ──────────────────────────────
@@ -121,6 +132,9 @@ data CreateMobileReleasesItem = CreateMobileReleasesItem
     , -- | the changelog summary captured on the create page; falls back to the
       -- request-level changeLog when absent
       changelogSummary :: Maybe Text
+    , -- | the AI SHORT synopsis captured on the create page — stored so the
+      -- promote form can prefill store notes without re-querying the AI
+      changelogSummaryShort :: Maybe Text
     }
     deriving (Generic, Show)
 
@@ -201,7 +215,11 @@ createMobileReleasesH ap CreateMobileReleasesReq{..} = do
     buildType <- getMobileBuildType
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
-    built <- mapM (buildRow ap appById groupId changeLog buildType destination sourceRef now) items
+    -- Denormalize the optional group label onto every member row (a group has
+    -- no table of its own — the label lives where the group lives).
+    let mLabel = releaseGroupLabel >>= \l -> let t = T.strip l in if T.null t then Nothing else Just t
+    built0 <- mapM (buildRow ap appById groupId changeLog buildType destination sourceRef now) items
+    let built = [(r{rtReleaseGroupLabel = mLabel}, s) | (r, s) <- built0]
     -- Friendly duplicate check: a build is identified by (version name + build number)
     -- (migration 0035). If that exact pair already exists, reject with a clear message
     -- instead of letting the unique index throw a raw 23505 / INTERNAL_ERROR. Only checks
@@ -221,7 +239,7 @@ createMobileReleasesH ap CreateMobileReleasesReq{..} = do
                                 <> ") "
                                 <> rtNewVersion row
                                 <> maybe "" (\c -> "+" <> T.pack (show c)) (rtVersionCode row)
-                                <> " already exists — use a new build number, or promote the existing build."
+                                <> " already exists — use a new build number, or discard or promote the existing build."
                 Nothing -> pure ()
     insertReleaseTrackerRowsBatch (map fst built)
     pure
@@ -247,7 +265,7 @@ buildRow ::
     UTCTime ->
     CreateMobileReleasesItem ->
     Flow (ReleaseTrackerRow, CreatedReleaseSummary)
-buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode, sendChangelogSlack = mSendSlack, changelogSummary = mSummary} = do
+buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode, sendChangelogSlack = mSendSlack, changelogSummary = mSummary, changelogSummaryShort = mShort} = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     -- safe: createMobileReleasesH validated that every id is present in appById
     let app_ = appById Map.! aid
@@ -285,6 +303,11 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                     if mSendSlack == Just True
                         then Just (maybe changeLog_ (\s -> if T.null (T.strip s) then changeLog_ else s) mSummary)
                         else Nothing
+                , -- Stored regardless of the Slack opt-in — it feeds the promote
+                  -- form's store-notes prefill, not the Slack post.
+                  mbcChangelogSummaryShort = case fmap T.strip mShort of
+                    Just s | not (T.null s) -> Just s
+                    _ -> Nothing
                 }
         target =
             MobileBuildTargetState
@@ -361,6 +384,16 @@ dispatchMobileReleasesH _ap DispatchMobileReleasesReq{releaseIds = rids} = do
     case rids of
         [] -> throwM $ BadRequest "releaseIds must be non-empty"
         _ -> pure ()
+    -- Already-dispatched guard: a second dispatch would re-stamp a FRESH
+    -- dispatch_id, splitting the original run group. A stamped row needs no
+    -- retry — the runner picks it up on its next tick.
+    alreadyDispatched <- findDispatchedReleaseIds rids
+    unless (null alreadyDispatched) $
+        throwM $
+            BadRequest
+                ( "already dispatched (the runner will pick them up): "
+                    <> T.intercalate ", " alreadyDispatched
+                )
     -- Batch both lookups up front (was an N+1: findReleaseTracker +
     -- loadAppCatalogFor per release). One tracker query + one catalog read,
     -- then pure per-release validation against the maps.
@@ -707,6 +740,35 @@ resolveBaseFromTracks mBase tracks leadingTag leadingCommit leadingVersion =
         Just t | not (T.null t) && t /= "debug-no-tag" -> t
         _ -> fromMaybe "" leadingCommit
 
+-- ─── Build location (duplicate-error deep link) ─────────────────
+
+data BuildLocationResp = BuildLocationResp
+    { blFound :: Bool
+    , blReleaseId :: Maybe Text
+    , blGroupId :: Maybe Text
+    }
+    deriving (Generic, Show)
+
+instance ToJSON BuildLocationResp where
+    toJSON = genericToJSON defaultOptions{omitNothingFields = True}
+
+{- | Where does an existing @(app, surface, platform, version, code)@ build live?
+Returns the owning release id + its group id so the create page's duplicate
+error ("… already exists") can offer an "open the existing build" link. Reuses
+'findMobileVersionRow' — the same lookup the create-time duplicate check uses.
+-}
+buildLocationH :: AuthedPerson -> Text -> Text -> Text -> Text -> Maybe Int32 -> Flow BuildLocationResp
+buildLocationH _ap appName surface platform version mCode = do
+    mRow <- findMobileVersionRow appName surface platform version mCode
+    pure $ case mRow of
+        Just row ->
+            BuildLocationResp
+                { blFound = True
+                , blReleaseId = Just (rtId row)
+                , blGroupId = rtReleaseGroupId row
+                }
+        Nothing -> BuildLocationResp{blFound = False, blReleaseId = Nothing, blGroupId = Nothing}
+
 -- ─── Create-time AI changelog summary ───────────────────────────
 --
 -- Summarise the commits being released BEFORE the release exists. Reuses the
@@ -723,6 +785,9 @@ data AiSummaryResp = AiSummaryResp
     , summaryShort :: Maybe Text
     -- ^ AI 2-3 line synopsis (only when ready)
     , model :: Maybe Text
+    , usableCount :: Maybe Int
+    -- ^ Combined only: # of selected apps that had a comparable last release
+    -- (the others contribute no changelog). Lets the UI label the real count.
     }
     deriving (Generic, Show)
 
@@ -738,6 +803,7 @@ aiUnavailable r =
         , summaryLong = Nothing
         , summaryShort = Nothing
         , model = Nothing
+        , usableCount = Nothing
         }
 
 renderCommitsForAi :: [CommitInfo] -> Text
@@ -762,6 +828,7 @@ stateResp st longTxt shortTxt mModel =
         , summaryLong = Just longTxt
         , summaryShort = if T.null (T.strip shortTxt) then Nothing else Just shortTxt
         , model = mModel
+        , usableCount = Nothing
         }
 
 changelogAiSummaryH :: AuthedPerson -> Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Maybe Text -> Flow AiSummaryResp
@@ -799,11 +866,11 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
                                 -- Generic one-liner for summary_short when AI is off or
                                 -- every model fails (no app name — usable as release notes).
                                 detShort = CL.renderShortSummary items
-                                -- "rn4" = generation version. Bump it whenever the
+                                -- "rn7" = generation version. Bump it whenever the
                                 -- prompt/format changes so cached rows invalidate.
                                 contentKey =
                                     computePromptHash $
-                                        T.intercalate "\US" ["rn6", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
+                                        T.intercalate "\US" ["rn7", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
                             mRow <- lookupReleaseSummary contentKey
                             case mRow of
                                 -- Done → return the AI (or cached deterministic) result.
@@ -838,3 +905,186 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
                                                 Just ("ready", mLong, mShort, mModel, _) ->
                                                     stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel
                                                 _ -> stateResp "pending" detLong "" Nothing
+
+-- ─── Combined multi-app AI changelog summary ─────────────────────
+--
+-- One changelog for a fleet selection: the common-vs-app-specific split is SHA
+-- set arithmetic over the per-app diffs (same base resolution + surface filter
+-- as the single-app endpoint); the AI categorizes the union ONCE. Result is
+-- cached/claimed in release_summary exactly like the per-app path.
+
+data CombinedAppKey = CombinedAppKey
+    { cakApp :: Text
+    , cakSurface :: Text
+    , cakPlatform :: Text
+    , cakVersion :: Maybe Text
+    -- ^ Display string ("v3.4.2+375") shown next to the app in the header.
+    }
+    deriving (Generic, Show)
+
+instance FromJSON CombinedAppKey where
+    parseJSON = genericParseJSON (stripPrefixOptions 3)
+
+data CombinedAiSummaryReq = CombinedAiSummaryReq
+    { casApps :: [CombinedAppKey]
+    , casBranch :: Text
+    , casBase :: Maybe Text
+    }
+    deriving (Generic, Show)
+
+instance FromJSON CombinedAiSummaryReq where
+    parseJSON = genericParseJSON (stripPrefixOptions 3)
+
+-- | CommitItem keyed by the FULL sha (the per-app path uses the short one for
+-- display; set intersection across apps wants the collision-free key).
+toCommitItemFullSha :: CommitInfo -> CL.CommitItem
+toCommitItemFullSha c = CL.CommitItem (ciSha c) (ciSubject c) (ciDisplayAuthor c)
+
+changelogAiSummaryCombinedH :: AuthedPerson -> CombinedAiSummaryReq -> Flow AiSummaryResp
+changelogAiSummaryCombinedH ap req = do
+    let appKeys = casApps req
+        branch = T.strip (casBranch req)
+    when (length appKeys < 2) $ throwM $ BadRequest "combined summary needs at least two apps"
+    when (T.null branch) $ throwM $ BadRequest "branch must not be empty"
+    creds <- loadGhCreds
+    -- Per-app ranges: same pipeline as the single-app endpoint, but paginated
+    -- (like the preview) — intersecting truncated ranges would misclassify.
+    perApp <- forM appKeys $ \k -> do
+        ac <- appCatalogByKey (cakApp k) (cakSurface k) (cakPlatform k)
+        builds <- fetchLatestBuildsForApp (cakApp k) (cakSurface k) (cakPlatform k)
+        let label = cakApp k <> " " <> cakPlatform k
+            surf = cakSurface k
+            mVer = T.strip <$> cakVersion k
+            ver = if maybe True T.null mVer then Nothing else mVer
+        case findLastReleaseBuild builds (cakApp k) (cakSurface k) (cakPlatform k) of
+            Nothing -> pure (label, surf, ver, Nothing)
+            Just lb -> do
+                (baseRef, _, _) <- resolveChangelogBase (casBase req) ac lb
+                if T.null baseRef
+                    then pure (label, surf, ver, Nothing)
+                    else do
+                        eRaw <- fetchFullRange creds (gitOwner ac) (gitRepo ac) baseRef branch
+                        case eRaw of
+                            Left _ -> pure (label, surf, ver, Nothing)
+                            Right cs -> do
+                                let raw = filter (not . isBotCommit) cs
+                                    items =
+                                        CL.filterCommitsForSurface (cakSurface k) $
+                                            CL.dropAutomationCommits (map toCommitItemFullSha raw)
+                                pure (label, surf, ver, Just (raw, items))
+    let usable = sortOn (\(lbl, _, _, _, _) -> lbl) [(lbl, surf, ver, raw, items) | (lbl, surf, ver, Just (raw, items)) <- perApp]
+    -- Only ONE app needs a comparable base — the summary covers whoever has one,
+    -- and names the rest in-line (finalize). Blocking on <2 was the old behaviour.
+    if null usable
+        then pure (aiUnavailable "no selected app has a comparable last release to diff against")
+        else do
+            let shaSetOf items = Set.fromList (map CL.cgSha items)
+                shaSets = map (\(_, _, _, _, items) -> shaSetOf items) usable
+                commonShas = foldr1 Set.intersection shaSets
+                dedupBySha = go Set.empty
+                  where
+                    go _ [] = []
+                    go seen (c : cs)
+                        | CL.cgSha c `Set.member` seen = go seen cs
+                        | otherwise = c : go (Set.insert (CL.cgSha c) seen) cs
+                unionItems = dedupBySha (concat [items | (_, _, _, _, items) <- usable])
+                common = [c | c <- unionItems, CL.cgSha c `Set.member` commonShas]
+                -- Per-surface (consumer / provider) common: shared across all
+                -- of a surface's apps but not across ALL apps. Only when a
+                -- surface has ≥2 selected apps and they actually share commits.
+                surfKey s = CL.ownSideLabel s
+                bySurf =
+                    Map.fromListWith
+                        (<>)
+                        [(surfKey surf, [shaSetOf items]) | (_, surf, _, _, items) <- usable]
+                surfCommonMap =
+                    Map.fromList
+                        [ (k, sc)
+                        | (k, sets) <- Map.toList bySurf
+                        , length sets >= 2
+                        , let sc = foldr1 Set.intersection sets `Set.difference` commonShas
+                        , not (Set.null sc)
+                        ]
+                surfaceCommons =
+                    [ (k <> " apps", [c | c <- unionItems, CL.cgSha c `Set.member` sc])
+                    | (k, sc) <- Map.toList surfCommonMap
+                    ]
+                extras =
+                    [ ( lbl
+                      , [ c
+                        | c <- items
+                        , not (CL.cgSha c `Set.member` commonShas)
+                        , not (CL.cgSha c `Set.member` Map.findWithDefault Set.empty (surfKey surf) surfCommonMap)
+                        ]
+                      )
+                    | (lbl, surf, _, _, items) <- usable
+                    ]
+                -- Excluded = commits dropped from EVERY selected app (bots,
+                -- automation, or out of scope for all of them).
+                keptShas = Set.unions shaSets
+                rawUnion = Set.fromList [ciSha c | (_, _, _, raw, _) <- usable, c <- raw]
+                excludedN = Set.size (rawUnion `Set.difference` keptShas)
+                apps = [(lbl, ver) | (lbl, _, ver, _, _) <- usable]
+                detLong = renderCombinedDeterministic apps branch excludedN common surfaceCommons extras
+                detShort = CL.renderShortSummary unionItems
+                -- Selected apps with no comparable base: named in-line so the
+                -- summary (and the Slack post) says what's missing.
+                excludedLabels = [lbl | (lbl, _, _, Nothing) <- perApp]
+                noBaseNote =
+                    if null excludedLabels
+                        then ""
+                        else
+                            "\n\n_No comparable previous release for "
+                                <> T.intercalate ", " excludedLabels
+                                <> " — not included above._"
+                -- Every combined-success response carries the no-base note and
+                -- the real usable count (the FE labels/annotates off these).
+                finalize r =
+                    r
+                        { summaryLong = fmap (<> noBaseNote) (summaryLong r)
+                        , usableCount = Just (length usable)
+                        }
+                -- "cg5" = combined-generation version; bump to invalidate cache.
+                contentKey =
+                    computePromptHash $
+                        T.intercalate "\US" $
+                            ["cg5", branch, fromMaybe "production" (casBase req)]
+                                ++ concat
+                                    [ [lbl, fromMaybe "" ver, T.unwords (map CL.cgSha items)]
+                                    | (lbl, _, ver, _, items) <- usable
+                                    ]
+            mRow <- lookupReleaseSummary contentKey
+            case mRow of
+                Just ("ready", mLong, mShort, mModel, _) ->
+                    pure (finalize (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel))
+                _ -> do
+                    ecfg <- loadAiConfig
+                    case ecfg of
+                        Left _ -> do
+                            upsertReleaseSummary contentKey detLong detShort "" (length unionItems)
+                            pure (finalize (stateResp "ready" detLong detShort Nothing))
+                        Right cfg -> do
+                            claimed <- claimReleaseSummary contentKey detLong (length unionItems)
+                            when claimed $
+                                void $
+                                    forkFlow $ do
+                                        mRes <- generateCombinedWithFallback (apEmail ap) cfg apps branch excludedN common surfaceCommons extras
+                                        case mRes of
+                                            Just (lng, sht, usedModel) -> upsertReleaseSummary contentKey lng sht usedModel (length unionItems)
+                                            Nothing -> upsertReleaseSummary contentKey detLong detShort "" (length unionItems)
+                            st <- lookupReleaseSummary contentKey
+                            pure $ finalize $ case st of
+                                Just ("ready", mLong, mShort, mModel, _) ->
+                                    stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel
+                                _ -> stateResp "pending" detLong "" Nothing
+  where
+    -- Compare, then paginate when GitHub truncated the range (>250 commits).
+    fetchFullRange creds owner repo baseRef branch = do
+        r <- compareRefs creds owner repo baseRef branch
+        case r of
+            Left e -> pure (Left e)
+            Right cr
+                | crTotalCommits cr > length (crCommits cr) -> do
+                    eAll <- compareAllCommits creds owner repo baseRef branch
+                    pure $ Right (either (const (crCommits cr)) Prelude.id eAll)
+                | otherwise -> pure (Right (crCommits cr))

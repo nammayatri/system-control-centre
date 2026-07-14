@@ -40,6 +40,8 @@ module Products.Autopilot.Actions.Release
 
     -- * Helpers exported for other modules
     isValidK8sVersion,
+    injectPromotable,
+    injectStoreState,
   )
 where
 
