@@ -55,6 +55,7 @@ module Products.Autopilot.Queries.ReleaseTracker
 
     -- * Misc / Update helpers
     updateReleaseTrackerSlackThreadTs,
+    touchReleaseHeartbeat,
 
     -- * Row conversion
     toRow,
@@ -183,15 +184,14 @@ insertReleaseTracker rt mts = withDb $ \db -> do
         )
     pure ()
 
-{- | Atomically update a release tracker only if its current status matches the
-expected value (CAS: @UPDATE ... WHERE id = ? AND status = ?@). Returns True if
-the update succeeded, False if the status was changed by another thread.
-
-Column-scoped ('casUpdateWorkflowCols'): the former DELETE+re-INSERT rebuilt the
-whole row from 'toRow', which blanked every setPhase-owned lifecycle column
-(review_*, rollout_*, store_track, terminal_status, asc ids) on the workflow's
-completion/abort persist — erasing a release's just-stamped outcome.
--}
+-- | Atomically update a release tracker only if its current status matches the
+-- expected value (CAS: @UPDATE ... WHERE id = ? AND status = ?@). Returns True if
+-- the update succeeded, False if the status was changed by another thread.
+--
+-- Column-scoped ('casUpdateWorkflowCols'): the former DELETE+re-INSERT rebuilt the
+-- whole row from 'toRow', which blanked every setPhase-owned lifecycle column
+-- (review_*, rollout_*, store_track, terminal_status, asc ids) on the workflow's
+-- completion/abort persist — erasing a release's just-stamped outcome.
 conditionalUpdateTracker :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> Text -> m Bool
 conditionalUpdateTracker rt mts expectedStatus = do
   now <- liftIO getCurrentTime
@@ -209,21 +209,20 @@ conditionalUpdateApprove rt mts = do
       row = toRow created now rt mts
   casUpdateWorkflowCols row "WHERE id = ? AND status = 'CREATED' AND is_approved = false" (Only (rtId row))
 
-{- | Shared CAS executor: ONE atomic UPDATE of the workflow-owned columns, with
-the caller's WHERE precondition. Deliberately NOT in the SET list — so their
-live values always survive a workflow persist:
-
-  * the 'setPhase'-owned lifecycle columns: @review_*@, @rollout_status@,
-    @rollout_percent@, @store_rollout_history@, @store_track@, @asc_version_id@,
-    @asc_phased_id@, @terminal_status@;
-  * the externally-stamped @dispatch_id@ / @external_run_id@ (the old
-    read-then-reinsert "preserved fields", now preserved for free).
-
-@version_code@ IS written: 'toRow' derives it from the target state, including
-the failed-terminal identity-slot release (a build aborted before uploading
-frees its (version, code) for a rebuild). @slack_thread_ts@ keeps COALESCE
-semantics: a Nothing in the row never erases a thread id another path stamped.
--}
+-- | Shared CAS executor: ONE atomic UPDATE of the workflow-owned columns, with
+-- the caller's WHERE precondition. Deliberately NOT in the SET list — so their
+-- live values always survive a workflow persist:
+--
+--  * the 'setPhase'-owned lifecycle columns: @review_*@, @rollout_status@,
+--    @rollout_percent@, @store_rollout_history@, @store_track@, @asc_version_id@,
+--    @asc_phased_id@, @terminal_status@;
+--  * the externally-stamped @dispatch_id@ / @external_run_id@ (the old
+--    read-then-reinsert "preserved fields", now preserved for free).
+--
+-- @version_code@ IS written: 'toRow' derives it from the target state, including
+-- the failed-terminal identity-slot release (a build aborted before uploading
+-- frees its (version, code) for a rebuild). @slack_thread_ts@ keeps COALESCE
+-- semantics: a Nothing in the row never erases a thread id another path stamped.
 casUpdateWorkflowCols :: (ToRow w, MonadFlow m) => ReleaseTrackerRow -> Query -> w -> m Bool
 casUpdateWorkflowCols row whereSql whereParams = withDb $ \db ->
   withConn db $ \conn -> do
@@ -286,11 +285,10 @@ findReleaseTrackersByIds rids = withDb $ \db -> do
           pure rt
   pure (map fromRow rows)
 
-{- | Of the given ids, those already stamped with a dispatch_id. A second
-dispatch call would re-stamp a FRESH group id — splitting the original run
-group — so the dispatch handler rejects these up front (the runner picks a
-stamped row up on its next tick; there is nothing to retry).
--}
+-- | Of the given ids, those already stamped with a dispatch_id. A second
+-- dispatch call would re-stamp a FRESH group id — splitting the original run
+-- group — so the dispatch handler rejects these up front (the runner picks a
+-- stamped row up on its next tick; there is nothing to retry).
 findDispatchedReleaseIds :: (MonadFlow m) => [Text] -> m [Text]
 findDispatchedReleaseIds [] = pure []
 findDispatchedReleaseIds rids = withDb $ \db ->
@@ -302,12 +300,11 @@ findDispatchedReleaseIds rids = withDb $ \db ->
         guard_ (isJust_ (rtDispatchId rt))
         pure (rtId rt)
 
-{- | All operator-created mobile group rows for the groups LIST: rows with a
-group id whose mode is not a store-sync mint (those are one-row pseudo-groups —
-design doc §5), and that are either still active (CREATED/INPROGRESS — always
-returned regardless of window, or the 24h-cliff bug returns in new clothes) or
-created within the @since@ window.
--}
+-- | All operator-created mobile group rows for the groups LIST: rows with a
+-- group id whose mode is not a store-sync mint (those are one-row pseudo-groups —
+-- design doc §5), and that are either still active (CREATED/INPROGRESS — always
+-- returned regardless of window, or the 24h-cliff bug returns in new clothes) or
+-- created within the @since@ window.
 findMobileGroupTrackersSince :: (MonadFlow m) => UTCTime -> m [GroupedTracker]
 findMobileGroupTrackersSince since = withDb $ \db -> do
   rows <-
@@ -320,8 +317,10 @@ findMobileGroupTrackersSince since = withDb $ \db -> do
             guard_ (isJust_ (rtReleaseGroupId rt))
             guard_ (not_ (fromMaybe_ (val_ "MANUAL") (rtMode rt) `in_` [val_ "STORE_SYNC", val_ "EXTERNAL_REVIEW"]))
             guard_
-              ( rtStatus rt `in_` [val_ "CREATED", val_ "INPROGRESS"]
-                  ||. rtCreatedAt rt >=. val_ since
+              ( rtStatus rt
+                  `in_` [val_ "CREATED", val_ "INPROGRESS"]
+                  ||. rtCreatedAt rt
+                  >=. val_ since
               )
             pure rt
   pure (mapMaybe toGrouped rows)
@@ -348,14 +347,13 @@ findReleaseTrackersByGroupId gid = withDb $ \db -> do
             pure rt
   pure (mapMaybe toGrouped rows)
 
-{- | Atomically CLAIM the group's "changelog posted to Slack" marker so the
-release changelog is posted ONCE per @release_group_id@, not once per app. One
-conditional UPDATE stamps @changelog_slack_sent_at@ on every group row, but only
-while still NULL — the row write-lock + READ COMMITTED predicate recheck make it
-a compare-and-swap. Returns True for the single caller whose UPDATE flipped the
-group (rows > 0); every sibling reaching it after the commit matches 0 rows and
-returns False. Durable, so the claim also survives a runner restart.
--}
+-- | Atomically CLAIM the group's "changelog posted to Slack" marker so the
+-- release changelog is posted ONCE per @release_group_id@, not once per app. One
+-- conditional UPDATE stamps @changelog_slack_sent_at@ on every group row, but only
+-- while still NULL — the row write-lock + READ COMMITTED predicate recheck make it
+-- a compare-and-swap. Returns True for the single caller whose UPDATE flipped the
+-- group (rows > 0); every sibling reaching it after the commit matches 0 rows and
+-- returns False. Durable, so the claim also survives a runner restart.
 claimChangelogSlackForGroup :: (MonadFlow m) => Text -> m Bool
 claimChangelogSlackForGroup gid
   | T.null (T.strip gid) = pure False
@@ -378,9 +376,9 @@ claimChangelogSlackForGroup gid
             (gid, gid)
         pure (n > 0)
 
-{- | Record a SUCCESSFUL group changelog-Slack post. The claim already stamped
-@changelog_slack_sent_at@; we only clear any prior error so the group reads
-"sent" (sent_at set + error NULL). -}
+-- | Record a SUCCESSFUL group changelog-Slack post. The claim already stamped
+-- @changelog_slack_sent_at@; we only clear any prior error so the group reads
+-- "sent" (sent_at set + error NULL).
 markChangelogSlackSent :: (MonadFlow m) => Text -> m ()
 markChangelogSlackSent gid
   | T.null (T.strip gid) = pure ()
@@ -393,10 +391,10 @@ markChangelogSlackSent gid
             \WHERE release_group_id = ?"
             (Only gid)
 
-{- | Record a FAILED group changelog-Slack post: store the Slack error AND
-RELEASE the claim (@changelog_slack_sent_at@ -> NULL) so the next build-settle
-or a manual resend can re-win the CAS and retry. Leaves the group in the
-"failed" state (sent_at NULL + error set). -}
+-- | Record a FAILED group changelog-Slack post: store the Slack error AND
+-- RELEASE the claim (@changelog_slack_sent_at@ -> NULL) so the next build-settle
+-- or a manual resend can re-win the CAS and retry. Leaves the group in the
+-- "failed" state (sent_at NULL + error set).
 markChangelogSlackFailed :: (MonadFlow m) => Text -> Text -> m ()
 markChangelogSlackFailed gid err
   | T.null (T.strip gid) = pure ()
@@ -409,12 +407,12 @@ markChangelogSlackFailed gid err
             \WHERE release_group_id = ?"
             (err, gid)
 
-{- | Read the group's changelog-Slack state for the UI: @(sentAt, error, optedIn)@.
-Columns are group-uniform, so MAX picks the (single) non-null value; @optedIn@ is
-true iff any member opted into the Slack post (its stored MobileBuildContext
-carries a @changelog_summary@ body). The jsonb dig is guarded so a non-JSON /
-empty release_context never aborts the read. Returns 'Nothing' for an unknown
-group. -}
+-- | Read the group's changelog-Slack state for the UI: @(sentAt, error, optedIn)@.
+-- Columns are group-uniform, so MAX picks the (single) non-null value; @optedIn@ is
+-- true iff any member opted into the Slack post (its stored MobileBuildContext
+-- carries a @changelog_summary@ body). The jsonb dig is guarded so a non-JSON /
+-- empty release_context never aborts the read. Returns 'Nothing' for an unknown
+-- group.
 getChangelogSlackState :: (MonadFlow m) => Text -> m (Maybe (Maybe UTCTime, Maybe Text, Bool))
 getChangelogSlackState gid
   | T.null (T.strip gid) = pure Nothing
@@ -538,23 +536,23 @@ storeTrackText (Just t) = case Aeson.eitherDecodeStrict (TE.encodeUtf8 t) of
 
 -- | Find approved CREATED releases ready to be dispatched.
 --
---  Backend categories: only CREATED+approved rows. INPROGRESS rows are
---  recovered via a separate rollback path; the workflow runs to completion
---  in one runner tick and never needs re-driving.
+-- Backend categories: only CREATED+approved rows. INPROGRESS rows are
+-- recovered via a separate rollback path; the workflow runs to completion
+-- in one runner tick and never needs re-driving.
 --
---  MobileBuild category: ALSO returns INPROGRESS rows whose mobile workflow
---  is not yet terminal. The mobile spec is poll-driven (StageWaiting on
---  ResolveRunId / PollMatrixJobs / ConfirmTag and on stage 2 advisory-lock
---  contention) — the runner must keep re-driving the workflow on every
---  tick until the stages reach a terminal MobileBuildWFStatus. The
---  terminal-mb-status filter is done in Haskell after parsing the
---  @target_state@ JSON (the column is plain TEXT, not jsonb, so SQL-side
---  JSON filtering would need a LIKE-on-substring hack). Trackers that
---  have reached terminal mobile states (MBCompleted / MBAborted /
---  MBFailed) are skipped — the runner's success / abort branches will
---  have flipped @release_tracker.status@ to a terminal value already, so
---  the lifecycle status guard below covers them in the common case; this
---  filter is a defensive safety net for partial-write scenarios.
+-- MobileBuild category: ALSO returns INPROGRESS rows whose mobile workflow
+-- is not yet terminal. The mobile spec is poll-driven (StageWaiting on
+-- ResolveRunId / PollMatrixJobs / ConfirmTag and on stage 2 advisory-lock
+-- contention) — the runner must keep re-driving the workflow on every
+-- tick until the stages reach a terminal MobileBuildWFStatus. The
+-- terminal-mb-status filter is done in Haskell after parsing the
+-- @target_state@ JSON (the column is plain TEXT, not jsonb, so SQL-side
+-- JSON filtering would need a LIKE-on-substring hack). Trackers that
+-- have reached terminal mobile states (MBCompleted / MBAborted /
+-- MBFailed) are skipped — the runner's success / abort branches will
+-- have flipped @release_tracker.status@ to a terminal value already, so
+-- the lifecycle status guard below covers them in the common case; this
+-- filter is a defensive safety net for partial-write scenarios.
 findRunnableReleaseTrackers :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
 findRunnableReleaseTrackers now = withDb $ \db -> do
   rows <-
@@ -569,7 +567,7 @@ findRunnableReleaseTrackers now = withDb $ \db -> do
                   ||. ( rtStatus rt
                           ==. val_ "INPROGRESS"
                           &&. rtCategory rt
-                            ==. val_ "MobileBuild"
+                          ==. val_ "MobileBuild"
                       )
               )
             guard_ (rtIsApproved rt ==. val_ (Just True))
@@ -627,8 +625,9 @@ findActiveTrackersForService ag svc = withDb $ \db -> do
             pure rt
   pure (map fromRow rows)
 
-findInProgressReleaseTrackers :: (MonadFlow m) => m [TrackerWithTarget]
-findInProgressReleaseTrackers = withDb $ \db -> do
+-- | INPROGRESS/REVERTING releases not updated since @staleBefore@ — a live workflow thread heartbeats every tick, so only truly-abandoned rows qualify.
+findInProgressReleaseTrackers :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
+findInProgressReleaseTrackers staleBefore = withDb $ \db -> do
   rows <-
     runDB db $
       runSelectReturningList $
@@ -640,8 +639,22 @@ findInProgressReleaseTrackers = withDb $ \db -> do
             -- Only INPROGRESS/REVERTING need restart recovery (workflow
             -- thread was lost).
             guard_ (rtStatus rt `in_` [val_ "INPROGRESS", val_ "REVERTING"])
+            guard_ (rtUpdatedAt rt <. val_ staleBefore)
             pure rt
   pure (map fromRow rows)
+
+-- | Bumps @last_updated@ only, as a liveness ping — 'conditionalUpdateTracker' can go silent for a whole cooloff.
+touchReleaseHeartbeat :: (MonadFlow m) => Text -> m ()
+touchReleaseHeartbeat rid = withDb $ \db ->
+  withConn db $ \conn -> do
+    now <- liftIO getCurrentTime
+    _ <-
+      execute
+        conn
+        "UPDATE release_tracker SET last_updated = ? \
+        \WHERE id = ? AND status = 'INPROGRESS'"
+        (now, rid)
+    pure ()
 
 findCleanupScheduledTrackers :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
 findCleanupScheduledTrackers now = withDb $ \db -> do
@@ -794,7 +807,7 @@ insertReleaseEvent rid category label payload = withDb $ \db -> do
           ]
 
 toRow :: UTCTime -> UTCTime -> ReleaseTracker -> Maybe TargetState -> ReleaseTrackerRow
-toRow createdAt updatedAt ReleaseTracker{..} mts =
+toRow createdAt updatedAt ReleaseTracker {..} mts =
   ReleaseTrackerT
     { rtId = releaseId,
       rtOldVersion = oldVersion,
@@ -871,7 +884,7 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
         || (neverShippedStatus && isNothing (mbcTagPushed (mbContext s)))
 
 fromRow :: ReleaseTrackerRow -> TrackerWithTarget
-fromRow ReleaseTrackerT{..} =
+fromRow ReleaseTrackerT {..} =
   let mTargetState = case parseJsonTextMaybe rtTargetState :: Maybe Value of
         Nothing -> Nothing
         Just v -> case fromJSON v :: Aeson.Result TargetState of
@@ -1148,7 +1161,7 @@ insertReleaseTrackerRow row = withDb $ \db ->
       let preservedTs = case existingTs of
             [Only (Just ts)] -> Just ts
             _ -> rtSlackThreadTs row
-          mergedRow = row{rtSlackThreadTs = preservedTs}
+          mergedRow = row {rtSlackThreadTs = preservedTs}
       _ <- execute conn "DELETE FROM release_tracker WHERE id = ?" (Only (rtId row))
       runBeamLogged conn $ runInsert $ insert (releaseTrackers autopilotDb) $ insertValues [mergedRow]
 
@@ -1250,7 +1263,7 @@ sweepStaleDiscardingTrackers ageMinutes = withDb $ \db -> do
                 rtStatus rt
                   ==. val_ "DISCARDING"
                   &&. rtUpdatedAt rt
-                    <=. val_ cutoff
+                  <=. val_ cutoff
             )
       pure (length stuckIds)
 
@@ -1288,9 +1301,9 @@ sweepAutoCompleteVsTrackers ageMinutes = withDb $ \db -> do
                 rtCategory rt
                   ==. val_ "VSEdit"
                   &&. rtStatus rt
-                    ==. val_ "APPLIED"
+                  ==. val_ "APPLIED"
                   &&. rtUpdatedAt rt
-                    <=. val_ cutoff
+                  <=. val_ cutoff
             )
       pure (length stuckIds)
 

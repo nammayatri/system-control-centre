@@ -2,10 +2,10 @@
 
 module Products.Autopilot.Runner where
 
-import qualified Control.Concurrent as CC
-import qualified Control.Exception as E
+import Control.Concurrent qualified as CC
+import Control.Exception qualified as E
 import Control.Monad (filterM, forM_, forever, when)
-import qualified Control.Monad.Catch as MC
+import Control.Monad.Catch qualified as MC
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
 import Core.Config (Config (..))
@@ -14,11 +14,11 @@ import Core.Logging (logInfoIO, logWarningIO)
 import Core.Types.Time (threadDelaySec)
 import Data.Aeson (object, toJSON, (.=))
 import Data.List (sortBy)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, listToMaybe)
 import Data.Ord (Down (..), comparing)
-import qualified Data.Text as T
-import Data.Time.Clock (getCurrentTime)
+import Data.Text qualified as T
+import Data.Time.Clock (NominalDiffTime, addUTCTime, getCurrentTime)
 import Products.Autopilot.EventLog (logStatusUpdated, logTrafficUpdatedWithMessage)
 import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getDeploymentReplicaStatus)
 import Products.Autopilot.K8s.Execute (isNotFoundError, runCmd)
@@ -34,11 +34,11 @@ import Products.Autopilot.Queries.ProductService (getProductCluster, getProductV
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getMaxCleanupRetries, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
 import Products.Autopilot.Types
-import qualified Products.Autopilot.Types as NT
+import Products.Autopilot.Types qualified as NT
 import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, dcAppGroup)
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (..), K8sReleaseContext (..), PodsScaleDownStatus (..))
-import qualified Products.Autopilot.Types.Target.Kubernetes as K8s
+import Products.Autopilot.Types.Target.Kubernetes qualified as K8s
 import Products.Autopilot.Workflow.Factory (executeReleaseWorkflow)
 import Products.Autopilot.Workflow.Types (ReleaseState (..), WorkFlowError (..))
 import Prelude
@@ -56,10 +56,10 @@ runnerLoop st = do
 {- | Startup recovery. Must run BEFORE the HTTP port binds, or concurrent
 HTTP writes race with the sweeps. Performs:
 
-  1. 'rollbackInProgressOnStartup' — drives orphaned INPROGRESS/REVERTING
-     releases to a terminal state (their workflow threads died with the server).
-  2. 'releaseExpiredVsLocksOnStartup' — clears orphaned VS locks older than
-     @lock_expiry_delay_minutes@; covers locks nobody else tries to acquire.
+ 1. 'rollbackInProgressOnStartup' — drives orphaned INPROGRESS/REVERTING
+    releases to a terminal state (their workflow threads died with the server).
+ 2. 'releaseExpiredVsLocksOnStartup' — clears orphaned VS locks older than
+    @lock_expiry_delay_minutes@; covers locks nobody else tries to acquire.
 -}
 runnerStartupRecovery :: AppState -> IO ()
 runnerStartupRecovery st = do
@@ -89,6 +89,10 @@ releaseExpiredVsLocksOnStartup = do
         then logInfo "[STARTUP] No expired VS locks to release"
         else logInfo $ "[STARTUP] Released " <> T.pack (show n) <> " expired VS lock(s)"
 
+-- | Staleness window before startup recovery treats a row as abandoned rather than still driven by a live sibling pod.
+orphanStalenessWindow :: NominalDiffTime
+orphanStalenessWindow = 5 * 60
+
 {- | Roll back orphaned INPROGRESS/REVERTING releases on startup: restore VS
 traffic and mark ABORTED. PAUSED is NOT included — pause is a user state
 with no in-flight kubectl work to recover.
@@ -96,7 +100,9 @@ with no in-flight kubectl work to recover.
 rollbackInProgressOnStartup :: Flow ()
 rollbackInProgressOnStartup = do
     cfg <- getConfig
-    orphaned <- findInProgressReleaseTrackers
+    startupNow <- liftIO getCurrentTime
+    let staleBefore = addUTCTime (negate orphanStalenessWindow) startupNow
+    orphaned <- findInProgressReleaseTrackers staleBefore
     st <- getAppState
     let logEnv = loggerEnv st
     if null orphaned
@@ -404,18 +410,18 @@ trigger _db (rtStale, mtsStale) = do
 {- | Run the release workflow against a tracker that is already (or has
 just been) marked INPROGRESS. Handles the three result branches:
 
-  * @Left RetriableError@ — a stage returned 'StageWaiting' (mobile
-    poll-style stages: ResolveRunId / PollMatrixJobs / ConfirmTag, or
-    stage 2 advisory-lock contention). The runner does NOT touch the
-    row: status stays INPROGRESS, no abort, no restore. The next runner
-    tick re-enters via the INPROGRESS+MobileBuild branch of
-    'findRunnableReleaseTrackers' and per-stage 'stageGuard' resumes
-    where the workflow paused.
+ * @Left RetriableError@ — a stage returned 'StageWaiting' (mobile
+   poll-style stages: ResolveRunId / PollMatrixJobs / ConfirmTag, or
+   stage 2 advisory-lock contention). The runner does NOT touch the
+   row: status stays INPROGRESS, no abort, no restore. The next runner
+   tick re-enters via the INPROGRESS+MobileBuild branch of
+   'findRunnableReleaseTrackers' and per-stage 'stageGuard' resumes
+   where the workflow paused.
 
-  * @Left other@ — terminal failure: abort + cleanup as before.
+ * @Left other@ — terminal failure: abort + cleanup as before.
 
-  * @Right _@ — completion: persist COMPLETED unless a concurrent edit
-    moved the row.
+ * @Right _@ — completion: persist COMPLETED unless a concurrent edit
+   moved the row.
 
 Factored out of 'trigger' so both the first-tick (CAS) and re-tick
 (no-CAS) paths share one execution body.
@@ -587,13 +593,13 @@ validateRunningVersion cfg rt mts = do
 {- | Restore traffic to the old version after a failed/orphaned release.
 
 Order matters (round-7 audit + outage prevention):
-  1. Check old deployment's current replica count.
-  2. If 0 (someone manually scaled it down OR a previous COMPLETED release
-     scaled it down legitimately), SCALE IT BACK UP first to a sensible
-     count derived from the new deployment's current replicas (or default 1)
-     and wait briefly for at least one pod to be ready.
-  3. THEN flip the VS to point at oldVersion.
-  4. Then scale the new deployment to 0.
+ 1. Check old deployment's current replica count.
+ 2. If 0 (someone manually scaled it down OR a previous COMPLETED release
+    scaled it down legitimately), SCALE IT BACK UP first to a sensible
+    count derived from the new deployment's current replicas (or default 1)
+    and wait briefly for at least one pod to be ready.
+ 3. THEN flip the VS to point at oldVersion.
+ 4. Then scale the new deployment to 0.
 
 Without step 2, restoring traffic to a 0-pod deployment would cause an
 immediate 5xx outage on the very route the rollback is supposed to protect.
@@ -865,15 +871,15 @@ would corrupt the revert.
 
 Two defenses, matching race-hunter's HIGH-severity finding:
 
-  Part A — re-read the tracker's status from DB before running the
-  kubectl scale-down. If the status is no longer in the set
-  @{COMPLETED, ABORTED, USER_ABORTED}@ (e.g. user reverted, admin edit),
-  skip the entire scale-down. Prevents kubectl-level corruption.
+ Part A — re-read the tracker's status from DB before running the
+ kubectl scale-down. If the status is no longer in the set
+ @{COMPLETED, ABORTED, USER_ABORTED}@ (e.g. user reverted, admin edit),
+ skip the entire scale-down. Prevents kubectl-level corruption.
 
-  Part B — CAS the final DB write of the scale-down flag against the
-  status we saw at poll-pick time. If anything changed between re-read
-  and CAS (narrow window but real), the blind insert is suppressed so
-  we don't overwrite the user's concurrent edit.
+ Part B — CAS the final DB write of the scale-down flag against the
+ status we saw at poll-pick time. If anything changed between re-read
+ and CAS (narrow window but real), the blind insert is suppressed so
+ we don't overwrite the user's concurrent edit.
 -}
 scaleDownOldDeployment :: Config -> TrackerWithTarget -> Flow ()
 scaleDownOldDeployment cfg (rt, mts) = do
