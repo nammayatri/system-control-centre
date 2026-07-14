@@ -226,8 +226,8 @@ renderShortSummary cs =
              in T.pack (show (length items)) <> " " <> word
         parts = [phrase label items | (label, items) <- groupByCategory cs, not (null items)]
      in case take 3 parts of
-            [] -> "This release contains maintenance and internal changes."
-            ps -> "This release includes " <> T.intercalate ", " ps <> "."
+            [] -> "Maintenance and internal changes."
+            ps -> T.intercalate ", " ps <> "."
 
 {- | Compact category DIGEST for the short AI synopsis — per category, the count
 plus the first few subjects (not the raw commits). Small input ⇒ fast call.

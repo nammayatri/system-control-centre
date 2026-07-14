@@ -31,6 +31,7 @@ module Products.Autopilot.Mobile.Github (
     WorkflowRun (..),
     WorkflowRunsResp (..),
     dispatchRunCandidates,
+    findRunWithJob,
     Job (..),
     JobsResp (..),
 
@@ -155,6 +156,34 @@ dispatchRunCandidates dispatchedAt = sortOn (Down . wrCreatedAt) . filter inWind
     lo = addUTCTime (-30) dispatchedAt
     hi = addUTCTime 300 dispatchedAt
     inWindow r = wrEvent r == "workflow_dispatch" && wrCreatedAt r >= lo && wrCreatedAt r <= hi
+
+{- | The first candidate run (newest-first, per 'dispatchRunCandidates') whose
+job list contains @jobName@. Two dispatches on the SAME workflow file can land
+inside each other's created-at windows (provider version cohorts, concurrent
+operators), so the window alone can cross-bind — the matrix job name is the
+disambiguator: each run only contains its own cohort's app jobs.
+
+'Nothing' = no candidate verified YET. Matrix jobs only appear once the run's
+setup job finishes expanding the matrix (minutes), so callers must treat
+Nothing as "wait and retry", not "no such run". Probes at most 3 candidates
+per call to bound API cost; a probe error just skips that candidate.
+-}
+findRunWithJob ::
+    (MonadFlow m) =>
+    GhAppCreds ->
+    Text -> -- owner
+    Text -> -- repo
+    Text -> -- this row's matrix job name
+    [WorkflowRun] ->
+    m (Maybe WorkflowRun)
+findRunWithJob creds owner repo jobName = go . take 3
+  where
+    go [] = pure Nothing
+    go (r : rs) = do
+        eJobs <- listJobs creds owner repo (T.pack (show (wrId r)))
+        case eJobs of
+            Right jobs | any ((== jobName) . jName) jobs -> pure (Just r)
+            _ -> go rs
 
 -- | One row from @\/actions\/runs\/{run_id}\/jobs@.
 data Job = Job

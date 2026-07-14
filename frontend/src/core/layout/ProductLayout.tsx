@@ -203,7 +203,7 @@ const ProductLayout: React.FC<{ product: ProductDefinition }> = ({ product }) =>
       {/* Content */}
       <div className="flex-1 flex flex-col h-screen overflow-hidden min-w-0">
         <TopBar onOpenMobileNav={() => setMobileOpen(true)} />
-        <main className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">
+        <main className="flex-1 overflow-y-auto scroll-pb-28 px-4 py-4 sm:px-6 sm:py-5">
           <Outlet />
         </main>
       </div>

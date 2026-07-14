@@ -42,6 +42,7 @@ module Products.Autopilot.Mobile.Workflow (
     reviewPollDue,
     selectBuildTag,
     codeFromTag,
+    electDispatchLeader,
 ) where
 
 import Control.Exception (Exception, SomeException, fromException, throwIO, try)
@@ -67,7 +68,8 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Char (digitToInt, isAlphaNum, isDigit)
 import Data.Int (Int32)
 import Data.List (sortOn)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
+import Text.Read (readMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -83,11 +85,12 @@ import Products.Autopilot.Mobile.Github (
     WorkflowRun (..),
     dispatchRunCandidates,
     dispatchWorkflow,
+    findRunWithJob,
     listJobs,
     listTags,
     listWorkflowRuns,
  )
-import Products.Autopilot.Mobile.Github.Auth (GhAppCreds (..), loadGhCreds)
+import Products.Autopilot.Mobile.Github.Auth (GhAppCreds (..), getInstallationToken, loadGhCreds)
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRow,
     findSiblingsByDispatchId,
@@ -96,6 +99,7 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     incrementResolveAttempts,
     logEvent,
     markReleaseRevertedBy,
+    parseMobileTargetState,
     setExternalRunIdForDispatch,
     setPhase,
     setReleaseVersionCode,
@@ -109,7 +113,7 @@ import Products.Autopilot.Mobile.Types (
     isDebugBuildType,
     isMBTerminal,
  )
-import Products.Autopilot.Mobile.Types.Storage (AppCatalogT (..))
+import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..))
 import Products.Autopilot.Mobile.Versioning (
     VersionResolution (..),
     resolveNextVersion,
@@ -120,9 +124,8 @@ import Products.Autopilot.Mobile.Versioning.Apple (
     loadAscCredsFor,
     renderAscErr,
  )
-import Products.Autopilot.Notifications (sendMobileChangelogSlack)
+import Products.Autopilot.Notifications (sendGroupChangelogSlackIfSettled)
 import Products.Autopilot.RuntimeConfig (
-    getMobileSlackChannel,
     getMobileTagConfirmTimeoutMinutes,
     getReviewPollIntervalSeconds,
     getReviewPollTimeoutDays,
@@ -178,16 +181,21 @@ stageResolveVersion
     , stageFinalize ::
         Stage ReleaseState
 
--- | Stage 1 — Play Console lookup → next version_name + version_code.
+-- | Stage 1 — store lookup → version floor. An operator-typed version at or
+-- above the floor is KEPT (source "operator"); below it, the resolved value
+-- wins and the bump is audited (source "store_floor_bump").
 stageResolveVersion =
     (mkStage "ResolveVersion" execResolveVersion)
         { stageGuard = mbStatusReached MBVersionResolved
         }
 
--- | Stage 2 — acquire the advisory lock keyed on @dispatch_id@.
+-- | Stage 2 — acquire the advisory lock keyed on @dispatch_id@. Skipped once
+-- the run id is known OR this row already dispatched (re-tick while stage 4
+-- polls) — re-trying the lock then can self-block on its own stale session lock
+-- (the pool returns connections without pg_advisory_unlock).
 stageGroupForDispatch =
     (mkStage "GroupForDispatch" execGroupForDispatch)
-        { stageGuard = hasExternalRunId
+        { stageGuard = \rs -> hasExternalRunId rs || mbStatusReached MBDispatched rs
         }
 
 -- | Stage 3 — POST @workflow_dispatch@ with selected_apps + version + payload.
@@ -428,39 +436,65 @@ execResolveVersion = mobileStage "ResolveVersion" $ do
                     | isConfigError err -> abort err
                     | otherwise -> retry err
                 Right (AndroidVersion nextName nextCode) -> do
+                    -- The store result is a FLOOR, not a replacement. Play enforces
+                    -- only CODE monotonicity, so a typed version NAME is always kept;
+                    -- a typed code at/above the floor is kept, below it we bump.
+                    let typedName = T.strip (newVersion rt)
+                        typedCode = mobileTarget rs >>= mbcVersionCode . mbContext
+                        finalName = if T.null typedName then nextName else typedName
+                        (finalCode, source) = case typedCode of
+                            Just c
+                                | c > nextCode -> (c, "operator" :: T.Text)
+                                | c == nextCode -> (c, "play_console")
+                                | otherwise -> (nextCode, "store_floor_bump")
+                            Nothing -> (nextCode, "play_console")
                     logInfoIO $
                         "[ResolveVersion] "
                             <> releaseId rt
-                            <> " resolved Android version "
-                            <> nextName
+                            <> " Android version "
+                            <> finalName
                             <> " (code "
-                            <> T.pack (show nextCode)
+                            <> T.pack (show finalCode)
+                            <> ", source "
+                            <> source
                             <> ")"
                     modify $ \s ->
-                        let rt' = (releaseTracker s){newVersion = nextName}
+                        let rt' = (releaseTracker s){newVersion = finalName}
                             ts' =
                                 applyMobileTarget s $ \mt ->
                                     mt
-                                        { mbContext = (mbContext mt){mbcVersionCode = Just nextCode}
+                                        { mbContext = (mbContext mt){mbcVersionCode = Just finalCode}
                                         , mbWfStatus = bumpStatus (mbWfStatus mt) MBVersionResolved
                                         }
                          in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
                     logEvent (releaseId rt) "VERSION_RESOLVED" $
-                        object
-                            [ "version_name" .= nextName
-                            , "version_code" .= nextCode
-                            , "source" .= ("play_console" :: T.Text)
+                        object $
+                            [ "version_name" .= finalName
+                            , "version_code" .= finalCode
+                            , "source" .= source
                             ]
+                                <> ["typed_code" .= c | source == "store_floor_bump", Just c <- [typedCode]]
+                                <> ["floor_code" .= nextCode | source /= "play_console"]
                     pure StageSuccess
                 Right (IosVersion nextNumber) -> do
+                    -- ASC enforces version_number > live, so the resolved value is
+                    -- the floor: a typed number at/above it is kept, below it bumps.
+                    let typed = T.strip (newVersion rt)
+                        (finalVer, source)
+                            | T.null typed = (nextNumber, "app_store_connect" :: T.Text)
+                            | versionLt typed nextNumber = (nextNumber, "store_floor_bump")
+                            | typed == nextNumber = (nextNumber, "app_store_connect")
+                            | otherwise = (typed, "operator")
                     logInfoIO $
                         "[ResolveVersion] "
                             <> releaseId rt
-                            <> " resolved iOS version_number "
-                            <> nextNumber
-                            <> " (build number computed by workflow)"
+                            <> " iOS version_number "
+                            <> finalVer
+                            <> " (source "
+                            <> source
+                            <> "; build number computed by workflow)"
                     modify $ \s ->
-                        let rt' = (releaseTracker s){newVersion = nextNumber}
+                        let rt' = (releaseTracker s){newVersion = finalVer}
                             ts' =
                                 applyMobileTarget s $ \mt ->
                                     mt
@@ -468,11 +502,21 @@ execResolveVersion = mobileStage "ResolveVersion" $ do
                                         }
                          in s{releaseTracker = rt', targetState = Just (MobileBuildState ts')}
                     logEvent (releaseId rt) "VERSION_RESOLVED" $
-                        object
-                            [ "version_number" .= nextNumber
-                            , "source" .= ("app_store_connect" :: T.Text)
+                        object $
+                            [ "version_number" .= finalVer
+                            , "source" .= source
                             ]
+                                <> ["typed_version" .= typed | source == "store_floor_bump"]
+                                <> ["floor_version" .= nextNumber | source /= "app_store_connect"]
                     pure StageSuccess
+
+-- | Dotted numeric version ordering ("3.3.107" < "3.3.108"); non-numeric parts
+-- compare as 0. Local mirror of StoreSync.versionOlderThan (same duplication
+-- idiom as Play/Apple bumpPatch).
+versionLt :: T.Text -> T.Text -> Bool
+versionLt a b = comps a < comps b
+  where
+    comps = map (\p -> fromMaybe 0 (readMaybe (T.unpack p)) :: Int) . T.splitOn "."
 
 {- | Stage 2: Acquire the dispatch-group advisory lock.
 
@@ -500,6 +544,20 @@ execGroupForDispatch = do
                         "release "
                             <> releaseId rt
                             <> " has no dispatch_id; mobile create endpoint must set it"
+            -- Group run already dispatched AND stamped (leader's ResolveRunId
+            -- writes the column on every sibling)? Then there is nothing left to
+            -- serialize — pass; stage 3 adopts. COLUMN read, not state: a
+            -- follower's own state lags the stamp, and waiting on the lock here
+            -- deadlocks against the leader's still-held session lock.
+            mStamp <- externalRunIdForRelease (releaseId rt)
+            case mStamp of
+                Just runId | not (T.null runId) -> pure StageSuccess
+                _ -> lockForDispatch rt dispatchId
+
+-- | The genuine pre-dispatch race: no run exists yet, so serialize the group
+-- on the advisory lock before anyone dispatches.
+lockForDispatch :: ReleaseTracker -> Text -> StateFlow StageOutcome
+lockForDispatch rt dispatchId = do
             ok <- tryAdvisoryLockShared dispatchId
             if ok
                 then do
@@ -516,20 +574,24 @@ execGroupForDispatch = do
                             <> " advisory lock busy; waiting"
                     pure StageWaiting
 
-{- | Stage 3: POST @workflow_dispatch@ with the assembled inputs.
+{- | Stage 3: POST @workflow_dispatch@ — exactly ONE GitHub run per dispatch
+group, via the leader gate ('electDispatchLeader'): the first non-terminal
+sibling dispatches, everyone else waits and then adopts the leader's run id
+('adoptGroupRun').
 
-Inputs are built from siblings (sorted by service for stability) joined
-to the AppCatalog so the GHA workflow knows which apps to build:
+Inputs are built from the LIVING (non-terminal) siblings joined to the
+AppCatalog so the GHA workflow knows which apps to build:
 
-* @selected_apps@ — comma-separated CSV of @AppCatalog.surface@ values
-  for every sibling in the dispatch group.
-* @version_name@ — the resolved name from stage 1.
-* @version_code@ — the resolved code from stage 1.
-* @change_log@   — from @mbContext.changeLog@.
-* @payload@      — JSON envelope with a fresh nonce so we can (in
-  principle) match a run later. Note: GitHub's @\/runs@ endpoint does
-  NOT echo @inputs@ back, so the nonce is best-effort observability
-  only — see stage 4 for the actual matching strategy.
+* @selected_apps@ — comma-separated CSV of @AppCatalog.name@ values; the
+  workflow expands it into one matrix job per app.
+* version\/changelog inputs vary by surface\/platform (see
+  'dispatchFreshRun'); a batched consumer run sends NO version inputs —
+  each matrix job auto-versions and ConfirmTag adopts the code from the
+  pushed tag ('mbBatchDispatch').
+* We deliberately do NOT send the workflow's @payload@ input — a non-empty
+  payload makes its Set-Matrix step bypass @selected_apps@. GitHub's
+  @\/runs@ endpoint doesn't echo inputs anyway, so stage 4 matches the run
+  by actor + created-at window (+ job-name verification when ambiguous).
 
 Failure modes:
 
@@ -564,6 +626,136 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
     target <- case mobileTarget rs of
         Just t -> pure t
         Nothing -> abort "MobileBuildState missing at DispatchWorkflow stage"
+    -- ── Leader gate: ONE GH run per dispatch group ──
+    -- The first living sibling by id is the leader — the only row that
+    -- dispatches. Followers adopt the run id the leader's ResolveRunId stamps
+    -- on every sibling ROW (a column read; their own state predates the stamp).
+    let living = [p | p@(r, _) <- siblings, not (isTerminalStatus (status r))]
+        leaderId = electDispatchLeader (releaseId rt) [(releaseId r, isTerminalStatus (status r)) | (r, _) <- siblings]
+    mStamp <- externalRunIdForRelease (releaseId rt)
+    -- Sibling contexts serve two reads: the dispatcher's persisted
+    -- mbBatchDispatch (adopters inherit it so ConfirmTag knows whether version
+    -- inputs were sent) and the prior-dispatch anchor for the orphan-adopt path.
+    contexts <- findDispatchGroupContexts dispatchId
+    let siblingStates = [st | (_, mCtx) <- contexts, Just st <- [parseMobileTargetState mCtx]]
+        inheritedBatch = listToMaybe [b | st <- siblingStates, Just b <- [mbBatchDispatch st]]
+    case mStamp of
+        Just runId
+            | not (T.null runId) ->
+                -- The group's run already exists — adopt, never dispatch a second.
+                adoptGroupRun rt leaderId runId inheritedBatch
+        _
+            | releaseId rt /= leaderId -> do
+                logInfoIO $
+                    "[DispatchWorkflow] "
+                        <> releaseId rt
+                        <> " follower; waiting for leader "
+                        <> leaderId
+                        <> " to dispatch (dispatch_id="
+                        <> dispatchId
+                        <> ")"
+                pure StageWaiting
+            | otherwise -> do
+                -- Leader. A dead ex-leader may have dispatched then aborted before
+                -- ResolveRunId stamped the group — mbBuildStartedAt on any sibling
+                -- context proves a dispatch happened. Look that run up via the same
+                -- window ResolveRunId uses and adopt it; only dispatch fresh when
+                -- there is provably nothing to adopt.
+                let mAnchor = listToMaybe [t | st <- siblingStates, Just t <- [mbBuildStartedAt st]]
+                case mAnchor of
+                    Nothing -> dispatchFreshRun rt ac creds target living
+                    Just anchor -> do
+                        res <- listWorkflowRuns creds (gitOwner ac) (gitRepo ac) (acWorkflowPath ac)
+                        runs <- case res of
+                            Right xs -> pure xs
+                            Left e -> retry ("listWorkflowRuns failed while checking for an orphaned dispatch: " <> e)
+                        let stampAndAdopt r = do
+                                let runIdT = T.pack (show (wrId r))
+                                setExternalRunIdForDispatch dispatchId runIdT (wrHeadSha r)
+                                logEvent (releaseId rt) "GH_RUN_RESOLVED" $
+                                    object
+                                        [ "run_id" .= runIdT
+                                        , "head_sha" .= wrHeadSha r
+                                        , "source" .= ("orphan_adopt" :: Text)
+                                        ]
+                                adoptGroupRun rt leaderId runIdT inheritedBatch
+                        case dispatchRunCandidates anchor runs of
+                            [] -> do
+                                logInfoIO $
+                                    "[DispatchWorkflow] "
+                                        <> releaseId rt
+                                        <> " prior dispatch evidence but no run in the lookup window — dispatching fresh"
+                                dispatchFreshRun rt ac creds target living
+                            [r] -> stampAndAdopt r
+                            rs -> do
+                                -- Several same-workflow runs in the window: adopt only a run
+                                -- PROVEN to contain this row's matrix job. Unverified ⇒ wait —
+                                -- dispatching fresh here could mint the duplicate we're avoiding.
+                                mV <- findRunWithJob creds (gitOwner ac) (gitRepo ac) (mbcMatrixJobName (mbContext target)) rs
+                                case mV of
+                                    Just r -> stampAndAdopt r
+                                    Nothing -> do
+                                        logInfoIO $
+                                            "[DispatchWorkflow] "
+                                                <> releaseId rt
+                                                <> " orphan-adopt ambiguous ("
+                                                <> T.pack (show (length rs))
+                                                <> " runs in window, none verified yet) — waiting"
+                                        pure StageWaiting
+
+{- | The dispatch-group leader: the first NON-TERMINAL sibling by release id
+(siblings arrive id-ascending from 'findSiblingsByDispatchId', so leadership
+slides to the next living row when the current leader aborts/fails). Falls
+back to @self@ when every sibling reads terminal — the executing row is itself
+a sibling, so that only happens on a mid-tick external flip.
+-}
+electDispatchLeader :: Text -> [(Text, Bool)] -> Text
+electDispatchLeader self sibs =
+    fromMaybe self (listToMaybe [i | (i, isTerm) <- sibs, not isTerm])
+
+{- | Adopt the group's already-dispatched GH run on THIS row: record the run id
+and dispatch progress without touching GitHub. Backfills @mbBuildStartedAt@
+(the ConfirmTag wall-clock anchor) for adopters that never dispatched, and
+inherits the dispatcher's batch flag so ConfirmTag matches the tag the same way.
+-}
+adoptGroupRun :: ReleaseTracker -> Text -> Text -> Maybe Bool -> StateFlow StageOutcome
+adoptGroupRun rt leaderId runId mBatch = do
+    now <- liftIO getCurrentTime
+    modify $ \s ->
+        s
+            { targetState =
+                Just $
+                    MobileBuildState
+                        ( applyMobileTarget s $ \mt ->
+                            mt
+                                { mbExternalRunId = Just runId
+                                , mbWfStatus = bumpStatus (mbWfStatus mt) MBDispatched
+                                , mbBuildStartedAt = Just (fromMaybe now (mbBuildStartedAt mt))
+                                , mbBatchDispatch = case mBatch of
+                                    Just b -> Just b
+                                    Nothing -> mbBatchDispatch mt
+                                }
+                        )
+            }
+    logEvent (releaseId rt) "GH_RUN_ADOPTED" $
+        object ["run_id" .= runId, "leader" .= leaderId]
+    logInfoIO $
+        "[DispatchWorkflow] " <> releaseId rt <> " adopted group run_id=" <> runId
+    pure StageSuccess
+
+{- | The actual @workflow_dispatch@ POST — reached only through the leader gate
+in 'execDispatchWorkflow'. @living@ is the group's non-terminal siblings:
+selected_apps is built from them, so a leader takeover never rebuilds an app
+whose row was already aborted.
+-}
+dispatchFreshRun ::
+    ReleaseTracker ->
+    AppCatalog ->
+    GhAppCreds ->
+    MobileBuildTargetState ->
+    [(ReleaseTracker, AppCatalog)] ->
+    StateFlow StageOutcome
+dispatchFreshRun rt ac creds target living = do
     let
         -- selected_apps is the comma-separated list of catalyst app NAMES
         -- (e.g. "NammaYatri,KeralaSavaari"), not surfaces. The workflow
@@ -572,7 +764,7 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
         -- Android and iOS workflows.
         selectedApps =
             T.intercalate "," $
-                map (acName . snd) (sortOn (acName . snd) siblings)
+                map (acName . snd) (sortOn (acName . snd) living)
         versionName = newVersion rt
         -- Only meaningful for Android rows. iOS rows have versionCode = 0
         -- here because the iOS workflow's `fastlane fetch_build_number`
@@ -596,6 +788,14 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
     let isDebug = isDebugBuildType (mbcBuildType (mbContext target))
         changeLogVal = mbcChangeLog (mbContext target)
         isProvider = acSurface ac == "driver"
+        -- Batched (multi-app) consumer run: a run-level version input would
+        -- force the LEADER's version onto every app, so send NONE — each matrix
+        -- job auto-detects its own next version from the store, and ConfirmTag
+        -- adopts the code from the tag the build pushed. Provider cohorts batch
+        -- only when versions agree (grouped at dispatch), so the provider branch
+        -- below still sends the cohort's shared version_name; for them isBatch
+        -- only switches ConfirmTag to tag-truth code adoption.
+        isBatch = length living > 1
         -- Debug builds skip store version resolution, so newVersion is blank — but
         -- the provider workflow REQUIRES a non-empty version_name. Use a date-based
         -- (CalVer) version, e.g. "2026.6.8", for provider DEBUG builds; provider
@@ -639,18 +839,23 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                     ]
             | otherwise = case acPlatform ac of
                 "ios" ->
-                    KM.fromList
+                    KM.fromList $
                         [ ("selected_apps", Aeson.String selectedApps)
-                        , ("version_number", Aeson.String versionName)
                         , ("change_log", Aeson.String changeLogVal)
                         ]
+                            <> [("version_number", Aeson.String versionName) | not isBatch]
                 _ ->
-                    KM.fromList
+                    KM.fromList $
                         [ ("selected_apps", Aeson.String selectedApps)
-                        , ("version_name", Aeson.String versionName)
-                        , ("version_code", Aeson.String (T.pack (show versionCode)))
                         , ("change_log", Aeson.String changeLogVal)
                         ]
+                            <> ( if isBatch
+                                    then []
+                                    else
+                                        [ ("version_name", Aeson.String versionName)
+                                        , ("version_code", Aeson.String (T.pack (show versionCode)))
+                                        ]
+                               )
         ref = fromMaybe "main" (sourceRef rt)
         body =
             WorkflowDispatchReq
@@ -686,6 +891,7 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                                     mt
                                         { mbWfStatus = bumpStatus (mbWfStatus mt) MBDispatched
                                         , mbBuildStartedAt = Just dispatchedAt
+                                        , mbBatchDispatch = Just isBatch
                                         }
                                 )
                     }
@@ -696,6 +902,7 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                     , "selected_apps" .= selectedApps
                     , "version_name" .= versionName
                     , "version_code" .= versionCode
+                    , "batch" .= isBatch
                     ]
             pure StageSuccess
         -- A 4xx from GitHub means the request itself is rejected — unknown/extra
@@ -757,22 +964,6 @@ execResolveRunId = do
                 Just d -> pure d
                 Nothing -> abort "dispatch_id missing at ResolveRunId"
             attempts <- incrementResolveAttempts (releaseId rt)
-            when (attempts > 10) $ do
-                modify $ \s ->
-                    s
-                        { targetState =
-                            Just $
-                                MobileBuildState
-                                    ( applyMobileTarget s $ \mt ->
-                                        mt{mbWfStatus = MBFailed "run_lookup_timeout"}
-                                    )
-                        }
-                logEvent (releaseId rt) "STATUS_UPDATED" $
-                    object
-                        [ "mb_wf_status" .= ("MBFailed: run_lookup_timeout" :: Text)
-                        , "reason" .= ("ResolveRunId exceeded 10 attempts" :: Text)
-                        ]
-                abort "ResolveRunId: max attempts exceeded"
             let wfPath = acWorkflowPath ac
             res <-
                 listWorkflowRuns
@@ -786,8 +977,43 @@ execResolveRunId = do
             now <- liftIO getCurrentTime
             let dispatchedAt = fromMaybe now (mbBuildStartedAt target)
                 candidates = dispatchRunCandidates dispatchedAt allRuns
-            case candidates of
-                (r : _) -> do
+            -- Bounded retry, two tiers. No candidate at all after ~10 ticks =
+            -- the dispatch never materialised (today's rule). Candidates present
+            -- but not yet disambiguated get a longer budget: matrix jobs only
+            -- list once the run's setup job finishes (minutes), and the run
+            -- itself provably exists.
+            when ((attempts > 10 && null candidates) || attempts > 40) $ do
+                modify $ \s ->
+                    s
+                        { targetState =
+                            Just $
+                                MobileBuildState
+                                    ( applyMobileTarget s $ \mt ->
+                                        mt{mbWfStatus = MBFailed "run_lookup_timeout"}
+                                    )
+                        }
+                logEvent (releaseId rt) "STATUS_UPDATED" $
+                    object
+                        [ "mb_wf_status" .= ("MBFailed: run_lookup_timeout" :: Text)
+                        , "reason" .= ("ResolveRunId exceeded attempts (candidates=" <> T.pack (show (length candidates)) <> ")" :: Text)
+                        ]
+                abort "ResolveRunId: max attempts exceeded"
+            -- One candidate = unambiguous, bind directly (the common case).
+            -- Several candidates = same-workflow runs dispatched within one
+            -- window (provider version cohorts / concurrent operators) — bind
+            -- only to the run that contains THIS row's matrix job.
+            mBound <- case candidates of
+                [] -> pure Nothing
+                [r] -> pure (Just r)
+                _ ->
+                    findRunWithJob
+                        creds
+                        (gitOwner ac)
+                        (gitRepo ac)
+                        (mbcMatrixJobName (mbContext target))
+                        candidates
+            case mBound of
+                Just r -> do
                     let runIdT = T.pack (show (wrId r))
                         headSha = wrHeadSha r
                     setExternalRunIdForDispatch dispatchId runIdT headSha
@@ -819,11 +1045,13 @@ execResolveRunId = do
                             <> " head_sha="
                             <> headSha
                     pure StageSuccess
-                [] -> do
+                Nothing -> do
                     logInfoIO $
                         "[ResolveRunId] "
                             <> releaseId rt
-                            <> " no candidate run yet (attempt "
+                            <> " no verified candidate run yet ("
+                            <> T.pack (show (length candidates))
+                            <> " in window, attempt "
                             <> T.pack (show attempts)
                             <> ")"
                     pure StageWaiting
@@ -934,6 +1162,10 @@ execPollMatrixJobs = mobileStage "PollMatrixJobs" $ do
                     ]
             case (status', conclusion) of
                 ("completed", Just "success") -> pure StageSuccess
+                ("completed", Just "cancelled") ->
+                    -- The shared GH run was cancelled (a sibling's abort or a manual
+                    -- cancel on GitHub) — this build died with it, it didn't fail.
+                    abort "build cancelled — the GH run was cancelled (sibling abort or manual cancel)"
                 ("completed", Just other) ->
                     abort $ "matrix job ended with conclusion=" <> other
                 ("completed", Nothing) ->
@@ -950,9 +1182,12 @@ tag"):
 
 > TAG = {normalize(app)}/prod/{platform}/v{version_name}+{version_code}
 
-and SCC's DispatchWorkflow passes @version_name@ + @version_code@ as inputs, so
-the workflow's auto-detect is skipped and it tags with /exactly/ the version SCC
-resolved. The tag is therefore fully reconstructible from the release row.
+For a SINGLE-app dispatch SCC passes @version_name@ + @version_code@ as inputs,
+so the workflow's auto-detect is skipped and it tags with /exactly/ the version
+SCC resolved — the tag is fully reconstructible from the release row. A BATCHED
+dispatch sends no version inputs (each matrix job auto-versions), so the code is
+workflow-assigned and matched like iOS: any @+\<digits\>@ tag of this version,
+then read the real code back off the tag (@mbBatchDispatch@ / @effCode@).
 
 We must select that exact tag — NOT "the first ref under a broad prefix". GitHub's
 @matching-refs@ API returns refs in ascending lexicographic order, so the first
@@ -1086,30 +1321,6 @@ column — is what makes it reliable: store-sync / rollout passes overwrite
 provided by the ConfirmTag stage guard (skipped once MBTagPushed is reached).
 Best-effort: a Slack failure is logged, never aborts the stage.
 -}
-maybeSendChangelogSlack :: ReleaseTracker -> MobileBuildTargetState -> StateFlow ()
-maybeSendChangelogSlack rt target =
-    case mbcChangelogSummary (mbContext target) of
-        Nothing -> pure () -- this release did not opt in
-        Just bodyRaw -> do
-            mCh <- getMobileSlackChannel
-            case mCh of
-                Nothing ->
-                    logInfoIO $
-                        "[ConfirmTag] "
-                            <> releaseId rt
-                            <> " opted into changelog Slack but mobile_slack_channel is not set — skipping"
-                Just ch -> do
-                    let body = if T.null (T.strip bodyRaw) then mbcChangeLog (mbContext target) else bodyRaw
-                        versionLabel = "v" <> newVersion rt
-                    ok <- lift (sendMobileChangelogSlack ch (appGroup rt) (service rt) versionLabel body)
-                    if ok
-                        then
-                            logEvent (releaseId rt) "CHANGELOG_SLACK_SENT" $
-                                object ["channel" .= ch, "version" .= newVersion rt]
-                        else
-                            logInfoIO $
-                                "[ConfirmTag] " <> releaseId rt <> " changelog Slack send failed (see [SLACK] logs)"
-
 execConfirmTag :: forall m. (StageM ReleaseState m) => m StageOutcome
 execConfirmTag = mobileStage "ConfirmTag" $ do
     rs <- gets id
@@ -1138,16 +1349,18 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                     }
             logEvent (releaseId rt) "TAG_OBSERVED" $
                 object ["tag" .= ("debug-no-tag" :: Text), "source" .= ("debug_skip" :: Text)]
-            -- Debug builds: only posts if mobile_slack_channel is set; body falls
-            -- back to mbcChangeLog (debug create has no rich summary).
-            maybeSendChangelogSlack rt target
+            -- This row just settled (debug tag). Re-check the group barrier: the
+            -- changelog posts ONCE per group when every member has settled.
+            lift (sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext target)) (Just (releaseId rt)))
             pure StageSuccess
         else do
             ac <- appCatalogForRow rt
             creds <- loadGhCredsSafe
             -- Tag scheme differs by surface:
-            --   consumer: {normalize(app)}/prod/{platform}/v{version}+{code} — exact match,
-            --             because SCC supplies version_code on dispatch.
+            --   consumer: {normalize(app)}/prod/{platform}/v{version}+{code} — exact match
+            --             when SCC supplied version_code on dispatch; a batched dispatch
+            --             sends no version inputs, so the code is workflow-assigned and
+            --             matched like iOS (see isBatch/effCode below).
             --   provider: {acName}-v{version}-{code} — the provider workflow assigns the
             --             version code itself (SCC never sends version_code to it), so we
             --             match the {acName}-v{version}- prefix and read the code back.
@@ -1156,20 +1369,26 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                 platform = acPlatform ac
                 version = newVersion rt
                 mCode = mbcVersionCode (mbContext target)
+                -- Batched dispatch sent NO version inputs (each app auto-versions),
+                -- so the code SCC pre-resolved was never given to the workflow —
+                -- match like iOS (any +<digits> tag of this version, highest wins)
+                -- and read the real code back off the pushed tag.
+                isBatch = mbBatchDispatch target == Just True
+                effCode = if isBatch then Nothing else mCode
                 prefix
                     | isProvider = acName ac <> "-v"
                     | otherwise = normalizeAppSegment (acName ac) <> "/prod/" <> platform <> "/v"
                 providerVerPrefix = acName ac <> "-v" <> version <> "-"
                 expectedTag
-                    | isProvider = providerVerPrefix <> maybe "<code>" (T.pack . show) mCode
-                    | otherwise = prefix <> version <> maybe "" (\c -> "+" <> T.pack (show c)) mCode
+                    | isProvider = providerVerPrefix <> maybe "<code>" (T.pack . show) effCode
+                    | otherwise = prefix <> version <> maybe "" (\c -> "+" <> T.pack (show c)) effCode
             res <- listTags creds (gitOwner ac) (gitRepo ac) prefix
             refs <- case res of
                 Right xs -> pure xs
                 Left e -> retry ("listTags failed: " <> e)
             let mSelected
-                    | isProvider = selectProviderBuildTag providerVerPrefix mCode refs
-                    | otherwise = selectBuildTag prefix version mCode refs
+                    | isProvider = selectProviderBuildTag providerVerPrefix effCode refs
+                    | otherwise = selectBuildTag prefix version effCode refs
             case mSelected of
                 Nothing -> do
                     -- Tag not pushed yet. Wall-clock guard (mirrors
@@ -1214,7 +1433,12 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                     -- at dispatch); it's embedded in the tag it pushed. Read it back so
                     -- every store-bound row carries its identity code — version+code is the
                     -- key the store_status join matches on.
-                    let observedCode = maybe (codeFromTag isProvider providerVerPrefix prefix version tagName) Just mCode
+                    -- effCode known → trust it (exact match found). Unknown (iOS /
+                    -- batched) → the tag's embedded code is the truth; fall back to
+                    -- the pre-resolved one only for a bare (codeless) tag.
+                    let observedCode = case effCode of
+                            Just c -> Just c
+                            Nothing -> maybe mCode Just (codeFromTag isProvider providerVerPrefix prefix version tagName)
                     modify $ \s ->
                         s
                             { targetState =
@@ -1239,10 +1463,10 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                             <> releaseId rt
                             <> " bound to tag="
                             <> tagName
-                    -- Build is fully successful and tagged: post the changelog to
-                    -- Slack if this release opted in. Exactly-once via the
-                    -- ConfirmTag stage guard (skipped once MBTagPushed is reached).
-                    maybeSendChangelogSlack rt target
+                    -- This row just settled (tag observed). Re-check the group
+                    -- barrier: the changelog posts ONCE per group, when every
+                    -- member has settled (shipped or failed) and ≥1 shipped.
+                    lift (sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext target)) (Just (releaseId rt)))
                     pure StageSuccess
 
 {- | Stage 7: Map fine-grained @MobileBuildWFStatus@ to the user-facing
@@ -1470,14 +1694,25 @@ retry msg = liftIO (throwIO (MobileRetry msg))
 logInfoIO :: Text -> StateFlow ()
 logInfoIO = liftIO . logInfoG
 
-{- | 'loadGhCreds' variant for post-dispatch polling stages. If the token
-refresh fails (clock drift, transient 401, etc.) we retry on the next
-tick instead of killing the release — the creds already worked for
-dispatch, so the failure is transient.
+{- | 'loadGhCreds' variant for post-dispatch polling stages. Retries on the
+next tick instead of killing the release when GitHub auth fails transiently
+(clock drift, transient 401, GitHub 5xx, network blip) — the creds already
+worked for dispatch, so the failure is transient.
+
+Critically, this FORCES the installation-token exchange here, inside the try.
+'loadGhCreds' only reads the env secrets; the token is minted lazily on the
+first API call ('getInstallationToken' inside 'listJobs' etc.), whose 'throwM'
+would otherwise escape that call's 'Left' handling and reach 'mobileStage' as
+an UNCAUGHT exception — turning a transient blip into a fatal build abort even
+while the GitHub job is building fine. Pre-warming the (cached) token here means
+the later API calls reuse it and never do the exchange themselves.
 -}
 loadGhCredsSafe :: StateFlow GhAppCreds
 loadGhCredsSafe = do
-    eCreds <- MC.try @_ @SomeException loadGhCreds
+    eCreds <- MC.try @_ @SomeException $ do
+        c <- loadGhCreds
+        _ <- getInstallationToken c -- force + cache the token so poll calls can't throw
+        pure c
     case eCreds of
         Right c -> pure c
         Left ex -> retry ("GH auth refresh failed (will retry): " <> T.pack (show ex))
@@ -1530,6 +1765,7 @@ applyMobileTarget rs f =
                             , mbcTagPushed = Nothing
                             , mbcDestination = Nothing
                             , mbcChangelogSummary = Nothing
+                , mbcChangelogSummaryShort = Nothing
                             }
                     , mbExternalRunId = Nothing
                     , mbMatrixJobStatus = Nothing
@@ -1538,6 +1774,7 @@ applyMobileTarget rs f =
                     , mbResolveAttempts = Nothing
                     , mbReviewSubmittedAt = Nothing
                     , mbReviewLastPolledAt = Nothing
+                    , mbBatchDispatch = Nothing
                     }
 
 {- | Status bump that respects ordering: never regresses to an earlier
@@ -1614,6 +1851,42 @@ findDispatchIdForRelease rid = withDb $ \db ->
         pure $ case rows of
             [Only mDid] -> mDid
             _ -> Nothing
+
+{- | The @external_run_id@ COLUMN for a release row. Deliberately a column
+read, not a target-state read: the leader's ResolveRunId stamps the column on
+every sibling in one UPDATE, and a follower must see that stamp on its next
+tick — its own persisted target state predates it.
+-}
+externalRunIdForRelease ::
+    (MonadFlow m) =>
+    Text ->
+    m (Maybe Text)
+externalRunIdForRelease rid = withDb $ \db ->
+    withConn db $ \conn -> do
+        rows <-
+            query
+                conn
+                "SELECT external_run_id FROM release_tracker WHERE id = ? LIMIT 1"
+                (Only rid)
+        pure $ case rows of
+            [Only mRunId] -> mRunId
+            _ -> Nothing
+
+{- | (id, release_context) for every row in a dispatch group — terminal rows
+included. The leader gate parses these to detect a dispatch by a dead
+ex-leader (a context carrying @mbBuildStartedAt@) and adopt its run instead of
+double-dispatching.
+-}
+findDispatchGroupContexts ::
+    (MonadFlow m) =>
+    Text ->
+    m [(Text, Maybe Text)]
+findDispatchGroupContexts did = withDb $ \db ->
+    withConn db $ \conn ->
+        query
+            conn
+            "SELECT id, release_context FROM release_tracker WHERE dispatch_id = ?"
+            (Only did)
 
 {- | @pg_try_advisory_lock(hashtext($1))@ — non-blocking advisory lock
 keyed on the dispatch id. Returns True if acquired, False if held by

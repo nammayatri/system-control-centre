@@ -15,6 +15,9 @@ interface AuthContextType {
   // configurable without a redeploy. This is the single knob the UI keys off for
   // debug vs release. Defaults to 'release'.
   buildType: 'debug' | 'release';
+  // Whether Slack posting is enabled (slack_enabled server_config). The mobile
+  // create form hides its "Send changelog to Slack" opt-in when this is false.
+  slackEnabled: boolean;
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
@@ -28,6 +31,7 @@ const AuthContext = createContext<AuthContextType>({
   deploymentAccess: [],
   env: 'UAT',
   buildType: 'release',
+  slackEnabled: true,
   login: async () => { },
   logout: () => { },
   isAuthenticated: false,
@@ -38,16 +42,19 @@ type BuildType = 'debug' | 'release';
 const asBuildType = (v: unknown): BuildType => (v === 'debug' ? 'debug' : 'release');
 
 // Hydrate from localStorage so the app paints an authed UI before the profile request returns.
-function loadCached(): { user: AuthUser | null; products: ProductAccess[]; deploymentAccess: DeploymentAccess[]; env: string; buildType: BuildType } {
+function loadCached(): { user: AuthUser | null; products: ProductAccess[]; deploymentAccess: DeploymentAccess[]; env: string; buildType: BuildType; slackEnabled: boolean } {
   try {
     const user = JSON.parse(localStorage.getItem('auth_user') || 'null');
     const products = JSON.parse(localStorage.getItem('auth_products') || '[]');
     const deploymentAccess = JSON.parse(localStorage.getItem('auth_deployment_access') || '[]');
     const env = localStorage.getItem('auth_env') || 'UAT';
     const buildType = asBuildType(localStorage.getItem('auth_build_type'));
-    return { user, products, deploymentAccess, env, buildType };
+    // Default true unless explicitly cached false, so the opt-in isn't hidden
+    // before the profile request confirms the config.
+    const slackEnabled = localStorage.getItem('auth_slack_enabled') !== 'false';
+    return { user, products, deploymentAccess, env, buildType, slackEnabled };
   } catch {
-    return { user: null, products: [], deploymentAccess: [], env: 'UAT', buildType: 'release' };
+    return { user: null, products: [], deploymentAccess: [], env: 'UAT', buildType: 'release', slackEnabled: true };
   }
 }
 
@@ -60,6 +67,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [deploymentAccess, setDeploymentAccess] = useState<DeploymentAccess[]>(storedToken ? cached.deploymentAccess : []);
   const [env, setEnv] = useState<string>(cached.env);
   const [buildType, setBuildType] = useState<BuildType>(cached.buildType);
+  const [slackEnabled, setSlackEnabled] = useState<boolean>(cached.slackEnabled);
   const [loading, setLoading] = useState(!cached.user && !!storedToken);
 
   const clearAuth = useCallback(() => {
@@ -73,6 +81,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem('auth_deployment_access');
     localStorage.removeItem('auth_env');
     localStorage.removeItem('auth_build_type');
+    localStorage.removeItem('auth_slack_enabled');
   }, []);
 
   // Validate token on mount — only logout on 401, not network errors
@@ -90,13 +99,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setToken(storedToken);
         const newEnv = data.config?.env || 'UAT';
         const newBuildType = asBuildType(data.config?.buildType);
+        const newSlack = data.config?.slackEnabled ?? true;
         setEnv(newEnv);
         setBuildType(newBuildType);
+        setSlackEnabled(newSlack);
         localStorage.setItem('auth_user', JSON.stringify(data.person));
         localStorage.setItem('auth_products', JSON.stringify(data.products || []));
         localStorage.setItem('auth_deployment_access', JSON.stringify(data.deploymentAccess || []));
         localStorage.setItem('auth_env', newEnv);
         localStorage.setItem('auth_build_type', newBuildType);
+        localStorage.setItem('auth_slack_enabled', String(newSlack));
       })
       .catch((err) => {
         // Only 401 clears auth — network errors keep the cached user so a transient
@@ -116,14 +128,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setDeploymentAccess(data.deploymentAccess || []);
     const newEnv = data.config?.env || 'UAT';
     const newBuildType = asBuildType(data.config?.buildType);
+    const newSlack = data.config?.slackEnabled ?? true;
     setEnv(newEnv);
     setBuildType(newBuildType);
+    setSlackEnabled(newSlack);
     localStorage.setItem('sc_token', data.token);
     localStorage.setItem('auth_user', JSON.stringify(data.person));
     localStorage.setItem('auth_products', JSON.stringify(data.products || []));
     localStorage.setItem('auth_deployment_access', JSON.stringify(data.deploymentAccess || []));
     localStorage.setItem('auth_env', newEnv);
     localStorage.setItem('auth_build_type', newBuildType);
+    localStorage.setItem('auth_slack_enabled', String(newSlack));
   }, []);
 
   const logout = useCallback(() => {
@@ -141,6 +156,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         deploymentAccess,
         env,
         buildType,
+        slackEnabled,
         login,
         logout,
         isAuthenticated: !!token && !!user,

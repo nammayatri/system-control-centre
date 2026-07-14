@@ -24,12 +24,12 @@ import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getD
 import Products.Autopilot.K8s.Execute (isNotFoundError, runCmd)
 import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
-import Products.Autopilot.Mobile.Github (cancelRun, dispatchRunCandidates, listWorkflowRuns, wrId)
+import Products.Autopilot.Mobile.Github (cancelRun, dispatchRunCandidates, findRunWithJob, listWorkflowRuns, wrId)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
 import Products.Autopilot.Mobile.Queries.Tracker (appCatalogForRow, gitOwner, gitRepo)
-import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..), MobileBuildWFStatus (..))
+import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), MobileBuildWFStatus (..))
 import Products.Autopilot.Mobile.Types.Storage (acWorkflowPath)
-import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted)
+import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted, sendGroupChangelogSlackIfSettled)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks, releaseService)
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getMaxCleanupRetries, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
@@ -494,6 +494,14 @@ runReleaseWorkflow _cfg rtNew mts = do
                             scheduleNewDeploymentCleanup abortedTracker mts
                             notifyReleaseAborted abortedTracker
                             releaseService (NT.appGroup abortedTracker) (NT.service abortedTracker)
+                            -- Fleet changelog: a build failing may be the LAST
+                            -- group member to settle — re-check the group barrier
+                            -- so the one Slack post still fires for whatever shipped.
+                            case mts of
+                                Just (MobileBuildState s)
+                                    | isJust (mbcChangelogSummary (mbContext s)) ->
+                                        sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext s)) Nothing
+                                _ -> pure ()
         Right _ -> do
             -- The workflow persists state via persistWorkflowState in each cprV2
             -- stage, but the Recorded monad's bind may short-circuit the final
@@ -756,6 +764,13 @@ handleAbortingRelease cfg rt mts = do
             insertReleaseEvent (releaseId rt) "BUSINESS" "ABORT_HANDLED" (toJSON ("User abort processed" :: String))
             notifyReleaseAborted aborted
             releaseService (NT.appGroup aborted) (NT.service aborted)
+            -- Fleet changelog: a user abort may settle the last group member —
+            -- re-check the group barrier so the one Slack post still fires.
+            case mts of
+                Just (MobileBuildState s)
+                    | isJust (mbcChangelogSummary (mbContext s)) ->
+                        sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext s)) Nothing
+                _ -> pure ()
 
 {- | Best-effort cancel of a mobile release's in-flight GitHub run on abort. If
 @external_run_id@ isn't resolved yet, it locates the dispatched run via the same
@@ -773,7 +788,7 @@ cancelMobileGhRun rt mts =
                     -- early-window abort (dispatched, not yet resolved) still stops the build.
                     mRunId <- case mbExternalRunId mb of
                         Just r | not (T.null r) -> pure (Just r)
-                        _ -> resolveForCancel creds ac (mbBuildStartedAt mb)
+                        _ -> resolveForCancel creds ac (mbcMatrixJobName (mbContext mb)) (mbBuildStartedAt mb)
                     case mRunId of
                         Nothing ->
                             logInfo $
@@ -806,8 +821,11 @@ cancelMobileGhRun rt mts =
                     <> " is MobileBuild but has no MobileBuildState target; skipping GH cancel"
   where
     -- Locate the dispatched run by the ResolveRunId window (workflow_dispatch within
-    -- [dispatchedAt-30s, +5m], newest). Best-effort: Nothing on no dispatch time or API error.
-    resolveForCancel creds ac mDispatchedAt = case mDispatchedAt of
+    -- [dispatchedAt-30s, +5m], newest). Best-effort: Nothing on no dispatch time or API
+    -- error. With SEVERAL same-workflow runs in the window (provider version cohorts /
+    -- concurrent operators), cancel only a run PROVEN to contain this row's matrix job —
+    -- cancelling an unverified guess could kill another cohort's builds.
+    resolveForCancel creds ac jobName mDispatchedAt = case mDispatchedAt of
         Nothing -> pure Nothing
         Just dispatchedAt -> do
             eRuns <- listWorkflowRuns creds (gitOwner ac) (gitRepo ac) (acWorkflowPath ac)
@@ -815,7 +833,21 @@ cancelMobileGhRun rt mts =
                 Left e -> do
                     logWarning $ "[handleAbortingRelease] run lookup for cancel failed for " <> releaseId rt <> ": " <> e
                     pure Nothing
-                Right runs -> pure (mkRunId <$> listToMaybe (dispatchRunCandidates dispatchedAt runs))
+                Right runs -> case dispatchRunCandidates dispatchedAt runs of
+                    [] -> pure Nothing
+                    [r] -> pure (Just (mkRunId r))
+                    rs -> do
+                        mV <- findRunWithJob creds (gitOwner ac) (gitRepo ac) jobName rs
+                        case mV of
+                            Just r -> pure (Just (mkRunId r))
+                            Nothing -> do
+                                logWarning $
+                                    "[handleAbortingRelease] "
+                                        <> releaseId rt
+                                        <> " ambiguous cancel target ("
+                                        <> T.pack (show (length rs))
+                                        <> " runs in window, none verified) — skipping GH cancel"
+                                pure Nothing
     mkRunId r = T.pack (show (wrId r))
 
 -- ============================================================================

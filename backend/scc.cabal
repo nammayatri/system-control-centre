@@ -80,6 +80,8 @@ library
       Products.Autopilot.Mobile.Handlers.Rollout
       Products.Autopilot.Mobile.Handlers.Versions
       Products.Autopilot.Mobile.Handlers.StoreMonitor
+      Products.Autopilot.Mobile.Handlers.Groups
+      Products.Autopilot.Mobile.Lifecycle.GroupSummary
       Products.Autopilot.Mobile.Routes
       Products.Autopilot.Mobile.Versioning
       Products.Autopilot.Mobile.Versioning.Play

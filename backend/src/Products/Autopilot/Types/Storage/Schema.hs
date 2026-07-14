@@ -103,6 +103,8 @@ data ReleaseTrackerT f = ReleaseTrackerT
     rtStoreTrack :: Columnar f (Maybe Text),
     rtVersionCode :: Columnar f (Maybe Int32),
     rtTerminalStatus :: Columnar f (Maybe Text),
+    rtReleaseGroupId :: Columnar f (Maybe Text),
+    rtReleaseGroupLabel :: Columnar f (Maybe Text),
     rtCreatedAt :: Columnar f UTCTime,
     rtUpdatedAt :: Columnar f UTCTime
   }
@@ -225,6 +227,8 @@ autopilotDb =
                   rtStoreTrack = fieldNamed "store_track",
                   rtVersionCode = fieldNamed "version_code",
                   rtTerminalStatus = fieldNamed "terminal_status",
+                  rtReleaseGroupId = fieldNamed "release_group_id",
+                  rtReleaseGroupLabel = fieldNamed "release_group_label",
                   rtCreatedAt = fieldNamed "date_created",
                   rtUpdatedAt = fieldNamed "last_updated"
                 },

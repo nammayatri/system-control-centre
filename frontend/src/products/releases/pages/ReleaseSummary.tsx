@@ -19,6 +19,7 @@ import type { LatestBuild } from '../types';
 import { ABValidationModal } from '../components/ABValidationModal';
 import { Badge } from '../../../shared/ui/badge';
 import { StatusBadge } from '../components/StatusBadge';
+import { ReleaseStatusBadge } from '../components/ReleaseStatusBadge';
 import { isFirebaseInternal, FirebaseInternalBadge } from '../components/FirebaseBadge';
 import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
@@ -1017,10 +1018,12 @@ const ReleaseSummary: React.FC = () => {
     rollout && (s === 'INPROGRESS' || isPromotableSnapshot) && rollout.rdPhase !== 'building'
       ? { label: rollout.rdStatusLabel, variant: rollout.rdStatusVariant }
       : null;
-  // While the build sits in a lifecycle stage, the generic Pause / Fast-Forward
-  // (rollout-runner) controls don't apply — the real action is Promote/Rollout in
-  // the Store panel.
-  const inMobileLifecycle = !!mobileStatus;
+  // Shared-run blast radius: abort cancels the whole GitHub run, so warn which
+  // sibling apps' still-running builds die with it (BE lists those only).
+  const mobileAbortWarning =
+    isMobile && rollout?.rdRunSiblings?.length
+      ? `This cancels the shared GitHub run. Still building in the same run and will ALSO be cancelled: ${rollout.rdRunSiblings.join(', ')}.`
+      : undefined;
 
   const matchedMobileApp = isMobile
     ? mobileApps.find(
@@ -1132,6 +1135,10 @@ const ReleaseSummary: React.FC = () => {
           </div>
           {mobileStatus ? (
             <Badge variant={mobileStatus.variant} dot>{mobileStatus.label}</Badge>
+          ) : isMobile ? (
+            // The ONE shared mobile badge (Failed / User aborted / phase labels)
+            // — never a raw engine status that drifts from the other surfaces.
+            <ReleaseStatusBadge release={release} />
           ) : (
             <StatusBadge status={release.status} />
           )}
@@ -1232,18 +1239,17 @@ const ReleaseSummary: React.FC = () => {
           {(s === 'INPROGRESS') && (
             <>
               <PermissionGate product="autopilot" permission="RELEASE_PAUSE" appGroup={release.appGroup}>
-                {/* Pause/Fast-Forward are rollout-runner controls. They don't apply
-                    to a mobile build held on the store awaiting Promote — the real
-                    action lives in the Store release panel below. Abort stays
-                    (cancel the release). */}
-                {!inMobileLifecycle && (
+                {/* Pause/Fast-Forward are generic k8s rollout-runner controls; a mobile
+                    build has no such runner (GitHub Actions while building, the Store
+                    panel once on-store), so Pause never applies to mobile. Abort stays. */}
+                {!isMobile && (
                   <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50" loading={pauseMut.isPending} onClick={() => doAction('pause', () => pauseMut.mutateAsync(id!))}><Pause className="w-3.5 h-3.5" /> Pause</Button>
                 )}
                 {/* Abort visibility is BE-driven (rdAbortable): shown only while the
                     build is still Building. A rejected / on-store / terminal build can't
                     be un-shipped, so Abort is hidden. Non-mobile keeps the INPROGRESS rule. */}
                 {(!isMobile || !!rollout?.rdAbortable) && (
-                  <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true)}><Square className="w-3.5 h-3.5" /> Abort</Button>
+                  <Button size="sm" variant="danger" loading={abortMut.isPending} onClick={() => doAction('abort', () => abortMut.mutateAsync(id!), true, mobileAbortWarning)}><Square className="w-3.5 h-3.5" /> Abort</Button>
                 )}
               </PermissionGate>
               {!isMobile && (

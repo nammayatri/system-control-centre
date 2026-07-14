@@ -93,6 +93,7 @@ import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
     findMobileReleaseById,
+    findRunSiblingsStillBuilding,
     logEvent,
     markReleaseInProgress,
     retireOlderHeldInternal,
@@ -160,6 +161,10 @@ data PromoteForm = PromoteForm
     , pfIsStoreSync :: Bool
     -- ^ True when this release was synced from the store (notes already default
     -- to the live production notes) → the FE must NOT swap in the AI summary.
+    , pfAiShort :: Maybe Text
+    -- ^ The AI short synopsis captured at CREATE time — describes the commits
+    -- that went into this build (a live AI re-query would diff the branch
+    -- head, which may have moved). The FE prefers this as the AI source.
     }
     deriving (Eq, Show, Generic)
 
@@ -227,10 +232,14 @@ data RolloutDetail = RolloutDetail
     -- it isn't already live on production. The FE gates the promote UI on this instead
     -- of re-deriving it, so it never offers a promote the backend would reject.
     , rdAbortable :: Bool
-    -- ^ BE truth for "can this build be aborted right now" — only while it's still
-    -- Building (no store artifact yet). A build that reached the store or went terminal
-    -- (rejected / superseded / live / failed) can't be un-shipped, so the FE hides Abort.
-    -- Derived from the phase, so a stale INPROGRESS status column can't resurrect Abort.
+    -- ^ BE truth for "can this build be aborted right now" — only while the build job
+    -- can still be killed (wf before MBSubmittedToStore: nothing uploaded yet). A build
+    -- whose artifact reached the store or that went terminal can't be un-shipped, so
+    -- the FE hides Abort. Phase+wf derived; a stale status column can't resurrect it.
+    , rdRunSiblings :: [Text]
+    -- ^ OTHER apps still building in the same shared GH run (dispatch group). Aborting
+    -- this row cancels the whole run — these builds die with it, so the FE lists them
+    -- in the abort confirm. Empty for solo runs / already-uploaded siblings.
     , rdAppCatalogId :: Int32
     -- ^ The app's @app_catalog.id@ — lets the FE force a store-sync
     -- (@POST /mobile/store-monitor/:id/refresh@) before re-reading, so a just-published
@@ -294,6 +303,7 @@ promoteFormH _ap rid = do
             , pfLocked = isPostPromote (mbWfStatus target)
             , pfPhasedSupported = platform == "ios"
             , pfIsStoreSync = isStoreSync
+            , pfAiShort = mbcChangelogSummaryShort (mbContext target)
             }
 
 {- | Best-effort fetch of the current production "What's New" from the store
@@ -314,20 +324,17 @@ fetchProdReleaseNotes ac platform = case (platform, acPackageName ac) of
             Nothing -> pure Nothing
     _ -> pure Nothing
 
-{- | The default release notes for a promote: for a store-synced release SCC has no
-changelog of its own (the synthetic row reads "Synced from store"), so default to
-the current production "What's New" pulled from the store. SCC-built releases keep
-their changelog (the FE may swap in the AI short summary). Best-effort — any store
-read failure falls back to the changelog. Shared by the promote form and bulk
-promote (where the operator supplies no per-app notes).
+{- | The default release notes for a promote: the current production "What's New"
+pulled from the store, for EVERY row — store notes address users, not the build
+pipeline, so the workflow changelog is only the last resort (store read failed /
+nothing live yet). SCC-built rows may still get the AI short summary swapped in
+by the FE. Shared by the promote form and bulk promote (where the operator
+supplies no per-app notes).
 -}
 promoteDefaultNotes :: ReleaseTrackerRow -> MobileBuildTargetState -> AppCatalog -> Flow Text
 promoteDefaultNotes row target ac = do
     let changelog = mbcChangeLog (mbContext target)
-        isStoreSync = rtMode row == Just "STORE_SYNC"
-    if isStoreSync
-        then fromMaybe changelog <$> fetchProdReleaseNotes ac (rtEnv row)
-        else pure changelog
+    fromMaybe changelog <$> fetchProdReleaseNotes ac (rtEnv row)
 
 {- | POST /releases/:id/promote — fill the release notes and submit the app for
 review. iOS: set What's New on every locale + releaseType MANUAL + submit, then
@@ -533,10 +540,19 @@ rolloutDetailH _ap rid = do
                 pct
                 storeTrack
         disp = displayStatusInferred (reviewInferredOf (parseJsonTextMaybe (rtMetadata row))) ph
+        canAbort = abortable (mbWfStatus target) ph
     notAhead <- atOrBelowProduction ac (rtNewVersion row) (rtVersionCode row)
     liveProd <- liveOnProduction ac (rtNewVersion row) (rtVersionCode row)
     syncedAgo <- secondsSinceLastSync (acId ac)
     cooldown <- fromIntegral <$> getStoreRefreshCooldownSeconds
+    -- Shared-run blast radius: aborting cancels the whole GH run, so surface
+    -- the sibling apps still building in it. Only fetched while Abort is live.
+    runSiblings <-
+        if canAbort
+            then case rtDispatchId row of
+                Just did | not (T.null did) -> findRunSiblingsStillBuilding did rid
+                _ -> pure []
+            else pure []
     pure
         RolloutDetail
             { rdReleaseId = rid
@@ -554,7 +570,8 @@ rolloutDetailH _ap rid = do
             , rdPhasedId = phasedId
             , rdStoreTrack = storeTrack
             , rdPromotable = promotableStage && not notAhead
-            , rdAbortable = abortable ph
+            , rdAbortable = canAbort
+            , rdRunSiblings = runSiblings
             , rdAppCatalogId = acId ac
             , rdLiveOnProduction = liveProd
             , rdSyncedSecondsAgo = syncedAgo

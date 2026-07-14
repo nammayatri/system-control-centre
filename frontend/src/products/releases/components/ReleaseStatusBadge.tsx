@@ -49,6 +49,26 @@ export function ReleaseStatusBadge({
         </>
       );
     }
+    // Terminal truth beats the raw status word: an abort that came from the
+    // Actions pipeline is a FAILURE, a user abort names the actor. (The wf
+    // phase can be stale here — aborting flips rt_status only — so key on the
+    // status itself; a genuine review 'rejected' phase still wins below.)
+    if (release.status === 'USER_ABORTED') {
+      return (
+        <>
+          {firebaseBadge}
+          <Badge variant="danger" dot>User aborted</Badge>
+        </>
+      );
+    }
+    if (release.status === 'ABORTED' && phase !== 'rejected') {
+      return (
+        <>
+          {firebaseBadge}
+          <Badge variant="danger" dot>Failed</Badge>
+        </>
+      );
+    }
     // The raw rt_status is misleading for a build with a store lifecycle — render the
     // canonical backend displayStatus (§15: one label on every surface) for active AND
     // terminal store phases, so the list can't drift from the monitor/detail (a live

@@ -161,22 +161,25 @@ chunkCategorizeSystem =
 
 {- | System prompt for the short release-notes synopsis. Tiny output (1-2 sentences)
 ⇒ fast, reliable. Fills @summary_short@, which is written to be reusable AS the store
-release notes when an app is submitted for review — so it is GENERIC: no app name, no
-commit counts, no version numbers, no author handles.
+release notes when an app is submitted for review — so it is GENERIC: category-level
+prose only (new features / UI improvements / bug fixes / performance), never specific
+feature or screen names, and no app name, commit counts, versions, or author handles.
 -}
 synopsisSystem :: Text
 synopsisSystem =
     systemPreamble
         <> "TASK: Write 1-2 sentences of release notes for an app-store review submission, \
-           \summarizing the changes in <context>. Ignore automation noise (bot commits, CI \
-           \version bumps) when judging the release. Lead with what the release delivers for users \
-           \— headline integrations, new features and enhancements — then the notable fixes \
-           \(grouped by area), and close with the overall risk profile (low / medium / high). \
-           \Generic product prose a reviewer can read: do NOT mention the app name, commit \
-           \counts, version numbers, or author/@handles. No bullet list, no headings, no \
-           \preamble. Example tone: \"This release integrates invoice and marketing APIs, \
-           \enhances bus tracking and ride search, and introduces new SDKs. It includes \
-           \production fixes for UI, navigation, and SOS, with a low risk profile.\""
+           \summarizing the changes in <context> at the CATEGORY level only. Say WHAT KINDS of \
+           \changes the release contains — new features, UI/UX improvements, bug fixes, \
+           \performance and stability improvements — never the specific features, screens, \
+           \flows, or APIs touched (no \"pickup pin\", \"ride history\" etc.). Ignore automation \
+           \noise (bot commits, CI version bumps) when judging the release. Mention only the \
+           \categories actually present, leading with the dominant one. No risk assessment. \
+           \Do NOT mention the app name, commit counts, version numbers, or author/@handles. \
+           \No bullet list, no headings, no preamble. Start DIRECTLY with the content — \
+           \never open with \"This release brings/includes/contains\" or similar filler. \
+           \Example tone: \"New features and UI improvements, along with several bug fixes \
+           \and performance enhancements.\""
 
 {- | Wrap untrusted text as a labelled data block, stripping our own delimiters
 from the body so injected content cannot forge a tag boundary.

@@ -31,12 +31,14 @@ export function groupAppsBySurface(apps: AppCatalogEntry[]): AppSurfaceGroup[] {
   })).filter((g) => g.apps.length > 0);
 }
 
-/** Collapse-state hook: every group open by default, toggle by surface key. */
-export function useGroupCollapse() {
-  const [closed, setClosed] = React.useState<Partial<Record<SurfaceKey, boolean>>>({});
-  const isOpen = (key: SurfaceKey) => !closed[key];
+/** Collapse-state hook, toggle by surface key. `defaultOpen` sets the initial
+ *  state for every group (default true; pass false to start collapsed). */
+export function useGroupCollapse(defaultOpen = true) {
+  // Track explicit user toggles; unseen keys fall back to `defaultOpen`.
+  const [flipped, setFlipped] = React.useState<Partial<Record<SurfaceKey, boolean>>>({});
+  const isOpen = (key: SurfaceKey) => (key in flipped ? !!flipped[key] : defaultOpen);
   const toggle = (key: SurfaceKey) =>
-    setClosed((s) => ({ ...s, [key]: !s[key] }));
+    setFlipped((s) => ({ ...s, [key]: !(key in s ? s[key] : defaultOpen) }));
   return { isOpen, toggle };
 }
 

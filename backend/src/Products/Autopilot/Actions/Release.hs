@@ -40,6 +40,8 @@ module Products.Autopilot.Actions.Release
 
     -- * Helpers exported for other modules
     isValidK8sVersion,
+    injectPromotable,
+    injectStoreState,
   )
 where
 
@@ -316,7 +318,7 @@ injectStoreState cellsByApp pair@(tracker, mts) =
                   disp = displayStatusInferred (reviewInferredOf (NT.metadata tracker)) ph
                   rc' =
                     fmap
-                      (addMobileLifecycle (T.pack (show (mbWfStatus s))) rollout pct track (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph))
+                      (addMobileLifecycle (T.pack (show (mbWfStatus s))) rollout pct track (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) Nothing)
                       (NT.releaseContext tracker)
                in (tracker {releaseContext = rc'}, mts)
     _ -> pair

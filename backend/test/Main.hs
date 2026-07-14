@@ -61,6 +61,7 @@ import Products.Autopilot.Mobile.RevertResolver (
  )
 import Products.Autopilot.Mobile.Types
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (BuildKind (..), buildKind, claimsStoreIdentity, hasStoreIdentity)
+import Products.Autopilot.Mobile.Lifecycle.GroupSummary (GroupSummary (..), MemberFact (..), deriveGroupSummary, effectivePhase)
 import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), Projection (..), ReleasePhase (..), Variant (..), abortable, canTransition, displayStatus, displayStatusInferred, pEngineStatus, phaseFromFields, phaseToWfStatus, project)
 import Products.Autopilot.Mobile.Versioning (TrackInfo (..), computeNextVersion)
 import Products.Autopilot.Mobile.StoreSync (ExternalReviewAction (..), PendingOutcome (..), ReconcileAction (..), androidReconcileAction, detectConsoleRollout, detectIosRelease, externalReviewAction, iosPhasedReconcileAction, pendingOutcome, pendingPublishRelease, retireOutcome, reviewStateToStatus)
@@ -71,7 +72,7 @@ import qualified Data.Map.Strict as Map
 import Products.Autopilot.Mobile.Versioning.Apple (AscPhasedState (..), AscReviewState (..), AscVersion (..), BuildsResp (..), appStoreStateToReview, applePhasedPercent, computeNextIosVersion, firstWhatsNew, parseAscVersion, parseVersionStatesWithBuild, selectInFlightReview)
 import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), ProdTrackRelease (..), StoreTrackSnapshot (..), parseProdReleaseNotes, parseProdTrackReleases, parseRolloutState, parseTrackSnapshot, userFractionInRange)
 import Products.Autopilot.Queries.ReleaseTracker (keepSnapshot)
-import Products.Autopilot.Mobile.Workflow (codeFromTag, reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
+import Products.Autopilot.Mobile.Workflow (codeFromTag, electDispatchLeader, reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
 import qualified Products.Autopilot.Types.Target
@@ -159,6 +160,8 @@ main = do
     section "[39] Store release-notes parsing (Play track + iOS whatsNew)" testStoreReleaseNotesParse
     section "[40] Out-of-band review detection (in-flight select / map / reconcile)" testExternalReviewDetection
     section "[41] Android pending-publish detection (track parse / pick rule)" testAndroidPendingPublish
+    section "[49] Dispatch-group leader election (first living sibling)" testElectDispatchLeader
+    section "[50] Group summary derivation (fleet stage rollup)" testGroupSummary
     section "[42] List dedup (hide store-sync snapshot when external review owns build)" testListDedup
     section "[43] Console rollout detection (approved android adopts a Console-set %)" testConsoleRolloutDetect
     section "[44] iOS release detection (adopt an out-of-band App Store Connect release)" testIosReleaseDetect
@@ -1025,6 +1028,7 @@ testClaimsStoreIdentity = do
                 , mbcTagPushed = Nothing
                 , mbcDestination = dest
                 , mbcChangelogSummary = Nothing
+                , mbcChangelogSummaryShort = Nothing
                 }
     -- Store-bound builds DO claim an identity.
     assertBool "consumer Android (release, no destination)" $ claimsStoreIdentity (ctx "release" Nothing)
@@ -1153,15 +1157,17 @@ testReleasePhase = do
         "resolveStoreState: version on both tracks -> production (live) wins"
         (Just (Just "completed", Nothing, Just "production"))
         (resolveStoreState bothTracks "9.9.14" (Just 2))
-    -- abortable: only a still-Building mobile release can be aborted. A rejected /
-    -- on-store / terminal build can't be un-shipped, so the FE must not offer Abort.
-    assertBool "Building is abortable" (abortable Building)
-    assertBool "Rejected is NOT abortable" (not (abortable (Rejected "")))
-    assertBool "InReview (on store) is NOT abortable" (not (abortable InReview))
-    assertBool "RollingOut is NOT abortable" (not (abortable (RollingOut 0.5)))
-    assertBool "Live is NOT abortable" (not (abortable Live))
-    assertBool "Superseded is NOT abortable" (not (abortable Superseded))
-    assertBool "InternalHeld (on internal) is NOT abortable" (not (abortable InternalHeld))
+    -- abortable: only while the build job can still be killed (nothing uploaded).
+    -- From MBSubmittedToStore the artifact is on the store — no un-ship, no Abort.
+    assertBool "Building (job running) is abortable" (abortable MBBuilding Building)
+    assertBool "Building (pre-dispatch) is abortable" (abortable MBVersionResolved Building)
+    assertBool "Building but already uploaded is NOT abortable" (not (abortable MBSubmittedToStore Building))
+    assertBool "Rejected is NOT abortable" (not (abortable MBReviewRejected (Rejected "")))
+    assertBool "InReview (on store) is NOT abortable" (not (abortable MBInReview InReview))
+    assertBool "RollingOut is NOT abortable" (not (abortable MBRollingOut (RollingOut 0.5)))
+    assertBool "Live is NOT abortable" (not (abortable MBCompleted Live))
+    assertBool "Superseded is NOT abortable" (not (abortable MBTagPushed Superseded))
+    assertBool "InternalHeld (on internal) is NOT abortable" (not (abortable MBTagPushed InternalHeld))
 
 testMobileBuildContextJsonRoundTrip :: IO ()
 testMobileBuildContextJsonRoundTrip = do
@@ -1177,6 +1183,7 @@ testMobileBuildContextJsonRoundTrip = do
                 , mbcTagPushed = Nothing
                 , mbcDestination = Nothing
                 , mbcChangelogSummary = Nothing
+                , mbcChangelogSummaryShort = Nothing
                 }
     let encoded = Aeson.encode ctx
     let decoded = Aeson.decode encoded :: Maybe MobileBuildContext
@@ -1383,6 +1390,35 @@ testSelectBuildTag = do
         (codeFromTag False "" "odishayatri/prod/ios/v" "3.3.17" "odishayatri/prod/ios/v3.3.17")
 
 -- ============================================================================
+-- [49] Dispatch-group leader election (Workflow.electDispatchLeader)
+-- ============================================================================
+
+testElectDispatchLeader :: IO ()
+testElectDispatchLeader = do
+    putStrLn "Leader = first NON-TERMINAL sibling by id (id-ascending input)"
+    -- (id, isTerminal) pairs, id-ascending — the shape findSiblingsByDispatchId yields.
+    assertEqual
+        "all living -> first id leads"
+        "a"
+        (electDispatchLeader "c" [("a", False), ("b", False), ("c", False)])
+    assertEqual
+        "singleton group (today's flow) -> self leads"
+        "a"
+        (electDispatchLeader "a" [("a", False)])
+    assertEqual
+        "dead ex-leader -> leadership slides to the next living sibling"
+        "b"
+        (electDispatchLeader "b" [("a", True), ("b", False), ("c", False)])
+    assertEqual
+        "leadership skips every terminal row, not just the first"
+        "c"
+        (electDispatchLeader "d" [("a", True), ("b", True), ("c", False), ("d", False)])
+    assertEqual
+        "all terminal (mid-tick external flip) -> falls back to self"
+        "d"
+        (electDispatchLeader "d" [("a", True), ("b", True)])
+
+-- ============================================================================
 -- [20] Mobile Version Bump (mirrors fastlane-android.yaml lines 124-189)
 -- ============================================================================
 
@@ -1424,10 +1460,14 @@ testAscReviewAndPhased = do
     assertEqual "REJECTED" (AscRejected "REJECTED") (appStoreStateToReview "REJECTED")
     assertEqual "METADATA_REJECTED" (AscRejected "METADATA_REJECTED") (appStoreStateToReview "METADATA_REJECTED")
     assertEqual "unknown -> other" (AscOther "PROCESSING_FOR_APP_STORE") (appStoreStateToReview "PROCESSING_FOR_APP_STORE")
-    assertEqual "phased day 0 = 1%" 1 (applePhasedPercent 0)
-    assertEqual "phased day 3 = 10%" 10 (applePhasedPercent 3)
-    assertEqual "phased day 6 = 100%" 100 (applePhasedPercent 6)
-    assertEqual "phased day >6 clamps to 100%" 100 (applePhasedPercent 9)
+    -- currentDayNumber is 1-BASED (1–7) — a live ACTIVE release started
+    -- Jul 6 reported day 6 on Jul 11 (= 50%, not 100%).
+    assertEqual "phased day 1 = 1%" 1 (applePhasedPercent 1)
+    assertEqual "phased day 4 = 10%" 10 (applePhasedPercent 4)
+    assertEqual "phased day 6 = 50%" 50 (applePhasedPercent 6)
+    assertEqual "phased day 7 = 100%" 100 (applePhasedPercent 7)
+    assertEqual "phased day >7 clamps to 100%" 100 (applePhasedPercent 9)
+    assertEqual "defensive day 0 reads as day 1" 1 (applePhasedPercent 0)
     assertEqual
         "parse appStoreVersions response -> first {id, state}"
         (Just (AscVersion "12345" "PENDING_DEVELOPER_RELEASE"))
@@ -1483,17 +1523,21 @@ testRolloutReconcileClassify = do
         CompleteRollout
         (iosPhasedReconcileAction (AscPhasedState "COMPLETE" (Just 6)))
     assertEqual
-        "ios ACTIVE day0 -> rolling_out @ 1%"
+        "ios ACTIVE day1 -> rolling_out @ 1%"
         (SetRollout "rolling_out" (Just 1))
-        (iosPhasedReconcileAction (AscPhasedState "ACTIVE" (Just 0)))
+        (iosPhasedReconcileAction (AscPhasedState "ACTIVE" (Just 1)))
     assertEqual
-        "ios ACTIVE day3 -> rolling_out @ 10%"
+        "ios ACTIVE day4 -> rolling_out @ 10%"
         (SetRollout "rolling_out" (Just 10))
-        (iosPhasedReconcileAction (AscPhasedState "ACTIVE" (Just 3)))
+        (iosPhasedReconcileAction (AscPhasedState "ACTIVE" (Just 4)))
     assertEqual
-        "ios PAUSED day4 -> halted @ 20%"
+        "ios ACTIVE day6 -> rolling_out @ 50% (the Lynx regression)"
+        (SetRollout "rolling_out" (Just 50))
+        (iosPhasedReconcileAction (AscPhasedState "ACTIVE" (Just 6)))
+    assertEqual
+        "ios PAUSED day5 -> halted @ 20%"
         (SetRollout "halted" (Just 20))
-        (iosPhasedReconcileAction (AscPhasedState "PAUSED" (Just 4)))
+        (iosPhasedReconcileAction (AscPhasedState "PAUSED" (Just 5)))
     assertEqual
         "ios INACTIVE (transient) -> LeaveAsIs"
         (LeaveAsIs "INACTIVE")
@@ -1529,8 +1573,12 @@ testAscBuildInfoParse = do
 testIosVersionBumpRule :: IO ()
 testIosVersionBumpRule = do
     putStrLn "iOS next-version: bump when TestFlight==prod, reuse when TestFlight ahead"
-    assertEqual "no TestFlight history -> 1.0.0" "1.0.0" (computeNextIosVersion Nothing Nothing)
-    assertEqual "no TestFlight, prod present -> 1.0.0" "1.0.0" (computeNextIosVersion Nothing (Just "3.3.10"))
+    assertEqual "no TestFlight history, no live version -> 1.0.0" "1.0.0" (computeNextIosVersion Nothing Nothing)
+    -- TestFlight builds expire after 90 days: an app that hasn't built recently
+    -- reads TF-empty while live on the store — next must come from the live
+    -- version, never 1.0.0 (the KeralaSavaari/Yatri regression).
+    assertEqual "TF expired/empty but app LIVE -> bump live patch" "3.3.107" (computeNextIosVersion Nothing (Just "3.3.106"))
+    assertEqual "TF expired/empty, live 3.0.27 -> 3.0.28" "3.0.28" (computeNextIosVersion Nothing (Just "3.0.27"))
     assertEqual "TF == prod -> bump patch" "3.3.74" (computeNextIosVersion (Just "3.3.73") (Just "3.3.73"))
     assertEqual "TF ahead of prod -> reuse TF verbatim" "3.3.73" (computeNextIosVersion (Just "3.3.73") (Just "3.3.70"))
     assertEqual "TF present, no live prod yet -> reuse TF" "3.3.73" (computeNextIosVersion (Just "3.3.73") Nothing)
@@ -1846,8 +1894,8 @@ testIosReleaseDetect = do
     putStrLn "ios release detect: approved iOS adopts an out-of-band App Store Connect release"
     assertEqual "held (PENDING_DEVELOPER_RELEASE) → no change" Nothing (detectIosRelease AscApproved (AscPhasedState "INACTIVE" Nothing))
     assertEqual "still in review → no change" Nothing (detectIosRelease AscInReview (AscPhasedState "INACTIVE" Nothing))
-    assertEqual "live + phased ACTIVE day2 → rolling_out @ 5%" (Just (SetRollout "rolling_out" (Just 5))) (detectIosRelease AscLive (AscPhasedState "ACTIVE" (Just 2)))
-    assertEqual "live + phased PAUSED day3 → halted @ 10%" (Just (SetRollout "halted" (Just 10))) (detectIosRelease AscLive (AscPhasedState "PAUSED" (Just 3)))
+    assertEqual "live + phased ACTIVE day3 → rolling_out @ 5%" (Just (SetRollout "rolling_out" (Just 5))) (detectIosRelease AscLive (AscPhasedState "ACTIVE" (Just 3)))
+    assertEqual "live + phased PAUSED day4 → halted @ 10%" (Just (SetRollout "halted" (Just 10))) (detectIosRelease AscLive (AscPhasedState "PAUSED" (Just 4)))
     assertEqual "live + phased COMPLETE → complete" (Just CompleteRollout) (detectIosRelease AscLive (AscPhasedState "COMPLETE" (Just 6)))
     assertEqual "live + no phasing (INACTIVE) → complete" (Just CompleteRollout) (detectIosRelease AscLive (AscPhasedState "INACTIVE" Nothing))
 
@@ -2171,3 +2219,76 @@ testDiffLink = do
     assertEqual "buildDiffLink no repo -> Nothing" Nothing (buildDiffLink Nothing "a1b2c3" "d4e5f6")
     assertEqual "buildDiffLink empty repo -> Nothing" Nothing (buildDiffLink (Just "") "a1b2c3" "d4e5f6")
     assertEqual "buildDiffLink non-hex new -> Nothing" Nothing (buildDiffLink (Just "owner/repo") "a1b2c3" "release-x")
+
+-- ─── [50] Group summary derivation ─────────────────────────────────
+
+testGroupSummary :: IO ()
+testGroupSummary = do
+    let m rid ph st appr plat =
+            MemberFact
+                { mfReleaseId = rid
+                , mfApp = "App" <> rid
+                , mfPlatform = plat
+                , mfStatus = st
+                , mfApproved = appr
+                , mfPhase = ph
+                }
+        stageOf = gsStage . deriveGroupSummary
+        verbOf = gsPrimaryVerb . deriveGroupSummary
+
+    -- CREATED drafts derive phase "building" but must NOT read as building
+    assertEqual "all drafts unapproved -> approval" "approval" (stageOf [m "1" "building" CREATED False "android"])
+    assertEqual "approval verb" (Just "approve") (verbOf [m "1" "building" CREATED False "android"])
+    assertEqual "mixed approved/unapproved -> approval first" "approval" (stageOf [m "1" "building" CREATED True "android", m "2" "building" CREATED False "ios"])
+    assertEqual "all approved drafts -> dispatch" "dispatch" (stageOf [m "1" "building" CREATED True "android"])
+    assertEqual "really building (INPROGRESS) -> building" "building" (stageOf [m "1" "building" INPROGRESS True "android"])
+    assertEqual "building has no verb" Nothing (verbOf [m "1" "building" INPROGRESS True "android"])
+    assertEqual "any internal_held -> promote" "promote" (stageOf [m "1" "internal_held" INPROGRESS True "android", m "2" "building" INPROGRESS True "ios"])
+    assertEqual "in_review (no held) -> in_review" "in_review" (stageOf [m "1" "in_review" INPROGRESS True "ios"])
+    assertEqual "approved-held -> releasing" "releasing" (stageOf [m "1" "approved" INPROGRESS True "ios"])
+    assertEqual "releasing verb is platform-split" (Just "release_or_rollout") (verbOf [m "1" "approved" INPROGRESS True "ios"])
+    assertEqual "rolling -> rolling_out" "rolling_out" (stageOf [m "1" "rolling_out" INPROGRESS True "android"])
+    -- halted must not fall through to done (design doc §6 must-fix)
+    assertEqual "all halted -> rolling_out" "rolling_out" (stageOf [m "1" "halted" INPROGRESS True "android"])
+    assertEqual "all live -> done" "done" (stageOf [m "1" "live" COMPLETED True "android"])
+
+    -- attention is a banner, never a stage: 1 rejected + 1 rolling stays rolling_out
+    let mixed = [m "1" "rejected" ABORTED True "android", m "2" "rolling_out" INPROGRESS True "ios"]
+    assertEqual "rejected member doesn't pin the stage" "rolling_out" (stageOf mixed)
+    assertEqual "rejected member lands in attention" ["1"] (map mfReleaseId (gsAttention (deriveGroupSummary mixed)))
+    -- halted is attention too, while still driving the rolling_out stage
+    assertEqual "halted joins attention" ["1"] (map mfReleaseId (gsAttention (deriveGroupSummary [m "1" "halted" INPROGRESS True "android"])))
+    -- an all-terminal-trouble group is done + all-attention (banner carries it)
+    let allBad = [m "1" "build_failed" ABORTED True "android", m "2" "rejected" ABORTED True "ios"]
+    assertEqual "all-terminal-trouble -> done stage" "done" (stageOf allBad)
+    assertEqual "all-terminal-trouble -> both in attention" 2 (length (gsAttention (deriveGroupSummary allBad)))
+
+    -- counts cover ALL members including terminal ones
+    let counted = deriveGroupSummary (mixed <> [m "3" "live" COMPLETED True "android"])
+    assertEqual "counts include terminal phases" (Just 1) (Map.lookup "rejected" (gsCounts counted))
+    assertEqual "counts include live" (Just 1) (Map.lookup "live" (gsCounts counted))
+
+    -- stage ordering: promote beats in_review beats releasing when mixed
+    assertEqual
+        "held+review+approved mixed -> promote wins"
+        "promote"
+        (stageOf [m "1" "internal_held" INPROGRESS True "a", m "2" "in_review" INPROGRESS True "b", m "3" "approved" INPROGRESS True "c"])
+
+    -- effectivePhase: abort flips rt_status but not mb_wf_status, so a stale
+    -- "building" phase must fold to a TRUTHFUL terminal slug (who ended it);
+    -- a terminal PHASE always wins over the status.
+    assertEqual "user abort + stale building phase -> user_aborted" "user_aborted" (effectivePhase USER_ABORTED "building")
+    assertEqual "user abort + generic aborted phase -> user_aborted" "user_aborted" (effectivePhase USER_ABORTED "aborted")
+    assertEqual "Actions-side failure (ABORTED, no MBFailed) -> build_failed" "build_failed" (effectivePhase ABORTED "building")
+    assertEqual "decision-engine abort -> aborted" "aborted" (effectivePhase GCLT_ABORTED "building")
+    assertEqual "discarded draft -> discarded" "discarded" (effectivePhase DISCARDED "building")
+    assertEqual "rejected phase survives aborted status" "rejected" (effectivePhase ABORTED "rejected")
+    assertEqual "build_failed phase survives abort status" "build_failed" (effectivePhase ABORTED "build_failed")
+    assertEqual "live phase survives terminal status" "live" (effectivePhase COMPLETED "live")
+    assertEqual "in-flight status keeps its phase" "in_review" (effectivePhase INPROGRESS "in_review")
+    -- and through the derivation: the group must NOT read as building
+    let staleAborted = [m "1" "user_aborted" USER_ABORTED True "ios", m "2" "user_aborted" USER_ABORTED True "ios"]
+    assertEqual "all user-aborted (post-reconcile) -> done stage" "done" (stageOf staleAborted)
+    assertEqual "both user-aborted in attention" 2 (length (gsAttention (deriveGroupSummary staleAborted)))
+    -- discarded drafts are counted but never attention noise
+    assertEqual "discarded excluded from attention" 0 (length (gsAttention (deriveGroupSummary [m "1" "discarded" DISCARDED False "android"])))

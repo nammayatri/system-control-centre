@@ -45,30 +45,13 @@ data MobileBuildContext = MobileBuildContext
     { mbcVersionCode :: Maybe Int32
     , mbcChangeLog :: Text
     , mbcBuildType :: Text
-    -- ^ "debug" or "release" — set from the @mobile_build_type@ config at
-    -- release creation and persisted so the release's build type reflects
-    -- what it WAS, independent of the environment's current setting.
     , mbcReleaseGroupId :: Text
     , mbcMatrixJobName :: Text
     , mbcOtaNamespace :: Maybe Text
     , mbcTagPushed :: Maybe Text
     , mbcDestination :: Maybe Text
-    -- ^ Play-store destination for provider PROD Android builds ONLY —
-    -- "GooglePlay" or "Firebase" — chosen by the operator on the create form
-    -- (mirrors provider-prod-apk-gen.yaml's required @destination@ input).
-    -- 'Nothing' for every other build (consumer, iOS, debug, and provider
-    -- rows created before this field existed); the dispatch falls back to
-    -- "GooglePlay" in that case. Consumed solely by the provider prod Android
-    -- @workflow_dispatch@ — ignored everywhere else.
     , mbcChangelogSummary :: Maybe Text
-    -- ^ Per-release opt-in for the post-build changelog Slack message (create
-    -- page's "Send changelog summary to Slack" tickbox). @Just body@ = opted in
-    -- AND carries the body to post (the rich AI summary, or the typed changelog
-    -- as fallback); 'Nothing' = NOT opted in (no post). It lives HERE, in
-    -- @release_context@, rather than in the shared @metadata@ column — because
-    -- many writers (store-sync, rollout reconcile) overwrite @metadata@ wholesale
-    -- between create and ConfirmTag and would clobber it. @release_context@ is
-    -- owned solely by the workflow, so the opt-in survives to ConfirmTag.
+    , mbcChangelogSummaryShort :: Maybe Text
     }
     deriving (Eq, Show, Generic)
 
@@ -85,6 +68,7 @@ instance ToJSON MobileBuildContext where
             , "tag_pushed" .= mbcTagPushed c
             , "destination" .= mbcDestination c
             , "changelog_summary" .= mbcChangelogSummary c
+            , "changelog_summary_short" .= mbcChangelogSummaryShort c
             ]
 
 instance FromJSON MobileBuildContext where
@@ -113,6 +97,7 @@ instance FromJSON MobileBuildContext where
             <*> pure mDest
             -- absent in rows persisted before this field → Nothing (not opted in)
             <*> o .:? "changelog_summary"
+            <*> o .:? "changelog_summary_short"
 
 data MobileBuildWFStatus
     = MBInit
@@ -155,6 +140,11 @@ data MobileBuildTargetState = MobileBuildTargetState
     , mbReviewLastPolledAt :: Maybe UTCTime
     -- ^ When the review-poll stage last hit the store. Throttle anchor
     -- (@review_poll_interval_sec@). Backward-compatible Maybe (old rows → Nothing).
+    , mbBatchDispatch :: Maybe Bool
+    -- ^ Just True = dispatched in a multi-app run WITHOUT version inputs (each
+    -- matrix job auto-versions; ConfirmTag adopts the code from the pushed tag).
+    -- Nothing / Just False = single dispatch with explicit version inputs.
+    -- Backward-compatible Maybe (old rows → Nothing).
     }
     deriving (Eq, Show, Generic)
 

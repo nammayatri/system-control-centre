@@ -77,30 +77,53 @@ function renderWithMentions(text: string) {
  * fade/slide so the swap feels intentional.
  */
 export function MobileChangelogAiSummary({
-  app,
-  surface,
-  platform,
+  app = '',
+  surface = '',
+  platform = '',
   branch,
   base = 'production',
   versionName = '',
   versionCode = '',
+  combinedApps,
+  defaultCollapsed = false,
   onSummary,
 }: {
-  app: string;
-  surface: string;
-  platform: string;
+  app?: string;
+  surface?: string;
+  platform?: string;
   branch: string;
   base?: string;
   versionName?: string;
   versionCode?: string;
+  // Start the panel collapsed (title bar only). Generation still runs; the
+  // summary is one click away. `onSummary` fires regardless.
+  defaultCollapsed?: boolean;
+  // ≥2 entries switch the panel to the COMBINED endpoint: one changelog for the
+  // whole selection — common changes + per-app extras (app/surface/platform
+  // props are ignored in that mode). `version` shows next to the app in the header.
+  combinedApps?: { app: string; surface: string; platform: string; version?: string }[];
   // Reports the current summary text (AI prose once ready, else the deterministic
-  // changelog) up to the parent, so the create page can stash it for "send to Slack".
-  onSummary?: (text: string) => void;
+  // changelog) up to the parent, so the create page can stash it for "send to
+  // Slack". `short` is the AI synopsis — present only once ready; the create
+  // page stores it on the release for the promote form's store-notes prefill.
+  onSummary?: (text: string, short?: string) => void;
 }) {
-  const enabled = !!(app && surface && platform && branch);
+  const combined = (combinedApps?.length ?? 0) >= 2;
+  const comboKey = combined
+    ? combinedApps!
+        .map((a) => `${a.app}|${a.surface}|${a.platform}|${a.version ?? ''}`)
+        .sort()
+        .join(',')
+    : '';
+  const enabled = combined ? !!branch : !!(app && surface && platform && branch);
   const q = useQuery({
-    queryKey: ['mobile-changelog-ai', app, surface, platform, branch, base, versionName, versionCode],
-    queryFn: () => mobileApi.changelogAiSummary(app, surface, platform, branch, base, versionName, versionCode),
+    queryKey: combined
+      ? ['mobile-changelog-ai-combined', comboKey, branch, base]
+      : ['mobile-changelog-ai', app, surface, platform, branch, base, versionName, versionCode],
+    queryFn: () =>
+      combined
+        ? mobileApi.changelogAiSummaryCombined(combinedApps!, branch, base)
+        : mobileApi.changelogAiSummary(app, surface, platform, branch, base, versionName, versionCode),
     enabled,
     // Poll only while the detached generation is in flight; stop once ready/failed.
     refetchInterval: (query) => (query.state.data?.status === 'pending' ? 4000 : false),
@@ -109,7 +132,7 @@ export function MobileChangelogAiSummary({
     staleTime: 15 * 1000,
   });
 
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const [copied, setCopied] = useState(false);
   const panelId = useId();
   const d = q.data;
@@ -119,8 +142,8 @@ export function MobileChangelogAiSummary({
 
   // Surface the current summary text to the parent (for "send changelog to Slack").
   useEffect(() => {
-    if (onSummary && d?.summaryLong) onSummary(d.summaryLong);
-  }, [onSummary, d?.summaryLong]);
+    if (onSummary && d?.summaryLong) onSummary(d.summaryLong, d.summaryShort?.trim() || undefined);
+  }, [onSummary, d?.summaryLong, d?.summaryShort]);
 
   const onCopy = async () => {
     if (!copyText) return;
@@ -133,10 +156,13 @@ export function MobileChangelogAiSummary({
     }
   };
   const isAi = d?.status === 'ready' && !!d.model;
-  const badge = !d?.available
-    ? null
-    : isPending
-      ? { label: 'Generating…', cls: 'bg-violet-100 text-violet-700', spin: true }
+  // "Generating…" covers the in-flight generation AND the very first fetch
+  // (before any data), so the collapsed title bar always shows it's working.
+  const generating = enabled && (isPending || (!d && (q.isLoading || q.isFetching)));
+  const badge = generating
+    ? { label: 'Generating…', cls: 'bg-violet-100 text-violet-700', spin: true }
+    : !d?.available
+      ? null
       : isAi
         ? { label: `AI · ${d.model}`, cls: 'bg-emerald-100 text-emerald-700', spin: false }
         : { label: 'Auto-generated', cls: 'bg-zinc-100 text-zinc-600', spin: false };
@@ -164,7 +190,13 @@ export function MobileChangelogAiSummary({
               )}
             />
             <Sparkles size={13} className="shrink-0" />
-            <span className="truncate">Changelog summary</span>
+            <span className="truncate">
+              {combined
+                ? d?.available && d.usableCount != null && d.usableCount < combinedApps!.length
+                  ? `Combined changelog — ${d.usableCount} of ${combinedApps!.length} apps`
+                  : `Combined changelog — ${combinedApps!.length} apps, one summary`
+                : 'Changelog summary'}
+            </span>
             {badge && (
               <span className={cn('ml-0.5 inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold transition-colors', badge.cls)}>
                 {badge.spin && <Loader2 size={9} className="animate-spin" />}

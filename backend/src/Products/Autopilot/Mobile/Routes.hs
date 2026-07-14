@@ -16,7 +16,16 @@ import Core.Auth.Protected (Protected)
 import Core.Environment (Flow)
 import Data.Int (Int32)
 import Data.Text (Text)
+import Data.Time (UTCTime)
 import Products.Autopilot.Mobile.Handlers.AppCatalog
+import Products.Autopilot.Mobile.Handlers.Groups (
+    ChangelogSlackState,
+    GroupDetailResp,
+    GroupsListResp,
+    groupDetailH,
+    listGroupsH,
+    resendGroupChangelogH,
+ )
 import Products.Autopilot.Mobile.Handlers.Live
 import Products.Autopilot.Mobile.Handlers.Release
 import Products.Autopilot.Mobile.Handlers.Revert (
@@ -109,6 +118,17 @@ type MobileAPI =
             :> Protected 'AP_RELEASE_CREATE
             :> QueryParam "q" Text
             :> Get '[JSON] BranchesResp
+        -- Where does an existing (app, version, code) build live? Powers the
+        -- "open the existing build" link on the create page's duplicate error.
+        :<|> "mobile"
+            :> "build-location"
+            :> Protected 'AP_RELEASE_CREATE
+            :> QueryParam' '[Required, Strict] "app" Text
+            :> QueryParam' '[Required, Strict] "surface" Text
+            :> QueryParam' '[Required, Strict] "platform" Text
+            :> QueryParam' '[Required, Strict] "version" Text
+            :> QueryParam "code" Int32
+            :> Get '[JSON] BuildLocationResp
         :<|> "mobile"
             :> "changelog-preview"
             :> Protected 'AP_RELEASE_CREATE
@@ -129,6 +149,13 @@ type MobileAPI =
             :> QueryParam "versionName" Text
             :> QueryParam "versionCode" Text
             :> Get '[JSON] AiSummaryResp
+        -- One combined changelog for a multi-app selection: common changes +
+        -- per-app extras, computed by SHA set arithmetic, AI-summarized once.
+        :<|> "mobile"
+            :> "changelog-ai-summary-combined"
+            :> Protected 'AP_AI_SUMMARIZE
+            :> ReqBody '[JSON] CombinedAiSummaryReq
+            :> Post '[JSON] AiSummaryResp
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "mobile-revert"
@@ -246,6 +273,24 @@ type MobileAPI =
             :> Protected 'AP_RELEASE_ROLLOUT
             :> ReqBody '[JSON] BulkRolloutReq
             :> Post '[JSON] BulkActionResp
+        -- ── Release groups (fleet design §5, Phase 2 read model) ──
+        :<|> "mobile"
+            :> "groups"
+            :> Protected 'AP_RELEASE_VIEW
+            :> QueryParam "since" UTCTime
+            :> Get '[JSON] GroupsListResp
+        :<|> "mobile"
+            :> "groups"
+            :> Capture "groupId" Text
+            :> Protected 'AP_RELEASE_VIEW
+            :> Get '[JSON] GroupDetailResp
+        :<|> "mobile"
+            :> "groups"
+            :> Capture "groupId" Text
+            :> "changelog-slack"
+            :> "resend"
+            :> Protected 'AP_RELEASE_CREATE
+            :> Post '[JSON] ChangelogSlackState
 
 mobileServer :: ServerT MobileAPI Flow
 mobileServer =
@@ -257,8 +302,10 @@ mobileServer =
         :<|> dispatchMobileReleasesH
         :<|> liveReleasesH
         :<|> (\ap mq -> listBranchesH ap mq)
+        :<|> (\ap app surface platform version code -> buildLocationH ap app surface platform version code)
         :<|> (\ap app surface platform branch base -> changelogPreviewH ap app surface platform branch base)
         :<|> (\ap app surface platform branch base vName vCode -> changelogAiSummaryH ap app surface platform branch base vName vCode)
+        :<|> (\ap req -> changelogAiSummaryCombinedH ap req)
         :<|> (\rid ap -> mobileRevertDraftH ap rid)
         :<|> (\rid ap req -> mobileRevertCreateH ap rid req)
         :<|> (\rid ap sha -> verifyCommitH ap rid sha)
@@ -281,3 +328,7 @@ mobileServer =
         -- ── Bulk promote / rollout ──
         :<|> (\ap req -> bulkPromoteH ap req)
         :<|> (\ap req -> bulkRolloutH ap req)
+        -- ── Release groups ──
+        :<|> (\ap mSince -> listGroupsH ap mSince)
+        :<|> (\gid ap -> groupDetailH ap gid)
+        :<|> (\gid ap -> resendGroupChangelogH ap gid)

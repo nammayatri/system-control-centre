@@ -553,12 +553,18 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
     -- The revert build inherits the bad release's build type (debug already
     -- excluded above); default to release if its state is somehow unparseable.
     let buildTypeVal = maybe "release" (mbcBuildType . mbContext) badState
+    -- Inherit the bad release's group so the revert shows up beside its
+    -- siblings on the group page; fall back to a fresh singleton for legacy
+    -- rows whose context carries no (or a blank) group id.
+    let inheritedGroupId = case fmap (mbcReleaseGroupId . mbContext) badState of
+            Just gid | not (T.null (T.strip gid)) -> gid
+            _ -> newId
     let ctx =
             MobileBuildContext
                 { mbcVersionCode = rrNewVersionCode
                 , mbcChangeLog = rrChangelog
                 , mbcBuildType = buildTypeVal
-                , mbcReleaseGroupId = newId
+                , mbcReleaseGroupId = inheritedGroupId
                 , mbcMatrixJobName = acName ac <> if isDebugBuildType buildTypeVal then "-Debug" else "-Release"
                 , mbcOtaNamespace = Nothing
                 , mbcTagPushed = Nothing
@@ -567,6 +573,7 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
                   mbcDestination = badState >>= (mbcDestination . mbContext)
                 , -- A revert is system-initiated; it never opts into a changelog post.
                   mbcChangelogSummary = Nothing
+                , mbcChangelogSummaryShort = Nothing
                 }
         targetState =
             MobileBuildTargetState
@@ -579,6 +586,7 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
                 , mbResolveAttempts = Nothing
                 , mbReviewSubmittedAt = Nothing
                 , mbReviewLastPolledAt = Nothing
+                , mbBatchDispatch = Nothing
                 }
     sourceRefStr <- case rrSourceCommit of
         Just commitSha | not (T.null commitSha) -> do

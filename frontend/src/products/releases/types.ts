@@ -52,6 +52,9 @@ export type CreateMobileReleasesItem = {
   // changelog summary captured on the create page; backend falls back to
   // the request-level changeLog when omitted
   changelogSummary?: string;
+  // AI short synopsis captured on the create page — stored so the promote
+  // form can prefill store notes without re-querying the AI
+  changelogSummaryShort?: string;
 };
 
 // Store destination for provider (driver) PROD Android builds — mirrors the

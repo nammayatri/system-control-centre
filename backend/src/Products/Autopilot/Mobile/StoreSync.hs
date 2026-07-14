@@ -80,9 +80,11 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (
     upsertStoreStatus,
  )
 import Products.Autopilot.Mobile.Queries.Tracker (
+    adoptDraftAsStoreBuild,
     appCatalogForRowRaw,
     completeExternalReviewRow,
     convergeStoreSyncRow,
+    findAdoptableDraft,
     findActiveRolloutReleases,
     findExternalReviewRow,
     findExternalReviewRowForVersion,
@@ -859,6 +861,7 @@ insertExternalReviewRow ac mCode inferred version reviewStatus = do
                 , mbcTagPushed = Nothing
                 , mbcDestination = Nothing
                 , mbcChangelogSummary = Nothing
+                , mbcChangelogSummaryShort = Nothing
                 }
         targetState =
             MobileBuildTargetState
@@ -871,6 +874,7 @@ insertExternalReviewRow ac mCode inferred version reviewStatus = do
                 , mbResolveAttempts = Nothing
                 , mbReviewSubmittedAt = Just now
                 , mbReviewLastPolledAt = Just now
+                , mbBatchDispatch = Nothing
                 }
         base = mkMobileTrackerRow rid ac targetState (Just version) Nothing "store-sync" now
         row =
@@ -927,7 +931,68 @@ insertSyntheticRelease ac version Nothing track =
             <> " ("
             <> track
             <> "): no build code resolved; retrying next sync"
-insertSyntheticRelease ac version mCode track = do
+insertSyntheticRelease ac version mCode@(Just code) track = do
+    -- An SCC draft that claimed this exact (version, code) but was never
+    -- dispatched means the build shipped OUTSIDE SCC: adopt the draft (skip
+    -- its build stages) instead of leaving it stale with phantom
+    -- approve/dispatch buttons and minting nothing (identity index).
+    adopted <- adoptManualDraft ac version code track
+    unless adopted $ mintSyntheticRelease ac version mCode track
+
+{- | Adopt a never-dispatched MANUAL draft whose identity just appeared on a
+store track: flip it to INPROGRESS + @MBTagPushed@ with the derived store tag —
+exactly the held-at-build-complete state the pipeline would have reached — so
+promote takes over as the next step. Returns False when there is no such draft
+(or a concurrent dispatch won the CAS) and the normal synthetic path should run.
+-}
+adoptManualDraft :: (MonadFlow m) => AppCatalog -> Text -> Int32 -> Text -> m Bool
+adoptManualDraft ac version code track = do
+    mDraft <- findAdoptableDraft (acName ac) (acSurface ac) (acPlatform ac) version code
+    case mDraft of
+        Just row
+            | Just ts <- parseMobileTargetState (rtTargetState row) -> do
+                now <- liftIO getCurrentTime
+                let ts' =
+                        ts
+                            { mbWfStatus = MBTagPushed
+                            , mbMatrixJobStatus = Just "completed"
+                            , mbBuildCompletedAt = Just now
+                            , mbContext = (mbContext ts){mbcTagPushed = derivedStoreTag ac version (Just code)}
+                            }
+                ok <-
+                    adoptDraftAsStoreBuild
+                        (rtId row)
+                        track
+                        (encodeJsonText (MobileBuildState ts'))
+                        (fromMaybe now (rtStartTime row))
+                        now
+                when ok $ do
+                    logInfo $
+                        "[STORE_SYNC] Adopted SCC draft "
+                            <> rtId row
+                            <> " for "
+                            <> acName ac
+                            <> " v"
+                            <> version
+                            <> "+"
+                            <> T.pack (show code)
+                            <> " — build uploaded outside SCC ("
+                            <> track
+                            <> "); skipped to build-complete"
+                    insertReleaseEvent (rtId row) "BUSINESS" "STORE_BUILD_ADOPTED" $
+                        object
+                            [ "app" .= acName ac
+                            , "platform" .= acPlatform ac
+                            , "version" .= version
+                            , "version_code" .= code
+                            , "track" .= track
+                            , "note" .= ("build uploaded outside SCC; draft skipped to build-complete" :: Text)
+                            ]
+                pure ok
+        _ -> pure False
+
+mintSyntheticRelease :: (MonadFlow m) => AppCatalog -> Text -> Maybe Int32 -> Text -> m ()
+mintSyntheticRelease ac version mCode track = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
@@ -943,6 +1008,7 @@ insertSyntheticRelease ac version mCode track = do
                 , mbcTagPushed = derivedTag
                 , mbcDestination = Nothing
                 , mbcChangelogSummary = Nothing
+                , mbcChangelogSummaryShort = Nothing
                 }
         targetState =
             MobileBuildTargetState
@@ -955,6 +1021,7 @@ insertSyntheticRelease ac version mCode track = do
                 , mbResolveAttempts = Nothing
                 , mbReviewSubmittedAt = Nothing
                 , mbReviewLastPolledAt = Nothing
+                , mbBatchDispatch = Nothing
                 }
         encodedCtx = encodeJsonText (MobileBuildState targetState)
         row =
@@ -1008,6 +1075,10 @@ insertSyntheticRelease ac version mCode track = do
                 , rtStoreTrack = Just track
                 , rtVersionCode = mCode
                 , rtTerminalStatus = Nothing
+                , -- Singleton pseudo-group: addressable by URL, but excluded from
+                  -- the groups list (mode=STORE_SYNC).
+                  rtReleaseGroupId = Just groupId
+                , rtReleaseGroupLabel = Nothing
                 , rtCreatedAt = now
                 , rtUpdatedAt = now
                 }

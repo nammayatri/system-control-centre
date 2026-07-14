@@ -225,14 +225,14 @@ promotableStage = \case
     InternalHeld -> True
     _ -> False
 
--- | Whether Abort still applies. Only a build with no store/distributable artifact
--- yet (still Building) can be cancelled. Once it's on a store track — or terminal
--- (rejected / superseded / live / failed) — Abort can't un-ship it (it re-surfaces
--- via store-sync), so the UI must not offer it. The BE truth for the FE's Abort gate.
-abortable :: ReleasePhase -> Bool
-abortable = \case
-    Building -> True
-    _ -> False
+-- | Whether Abort still applies: only while the build job can actually be
+-- killed. From MBSubmittedToStore on, the artifact is already uploaded — abort
+-- can't un-ship it (it re-surfaces via store-sync), so the UI must not offer
+-- it even though the phase still reads Building until the tag is confirmed.
+abortable :: MobileBuildWFStatus -> ReleasePhase -> Bool
+abortable wf Building =
+    wf `elem` [MBInit, MBVersionResolved, MBDispatched, MBRunIdResolved, MBBuilding]
+abortable _ _ = False
 
 -- | The mb_wf_status mirror for a phase. Just = setPhase writes it into the
 -- target-state JSON. Nothing = leave wf-status as the build pipeline set it
