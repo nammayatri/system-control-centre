@@ -212,6 +212,12 @@ autopilotConfigs =
         DeploymentGroup
         "Pod readiness: max container restart count before failing release"
         (Just "autopilot")
+    , ConfigEntry
+        "pod_ready_stabilize_seconds"
+        (IntConfig 0)
+        DeploymentGroup
+        "Extra wait after new-version pods go Ready, before flipping VS traffic. 0 = skip"
+        (Just "autopilot")
     , -- HPA default (grouped under ScalingGroup)
       ConfigEntry
         "hpa_default_min_pods_config"

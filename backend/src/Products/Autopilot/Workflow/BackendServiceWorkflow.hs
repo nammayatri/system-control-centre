@@ -65,6 +65,7 @@ import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWit
 import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildCreateHpaFromTemplateCommand, buildDeleteHpaCommand, getHpaMinMax, hpaExists)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRolloutWithRetries, getVirtualServiceJson)
 import Products.Autopilot.Notifications (
+    notifyDecisionThreadMessage,
     notifyGenericThreadMessage,
     notifyReleaseCompleted,
     notifyReleaseProgress,
@@ -1191,6 +1192,28 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
 
                                                     rtForEvent <- getRT
                                                     logDecisionResult rtForEvent combinedDecision combinedResultText combinedReasons
+
+                                                    when (combinedDecision /= Continue) $ do
+                                                        let reasonText = if null combinedReasons then Nothing else Just (T.intercalate "; " combinedReasons)
+                                                            -- Stage index folded into decisionType so the dedup key changes
+                                                            -- on every new stagger stage, even when the decision/reason text
+                                                            -- repeats verbatim — one notification per stage, not per poll.
+                                                            stageDecisionType = "ROLLOUT_DECISION_STAGE_" <> T.pack (show currentIndex)
+                                                            notifyMsg =
+                                                                "⏸️ Decision: "
+                                                                    <> T.pack (show combinedDecision)
+                                                                    <> " — "
+                                                                    <> combinedResultText
+                                                                    <> maybe "" (" | " <>) reasonText
+                                                        _ <-
+                                                            lift $
+                                                                notifyDecisionThreadMessage
+                                                                    rtForEvent
+                                                                    stageDecisionType
+                                                                    (T.pack (show combinedDecision))
+                                                                    reasonText
+                                                                    notifyMsg
+                                                        pure ()
 
                                                     case combinedDecision of
                                                         Continue -> pure True
