@@ -36,6 +36,10 @@ import Products.Autopilot.K8s.Execute
 import Products.Autopilot.Types.Release (RolloutStep (..))
 import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..))
 
+envFieldRefKeepPredicate :: String
+envFieldRefKeepPredicate =
+  "((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not) or ((.valueFrom.fieldRef.fieldPath // \"\") == \"metadata.labels['version']\")"
+
 buildSetImageCommand :: Config -> K8sReleaseContext -> String
 buildSetImageCommand cfg ctx =
   let nsQ = shellQuote (namespace ctx)
@@ -56,8 +60,7 @@ buildCloneDeploymentCommand cfg ctx =
   let sourceDep = T.unpack (serviceName ctx) <> "-" <> T.unpack (oldVersion ctx)
       targetDep = T.unpack (deploymentName ctx)
       explicitDockerImage = maybe "" T.unpack (dockerImage ctx)
-      -- Strip env vars whose fieldRef points at metadata.labels[...].
-      stripUnsupportedEnvs = "(.spec.template.spec.containers[].env) |= [.[]? | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]"
+      stripUnsupportedEnvs = "(.spec.template.spec.containers[].env) |= [.[]? | select(" <> envFieldRefKeepPredicate <> ")]"
       patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[0].image) |= (if ($dockerImage != \"\") then (if (($dockerImage | test(\"/\")) or ($dockerImage | test(\":\"))) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\":\" + $oldTag + \"$\") then sub(\":\" + $oldTag + \"$\"; \":\" + $newTag) elif test(\":\") then sub(\":[^:]+$\"; \":\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | " <> stripUnsupportedEnvs <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
    in unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "get deployment", shellQuote (T.pack sourceDep), "-o json | jq", "--arg targetDep", shellQuote (T.pack targetDep), "--arg container", shellQuote (containerName ctx), "--arg newTag", shellQuote (newVersion ctx), "--arg oldTag", shellQuote (oldVersion ctx), "--arg dockerImage", shellQuote (T.pack explicitDockerImage), "'" <> patchFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "apply -f -"]
 
@@ -67,9 +70,7 @@ buildCloneDeploymentWithEnvsCommand cfg ctx envsJson =
   let sourceDep = T.unpack (serviceName ctx) <> "-" <> T.unpack (oldVersion ctx)
       targetDep = T.unpack (deploymentName ctx)
       explicitDockerImage = maybe "" T.unpack (dockerImage ctx)
-      -- Strip env vars whose fieldRef points at metadata.labels[...] —
-      -- these require a downward API rule and break kubectl patch.
-      stripUnsupportedEnvs = "(.spec.template.spec.containers[].env) |= [.[]? | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]"
+      stripUnsupportedEnvs = "(.spec.template.spec.containers[].env) |= [.[]? | select(" <> envFieldRefKeepPredicate <> ")]"
       patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[0].image) |= (if ($dockerImage != \"\") then (if (($dockerImage | test(\"/\")) or ($dockerImage | test(\":\"))) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\":\" + $oldTag + \"$\") then sub(\":\" + $oldTag + \"$\"; \":\" + $newTag) elif test(\":\") then sub(\":[^:]+$\"; \":\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | (.spec.template.spec.containers[] | select(.name == $container) | .env) = ($envs | fromjson) | " <> stripUnsupportedEnvs <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
    in unwords [kubectlBin cfg, "-n", shellQuote (namespace ctx), "get deployment", shellQuote (T.pack sourceDep), "-o json | jq", "--arg targetDep", shellQuote (T.pack targetDep), "--arg container", shellQuote (containerName ctx), "--arg newTag", shellQuote (newVersion ctx), "--arg oldTag", shellQuote (oldVersion ctx), "--arg dockerImage", shellQuote (T.pack explicitDockerImage), "--arg envs", shellQuote envsJson, "'" <> patchFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote (namespace ctx), "apply -f -"]
 
@@ -96,9 +97,9 @@ buildRolloutStatusCommand cfg ctx =
 buildPatchDeploymentEnvsCommand :: Config -> K8sReleaseContext -> Text -> String
 buildPatchDeploymentEnvsCommand cfg ctx envsJson =
   -- jq parses envsJson into a real JSON array (not a string), and
-  -- strips metadata.labels[...] fieldRefs.
+  -- strips unsupported metadata.labels[...] fieldRefs (see envFieldRefKeepPredicate).
   let stripAndPatch =
-        "($envs | fromjson | [.[] | select((.valueFrom.fieldRef.fieldPath // \"\") | startswith(\"metadata.labels[\") | not)]) as $filtered | [{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/env\",\"value\":$filtered}]"
+        "($envs | fromjson | [.[] | select(" <> envFieldRefKeepPredicate <> ")]) as $filtered | [{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/env\",\"value\":$filtered}]"
    in unwords
         [ kubectlBin cfg,
           "-n",
