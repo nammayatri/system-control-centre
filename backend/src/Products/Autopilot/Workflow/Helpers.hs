@@ -355,53 +355,8 @@ modifyDeploymentForPreview (Object obj) oldDepName newVer newImage envOverride =
                 , Array _ <- parsed ->
                     updateContainerEnv parsed obj5
             _ -> obj5
-        obj7 = stripUnsupportedEnvVars obj6
-     in Object obj7
+     in Object obj6
 modifyDeploymentForPreview other _ _ _ _ = other
-
-{- | Keep an env entry unless it's a fieldRef into metadata.labels[...]
-OTHER than metadata.labels['version'] — mirrors envFieldRefKeepPredicate
-in Products.Autopilot.K8s.Deployment, the jq rule the real clone commands
-apply. Kept in sync by hand: one is jq (runs in the shell), this one is
-Aeson (runs in the preview), so there's no single source of truth to share.
--}
-keepEnvEntry :: Value -> Bool
-keepEnvEntry (Object envObj) =
-    case KM.lookup (K.fromText "valueFrom") envObj of
-        Just (Object vf) -> case KM.lookup (K.fromText "fieldRef") vf of
-            Just (Object fr) -> case KM.lookup (K.fromText "fieldPath") fr of
-                Just (String fp) -> not (T.isPrefixOf "metadata.labels[" fp) || fp == "metadata.labels['version']"
-                _ -> True
-            _ -> True
-        _ -> True
-keepEnvEntry _ = True
-
-{- | Strip unsupported metadata.labels[...] fieldRef envs from every
-container's env array, so the preview matches what the real clone
-(buildCloneDeploymentCommand / buildCloneDeploymentWithEnvsCommand)
-actually applies.
--}
-stripUnsupportedEnvVars :: KM.KeyMap Value -> KM.KeyMap Value
-stripUnsupportedEnvVars obj =
-    case KM.lookup (K.fromText "spec") obj of
-        Just (Object spec) -> case KM.lookup (K.fromText "template") spec of
-            Just (Object tmpl) -> case KM.lookup (K.fromText "spec") tmpl of
-                Just (Object podSpec) -> case KM.lookup (K.fromText "containers") podSpec of
-                    Just (Array containers) ->
-                        let containers' = Array (V.map stripContainerEnv containers)
-                            podSpec' = KM.insert (K.fromText "containers") containers' podSpec
-                            tmpl' = KM.insert (K.fromText "spec") (Object podSpec') tmpl
-                            spec' = KM.insert (K.fromText "template") (Object tmpl') spec
-                         in KM.insert (K.fromText "spec") (Object spec') obj
-                    _ -> obj
-                _ -> obj
-            _ -> obj
-        _ -> obj
-  where
-    stripContainerEnv (Object c) = case KM.lookup (K.fromText "env") c of
-        Just (Array envs) -> Object (KM.insert (K.fromText "env") (Array (V.filter keepEnvEntry envs)) c)
-        _ -> Object c
-    stripContainerEnv other = other
 
 -- | Replace the first container's @env@ array with the given Value.
 updateContainerEnv :: Value -> KM.KeyMap Value -> KM.KeyMap Value
