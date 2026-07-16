@@ -676,6 +676,7 @@ const ListRelease: React.FC<{ slim?: boolean; slimFilters?: SlimFilters }> = ({ 
                     const isRevert = release.release_context?.revert === 1 || !!release.revertsReleaseId;
                     const isMobile = release.tracker_type === 'MobileBuild';
                     const isDebugBuild = isMobile && release.release_context?.build_type === 'debug';
+                    const isCrossCloud = !isMobile && (release.sync_enabled === 'true' || !!release.global_id);
                     const track = mobileTrackBadge(release);
                     // Mobile rows reuse the underlying tracker columns with relabeled
                     // semantics (app/surface/platform). Backend rows render the
@@ -764,6 +765,14 @@ const ListRelease: React.FC<{ slim?: boolean; slimFilters?: SlimFilters }> = ({ 
                                 DEBUG
                               </span>
                             )}
+                            {isCrossCloud && (
+                              <img
+                                src="/cross-cloud.png"
+                                alt="Cross-cloud"
+                                title="Synced to other cloud"
+                                className="h-[19px] w-[19px] shrink-0"
+                              />
+                            )}
                           </div>
                         </td>
                         <td className="py-3 px-4 text-xs text-zinc-600">{release.release_manager || '-'}</td>
@@ -850,6 +859,7 @@ const ListRelease: React.FC<{ slim?: boolean; slimFilters?: SlimFilters }> = ({ 
                 const isRevert = release.release_context?.revert === 1 || !!release.revertsReleaseId;
                 const isMobile = release.tracker_type === 'MobileBuild';
                 const isDebugBuild = isMobile && release.release_context?.build_type === 'debug';
+                const isCrossCloud = !isMobile && (release.sync_enabled === 'true' || !!release.global_id);
                 const releaseHref = isMobile
                   ? `/mobile/releases/${release.id}`
                   : `/backend/releases/${release.id}`;
@@ -942,6 +952,14 @@ const ListRelease: React.FC<{ slim?: boolean; slimFilters?: SlimFilters }> = ({ 
                         <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-amber-600 text-white">
                           DEBUG
                         </span>
+                      )}
+                      {isCrossCloud && (
+                        <img
+                          src="/cross-cloud.png"
+                          alt="Cross-cloud"
+                          title="Synced to other cloud"
+                          className="h-[19px] w-[19px] shrink-0"
+                        />
                       )}
                     </div>
                     <div className="flex items-center gap-3 text-[11px] text-zinc-500 font-mono flex-wrap">
