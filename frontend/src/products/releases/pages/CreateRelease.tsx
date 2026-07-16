@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import { useProductConfigs, useServices } from '../useProducts';
 import { useCreateRelease, useUpdateTracker } from '../hooks';
-import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources, resolveOldVersion, fetchRolloutPodEstimate } from '../api';
+import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources, resolveOldVersion, fetchRolloutPodEstimate, fetchRolloutPodEstimateSecondary } from '../api';
 import type { ProductConfig } from '../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
@@ -151,6 +151,7 @@ const CreateRelease: React.FC = () => {
   const [syncCluster, setSyncCluster] = useState('');
   const [rolloutHistoryLength, setRolloutHistoryLength] = useState(0);
   const [podsAutoLocked, setPodsAutoLocked] = useState(true);
+  const [secondaryPodsAutoLocked, setSecondaryPodsAutoLocked] = useState(true);
   const [oldVersionUnresolved, setOldVersionUnresolved] = useState(false);
   // Same signal buildPayload sends as trackerType — the app group's product_type,
   // not the per-service serviceType row (which can drift out of sync with it).
@@ -352,6 +353,17 @@ const CreateRelease: React.FC = () => {
       console.error('[CreateRelease] fetchRolloutPodEstimate failed:', e);
     });
   }, [formData.appGroup, formData.service, isUpdate, podsAutoLocked, stageRolloutsKey]);
+
+  const secondaryStageRolloutsKey = secondaryStages.map(s => s.rollout).join(',');
+  useEffect(() => {
+    if (isUpdate || !isReleaseSync || !formData.appGroup || !formData.service || !secondaryPodsAutoLocked || !secondaryStageRolloutsKey) return;
+    const rolloutPercents = secondaryStageRolloutsKey.split(',').map(Number);
+    fetchRolloutPodEstimateSecondary(formData.appGroup, formData.service, rolloutPercents).then(est => {
+      setSecondaryStages(prev => prev.map((s, i) => (est.podCounts[i] != null ? { ...s, pods: est.podCounts[i] } : s)));
+    }).catch((e: any) => {
+      console.error('[CreateRelease] fetchRolloutPodEstimateSecondary failed:', e);
+    });
+  }, [formData.appGroup, formData.service, isUpdate, isReleaseSync, secondaryPodsAutoLocked, secondaryStageRolloutsKey]);
 
   useEffect(() => { if (!isEnvSwitch) setEnvData(''); }, [isEnvSwitch]);
   useEffect(() => { if (!isResourcesSwitch) setResourcesData(''); }, [isResourcesSwitch]);
@@ -1059,7 +1071,21 @@ const CreateRelease: React.FC = () => {
                   )}
                 </div>
                 <div>
-                  <h3 className="text-base font-semibold text-zinc-900 mb-3">Secondary Cluster Stages</h3>
+                  <div className="flex items-center justify-between gap-3 mb-1">
+                    <h3 className="text-base font-semibold text-zinc-900">Secondary Cluster Stages</h3>
+                    <button
+                      type="button"
+                      onClick={() => setSecondaryPodsAutoLocked(v => !v)}
+                      className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-zinc-600 border border-zinc-200 hover:bg-zinc-50 cursor-pointer transition-colors duration-150"
+                      title={secondaryPodsAutoLocked ? 'Unlock Min Pods to edit manually' : 'Lock Min Pods (auto-calculated)'}
+                    >
+                      {secondaryPodsAutoLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                      {secondaryPodsAutoLocked ? 'Auto' : 'Manual'}
+                    </button>
+                  </div>
+                  <p className="text-xs text-zinc-500 mb-3">
+                    Min Pods is auto-calculated from the secondary cluster's live old-version pod count. {secondaryPodsAutoLocked ? 'Unlock to override.' : 'Editing manually — values will not be recalculated.'}
+                  </p>
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm text-left">
                       <thead>
@@ -1082,7 +1108,7 @@ const CreateRelease: React.FC = () => {
                             <td className="py-2 px-3 text-zinc-400 font-mono text-xs">{idx + 1}</td>
                             <td className="py-2 px-3"><input type="number" value={stage.rollout} onChange={(e) => { const s = [...secondaryStages]; s[idx].rollout = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(inputClass, 'w-24')} /></td>
                             <td className="py-2 px-3"><input type="number" value={stage.cooloff} onChange={(e) => { const s = [...secondaryStages]; s[idx].cooloff = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(inputClass, 'w-24')} /></td>
-                            <td className="py-2 px-3"><input type="number" value={stage.pods} onChange={(e) => { const s = [...secondaryStages]; s[idx].pods = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(inputClass, 'w-24')} /></td>
+                            <td className="py-2 px-3"><input type="number" value={stage.pods} disabled={secondaryPodsAutoLocked} onChange={(e) => { const s = [...secondaryStages]; s[idx].pods = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(secondaryPodsAutoLocked ? disabledInputClass : inputClass, 'w-24')} /></td>
                             <td className="py-2 px-3">
                               {secondaryStages.length > 1 && (
                                 <button type="button" onClick={() => setSecondaryStages(secondaryStages.filter((_, i) => i !== idx))} className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 cursor-pointer transition-colors duration-150">

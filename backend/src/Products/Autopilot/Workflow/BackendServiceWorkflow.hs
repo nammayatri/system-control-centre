@@ -62,7 +62,7 @@ import Products.Autopilot.K8s.Deployment (
  )
 import Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
-import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildCreateHpaFromTemplateCommand, buildDeleteHpaCommand, getHpaMinMax, hpaExists)
+import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildCreateHpaFromTemplateCommand, buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax, hpaExists)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRolloutWithRetries, getVirtualServiceJson)
 import Products.Autopilot.Notifications (
     notifyDecisionThreadMessage,
@@ -271,80 +271,112 @@ waitForStagePodsReady cfg ctx = do
 scaleNewDeploymentForStage ::
     Config ->
     K8sReleaseContext ->
-    -- | rolloutPercent (traffic %) for this stage
+    -- | rolloutPercent (traffic %) for this stage -- new version's upcoming weight
     Int ->
-    -- | operator's explicit minimum pod count (raw, not %)
+    -- | old version's CURRENT traffic weight, right now, before this stage's flip
+    Int ->
+    -- | this stage's own podCount, set at creation time (auto-calculated or operator override)
     Int ->
     StateFlow ()
-scaleNewDeploymentForStage cfg ctx routePct stagePodCount = do
+scaleNewDeploymentForStage cfg ctx routePct oldVersionCurrWeight stagePodCount = do
     rtNow <- getRT
-    let newDep = deploymentName ctx
+    let oldDep = serviceName ctx <> "-" <> oldVersion ctx
+        newDep = deploymentName ctx
         newHpa = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
         ns = namespace ctx
     newStatus <- liftIO $ getDeploymentReplicaStatus cfg ns newDep
+    oldStatus <- liftIO $ getDeploymentReplicaStatus cfg ns oldDep
     let
         -- (ready, available, desired)
         (_, _, newDesired) = case newStatus of
             Right tup -> tup
             Left _ -> (0, 0, 0)
+        (oldReady, _, _) = case oldStatus of
+            Right tup -> tup
+            Left _ -> (0, 0, 0)
         currentNew = max 0 newDesired
-        -- Trust this stage's own auto-calculated podCount (ceil(oldReadyPods *
-        -- routePct/100), max 1 -- see /rollout-pod-estimate) as the sole scale
-        -- target. No factor/predicted-from-old heuristics, no pre-warming to
-        -- the next stage: each stage scales to exactly its own pod count.
-        safeTarget = max 1 stagePodCount
-    if currentNew >= safeTarget
+        -- Live estimate: normalize the old version's CURRENT ready-pod count to
+        -- what a full 100%-traffic fleet would need (by its current traffic
+        -- share), then take this stage's share of that. Reacts to a traffic
+        -- spike growing the old version mid-release -- e.g. old is at 80%
+        -- traffic and needed to scale to 40 ready pods to keep up, so 100%
+        -- would need ~50; this stage's 20% share is then ~10, not whatever a
+        -- flat calculation from creation time assumed.
+        liveEstimate
+            | oldVersionCurrWeight <= 0 = 0
+            | otherwise =
+                ceiling
+                    ( fromIntegral oldReady
+                        * (100.0 / fromIntegral oldVersionCurrWeight)
+                        * fromIntegral routePct
+                        / 100.0 ::
+                        Double
+                    )
+        -- Never below the creation-time estimate either -- that's the floor
+        -- the auto-calc (or an operator override) already committed to.
+        safeTarget = maximum [1, liveEstimate, stagePodCount]
+    (_liveMin, liveMax) <- liftIO $ getHpaMinMax cfg ns newHpa
+    let cappedTarget
+            | liveMax > 0 = min safeTarget liveMax
+            | otherwise = safeTarget -- no HPA, or read failure
+        wasCapped = liveMax > 0 && safeTarget > liveMax
+        logCtx =
+            " (safeTarget="
+                <> T.pack (show safeTarget)
+                <> ", liveEstimate="
+                <> T.pack (show liveEstimate)
+                <> ", currentNew="
+                <> T.pack (show currentNew)
+                <> ", oldReady="
+                <> T.pack (show oldReady)
+                <> ", oldCurrWeight="
+                <> T.pack (show oldVersionCurrWeight)
+                <> ", route%="
+                <> T.pack (show routePct)
+                <> ", podCount="
+                <> T.pack (show stagePodCount)
+                <> ")"
+    when wasCapped $ do
+        logWarningS $
+            "  [pods] Rollout target "
+                <> T.pack (show safeTarget)
+                <> " exceeds HPA "
+                <> newHpa
+                <> " maxReplicas="
+                <> T.pack (show liveMax)
+                <> " — capping at "
+                <> T.pack (show liveMax)
+                <> logCtx
+        insertReleaseEvent
+            (releaseId rtNow)
+            "BUSINESS"
+            "ROLLOUT_CAPPED_BY_HPA"
+            ( object
+                [ "hpa" .= newHpa
+                , "safeTarget" .= safeTarget
+                , "hpaMaxReplicas" .= liveMax
+                , "cappedTo" .= liveMax
+                , "routePct" .= routePct
+                ]
+            )
+    -- Lock the HPA's floor to this stage's target so it can't scale the new
+    -- deployment down mid-stage (e.g. on a brief CPU dip) below what the
+    -- rollout plan just committed to. Restored to the service's configured
+    -- hpa_min_replicas (or 2) once the release completes -- see cleanupOldVersion.
+    when (liveMax > 0) $ do
+        _ <- liftIO $ runCmd (buildPatchHpaReplicasCommand cfg ns newHpa cappedTarget liveMax)
+        pure ()
+    if currentNew >= cappedTarget
         then
             logInfoS $
                 "  [pods] "
                     <> newDep
                     <> " already at "
                     <> T.pack (show currentNew)
-                    <> " replicas (safeTarget="
-                    <> T.pack (show safeTarget)
-                    <> ", route%="
-                    <> T.pack (show routePct)
-                    <> "), no-op"
+                    <> " replicas"
+                    <> logCtx
+                    <> ", no-op"
         else do
-            let logCtx =
-                    " (safeTarget="
-                        <> T.pack (show safeTarget)
-                        <> ", currentNew="
-                        <> T.pack (show currentNew)
-                        <> ", route%="
-                        <> T.pack (show routePct)
-                        <> ", podCount="
-                        <> T.pack (show stagePodCount)
-                        <> ")"
-            -- Cap at HPA max; never mutate HPA here (only prepare stage does).
-            (_liveMin, liveMax) <- liftIO $ getHpaMinMax cfg ns newHpa
-            let cappedTarget
-                    | liveMax > 0 = min safeTarget liveMax
-                    | otherwise = safeTarget -- no HPA, or read failure
-                wasCapped = liveMax > 0 && safeTarget > liveMax
-            when wasCapped $ do
-                logWarningS $
-                    "  [pods] Rollout target "
-                        <> T.pack (show safeTarget)
-                        <> " exceeds HPA "
-                        <> newHpa
-                        <> " maxReplicas="
-                        <> T.pack (show liveMax)
-                        <> " — capping at "
-                        <> T.pack (show liveMax)
-                        <> logCtx
-                insertReleaseEvent
-                    (releaseId rtNow)
-                    "BUSINESS"
-                    "ROLLOUT_CAPPED_BY_HPA"
-                    ( object
-                        [ "hpa" .= newHpa
-                        , "safeTarget" .= safeTarget
-                        , "hpaMaxReplicas" .= liveMax
-                        , "cappedTo" .= liveMax
-                        , "routePct" .= routePct
-                        ]
-                    )
             logInfoS $
                 "  [pods] Scaling "
                     <> newDep
@@ -887,7 +919,8 @@ progressiveRollout = do
                                 firstNewW = rolloutPercent firstStep
                                 firstOldW = max 0 (100 - firstNewW)
                             logInfoS $ "  Initial rollout step: new=" <> T.pack (show firstNewW) <> "%, cooloff=" <> T.pack (show (cooloffMinutes firstStep)) <> "min"
-                            scaleNewDeploymentForStage cfg ctx firstNewW (podCount firstStep)
+                            -- Old is still at 100% traffic; nothing has flipped yet.
+                            scaleNewDeploymentForStage cfg ctx firstNewW 100 (podCount firstStep)
                             waitForStagePodsReady cfg ctx
                             runVsRolloutWithLock cfg ctx (wcMaxK8sRetries wfCfg) firstOldW firstNewW
                             updateK8sField (\k8s -> k8s{trafficPercentage = firstNewW})
@@ -1173,6 +1206,8 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                                     case unsnocList (rolloutHistory freshRT) of
                                                         Nothing -> 0
                                                         Just (_, lastEntry) -> historyRolloutPercent lastEntry
+                                                -- Old's CURRENT traffic weight, right now, before this stage's flip.
+                                                currentOldW = max 0 (100 - previousRolloutW)
                                             logInfoS $
                                                 "  Rollout step "
                                                     <> T.pack (show (currentIndex + 1))
@@ -1185,7 +1220,7 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                                     <> "min"
 
                                             -- Scale + wait Ready BEFORE VS flip (see waitForStagePodsReady).
-                                            scaleNewDeploymentForStage cfg ctx nextNewW (podCount nextStep)
+                                            scaleNewDeploymentForStage cfg ctx nextNewW currentOldW (podCount nextStep)
                                             waitForStagePodsReady cfg ctx
                                             runVsRolloutWithLock cfg ctx (wcMaxK8sRetries wfCfg) nextOldW nextNewW
                                             updateK8sField (\k8s -> k8s{trafficPercentage = nextNewW})
@@ -1498,6 +1533,16 @@ checkSinglePod restartThreshold (Object podObj) =
     let podName = case KM.lookup (K.fromText "metadata") podObj >>= getObj' "name" of
             Just n -> n
             Nothing -> "unknown-pod"
+        -- Set the moment a pod is deleted for ANY reason -- HPA scaling it
+        -- down, our own scale commands between stages, a rolling update.
+        -- SIGTERM often makes the container's own exit look like a crash
+        -- (terminatedReason "Error", occasionally a stray restart bump), but
+        -- it isn't one: this pod was never meant to keep running. Skip the
+        -- crash checks entirely for it so a normal scale-down never gets
+        -- misread as the new version being broken.
+        isTerminating = case KM.lookup (K.fromText "metadata") podObj >>= getObj' "deletionTimestamp" of
+            Just _ -> True
+            Nothing -> False
         statusObj = KM.lookup (K.fromText "status") podObj
         phase =
             statusObj >>= \case
@@ -1511,9 +1556,11 @@ checkSinglePod restartThreshold (Object podObj) =
                     Just (Array cs) -> Just (foldr (:) [] cs)
                     _ -> Nothing
                 _ -> Nothing
-        containerErrors = case containerStatuses of
-            Nothing -> []
-            Just cs -> concatMap (checkContainer podName) cs
+        containerErrors
+            | isTerminating = []
+            | otherwise = case containerStatuses of
+                Nothing -> []
+                Just cs -> concatMap (checkContainer podName) cs
      in case phase of
             -- Non-fatal: phase Failed is almost always infra-caused (node
             -- eviction/preemption, scheduling churn) rather than a bad new
@@ -1643,6 +1690,21 @@ cleanupOldVersion = do
                             (toJSON oldHpaName)
                     Left err ->
                         logErrorS $ "  WARNING: Failed to delete old HPA: " <> T.pack (show err)
+
+            -- Restore the new (now-primary) HPA's floor to the service's
+            -- configured steady-state minimum. scaleNewDeploymentForStage
+            -- raised it stage-by-stage during rollout so HPA couldn't scale
+            -- the release down mid-transition on a brief CPU dip; that raised
+            -- floor must not outlive the release, or a later legitimate
+            -- traffic drop could never scale below it.
+            let newHpaName = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
+            svcCfg <- findServiceByProductAndName (appGroup rt) (service rt)
+            let configuredMinReplicas = maybe 2 (fromIntegral . getHpaMinReplicas) svcCfg :: Int
+            (_curMin, curMax) <- liftIO $ getHpaMinMax cfg (namespace ctx) newHpaName
+            when (curMax > 0) $ do
+                logInfoS $ "  Restoring HPA " <> newHpaName <> " minReplicas to " <> T.pack (show configuredMinReplicas)
+                _ <- liftIO $ runCmd (buildPatchHpaReplicasCommand cfg (namespace ctx) newHpaName configuredMinReplicas curMax)
+                pure ()
 
     cfgAfter <- getCfg
     rtAfter <- getRT

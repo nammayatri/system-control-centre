@@ -8,6 +8,7 @@ module Products.Autopilot.Actions.K8sResource (
     fetchSecondaryEnvsH,
     resolveRunningVersionH,
     resolveRolloutPodEstimateH,
+    resolveRolloutPodEstimateSecondaryH,
 )
 where
 
@@ -109,7 +110,9 @@ resolveRolloutPodEstimateH _ap req = do
                     Nothing -> service req
                 ns = getProductNamespace pCfg
                 vsName' = getProductVsName pCfg
-                isScheduler = (svc >>= S.dcServiceType) == Just "SCHEDULER"
+                -- Same signal createReleaseH branches on: the app group's
+                -- product_type, not the per-service serviceType row.
+                isScheduler = either (const False) (== "BackendScheduler") (normalizeProductType (fromMaybe "" (S.dcAppGroupType pCfg)))
             mOldVersion <- liftIO $ runningVersionFromK8s cfg ns vsName' svcHost isScheduler
             oldReadyPods <- case mOldVersion of
                 Nothing -> pure 0
@@ -121,6 +124,59 @@ resolveRolloutPodEstimateH _ap req = do
             let estimate :: Int -> Int
                 estimate pct = max 1 (ceiling (fromIntegral oldReadyPods * fromIntegral pct / (100.0 :: Double)))
             pure $ object ["oldVersion" .= mOldVersion, "podCounts" .= map estimate pcts]
+
+{- | Same as 'resolveRolloutPodEstimateH', but against the secondary cluster's
+own scc instance instead of this one's local k8s -- for the "sync to
+secondary cloud" toggle's stages table, sized off the secondary cluster's own
+live old-version pod count (the two clusters don't share deployments, so the
+primary cluster's count wouldn't mean anything there). Proxies to
+@{syncClusterUrl}/rollout-pod-estimate@ the same way 'fetchSecondaryEnvsH'
+proxies @/envs@. Returns the all-1s fallback (not an error) when the sync
+cluster isn't configured or the request fails, so the UI still has a sane
+starting point.
+-}
+resolveRolloutPodEstimateSecondaryH :: AuthedPerson -> RolloutPodEstimateReq -> Flow Value
+resolveRolloutPodEstimateSecondaryH _ap req = do
+    cfg <- getConfig
+    let pcts = rolloutPercents req
+        noEstimate = object ["oldVersion" .= (Nothing :: Maybe Text), "podCounts" .= map (const (1 :: Int)) pcts]
+        rawUrl = syncClusterUrl cfg
+    if null rawUrl
+        then pure noEstimate
+        else do
+            let normalised =
+                    let u = if "http" `T.isPrefixOf` T.pack rawUrl then T.pack rawUrl else "http://" <> T.pack rawUrl
+                     in if T.null u || T.last u == '/' then u else u <> "/"
+                apiKey = syncClusterApiKey cfg
+                auth =
+                    if null apiKey
+                        then []
+                        else [("X-Sync-Api-Key", T.pack apiKey)]
+                postUrl = normalised <> "rollout-pod-estimate"
+                bodyJson = encode (object ["appGroup" .= appGroup req, "service" .= service req, "rolloutPercents" .= pcts])
+                postReq =
+                    (defaultReq postUrl)
+                        { reqMethod = POST
+                        , reqHeaders = ("Content-Type", "application/json") : auth
+                        , reqBody = Just bodyJson
+                        , reqTimeout = Seconds 15
+                        , reqRetries = 0
+                        , reqLogTag = "sync-rollout-pod-estimate"
+                        }
+            logInfo $ "[SYNC-ROLLOUT-ESTIMATE] Fetching secondary rollout pod estimate from: " <> postUrl
+            result <- liftIO (httpRaw postReq)
+            case result of
+                Right HttpResponse{respStatus = s, respBody = b}
+                    | s < 400 && not (LBS.null b) ->
+                        case A.decodeStrict' (LBS.toStrict b) :: Maybe Value of
+                            Just v -> pure v
+                            Nothing -> pure noEstimate
+                Right HttpResponse{respStatus = s} -> do
+                    logInfo $ "[SYNC-ROLLOUT-ESTIMATE] Secondary returned status " <> T.pack (show s)
+                    pure noEstimate
+                Left e -> do
+                    logInfo $ "[SYNC-ROLLOUT-ESTIMATE] Request failed: " <> T.pack (show e)
+                    pure noEstimate
 
 fetchEnvsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
 fetchEnvsH _ap mProduct _mEnv mService = do

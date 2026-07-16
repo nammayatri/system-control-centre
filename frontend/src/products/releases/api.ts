@@ -632,6 +632,12 @@ export async function fetchRolloutPodEstimate(appGroup: string, service: string,
     return { oldVersion: data?.oldVersion ?? null, podCounts: Array.isArray(data?.podCounts) ? data.podCounts : rolloutPercents.map(() => 1) };
 }
 
+export async function fetchRolloutPodEstimateSecondary(appGroup: string, service: string, rolloutPercents: number[]): Promise<RolloutPodEstimate> {
+    if (!appGroup || !service || rolloutPercents.length === 0) return { oldVersion: null, podCounts: rolloutPercents.map(() => 1) };
+    const { data } = await apiClient.post('/rollout-pod-estimate/secondary', { appGroup, service, rolloutPercents });
+    return { oldVersion: data?.oldVersion ?? null, podCounts: Array.isArray(data?.podCounts) ? data.podCounts : rolloutPercents.map(() => 1) };
+}
+
 export async function fetchAPConfigMaps(from: string, to: string): Promise<APConfigMap[]> {
     const { data } = await apiClient.get('/tracker/configmap/list', { params: { from, to } });
     // Backend returns either {list: [...]} or a plain array depending on the handler.
