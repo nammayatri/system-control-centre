@@ -4,13 +4,13 @@ import { useQuery } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import { useProductConfigs, useServices } from '../useProducts';
 import { useCreateRelease, useUpdateTracker } from '../hooks';
-import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources, resolveOldVersion } from '../api';
+import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources, resolveOldVersion, fetchRolloutPodEstimate } from '../api';
 import type { ProductConfig } from '../api';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
 import { normalizeProductType } from '../../../lib/constants';
 import { useAuth } from '../../../core/auth/AuthContext';
-import { Trash2, Lock, ChevronDown, Check, Info } from 'lucide-react';
+import { Trash2, Lock, Unlock, ChevronDown, Check, Info } from 'lucide-react';
 import { toast } from 'sonner';
 
 const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
@@ -150,6 +150,14 @@ const CreateRelease: React.FC = () => {
   ]);
   const [syncCluster, setSyncCluster] = useState('');
   const [rolloutHistoryLength, setRolloutHistoryLength] = useState(0);
+  const [podsAutoLocked, setPodsAutoLocked] = useState(true);
+  const [oldVersionUnresolved, setOldVersionUnresolved] = useState(false);
+  // Same signal buildPayload sends as trackerType — the app group's product_type,
+  // not the per-service serviceType row (which can drift out of sync with it).
+  const selectedTrackerType = useMemo(
+    () => normalizeProductType(productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup)?.product_type),
+    [productConfigs, formData.appGroup],
+  );
 
   const { data: services = [] } = useServices(formData.appGroup, isNewService);
   const createMutation = useCreateRelease();
@@ -175,11 +183,13 @@ const CreateRelease: React.FC = () => {
     if (isUpdate) return;
     if (selectedServices.length !== 1) {
       setFormData(prev => (prev.old_version === autoOldVersionRef.current ? { ...prev, old_version: '' } : prev));
+      setOldVersionUnresolved(false);
       return;
     }
     const svc = selectedServices[0];
     if (!formData.appGroup || !svc) return;
     resolveOldVersion(formData.appGroup, svc).then(ver => {
+      setOldVersionUnresolved(!ver);
       if (!ver) return;
       setFormData(prev => {
         if (prev.old_version === '' || prev.old_version === autoOldVersionRef.current) {
@@ -188,7 +198,7 @@ const CreateRelease: React.FC = () => {
         }
         return prev;
       });
-    }).catch(() => {});
+    }).catch(() => setOldVersionUnresolved(true));
   }, [isUpdate, formData.appGroup, selectedServices]);
 
   useEffect(() => {
@@ -287,10 +297,13 @@ const CreateRelease: React.FC = () => {
   }, [formData.appGroup, productConfigs]);
 
   // Load rollout stages from service config on service select (skip clone/update — those use existing stages).
+  // Pod counts are auto-recalculated separately, below, whenever the loaded stages' percentages settle.
   useEffect(() => {
     if (!isClone && !isUpdate && formData.appGroup && formData.service) {
-      fetchReleaseConfigs(formData.appGroup).then(configs => {
-        const svcConfig = configs.find(c => c.service === formData.service);
+      const appGroup = formData.appGroup;
+      const service = formData.service;
+      fetchReleaseConfigs(appGroup).then(configs => {
+        const svcConfig = configs.find(c => c.service === service);
         if (svcConfig?.rollout_strategy) {
           try {
             // DB stores double-escaped JSON — parse until we get an array.
@@ -321,6 +334,21 @@ const CreateRelease: React.FC = () => {
       });
     }
   }, [formData.appGroup, formData.service, isClone, isUpdate]);
+
+  // Recalculate Min Pods (while locked) whenever the stage percentages change —
+  // service select (above), the user editing a stage's %, or adding/removing a
+  // stage all land here since they all change this key. Unlocking just stops
+  // this from overwriting manual edits; it doesn't clear them.
+  const stageRolloutsKey = stages.map(s => s.rollout).join(',');
+  useEffect(() => {
+    if (isClone || isUpdate || !formData.appGroup || !formData.service || !podsAutoLocked || !stageRolloutsKey) return;
+    const rolloutPercents = stageRolloutsKey.split(',').map(Number);
+    fetchRolloutPodEstimate(formData.appGroup, formData.service, rolloutPercents).then(est => {
+      setStages(prev => prev.map((s, i) => (est.podCounts[i] != null ? { ...s, pods: est.podCounts[i] } : s)));
+    }).catch((e: any) => {
+      console.error('[CreateRelease] fetchRolloutPodEstimate failed:', e);
+    });
+  }, [formData.appGroup, formData.service, isClone, isUpdate, podsAutoLocked, stageRolloutsKey]);
 
   useEffect(() => { if (!isEnvSwitch) setEnvData(''); }, [isEnvSwitch]);
   useEffect(() => { if (!isResourcesSwitch) setResourcesData(''); }, [isResourcesSwitch]);
@@ -416,6 +444,15 @@ const CreateRelease: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    // Schedulers have no VirtualService to fall back on for old-version
+    // discovery — an unresolved old version means the release would be
+    // created with oldVersion "unknown" and silently mis-sized pods. Block
+    // rather than let that happen silently.
+    if (!isUpdate && selectedTrackerType === 'BackendScheduler' && oldVersionUnresolved) {
+      toast.error('Could not detect the currently running version for this scheduler service — check the deployment in the cluster before creating this release.');
+      return;
+    }
 
     // The changelog is always a generated diff link (FE for single-service,
     // backend per service for multi) — never handwritten — so there is nothing
@@ -657,6 +694,9 @@ const CreateRelease: React.FC = () => {
                 {multiService && (
                   <p className="text-[10px] text-zinc-400 mt-0.5">Multiple services selected — the currently-deployed version is resolved per service from K8s at creation.</p>
                 )}
+                {!isUpdate && !multiService && selectedTrackerType === 'BackendScheduler' && oldVersionUnresolved && (
+                  <p className="text-[10px] text-red-500 mt-0.5">Could not detect the currently running version for this scheduler in the cluster — release creation is blocked until this resolves or you set Old Version manually.</p>
+                )}
               </div>
               <div>
                 <FieldLabel>Mode</FieldLabel>
@@ -719,7 +759,7 @@ const CreateRelease: React.FC = () => {
                   </div>
                   {showPriorityDropdown && !isMidFlight && (
                     <div className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto bg-white border border-zinc-200 rounded-lg shadow-lg">
-                      {[0,1,2,3,4,5,6,7,8,9].map(d => (
+                      {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(d => (
                         <button key={d} type="button"
                           onClick={() => { setFormData(prev => ({ ...prev, priority: String(d) })); setShowPriorityDropdown(false); }}
                           className="w-full px-3 py-2 text-left text-sm hover:bg-zinc-50 flex items-center justify-between">
@@ -862,12 +902,30 @@ const CreateRelease: React.FC = () => {
         )}
 
         <div className="bg-white rounded-xl border border-zinc-200">
-          <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
-            <h2 className="text-base sm:text-lg font-semibold text-zinc-900">Stages</h2>
-            {isUpdate && rolloutHistoryLength > 0 && (
-              <p className="text-xs text-zinc-500 mt-1">
-                Stages 1-{rolloutHistoryLength} are locked (already executed). Only future stages can be edited.
-              </p>
+          <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-base sm:text-lg font-semibold text-zinc-900">Stages</h2>
+              {isUpdate && rolloutHistoryLength > 0 && (
+                <p className="text-xs text-zinc-500 mt-1">
+                  Stages 1-{rolloutHistoryLength} are locked (already executed). Only future stages can be edited.
+                </p>
+              )}
+              {!isUpdate && (
+                <p className="text-xs text-zinc-500 mt-1">
+                  Min Pods is auto-calculated from the old version's live pod count. {podsAutoLocked ? 'Unlock to override.' : 'Editing manually — values will not be recalculated.'}
+                </p>
+              )}
+            </div>
+            {!isUpdate && (
+              <button
+                type="button"
+                onClick={() => setPodsAutoLocked(v => !v)}
+                className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-zinc-600 border border-zinc-200 hover:bg-zinc-50 cursor-pointer transition-colors duration-150"
+                title={podsAutoLocked ? 'Unlock Min Pods to edit manually' : 'Lock Min Pods (auto-calculated)'}
+              >
+                {podsAutoLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                {podsAutoLocked ? 'Auto' : 'Manual'}
+              </button>
             )}
           </div>
           <div className="p-4 sm:p-6">
@@ -914,9 +972,9 @@ const CreateRelease: React.FC = () => {
                         </td>
                         <td className="py-2 px-3">
                           <input type="number" value={stage.pods}
-                            disabled={isLocked}
+                            disabled={isLocked || podsAutoLocked}
                             onChange={(e) => setStages(prev => prev.map((s, i) => i === idx ? { ...s, pods: parseInt(e.target.value) || 0 } : s))}
-                            className={cn(isLocked ? disabledInputClass : inputClass, 'w-24')} />
+                            className={cn((isLocked || podsAutoLocked) ? disabledInputClass : inputClass, 'w-24')} />
                         </td>
                         <td className="py-2 px-3">
                           {!isLocked && stages.filter((_, i) => !isUpdate || i >= rolloutHistoryLength).length > 1 && (
@@ -1043,7 +1101,7 @@ const CreateRelease: React.FC = () => {
 
         <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3 pt-2">
           <Button type="button" variant="secondary" onClick={() => isUpdate ? navigate(`/backend/releases/${id}`) : navigate('/backend/releases')}>Cancel</Button>
-          <Button type="submit" loading={isSubmitting}>{submitLabel}</Button>
+          <Button type="submit" loading={isSubmitting} disabled={!isUpdate && selectedTrackerType === 'BackendScheduler' && oldVersionUnresolved}>{submitLabel}</Button>
         </div>
       </form>
     </div>

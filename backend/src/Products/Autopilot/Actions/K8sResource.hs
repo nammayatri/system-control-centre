@@ -7,6 +7,7 @@ module Products.Autopilot.Actions.K8sResource (
     fetchEnvsH,
     fetchSecondaryEnvsH,
     resolveRunningVersionH,
+    resolveRolloutPodEstimateH,
 )
 where
 
@@ -17,18 +18,19 @@ import Core.Environment (Flow, getConfig, logInfo)
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value (..), encode, object, (.=))
-import qualified Data.Aeson as A
-import qualified Data.ByteString.Lazy as LBS
+import Data.Aeson qualified as A
+import Data.ByteString.Lazy qualified as LBS
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
-import Products.Autopilot.K8s.Deployment (getDeploymentEnvs)
+import Products.Autopilot.Actions.Release (normalizeProductType)
+import Products.Autopilot.K8s.Deployment (getDeploymentEnvs, getDeploymentReplicaStatus)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.K8s.Kubectl (runningVersionFromK8s)
 import Products.Autopilot.Queries.ProductService
-import Products.Autopilot.Types.API (ResourcesResponse (..))
-import qualified Products.Autopilot.Types.Storage.Schema as S
+import Products.Autopilot.Types.API (ResourcesResponse (..), RolloutPodEstimateReq (..))
+import Products.Autopilot.Types.Storage.Schema qualified as S
 
 fetchResourcesH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow ResourcesResponse
 fetchResourcesH _ap mProduct mService = do
@@ -84,10 +86,41 @@ resolveRunningVersionH _ap mProduct mService = do
                             Nothing -> serviceName'
                         ns = getProductNamespace pCfg
                         vsName' = getProductVsName pCfg
-                        isScheduler = (svc >>= S.dcServiceType) == Just "SCHEDULER"
+                        -- Same signal createReleaseH branches on: the app group's
+                        -- product_type, not the per-service serviceType row (which
+                        -- can drift out of sync with it).
+                        isScheduler = either (const False) (== "BackendScheduler") (normalizeProductType (fromMaybe "" (S.dcAppGroupType pCfg)))
                     mVersion <- liftIO $ runningVersionFromK8s cfg ns vsName' svcHost isScheduler
                     pure $ object ["oldVersion" .= mVersion]
         _ -> pure noVersion
+
+resolveRolloutPodEstimateH :: AuthedPerson -> RolloutPodEstimateReq -> Flow Value
+resolveRolloutPodEstimateH _ap req = do
+    cfg <- getConfig
+    let pcts = rolloutPercents req
+        noEstimate = object ["oldVersion" .= (Nothing :: Maybe Text), "podCounts" .= map (const (1 :: Int)) pcts]
+    p <- findProductByName (appGroup req)
+    case p of
+        Nothing -> pure noEstimate
+        Just pCfg -> do
+            svc <- findServiceByProductAndName (appGroup req) (service req)
+            let svcHost = case svc of
+                    Just s -> fromMaybe (service req) (getServiceHost s)
+                    Nothing -> service req
+                ns = getProductNamespace pCfg
+                vsName' = getProductVsName pCfg
+                isScheduler = (svc >>= S.dcServiceType) == Just "SCHEDULER"
+            mOldVersion <- liftIO $ runningVersionFromK8s cfg ns vsName' svcHost isScheduler
+            oldReadyPods <- case mOldVersion of
+                Nothing -> pure 0
+                Just ov -> do
+                    statusResult <- liftIO $ getDeploymentReplicaStatus cfg ns (svcHost <> "-" <> ov)
+                    pure $ case statusResult of
+                        Right (ready, _, _) -> ready
+                        Left _ -> 0
+            let estimate :: Int -> Int
+                estimate pct = max 1 (ceiling (fromIntegral oldReadyPods * fromIntegral pct / (100.0 :: Double)))
+            pure $ object ["oldVersion" .= mOldVersion, "podCounts" .= map estimate pcts]
 
 fetchEnvsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
 fetchEnvsH _ap mProduct _mEnv mService = do

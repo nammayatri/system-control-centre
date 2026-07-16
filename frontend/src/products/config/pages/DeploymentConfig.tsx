@@ -6,7 +6,7 @@ import {
   fetchReleaseConfigs, createReleaseConfig, updateReleaseConfig, deleteReleaseConfig,
 } from '../../releases/api';
 import type { ProductConfig, ReleaseConfig } from '../../releases/api';
-import { PRODUCT_TYPES } from '../../../lib/constants';
+import { PRODUCT_TYPES, SERVICE_TYPES } from '../../../lib/constants';
 import { Button } from '../../../shared/ui/button';
 import { Badge } from '../../../shared/ui/badge';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
@@ -739,9 +739,9 @@ const DeploymentConfig: React.FC = () => {
                   onChange={e => setServiceForm(prev => ({ ...prev, serviceType: e.target.value }))}
                   className={cn(inputClass, 'cursor-pointer')}
                 >
-                  <option value="SERVICE">SERVICE</option>
-                  <option value="SCHEDULER">SCHEDULER</option>
-                  <option value="CUSTOM">CUSTOM</option>
+                  {SERVICE_TYPES.map(({ value, label }) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
                 </select>
               </div>
               <div className="grid grid-cols-2 gap-4">

@@ -428,30 +428,30 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         sync_x_forwarded_email: r.releaseContext?.syncXForwardedEmail || '',
         sync_x_pomerium_jwt: r.releaseContext?.syncXPomeriumJwt || '',
         // Mobile fields pass through unchanged from the raw API (snake_case JSON keys).
-        kind:             (r.releaseContext as any)?.kind,
+        kind: (r.releaseContext as any)?.kind,
         release_group_id: (r.releaseContext as any)?.release_group_id,
-        version_code:     (r.releaseContext as any)?.version_code,
-        tag_pushed:       (r.releaseContext as any)?.tag_pushed,
-        matrix_job_name:  (r.releaseContext as any)?.matrix_job_name,
-        dispatch_id:      (r.releaseContext as any)?.dispatch_id,
-        build_type:       (r.releaseContext as any)?.build_type,
+        version_code: (r.releaseContext as any)?.version_code,
+        tag_pushed: (r.releaseContext as any)?.tag_pushed,
+        matrix_job_name: (r.releaseContext as any)?.matrix_job_name,
+        dispatch_id: (r.releaseContext as any)?.dispatch_id,
+        build_type: (r.releaseContext as any)?.build_type,
         // Provider Android store destination ("GooglePlay" | "Firebase") — drives the
         // "Firebase internal" badge. Must be passed through here or it's dropped.
-        destination:      (r.releaseContext as any)?.destination,
-        ota_namespace:    (r.releaseContext as any)?.ota_namespace,
-        change_log:       (r.releaseContext as any)?.change_log,
-        mb_wf_status:     (r.releaseContext as any)?.mb_wf_status,
-        rollout_status:   (r.releaseContext as any)?.rollout_status,
-        rollout_percent:  (r.releaseContext as any)?.rollout_percent,
-        store_track:      (r.releaseContext as any)?.store_track,
+        destination: (r.releaseContext as any)?.destination,
+        ota_namespace: (r.releaseContext as any)?.ota_namespace,
+        change_log: (r.releaseContext as any)?.change_log,
+        mb_wf_status: (r.releaseContext as any)?.mb_wf_status,
+        rollout_status: (r.releaseContext as any)?.rollout_status,
+        rollout_percent: (r.releaseContext as any)?.rollout_percent,
+        store_track: (r.releaseContext as any)?.store_track,
         // BE-injected promotability (higher than production). Must be passed through here
         // or it's dropped before the badge can read it.
-        promotable:       (r.releaseContext as any)?.promotable,
+        promotable: (r.releaseContext as any)?.promotable,
         // Canonical backend displayStatus (label/variant) + machine phase tag — the
         // list badge renders these instead of re-deriving the stage.
-        display_label:    (r.releaseContext as any)?.display_label,
-        display_variant:  (r.releaseContext as any)?.display_variant,
-        display_phase:    (r.releaseContext as any)?.display_phase,
+        display_label: (r.releaseContext as any)?.display_label,
+        display_variant: (r.releaseContext as any)?.display_variant,
+        display_phase: (r.releaseContext as any)?.display_phase,
     },
 
     rollout_strategy: (r.rolloutStrategy || []).map(s => ({
@@ -619,6 +619,17 @@ export async function resolveOldVersion(appGroup: string, service: string): Prom
     } catch {
         return '';
     }
+}
+
+export interface RolloutPodEstimate {
+    oldVersion: string | null;
+    podCounts: number[];
+}
+
+export async function fetchRolloutPodEstimate(appGroup: string, service: string, rolloutPercents: number[]): Promise<RolloutPodEstimate> {
+    if (!appGroup || !service || rolloutPercents.length === 0) return { oldVersion: null, podCounts: rolloutPercents.map(() => 1) };
+    const { data } = await apiClient.post('/rollout-pod-estimate', { appGroup, service, rolloutPercents });
+    return { oldVersion: data?.oldVersion ?? null, podCounts: Array.isArray(data?.podCounts) ? data.podCounts : rolloutPercents.map(() => 1) };
 }
 
 export async function fetchAPConfigMaps(from: string, to: string): Promise<APConfigMap[]> {

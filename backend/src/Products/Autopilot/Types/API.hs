@@ -102,6 +102,16 @@ instance FromJSON UpsertServiceReq where
 instance ToJSON UpsertServiceReq where
     toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
+data RolloutPodEstimateReq = RolloutPodEstimateReq
+    { appGroup :: Text
+    , service :: Text
+    , rolloutPercents :: [Int]
+    }
+    deriving (Show, Generic)
+
+instance FromJSON RolloutPodEstimateReq where
+    parseJSON = genericParseJSON defaultOptions
+
 data K8sCreateReleaseReq = K8sCreateReleaseReq
     { appGroup :: Text
     , service :: Text
