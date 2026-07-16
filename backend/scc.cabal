@@ -26,6 +26,7 @@ library
       Core.Admin.Types
       Core.Auth.Middleware
       Core.Auth.Permission
+      Core.Auth.Pomerium
       Core.Auth.Protected
       Core.Auth.Queries
       Core.Auth.RouteCheck

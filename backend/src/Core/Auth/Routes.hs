@@ -13,6 +13,7 @@ where
 import Control.Monad.Catch (throwM)
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..), AuthError (..))
+import Core.Auth.Pomerium (resolvePomeriumEmail)
 import Core.Auth.Queries
 import Core.Auth.Schema (McpPatKey, McpPatKeyT (..))
 import Core.Auth.Types
@@ -39,7 +40,7 @@ type AuthAPI =
         :<|> "logout" :> Header "Authorization" Text :> Post '[JSON] APIResponse
         :<|> "me" :> Header "Authorization" Text :> Get '[JSON] Value
         :<|> "verify" :> ReqBody '[JSON] Value :> Post '[JSON] Value
-        :<|> "reset-password" :> Header "X-Forwarded-Email" Text :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
+        :<|> "reset-password" :> Header "X-Forwarded-Email" Text :> Header "x-pomerium-jwt-assertion" Text :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
         :<|> "mcp-keys" :> Header "Authorization" Text :> Get '[JSON] Value
         :<|> "mcp-keys" :> Header "Authorization" Text :> ReqBody '[JSON] Value :> Post '[JSON] Value
         :<|> "mcp-keys" :> Capture "keyId" UUID :> Header "Authorization" Text :> Delete '[JSON] APIResponse
@@ -281,12 +282,12 @@ parseVerifyBody (Object obj) =
 parseVerifyBody _ = Nothing
 
 -- | POST /auth/reset-password
-resetPasswordH' :: Maybe Text -> Value -> Flow APIResponse
-resetPasswordH' mPomeriumEmail body = do
+resetPasswordH' :: Maybe Text -> Maybe Text -> Value -> Flow APIResponse
+resetPasswordH' mXFE mJwt body = do
     case parseResetPasswordBody body of
         Nothing -> throwM $ BadRequest "Email and newPassword are required"
         Just (email, newPassword) -> do
-            case mPomeriumEmail of
+            case resolvePomeriumEmail mXFE mJwt of
                 Nothing -> throwM $ Forbidden "Identity header missing; cannot verify account ownership"
                 Just pomeriumEmail
                     | T.strip pomeriumEmail /= T.strip email ->
