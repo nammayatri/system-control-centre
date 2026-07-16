@@ -3,16 +3,16 @@
 
 module Products.Autopilot.Queries.ProductService where
 
-import qualified Control.Exception
+import Control.Exception qualified
 import Control.Monad (void)
-import qualified Control.Monad.Catch
+import Control.Monad.Catch qualified
 import Core.DB.Connection (runBeamLogged, runDB, withConn)
 import Core.Environment (MonadFlow, withDb)
 import Core.Logging (logInfoG)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.Text
-import qualified Data.Text.Read as TR
+import Data.Text qualified
+import Data.Text.Read qualified as TR
 import Database.Beam
 import Database.PostgreSQL.Simple (In (..), Only (..), execute, query, withTransaction)
 import Database.PostgreSQL.Simple.Types (PGArray (..))
@@ -55,8 +55,16 @@ getServiceHost = dcServiceHost
 getSlackChannelDirect :: DeploymentConfig -> Maybe Text
 getSlackChannelDirect = dcSlackChannel
 
--- | The app group's configured GitHub repo (@repo_name@ column), used to build
--- changelog diff links and fetch commits. 'Nothing' when unset.
+-- | Service's configured HPA floor/ceiling, defaulting to 2/100 when unset.
+getHpaMinReplicas :: DeploymentConfig -> Int32
+getHpaMinReplicas = fromMaybe 2 . dcHpaMinReplicas
+
+getHpaMaxReplicas :: DeploymentConfig -> Int32
+getHpaMaxReplicas = fromMaybe 100 . dcHpaMaxReplicas
+
+{- | The app group's configured GitHub repo (@repo_name@ column), used to build
+changelog diff links and fetch commits. 'Nothing' when unset.
+-}
 getRepoNameDirect :: DeploymentConfig -> Maybe Text
 getRepoNameDirect = dcRepoName
 
@@ -211,6 +219,8 @@ upsertProduct productName' cluster' namespace' vsName' productType' productAcron
                                 , dcDecisionConfig = val_ Nothing
                                 , dcSlackChannel = val_ slackChannel'
                                 , dcServiceState = val_ Nothing
+                                , dcHpaMinReplicas = val_ Nothing
+                                , dcHpaMaxReplicas = val_ Nothing
                                 }
                             ]
 
@@ -223,8 +233,10 @@ upsertService ::
     Text ->
     Maybe Text ->
     Maybe Text ->
+    Maybe Int32 ->
+    Maybe Int32 ->
     m ()
-upsertService rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy = withDb $ \db -> do
+upsertService rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy hpaMinReplicas' hpaMaxReplicas' = withDb $ \db -> do
     withConn db $ \conn ->
         withTransaction conn $ do
             runBeamLogged conn $
@@ -255,6 +267,8 @@ upsertService rolloutStrategy decisionConfig serviceName' product' sType service
                                 , dcDecisionConfig = val_ decisionConfig
                                 , dcSlackChannel = val_ Nothing
                                 , dcServiceState = val_ (Just (serviceStateText AVAILABLE))
+                                , dcHpaMinReplicas = val_ hpaMinReplicas'
+                                , dcHpaMaxReplicas = val_ hpaMaxReplicas'
                                 }
                             ]
 

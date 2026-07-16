@@ -70,12 +70,10 @@ import Products.Autopilot.Notifications (
     notifyReleaseCompleted,
     notifyReleaseProgress,
  )
-import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, isVsLockedByEditor, withVsLock)
+import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, getHpaMaxReplicas, getHpaMinReplicas, isVsLockedByEditor, withVsLock)
 import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTracker, findReleaseTracker, insertReleaseEvent, insertReleaseTracker, touchReleaseHeartbeat)
 import Products.Autopilot.RuntimeConfig (
     getCollectMetricsDelay,
-    getHpaDefaultMinPods,
-    getHpaMinMaxFactor,
     getHpaTemplate,
     getMaxK8sRetries,
     getMaxVsLockWaitRetries,
@@ -508,8 +506,6 @@ data WorkflowConfig = WorkflowConfig
     { wcCollectMetricsDelay :: Int
     , wcReleaseStartDelay :: Int
     , wcMaxK8sRetries :: Int
-    , wcHpaMinMaxFactor :: Double
-    , wcHpaDefaultMinPods :: Int
     , wcHpaEnabled :: Bool
     , wcScaleDownOnCompletion :: Bool
     , wcPodsCalculationFactor :: Double
@@ -523,8 +519,6 @@ loadWorkflowConfig product_ = do
     cmd <- getCollectMetricsDelay
     rsd <- getReleaseStartDelay
     mkr <- getMaxK8sRetries
-    hmf <- getHpaMinMaxFactor
-    hdm <- getHpaDefaultMinPods
     hpa <- isHpaEnabledForProduct product_
     scd <- isScaleDownPodsOnCompletion
     pcf <- getPodsCalculationFactor
@@ -534,8 +528,6 @@ loadWorkflowConfig product_ = do
             { wcCollectMetricsDelay = cmd
             , wcReleaseStartDelay = rsd
             , wcMaxK8sRetries = mkr
-            , wcHpaMinMaxFactor = hmf
-            , wcHpaDefaultMinPods = hdm
             , wcHpaEnabled = hpa
             , wcScaleDownOnCompletion = scd
             , wcPodsCalculationFactor = pcf
@@ -826,13 +818,6 @@ prepareK8sResources = do
     when hpaEnabled $ do
         let newHpaName = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
             oldHpaName = serviceName ctx <> "-" <> oldVersion ctx <> "-hpa"
-            hpaMinMaxFactor = wcHpaMinMaxFactor wfCfg
-            defaultMinPods = wcHpaDefaultMinPods wfCfg
-            -- Only used for first-release template creation.
-            computeTemplateMinMax desired =
-                let hpaMin = max 1 desired
-                    hpaMax = max hpaMin (round (fromIntegral desired * hpaMinMaxFactor))
-                 in (hpaMin, hpaMax)
 
         newHpaFound <- liftIO $ hpaExists cfg (namespace ctx) newHpaName
         if newHpaFound
@@ -855,18 +840,18 @@ prepareK8sResources = do
                                 insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_CLONED" (toJSON newHpaName)
                             Left (K8sError err) -> logErrorS $ "  [HPA] Clone failed (non-fatal): " <> err
                     else do
-                        -- First release: create from template using last stage's
-                        -- podCount as steady-state target. This is the only place
-                        -- we compute HPA bounds (no prior HPA to inherit from).
-                        let targetPods = case rolloutStrategy rt of
-                                [] -> defaultMinPods
-                                steps -> max 1 (podCount (last steps))
+                        -- First release: create from template verbatim (no
+                        -- prior HPA to inherit from). min/max come from this
+                        -- service's own deployment_config (hpa_min_replicas/
+                        -- hpa_max_replicas), defaulting to 2/100 when unset.
                         mTemplate <- getHpaTemplate
                         case mTemplate of
                             Just tmpl | not (T.null tmpl) -> do
-                                let (hpaMin, hpaMax) = computeTemplateMinMax targetPods
+                                mSvcConfig <- findServiceByProductAndName (appGroup rt) (service rt)
+                                let hpaMin = maybe 2 getHpaMinReplicas mSvcConfig
+                                    hpaMax = maybe 100 getHpaMaxReplicas mSvcConfig
                                 logInfoS $ "  Creating HPA from template: " <> newHpaName <> " (min=" <> T.pack (show hpaMin) <> " max=" <> T.pack (show hpaMax) <> ")"
-                                createResult <- liftIO $ runCmd (buildCreateHpaFromTemplateCommand cfg (namespace ctx) (serviceName ctx) (newVersion ctx) tmpl hpaMin hpaMax)
+                                createResult <- liftIO $ runCmd (buildCreateHpaFromTemplateCommand cfg (namespace ctx) (serviceName ctx) (newVersion ctx) tmpl (fromIntegral hpaMin) (fromIntegral hpaMax))
                                 case createResult of
                                     Right _ -> do
                                         logInfoS "  HPA created from template"

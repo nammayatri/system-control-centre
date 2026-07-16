@@ -236,7 +236,7 @@ listServicesH _ap productName' = do
 upsertServiceH :: AuthedPerson -> UpsertServiceReq -> Flow APIResponse
 upsertServiceH ap req = do
     requireDeploymentPermission (Proxy :: Proxy 'AP_PRODUCT_CONFIG_EDIT) ap req.appGroup
-    upsertService req.rolloutStrategyText req.decisionConfigText req.service req.appGroup req.serviceType req.serviceHost req.revertStrategyText
+    upsertService req.rolloutStrategyText req.decisionConfigText req.service req.appGroup req.serviceType req.serviceHost req.revertStrategyText req.hpaMinReplicas req.hpaMaxReplicas
     pure $ APIResponse "SUCCESS" "release_config upserted"
 
 -- ============================================================================

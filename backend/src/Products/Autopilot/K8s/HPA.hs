@@ -13,7 +13,7 @@ where
 
 import Core.Config (Config (..))
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Products.Autopilot.K8s.Execute
 import Text.Read (readMaybe)
 
@@ -62,10 +62,10 @@ buildDeleteHpaCommand cfg ns hpaName =
 
 buildCreateHpaFromTemplateCommand :: Config -> Text -> Text -> Text -> Text -> Int -> Int -> String
 buildCreateHpaFromTemplateCommand cfg ns serviceHost version hpaTemplate minR maxR =
-    -- Substitute template placeholders, then JSON-set
-    -- spec.minReplicas/maxReplicas via jq so ANY initial value gets
-    -- overwritten (string-replace silently no-oped if the template's
-    -- values differed from the literal `1`, producing wrong-sized HPAs).
+    -- Substitute template placeholders, then JSON-set spec.minReplicas/maxReplicas
+    -- from the service's deployment_config (hpa_min_replicas/hpa_max_replicas,
+    -- defaulting to 2/100) so ANY value baked into the template JSON gets
+    -- overwritten -- min/max is per-service config, not part of the shared template.
     let depName = T.unpack serviceHost <> "-" <> T.unpack version
         withDep = T.replace "{{DEPLOYMENT-NAME}}" (T.pack depName) hpaTemplate
         withNs = T.replace "{{NAMESPACE}}" ns withDep

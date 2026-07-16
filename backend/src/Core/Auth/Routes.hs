@@ -4,10 +4,10 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Core.Auth.Routes
-  ( AuthAPI,
+module Core.Auth.Routes (
+    AuthAPI,
     authServer,
-  )
+)
 where
 
 import Control.Monad.Catch (throwM)
@@ -35,362 +35,365 @@ import System.Environment (lookupEnv)
 
 -- | Auth API type
 type AuthAPI =
-  "login" :> ReqBody '[JSON] Value :> Post '[JSON] Value
-    :<|> "logout" :> Header "Authorization" Text :> Post '[JSON] APIResponse
-    :<|> "me" :> Header "Authorization" Text :> Get '[JSON] Value
-    :<|> "verify" :> ReqBody '[JSON] Value :> Post '[JSON] Value
-    :<|> "reset-password" :> Header "X-Forwarded-Email" Text :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
-    :<|> "mcp-keys" :> Header "Authorization" Text :> Get '[JSON] Value
-    :<|> "mcp-keys" :> Header "Authorization" Text :> ReqBody '[JSON] Value :> Post '[JSON] Value
-    :<|> "mcp-keys" :> Capture "keyId" UUID :> Header "Authorization" Text :> Delete '[JSON] APIResponse
+    "login" :> ReqBody '[JSON] Value :> Post '[JSON] Value
+        :<|> "logout" :> Header "Authorization" Text :> Post '[JSON] APIResponse
+        :<|> "me" :> Header "Authorization" Text :> Get '[JSON] Value
+        :<|> "verify" :> ReqBody '[JSON] Value :> Post '[JSON] Value
+        :<|> "reset-password" :> Header "X-Forwarded-Email" Text :> ReqBody '[JSON] Value :> Post '[JSON] APIResponse
+        :<|> "mcp-keys" :> Header "Authorization" Text :> Get '[JSON] Value
+        :<|> "mcp-keys" :> Header "Authorization" Text :> ReqBody '[JSON] Value :> Post '[JSON] Value
+        :<|> "mcp-keys" :> Capture "keyId" UUID :> Header "Authorization" Text :> Delete '[JSON] APIResponse
 
 authServer :: ServerT AuthAPI Flow
 authServer =
-  loginH
-    :<|> logoutH
-    :<|> meH
-    :<|> verifyH
-    :<|> resetPasswordH'
-    :<|> listMcpKeysH
-    :<|> createMcpKeyH
-    :<|> revokeMcpKeyH
+    loginH
+        :<|> logoutH
+        :<|> meH
+        :<|> verifyH
+        :<|> resetPasswordH'
+        :<|> listMcpKeysH
+        :<|> createMcpKeyH
+        :<|> revokeMcpKeyH
 
 -- | POST /auth/login
 loginH :: Value -> Flow Value
 loginH body = do
-  case parseLoginBody body of
-    Nothing -> throwM $ BadRequest "Email and password are required"
-    Just (email, password) -> do
-      mPerson <- findPersonByEmail email
-      case mPerson of
-        Nothing -> throwM $ Unauthorized "Invalid credentials"
-        Just person
-          | not (personIsActive person) ->
-              throwM $ Unauthorized "Account deactivated"
-        Just person -> do
-          let valid = verifyPassword password (personPasswordHash person)
-          if not valid
-            then throwM $ Unauthorized "Invalid credentials"
-            else do
-              -- Don't deactivate old tokens — allow multiple sessions
-              -- Old tokens expire naturally (24hr TTL)
-              -- Create new token
-              tok <- liftIO $ UUID.toText <$> UUID.nextRandom
-              now <- liftIO getCurrentTime
-              let expiresAt = addUTCTime (24 * 3600) now -- 24 hours
-              insertToken (personId person) tok expiresAt
-              -- Get product access with permissions
-              products <- findAllProductsForPerson person
-              deploymentAccess <- findAllDeploymentPermsForPerson person
-              -- Same deployment descriptor the frontend gets at /auth/me,
-              -- returned here too so the SPA has it immediately after login.
-              cfg <- resolveDeploymentConfig
-              pure $
-                object
-                  [ "token" .= tok,
-                    "person"
-                      .= object
-                        [ "id" .= personId person,
-                          "email" .= personEmail person,
-                          "firstName" .= personFirstName person,
-                          "lastName" .= personLastName person,
-                          "isSuperadmin" .= personIsSuperadmin person
-                        ],
-                    "products"
-                      .= map
-                        ( \PersonProductPerms {..} ->
-                            object
-                              [ "slug" .= pppProductSlug,
-                                "role" .= pppRoleName,
-                                "permissions" .= pppPermissions
-                              ]
-                        )
-                        products,
-                    "deploymentAccess"
-                      .= map
-                        ( \PersonDeploymentPerms {..} ->
-                            object
-                              [ "productSlug" .= pdpProductSlug,
-                                "appGroup" .= pdpAppGroup,
-                                "role" .= pdpRoleName,
-                                "permissions" .= pdpPermissions
-                              ]
-                        )
-                        deploymentAccess,
-                    "config" .= cfg
-                  ]
+    case parseLoginBody body of
+        Nothing -> throwM $ BadRequest "Email and password are required"
+        Just (email, password) -> do
+            mPerson <- findPersonByEmail email
+            case mPerson of
+                Nothing -> throwM $ Unauthorized "Invalid credentials"
+                Just person
+                    | not (personIsActive person) ->
+                        throwM $ Unauthorized "Account deactivated"
+                Just person -> do
+                    let valid = verifyPassword password (personPasswordHash person)
+                    if not valid
+                        then throwM $ Unauthorized "Invalid credentials"
+                        else do
+                            -- Don't deactivate old tokens — allow multiple sessions
+                            -- Old tokens expire naturally (24hr TTL)
+                            -- Create new token
+                            tok <- liftIO $ UUID.toText <$> UUID.nextRandom
+                            now <- liftIO getCurrentTime
+                            let expiresAt = addUTCTime (24 * 3600) now -- 24 hours
+                            insertToken (personId person) tok expiresAt
+                            -- Get product access with permissions
+                            products <- findAllProductsForPerson person
+                            deploymentAccess <- findAllDeploymentPermsForPerson person
+                            -- Same deployment descriptor the frontend gets at /auth/me,
+                            -- returned here too so the SPA has it immediately after login.
+                            cfg <- resolveDeploymentConfig
+                            pure $
+                                object
+                                    [ "token" .= tok
+                                    , "person"
+                                        .= object
+                                            [ "id" .= personId person
+                                            , "email" .= personEmail person
+                                            , "firstName" .= personFirstName person
+                                            , "lastName" .= personLastName person
+                                            , "isSuperadmin" .= personIsSuperadmin person
+                                            ]
+                                    , "products"
+                                        .= map
+                                            ( \PersonProductPerms{..} ->
+                                                object
+                                                    [ "slug" .= pppProductSlug
+                                                    , "role" .= pppRoleName
+                                                    , "permissions" .= pppPermissions
+                                                    ]
+                                            )
+                                            products
+                                    , "deploymentAccess"
+                                        .= map
+                                            ( \PersonDeploymentPerms{..} ->
+                                                object
+                                                    [ "productSlug" .= pdpProductSlug
+                                                    , "appGroup" .= pdpAppGroup
+                                                    , "role" .= pdpRoleName
+                                                    , "permissions" .= pdpPermissions
+                                                    ]
+                                            )
+                                            deploymentAccess
+                                    , "config" .= cfg
+                                    ]
 
--- | The deployment descriptor returned in the @config@ block of @\/auth\/login@
--- and @\/auth\/me@. Frontend behaviour keys off @buildType@ (a runtime
--- @server_config@ value — @mobile_build_type@, default @"release"@), NOT the
--- @env@ label. So flipping a deployment debug↔release is a config update, no
--- code change or redeploy; @env@ is kept only as a cosmetic label.
+{- | The deployment descriptor returned in the @config@ block of @\/auth\/login@
+and @\/auth\/me@. Frontend behaviour keys off @buildType@ (a runtime
+@server_config@ value — @mobile_build_type@, default @"release"@), NOT the
+@env@ label. So flipping a deployment debug↔release is a config update, no
+code change or redeploy; @env@ is kept only as a cosmetic label.
+-}
 resolveDeploymentConfig :: Flow Value
 resolveDeploymentConfig = do
-  envVal <- liftIO (fromMaybe "UAT" <$> lookupEnv "SC_ENV")
-  buildType <- getConfigTextForProduct "mobile_build_type" (Just "autopilot") "release"
-  -- Mirrors isSlackEnabled; the mobile create form hides its "Send changelog to
-  -- Slack" opt-in when this is false (no point offering a post that can't send).
-  slackEnabled <- getConfigBoolForProduct "slack_enabled" (Just "autopilot") False
-  pure $
-    object
-      [ "env" .= T.pack envVal,
-        "buildType" .= buildType,
-        "slackEnabled" .= slackEnabled
-      ]
+    envVal <- liftIO (fromMaybe "UAT" <$> lookupEnv "SC_ENV")
+    buildType <- getConfigTextForProduct "mobile_build_type" (Just "autopilot") "release"
+    -- Mirrors isSlackEnabled; the mobile create form hides its "Send changelog to
+    -- Slack" opt-in when this is false (no point offering a post that can't send).
+    slackEnabled <- getConfigBoolForProduct "slack_enabled" (Just "autopilot") False
+    pure $
+        object
+            [ "env" .= T.pack envVal
+            , "buildType" .= buildType
+            , "slackEnabled" .= slackEnabled
+            ]
 
 -- | POST /auth/logout
 logoutH :: Maybe Text -> Flow APIResponse
 logoutH mAuth = do
-  case extractToken mAuth of
-    Nothing -> throwM $ Unauthorized "Missing Authorization header"
-    Just tok -> do
-      deactivateToken tok
-      pure $ APIResponse "SUCCESS" "Logged out"
+    case extractToken mAuth of
+        Nothing -> throwM $ Unauthorized "Missing Authorization header"
+        Just tok -> do
+            deactivateToken tok
+            pure $ APIResponse "SUCCESS" "Logged out"
 
 -- | GET /auth/me
 meH :: Maybe Text -> Flow Value
 meH mAuth = do
-  case extractToken mAuth of
-    Nothing -> throwM $ Unauthorized "Missing Authorization header"
-    Just tok -> do
-      mToken <- findTokenByValue tok
-      case mToken of
-        Nothing -> throwM $ InvalidToken "Invalid or expired token"
-        Just tokenRow -> do
-          now <- liftIO getCurrentTime
-          if trExpiresAt tokenRow < now
-            then throwM TokenExpired
-            else do
-              mPerson <- findPersonById (trPersonId tokenRow)
-              case mPerson of
-                Nothing -> throwM $ NotFound "Person not found"
-                Just person
-                  | not (personIsActive person) ->
-                      throwM $ Unauthorized "Account deactivated"
-                Just person -> do
-                  products <- findAllProductsForPerson person
-                  deploymentAccess <- findAllDeploymentPermsForPerson person
-                  cfg <- resolveDeploymentConfig
-                  pure $
-                    object
-                      [ "person"
-                          .= object
-                            [ "id" .= personId person,
-                              "email" .= personEmail person,
-                              "firstName" .= personFirstName person,
-                              "lastName" .= personLastName person,
-                              "isSuperadmin" .= personIsSuperadmin person
-                            ],
-                        "products"
-                          .= map
-                            ( \PersonProductPerms {..} ->
-                                object
-                                  [ "slug" .= pppProductSlug,
-                                    "role" .= pppRoleName,
-                                    "permissions" .= pppPermissions
-                                  ]
-                            )
-                            products,
-                        "deploymentAccess"
-                          .= map
-                            ( \PersonDeploymentPerms {..} ->
-                                object
-                                  [ "productSlug" .= pdpProductSlug,
-                                    "appGroup" .= pdpAppGroup,
-                                    "role" .= pdpRoleName,
-                                    "permissions" .= pdpPermissions
-                                  ]
-                            )
-                            deploymentAccess,
-                        "config" .= cfg
-                      ]
+    case extractToken mAuth of
+        Nothing -> throwM $ Unauthorized "Missing Authorization header"
+        Just tok -> do
+            mToken <- findTokenByValue tok
+            case mToken of
+                Nothing -> throwM $ InvalidToken "Invalid or expired token"
+                Just tokenRow -> do
+                    now <- liftIO getCurrentTime
+                    if trExpiresAt tokenRow < now
+                        then throwM TokenExpired
+                        else do
+                            mPerson <- findPersonById (trPersonId tokenRow)
+                            case mPerson of
+                                Nothing -> throwM $ NotFound "Person not found"
+                                Just person
+                                    | not (personIsActive person) ->
+                                        throwM $ Unauthorized "Account deactivated"
+                                Just person -> do
+                                    products <- findAllProductsForPerson person
+                                    deploymentAccess <- findAllDeploymentPermsForPerson person
+                                    cfg <- resolveDeploymentConfig
+                                    pure $
+                                        object
+                                            [ "person"
+                                                .= object
+                                                    [ "id" .= personId person
+                                                    , "email" .= personEmail person
+                                                    , "firstName" .= personFirstName person
+                                                    , "lastName" .= personLastName person
+                                                    , "isSuperadmin" .= personIsSuperadmin person
+                                                    ]
+                                            , "products"
+                                                .= map
+                                                    ( \PersonProductPerms{..} ->
+                                                        object
+                                                            [ "slug" .= pppProductSlug
+                                                            , "role" .= pppRoleName
+                                                            , "permissions" .= pppPermissions
+                                                            ]
+                                                    )
+                                                    products
+                                            , "deploymentAccess"
+                                                .= map
+                                                    ( \PersonDeploymentPerms{..} ->
+                                                        object
+                                                            [ "productSlug" .= pdpProductSlug
+                                                            , "appGroup" .= pdpAppGroup
+                                                            , "role" .= pdpRoleName
+                                                            , "permissions" .= pdpPermissions
+                                                            ]
+                                                    )
+                                                    deploymentAccess
+                                            , "config" .= cfg
+                                            ]
 
 -- | POST /auth/verify
 verifyH :: Value -> Flow Value
 verifyH body = do
-  case parseVerifyBody body of
-    Nothing -> throwM $ BadRequest "Invalid request"
-    Just (tok, productSlug, permission) -> do
-      mToken <- findTokenByValue tok
-      case mToken of
-        Nothing -> throwM $ InvalidToken "Invalid token"
-        Just tokenRow -> do
-          now <- liftIO getCurrentTime
-          if trExpiresAt tokenRow < now
-            then throwM TokenExpired
-            else do
-              mPerson <- findPersonById (trPersonId tokenRow)
-              case mPerson of
-                Nothing -> throwM $ NotFound "Person not found"
-                Just person -> do
-                  if personIsSuperadmin person
-                    then
-                      pure $
-                        object
-                          [ "authorized" .= True,
-                            "person" .= personToJson person
-                          ]
-                    else do
-                      accesses <- findProductAccessForPerson (personId person)
-                      case filter (\pa -> paProductSlug pa == productSlug) accesses of
-                        [] -> throwM $ PermissionDenied "No access to product"
-                        (pa : _) -> do
-                          perms <- computeEffectivePermissions person productSlug (paRoleId pa)
-                          if permission `elem` perms
-                            then
-                              pure $
-                                object
-                                  [ "authorized" .= True,
-                                    "person" .= personToJson person
-                                  ]
-                            else throwM $ PermissionDenied "Permission denied"
+    case parseVerifyBody body of
+        Nothing -> throwM $ BadRequest "Invalid request"
+        Just (tok, productSlug, permission) -> do
+            mToken <- findTokenByValue tok
+            case mToken of
+                Nothing -> throwM $ InvalidToken "Invalid token"
+                Just tokenRow -> do
+                    now <- liftIO getCurrentTime
+                    if trExpiresAt tokenRow < now
+                        then throwM TokenExpired
+                        else do
+                            mPerson <- findPersonById (trPersonId tokenRow)
+                            case mPerson of
+                                Nothing -> throwM $ NotFound "Person not found"
+                                Just person -> do
+                                    if personIsSuperadmin person
+                                        then
+                                            pure $
+                                                object
+                                                    [ "authorized" .= True
+                                                    , "person" .= personToJson person
+                                                    ]
+                                        else do
+                                            accesses <- findProductAccessForPerson (personId person)
+                                            case filter (\pa -> paProductSlug pa == productSlug) accesses of
+                                                [] -> throwM $ PermissionDenied "No access to product"
+                                                (pa : _) -> do
+                                                    perms <- computeEffectivePermissions person productSlug (paRoleId pa)
+                                                    if permission `elem` perms
+                                                        then
+                                                            pure $
+                                                                object
+                                                                    [ "authorized" .= True
+                                                                    , "person" .= personToJson person
+                                                                    ]
+                                                        else throwM $ PermissionDenied "Permission denied"
 
 -- ── Helpers ─────────────────────────────────────────────────────────
 
 personToJson :: PersonAuth -> Value
 personToJson person =
-  object
-    [ "id" .= personId person,
-      "email" .= personEmail person,
-      "firstName" .= personFirstName person,
-      "lastName" .= personLastName person
-    ]
+    object
+        [ "id" .= personId person
+        , "email" .= personEmail person
+        , "firstName" .= personFirstName person
+        , "lastName" .= personLastName person
+        ]
 
 extractToken :: Maybe Text -> Maybe Text
 extractToken Nothing = Nothing
 extractToken (Just h) =
-  let stripped = T.strip h
-   in case T.stripPrefix "Bearer " stripped of
-        Just t -> Just (T.strip t)
-        Nothing -> Just stripped
+    let stripped = T.strip h
+     in case T.stripPrefix "Bearer " stripped of
+            Just t -> Just (T.strip t)
+            Nothing -> Just stripped
 
 parseLoginBody :: Value -> Maybe (Text, Text)
 parseLoginBody (Object obj) =
-  case (KM.lookup (K.fromText "email") obj, KM.lookup (K.fromText "password") obj) of
-    (Just (String e), Just (String p)) -> Just (e, p)
-    _ -> Nothing
+    case (KM.lookup (K.fromText "email") obj, KM.lookup (K.fromText "password") obj) of
+        (Just (String e), Just (String p)) -> Just (e, p)
+        _ -> Nothing
 parseLoginBody _ = Nothing
 
 parseVerifyBody :: Value -> Maybe (Text, Text, Text)
 parseVerifyBody (Object obj) =
-  case (KM.lookup (K.fromText "token") obj, KM.lookup (K.fromText "product") obj, KM.lookup (K.fromText "permission") obj) of
-    (Just (String t), Just (String p), Just (String perm)) -> Just (t, p, perm)
-    _ -> Nothing
+    case (KM.lookup (K.fromText "token") obj, KM.lookup (K.fromText "product") obj, KM.lookup (K.fromText "permission") obj) of
+        (Just (String t), Just (String p), Just (String perm)) -> Just (t, p, perm)
+        _ -> Nothing
 parseVerifyBody _ = Nothing
 
 -- | POST /auth/reset-password
 resetPasswordH' :: Maybe Text -> Value -> Flow APIResponse
 resetPasswordH' mPomeriumEmail body = do
-  case parseResetPasswordBody body of
-    Nothing -> throwM $ BadRequest "Email and newPassword are required"
-    Just (email, newPassword) -> do
-      case mPomeriumEmail of
-        Just pomeriumEmail
-          | T.strip pomeriumEmail /= T.strip email ->
-              throwM $ BadRequest "You can only reset your own password"
-        _ -> pure ()
-      if T.length newPassword < 6
-        then throwM $ BadRequest "Password must be at least 6 characters"
-        else do
-          updated <- resetPasswordByEmail email newPassword
-          if updated
-            then pure $ APIResponse "SUCCESS" "Password reset successfully"
-            else throwM $ NotFound "No active account found with that email"
+    case parseResetPasswordBody body of
+        Nothing -> throwM $ BadRequest "Email and newPassword are required"
+        Just (email, newPassword) -> do
+            case mPomeriumEmail of
+                Nothing -> throwM $ Forbidden "Identity header missing; cannot verify account ownership"
+                Just pomeriumEmail
+                    | T.strip pomeriumEmail /= T.strip email ->
+                        throwM $ Forbidden "You can only reset your own password"
+                    | otherwise -> pure ()
+            if T.length newPassword < 6
+                then throwM $ BadRequest "Password must be at least 6 characters"
+                else do
+                    updated <- resetPasswordByEmail email newPassword
+                    if updated
+                        then pure $ APIResponse "SUCCESS" "Password reset successfully"
+                        else throwM $ NotFound "No active account found with that email"
 
 parseResetPasswordBody :: Value -> Maybe (Text, Text)
 parseResetPasswordBody (Object obj) =
-  case (KM.lookup (K.fromText "email") obj, KM.lookup (K.fromText "newPassword") obj) of
-    (Just (String e), Just (String p)) -> Just (e, p)
-    _ -> Nothing
+    case (KM.lookup (K.fromText "email") obj, KM.lookup (K.fromText "newPassword") obj) of
+        (Just (String e), Just (String p)) -> Just (e, p)
+        _ -> Nothing
 parseResetPasswordBody _ = Nothing
 
 requireSessionPerson :: Maybe Text -> Flow PersonAuth
 requireSessionPerson mAuth =
-  case extractToken mAuth of
-    Nothing -> throwM $ Unauthorized "Missing Authorization header"
-    Just tok -> do
-      mToken <- findTokenByValue tok
-      case mToken of
-        Nothing -> throwM $ InvalidToken "Invalid or expired token"
-        Just tokenRow -> do
-          now <- liftIO getCurrentTime
-          if trExpiresAt tokenRow < now
-            then throwM TokenExpired
-            else do
-              mPerson <- findPersonById (trPersonId tokenRow)
-              case mPerson of
-                Nothing -> throwM $ NotFound "Person not found"
-                Just person
-                  | not (personIsActive person) -> throwM $ Unauthorized "Account deactivated"
-                  | otherwise -> pure person
+    case extractToken mAuth of
+        Nothing -> throwM $ Unauthorized "Missing Authorization header"
+        Just tok -> do
+            mToken <- findTokenByValue tok
+            case mToken of
+                Nothing -> throwM $ InvalidToken "Invalid or expired token"
+                Just tokenRow -> do
+                    now <- liftIO getCurrentTime
+                    if trExpiresAt tokenRow < now
+                        then throwM TokenExpired
+                        else do
+                            mPerson <- findPersonById (trPersonId tokenRow)
+                            case mPerson of
+                                Nothing -> throwM $ NotFound "Person not found"
+                                Just person
+                                    | not (personIsActive person) -> throwM $ Unauthorized "Account deactivated"
+                                    | otherwise -> pure person
 
 listMcpKeysH :: Maybe Text -> Flow Value
 listMcpKeysH mAuth = do
-  person <- requireSessionPerson mAuth
-  keys <- listPatKeysForPerson (personId person)
-  pure . toJSON $ map patKeyToJson keys
+    person <- requireSessionPerson mAuth
+    keys <- listPatKeysForPerson (personId person)
+    pure . toJSON $ map patKeyToJson keys
 
 createMcpKeyH :: Maybe Text -> Value -> Flow Value
 createMcpKeyH mAuth body = do
-  person <- requireSessionPerson mAuth
-  case parseCreatePatKeyBody body of
-    Nothing -> throwM $ BadRequest "label and expiresAt are required"
-    Just (label, requestedExpiry) -> do
-      now <- liftIO getCurrentTime
-      let maxExpiry = addUTCTime patMaxValiditySeconds now
-          expiresAt = min requestedExpiry maxExpiry
-      if expiresAt <= now
-        then throwM $ BadRequest "expiresAt must be in the future"
-        else do
-          (token, key) <- createPatKey (personId person) label expiresAt
-          cfg <- getConfig
-          pure $
-            object
-              [ "id" .= mpkId key,
-                "token" .= token,
-                "label" .= mpkLabel key,
-                "prefix" .= mpkTokenPrefix key,
-                "createdAt" .= mpkCreatedAt key,
-                "expiresAt" .= mpkExpiresAt key,
-                "baseUrl" .= mcpBaseUrl cfg
-              ]
+    person <- requireSessionPerson mAuth
+    case parseCreatePatKeyBody body of
+        Nothing -> throwM $ BadRequest "label and expiresAt are required"
+        Just (label, requestedExpiry) -> do
+            now <- liftIO getCurrentTime
+            let maxExpiry = addUTCTime patMaxValiditySeconds now
+                expiresAt = min requestedExpiry maxExpiry
+            if expiresAt <= now
+                then throwM $ BadRequest "expiresAt must be in the future"
+                else do
+                    (token, key) <- createPatKey (personId person) label expiresAt
+                    cfg <- getConfig
+                    pure $
+                        object
+                            [ "id" .= mpkId key
+                            , "token" .= token
+                            , "label" .= mpkLabel key
+                            , "prefix" .= mpkTokenPrefix key
+                            , "createdAt" .= mpkCreatedAt key
+                            , "expiresAt" .= mpkExpiresAt key
+                            , "baseUrl" .= mcpBaseUrl cfg
+                            ]
 
 revokeMcpKeyH :: UUID -> Maybe Text -> Flow APIResponse
 revokeMcpKeyH keyId mAuth = do
-  person <- requireSessionPerson mAuth
-  ok <- revokePatKey (personId person) keyId
-  if ok
-    then pure $ APIResponse "SUCCESS" "Key revoked"
-    else throwM $ NotFound "Key not found"
+    person <- requireSessionPerson mAuth
+    ok <- revokePatKey (personId person) keyId
+    if ok
+        then pure $ APIResponse "SUCCESS" "Key revoked"
+        else throwM $ NotFound "Key not found"
 
 patKeyToJson :: McpPatKey -> Value
-patKeyToJson McpPatKeyT {..} =
-  object
-    [ "id" .= mpkId,
-      "label" .= mpkLabel,
-      "prefix" .= mpkTokenPrefix,
-      "createdAt" .= mpkCreatedAt,
-      "expiresAt" .= mpkExpiresAt,
-      "lastUsedAt" .= mpkLastUsedAt,
-      "revoked" .= isJust mpkRevokedAt
-    ]
+patKeyToJson McpPatKeyT{..} =
+    object
+        [ "id" .= mpkId
+        , "label" .= mpkLabel
+        , "prefix" .= mpkTokenPrefix
+        , "createdAt" .= mpkCreatedAt
+        , "expiresAt" .= mpkExpiresAt
+        , "lastUsedAt" .= mpkLastUsedAt
+        , "revoked" .= isJust mpkRevokedAt
+        ]
 
 parseCreatePatKeyBody :: Value -> Maybe (Text, UTCTime)
 parseCreatePatKeyBody (Object obj) =
-  case (KM.lookup (K.fromText "label") obj, KM.lookup (K.fromText "expiresAt") obj) of
-    (Just (String l), Just expiresVal)
-      | not (T.null (T.strip l)) ->
-          case fromJSON expiresVal of
-            Success t -> Just (l, t)
-            Error _ -> Nothing
-    _ -> Nothing
+    case (KM.lookup (K.fromText "label") obj, KM.lookup (K.fromText "expiresAt") obj) of
+        (Just (String l), Just expiresVal)
+            | not (T.null (T.strip l)) ->
+                case fromJSON expiresVal of
+                    Success t -> Just (l, t)
+                    Error _ -> Nothing
+        _ -> Nothing
 parseCreatePatKeyBody _ = Nothing
 
--- | Simple password verification.
--- Compares against the stored hash. In production use bcrypt.
--- For bootstrap, accepts 'admin123' against the known bcrypt hash.
+{- | Simple password verification.
+Compares against the stored hash. In production use bcrypt.
+For bootstrap, accepts 'admin123' against the known bcrypt hash.
+-}
 verifyPassword :: Text -> Text -> Bool
 verifyPassword inputPassword storedHash =
-  inputPassword == storedHash
-    || (inputPassword == "admin123" && "$2b$10$" `T.isPrefixOf` storedHash)
+    inputPassword == storedHash
+        || (inputPassword == "admin123" && "$2b$10$" `T.isPrefixOf` storedHash)

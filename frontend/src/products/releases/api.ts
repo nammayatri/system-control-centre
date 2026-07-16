@@ -976,6 +976,8 @@ export interface ReleaseConfig {
     serviceAcronym?: string;
     revert_strategy?: string;
     decision_config?: string;
+    hpa_min_replicas?: number | null;
+    hpa_max_replicas?: number | null;
 }
 
 export async function fetchReleaseConfigs(appGroup?: string): Promise<ReleaseConfig[]> {
@@ -992,6 +994,8 @@ export async function fetchReleaseConfigs(appGroup?: string): Promise<ReleaseCon
         serviceAcronym: d.serviceAcronym || '',
         revert_strategy: d.revertStrategy || d.revert_strategy || '',
         decision_config: d.decisionConfig || d.decision_config || '',
+        hpa_min_replicas: d.hpaMinReplicas ?? d.hpa_min_replicas ?? null,
+        hpa_max_replicas: d.hpaMaxReplicas ?? d.hpa_max_replicas ?? null,
     }));
 }
 
@@ -1005,6 +1009,8 @@ export async function createReleaseConfig(payload: Partial<ReleaseConfig>): Prom
         rolloutStrategyText: payload.rollout_strategy,
         revertStrategyText: payload.revert_strategy || null,
         decisionConfigText: payload.decision_config || null,
+        hpaMinReplicas: payload.hpa_min_replicas ?? null,
+        hpaMaxReplicas: payload.hpa_max_replicas ?? null,
     };
     const { data } = await apiClient.post('/services/config', body);
     return data;
@@ -1020,6 +1026,8 @@ export async function updateReleaseConfig(id: number, payload: Partial<ReleaseCo
         rolloutStrategyText: payload.rollout_strategy,
         revertStrategyText: payload.revert_strategy || null,
         decisionConfigText: payload.decision_config || null,
+        hpaMinReplicas: payload.hpa_min_replicas ?? null,
+        hpaMaxReplicas: payload.hpa_max_replicas ?? null,
     };
     const { data } = await apiClient.put(`/services/config/${id}`, body);
     return data;

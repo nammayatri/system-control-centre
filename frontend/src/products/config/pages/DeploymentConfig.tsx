@@ -35,6 +35,7 @@ const EMPTY_SERVICE_FORM: Partial<ReleaseConfig> = {
   appGroup: '', service: '', host: '', rollout_strategy: '',
   serviceType: 'SERVICE',
   revert_strategy: '', decision_config: '',
+  hpa_min_replicas: null, hpa_max_replicas: null,
 };
 
 const truncateJson = (json: string, maxLen = 50): string => {
@@ -742,6 +743,30 @@ const DeploymentConfig: React.FC = () => {
                   <option value="SCHEDULER">SCHEDULER</option>
                   <option value="CUSTOM">CUSTOM</option>
                 </select>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">HPA Min Replicas</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={serviceForm.hpa_min_replicas ?? ''}
+                    onChange={e => setServiceForm(prev => ({ ...prev, hpa_min_replicas: e.target.value === '' ? null : parseInt(e.target.value) || null }))}
+                    className={inputClass}
+                    placeholder="Default: 2"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">HPA Max Replicas</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={serviceForm.hpa_max_replicas ?? ''}
+                    onChange={e => setServiceForm(prev => ({ ...prev, hpa_max_replicas: e.target.value === '' ? null : parseInt(e.target.value) || null }))}
+                    className={inputClass}
+                    placeholder="Default: 100"
+                  />
+                </div>
               </div>
               <div>
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Rollout Strategy</label>

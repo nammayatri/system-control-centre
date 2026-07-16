@@ -21,8 +21,8 @@ import Data.Aeson (
     (.:?),
     (.=),
  )
-import qualified Data.Aeson.Key as K
-import qualified Data.Aeson.KeyMap as KM
+import Data.Aeson.Key qualified as K
+import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, (.!=))
 import Data.Foldable (toList)
 import Data.Text (Text, pack)
@@ -91,6 +91,8 @@ data UpsertServiceReq = UpsertServiceReq
     , serviceType :: Text
     , serviceHost :: Maybe Text
     , revertStrategyText :: Maybe Text
+    , hpaMinReplicas :: Maybe Int32
+    , hpaMaxReplicas :: Maybe Int32
     }
     deriving (Show, Generic)
 
@@ -566,6 +568,8 @@ data ReleaseConfigResponse = ReleaseConfigResponse
     , revertStrategy :: Maybe Text
     , jiraWebhookUrl :: Maybe Text
     , serviceHost :: Maybe Text
+    , hpaMinReplicas :: Maybe Int32
+    , hpaMaxReplicas :: Maybe Int32
     }
     deriving (Show, Generic)
 
