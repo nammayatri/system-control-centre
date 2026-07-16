@@ -648,6 +648,12 @@ prepareK8sResources = do
     let envOverride = case envOverrideData rt of
             Just t | not (T.null t) -> Just t
             _ -> Nothing
+        -- Baked into .spec.replicas at clone time (see buildCloneDeploymentCommand)
+        -- so the new deployment is born at the right size instead of inheriting
+        -- the old deployment's current replica count and needing a fix-up scale.
+        firstStagePods = case rolloutStrategy rt of
+            (firstStep : _) -> max 1 (podCount firstStep)
+            [] -> 1
     newDepExists <- liftIO $ deploymentExists cfg (namespace ctx) (deploymentName ctx)
     if newDepExists
         then case envOverride of
@@ -669,38 +675,40 @@ prepareK8sResources = do
                             liftIO $ throwIO $ WorkflowError "deploy" "New service release requires deployFilePath"
                 else case envOverride of
                     Just envs -> do
-                        logInfoS $ "  Cloning deployment to " <> deploymentName ctx <> " with envOverrideData injected"
-                        _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentWithEnvsCommand cfg ctx envs)
+                        logInfoS $ "  Cloning deployment to " <> deploymentName ctx <> " with envOverrideData injected, replicas=" <> T.pack (show firstStagePods)
+                        _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentWithEnvsCommand cfg ctx envs firstStagePods)
                         pure ()
                     Nothing -> do
-                        logInfoS $ "  Cloning deployment to " <> deploymentName ctx
-                        _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg ctx)
+                        logInfoS $ "  Cloning deployment to " <> deploymentName ctx <> ", replicas=" <> T.pack (show firstStagePods)
+                        _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg ctx firstStagePods)
                         pure ()
     updateK8sField (\k8s -> k8s{deploymentCreated = True})
 
     -- Block until new pods Ready BEFORE VS flip / HPA setup so broken images
     -- abort immediately instead of routing to zero-ready pods.
     do
-        -- Warmup: a skipped clone may leave deployment at 0 replicas (e.g.
-        -- janitor scaled down a prior aborted release); waitForPodsReady's
-        -- `desired > 0` precondition would otherwise loop to timeout.
+        -- Fresh clones are already born at firstStagePods (baked into the jq
+        -- patch), so this is normally a no-op. Still needed as a safety net
+        -- for the "deployment already exists, skip clone" resume/retry path
+        -- above, where nothing just set .spec.replicas -- it could be sitting
+        -- at 0 (e.g. janitor scaled down a prior aborted release, which would
+        -- otherwise loop waitForPodsReady's `desired > 0` precondition to
+        -- timeout) or some other stale value.
         do
             curStatus <- liftIO $ getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
             let curDesired = case curStatus of
                     Right (_, _, d) -> d
                     Left _ -> 0
-            when (curDesired <= 0) $ do
-                oldStat <- liftIO $ getDeploymentReplicaStatus cfg (namespace ctx) (serviceName ctx <> "-" <> oldVersion ctx)
-                let warmupReplicas = case oldStat of
-                        Right (_, _, d) | d > 0 -> d
-                        _ -> 1
+            when (curDesired /= firstStagePods) $ do
                 logInfoS $
                     "  [PREPARING] New deployment "
                         <> deploymentName ctx
-                        <> " at 0 replicas — scaling to "
-                        <> T.pack (show warmupReplicas)
+                        <> " at "
+                        <> T.pack (show curDesired)
+                        <> " replicas — scaling to first stage's target "
+                        <> T.pack (show firstStagePods)
                         <> " before readiness wait"
-                _ <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) (deploymentName ctx) warmupReplicas)
+                _ <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) (deploymentName ctx) firstStagePods)
                 pure ()
         maxAttempts0 <- getPodReadinessMaxAttempts
         pollSeconds0 <- getPodReadinessPollSeconds

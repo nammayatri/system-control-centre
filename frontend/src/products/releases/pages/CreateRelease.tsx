@@ -975,9 +975,9 @@ const CreateRelease: React.FC = () => {
                         </td>
                         <td className="py-2 px-3">
                           <input type="number" value={stage.pods}
-                            disabled={isLocked || podsAutoLocked}
+                            disabled={isLocked || (podsAutoLocked && !isUpdate)}
                             onChange={(e) => setStages(prev => prev.map((s, i) => i === idx ? { ...s, pods: parseInt(e.target.value) || 0 } : s))}
-                            className={cn((isLocked || podsAutoLocked) ? disabledInputClass : inputClass, 'w-24')} />
+                            className={cn((isLocked || (podsAutoLocked && !isUpdate)) ? disabledInputClass : inputClass, 'w-24')} />
                         </td>
                         <td className="py-2 px-3">
                           {!isLocked && stages.filter((_, i) => !isUpdate || i >= rolloutHistoryLength).length > 1 && (

@@ -311,7 +311,7 @@ prepareK8sResources = do
             <> oldVersion srcCtx
             <> " newVersion="
             <> newVersion ctx
-        _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg srcCtx)
+        _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg srcCtx 1)
         _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
         -- Verify the cloned deployment has the expected image.
         -- This catches jq/container-name mismatches immediately as a visible event.
