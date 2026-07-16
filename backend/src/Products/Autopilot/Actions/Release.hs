@@ -42,6 +42,7 @@ module Products.Autopilot.Actions.Release (
     isValidK8sVersion,
     injectPromotable,
     injectStoreState,
+    normalizeProductType,
 )
 where
 

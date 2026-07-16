@@ -81,7 +81,6 @@ import Products.Autopilot.RuntimeConfig (
     getPodReadinessPollSeconds,
     getPodReadyStabilizeSeconds,
     getPodRestartCountThreshold,
-    getPodsCalculationFactor,
     getPodsScaleDownDelayFromConfig,
     getReleaseStartDelay,
     getVsLockWaitDelaySeconds,
@@ -279,65 +278,21 @@ scaleNewDeploymentForStage ::
     StateFlow ()
 scaleNewDeploymentForStage cfg ctx routePct stagePodCount = do
     rtNow <- getRT
-    wfCfg <- loadWorkflowConfig (appGroup rtNow)
-    let oldDep = serviceName ctx <> "-" <> oldVersion ctx
-        newDep = deploymentName ctx
+    let newDep = deploymentName ctx
         newHpa = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
         ns = namespace ctx
-    oldStatus <- liftIO $ getDeploymentReplicaStatus cfg ns oldDep
     newStatus <- liftIO $ getDeploymentReplicaStatus cfg ns newDep
     let
         -- (ready, available, desired)
-        (oldReady, _, oldDesired) = case oldStatus of
+        (_, _, newDesired) = case newStatus of
             Right tup -> tup
             Left _ -> (0, 0, 0)
-        (newReady, _, newDesired) = case newStatus of
-            Right tup -> tup
-            Left _ -> (0, 0, 0)
-        currentOld = max 0 oldDesired
         currentNew = max 0 newDesired
-        oldVersionPods = max 0 oldReady
-        availableNew = max 0 newReady
-        factor = wcPodsCalculationFactor wfCfg
-        -- factor × oldDesired × routePct/100
-        strategyByFactor =
-            ceiling
-                ( factor
-                    * (fromIntegral currentOld :: Double)
-                    / 100.0
-                    * fromIntegral routePct
-                )
-        -- Share of old pods at (routePct + 10%), capped at 100 — headroom for mid-shift.
-        predictedFromOld =
-            let pct = min (routePct + 10) 100
-             in ceiling
-                    ( (fromIntegral oldVersionPods :: Double)
-                        * fromIntegral pct
-                        / 100.0
-                    )
-        operatorFloor = max 1 stagePodCount
-        -- max-of-all-inputs: never shrink, never under-provision.
-        target =
-            maximum
-                [ currentNew
-                , strategyByFactor
-                , availableNew
-                , predictedFromOld
-                , operatorFloor
-                ]
-    -- Pre-warm to the next stage's operator pods so [50%@5, 100%@10] doesn't
-    -- wait out cooloff under-provisioned; HPA is too slow to close the gap.
-    let nextStageFloor =
-            let strat = rolloutStrategy rtNow
-                idxAndNext = case dropWhile (\(_, s) -> rolloutPercent s /= routePct) (zip [0 :: Int ..] strat) of
-                    ((i, _) : _) -> drop (i + 1) strat
-                    _ -> []
-             in case idxAndNext of
-                    (next : _) -> max 1 (podCount next)
-                    _ -> 0
-        safeTarget =
-            let baseTarget = if currentOld <= 0 then max 1 operatorFloor else target
-             in max baseTarget nextStageFloor
+        -- Trust this stage's own auto-calculated podCount (ceil(oldReadyPods *
+        -- routePct/100), max 1 -- see /rollout-pod-estimate) as the sole scale
+        -- target. No factor/predicted-from-old heuristics, no pre-warming to
+        -- the next stage: each stage scales to exactly its own pod count.
+        safeTarget = max 1 stagePodCount
     if currentNew >= safeTarget
         then
             logInfoS $
@@ -347,8 +302,6 @@ scaleNewDeploymentForStage cfg ctx routePct stagePodCount = do
                     <> T.pack (show currentNew)
                     <> " replicas (safeTarget="
                     <> T.pack (show safeTarget)
-                    <> ", currentOld="
-                    <> T.pack (show currentOld)
                     <> ", route%="
                     <> T.pack (show routePct)
                     <> "), no-op"
@@ -356,26 +309,12 @@ scaleNewDeploymentForStage cfg ctx routePct stagePodCount = do
             let logCtx =
                     " (safeTarget="
                         <> T.pack (show safeTarget)
-                        <> ", inputs: currentNew="
+                        <> ", currentNew="
                         <> T.pack (show currentNew)
-                        <> ", availableNew="
-                        <> T.pack (show availableNew)
-                        <> ", strategyByFactor="
-                        <> T.pack (show strategyByFactor)
-                        <> ", predictedFromOld="
-                        <> T.pack (show predictedFromOld)
-                        <> ", operatorFloor="
-                        <> T.pack (show operatorFloor)
-                        <> ", oldDesired="
-                        <> T.pack (show currentOld)
-                        <> ", oldVersionPods="
-                        <> T.pack (show oldVersionPods)
                         <> ", route%="
                         <> T.pack (show routePct)
                         <> ", podCount="
                         <> T.pack (show stagePodCount)
-                        <> ", factor="
-                        <> T.pack (show factor)
                         <> ")"
             -- Cap at HPA max; never mutate HPA here (only prepare stage does).
             (_liveMin, liveMax) <- liftIO $ getHpaMinMax cfg ns newHpa
@@ -508,8 +447,6 @@ data WorkflowConfig = WorkflowConfig
     , wcMaxK8sRetries :: Int
     , wcHpaEnabled :: Bool
     , wcScaleDownOnCompletion :: Bool
-    , wcPodsCalculationFactor :: Double
-    -- ^ Safety multiplier on (oldDesired × routePct/100) (default 1.2).
     , wcPodsScaleDownDelay :: Double
     -- ^ Minutes after rollout success before scaling old deployment to 0.
     }
@@ -521,7 +458,6 @@ loadWorkflowConfig product_ = do
     mkr <- getMaxK8sRetries
     hpa <- isHpaEnabledForProduct product_
     scd <- isScaleDownPodsOnCompletion
-    pcf <- getPodsCalculationFactor
     psd <- getPodsScaleDownDelayFromConfig
     pure
         WorkflowConfig
@@ -530,7 +466,6 @@ loadWorkflowConfig product_ = do
             , wcMaxK8sRetries = mkr
             , wcHpaEnabled = hpa
             , wcScaleDownOnCompletion = scd
-            , wcPodsCalculationFactor = pcf
             , wcPodsScaleDownDelay = psd
             }
 
