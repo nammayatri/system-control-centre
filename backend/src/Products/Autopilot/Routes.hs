@@ -55,7 +55,7 @@ type CoreAPI =
     :<|> "envs" :> ServiceProtected 'AP_RELEASE_VIEW :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
     :<|> "envs" :> Protected 'AP_RELEASE_VIEW :> "secondary" :> QueryParam "product" Text :> QueryParam "env" Text :> QueryParam "service" Text :> Get '[JSON] Value
     :<|> "running-version" :> Protected 'AP_RELEASE_VIEW :> QueryParam "product" Text :> QueryParam "service" Text :> Get '[JSON] Value
-    :<|> "rollout-pod-estimate" :> Protected 'AP_RELEASE_VIEW :> ReqBody '[JSON] RolloutPodEstimateReq :> Post '[JSON] Value
+    :<|> "rollout-pod-estimate" :> ServiceProtected 'AP_RELEASE_VIEW :> ReqBody '[JSON] RolloutPodEstimateReq :> Post '[JSON] Value
     :<|> "rollout-pod-estimate" :> "secondary" :> Protected 'AP_RELEASE_VIEW :> ReqBody '[JSON] RolloutPodEstimateReq :> Post '[JSON] Value
     -- New endpoints
     :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "diff" :> QueryParam "type" Text :> Get '[JSON] DiffResponse
