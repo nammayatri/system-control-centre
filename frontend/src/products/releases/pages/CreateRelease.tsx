@@ -336,19 +336,22 @@ const CreateRelease: React.FC = () => {
   }, [formData.appGroup, formData.service, isClone, isUpdate]);
 
   // Recalculate Min Pods (while locked) whenever the stage percentages change —
-  // service select (above), the user editing a stage's %, or adding/removing a
-  // stage all land here since they all change this key. Unlocking just stops
-  // this from overwriting manual edits; it doesn't clear them.
+  // service select, the user editing a stage's %, adding/removing a stage, or
+  // loading a cloned release's stages all land here since they all change this
+  // key. Runs on clone too: the cloned release's own pod counts are stale
+  // (sized against whatever the old version's pod count was back then), so
+  // they get replaced with a fresh estimate against the live old version.
+  // Unlocking just stops this from overwriting manual edits; it doesn't clear them.
   const stageRolloutsKey = stages.map(s => s.rollout).join(',');
   useEffect(() => {
-    if (isClone || isUpdate || !formData.appGroup || !formData.service || !podsAutoLocked || !stageRolloutsKey) return;
+    if (isUpdate || !formData.appGroup || !formData.service || !podsAutoLocked || !stageRolloutsKey) return;
     const rolloutPercents = stageRolloutsKey.split(',').map(Number);
     fetchRolloutPodEstimate(formData.appGroup, formData.service, rolloutPercents).then(est => {
       setStages(prev => prev.map((s, i) => (est.podCounts[i] != null ? { ...s, pods: est.podCounts[i] } : s)));
     }).catch((e: any) => {
       console.error('[CreateRelease] fetchRolloutPodEstimate failed:', e);
     });
-  }, [formData.appGroup, formData.service, isClone, isUpdate, podsAutoLocked, stageRolloutsKey]);
+  }, [formData.appGroup, formData.service, isUpdate, podsAutoLocked, stageRolloutsKey]);
 
   useEffect(() => { if (!isEnvSwitch) setEnvData(''); }, [isEnvSwitch]);
   useEffect(() => { if (!isResourcesSwitch) setResourcesData(''); }, [isResourcesSwitch]);
