@@ -1515,7 +1515,15 @@ checkSinglePod restartThreshold (Object podObj) =
             Nothing -> []
             Just cs -> concatMap (checkContainer podName) cs
      in case phase of
-            Just "Failed" -> Left (podName <> ": pod phase is Failed")
+            -- Non-fatal: phase Failed is almost always infra-caused (node
+            -- eviction/preemption, scheduling churn) rather than a bad new
+            -- version -- the ReplicaSet controller already replaces it with a
+            -- new pod on its own. Hard-failing here on a single transient
+            -- Failed pod aborted the whole release before the replacement
+            -- ever got a chance to come up; let readyCount/desired (checked
+            -- by the caller's poll loop, with its own timeout) be the real
+            -- gate instead.
+            Just "Failed" -> Right (podName <> ": pod phase is Failed (transient, likely node/infra — waiting for K8s to replace it)")
             Just "Error" -> Left (podName <> ": pod phase is Error (application crashing)")
             _ ->
                 if null containerErrors
