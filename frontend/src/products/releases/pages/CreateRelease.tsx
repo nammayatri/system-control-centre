@@ -46,6 +46,13 @@ const toCommitId = (version: string): string => {
   return COMMIT_ID_RE.test(id) ? id : '';
 };
 
+const VERSION_RE = /^([0-9a-f]{6})(?:v(\d+))?$/i;
+const parseVersionParts = (version: string): { hash: string; vNum: number } | null => {
+  const m = VERSION_RE.exec((version || '').trim());
+  if (!m) return null;
+  return { hash: m[1].toLowerCase(), vNum: m[2] ? parseInt(m[2], 10) : 0 };
+};
+
 // Build a GitHub link that shows what shipped in this release. Prefer a
 // compare view (old...new) so reviewers see the exact diff; fall back to the
 // new ref's commit history when there's no old version to diff against.
@@ -152,6 +159,7 @@ const CreateRelease: React.FC = () => {
   const [rolloutHistoryLength, setRolloutHistoryLength] = useState(0);
   const [podsAutoLocked, setPodsAutoLocked] = useState(true);
   const [secondaryPodsAutoLocked, setSecondaryPodsAutoLocked] = useState(true);
+  const [secondaryOldVersion, setSecondaryOldVersion] = useState<string | null>(null);
   const [oldVersionUnresolved, setOldVersionUnresolved] = useState(false);
   // Same signal buildPayload sends as trackerType — the app group's product_type,
   // not the per-service serviceType row (which can drift out of sync with it).
@@ -159,6 +167,14 @@ const CreateRelease: React.FC = () => {
     () => normalizeProductType(productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup)?.product_type),
     [productConfigs, formData.appGroup],
   );
+
+  const secondaryVersionConflict = useMemo(() => {
+    if (!isReleaseSync || !secondaryOldVersion || !formData.new_version) return false;
+    const aws = parseVersionParts(secondaryOldVersion);
+    const gcp = parseVersionParts(formData.new_version);
+    if (!aws || !gcp) return false;
+    return aws.hash === gcp.hash && aws.vNum >= gcp.vNum;
+  }, [isReleaseSync, secondaryOldVersion, formData.new_version]);
 
   const { data: services = [] } = useServices(formData.appGroup, isNewService);
   const createMutation = useCreateRelease();
@@ -356,10 +372,16 @@ const CreateRelease: React.FC = () => {
 
   const secondaryStageRolloutsKey = secondaryStages.map(s => s.rollout).join(',');
   useEffect(() => {
-    if (isUpdate || !isReleaseSync || !formData.appGroup || !formData.service || !secondaryPodsAutoLocked || !secondaryStageRolloutsKey) return;
+    if (isUpdate || !isReleaseSync || !formData.appGroup || !formData.service || !secondaryStageRolloutsKey) {
+      setSecondaryOldVersion(null);
+      return;
+    }
     const rolloutPercents = secondaryStageRolloutsKey.split(',').map(Number);
     fetchRolloutPodEstimateSecondary(formData.appGroup, formData.service, rolloutPercents).then(est => {
-      setSecondaryStages(prev => prev.map((s, i) => (est.podCounts[i] != null ? { ...s, pods: est.podCounts[i] } : s)));
+      setSecondaryOldVersion(est.oldVersion ?? null);
+      if (secondaryPodsAutoLocked) {
+        setSecondaryStages(prev => prev.map((s, i) => (est.podCounts[i] != null ? { ...s, pods: est.podCounts[i] } : s)));
+      }
     }).catch((e: any) => {
       console.error('[CreateRelease] fetchRolloutPodEstimateSecondary failed:', e);
     });
@@ -466,6 +488,11 @@ const CreateRelease: React.FC = () => {
     // rather than let that happen silently.
     if (!isUpdate && selectedTrackerType === 'BackendScheduler' && oldVersionUnresolved) {
       toast.error('Could not detect the currently running version for this scheduler service — check the deployment in the cluster before creating this release.');
+      return;
+    }
+
+    if (!isUpdate && secondaryVersionConflict) {
+      toast.error(`This version should already be running in AWS (currently at ${secondaryOldVersion}) — nothing new to sync.`);
       return;
     }
 
@@ -1086,6 +1113,14 @@ const CreateRelease: React.FC = () => {
                   <p className="text-xs text-zinc-500 mb-3">
                     Min Pods is auto-calculated from the secondary cluster's live old-version pod count. {secondaryPodsAutoLocked ? 'Unlock to override.' : 'Editing manually — values will not be recalculated.'}
                   </p>
+                  <p className="text-xs text-zinc-500 mb-3">
+                    Currently running in {syncCluster}: <span className="font-mono">{secondaryOldVersion || (formData.appGroup && formData.service ? 'resolving…' : '—')}</span>
+                  </p>
+                  {secondaryVersionConflict && (
+                    <p className="text-xs text-red-500 mb-3">
+                      This version should already be running in {syncCluster} (currently at {secondaryOldVersion}) — sync release creation is blocked since there's nothing new to sync.
+                    </p>
+                  )}
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm text-left">
                       <thead>
@@ -1130,7 +1165,7 @@ const CreateRelease: React.FC = () => {
 
         <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3 pt-2">
           <Button type="button" variant="secondary" onClick={() => isUpdate ? navigate(`/backend/releases/${id}`) : navigate('/backend/releases')}>Cancel</Button>
-          <Button type="submit" loading={isSubmitting} disabled={!isUpdate && selectedTrackerType === 'BackendScheduler' && oldVersionUnresolved}>{submitLabel}</Button>
+          <Button type="submit" loading={isSubmitting} disabled={!isUpdate && ((selectedTrackerType === 'BackendScheduler' && oldVersionUnresolved) || secondaryVersionConflict)}>{submitLabel}</Button>
         </div>
       </form>
     </div>

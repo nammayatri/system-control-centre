@@ -9,23 +9,25 @@ event log, flagging terminal secondary states as COMPLETED/FAILED.
 module Products.Autopilot.SyncWatcher (
     syncWatcherLoop,
     syncWatcherPollLoop,
-) where
+)
+where
 
-import qualified Control.Exception as E
+import Control.Exception qualified as E
 import Control.Monad (forM_, forever, when)
-import qualified Control.Monad.Catch as MC
+import Control.Monad.Catch qualified as MC
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
 import Core.Environment (AppState, Flow, forkFlow, getConfig, logError, logInfo, logWarning, runFlow)
 import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Types.Time (Seconds (..), threadDelaySec)
 import Data.Aeson (Value (..), decode, object, (.=))
-import qualified Data.Aeson.Key as AK
-import qualified Data.Aeson.KeyMap as KM
-import qualified Data.ByteString.Lazy.Char8 as LBS
+import Data.Aeson.Key qualified as AK
+import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString.Lazy.Char8 qualified as LBS
+import Data.Maybe (isJust)
 import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Products.Autopilot.Queries.ReleaseTracker (findActiveSyncTrackers, findEventByLabel, insertReleaseEvent)
 import Products.Autopilot.RuntimeConfig (getReleaseWatchDelay, isSyncClusterEnabled)
 import Products.Autopilot.Sync (buildAuthHeaders, normaliseBase)
@@ -68,6 +70,14 @@ terminalStatuses =
 
 pollSecondarySyncStatus :: Config -> ReleaseTracker -> Flow ()
 pollSecondarySyncStatus cfg tracker = do
+    alreadyDone <- isJust <$> findEventByLabel (releaseId tracker) "SYNC_COMPLETED"
+    alreadyFailed <- isJust <$> findEventByLabel (releaseId tracker) "SYNC_FAILED"
+    if alreadyDone || alreadyFailed
+        then pure ()
+        else pollSecondarySyncStatus' cfg tracker
+
+pollSecondarySyncStatus' :: Config -> ReleaseTracker -> Flow ()
+pollSecondarySyncStatus' cfg tracker = do
     mEvent <- findEventByLabel (releaseId tracker) "SYNC_SECONDARY_TRACKER_ID"
     case mEvent of
         Nothing -> do

@@ -42,7 +42,7 @@ import YAML from 'yaml';
 
 const AndroidIcon = ({ className }: { className?: string }) => (
   <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
-    <path d="M17.6 9.48l1.84-3.18c.16-.31.04-.69-.27-.85a.637.637 0 00-.83.22l-1.88 3.24a11.463 11.463 0 00-8.92 0L5.66 5.67c-.19-.29-.58-.38-.87-.2-.28.18-.37.54-.19.83L6.4 9.48A10.78 10.78 0 003 16h18a10.78 10.78 0 00-3.4-6.52zM8.86 13a.98.98 0 110-1.96.98.98 0 010 1.96zm6.28 0a.98.98 0 110-1.96.98.98 0 010 1.96z"/>
+    <path d="M17.6 9.48l1.84-3.18c.16-.31.04-.69-.27-.85a.637.637 0 00-.83.22l-1.88 3.24a11.463 11.463 0 00-8.92 0L5.66 5.67c-.19-.29-.58-.38-.87-.2-.28.18-.37.54-.19.83L6.4 9.48A10.78 10.78 0 003 16h18a10.78 10.78 0 00-3.4-6.52zM8.86 13a.98.98 0 110-1.96.98.98 0 010 1.96zm6.28 0a.98.98 0 110-1.96.98.98 0 010 1.96z" />
   </svg>
 );
 
@@ -65,6 +65,19 @@ const formatDate = (d?: string) => {
 const tryFormatJson = (data: string): string => {
   try { return JSON.stringify(JSON.parse(data), null, 2); }
   catch { return data; }
+};
+
+type SyncStatusInfo = { label: string; variant: 'default' | 'warning' | 'success' | 'danger' };
+const deriveSyncStatus = (events: RolloutEvent[], releaseStatus: string): SyncStatusInfo | null => {
+  const has = (label: string) => events.some(e => e.label === label);
+  if (releaseStatus !== 'COMPLETED') return { label: 'Sync Not Initiated', variant: 'default' };
+  if (has('SYNC_COMPLETED')) return { label: 'Sync Completed', variant: 'success' };
+  if (has('SYNC_FAILED') || has('SYNC_FAILED_FINAL')) return { label: 'Sync Failed', variant: 'danger' };
+  if (has('SYNC_TRIGGERED') || has('SYNC_REQUEST') || has('SYNC_RESPONSE') || has('SYNC_STATUS_UPDATE') || has('SYNC_SECONDARY_TRACKER_ID')) {
+    return { label: 'Sync In Progress', variant: 'warning' };
+  }
+  if (has('SYNC_SKIPPED')) return { label: 'Sync Skipped', variant: 'default' };
+  return null;
 };
 
 const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
@@ -1027,8 +1040,8 @@ const ReleaseSummary: React.FC = () => {
 
   const matchedMobileApp = isMobile
     ? mobileApps.find(
-        a => a.name === release.appGroup && a.surface === release.service && a.platform === release.env,
-      )
+      a => a.name === release.appGroup && a.surface === release.service && a.platform === release.env,
+    )
     : undefined;
   const crashlyticsUrl = (() => {
     if (!isMobile) return '';
@@ -1163,6 +1176,10 @@ const ReleaseSummary: React.FC = () => {
           )}
           {isFirebaseInternal(release) && <FirebaseInternalBadge />}
           {(release.release_context?.revert === 1 || revertsTarget) && <Badge variant="purple" dot>REVERT</Badge>}
+          {!isMobile && release.sync_enabled === 'true' && (() => {
+            const syncStatus = deriveSyncStatus(events, release.status);
+            return syncStatus ? <Badge variant={syncStatus.variant} dot>{syncStatus.label}</Badge> : null;
+          })()}
           {isMobile && release.release_context?.build_type === 'debug' && (
             <Badge variant="warning" dot>DEBUG</Badge>
           )}
@@ -1305,17 +1322,17 @@ const ReleaseSummary: React.FC = () => {
           {s === 'COMPLETED' && isMobile && !revertedByTarget
             && !revertsTarget
             && release.release_context?.build_type !== 'debug' && (
-            <PermissionGate product="autopilot" permission="RELEASE_REVERT" appGroup={release.appGroup}>
-              <Button
-                size="sm"
-                variant="outline"
-                className="border-violet-300 text-violet-700 hover:bg-violet-50"
-                onClick={() => navigate(`/mobile/releases/${id}/revert`)}
-              >
-                <Undo2 className="w-3.5 h-3.5" /> Revert
-              </Button>
-            </PermissionGate>
-          )}
+              <PermissionGate product="autopilot" permission="RELEASE_REVERT" appGroup={release.appGroup}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-violet-300 text-violet-700 hover:bg-violet-50"
+                  onClick={() => navigate(`/mobile/releases/${id}/revert`)}
+                >
+                  <Undo2 className="w-3.5 h-3.5" /> Revert
+                </Button>
+              </PermissionGate>
+            )}
           {/* Restart is backend-only: it restarts a k8s Deployment. Mobile builds
               are GitHub Actions runs with no k8s deployment, so the endpoint fails
               for them — hide it until a mobile restart (re-dispatch) is built.
