@@ -577,8 +577,10 @@ notifyReleaseReverted tracker = whenSlackEnabled $
           [ sectionBlock "*REVERTED*",
             contextBlock ["Rolled back to `" <> newVersion tracker <> "`"]
           ]
-    _ <- sendSlackRich channel "REVERTED" colorReverted blocks threadTs
-    pure ()
+    mTs <- sendSlackRich channel "REVERTED" colorReverted blocks threadTs
+    case (threadTs, mTs) of
+      (Nothing, Just ts) -> saveThreadTs (releaseId tracker) ts
+      _ -> pure ()
 
 notifyReleaseDiscarded :: ReleaseTracker -> Flow ()
 notifyReleaseDiscarded tracker = whenSlackEnabled $

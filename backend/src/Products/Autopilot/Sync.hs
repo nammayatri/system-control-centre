@@ -201,7 +201,7 @@ doCreate cfg tracker mts targetCluster = do
                 , "global_id" .= globalId tracker
                 , "is_infra_approved" .= (1 :: Int)
                 , "is_approved" .= True
-                , "udf3" .= slackThreadTs tracker
+                , "udf3" .= (Nothing :: Maybe Text)
                 , "isReleaseSync" .= False
                 , "isSystemTriggered" .= True
                 ]

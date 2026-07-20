@@ -775,7 +775,7 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{
                             Just True -> Just "true"
                             _ -> syncEnabled
                 , envOverrideData = envOverrideData
-                , slackThreadTs = slackThreadTs
+                , slackThreadTs = if isFromSync then Nothing else slackThreadTs
                 , -- Seed from 'derivedContext' below so the tracker's public view
                   -- matches the 'K8sState' target state we're about to persist.
                   -- Without this field the record is partial and any access to
@@ -1008,6 +1008,7 @@ revertReleaseH ap rid req = do
                                   -- of a release that ever had a global_id (i.e. every cross-cloud
                                   -- replicated release) hit a raw SQL 23505 violation.
                                   NT.globalId = Nothing
+                                , NT.slackThreadTs = Nothing
                                 }
                     -- Round 8 audit C5: use insertReleaseTrackerSafe so the
                     -- partial unique index uq_release_tracker_service_inflight
