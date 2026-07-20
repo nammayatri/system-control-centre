@@ -1184,6 +1184,7 @@ mintSyntheticRelease observed ac version mCode track = do
                   -- the groups list (mode=STORE_SYNC).
                   rtReleaseGroupId = Just groupId
                 , rtReleaseGroupLabel = Nothing
+                , rtCloudType = Nothing
                 , rtCreatedAt = now
                 , rtUpdatedAt = now
                 }

@@ -42,6 +42,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (UTCTime)
 import Database.Beam
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..))
+import Products.Autopilot.Queries.ReleaseTracker (visibleToCloud, withCloudDb)
 import Products.Autopilot.Types.Storage.Schema
 import Products.Autopilot.Types.Target (TargetState (..))
 
@@ -122,7 +123,7 @@ liveReleasesH _ap mCategory = do
 
 fetchBackendLive :: Flow [LiveBackendRow]
 fetchBackendLive = do
-    rows <- withDb $ \db ->
+    rows <- withCloudDb $ \cloud db ->
         runDB db $
             runSelectReturningList $
                 select $
@@ -133,6 +134,7 @@ fetchBackendLive = do
                     -- ordering we'd get from end_time but is non-null.
                     orderBy_ (desc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
                         guard_ (rtStatus rt ==. val_ "COMPLETED")
                         guard_ (rtCategory rt `in_` map val_ backendCategories)
                         pure rt
