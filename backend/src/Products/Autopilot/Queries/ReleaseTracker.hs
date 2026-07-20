@@ -57,6 +57,12 @@ module Products.Autopilot.Queries.ReleaseTracker (
     updateReleaseTrackerSlackThreadTs,
     touchReleaseHeartbeat,
 
+    -- * Cloud scoping (migration 0045)
+    visibleToCloud,
+    withCloudDb,
+    currentCloud,
+    cloudTypeForCategory,
+
     -- * Row conversion
     toRow,
     fromRow,
@@ -83,8 +89,9 @@ module Products.Autopilot.Queries.ReleaseTracker (
 where
 
 import Control.Monad (void)
+import Core.Config (Config (..))
 import Core.DB.Connection (runBeamLogged, runDB, withConn)
-import Core.Environment (MonadFlow, withDb)
+import Core.Environment (DBEnv, MonadFlow, getConfig, withDb)
 import Data.Aeson (FromJSON, ToJSON, Value (..), fromJSON, toJSON)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KM
@@ -96,9 +103,9 @@ import Data.Text.Encoding qualified as TE
 import Data.Text.Lazy qualified as LT
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Database.Beam
-import Database.Beam.Postgres ()
+import Database.Beam.Postgres (Postgres)
 import Database.Beam.Postgres.Full (anyConflict, insertReturning, onConflict, onConflictDoNothing, runPgInsertReturningList)
-import Database.PostgreSQL.Simple (Only (..), Query, ToRow, execute, execute_, query, withTransaction)
+import Database.PostgreSQL.Simple (Only (..), Query, ToRow, execute, query, withTransaction)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
 import Debug.Trace qualified as DT
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind, claimsStoreIdentity)
@@ -112,77 +119,104 @@ import Products.Autopilot.Types.Target.Kubernetes
 
 type TrackerWithTarget = (ReleaseTracker, Maybe TargetState)
 
+visibleToCloud :: Text -> ReleaseTrackerT (QExpr Postgres s) -> QExpr Postgres s Bool
+visibleToCloud cloud rt =
+    rtCloudType rt ==. val_ (Just cloud) ||. isNothing_ (rtCloudType rt)
+
+currentCloud :: (MonadFlow m) => m Text
+currentCloud = cloudProvider <$> getConfig
+
+withCloudDb :: (MonadFlow m) => (Text -> DBEnv -> IO a) -> m a
+withCloudDb action = do
+    cloud <- currentCloud
+    withDb (action cloud)
+
+cloudTypeForCategory :: (MonadFlow m) => ReleaseCategory -> m (Maybe Text)
+cloudTypeForCategory cat = case cat of
+    MobileBuild -> pure Nothing
+    BackendService -> instanceCloud
+    BackendScheduler -> instanceCloud
+    BackendConfig -> instanceCloud
+    VSEdit -> instanceCloud
+  where
+    instanceCloud = Just . cloudProvider <$> getConfig
+
 insertReleaseTracker :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m ()
-insertReleaseTracker rt mts = withDb $ \db -> do
-    now <- getCurrentTime
-    let created = fromMaybe now (dateCreated rt)
-        row = toRow created now rt mts
-    -- Every non-PK column must appear in BOTH the INSERT list AND the DO
-    -- UPDATE SET clause, otherwise it silently retains its old value on
-    -- conflict and corrupts rollout state. EXCEPTIONS (deliberately absent
-    -- from both lists so this writer can never clobber them): the
-    -- setPhase-owned lifecycle columns (review_*, rollout_*, store_track,
-    -- asc ids, terminal_status), the externally-stamped dispatch_id /
-    -- external_run_id / version_code, and the creation-stamped
-    -- release_group_id / release_group_label (migration 0042).
-    withConn db $ \conn -> do
-        _ <-
-            execute
-                conn
-                "INSERT INTO release_tracker \
-                \  ( id, old_version, new_version, app_group, service, priority, env \
-                \  , category, status, release_wf_status, mode, release_manager, approved_by \
-                \  , is_approved, is_infra_approved, release_tag, schedule_time, start_time \
-                \  , end_time, rollout_strategy, rollout_history, release_context, info \
-                \  , description, change_log, metadata, global_id, sync_enabled \
-                \  , env_override_data, slack_thread_ts, date_created, last_updated ) \
-                \VALUES \
-                \  ( ?, ?, ?, ?, ?, ?, ? \
-                \  , ?, ?, ?, ?, ?, ? \
-                \  , ?, ?, ?, ?, ? \
-                \  , ?, ?, ?, ?, ? \
-                \  , ?, ?, ?, ?, ? \
-                \  , ?, ?, ?, ? ) \
-                \ON CONFLICT (id) DO UPDATE SET \
-                \    old_version       = EXCLUDED.old_version \
-                \  , new_version       = EXCLUDED.new_version \
-                \  , app_group         = EXCLUDED.app_group \
-                \  , service           = EXCLUDED.service \
-                \  , priority          = EXCLUDED.priority \
-                \  , env               = EXCLUDED.env \
-                \  , category          = EXCLUDED.category \
-                \  , status            = EXCLUDED.status \
-                \  , release_wf_status = EXCLUDED.release_wf_status \
-                \  , mode              = EXCLUDED.mode \
-                \  , release_manager   = EXCLUDED.release_manager \
-                \  , approved_by       = EXCLUDED.approved_by \
-                \  , is_approved       = EXCLUDED.is_approved \
-                \  , is_infra_approved = EXCLUDED.is_infra_approved \
-                \  , release_tag       = EXCLUDED.release_tag \
-                \  , schedule_time     = EXCLUDED.schedule_time \
-                \  , start_time        = EXCLUDED.start_time \
-                \  , end_time          = EXCLUDED.end_time \
-                \  , rollout_strategy  = EXCLUDED.rollout_strategy \
-                \  , rollout_history   = EXCLUDED.rollout_history \
-                \  , release_context   = EXCLUDED.release_context \
-                \  , info              = EXCLUDED.info \
-                \  , description       = EXCLUDED.description \
-                \  , change_log        = EXCLUDED.change_log \
-                \  , metadata          = EXCLUDED.metadata \
-                \  , global_id         = EXCLUDED.global_id \
-                \  , sync_enabled      = EXCLUDED.sync_enabled \
-                \  , env_override_data = EXCLUDED.env_override_data \
-                \  , slack_thread_ts   = COALESCE(EXCLUDED.slack_thread_ts, release_tracker.slack_thread_ts) \
-                \  , date_created      = EXCLUDED.date_created \
-                \  , last_updated      = EXCLUDED.last_updated"
-                ( (rtId row, rtOldVersion row, rtNewVersion row, rtAppGroup row, rtService row, rtPriority row, rtEnv row)
-                    :. (rtCategory row, rtStatus row, rtReleaseWFStatus row, rtMode row, rtCreatedBy row, rtApprovedBy row)
-                    :. (rtIsApproved row, rtIsInfraApproved row, rtReleaseTag row, rtScheduleTime row, rtStartTime row)
-                    :. (rtEndTime row, rtRolloutStrategy row, rtRolloutHistory row, rtTargetState row, rtInfo row)
-                    :. (rtDescription row, rtChangeLog row, rtMetadata row, rtGlobalId row, rtSyncEnabled row)
-                    :. (rtEnvOverrideData row, rtSlackThreadTs row, rtCreatedAt row, rtUpdatedAt row)
-                )
-        pure ()
+insertReleaseTracker rt mts = do
+    cloud <- cloudTypeForCategory (category rt)
+    withDb $ \db -> do
+        now <- getCurrentTime
+        let created = fromMaybe now (dateCreated rt)
+            row = toRow cloud created now rt mts
+        -- Every non-PK column must appear in BOTH the INSERT list AND the DO
+        -- UPDATE SET clause, otherwise it silently retains its old value on
+        -- conflict and corrupts rollout state. EXCEPTIONS (deliberately absent
+        -- from both lists so this writer can never clobber them): the
+        -- setPhase-owned lifecycle columns (review_*, rollout_*, store_track,
+        -- asc ids, terminal_status), the externally-stamped dispatch_id /
+        -- external_run_id / version_code, and the creation-stamped
+        -- release_group_id / release_group_label (migration 0042).
+        withConn db $ \conn -> do
+            _ <-
+                execute
+                    conn
+                    "INSERT INTO release_tracker \
+                    \  ( id, old_version, new_version, app_group, service, priority, env \
+                    \  , category, status, release_wf_status, mode, release_manager, approved_by \
+                    \  , is_approved, is_infra_approved, release_tag, schedule_time, start_time \
+                    \  , end_time, rollout_strategy, rollout_history, release_context, info \
+                    \  , description, change_log, metadata, global_id, sync_enabled \
+                    \  , env_override_data, slack_thread_ts, date_created, last_updated \
+                    \  , cloud_type ) \
+                    \VALUES \
+                    \  ( ?, ?, ?, ?, ?, ?, ? \
+                    \  , ?, ?, ?, ?, ?, ? \
+                    \  , ?, ?, ?, ?, ? \
+                    \  , ?, ?, ?, ?, ? \
+                    \  , ?, ?, ?, ?, ? \
+                    \  , ?, ?, ?, ? \
+                    \  , ? ) \
+                    \ON CONFLICT (id) DO UPDATE SET \
+                    \    old_version       = EXCLUDED.old_version \
+                    \  , new_version       = EXCLUDED.new_version \
+                    \  , app_group         = EXCLUDED.app_group \
+                    \  , service           = EXCLUDED.service \
+                    \  , priority          = EXCLUDED.priority \
+                    \  , env               = EXCLUDED.env \
+                    \  , category          = EXCLUDED.category \
+                    \  , status            = EXCLUDED.status \
+                    \  , release_wf_status = EXCLUDED.release_wf_status \
+                    \  , mode              = EXCLUDED.mode \
+                    \  , release_manager   = EXCLUDED.release_manager \
+                    \  , approved_by       = EXCLUDED.approved_by \
+                    \  , is_approved       = EXCLUDED.is_approved \
+                    \  , is_infra_approved = EXCLUDED.is_infra_approved \
+                    \  , release_tag       = EXCLUDED.release_tag \
+                    \  , schedule_time     = EXCLUDED.schedule_time \
+                    \  , start_time        = EXCLUDED.start_time \
+                    \  , end_time          = EXCLUDED.end_time \
+                    \  , rollout_strategy  = EXCLUDED.rollout_strategy \
+                    \  , rollout_history   = EXCLUDED.rollout_history \
+                    \  , release_context   = EXCLUDED.release_context \
+                    \  , info              = EXCLUDED.info \
+                    \  , description       = EXCLUDED.description \
+                    \  , change_log        = EXCLUDED.change_log \
+                    \  , metadata          = EXCLUDED.metadata \
+                    \  , global_id         = EXCLUDED.global_id \
+                    \  , sync_enabled      = EXCLUDED.sync_enabled \
+                    \  , env_override_data = EXCLUDED.env_override_data \
+                    \  , slack_thread_ts   = COALESCE(EXCLUDED.slack_thread_ts, release_tracker.slack_thread_ts) \
+                    \  , date_created      = EXCLUDED.date_created \
+                    \  , last_updated      = EXCLUDED.last_updated"
+                    ( (rtId row, rtOldVersion row, rtNewVersion row, rtAppGroup row, rtService row, rtPriority row, rtEnv row)
+                        :. (rtCategory row, rtStatus row, rtReleaseWFStatus row, rtMode row, rtCreatedBy row, rtApprovedBy row)
+                        :. (rtIsApproved row, rtIsInfraApproved row, rtReleaseTag row, rtScheduleTime row, rtStartTime row)
+                        :. (rtEndTime row, rtRolloutStrategy row, rtRolloutHistory row, rtTargetState row, rtInfo row)
+                        :. (rtDescription row, rtChangeLog row, rtMetadata row, rtGlobalId row, rtSyncEnabled row)
+                        :. (rtEnvOverrideData row, rtSlackThreadTs row, rtCreatedAt row, rtUpdatedAt row)
+                        :. Only (rtCloudType row)
+                    )
+            pure ()
 
 {- | Atomically update a release tracker only if its current status matches the
 expected value (CAS: @UPDATE ... WHERE id = ? AND status = ?@). Returns True if
@@ -197,7 +231,7 @@ conditionalUpdateTracker :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState
 conditionalUpdateTracker rt mts expectedStatus = do
     now <- liftIO getCurrentTime
     let created = fromMaybe now (dateCreated rt)
-        row = toRow created now rt mts
+        row = toRow Nothing created now rt mts
     casUpdateWorkflowCols row "WHERE id = ? AND status = ?" (rtId row, expectedStatus)
 
 {- | Atomic approve. Precondition is @is_approved=false AND status='CREATED'@,
@@ -208,7 +242,7 @@ conditionalUpdateApprove :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState
 conditionalUpdateApprove rt mts = do
     now <- liftIO getCurrentTime
     let created = fromMaybe now (dateCreated rt)
-        row = toRow created now rt mts
+        row = toRow Nothing created now rt mts
     casUpdateWorkflowCols row "WHERE id = ? AND status = 'CREATED' AND is_approved = false" (Only (rtId row))
 
 {- | Shared CAS executor: ONE atomic UPDATE of the workflow-owned columns, with
@@ -572,13 +606,14 @@ the lifecycle status guard below covers them in the common case; this
 filter is a defensive safety net for partial-write scenarios.
 -}
 findRunnableReleaseTrackers :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
-findRunnableReleaseTrackers now = withDb $ \db -> do
+findRunnableReleaseTrackers now = withCloudDb $ \cloud db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $
                     orderBy_ (asc_ . rtCreatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
                         guard_
                             ( rtStatus rt
                                 ==. val_ "CREATED"
@@ -622,13 +657,14 @@ same-service concurrency guard at create time. Excludes terminal states
 and VS-edit lock rows (LOCKED, UNLOCKED).
 -}
 findActiveTrackersForService :: (MonadFlow m) => Text -> Text -> m [TrackerWithTarget]
-findActiveTrackersForService ag svc = withDb $ \db -> do
+findActiveTrackersForService ag svc = withCloudDb $ \cloud db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $
                     orderBy_ (desc_ . rtCreatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
                         guard_ (rtAppGroup rt ==. val_ ag)
                         guard_ (rtService rt ==. val_ svc)
                         guard_
@@ -646,13 +682,14 @@ findActiveTrackersForService ag svc = withDb $ \db -> do
 
 -- | INPROGRESS/REVERTING releases not updated since @staleBefore@ — a live workflow thread heartbeats every tick, so only truly-abandoned rows qualify.
 findInProgressReleaseTrackers :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
-findInProgressReleaseTrackers staleBefore = withDb $ \db -> do
+findInProgressReleaseTrackers staleBefore = withCloudDb $ \cloud db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $
                     orderBy_ (asc_ . rtCreatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
                         -- PAUSED is intentional user state — do NOT include it here, or
                         -- a backend restart would silently ABORT user-paused releases.
                         -- Only INPROGRESS/REVERTING need restart recovery (workflow
@@ -708,13 +745,14 @@ has @cleanupTargetDeployment@ set, @cleanupStatus == "SCALE_DOWN_SCHEDULED"@,
 @cleanupAt <= now@ (unset = overdue).
 -}
 findLeakedNewDeploymentTrackers :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
-findLeakedNewDeploymentTrackers now = withDb $ \db -> do
+findLeakedNewDeploymentTrackers now = withCloudDb $ \cloud db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $
                     orderBy_ (asc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
                         guard_ (rtStatus rt `in_` [val_ "ABORTED", val_ "USER_ABORTED", val_ "DISCARDED"])
                         pure rt
     let parsed = map fromRow rows
@@ -735,37 +773,41 @@ findLeakedNewDeploymentTrackers now = withDb $ \db -> do
 startup before the poll loop. Returns the number of trackers reset.
 -}
 resetStuckScaleDownInProgress :: (MonadFlow m) => m Int
-resetStuckScaleDownInProgress = withDb $ \db ->
+resetStuckScaleDownInProgress = withCloudDb $ \cloud db ->
     withConn db $ \conn -> do
         n <-
-            execute_
+            execute
                 conn
                 "UPDATE release_tracker \
                 \SET release_context = REPLACE(release_context, '\"SCALE_DOWN_INPROGRESS\"', '\"SCALE_DOWN_SCHEDULED\"') \
                 \WHERE status IN ('ABORTED','USER_ABORTED','DISCARDED','COMPLETED') \
-                \  AND release_context LIKE '%SCALE_DOWN_INPROGRESS%'"
+                \  AND release_context LIKE '%SCALE_DOWN_INPROGRESS%' \
+                \  AND (cloud_type = ? OR cloud_type IS NULL)"
+                (Only cloud)
         pure (fromIntegral n)
 
 findAbortingReleaseTrackers :: (MonadFlow m) => m [TrackerWithTarget]
-findAbortingReleaseTrackers = withDb $ \db -> do
+findAbortingReleaseTrackers = withCloudDb $ \cloud db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $
                     orderBy_ (asc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
                         guard_ (rtStatus rt ==. val_ "ABORTING")
                         pure rt
     pure (map fromRow rows)
 
 findOngoingReleaseTrackers :: (MonadFlow m) => m [TrackerWithTarget]
-findOngoingReleaseTrackers = withDb $ \db -> do
+findOngoingReleaseTrackers = withCloudDb $ \cloud db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $
                     orderBy_ (desc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
                         guard_ (rtStatus rt `in_` [val_ "INPROGRESS", val_ "PAUSED", val_ "ABORTING", val_ "REVERTING", val_ "RESTARTING"])
                         pure rt
     pure (map fromRow rows)
@@ -827,8 +869,8 @@ insertReleaseEvent rid category label payload = withDb $ \db -> do
                         }
                     ]
 
-toRow :: UTCTime -> UTCTime -> ReleaseTracker -> Maybe TargetState -> ReleaseTrackerRow
-toRow createdAt updatedAt ReleaseTracker{..} mts =
+toRow :: Maybe Text -> UTCTime -> UTCTime -> ReleaseTracker -> Maybe TargetState -> ReleaseTrackerRow
+toRow cloudType createdAt updatedAt ReleaseTracker{..} mts =
     ReleaseTrackerT
         { rtId = releaseId
         , rtOldVersion = oldVersion
@@ -890,6 +932,7 @@ toRow createdAt updatedAt ReleaseTracker{..} mts =
           -- writers above, whose column lists exclude both — never written here.
           rtReleaseGroupId = Nothing
         , rtReleaseGroupLabel = Nothing
+        , rtCloudType = cloudType
         , rtCreatedAt = createdAt
         , rtUpdatedAt = updatedAt
         }
@@ -1096,13 +1139,14 @@ parseJsonTextMaybe (Just t) =
         Right a -> Just a
 
 findReleaseTrackerByGlobalId :: (MonadFlow m) => Text -> m (Maybe TrackerWithTarget)
-findReleaseTrackerByGlobalId gid = withDb $ \db -> do
+findReleaseTrackerByGlobalId gid = withCloudDb $ \cloud db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $
                     orderBy_ (desc_ . rtCreatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
                         guard_ (rtGlobalId rt ==. val_ (Just gid))
                         pure rt
     pure $ fmap fromRow (safeHead rows)
@@ -1126,7 +1170,7 @@ scale-down. Eligibility: terminal status, @end_time + delayHours < now@,
 old_version looks real, and @podsScaleDownStatus == ScaleDownScheduled@.
 -}
 findCompletedTrackersForScaleDown :: (MonadFlow m) => UTCTime -> Double -> m [TrackerWithTarget]
-findCompletedTrackersForScaleDown now delayHours = withDb $ \db -> do
+findCompletedTrackersForScaleDown now delayHours = withCloudDb $ \cloud db -> do
     -- Push end_time cutoff into SQL; target_state JSON filtering stays in Haskell.
     let cutoff = addUTCTime (realToFrac (negate (delayHours * 3600)) :: NominalDiffTime) now
     rows <-
@@ -1135,6 +1179,7 @@ findCompletedTrackersForScaleDown now delayHours = withDb $ \db -> do
                 select $
                     orderBy_ (asc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
                         -- Status filter is broad; the SCALE_DOWN_SCHEDULED
                         -- predicate below is the real gate. Flag is only set
                         -- on success/revert paths, so aborts stay excluded.
@@ -1232,13 +1277,14 @@ insertReleaseTrackerRowIfAbsent row = withDb $ \db ->
             pure (not (null inserted))
 
 findActiveSyncTrackers :: (MonadFlow m) => m [ReleaseTracker]
-findActiveSyncTrackers = withDb $ \db -> do
+findActiveSyncTrackers = withCloudDb $ \cloud db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $
                     orderBy_ (asc_ . rtCreatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
                         guard_ (rtSyncEnabled rt ==. val_ (Just "true"))
                         guard_ (rtStatus rt ==. val_ "COMPLETED")
                         pure rt
@@ -1249,7 +1295,7 @@ DISCARDED. Grace period absorbs in-flight kubectl calls before declaring
 them dead. Returns the number of trackers flipped.
 -}
 sweepStaleDiscardingTrackers :: (MonadFlow m) => Int -> m Int
-sweepStaleDiscardingTrackers ageMinutes = withDb $ \db -> do
+sweepStaleDiscardingTrackers ageMinutes = withCloudDb $ \cloud db -> do
     now <- liftIO getCurrentTime
     let cutoff = addUTCTime (negate (fromIntegral (ageMinutes * 60) :: NominalDiffTime)) now
     -- Two-step SELECT-then-UPDATE because Beam's runUpdate has no row count.
@@ -1258,6 +1304,7 @@ sweepStaleDiscardingTrackers ageMinutes = withDb $ \db -> do
             runSelectReturningList $
                 select $ do
                     rt <- all_ (releaseTrackers autopilotDb)
+                    guard_ (visibleToCloud cloud rt)
                     guard_ (rtStatus rt ==. val_ "DISCARDING")
                     guard_ (rtUpdatedAt rt <=. val_ cutoff)
                     pure (rtId rt)
@@ -1276,8 +1323,9 @@ sweepStaleDiscardingTrackers ageMinutes = withDb $ \db -> do
                                 ]
                         )
                         ( \rt ->
-                            rtStatus rt
-                                ==. val_ "DISCARDING"
+                            visibleToCloud cloud rt
+                                &&. rtStatus rt
+                                    ==. val_ "DISCARDING"
                                 &&. rtUpdatedAt rt
                                     <=. val_ cutoff
                         )
@@ -1288,7 +1336,7 @@ sweepStaleDiscardingTrackers ageMinutes = withDb $ \db -> do
 in-flight view. Returns the count flipped.
 -}
 sweepAutoCompleteVsTrackers :: (MonadFlow m) => Int -> m Int
-sweepAutoCompleteVsTrackers ageMinutes = withDb $ \db -> do
+sweepAutoCompleteVsTrackers ageMinutes = withCloudDb $ \cloud db -> do
     now <- liftIO getCurrentTime
     let cutoff = addUTCTime (negate (fromIntegral (ageMinutes * 60) :: NominalDiffTime)) now
     stuckIds <-
@@ -1296,6 +1344,7 @@ sweepAutoCompleteVsTrackers ageMinutes = withDb $ \db -> do
             runSelectReturningList $
                 select $ do
                     rt <- all_ (releaseTrackers autopilotDb)
+                    guard_ (visibleToCloud cloud rt)
                     guard_ (rtCategory rt ==. val_ "VSEdit")
                     guard_ (rtStatus rt ==. val_ "APPLIED")
                     guard_ (rtUpdatedAt rt <=. val_ cutoff)
@@ -1315,8 +1364,9 @@ sweepAutoCompleteVsTrackers ageMinutes = withDb $ \db -> do
                                 ]
                         )
                         ( \rt ->
-                            rtCategory rt
-                                ==. val_ "VSEdit"
+                            visibleToCloud cloud rt
+                                &&. rtCategory rt
+                                    ==. val_ "VSEdit"
                                 &&. rtStatus rt
                                     ==. val_ "APPLIED"
                                 &&. rtUpdatedAt rt
@@ -1330,7 +1380,7 @@ release was killed by the global changelog tracker until an operator
 explicitly resolves it.
 -}
 findLastGcltAbortedTracker :: (MonadFlow m) => Text -> Text -> Text -> m (Maybe ReleaseTracker)
-findLastGcltAbortedTracker ag svc envT = withDb $ \db -> do
+findLastGcltAbortedTracker ag svc envT = withCloudDb $ \cloud db -> do
     rows <-
         runDB db $
             runSelectReturningList $
@@ -1338,6 +1388,7 @@ findLastGcltAbortedTracker ag svc envT = withDb $ \db -> do
                     limit_ 1 $
                         orderBy_ (desc_ . rtUpdatedAt) $ do
                             rt <- all_ (releaseTrackers autopilotDb)
+                            guard_ (visibleToCloud cloud rt)
                             guard_ (rtAppGroup rt ==. val_ ag)
                             guard_ (rtService rt ==. val_ svc)
                             guard_ (rtEnv rt ==. val_ envT)

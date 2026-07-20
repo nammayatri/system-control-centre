@@ -7,7 +7,8 @@ import Control.Exception qualified
 import Control.Monad (void)
 import Control.Monad.Catch qualified
 import Core.DB.Connection (runBeamLogged, runDB, withConn)
-import Core.Environment (MonadFlow, withDb)
+import Core.Config (Config (..))
+import Core.Environment (MonadFlow, getConfig, withDb)
 import Core.Logging (logInfoG)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -403,6 +404,7 @@ Complements the expiry check inside 'tryAcquireVsLock'. Returns count cleared.
 releaseExpiredVsLocks :: (MonadFlow m) => m Int
 releaseExpiredVsLocks = do
     expiryMins <- getLockExpiryMins
+    cloud <- cloudProvider <$> getConfig
     withDb $ \db -> withConn db $ \conn -> do
         -- Fetch app_groups about to be cleared, for logging.
         (owners :: [(Text, Text)]) <-
@@ -448,16 +450,18 @@ releaseExpiredVsLocks = do
                         "UPDATE release_tracker \
                         \SET status = 'UNLOCKED', last_updated = NOW(), end_time = NOW() \
                         \WHERE category = 'VSEdit' AND status = 'LOCKED' \
-                        \  AND app_group IN ?"
-                        (Only (In ags))
+                        \  AND app_group IN ? \
+                        \  AND (cloud_type = ? OR cloud_type IS NULL)"
+                        (In ags, cloud)
         _ <-
             execute
                 conn
                 "UPDATE release_tracker \
                 \SET status = 'UNLOCKED', last_updated = NOW(), end_time = COALESCE(end_time, NOW()) \
                 \WHERE category = 'VSEdit' AND status = 'LOCKED' \
-                \  AND ( end_time IS NULL OR end_time < NOW() )"
-                ()
+                \  AND ( end_time IS NULL OR end_time < NOW() ) \
+                \  AND (cloud_type = ? OR cloud_type IS NULL)"
+                (Only cloud)
         pure (fromIntegral n)
 
 {- | Acquire VS lock, run action, release via finally. Returns Left if

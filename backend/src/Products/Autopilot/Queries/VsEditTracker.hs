@@ -11,6 +11,7 @@ import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import Database.Beam
 import Database.PostgreSQL.Simple (execute)
+import Products.Autopilot.Queries.ReleaseTracker (visibleToCloud, withCloudDb)
 import Products.Autopilot.Types.Storage.Schema
 
 findActiveLockFromConfig :: (MonadFlow m) => Text -> m (Maybe DeploymentConfig)
@@ -29,12 +30,13 @@ findActiveLockFromConfig product' = withDb $ \db -> do
         (x : _) -> Just x
 
 listVsEditTrackerRows :: (MonadFlow m) => Maybe UTCTime -> Maybe UTCTime -> m [ReleaseTrackerRow]
-listVsEditTrackerRows mFrom mTo = withDb $ \db ->
+listVsEditTrackerRows mFrom mTo = withCloudDb $ \cloud db ->
     runDB db $
         runSelectReturningList $
             select $
                 orderBy_ (desc_ . rtCreatedAt) $ do
                     t <- all_ (releaseTrackers autopilotDb)
+                    guard_ (visibleToCloud cloud t)
                     guard_ (rtCategory t ==. val_ "VSEdit")
                     case mFrom of
                         Just from -> guard_ (rtCreatedAt t >=. val_ from)
@@ -63,7 +65,7 @@ is not @keepTrackerId@. Closes a TOCTOU window between two concurrent
 create calls that both acquire the VS lock. Returns count discarded.
 -}
 discardDuplicateCreatedVsTrackers :: (MonadFlow m) => Text -> Text -> m Int
-discardDuplicateCreatedVsTrackers appGroup' keepTrackerId = withDb $ \db ->
+discardDuplicateCreatedVsTrackers appGroup' keepTrackerId = withCloudDb $ \cloud db ->
     withConn db $ \conn -> do
         n <-
             execute
@@ -73,6 +75,7 @@ discardDuplicateCreatedVsTrackers appGroup' keepTrackerId = withDb $ \db ->
                 \WHERE category = 'VSEdit' \
                 \  AND app_group = ? \
                 \  AND status = 'CREATED' \
-                \  AND id <> ?"
-                (appGroup', keepTrackerId)
+                \  AND id <> ? \
+                \  AND (cloud_type = ? OR cloud_type IS NULL)"
+                (appGroup', keepTrackerId, cloud)
         pure (fromIntegral n)

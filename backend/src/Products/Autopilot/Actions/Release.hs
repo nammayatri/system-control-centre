@@ -596,9 +596,9 @@ createReleaseHBodyAfterStrategyCheck mXForwardedEmail mXPomeriumJwt K8sCreateRel
 
                             if not (isValidK8sVersion newVersion)
                                 then pure $ APIResponse "ERROR" ("Invalid version format for K8s label: " <> newVersion <> ". Must match [a-z0-9]([-a-z0-9]*[a-z0-9])?")
-                                else -- Existing cluster check
-
-                                    if maybe False (/= getProductCluster pCfg) requestedCluster
+                                else
+                                    if not (fromMaybe False isSystemTriggered)
+                                        && maybe False (/= getProductCluster pCfg) requestedCluster
                                         then pure $ APIResponse "ERROR" "Requested cluster does not match product config"
                                         else do
                                             -- Safety check: duplicate deployment in K8s
@@ -608,7 +608,8 @@ createReleaseHBodyAfterStrategyCheck mXForwardedEmail mXPomeriumJwt K8sCreateRel
                                             if depAlreadyExists && not (fromMaybe False newService)
                                                 then pure $ APIResponse "ERROR" ("Deployment with version " <> newVersion <> " already exists: " <> newDepNameCheck)
                                                 else do
-                                                    claimed <- claimServiceForModification appGroup service
+                                                    let isFromSync = fromMaybe False isSystemTriggered
+                                                    claimed <- if isFromSync then pure True else claimServiceForModification appGroup service
                                                     if not claimed
                                                         then pure $ APIResponse "ERROR" ("Service " <> service <> " in app group " <> appGroup <> " is already being modified (service_state guard). Try again shortly.")
                                                         else createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} pCfg sCfg
@@ -770,7 +771,7 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{
                 , globalId = globalId
                 , syncEnabled =
                     if isFromSync
-                        then Nothing
+                        then Just "false"
                         else case isReleaseSync of
                             Just True -> Just "true"
                             _ -> syncEnabled

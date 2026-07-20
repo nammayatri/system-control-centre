@@ -78,11 +78,14 @@ CREATE TABLE IF NOT EXISTS release_tracker (
   global_id TEXT,
   new_service BOOLEAN,
   cronjob_suspend BOOLEAN,
-  ab_hs_status TEXT DEFAULT 'Uninitiated'
+  ab_hs_status TEXT DEFAULT 'Uninitiated',
+  -- Which cloud's cluster this release targets. NULL = not cluster-bound
+  -- (MobileBuild rows, whose identity is global). See migration 0045.
+  cloud_type TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_release_tracker_global_id
-  ON release_tracker (global_id) WHERE global_id IS NOT NULL;
+  ON release_tracker (global_id, cloud_type) WHERE global_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS release_events (
   re_id SERIAL PRIMARY KEY,

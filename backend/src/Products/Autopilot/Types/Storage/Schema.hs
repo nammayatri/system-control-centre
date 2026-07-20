@@ -108,6 +108,7 @@ data ReleaseTrackerT f = ReleaseTrackerT
     , rtTerminalStatus :: Columnar f (Maybe Text)
     , rtReleaseGroupId :: Columnar f (Maybe Text)
     , rtReleaseGroupLabel :: Columnar f (Maybe Text)
+    , rtCloudType :: Columnar f (Maybe Text)
     , rtCreatedAt :: Columnar f UTCTime
     , rtUpdatedAt :: Columnar f UTCTime
     }
@@ -232,6 +233,7 @@ autopilotDb =
                             , rtTerminalStatus = fieldNamed "terminal_status"
                             , rtReleaseGroupId = fieldNamed "release_group_id"
                             , rtReleaseGroupLabel = fieldNamed "release_group_label"
+                            , rtCloudType = fieldNamed "cloud_type"
                             , rtCreatedAt = fieldNamed "date_created"
                             , rtUpdatedAt = fieldNamed "last_updated"
                             }

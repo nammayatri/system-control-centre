@@ -68,6 +68,7 @@ vsStatusDiscarded = "DISCARDED"
 forceUnlockAppGroupTransactional :: Text -> Flow Text
 forceUnlockAppGroupTransactional ag = do
   db <- getDBEnv
+  cloud <- cloudProvider <$> getConfig
   liftIO $ withConn db $ \conn -> PG.withTransaction conn $ do
     -- Snapshot most-recent LOCKED tracker before flipping it (for thread_ts).
     rows <-
@@ -75,8 +76,9 @@ forceUnlockAppGroupTransactional ag = do
         conn
         "SELECT id FROM release_tracker \
         \WHERE category = 'VSEdit' AND status = 'LOCKED' AND app_group = ? \
+        \  AND (cloud_type = ? OR cloud_type IS NULL) \
         \ORDER BY date_created DESC LIMIT 1"
-        (PG.Only ag) ::
+        (ag, cloud) ::
         IO [PG.Only Text]
     let tid = case rows of
           (PG.Only t : _) -> t
@@ -93,8 +95,9 @@ forceUnlockAppGroupTransactional ag = do
         conn
         "UPDATE release_tracker \
         \SET status = 'UNLOCKED', last_updated = NOW(), end_time = NOW() \
-        \WHERE category = 'VSEdit' AND status = 'LOCKED' AND app_group = ?"
-        (PG.Only ag)
+        \WHERE category = 'VSEdit' AND status = 'LOCKED' AND app_group = ? \
+        \  AND (cloud_type = ? OR cloud_type IS NULL)"
+        (ag, cloud)
     pure tid
 
 -- | Convert a VSEdit release_tracker row to response. old/new VS data live in
@@ -139,8 +142,8 @@ releaseRowToVsResponseWithEvents t events =
           vetRespNewVsData = newFromEvent <|> vetRespNewVsData base
         }
 
-mkVsEditRow :: Text -> Text -> Text -> Text -> Text -> Maybe Text -> Text -> UTCTime -> S.ReleaseTrackerRow
-mkVsEditRow tid product' service' env' vsName' createdBy' status' now =
+mkVsEditRow :: Text -> Text -> Text -> Text -> Text -> Text -> Maybe Text -> Text -> UTCTime -> S.ReleaseTrackerRow
+mkVsEditRow cloud tid product' service' env' vsName' createdBy' status' now =
   S.ReleaseTrackerT
     { rtId = tid,
       rtOldVersion = "",
@@ -195,6 +198,7 @@ mkVsEditRow tid product' service' env' vsName' createdBy' status' now =
       rtTerminalStatus = Nothing,
       rtReleaseGroupId = Nothing,
       rtReleaseGroupLabel = Nothing,
+      rtCloudType = Just cloud,
       rtCreatedAt = now,
       rtUpdatedAt = now
     }
@@ -207,10 +211,11 @@ createVsEditTrackerH ap CreateVsEditTrackerReq {..} = do
   -- Atomic acquire; tryAcquireVsLock treats a stale lock
   -- (> lock_expiry_delay_minutes) as released so crash-mid-edit doesn't wedge.
   acquired <- tryAcquireVsLock appGroup createdBy
+  cfg <- getConfig
   if not acquired
     then throwM (Conflict ("VS is already locked for app group " <> appGroup))
     else do
-      let row = mkVsEditRow tid appGroup service env vsName (Just createdBy) vsStatusCreated now
+      let row = mkVsEditRow (cloudProvider cfg) tid appGroup service env vsName (Just createdBy) vsStatusCreated now
       -- Race: insertReleaseTrackerRow and the duplicate sweep below run
       -- in separate DB connections, not one transaction. Mitigated by
       -- tryAcquireVsLock holding the VS lock across the whole handler,
@@ -218,7 +223,6 @@ createVsEditTrackerH ap CreateVsEditTrackerReq {..} = do
       insertReleaseTrackerRow row
       -- VS_OLD snapshot is mandatory at lock time so revert can restore
       -- the original. If caller didn't supply it, fetch live VS now.
-      cfg <- getConfig
       mProdCfg <- findProductByNameAndCluster appGroup ""
       let mNs = getProductNamespace <$> mProdCfg
           vsToFetch = vsName
@@ -383,7 +387,7 @@ lockVsEditTrackerH ap VsLockReq {..} = do
       tid <- liftIO (UUID.toText <$> UUID.nextRandom)
       let durationSecs = fromIntegral (fromMaybe 15 lockDurationMinutes) * 60
           lockExpiry = addUTCTime durationSecs now
-          row = mkVsEditRow tid appGroup resolvedService resolvedEnv resolvedVsName (Just resolvedLockedBy) "LOCKED" now
+          row = mkVsEditRow (cloudProvider cfg) tid appGroup resolvedService resolvedEnv resolvedVsName (Just resolvedLockedBy) "LOCKED" now
           rowWithExpiry = row {S.rtEndTime = Just lockExpiry}
       insertReleaseTrackerRow rowWithExpiry
       capturedOld <- case oldVsData of
@@ -568,9 +572,10 @@ revertVsEditTrackerH ap tid = do
                                   now <- liftIO getCurrentTime
                                   newTid <- liftIO (UUID.toText <$> UUID.nextRandom)
                                   let revertRow =
-                                        (mkVsEditRow newTid (S.rtAppGroup orig) (S.rtService orig) (S.rtEnv orig) (fromMaybe "" (S.rtMetadata orig)) (Just (S.rtCreatedBy orig <> "-revert")) "CREATED" now)
+                                        (mkVsEditRow (cloudProvider cfg) newTid (S.rtAppGroup orig) (S.rtService orig) (S.rtEnv orig) (fromMaybe "" (S.rtMetadata orig)) (Just (S.rtCreatedBy orig <> "-revert")) "CREATED" now)
                                           { S.rtInfo = Just ("Revert of " <> tid),
-                                            S.rtDescription = Just ("Revert of " <> tid)
+                                            S.rtDescription = Just ("Revert of " <> tid),
+                                            S.rtCloudType = S.rtCloudType orig <|> Just (cloudProvider cfg)
                                           }
                                   insertReleaseTrackerRow revertRow
                                   insertReleaseEvent newTid "BUSINESS" "REVERT_TRACKER_CREATED" (String ("Revert of " <> tid))
