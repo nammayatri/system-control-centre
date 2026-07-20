@@ -596,8 +596,7 @@ createReleaseHBodyAfterStrategyCheck mXForwardedEmail mXPomeriumJwt K8sCreateRel
 
                             if not (isValidK8sVersion newVersion)
                                 then pure $ APIResponse "ERROR" ("Invalid version format for K8s label: " <> newVersion <> ". Must match [a-z0-9]([-a-z0-9]*[a-z0-9])?")
-                                else -- Existing cluster check
-
+                                else
                                     if maybe False (/= getProductCluster pCfg) requestedCluster
                                         then pure $ APIResponse "ERROR" "Requested cluster does not match product config"
                                         else do
@@ -770,7 +769,7 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{
                 , globalId = globalId
                 , syncEnabled =
                     if isFromSync
-                        then Nothing
+                        then Just "false"
                         else case isReleaseSync of
                             Just True -> Just "true"
                             _ -> syncEnabled

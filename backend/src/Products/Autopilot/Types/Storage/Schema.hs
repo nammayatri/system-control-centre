@@ -43,6 +43,7 @@ data DeploymentConfigT f = DeploymentConfigT
     , dcServiceState :: Columnar f (Maybe Text)
     , dcHpaMinReplicas :: Columnar f (Maybe Int32)
     , dcHpaMaxReplicas :: Columnar f (Maybe Int32)
+    , dcCloudType :: Columnar f Text
     }
     deriving (Generic, Beamable)
 
@@ -108,6 +109,7 @@ data ReleaseTrackerT f = ReleaseTrackerT
     , rtTerminalStatus :: Columnar f (Maybe Text)
     , rtReleaseGroupId :: Columnar f (Maybe Text)
     , rtReleaseGroupLabel :: Columnar f (Maybe Text)
+    , rtCloudType :: Columnar f (Maybe Text)
     , rtCreatedAt :: Columnar f UTCTime
     , rtUpdatedAt :: Columnar f UTCTime
     }
@@ -176,6 +178,7 @@ autopilotDb =
                             , dcDecisionConfig = fieldNamed "decision_config"
                             , dcSlackChannel = fieldNamed "slack_channel"
                             , dcServiceState = fieldNamed "service_state"
+                            , dcCloudType = fieldNamed "cloud_type"
                             }
             , releaseTrackers =
                 setEntityName "release_tracker"
@@ -232,6 +235,7 @@ autopilotDb =
                             , rtTerminalStatus = fieldNamed "terminal_status"
                             , rtReleaseGroupId = fieldNamed "release_group_id"
                             , rtReleaseGroupLabel = fieldNamed "release_group_label"
+                            , rtCloudType = fieldNamed "cloud_type"
                             , rtCreatedAt = fieldNamed "date_created"
                             , rtUpdatedAt = fieldNamed "last_updated"
                             }

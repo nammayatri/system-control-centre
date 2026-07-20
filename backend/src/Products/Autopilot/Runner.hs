@@ -399,7 +399,7 @@ trigger _db (rtStale, mtsStale) = do
                     runReleaseWorkflow cfg rt mts
                 else do
                     let rtNew = rt{status = INPROGRESS, startTime = Just now}
-                        row = toRow now now rtNew mts
+                        row = toRow Nothing now now rtNew mts
                     claimed <- conditionalUpdateTrackerRow row "CREATED"
                     if not claimed
                         then logInfo $ "[RUNNER] Release " <> releaseId rt <> " already claimed, skipping"

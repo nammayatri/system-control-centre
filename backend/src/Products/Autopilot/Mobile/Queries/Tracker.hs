@@ -1050,6 +1050,7 @@ mkMobileTrackerRow rid ac targetState mVersionName mSourceRef createdBy_ created
           -- guard drops the empty-string placeholder some persists carry.
           rtReleaseGroupId = groupIdColumn targetState,
           rtReleaseGroupLabel = Nothing,
+          rtCloudType = Nothing,
           rtCreatedAt = createdAt,
           rtUpdatedAt = createdAt
         }
@@ -1334,6 +1335,9 @@ insertMobileRevertTracker rid ac targetState versionName changeLog_ sourceRef_ r
           -- so the revert shows up beside its siblings on the group page.
           rtReleaseGroupId = groupIdColumn targetState,
           rtReleaseGroupLabel = Nothing,
+          -- Not cluster-bound (migration 0045): a build's identity is global,
+          -- so it stays visible to every instance rather than one cloud's.
+          rtCloudType = Nothing,
           rtCreatedAt = createdAt,
           rtUpdatedAt = createdAt
         }
