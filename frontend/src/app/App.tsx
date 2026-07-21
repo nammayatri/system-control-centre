@@ -57,7 +57,11 @@ function App() {
             path={product.basePath}
             element={<ProductLayout product={product} />}
           >
-            <Route index element={<Navigate to={product.navItems[0].path} replace />} />
+            {/* Products with their own '' route render it at basePath; others
+                redirect to the first nav item. */}
+            {!product.routes.some((r) => r.path === '') && (
+              <Route index element={<Navigate to={product.navItems[0].path} replace />} />
+            )}
             {product.routes.map((route) => (
               <Route
                 key={route.path}

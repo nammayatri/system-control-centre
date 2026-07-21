@@ -24,31 +24,38 @@ where
 
 import Data.Proxy (Proxy)
 import Data.Text (Text)
+import Products.AirborneOta.Types.Permission
 import Products.Autopilot.Types.Permission
 
 -- | All known products in the system.
 data ProductSlug
     = Autopilot
+    | AirborneOta
     deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 productSlugToText :: ProductSlug -> Text
 productSlugToText Autopilot = "autopilot"
+productSlugToText AirborneOta = "airborne-ota"
 
 textToProductSlug :: Text -> Maybe ProductSlug
 textToProductSlug "autopilot" = Just Autopilot
+textToProductSlug "airborne-ota" = Just AirborneOta
 textToProductSlug _ = Nothing
 
 -- | Union of all product permissions.
 data Permission
     = AutopilotPerm AutopilotPermission
+    | OtaPerm OtaPermission
     deriving (Show, Read, Eq, Ord)
 
 permissionToText :: Permission -> Text
 permissionToText (AutopilotPerm p) = autopilotPermissionToText p
+permissionToText (OtaPerm p) = otaPermissionToText p
 
 -- | All permissions for a given product.
 allPermissions :: ProductSlug -> [Permission]
 allPermissions Autopilot = map AutopilotPerm [minBound .. maxBound]
+allPermissions AirborneOta = map OtaPerm [minBound .. maxBound]
 
 -- | All permissions as Text for a product.
 allPermissionsText :: Text -> [Text]
@@ -86,6 +93,7 @@ textToOverrideType _ = Nothing
 
 isViewPerm :: Permission -> Bool
 isViewPerm (AutopilotPerm p) = p `elem` [AP_RELEASE_VIEW, AP_PRODUCT_CONFIG_VIEW, AP_SERVICE_CONFIG_VIEW]
+isViewPerm (OtaPerm p) = p == OTA_VIEW
 
 defaultPermissions :: SystemRole -> ProductSlug -> [Permission]
 defaultPermissions Admin p = allPermissions p
@@ -104,6 +112,8 @@ isManagerRestrictedPerm (AutopilotPerm p) =
                , AP_RELEASE_DELETE
                , AP_MOBILE_APP_MANAGE
                ]
+isManagerRestrictedPerm (OtaPerm p) =
+    p `elem` [OTA_RELEASE_DISCARD, OTA_APP_MANAGE]
 
 -- | Product typeclass - each product must implement this.
 class IsProduct (p :: ProductSlug) where

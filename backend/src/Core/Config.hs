@@ -56,7 +56,14 @@ data Config = Config
     abEngineUrl :: String,
     abHsUrl :: String,
     mcpBaseUrl :: Text,
-    cloudProvider :: Text
+    cloudProvider :: Text,
+    -- Airborne OTA control-plane base URL (PAT creds come from Core.Secrets
+    -- at call time, never Config). See V4 layer note above.
+    airborneUrl :: String,
+    -- Airborne analytics base URL — a SEPARATE, unauthenticated service from
+    -- the control plane (no PAT, org/app passed as query params). Empty = the
+    -- analytics proxy routes report "not configured" instead of guessing.
+    airborneAnalyticsUrl :: String
   }
   deriving (Show)
 
@@ -89,6 +96,9 @@ loadConfig = do
   mcpBaseUrl <- pack <$> envOr "SC_MCP_BASE_URL" ""
 
   cloudProvider <- pack <$> envOr "SC_CLOUD_PROVIDER" "GCP"
+
+  airborneUrl <- envOr "SC_AIRBORNE_URL" "https://airborne.juspay.in"
+  airborneAnalyticsUrl <- envOr "SC_AIRBORNE_ANALYTICS_URL" ""
 
   pure Config {..}
 

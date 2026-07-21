@@ -98,6 +98,12 @@ library
       Products.Autopilot.Queries.ProductService
       Products.Autopilot.Queries.ReleaseTracker
       Products.Autopilot.Queries.VsEditTracker
+      Products.AirborneOta.Client
+      Products.AirborneOta.Keepalive
+      Products.AirborneOta.Queries
+      Products.AirborneOta.Routes
+      Products.AirborneOta.Types
+      Products.AirborneOta.Types.Permission
       Products.Autopilot.Actions.ABValidation
       Products.Autopilot.Actions.Config
       Products.Autopilot.Actions.ConfigMap

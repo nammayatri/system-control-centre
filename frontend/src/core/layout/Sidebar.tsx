@@ -16,6 +16,9 @@ import {
   Layers,
   Plus,
   List,
+  CloudDownload,
+  LayoutGrid,
+  Link2,
 } from 'lucide-react';
 import nyLogo from '../../assets/ny-logo.svg';
 import { cn } from '../../lib/utils';
@@ -31,6 +34,9 @@ const iconMap: Record<string, React.ReactNode> = {
   Layers: <Layers className="w-3.5 h-3.5" />,
   Plus: <Plus className="w-3.5 h-3.5" />,
   List: <List className="w-3.5 h-3.5" />,
+  CloudDownload: <CloudDownload className="w-4 h-4" />,
+  LayoutGrid: <LayoutGrid className="w-3.5 h-3.5" />,
+  Link2: <Link2 className="w-3.5 h-3.5" />,
 };
 
 interface SidebarProps {
@@ -43,7 +49,7 @@ interface SidebarProps {
 const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle, onItemClick, forceExpanded }) => {
   const location = useLocation();
   const { user } = useAuth();
-  const { isAdmin, hasPermission } = usePermissions();
+  const { isAdmin, hasPermission, hasAnyDeploymentAccess } = usePermissions();
 
   // When inside the mobile drawer, always behave as expanded.
   const effectiveCollapsed = forceExpanded ? false : collapsed;
@@ -68,8 +74,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle, onItemClick, for
     setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const visibleProducts = PRODUCT_REGISTRY.filter((p) =>
-    hasPermission(p.slug, p.viewPermission)
+  const visibleProducts = PRODUCT_REGISTRY.filter(
+    (p) => hasPermission(p.slug, p.viewPermission) || hasAnyDeploymentAccess(p.slug)
   );
 
   const renderProductSection = (product: ProductDefinition) => {
