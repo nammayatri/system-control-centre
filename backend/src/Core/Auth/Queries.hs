@@ -12,6 +12,7 @@ module Core.Auth.Queries
     findDeploymentAccessForPerson,
     computeEffectivePermissions,
     computeEffectivePermissionsForAppGroup,
+    computeEffectivePermissionsForAppGroups,
     findAllProductsForPerson,
     findAllDeploymentPermsForPerson,
     hasAnyDeploymentPermission,
@@ -292,6 +293,34 @@ computeEffectivePermissionsForAppGroupIO db pid productSlug appGroup = do
 computeEffectivePermissionsForAppGroup :: (MonadFlow m) => UUID -> Text -> Text -> m [Text]
 computeEffectivePermissionsForAppGroup pid productSlug appGroup =
   withDb $ \db -> computeEffectivePermissionsForAppGroupIO db pid productSlug appGroup
+
+{- | Batched 'computeEffectivePermissionsForAppGroup': fetches the person-wide
+access data (deployment + product access, plus the product-level baseline)
+ONCE, then computes each app group's effective perms from it. Semantics are
+identical to the per-group function — this just hoists the repeated person
+queries out of the loop when scoping a whole app list.
+-}
+computeEffectivePermissionsForAppGroups ::
+  (MonadFlow m) => UUID -> Text -> [Text] -> m [(Text, [Text])]
+computeEffectivePermissionsForAppGroups pid productSlug appGroups =
+  withDb $ \db -> do
+    deploymentAccesses <- findDeploymentAccessForPersonIO db pid
+    productAccesses <- findProductAccessForPersonIO db pid
+    -- Product-level baseline: identical for every app group WITHOUT a
+    -- deployment grant (the Nothing branch below doesn't depend on the group).
+    productBase <- case find (\pa -> paProductSlug pa == productSlug) productAccesses of
+      Just pa -> applyOverridesIO db pid productSlug =<< getRolePermissions db productSlug (paRoleId pa)
+      Nothing -> pure []
+    let deployRole ag =
+          daRoleId <$> find (\da -> daProductSlug da == productSlug && daAppGroup da == ag) deploymentAccesses
+    mapM
+      ( \ag -> case deployRole ag of
+          Just roleId -> do
+            perms <- applyOverridesIO db pid productSlug =<< getRolePermissions db productSlug roleId
+            pure (ag, perms)
+          Nothing -> pure (ag, productBase)
+      )
+      appGroups
 
 -- | Get permissions for a role (PGArray — kept as raw SQL).
 getRolePermissions :: DBEnv -> Text -> UUID -> IO [Text]

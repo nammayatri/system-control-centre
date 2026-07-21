@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
-import type { ProductDefinition } from '../../products/registry';
+import type { ProductDefinition, ProductNavItem } from '../../products/registry';
 import {
   Rocket, FileText, Settings, Package, Layers,
   Plus, List, ChevronLeft,
   PanelLeftClose, PanelLeft, X,
   Activity, Flame, ExternalLink, Smartphone, Server, Gauge,
+  CloudDownload, LayoutGrid, Link2,
+  SlidersHorizontal, Users, Settings2, Bookmark,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import TopBar from './TopBar';
@@ -23,18 +25,46 @@ const iconMap: Record<string, React.ReactNode> = {
   Smartphone: <Smartphone className="w-4 h-4" />,
   Server: <Server className="w-4 h-4" />,
   Gauge: <Gauge className="w-3.5 h-3.5" />,
+  CloudDownload: <CloudDownload className="w-4 h-4" />,
+  LayoutGrid: <LayoutGrid className="w-3.5 h-3.5" />,
+  Link2: <Link2 className="w-3.5 h-3.5" />,
+  SlidersHorizontal: <SlidersHorizontal className="w-3.5 h-3.5" />,
+  Users: <Users className="w-3.5 h-3.5" />,
+  Settings2: <Settings2 className="w-3.5 h-3.5" />,
+  Bookmark: <Bookmark className="w-3.5 h-3.5" />,
 };
 
 interface SidebarBodyProps {
-  product: ProductDefinition;
+  navItems: ProductNavItem[];
   collapsed: boolean;
   isActive: (path: string) => boolean;
   onItemClick?: () => void;
+  pill?: boolean;
 }
 
-const SidebarBody: React.FC<SidebarBodyProps> = ({ product, collapsed, isActive, onItemClick }) => (
+// Two visual styles: default (left-border indicator, full-bleed rows) and
+// pill (rounded — used by products with navPill: true). Pill mode matches the
+// airborne dashboard: selected = #282931 surface, hover = brand purple.
+const itemClasses = (pill: boolean, collapsed: boolean, active: boolean) =>
+  pill
+    ? cn(
+        'flex items-center gap-2.5 mx-2 my-0.5 px-3 h-10 md:h-9 rounded-lg text-sm cursor-pointer transition-colors duration-150',
+        collapsed && 'md:justify-center md:px-0 md:mx-1.5',
+        active
+          ? 'bg-airborne-nav text-white'
+          : 'text-zinc-300 hover:bg-airborne hover:text-white'
+      )
+    : cn(
+        'flex items-center gap-2.5 px-4 h-11 md:h-10 text-sm cursor-pointer transition-colors duration-150',
+        collapsed && 'md:justify-center md:px-0',
+        active
+          ? 'text-zinc-50 bg-zinc-800 border-l-2 border-emerald-500'
+          : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 border-l-2 border-transparent'
+      );
+
+const SidebarBody: React.FC<SidebarBodyProps> = ({ navItems, collapsed, isActive, onItemClick, pill = false }) => (
   <nav className="flex-1 overflow-y-auto py-3">
-    {product.navItems.map((item) => {
+    {navItems.map((item) => {
       if (item.external) {
         return (
           <a
@@ -43,11 +73,7 @@ const SidebarBody: React.FC<SidebarBodyProps> = ({ product, collapsed, isActive,
             target="_blank"
             rel="noopener noreferrer"
             onClick={onItemClick}
-            className={cn(
-              'flex items-center gap-2.5 px-4 h-11 md:h-10 text-sm cursor-pointer transition-colors duration-150',
-              collapsed && 'md:justify-center md:px-0',
-              'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 border-l-2 border-transparent'
-            )}
+            className={itemClasses(pill, collapsed, false)}
           >
             <span className="shrink-0">{iconMap[item.icon] || null}</span>
             {(!collapsed || onItemClick) && (
@@ -66,13 +92,7 @@ const SidebarBody: React.FC<SidebarBodyProps> = ({ product, collapsed, isActive,
           key={item.path}
           to={item.path}
           onClick={onItemClick}
-          className={cn(
-            'flex items-center gap-2.5 px-4 h-11 md:h-10 text-sm cursor-pointer transition-colors duration-150',
-            collapsed && 'md:justify-center md:px-0',
-            active
-              ? 'text-zinc-50 bg-zinc-800 border-l-2 border-emerald-500'
-              : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 border-l-2 border-transparent'
-          )}
+          className={itemClasses(pill, collapsed, active)}
         >
           <span className="shrink-0">{iconMap[item.icon] || null}</span>
           {(!collapsed || onItemClick) && <span className="truncate">{item.label}</span>}
@@ -88,9 +108,18 @@ const ProductLayout: React.FC<{ product: ProductDefinition }> = ({ product }) =>
   const location = useLocation();
   const navigate = useNavigate();
 
+  // URL segments after basePath (e.g. '/airborne/ny-app/releases' → ['ny-app','releases']).
+  // Products with getNavItems derive a location-aware sidebar from them.
+  const parts = location.pathname.startsWith(product.basePath)
+    ? location.pathname.slice(product.basePath.length).split('/').filter(Boolean)
+    : [];
+  const navItems = product.getNavItems?.(parts) ?? product.navItems;
+
+  // Longest matching prefix wins, so '/x/:app' (Overview) stays inactive on
+  // '/x/:app/releases' — the deeper Releases item out-lengths it.
   const activeNavPath = (() => {
     let best = '';
-    for (const item of product.navItems) {
+    for (const item of navItems) {
       if (item.external) continue;
       if (location.pathname === item.path || location.pathname.startsWith(item.path + '/')) {
         if (item.path.length > best.length) best = item.path;
@@ -135,14 +164,18 @@ const ProductLayout: React.FC<{ product: ProductDefinition }> = ({ product }) =>
           >
             <ChevronLeft className="w-4 h-4" />
           </button>
-          {!collapsed && (
-            <span className="text-sm font-semibold text-white tracking-tight truncate">
-              {product.label}
-            </span>
-          )}
+          {!collapsed &&
+            (product.logo ? (
+              <img src={product.logo} alt={product.label} className="h-6 w-auto" />
+            ) : (
+              <span className="text-sm font-semibold text-white tracking-tight truncate">
+                {product.label}
+              </span>
+            ))}
         </div>
 
-        <SidebarBody product={product} collapsed={collapsed} isActive={isActive} />
+        {!collapsed && product.SidebarHeader && <product.SidebarHeader />}
+        <SidebarBody navItems={navItems} pill={product.navPill} collapsed={collapsed} isActive={isActive} />
 
         <div className="shrink-0 border-t border-zinc-800">
           <button
@@ -180,9 +213,13 @@ const ProductLayout: React.FC<{ product: ProductDefinition }> = ({ product }) =>
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
-            <span className="text-sm font-semibold text-white tracking-tight truncate">
-              {product.label}
-            </span>
+            {product.logo ? (
+              <img src={product.logo} alt={product.label} className="h-6 w-auto" />
+            ) : (
+              <span className="text-sm font-semibold text-white tracking-tight truncate">
+                {product.label}
+              </span>
+            )}
           </div>
           <button
             onClick={() => setMobileOpen(false)}
@@ -192,20 +229,34 @@ const ProductLayout: React.FC<{ product: ProductDefinition }> = ({ product }) =>
             <X className="w-4 h-4" />
           </button>
         </div>
+        {product.SidebarHeader && <product.SidebarHeader />}
         <SidebarBody
-          product={product}
+          navItems={navItems}
+          pill={product.navPill}
           collapsed={false}
           isActive={isActive}
           onItemClick={() => setMobileOpen(false)}
         />
       </aside>
 
-      {/* Content */}
+      {/* Content — optionally wrapped in the product's ThemeWrapper so scoped
+          theming (e.g. Airborne dark mode) covers TopBar + main only. */}
       <div className="flex-1 flex flex-col h-screen overflow-hidden min-w-0">
-        <TopBar onOpenMobileNav={() => setMobileOpen(true)} />
-        <main className="flex-1 overflow-y-auto scroll-pb-28 px-4 py-4 sm:px-6 sm:py-5">
-          <Outlet />
-        </main>
+        {(() => {
+          const content = (
+            <>
+              <TopBar
+                onOpenMobileNav={() => setMobileOpen(true)}
+                headerActions={product.HeaderActions ? <product.HeaderActions /> : null}
+              />
+              {product.Banner && <product.Banner />}
+              <main className="flex-1 overflow-y-auto scroll-pb-28 px-4 py-4 sm:px-6 sm:py-5">
+                <Outlet />
+              </main>
+            </>
+          );
+          return product.ThemeWrapper ? <product.ThemeWrapper>{content}</product.ThemeWrapper> : content;
+        })()}
       </div>
     </div>
   );

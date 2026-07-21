@@ -5,6 +5,10 @@ interface PermissionsContextType {
   hasPermission: (product: string, action: string, appGroup?: string) => boolean;
   hasAnyPermission: (product: string, actions: string[], appGroup?: string) => boolean;
   hasAnyDeploymentPermission: (product: string, action: string) => boolean;
+  // True if the user has ANY per-app (deployment) grant for the product,
+  // regardless of action — used by the coarse product gate so per-app-only
+  // users can enter the product (the app list itself is filtered server-side).
+  hasAnyDeploymentAccess: (product: string) => boolean;
   isAdmin: boolean;
   userPermissions: Record<string, string[]>;
 }
@@ -13,6 +17,7 @@ const PermissionsContext = createContext<PermissionsContextType>({
   hasPermission: () => true,
   hasAnyPermission: () => true,
   hasAnyDeploymentPermission: () => true,
+  hasAnyDeploymentAccess: () => true,
   isAdmin: false,
   userPermissions: {},
 });
@@ -68,9 +73,15 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
     return Object.values(groups).some((perms) => perms.includes(action) || perms.includes('*'));
   };
 
+  const hasAnyDeploymentAccess = (product: string): boolean => {
+    if (isAdmin) return true;
+    const groups = deploymentPermMap[product];
+    return !!groups && Object.keys(groups).length > 0;
+  };
+
   return (
     <PermissionsContext.Provider
-      value={{ hasPermission, hasAnyPermission, hasAnyDeploymentPermission, isAdmin, userPermissions: permMap }}
+      value={{ hasPermission, hasAnyPermission, hasAnyDeploymentPermission, hasAnyDeploymentAccess, isAdmin, userPermissions: permMap }}
     >
       {children}
     </PermissionsContext.Provider>

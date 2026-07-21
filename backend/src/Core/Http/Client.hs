@@ -33,11 +33,12 @@ import Core.Logging (logErrorG, logInfoG)
 import Core.Types.Time (Seconds (..), toMicros)
 import Data.Aeson (FromJSON, eitherDecode)
 import qualified Data.ByteString.Lazy as LBS
-import Data.CaseInsensitive (mk)
+import Data.CaseInsensitive (mk, original)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Encoding.Error as TEE
 import Network.HTTP.Client (
     HttpException,
     Manager,
@@ -47,6 +48,7 @@ import Network.HTTP.Client (
     httpLbs,
     newManager,
     parseRequest,
+    responseHeaders,
     responseTimeoutMicro,
     responseTimeoutNone,
  )
@@ -99,6 +101,8 @@ defaultReq url =
 data HttpResponse = HttpResponse
     { respStatus :: Int
     , respBody :: LBS.ByteString
+    , respHeaders :: [(Text, Text)]
+    -- ^ Response headers, lenient-decoded. Header names keep original casing.
     }
     deriving (Show)
 
@@ -178,6 +182,10 @@ doOne HttpReq{..} = do
                             HttpResponse
                                 { respStatus = statusCode (responseStatus r)
                                 , respBody = responseBody r
+                                , respHeaders =
+                                    [ (TE.decodeUtf8With TEE.lenientDecode (original k), TE.decodeUtf8With TEE.lenientDecode v)
+                                    | (k, v) <- responseHeaders r
+                                    ]
                                 }
 
 -- | HTTP call expecting a JSON response; decodes to @a@.

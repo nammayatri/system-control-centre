@@ -450,8 +450,15 @@ export default function GroupsHome() {
       <StoreSyncBanner />
 
       {/* All-time mobile-build KPIs (every build till today; real builds only)
-          — constant across the date filter AND the groups/history toggle. */}
-      <MobileBuildKpis releases={allTimeReleases} />
+          — constant across the date filter AND the groups/history toggle.
+          Counts use storeBucket (the status filter's own fn) and clicking a
+          card applies that filter, so card and list can never disagree. */}
+      <MobileBuildKpis
+        releases={allTimeReleases}
+        bucketOf={storeBucket}
+        active={statusFilter}
+        onSelect={setStatusFilter}
+      />
 
       {/* ONE fixed filter toolbar for both views — toggling history swaps only
           the table below; every filter here drives whichever table is shown. */}
