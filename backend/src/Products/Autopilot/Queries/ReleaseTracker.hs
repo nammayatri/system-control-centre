@@ -62,6 +62,7 @@ module Products.Autopilot.Queries.ReleaseTracker (
     withCloudDb,
     currentCloud,
     cloudTypeForCategory,
+    findReleaseTrackerForCloud,
 
     -- * Row conversion
     toRow,
@@ -304,6 +305,19 @@ findReleaseTracker rid = withDb $ \db -> do
                 select $
                     do
                         rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (rtId rt ==. val_ rid)
+                        pure rt
+    pure $ fmap fromRow (safeHead rows)
+
+findReleaseTrackerForCloud :: (MonadFlow m) => Text -> m (Maybe TrackerWithTarget)
+findReleaseTrackerForCloud rid = withCloudDb $ \cloud db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $
+                    do
+                        rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
                         guard_ (rtId rt ==. val_ rid)
                         pure rt
     pure $ fmap fromRow (safeHead rows)

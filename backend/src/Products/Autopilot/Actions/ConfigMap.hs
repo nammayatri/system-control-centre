@@ -158,7 +158,7 @@ createConfigMapH ap body = do
 
 updateConfigMapH :: AuthedPerson -> Text -> Value -> Flow APIResponse
 updateConfigMapH ap cmId' body = do
-  m <- findReleaseTracker cmId'
+  m <- findReleaseTrackerForCloud cmId'
   case m of
     Nothing -> pure $ APIResponse "ERROR" "ConfigMap tracker not found"
     Just (rt, mts) -> do
@@ -211,7 +211,7 @@ restoreOriginalOnRevertCancel rt = do
       let origId = T.stripPrefix "Revert of " =<< NT.description rt
       case origId of
         Just oid -> do
-          mOrig <- findReleaseTracker oid
+          mOrig <- findReleaseTrackerForCloud oid
           case mOrig of
             Just (origRt, origTs) | NT.status origRt == REVERTING -> do
               let restored = origRt {NT.status = COMPLETED}

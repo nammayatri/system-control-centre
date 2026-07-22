@@ -1,6 +1,7 @@
 module Core.Config where
 
 import Control.Exception (IOException, try)
+import Data.Char (toLower)
 import Data.Text (Text, pack)
 import Data.Text qualified as T
 import System.Directory (doesFileExist)
@@ -48,6 +49,7 @@ data Config = Config
     -- Cross-cluster sync endpoint (secrets). See V4 layer note above.
     syncClusterUrl :: String,
     syncClusterApiKey :: String,
+    syncClusterEnabled :: Bool,
     syncReleaseManager :: String,
     -- Decision engine URLs (metrics + A/B + health score). See V4 layer note.
     prometheusUrl :: String,
@@ -77,6 +79,7 @@ loadConfig = do
 
   syncClusterUrl <- envOr "SYNC_CLUSTER_URL" ""
   syncClusterApiKey <- envOr "SYNC_CLUSTER_API_KEY" ""
+  syncClusterEnabled <- (\v -> map toLower v `elem` ["true", "1", "yes"]) <$> envOr "SYNC_CLUSTER_ENABLED" "false"
   syncReleaseManager <- envOr "SYNC_RELEASE_MANAGER" "sync-service"
 
   prometheusUrl <- envOr "PROMETHEUS_URL" ""

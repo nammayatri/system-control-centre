@@ -80,22 +80,32 @@ getProductConfigH _ap pid = do
         Just p -> pure $ toJSON (toProductConfigResponse p)
 
 updateProductConfigH :: AuthedPerson -> Int32 -> UpsertProductReq -> Flow APIResponse
-updateProductConfigH ap pathId UpsertProductReq{appGroup = appGroup', cluster = cluster', namespace = namespace', vsName = vsName', productType = productType', productAcronym = productAcronym', syncCluster = syncCluster', needInfraApproval = needInfraApproval', slackChannel = slackChannel', repoName = repoName'} =
-    upsertProductH
-        ap
-        UpsertProductReq
-            { id = Just pathId
-            , appGroup = appGroup'
-            , cluster = cluster'
-            , namespace = namespace'
-            , vsName = vsName'
-            , productType = productType'
-            , productAcronym = productAcronym'
-            , syncCluster = syncCluster'
-            , needInfraApproval = needInfraApproval'
-            , slackChannel = slackChannel'
-            , repoName = repoName'
-            }
+updateProductConfigH ap pathId UpsertProductReq{appGroup = appGroup', cluster = cluster', namespace = namespace', vsName = vsName', productType = productType', productAcronym = productAcronym', syncCluster = syncCluster', needInfraApproval = needInfraApproval', slackChannel = slackChannel', repoName = repoName'} = do
+    existing <- findProductConfigById pathId
+    case existing of
+        Nothing -> throwM $ NotFound "Product config not found"
+        Just p
+            | S.dcAppGroup p /= appGroup' ->
+                throwM $
+                    BadRequest
+                        ( "Product config " <> T.pack (show pathId) <> " belongs to app group " <> S.dcAppGroup p <> ", not " <> appGroup'
+                        )
+            | otherwise ->
+                upsertProductH
+                    ap
+                    UpsertProductReq
+                        { id = Just pathId
+                        , appGroup = appGroup'
+                        , cluster = cluster'
+                        , namespace = namespace'
+                        , vsName = vsName'
+                        , productType = productType'
+                        , productAcronym = productAcronym'
+                        , syncCluster = syncCluster'
+                        , needInfraApproval = needInfraApproval'
+                        , slackChannel = slackChannel'
+                        , repoName = repoName'
+                        }
 
 deleteProductConfigH :: AuthedPerson -> Int32 -> Flow APIResponse
 deleteProductConfigH ap pid = do
@@ -145,7 +155,17 @@ getReleaseConfigH _ap rid = do
         Just r -> pure $ toJSON (toReleaseConfigResponse r)
 
 updateReleaseConfigH :: AuthedPerson -> Int32 -> UpsertServiceReq -> Flow APIResponse
-updateReleaseConfigH ap _ req = upsertServiceH ap req
+updateReleaseConfigH ap pathId req@UpsertServiceReq{appGroup = appGroup', service = service'} = do
+    existing <- findReleaseConfigById pathId
+    case existing of
+        Nothing -> throwM $ NotFound "Release config not found"
+        Just r
+            | S.dcAppGroup r /= appGroup' || S.dcService r /= Just service' ->
+                throwM $
+                    BadRequest
+                        ( "Release config " <> T.pack (show pathId) <> " belongs to " <> S.dcAppGroup r <> "/" <> fromMaybe "" (S.dcService r) <> ", not " <> appGroup' <> "/" <> service'
+                        )
+            | otherwise -> upsertServiceH ap req
 
 deleteReleaseConfigH :: AuthedPerson -> Int32 -> Flow APIResponse
 deleteReleaseConfigH ap rid = do

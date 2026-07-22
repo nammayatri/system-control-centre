@@ -14,7 +14,6 @@ module Products.Autopilot.RuntimeConfig
     getDecisionEngineFailClosed,
     getABHSApiKey,
     getABHSAllowedTimeDiffMins,
-    isSyncClusterEnabled,
     isMultiReleasePerProduct,
     getStoreRefreshCooldownSeconds,
     isVersionPreviewEnabled,
@@ -64,7 +63,8 @@ module Products.Autopilot.RuntimeConfig
   )
 where
 
-import Core.Environment (MonadFlow, withDb)
+import Core.Config (Config (..))
+import Core.Environment (MonadFlow, getConfig, withDb)
 import Data.Aeson (Value (..), eitherDecode)
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
@@ -191,12 +191,6 @@ getABHSApiKey = withDb $ \db -> do
 getABHSAllowedTimeDiffMins :: (MonadFlow m) => m Int
 getABHSAllowedTimeDiffMins =
   getConfigIntForProduct "ab_hs_allowed_time_diff_mins" (Just "autopilot") 60
-
--- | Master gate for cross-cloud sync. When True, completed releases POST
--- to the secondary cluster's @/releases/create@ with @isFromSync=true@ to
--- prevent loops. Off unless running multi-cloud.
-isSyncClusterEnabled :: (MonadFlow m) => m Bool
-isSyncClusterEnabled = getConfigBoolForProduct "sync_cluster_enabled" (Just "autopilot") False
 
 -- | When True, allow multiple in-flight releases per (app_group, env)
 -- provided they target DIFFERENT services. Same-service concurrency is
@@ -443,7 +437,7 @@ loadRuntimeConfigSnapshot =
     <*> isScaleDownPodsOnCompletion
     <*> isGcltEnabled
     <*> isPromQueryCheckEnabled
-    <*> isSyncClusterEnabled
+    <*> (syncClusterEnabled <$> getConfig)
     <*> isMultiReleasePerProduct
     <*> getReleaseWatchDelay
     <*> getReleaseStartDelay

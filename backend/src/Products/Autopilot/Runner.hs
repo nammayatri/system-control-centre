@@ -312,12 +312,22 @@ isEligibleToRun products multiRelease ongoing (rt, mts) = case category rt of
                     [] -> firstOf sameName
             firstOf [] = Nothing
             firstOf (x : _) = Just x
-        let vsLocked = maybe False (isJust . getProductVsLockedBy) p
-            -- Block same-service concurrent releases (always, even with multi_release_per_product)
-            hasOngoingSameService = any (\(o, _) -> appGroup o == appGroup rt && service o == service rt && env o == env rt) ongoing
-            -- Block same-appGroup when multi_release_per_product is off
-            hasOngoingSameProduct = any (\(o, _) -> appGroup o == appGroup rt && env o == env rt) ongoing
-        pure (not vsLocked && not hasOngoingSameService && (multiRelease || not hasOngoingSameProduct))
+        case p of
+            Nothing -> do
+                logWarning $
+                    "[RUNNER] Skipping "
+                        <> releaseId rt
+                        <> " — no deployment_config for app group "
+                        <> appGroup rt
+                        <> " in this cloud"
+                pure False
+            Just _ -> do
+                let vsLocked = maybe False (isJust . getProductVsLockedBy) p
+                    -- Block same-service concurrent releases (always, even with multi_release_per_product)
+                    hasOngoingSameService = any (\(o, _) -> appGroup o == appGroup rt && service o == service rt && env o == env rt) ongoing
+                    -- Block same-appGroup when multi_release_per_product is off
+                    hasOngoingSameProduct = any (\(o, _) -> appGroup o == appGroup rt && env o == env rt) ongoing
+                pure (not vsLocked && not hasOngoingSameService && (multiRelease || not hasOngoingSameProduct))
 
 pickJobs :: Bool -> [TrackerWithTarget] -> [TrackerWithTarget]
 pickJobs multi jobs

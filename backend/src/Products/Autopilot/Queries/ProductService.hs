@@ -284,12 +284,13 @@ upsertService rolloutStrategy decisionConfig serviceName' product' sType service
                             ]
 
 findProductConfigById :: (MonadFlow m) => Int32 -> m (Maybe DeploymentConfig)
-findProductConfigById pid = withDb $ \db -> do
+findProductConfigById pid = withCloudDb $ \cloud db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $ do
                     p <- all_ (deploymentConfig autopilotDb)
+                    guard_ (dcCloudType p ==. val_ cloud)
                     guard_ (dcId p ==. val_ pid)
                     guard_ (isNothing_ (dcService p))
                     pure p
@@ -298,10 +299,10 @@ findProductConfigById pid = withDb $ \db -> do
         (x : _) -> Just x
 
 deleteProductConfig :: (MonadFlow m) => Int32 -> m ()
-deleteProductConfig pid = withDb $ \db ->
+deleteProductConfig pid = withCloudDb $ \cloud db ->
     runDB db $
         runDelete $
-            delete (deploymentConfig autopilotDb) (\p -> dcId p ==. val_ pid)
+            delete (deploymentConfig autopilotDb) (\p -> dcId p ==. val_ pid &&. dcCloudType p ==. val_ cloud)
 
 listAllReleaseConfigs :: (MonadFlow m) => m [DeploymentConfig]
 listAllReleaseConfigs = withCloudDb $ \cloud db ->
@@ -314,12 +315,13 @@ listAllReleaseConfigs = withCloudDb $ \cloud db ->
                 pure s
 
 findReleaseConfigById :: (MonadFlow m) => Int32 -> m (Maybe DeploymentConfig)
-findReleaseConfigById rid = withDb $ \db -> do
+findReleaseConfigById rid = withCloudDb $ \cloud db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $ do
                     r <- all_ (deploymentConfig autopilotDb)
+                    guard_ (dcCloudType r ==. val_ cloud)
                     guard_ (dcId r ==. val_ rid)
                     guard_ (isNothing_ (dcService r) ==. val_ False)
                     pure r
@@ -328,10 +330,10 @@ findReleaseConfigById rid = withDb $ \db -> do
         (x : _) -> Just x
 
 deleteReleaseConfig :: (MonadFlow m) => Int32 -> m ()
-deleteReleaseConfig rid = withDb $ \db ->
+deleteReleaseConfig rid = withCloudDb $ \cloud db ->
     runDB db $
         runDelete $
-            delete (deploymentConfig autopilotDb) (\r -> dcId r ==. val_ rid)
+            delete (deploymentConfig autopilotDb) (\r -> dcId r ==. val_ rid &&. dcCloudType r ==. val_ cloud)
 
 -- | Default stale-lock expiry (minutes) when server_config has no override.
 defaultLockExpiryMinutes :: Int

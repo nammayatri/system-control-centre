@@ -37,7 +37,7 @@ getEnabledServerConfigValue name = withDb $ \db -> getEnabledServerConfigValueFo
 Queries all enabled rows matching the name, then picks:
   1. Product-specific match (if product param given and match exists)
   2. Global match (product IS NULL)
-  3. Any match (first found) — backward-compat fallback
+Falls through to the caller's default when neither exists.
 -}
 getEnabledServerConfigValueForProduct_io :: DBEnv -> Text -> Maybe Text -> IO (Maybe Text)
 getEnabledServerConfigValueForProduct_io db name mProduct = do
@@ -53,10 +53,7 @@ getEnabledServerConfigValueForProduct_io db name mProduct = do
             Just p -> lookup (Just p) rows
             Nothing -> Nothing
         globalMatch = lookup Nothing rows
-        anyMatch = case rows of
-            ((_, v) : _) -> Just v
-            _ -> Nothing
-    pure $ productMatch <|> globalMatch <|> anyMatch
+    pure $ productMatch <|> globalMatch
 
 getEnabledServerConfigValueForProduct :: (MonadFlow m) => Text -> Maybe Text -> m (Maybe Text)
 getEnabledServerConfigValueForProduct name mProduct = withDb $ \db -> getEnabledServerConfigValueForProduct_io db name mProduct
