@@ -29,7 +29,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Products.Autopilot.Queries.ReleaseTracker (findActiveSyncTrackers, findEventByLabel, insertReleaseEvent)
-import Products.Autopilot.RuntimeConfig (getReleaseWatchDelay, isSyncClusterEnabled)
+import Products.Autopilot.RuntimeConfig (getReleaseWatchDelay)
 import Products.Autopilot.Sync (buildAuthHeaders, normaliseBase)
 import Products.Autopilot.Types
 import Products.Autopilot.Types.Storage.Schema (rePayload)
@@ -53,10 +53,9 @@ syncWatcherPollLoop = forever $ do
 
 syncWatcherIteration :: Flow ()
 syncWatcherIteration = do
-    syncOn <- isSyncClusterEnabled
-    when syncOn $ do
+    cfg <- getConfig
+    when (syncClusterEnabled cfg) $ do
         trackers <- findActiveSyncTrackers
-        cfg <- getConfig
         logInfo $
             "[SYNC_WATCHER] Polling " <> T.pack (show (length trackers)) <> " active sync tracker(s)"
         forM_ trackers $ \tracker -> do

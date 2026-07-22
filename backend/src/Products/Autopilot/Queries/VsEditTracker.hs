@@ -48,12 +48,13 @@ listVsEditTrackerRows mFrom mTo = withCloudDb $ \cloud db ->
                     pure t
 
 findVsEditTrackerRowById :: (MonadFlow m) => Text -> m (Maybe ReleaseTrackerRow)
-findVsEditTrackerRowById tid = withDb $ \db -> do
+findVsEditTrackerRowById tid = withCloudDb $ \cloud db -> do
     rows <-
         runDB db $
             runSelectReturningList $
                 select $ do
                     t <- all_ (releaseTrackers autopilotDb)
+                    guard_ (visibleToCloud cloud t)
                     guard_ (rtId t ==. val_ tid)
                     guard_ (rtCategory t ==. val_ "VSEdit")
                     pure t

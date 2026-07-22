@@ -855,7 +855,7 @@ getReleaseH _ap rid = do
 
 approveReleaseH :: AuthedPerson -> Text -> ApproveReleaseReq -> Flow (Maybe ReleaseTracker)
 approveReleaseH ap rid req = do
-    m <- findReleaseTracker rid
+    m <- findReleaseTrackerForCloud rid
     case m of
         Nothing -> throwM $ NotFound ("Release not found: " <> rid)
         Just (tracker, mTargetState) -> do
@@ -892,7 +892,7 @@ approveReleaseH ap rid req = do
 
 triggerReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
 triggerReleaseH ap rid TriggerReleaseReq{..} = do
-    m <- findReleaseTracker rid
+    m <- findReleaseTrackerForCloud rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -912,7 +912,7 @@ triggerReleaseH ap rid TriggerReleaseReq{..} = do
 
 rollbackReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
 rollbackReleaseH ap rid TriggerReleaseReq{..} = do
-    m <- findReleaseTracker rid
+    m <- findReleaseTrackerForCloud rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -933,7 +933,7 @@ rollbackReleaseH ap rid TriggerReleaseReq{..} = do
 revertReleaseH :: AuthedPerson -> Text -> RevertReleaseReq -> Flow APIResponse
 revertReleaseH ap rid req = do
     cfg <- getConfig
-    m <- findReleaseTracker rid
+    m <- findReleaseTrackerForCloud rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -1097,7 +1097,7 @@ immediateRevertByGlobalIdH ap gid = do
 
 discardReleaseH :: AuthedPerson -> Text -> DiscardReleaseReq -> Flow APIResponse
 discardReleaseH ap rid DiscardReleaseReq{..} = do
-    m <- findReleaseTracker rid
+    m <- findReleaseTrackerForCloud rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -1120,7 +1120,7 @@ discardReleaseH ap rid DiscardReleaseReq{..} = do
 deleteReleaseH :: AuthedPerson -> Text -> Flow APIResponse
 deleteReleaseH ap rid = do
     db <- getDBEnv
-    mTracker <- findReleaseTracker rid
+    mTracker <- findReleaseTrackerForCloud rid
     case mTracker of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, _) -> do
@@ -1138,7 +1138,7 @@ deleteReleaseH ap rid = do
 
 updateTrackerH :: AuthedPerson -> Text -> K8sUpdateTrackerReq -> Flow APIResponse
 updateTrackerH ap rid req = do
-    m <- findReleaseTracker rid
+    m <- findReleaseTrackerForCloud rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -1820,7 +1820,7 @@ What this deliberately does NOT do (matching Julia):
 immediateRevertH :: AuthedPerson -> Text -> ImmediateRevertReq -> Flow APIResponse
 immediateRevertH ap rid req@ImmediateRevertReq{isRevertSync = mIsRevertSync} = do
     cfg <- getConfig
-    m <- findReleaseTracker rid
+    m <- findReleaseTrackerForCloud rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -2053,7 +2053,7 @@ has nothing to scale up).
 restartReleaseH :: AuthedPerson -> Text -> RestartReleaseReq -> Flow APIResponse
 restartReleaseH ap rid req = do
     cfg <- getConfig
-    m <- findReleaseTracker rid
+    m <- findReleaseTrackerForCloud rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -2231,7 +2231,7 @@ restartReleaseH ap rid req = do
 rolloutRestartDeploymentH :: AuthedPerson -> Text -> RestartReleaseReq -> Flow APIResponse
 rolloutRestartDeploymentH ap rid req = do
     cfg <- getConfig
-    m <- findReleaseTracker rid
+    m <- findReleaseTrackerForCloud rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
@@ -2297,7 +2297,7 @@ rolloutRestartDeploymentH ap rid req = do
 
 fastForwardH :: AuthedPerson -> Text -> FastForwardReq -> Flow APIResponse
 fastForwardH ap rid req = do
-    m <- findReleaseTracker rid
+    m <- findReleaseTrackerForCloud rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do

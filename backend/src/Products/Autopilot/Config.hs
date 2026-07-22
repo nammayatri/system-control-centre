@@ -31,12 +31,6 @@ autopilotConfigs =
         "Delay before starting release (seconds)"
         (Just "autopilot")
     , ConfigEntry
-        "sync_cluster_enabled"
-        (BoolConfig False)
-        SyncGroup
-        "Enable multi-cloud sync to secondary cluster"
-        (Just "autopilot")
-    , ConfigEntry
         "sync_rollout_strategy_config"
         (JsonConfig "{}")
         SyncGroup
