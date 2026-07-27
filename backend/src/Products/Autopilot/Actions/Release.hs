@@ -237,8 +237,18 @@ listServicesH _ap productName' = do
 upsertServiceH :: AuthedPerson -> UpsertServiceReq -> Flow APIResponse
 upsertServiceH ap req = do
     requireDeploymentPermission (Proxy :: Proxy 'AP_PRODUCT_CONFIG_EDIT) ap req.appGroup
-    upsertService req.rolloutStrategyText req.decisionConfigText req.service req.appGroup req.serviceType req.serviceHost req.revertStrategyText req.hpaMinReplicas req.hpaMaxReplicas
-    pure $ APIResponse "SUCCESS" "release_config upserted"
+    -- deployment_config.rollout_strategy/revert_strategy are opaque Text columns
+    -- with no DB-level schema -- this is the only gate keeping malformed or
+    -- corrupted stage data (e.g. a legacy {cluster, rollouts: [...]} wrapper
+    -- merged with new flat fields, a bug that has actually reached production)
+    -- from being persisted here.
+    case validateOptionalStrategyText "Rollout" req.rolloutStrategyText of
+        Left errMsg -> pure $ APIResponse "ERROR" errMsg
+        Right () -> case validateOptionalStrategyText "Revert" req.revertStrategyText of
+            Left errMsg -> pure $ APIResponse "ERROR" errMsg
+            Right () -> do
+                upsertService req.rolloutStrategyText req.decisionConfigText req.service req.appGroup req.serviceType req.serviceHost req.revertStrategyText req.hpaMinReplicas req.hpaMaxReplicas
+                pure $ APIResponse "SUCCESS" "release_config upserted"
 
 -- ============================================================================
 -- Release CRUD Handlers
@@ -1299,6 +1309,43 @@ validateStrategyShape steps = do
         if all (uncurry (<)) (zip xs (drop 1 xs))
             then xs
             else [] -- sentinel that never equals a valid list of length >= 1
+
+{- | Decode a stored rollout/revert-strategy Text value into stages, tolerating
+the double-JSON-encoding some rows carry (the column holding a JSON string that
+itself contains an escaped JSON array, rather than the array directly) --
+mirrors the frontend's own tolerant parsing in @parseStrategyStages@.
+-}
+decodeStrategyText :: Text -> Either Text [RolloutStep]
+decodeStrategyText = go (3 :: Int)
+  where
+    go :: Int -> Text -> Either Text [RolloutStep]
+    go n t
+        | n <= 0 = Left "rollout strategy JSON is nested too deeply"
+        | otherwise =
+            case A.eitherDecodeStrict (encodeUtf8 t) :: Either String [RolloutStep] of
+                Right steps -> Right steps
+                Left errSteps ->
+                    case A.eitherDecodeStrict (encodeUtf8 t) :: Either String Text of
+                        Right inner -> go (n - 1) inner
+                        Left _ -> Left (T.pack errSteps)
+
+{- | Reject a malformed rollout/revert strategy before it reaches
+deployment_config -- that column is opaque Text with no DB-level schema, so
+this is the only gate keeping corrupted stage data (e.g. a legacy
+@{cluster, rollouts: [...]}@ wrapper merged with new flat fields — a shape
+that has actually reached production) from being persisted. @Nothing@ or a
+blank string means "no strategy configured" and is allowed through.
+-}
+validateOptionalStrategyText :: Text -> Maybe Text -> Either Text ()
+validateOptionalStrategyText _ Nothing = Right ()
+validateOptionalStrategyText label (Just t)
+    | T.strip t == "" = Right ()
+    | otherwise =
+        case decodeStrategyText t of
+            Left err -> Left (label <> " strategy is not valid JSON: " <> err)
+            Right steps -> case validateStrategyShape steps of
+                Left err -> Left (label <> " strategy invalid: " <> err)
+                Right () -> Right ()
 
 {- | Identify the first mid-flight-forbidden field set in the request, if any.
 During INPROGRESS/PAUSED/etc only @status@, @rolloutStrategy@, @mode@, and

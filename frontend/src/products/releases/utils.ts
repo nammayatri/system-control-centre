@@ -2,6 +2,54 @@
 // percent / age formatting, reused across list, detail, monitor, modal, and admin
 // so the same value reads identically on every surface.
 
+/** One stage after alias resolution; fields are undefined only when truly absent
+ *  from the source row, so callers can apply their own context-appropriate default. */
+export interface RawStrategyStage {
+  rolloutPercent: number | undefined;
+  cooloffMinutes: number | undefined;
+  podCount: number | undefined;
+}
+
+// Parses a stored rollout/revert `deployment_config` strategy value into a flat
+// list of stages. Handles double/triple-escaped JSON strings (DB round-trips can
+// stack an extra layer of stringification) and the legacy single-object wrapper
+// shape `[{cluster, rollouts: [...]}]` predating multi-stage support.
+//
+// The wrapper is only unwrapped when unambiguous — exactly one element, a nested
+// `rollouts` array, and no flat `rolloutPercent` of its own — so a real multi-stage
+// flat array is never collapsed just because a corrupted first element happens to
+// carry a stray `rollouts` key (this exact corruption has occurred in production:
+// an old wrapper object merged with new flat fields on save). Both the release
+// form (read path) and the deployment-config edit modal (read+write path) must
+// call this so their shape handling can't drift apart again.
+export function parseStrategyStages(raw: unknown): RawStrategyStage[] {
+  let parsed: any = raw;
+  for (let i = 0; i < 3 && typeof parsed === 'string'; i++) {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return [];
+
+  const first = parsed[0];
+  const isLegacyWrapper =
+    parsed.length === 1 &&
+    first &&
+    typeof first === 'object' &&
+    Array.isArray(first.rollouts) &&
+    first.rolloutPercent === undefined;
+  const list = isLegacyWrapper ? first.rollouts : parsed;
+  if (!Array.isArray(list)) return [];
+
+  return list.map((r: any) => ({
+    rolloutPercent: r?.rolloutPercent ?? r?.rollout,
+    cooloffMinutes: r?.cooloffMinutes ?? r?.cooloff,
+    podCount: r?.podCount ?? r?.pods ?? r?.podPercent,
+  }));
+}
+
 /** A build code rendered consistently as `+460` (empty when absent). */
 export function formatBuildCode(code: number | null | undefined): string {
   return code != null ? `+${code}` : '';

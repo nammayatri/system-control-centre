@@ -6,6 +6,7 @@ import {
   fetchReleaseConfigs, createReleaseConfig, updateReleaseConfig, deleteReleaseConfig,
 } from '../../releases/api';
 import type { ProductConfig, ReleaseConfig } from '../../releases/api';
+import { parseStrategyStages } from '../../releases/utils';
 import { PRODUCT_TYPES, SERVICE_TYPES } from '../../../lib/constants';
 import { Button } from '../../../shared/ui/button';
 import { Badge } from '../../../shared/ui/badge';
@@ -771,9 +772,16 @@ const DeploymentConfig: React.FC = () => {
               <div>
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Rollout Strategy</label>
                 {(() => {
-                  let stages: Array<{rolloutPercent: number; cooloffMinutes: number; podCount: number}> = [];
-                  try { stages = JSON.parse(serviceForm.rollout_strategy || '[]'); } catch { stages = []; }
-                  if (!Array.isArray(stages)) stages = [];
+                  // Unwraps the legacy `[{cluster, rollouts: [...]}]` shape (and
+                  // normalizes field aliases) so a config saved before multi-stage
+                  // rollouts existed still shows its real stages here, instead of
+                  // one bogus 0/0/0 row that would overwrite them on Update.
+                  const stages: Array<{ rolloutPercent: number; cooloffMinutes: number; podCount: number }> =
+                    parseStrategyStages(serviceForm.rollout_strategy).map(s => ({
+                      rolloutPercent: s.rolloutPercent ?? 0,
+                      cooloffMinutes: s.cooloffMinutes ?? 0,
+                      podCount: s.podCount ?? 0,
+                    }));
 
                   const updateStages = (newStages: typeof stages) => {
                     setServiceForm(prev => ({ ...prev, rollout_strategy: JSON.stringify(newStages) }));
@@ -828,9 +836,12 @@ const DeploymentConfig: React.FC = () => {
               <div>
                 <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Revert Strategy</label>
                 {(() => {
-                  let stages: Array<{rolloutPercent: number; cooloffMinutes: number; podCount: number}> = [];
-                  try { stages = JSON.parse(serviceForm.revert_strategy || '[]'); } catch { stages = []; }
-                  if (!Array.isArray(stages)) stages = [];
+                  const stages: Array<{ rolloutPercent: number; cooloffMinutes: number; podCount: number }> =
+                    parseStrategyStages(serviceForm.revert_strategy).map(s => ({
+                      rolloutPercent: s.rolloutPercent ?? 0,
+                      cooloffMinutes: s.cooloffMinutes ?? 0,
+                      podCount: s.podCount ?? 0,
+                    }));
 
                   const updateStages = (newStages: typeof stages) => {
                     setServiceForm(prev => ({ ...prev, revert_strategy: JSON.stringify(newStages) }));

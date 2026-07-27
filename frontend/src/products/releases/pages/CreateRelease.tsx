@@ -6,6 +6,7 @@ import { useProductConfigs, useServices } from '../useProducts';
 import { useCreateRelease, useUpdateTracker } from '../hooks';
 import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources, resolveOldVersion, fetchRolloutPodEstimate, fetchRolloutPodEstimateSecondary } from '../api';
 import type { ProductConfig } from '../api';
+import { parseStrategyStages } from '../utils';
 import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
 import { normalizeProductType } from '../../../lib/constants';
@@ -323,21 +324,13 @@ const CreateRelease: React.FC = () => {
         const svcConfig = configs.find(c => c.service === service);
         if (svcConfig?.rollout_strategy) {
           try {
-            // DB stores double-escaped JSON — parse until we get an array.
-            let parsed: any = svcConfig.rollout_strategy;
-            for (let i = 0; i < 3 && typeof parsed === 'string'; i++) {
-              parsed = JSON.parse(parsed);
-            }
-            // Accept both [{cluster, rollouts: [...]}] and plain array shapes.
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              const rollouts = parsed[0]?.rollouts || parsed;
-              if (Array.isArray(rollouts) && rollouts.length > 0) {
-                setStages(rollouts.map((r: any) => ({
-                  rollout: r.rollout ?? r.rolloutPercent ?? 0,
-                  cooloff: r.cooloff ?? r.cooloffMinutes ?? 10,
-                  pods: r.pods ?? r.podCount ?? r.podPercent ?? 1,
-                })));
-              }
+            const rollouts = parseStrategyStages(svcConfig.rollout_strategy);
+            if (rollouts.length > 0) {
+              setStages(rollouts.map(r => ({
+                rollout: r.rolloutPercent ?? 0,
+                cooloff: r.cooloffMinutes ?? 10,
+                pods: r.podCount ?? 1,
+              })));
             }
           } catch (e) {
             // Surface parse errors — silent fallback to defaults hides misconfigured service configs.
