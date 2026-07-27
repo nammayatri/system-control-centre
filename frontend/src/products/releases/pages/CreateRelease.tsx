@@ -11,6 +11,7 @@ import { Button } from '../../../shared/ui/button';
 import { cn } from '../../../lib/utils';
 import { normalizeProductType } from '../../../lib/constants';
 import { useAuth } from '../../../core/auth/AuthContext';
+import { usePermissions } from '../../../core/auth/PermissionsContext';
 import { Trash2, Lock, Unlock, ChevronDown, Check, Info } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -76,6 +77,7 @@ const CreateRelease: React.FC = () => {
   const { id } = useParams<{ id?: string }>();
   const isClone = location.pathname.endsWith('/clone') && !!id;
   const { env: deploymentEnv, user, products: productAccess, deploymentAccess } = useAuth();
+  const { hasPermission } = usePermissions();
   const isUpdate = !!id && location.pathname.endsWith('/edit');
 
   const { data: productConfigs = [] } = useProductConfigs();
@@ -96,6 +98,7 @@ const CreateRelease: React.FC = () => {
     cluster: 'MOVING_TECH',
     cronjob_suspend: false, description: '', schedule_time: '',
   });
+  const canManageStagger = hasPermission('autopilot', 'MANAGE_STAGGER', formData.appGroup);
   const isNewService = false;
   const [selectedServices, setSelectedServices] = useState<string[]>([]);
   // A multi-service create fans out one POST per service; a single old_version /
@@ -955,8 +958,12 @@ const CreateRelease: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setPodsAutoLocked(v => !v)}
-                className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-zinc-600 border border-zinc-200 hover:bg-zinc-50 cursor-pointer transition-colors duration-150"
-                title={podsAutoLocked ? 'Unlock Min Pods to edit manually' : 'Lock Min Pods (auto-calculated)'}
+                disabled={!canManageStagger}
+                className={cn(
+                  "shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors duration-150",
+                  canManageStagger ? "text-zinc-600 border-zinc-200 hover:bg-zinc-50 cursor-pointer" : "text-zinc-400 border-zinc-100 bg-zinc-50 cursor-not-allowed opacity-70"
+                )}
+                title={!canManageStagger ? 'Requires MANAGE_STAGGER permission' : podsAutoLocked ? 'Unlock Min Pods to edit manually' : 'Lock Min Pods (auto-calculated)'}
               >
                 {podsAutoLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
                 {podsAutoLocked ? 'Auto' : 'Manual'}
@@ -995,25 +1002,25 @@ const CreateRelease: React.FC = () => {
                         </td>
                         <td className="py-2 px-3">
                           <input type="number" value={stage.rollout}
-                            disabled={isLocked}
+                            disabled={isLocked || !canManageStagger}
                             onChange={(e) => setStages(prev => prev.map((s, i) => i === idx ? { ...s, rollout: parseInt(e.target.value) || 0 } : s))}
-                            className={cn(isLocked ? disabledInputClass : inputClass, 'w-24')} />
+                            className={cn(isLocked || !canManageStagger ? disabledInputClass : inputClass, 'w-24')} />
                         </td>
                         <td className="py-2 px-3">
                           <input type="number" value={stage.cooloff}
-                            disabled={isLocked}
+                            disabled={isLocked || !canManageStagger}
                             onChange={(e) => setStages(prev => prev.map((s, i) => i === idx ? { ...s, cooloff: parseInt(e.target.value) || 0 } : s))}
-                            className={cn(isLocked ? disabledInputClass : inputClass, 'w-24')} />
+                            className={cn(isLocked || !canManageStagger ? disabledInputClass : inputClass, 'w-24')} />
                         </td>
                         <td className="py-2 px-3">
                           <input type="number" value={stage.pods}
-                            disabled={isLocked || (podsAutoLocked && !isUpdate)}
+                            disabled={isLocked || !canManageStagger || (podsAutoLocked && !isUpdate)}
                             onChange={(e) => setStages(prev => prev.map((s, i) => i === idx ? { ...s, pods: parseInt(e.target.value) || 0 } : s))}
-                            className={cn((isLocked || (podsAutoLocked && !isUpdate)) ? disabledInputClass : inputClass, 'w-24')} />
+                            className={cn((isLocked || !canManageStagger || (podsAutoLocked && !isUpdate)) ? disabledInputClass : inputClass, 'w-24')} />
                         </td>
                         <td className="py-2 px-3">
                           {!isLocked && stages.filter((_, i) => !isUpdate || i >= rolloutHistoryLength).length > 1 && (
-                            <button type="button" onClick={() => setStages(stages.filter((_, i) => i !== idx))} className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 cursor-pointer transition-colors duration-150">
+                            <button type="button" onClick={() => setStages(stages.filter((_, i) => i !== idx))} disabled={!canManageStagger} className={cn("p-1.5 rounded-lg transition-colors duration-150", canManageStagger ? "text-red-500 hover:bg-red-50 cursor-pointer" : "text-zinc-300 cursor-not-allowed opacity-50")}>
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           )}
@@ -1024,7 +1031,7 @@ const CreateRelease: React.FC = () => {
                 </tbody>
               </table>
             </div>
-            <Button type="button" variant="secondary" size="sm" onClick={() => setStages([...stages, { rollout: 100, cooloff: 0, pods: 0 }])} className="mt-3">+ Add Stage</Button>
+            <Button type="button" variant="secondary" size="sm" onClick={() => setStages([...stages, { rollout: 100, cooloff: 0, pods: 0 }])} disabled={!canManageStagger} className="mt-3">+ Add Stage</Button>
           </div>
         </div>
 
@@ -1096,8 +1103,12 @@ const CreateRelease: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setSecondaryPodsAutoLocked(v => !v)}
-                      className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-zinc-600 border border-zinc-200 hover:bg-zinc-50 cursor-pointer transition-colors duration-150"
-                      title={secondaryPodsAutoLocked ? 'Unlock Min Pods to edit manually' : 'Lock Min Pods (auto-calculated)'}
+                      disabled={!canManageStagger}
+                      className={cn(
+                        "shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors duration-150",
+                        canManageStagger ? "text-zinc-600 border-zinc-200 hover:bg-zinc-50 cursor-pointer" : "text-zinc-400 border-zinc-100 bg-zinc-50 cursor-not-allowed opacity-70"
+                      )}
+                      title={!canManageStagger ? 'Requires MANAGE_STAGGER permission' : secondaryPodsAutoLocked ? 'Unlock Min Pods to edit manually' : 'Lock Min Pods (auto-calculated)'}
                     >
                       {secondaryPodsAutoLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
                       {secondaryPodsAutoLocked ? 'Auto' : 'Manual'}
@@ -1134,12 +1145,12 @@ const CreateRelease: React.FC = () => {
                         {secondaryStages.map((stage, idx) => (
                           <tr key={idx} className={cn('border-b border-zinc-100', idx % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
                             <td className="py-2 px-3 text-zinc-400 font-mono text-xs">{idx + 1}</td>
-                            <td className="py-2 px-3"><input type="number" value={stage.rollout} onChange={(e) => { const s = [...secondaryStages]; s[idx].rollout = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(inputClass, 'w-24')} /></td>
-                            <td className="py-2 px-3"><input type="number" value={stage.cooloff} onChange={(e) => { const s = [...secondaryStages]; s[idx].cooloff = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(inputClass, 'w-24')} /></td>
-                            <td className="py-2 px-3"><input type="number" value={stage.pods} disabled={secondaryPodsAutoLocked} onChange={(e) => { const s = [...secondaryStages]; s[idx].pods = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(secondaryPodsAutoLocked ? disabledInputClass : inputClass, 'w-24')} /></td>
+                            <td className="py-2 px-3"><input type="number" value={stage.rollout} disabled={!canManageStagger} onChange={(e) => { const s = [...secondaryStages]; s[idx].rollout = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(!canManageStagger ? disabledInputClass : inputClass, 'w-24')} /></td>
+                            <td className="py-2 px-3"><input type="number" value={stage.cooloff} disabled={!canManageStagger} onChange={(e) => { const s = [...secondaryStages]; s[idx].cooloff = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(!canManageStagger ? disabledInputClass : inputClass, 'w-24')} /></td>
+                            <td className="py-2 px-3"><input type="number" value={stage.pods} disabled={!canManageStagger || secondaryPodsAutoLocked} onChange={(e) => { const s = [...secondaryStages]; s[idx].pods = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(!canManageStagger || secondaryPodsAutoLocked ? disabledInputClass : inputClass, 'w-24')} /></td>
                             <td className="py-2 px-3">
                               {secondaryStages.length > 1 && (
-                                <button type="button" onClick={() => setSecondaryStages(secondaryStages.filter((_, i) => i !== idx))} className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 cursor-pointer transition-colors duration-150">
+                                <button type="button" onClick={() => setSecondaryStages(secondaryStages.filter((_, i) => i !== idx))} disabled={!canManageStagger} className={cn("p-1.5 rounded-lg transition-colors duration-150", canManageStagger ? "text-red-500 hover:bg-red-50 cursor-pointer" : "text-zinc-300 cursor-not-allowed opacity-50")}>
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
                               )}
@@ -1149,7 +1160,7 @@ const CreateRelease: React.FC = () => {
                       </tbody>
                     </table>
                   </div>
-                  <Button type="button" variant="secondary" size="sm" onClick={() => setSecondaryStages([...secondaryStages, { rollout: 100, cooloff: 0, pods: 0 }])} className="mt-3">+ Add Stage</Button>
+                  <Button type="button" variant="secondary" size="sm" onClick={() => setSecondaryStages([...secondaryStages, { rollout: 100, cooloff: 0, pods: 0 }])} disabled={!canManageStagger} className="mt-3">+ Add Stage</Button>
                 </div>
               </div>
             )}
