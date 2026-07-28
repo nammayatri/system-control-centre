@@ -37,6 +37,9 @@ data AppCatalogT f = AppCatalog
     -- ^ Which App Store Connect account/team this app lives in. NULL = the default
     -- (unsuffixed) ASC key; a value (e.g. "cumta") selects @SC_ASC_*_<ACCOUNT>@. Lets
     -- one SCC instance read apps that span multiple Apple accounts.
+    , acAirborneAppRef :: Columnar f (Maybe Text)
+    -- ^ Airborne composite ref @"<org>~<app>"@ (production namespace).
+    -- NULL = app has no OTA (migration 0047).
     , acCreatedAt :: Columnar f UTCTime
     }
     deriving (Generic, Beamable)
@@ -68,6 +71,7 @@ appCatalog =
                 , acFirebaseProjectId = fieldNamed "firebase_project_id"
                 , acEnabled = fieldNamed "enabled"
                 , acStoreAccount = fieldNamed "store_account"
+                , acAirborneAppRef = fieldNamed "airborne_app_ref"
                 , acCreatedAt = fieldNamed "created_at"
                 }
 

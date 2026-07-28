@@ -31,6 +31,21 @@ function errMsg(e: any): string {
     );
 }
 
+// Backend guidance may end with " Open: <App Store Connect url>" — lift that
+// into a clickable toast action instead of showing a raw URL in the text.
+function errorToast(e: any) {
+    const msg = errMsg(e);
+    const m = msg.match(/\s*Open:\s*(https:\/\/appstoreconnect\.apple\.com\/\S+)\s*$/);
+    if (m && m.index !== undefined) {
+        toast.error(msg.slice(0, m.index).trim(), {
+            duration: 12000,
+            action: { label: 'Open App Store Connect', onClick: () => window.open(m[1], '_blank') },
+        });
+    } else {
+        toast.error(msg);
+    }
+}
+
 // Where the operator goes to click "Publish" under Play Managed Publishing. We don't
 // store per-app Play Console ids (only the package name), and Managed Publishing batches
 // every app's pending changes at the account level, so the account console is the right
@@ -67,9 +82,12 @@ export interface PromoteAiNotes {
 export function MobileRolloutPanel({
     releaseId,
     aiNotes,
+    appKey,
 }: {
     releaseId: string;
     aiNotes?: PromoteAiNotes;
+    /** "<appName>/<platform>" — per-app grant key (unified permission model). */
+    appKey?: string;
 }) {
     const qc = useQueryClient();
     const { hasPermission } = usePermissions();
@@ -114,8 +132,8 @@ export function MobileRolloutPanel({
     if (stage === 'promote' && !d.rdPromotable) return null;
 
     const isIos = d.rdPlatform === 'ios';
-    const canPromote = hasPermission('autopilot', 'RELEASE_PROMOTE');
-    const canRollout = hasPermission('autopilot', 'RELEASE_ROLLOUT');
+    const canPromote = hasPermission('autopilot', 'RELEASE_PROMOTE', appKey);
+    const canRollout = hasPermission('autopilot', 'RELEASE_ROLLOUT', appKey);
 
     const refresh = () => {
         void q.refetch();
@@ -154,7 +172,7 @@ export function MobileRolloutPanel({
             toast.success(label);
             refresh();
         } catch (e) {
-            toast.error(errMsg(e));
+            errorToast(e);
         } finally {
             setBusy(null);
         }
@@ -229,7 +247,7 @@ export function MobileRolloutPanel({
             }
             refresh();
         } catch (e) {
-            toast.error(errMsg(e));
+            errorToast(e);
         } finally {
             setBusy(null);
         }

@@ -79,13 +79,16 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (
     setProductionRolloutStatus,
     upsertStoreStatus,
  )
+import Products.Autopilot.Mobile.Queries.Supersession (bestActiveInternalBuild, convergeMobileSlots, supersedeRebuiltSameVersion)
 import Products.Autopilot.Mobile.Queries.Tracker (
     adoptDraftAsStoreBuild,
     appCatalogForRowRaw,
+    applyExternalReviewPhase,
+    closeExternalReviewRow,
     completeExternalReviewRow,
     convergeStoreSyncRow,
-    findAdoptableDraft,
     findActiveRolloutReleases,
+    findAdoptableDraft,
     findExternalReviewRow,
     findExternalReviewRowForVersion,
     findMobileAwaitingRollout,
@@ -93,10 +96,9 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     logEvent,
     mkMobileTrackerRow,
     parseMobileTargetState,
+    retireOlderHeldInternal,
     sccActiveReleaseExistsForVersion,
     setAscIds,
-    applyExternalReviewPhase,
-    closeExternalReviewRow,
     setPhase,
     storeSyncRowExistsForVersion,
     updateStoreSyncBuildCode,
@@ -252,6 +254,9 @@ syncAppUnified mPlayCreds buildMap expected ac = do
                                     safely ("external-review " <> acName ac) $
                                         reconcileAndroidExternalReviewFrom ac (bodiesToProdReleases bodies)
                                 reconcileAndroidRolloutsFrom ac (bodiesToProdReleases bodies)
+                                when (acEnabled ac) $
+                                    safely ("converge " <> acName ac) $
+                                        convergeSlotsForAc ac
                                 recordStoreSyncOk aid
                 _ -> noPkg >> logWarning ("[STORE_SYNC] No package id for " <> acName ac <> ", skipping")
         -- Resolve the ASC key for THIS app's account (multi-account: different Apple
@@ -277,11 +282,41 @@ syncAppUnified mPlayCreds buildMap expected ac = do
                                         syncIos creds ac existing
                                         syncIosExternalReview creds ac
                                     reconcileIosRollouts creds ac
+                                    when (acEnabled ac) $
+                                        safely ("converge " <> acName ac) $
+                                            convergeSlotsForAc ac
                                     recordStoreSyncOk aid
                     _ -> noPkg >> logWarning ("[STORE_SYNC] No bundle id for " <> acName ac <> ", skipping")
         p -> do
             recordStoreSyncError aid "api_error" ("Unknown platform " <> p)
             logWarning $ "[STORE_SYNC] Unknown platform " <> p <> " for " <> acName ac
+
+{- | End-of-sync slot convergence: keep one active row per slot, anchored on
+the production cell this pass just refreshed. Same pass, no extra store calls.
+-}
+convergeSlotsForAc :: AppCatalog -> Flow ()
+convergeSlotsForAc ac = do
+    mCell <- findProductionLiveCell (acId ac) (acPlatform ac)
+    let anchor = case mCell of
+            Just (Just v, mCode, _, _) -> Just (v, mCode)
+            _ -> Nothing
+    (live, incoming, held) <- convergeMobileSlots (acName ac) (acSurface ac) (acPlatform ac) anchor
+    -- Rule C on sync: stale SCC-built landed rows (store_track NULL) retire
+    -- against the surviving best internal build, not only at promote time.
+    sccHeld <-
+        bestActiveInternalBuild (acName ac) (acSurface ac) (acPlatform ac) >>= \case
+            Just (bestRid, bestCode) ->
+                retireOlderHeldInternal (acName ac) (acSurface ac) (acPlatform ac) bestRid (Just bestCode)
+            Nothing -> pure []
+    let tagged =
+            [("live", i) | i <- live]
+                <> [("incoming", i) | i <- incoming]
+                <> [("internal", i) | i <- held]
+                <> [("internal-scc", i) | i <- sccHeld]
+    forM_ tagged $ \(slot, rid) -> do
+        logInfo $ "[STORE_SYNC] " <> rid <> " superseded by slot convergence (" <> slot <> ")"
+        logEvent rid "SLOT_CONVERGED" $
+            object ["slot" .= (slot :: Text), "live_version" .= (fst <$> anchor), "live_code" .= (snd =<< anchor)]
 
 -- | True when this @release_tracker@ row belongs to the given app catalog entry.
 rowIsApp :: AppCatalog -> ReleaseTrackerRow -> Bool
@@ -512,6 +547,18 @@ syncIos creds ac existing = do
                     -- Write an App Store PHASED rollout's % (incl. one started outside
                     -- SCC) to store_status so the list shows "Rolling out X%".
                     reflectIosPhasedRollout creds ac bundleId (fmap (\v -> (v, mProdCode)) mProdVer)
+                    -- A REBUILD of the live version (same version, new build code)
+                    -- is invisible to the version-level heals: Rule A skips
+                    -- completed rows and the stale-retire is version-strict, so
+                    -- the older build would read "Live" forever beside the real
+                    -- one. Supersede same-version rows whose code differs.
+                    case (mProdVer, mProdCode) of
+                        (Just pv, Just liveCode) -> do
+                            ids <- supersedeRebuiltSameVersion (acName ac) (acSurface ac) (acPlatform ac) pv liveCode
+                            forM_ ids $ \i -> do
+                                logInfo $ "[STORE_SYNC] " <> i <> " superseded: rebuild of " <> pv <> " live at code " <> T.pack (show liveCode)
+                                logEvent i "ROLLOUT_SUPERSEDED" $ object ["reason" .= ("same_version_rebuild" :: Text), "live_version" .= pv, "live_code" .= liveCode]
+                        _ -> pure ()
 
 {- | Insert-or-update an iOS store-sync snapshot for whichever track leads —
 TestFlight when a build exists, else production. Factored out so the live
@@ -725,10 +772,13 @@ reconcileExternalReviewMapped ac mCode inferred existing mMapped = do
                     closeExternalReviewRow (rtId r) Superseded
                     logInfo $ "[STORE_SYNC] External review " <> rtId r <> " replaced by a newer submission — superseded"
                     logEvent (rtId r) "EXTERNAL_REVIEW_RETIRED" (object ["outcome" .= ("replaced" :: Text)])
+                -- No verdict is provable here (Play exposes none; a replaced
+                -- successor may simply be out of view) — stamp Superseded, not
+                -- Rejected. Real verdicts arrive via AscRejected / mark-rejected.
                 PendingWithdrawn -> do
-                    closeExternalReviewRow (rtId r) (Rejected "Removed from the store before publishing (rejected or withdrawn in the store console)")
-                    logInfo $ "[STORE_SYNC] External review " <> rtId r <> " left the store before publishing — rejected/withdrawn"
-                    logEvent (rtId r) "EXTERNAL_REVIEW_RETIRED" (object ["outcome" .= ("rejected_or_withdrawn" :: Text)])
+                    closeExternalReviewRow (rtId r) Superseded
+                    logInfo $ "[STORE_SYNC] External review " <> rtId r <> " left the store before publishing — superseded (withdrawn or replaced)"
+                    logEvent (rtId r) "EXTERNAL_REVIEW_RETIRED" (object ["outcome" .= ("withdrawn_or_replaced" :: Text)])
                 PendingParked -> pure ()
     case externalReviewAction inferred mExisting mMapped sccOwns of
         ExtNoop -> pure ()
@@ -745,8 +795,9 @@ reconcileExternalReviewMapped ac mCode inferred existing mMapped = do
             retire True
             insertExternalReviewRow ac mCode inferred version reviewStatus
 
--- | What to do with the external-review row this pass. The verdict string is the
--- single source — the wf mirror is derived from it at the write site.
+{- | What to do with the external-review row this pass. The verdict string is the
+single source — the wf mirror is derived from it at the write site.
+-}
 data ExternalReviewAction
     = ExtNoop
     | -- | complete the existing row
@@ -795,8 +846,9 @@ externalReviewAction inferred mExisting mMapped sccOwns = case mMapped of
     retireExisting = maybe ExtNoop (const ExtComplete) mExisting
     isOperatorDecided s = s == "approved" || s == "rejected"
 
--- | Map a review state to a verdict; 'Nothing' for states we don't surface
--- (prepare-for-submission / live / unknown).
+{- | Map a review state to a verdict; 'Nothing' for states we don't surface
+(prepare-for-submission / live / unknown).
+-}
 reviewStateToStatus :: AscReviewState -> Maybe Text
 reviewStateToStatus = \case
     AscWaitingForReview -> Just "in_review"
@@ -805,8 +857,9 @@ reviewStateToStatus = \case
     AscRejected _ -> Just "rejected"
     _ -> Nothing
 
--- | The wf mirror for an external verdict — the same mapping 'phaseToWfStatus'
--- projects, derived from the one verdict source.
+{- | The wf mirror for an external verdict — the same mapping 'phaseToWfStatus'
+projects, derived from the one verdict source.
+-}
 externalWf :: Text -> MobileBuildWFStatus
 externalWf = \case
     "approved" -> MBReviewApproved
@@ -1241,10 +1294,12 @@ resolveVanishedSubmission row code releases = do
                 close Superseded
                 logInfo $ "[ROLLOUT_SYNC] " <> rtId row <> " submission replaced on the production track — superseded"
                 logEvent (rtId row) "SUBMISSION_RETIRED" (object ["outcome" .= ("replaced" :: Text)])
+            -- Same rule as the external-review retire: no provable verdict →
+            -- Superseded, never a fabricated "Rejected".
             PendingWithdrawn -> do
-                close (Rejected "Removed from the production track before publishing (rejected or withdrawn in Play Console)")
-                logInfo $ "[ROLLOUT_SYNC] " <> rtId row <> " submission left the production track before publishing — rejected/withdrawn"
-                logEvent (rtId row) "SUBMISSION_RETIRED" (object ["outcome" .= ("rejected_or_withdrawn" :: Text)])
+                close Superseded
+                logInfo $ "[ROLLOUT_SYNC] " <> rtId row <> " submission left the production track before publishing — superseded (withdrawn or replaced)"
+                logEvent (rtId row) "SUBMISSION_RETIRED" (object ["outcome" .= ("withdrawn_or_replaced" :: Text)])
             -- Parked/Published require the code to be PRESENT — unreachable from
             -- the vanished arm; kept for totality.
             _ -> pure ()

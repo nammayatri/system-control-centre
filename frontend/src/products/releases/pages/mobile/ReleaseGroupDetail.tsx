@@ -1,7 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, CheckCircle2, Copy, Send, Smartphone, Apple, Cpu, Info, Trash2, Undo2 } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, ChevronDown, Copy, GitBranch, Rocket, Send, Smartphone, Apple, Cpu, Info, Trash2, Undo2 } from 'lucide-react';
 import { useMobileGroup, useDispatchMobileReleases } from '../../hooks';
+import { useGroupOta } from '../../otaApi';
+import { OtaSection } from '../../components/ota/OtaSection';
+import { OtaBranchPicker } from '../../components/ota/OtaPanel';
+import { usePermissions } from '../../../../core/auth/PermissionsContext';
 import { approveRelease, createMobileRevert, discardRelease, getMobileRevertDraft, mobileApi } from '../../api';
 import type { BulkActionResp, RevertDraft } from '../../api';
 import { PermissionGate } from '../../../../core/auth/PermissionGate';
@@ -166,7 +170,60 @@ export default function ReleaseGroupDetail() {
   // the backend's cooldown-gated store refresh for stale member apps.
   const { data: group, isLoading, isError, refetch } = useMobileGroup(groupId);
 
+  // OTA section data — the GET also drives backend push-status convergence.
+  const otaQ = useGroupOta(groupId);
+  const { hasPermission } = usePermissions();
+  // Per-app grant key "<name>/<platform>" (unified model); falls back to the
+  // product-level permission for fleet-wide role holders.
+  const canOtaDispatchFor = (app: string, platform: string) =>
+    hasPermission('autopilot', 'MOBILE_DISPATCH', `${app}/${platform}`);
+  const otaAvailable = !!otaQ.data?.available && otaQ.data.capableApps.length > 0;
+
   const groupReleases = useMemo(() => group?.members ?? [], [group]);
+
+  // The group's source branch — from any member that has one (uniform per
+  // group). Store-sync groups have none until adopted via the picker.
+  const groupBranch = useMemo(
+    () => groupReleases.find((r) => r.sourceRef)?.sourceRef ?? null,
+    [groupReleases],
+  );
+  // Picker target: the first OTA-capable app still missing a branch (its
+  // recovered anchor commit is what candidates are verified against).
+  const branchPickTarget = useMemo(
+    () =>
+      otaAvailable
+        ? (otaQ.data!.capableApps.find(
+            (c) =>
+              !groupReleases.find((r) => r.appGroup === c.appName && r.env === c.platform)
+                ?.sourceRef,
+          )?.airborneAppRef ?? null)
+        : null,
+    [otaAvailable, otaQ.data, groupReleases],
+  );
+  const [headerPickerOpen, setHeaderPickerOpen] = useState(false);
+  // Group members with no airborne app — shown inert in the OTA section so
+  // "this app has no OTA" is visible instead of silently absent.
+  const unmappedOta = useMemo(() => {
+    if (!otaQ.data) return [];
+    const capable = new Set(otaQ.data.capableApps.map((c) => `${c.appName}|${c.platform}`));
+    const seen = new Set<string>();
+    return groupReleases
+      .filter((r) => {
+        const k = `${r.appGroup}|${r.env}`;
+        if (capable.has(k) || seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      })
+      .map((r) => ({ appName: r.appGroup, platform: r.env, surface: r.service }));
+  }, [otaQ.data, groupReleases]);
+  // The capable app the picker would adopt a branch for (named in the banner).
+  const branchPickApp = useMemo(
+    () =>
+      otaAvailable && branchPickTarget
+        ? (otaQ.data!.capableApps.find((c) => c.airborneAppRef === branchPickTarget) ?? null)
+        : null,
+    [otaAvailable, otaQ.data, branchPickTarget],
+  );
 
   const groupingMissing = !isLoading && (isError || (!!group && groupReleases.length === 0));
 
@@ -206,7 +263,11 @@ export default function ReleaseGroupDetail() {
   const phaseOf = (r: APRelease) => r.release_context?.display_phase ?? '';
   const VERB_ELIGIBLE: Record<string, (r: APRelease) => boolean> = {
     approve: (r) => r.status === 'CREATED' && r.is_approved !== 1,
-    dispatch: (r) => r.status === 'CREATED' && r.is_approved === 1,
+    // A stamped row is already in the runner's hands — re-dispatch would fork
+    // a second CI run. The status stays CREATED until the build starts, so the
+    // dispatch_id is the only reliable "already clicked" signal.
+    dispatch: (r) =>
+      r.status === 'CREATED' && r.is_approved === 1 && !r.release_context?.dispatch_id,
     promote: (r) => phaseOf(r) === 'internal_held' && r.release_context?.promotable !== false,
     release: (r) => r.env === 'ios' && phaseOf(r) === 'approved',
     rollout: (r) =>
@@ -231,9 +292,29 @@ export default function ReleaseGroupDetail() {
     () => groupReleases.filter((r) => selectedIds.has(r.id)),
     [groupReleases, selectedIds],
   );
+  // Toolbar segments render only when at least one of their verbs is currently
+  // performable on ANY member — dead segments are noise. RECOVER always shows
+  // (Copy is performable on every group).
+  const segHasEligible = (verbs: string[]) =>
+    groupReleases.some((r) => verbs.some((v) => VERB_ELIGIBLE[v]?.(r)));
+  const showBuildSeg = segHasEligible(['approve', 'dispatch', 'discard']);
+  const showReviewSeg = segHasEligible(['promote', 'markApproved', 'markRejected', 'withdraw']);
+  const showRolloutSeg = segHasEligible(['release', 'rollout', 'halt', 'resume', 'releaseAll']);
   // Which verb button is being hovered — its target rows highlight, the rest
   // dim, so "Approve (2)" visibly means THESE two rows.
   const [hoveredVerb, setHoveredVerb] = useState<string | null>(null);
+  // The release-group panel collapses on header click; the header line (title,
+  // stage chip, group id, branch) stays visible either way. A healthy FINISHED
+  // group (everything shipped, nothing needing attention) starts collapsed —
+  // there's nothing left to operate on. Applied once; the user's toggle wins after.
+  const [groupPanelOpen, setGroupPanelOpen] = useState(true);
+  const panelDefaultApplied = useRef(false);
+  useEffect(() => {
+    if (panelDefaultApplied.current || !group?.summary) return;
+    panelDefaultApplied.current = true;
+    if (group.summary.stage === 'done' && (group.summary.attention?.length ?? 0) === 0)
+      setGroupPanelOpen(false);
+  }, [group?.summary]);
 
   // Each row's next lifecycle action, shown as a chip so the mapping from
   // buttons to rows is readable without hovering anything.
@@ -474,6 +555,30 @@ export default function ReleaseGroupDetail() {
   };
 
   // ── Stage-bar building blocks (closures over selection/eligibility) ──
+  // Light per-GROUP tints (one hue per toolbar segment, destructive = red)
+  // so the bar reads as zones without turning into a rainbow. The suggested
+  // next step keeps the solid primary fill.
+  const buildTint = 'bg-emerald-50 border-emerald-200 text-emerald-800 enabled:hover:bg-emerald-100';
+  const reviewTint = 'bg-violet-50 border-violet-200 text-violet-800 enabled:hover:bg-violet-100';
+  const rolloutTint = 'bg-sky-50 border-sky-200 text-sky-800 enabled:hover:bg-sky-100';
+  const recoverTint = 'bg-amber-50 border-amber-200 text-amber-800 enabled:hover:bg-amber-100';
+  const dangerTint = 'bg-red-50 border-red-200 text-red-700 enabled:hover:bg-red-100';
+  const VERB_COLOR: Record<string, string> = {
+    approve: buildTint,
+    dispatch: buildTint,
+    discard: dangerTint,
+    promote: reviewTint,
+    markApproved: reviewTint,
+    markRejected: dangerTint,
+    withdraw: reviewTint,
+    release: rolloutTint,
+    rollout: rolloutTint,
+    halt: rolloutTint,
+    resume: rolloutTint,
+    releaseAll: rolloutTint,
+    revert: recoverTint,
+  };
+
   const VerbButton = ({
     verb,
     label,
@@ -512,6 +617,7 @@ export default function ReleaseGroupDetail() {
         <Button
           size="sm"
           variant={primary ? 'primary' : 'secondary'}
+          className={primary ? undefined : VERB_COLOR[verb]}
           onClick={onClick}
           loading={busyVerb === verb}
           disabled={disabled}
@@ -545,9 +651,27 @@ export default function ReleaseGroupDetail() {
       </div>
 
       <div className="bg-white rounded-xl border border-zinc-200">
-        <header className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex flex-wrap items-center justify-between gap-3">
+        <header
+          onClick={() => setGroupPanelOpen((o) => !o)}
+          aria-expanded={groupPanelOpen}
+          title={groupPanelOpen ? 'Collapse release group' : 'Expand release group'}
+          className={`px-4 py-3 sm:px-6 sm:py-4 flex flex-wrap items-center justify-between gap-3 cursor-pointer select-none hover:bg-zinc-50/60 transition-colors ${groupPanelOpen ? 'border-b border-zinc-100' : 'rounded-xl'}`}
+        >
           <div className="min-w-0">
             <h1 className="text-base sm:text-lg font-semibold text-zinc-900 flex items-center gap-2 flex-wrap">
+              {/* Left expand chevron — same affordance as every expandable row. */}
+              <span
+                aria-hidden
+                className={`h-6 w-6 -ml-1 flex items-center justify-center rounded-md transition-all ${
+                  groupPanelOpen
+                    ? 'bg-violet-100 text-violet-700'
+                    : 'text-zinc-400 hover:bg-zinc-200/60 hover:text-zinc-700'
+                }`}
+              >
+                <ChevronDown
+                  className={`w-4 h-4 transition-transform duration-200 ${groupPanelOpen ? '' : '-rotate-90'}`}
+                />
+              </span>
               <Smartphone className="w-4 h-4 text-violet-600" />
               {group?.label || 'Release group'}
               {/* THE stage chip — same component + server derivation as the
@@ -558,7 +682,8 @@ export default function ReleaseGroupDetail() {
             </h1>
             <div className="flex items-center gap-2 mt-0.5">
               <button
-                onClick={() => {
+                onClick={(e) => {
+                  e.stopPropagation();
                   void navigator.clipboard.writeText(groupId ?? '');
                   toast.success('Group ID copied');
                 }}
@@ -567,6 +692,16 @@ export default function ReleaseGroupDetail() {
               >
                 {groupId?.slice(0, 8)}… ⧉
               </button>
+              {groupBranch ? (
+                <span
+                  className="inline-flex items-center gap-1 text-[11px] text-zinc-500 font-mono border border-zinc-200 rounded px-1.5 py-0.5"
+                  title={`Source branch: ${groupBranch}`}
+                >
+                  <GitBranch className="w-3 h-3 text-zinc-400" /> {groupBranch}
+                </span>
+              ) : null}
+              {/* Missing-branch prompt lives in the banner right below —
+                  one affordance, not a pill + banner + card triplet. */}
               {/* Changelog → Slack outcome: only for groups that opted in. A
                   failed post surfaces the reason + a one-click Resend. */}
               {slack?.state === 'failed' && (
@@ -578,7 +713,10 @@ export default function ReleaseGroupDetail() {
                     <Send className="w-3 h-3" /> Changelog → Slack failed
                   </span>
                   <button
-                    onClick={handleResendSlack}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleResendSlack();
+                    }}
                     disabled={resendingSlack}
                     className="inline-flex items-center gap-1 text-[11px] font-medium rounded-full border border-violet-300 text-violet-700 hover:bg-violet-50 px-2 py-0.5 transition-colors disabled:opacity-50"
                   >
@@ -617,10 +755,38 @@ export default function ReleaseGroupDetail() {
           />
         </header>
 
+        {groupPanelOpen && (
+        <>
+
+        {/* Missing source branch — same banner as the OTA card, surfaced at
+            the top so it's never discovered only after expanding a row. */}
+        {branchPickTarget && (
+          <div className="mx-4 sm:mx-6 mt-3 flex items-center justify-between gap-3 rounded-lg border border-sky-200 bg-sky-50/60 px-3 py-2">
+            <span className="text-xs text-sky-900">
+              Imported from store — no source branch known
+              {branchPickApp ? ` for ${branchPickApp.appName} · ${branchPickApp.platform}` : ''}. OTA
+              bundle pushes need a branch.
+            </span>
+            <button
+              onClick={() => setHeaderPickerOpen(true)}
+              className="shrink-0 inline-flex items-center gap-1 text-xs font-medium rounded-md border border-sky-300 bg-white text-sky-700 hover:bg-sky-100 px-2.5 py-1 transition-colors"
+            >
+              <GitBranch className="w-3.5 h-3.5" /> Set source branch
+            </button>
+          </div>
+        )}
+
         {/* ── Stage action bar: EVERY stage verb, always visible — disabled
             (never hidden) when the selection can't take that action. The
-            segments mirror the stepper: Build → Store review → Rollout. ── */}
-        <div className="px-4 py-2.5 sm:px-6 border-b border-zinc-100 flex flex-wrap items-center gap-x-4 gap-y-2">
+            segments mirror the stepper: Build → Store review → Rollout.
+            The container-level mouseleave is the stuck-hover safety net: the
+            per-button spans remount on every poll re-render (VerbButton is
+            component-local), which can swallow their own onMouseLeave. ── */}
+        <div
+          onMouseLeave={() => setHoveredVerb(null)}
+          className="px-4 py-2.5 sm:px-6 border-b border-zinc-100 flex flex-wrap items-center gap-x-4 gap-y-2"
+        >
+          {showBuildSeg && (
           <span className="inline-flex items-center gap-2">
             <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-400 select-none">
               Build
@@ -658,7 +824,10 @@ export default function ReleaseGroupDetail() {
               />
             </PermissionGate>
           </span>
-          <span className="w-px h-6 bg-zinc-200 hidden sm:block" />
+          )}
+          {showReviewSeg && (
+          <>
+          {showBuildSeg && <span className="w-px h-6 bg-zinc-200 hidden sm:block" />}
           <span className="inline-flex items-center gap-2">
             <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-400 select-none">
               Store review
@@ -692,7 +861,13 @@ export default function ReleaseGroupDetail() {
               }}
             />
           </span>
-          <span className="w-px h-6 bg-zinc-200 hidden sm:block" />
+          </>
+          )}
+          {showRolloutSeg && (
+          <>
+          {(showBuildSeg || showReviewSeg) && (
+            <span className="w-px h-6 bg-zinc-200 hidden sm:block" />
+          )}
           <span className="inline-flex items-center gap-2">
             <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-400 select-none">
               Rollout
@@ -732,7 +907,11 @@ export default function ReleaseGroupDetail() {
               }}
             />
           </span>
-          <span className="w-px h-6 bg-zinc-200 hidden sm:block" />
+          </>
+          )}
+          {(showBuildSeg || showReviewSeg || showRolloutSeg) && (
+            <span className="w-px h-6 bg-zinc-200 hidden sm:block" />
+          )}
           <span className="inline-flex items-center gap-2">
             <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-400 select-none">
               Recover
@@ -848,8 +1027,12 @@ export default function ReleaseGroupDetail() {
                     // Revert targets the whole group when nothing is selected.
                     const inScope =
                       checked || (hoveredVerb === 'revert' && selectedIds.size === 0);
-                    const verbTarget =
-                      hoveredVerb != null && inScope && VERB_ELIGIBLE[hoveredVerb]?.(r);
+                    // Can the hovered verb apply to this row at all? Fading
+                    // keys off ELIGIBILITY — a selectable row never greys just
+                    // because it isn't selected yet.
+                    const eligibleForHovered =
+                      hoveredVerb != null && !!VERB_ELIGIBLE[hoveredVerb]?.(r);
+                    const verbTarget = eligibleForHovered && inScope;
                     return (
                       <tr
                         key={r.id}
@@ -859,9 +1042,11 @@ export default function ReleaseGroupDetail() {
                           checked
                             ? 'bg-violet-50/50 hover:bg-violet-50/70'
                             : 'bg-white hover:bg-zinc-50',
-                          // hovering a verb button: its targets glow, the rest fade
+                          // hovering a verb button: rows it would act on glow;
+                          // rows it CANNOT apply to fade; eligible-but-unselected
+                          // rows stay normal (select them and the verb works).
                           verbTarget && 'bg-violet-100/80 hover:bg-violet-100/80',
-                          hoveredVerb != null && !verbTarget && 'opacity-40',
+                          hoveredVerb != null && !eligibleForHovered && 'opacity-40',
                         )}
                       >
                         <td className="py-3 px-4">
@@ -889,7 +1074,10 @@ export default function ReleaseGroupDetail() {
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <ReleaseStatusBadge release={r} />
-                            {r.is_approved === 1 && (
+                            {/* Draft approval gates Dispatch — after dispatch every
+                                build is approved by definition, so the chip only
+                                renders while the row is still a draft. */}
+                            {r.is_approved === 1 && r.status === 'CREATED' && (
                               <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-emerald-700 text-white">
                                 APPROVED
                               </span>
@@ -970,7 +1158,7 @@ export default function ReleaseGroupDetail() {
                         </div>
                         <div className="flex items-center gap-1.5 flex-wrap mt-2">
                           <ReleaseStatusBadge release={r} />
-                          {r.is_approved === 1 && (
+                          {r.is_approved === 1 && r.status === 'CREATED' && (
                             <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-emerald-700 text-white">
                               APPROVED
                             </span>
@@ -1000,7 +1188,64 @@ export default function ReleaseGroupDetail() {
             </div>
           </>
         )}
+        </>
+        )}
+
       </div>
+
+      {/* ── OTA bundles — its own section below the release group; debug
+          groups stay silent, but a production group with NO mapped apps says
+          so instead of hiding the concept. ── */}
+      {!otaAvailable &&
+        otaQ.data &&
+        groupReleases.length > 0 &&
+        groupReleases[0]?.release_context?.build_type !== 'debug' && (
+          <div className="mt-12 flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-xs text-zinc-500">
+            <Rocket className="w-3.5 h-3.5 text-zinc-400" />
+            {groupReleases.every((r) => r.service === 'driver')
+              ? 'No OTA — airborne is not available for provider apps.'
+              : 'No OTA — none of this group’s apps have an airborne app mapped (set "OTA ref" in Mobile Apps admin).'}
+          </div>
+        )}
+      {otaAvailable && otaQ.data && (
+        <div className="mt-12">
+          <h2 className="flex items-baseline gap-2 mb-2">
+            <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-violet-700">
+              <Rocket className="w-4 h-4" /> OTA bundles
+            </span>
+            <span className="text-xs text-zinc-600">
+              over-the-air JS bundles · separate from the store builds above
+            </span>
+          </h2>
+          <OtaSection
+            groupId={groupId!}
+            ota={otaQ.data}
+            sourceRefFor={(app, platform) =>
+              groupReleases.find((r) => r.appGroup === app && r.env === platform)?.sourceRef ??
+              null
+            }
+            nativeVersionFor={(app, platform) =>
+              groupReleases.find((r) => r.appGroup === app && r.env === platform)?.new_version ??
+              null
+            }
+            canDispatchFor={canOtaDispatchFor}
+            unmapped={unmappedOta}
+            onChanged={() => void otaQ.refetch()}
+          />
+        </div>
+      )}
+
+      {headerPickerOpen && branchPickTarget && (
+        <OtaBranchPicker
+          groupId={groupId!}
+          appRef={branchPickTarget}
+          onClose={() => setHeaderPickerOpen(false)}
+          onAdopted={() => {
+            void refetch();
+            void otaQ.refetch();
+          }}
+        />
+      )}
 
       <PromoteGroupDialog
         open={promoteOpen}
@@ -1503,7 +1748,15 @@ function RolloutGroupDialog({
   busy: boolean;
   onSubmit: (percent: number) => void;
 }) {
-  const [percent, setPercent] = useState('10');
+  // Highest live % among the targeted rows — Play rollouts only ramp UP, so
+  // the suggested next step (and the validation floor) must clear all of them.
+  const current = Math.max(0, ...rows.map((r) => r.release_context?.rollout_percent ?? 0));
+  const nextStep = [1, 5, 10, 25, 50, 100].find((p) => p > current) ?? 100;
+  const [percent, setPercent] = useState(String(nextStep));
+  // Re-suggest on every open (rows/current change between opens).
+  useEffect(() => {
+    if (open) setPercent(String(nextStep));
+  }, [open, nextStep]);
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent size="md" fullScreenOnMobile={false}>
@@ -1512,18 +1765,30 @@ function RolloutGroupDialog({
         </DialogHeader>
         <DialogBody className="space-y-4">
           <div className="text-xs text-zinc-500">
-            {rows.map((r) => `${r.appGroup}`).join(' · ')}
+            {rows
+              .map(
+                (r) =>
+                  `${r.appGroup}${
+                    (r.release_context?.rollout_percent ?? 0) > 0
+                      ? ` (now ${r.release_context!.rollout_percent}%)`
+                      : ''
+                  }`,
+              )
+              .join(' · ')}
           </div>
           <div className="flex items-center gap-2">
             {[1, 5, 10, 25, 50, 100].map((p) => (
               <button
                 key={p}
                 onClick={() => setPercent(String(p))}
+                disabled={p <= current}
+                title={p <= current ? `Already at ${current}% — rollouts only ramp up` : undefined}
                 className={cn(
                   'px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors',
                   percent === String(p)
                     ? 'bg-zinc-900 text-white border-zinc-900'
                     : 'bg-white text-zinc-600 border-zinc-200 hover:border-zinc-400',
+                  p <= current && 'opacity-40 cursor-not-allowed hover:border-zinc-200',
                 )}
               >
                 {p}%
@@ -1553,6 +1818,12 @@ function RolloutGroupDialog({
               const p = Number(percent);
               if (Number.isNaN(p) || p <= 0 || p > 100) {
                 toast.error('Percent must be between 0 and 100');
+                return;
+              }
+              if (p <= current) {
+                toast.error(
+                  `Must be greater than the current ${current}% — staged rollouts only ramp up.`,
+                );
                 return;
               }
               onSubmit(p);

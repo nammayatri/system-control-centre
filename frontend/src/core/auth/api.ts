@@ -154,8 +154,10 @@ export async function revokeDeploymentAccess(
   productSlug: string,
   appGroup: string
 ): Promise<any> {
+  // appGroup may contain '/' (mobile keys "NammaYatri/android", wildcard
+  // "mobile/*") — encode so it stays one path segment.
   const { data } = await apiClient.delete(
-    `/admin/users/${userId}/deployment-access/${productSlug}/${appGroup}`
+    `/admin/users/${userId}/deployment-access/${productSlug}/${encodeURIComponent(appGroup)}`
   );
   return data;
 }

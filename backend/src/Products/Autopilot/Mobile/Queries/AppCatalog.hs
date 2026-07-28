@@ -9,6 +9,8 @@ module Products.Autopilot.Mobile.Queries.AppCatalog (
     listEnabledAppCatalog,
     findAppCatalogById,
     findAppCatalogByIds,
+    findAppByAirborneRef,
+    appGrantKey,
     insertAppCatalog,
     updateAppCatalog,
     NewAppCatalogRow (..),
@@ -71,6 +73,8 @@ data PatchAppCatalogRow = PatchAppCatalogRow
     , pacPackageName :: Maybe Text
     , pacFirebaseProjectId :: Maybe Text
     , pacWorkflowPath :: Maybe Text
+    , pacAirborneAppRef :: Maybe Text
+    -- ^ Empty string clears the ref (NULL); any other value sets it.
     }
 
 -- | All rows.
@@ -99,6 +103,28 @@ findAppCatalogById aid = withDb $ \db -> do
                 select $ do
                     a <- all_ (appCatalogs autopilotDb)
                     guard_ (acId a ==. val_ aid)
+                    pure a
+    pure $ case rows of
+        [] -> Nothing
+        (x : _) -> Just x
+
+{- | Unified per-app grant key: @\<name\>/\<platform\>@ (e.g.
+@NammaYatri/android@). This is the @app_group@ string stored in
+sc_person_deployment_access under product_slug=autopilot; the slash keeps
+mobile grants disjoint from server-deploy app_group names.
+-}
+appGrantKey :: Text -> Text -> Text
+appGrantKey name platform = name <> "/" <> platform
+
+-- | App row owning an airborne app ref (production namespace mapping).
+findAppByAirborneRef :: (MonadFlow m) => Text -> m (Maybe AppCatalog)
+findAppByAirborneRef ref = withDb $ \db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $ do
+                    a <- all_ (appCatalogs autopilotDb)
+                    guard_ (acAirborneAppRef a ==. val_ (Just ref))
                     pure a
     pure $ case rows of
         [] -> Nothing
@@ -141,6 +167,7 @@ insertAppCatalog NewAppCatalogRow{..} = withDb $ \db -> do
                             , acFirebaseProjectId = val_ nacFirebaseProjectId
                             , acEnabled = val_ enabled'
                             , acStoreAccount = val_ Nothing
+                            , acAirborneAppRef = val_ Nothing
                             , acCreatedAt = default_
                             }
                         ]
@@ -177,6 +204,7 @@ updateAppCatalog aid PatchAppCatalogRow{..} = withDb $ \db ->
                                         , fmap (\v -> acPackageName a <-. val_ (Just v)) pacPackageName
                                         , fmap (\v -> acFirebaseProjectId a <-. val_ (Just v)) pacFirebaseProjectId
                                         , fmap (\v -> acWorkflowPath a <-. val_ v) pacWorkflowPath
+                                        , fmap (\v -> acAirborneAppRef a <-. val_ (if v == "" then Nothing else Just v)) pacAirborneAppRef
                                         ]
                             )
                             (\a -> acId a ==. val_ aid)
@@ -186,8 +214,8 @@ updateAppCatalog aid PatchAppCatalogRow{..} = withDb $ \db ->
                     (x : _) -> Just x
 
     isNoop =
-        case (pacEnabled, pacDisplayLabel, pacPackageName, pacFirebaseProjectId, pacWorkflowPath) of
-            (Nothing, Nothing, Nothing, Nothing, Nothing) -> True
+        case (pacEnabled, pacDisplayLabel, pacPackageName, pacFirebaseProjectId, pacWorkflowPath, pacAirborneAppRef) of
+            (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) -> True
             _ -> False
 
     lookupCurrent :: Pg (Maybe AppCatalog)

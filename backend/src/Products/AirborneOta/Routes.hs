@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
@@ -18,7 +19,7 @@ module Products.AirborneOta.Routes (AirborneAPI, airborneServer) where
 import Control.Monad (unless)
 import Control.Monad.Catch (SomeException, catch, throwM)
 import Core.AppError (APIError (..))
-import Core.Auth.Protected (AuthedPerson (..), Protected, requireDeploymentPermission)
+import Core.Auth.Protected (AuthedPerson (..), KnownPermission, Protected, requireDeploymentPermissionScopes)
 import Core.Auth.Queries (computeEffectivePermissions, computeEffectivePermissionsForAppGroups, findPersonById)
 import Core.Auth.Types (ProductAccess (..))
 import Core.Config (airborneAnalyticsUrl)
@@ -28,7 +29,7 @@ import Data.Aeson (Value (..), object, (.=))
 import Data.Aeson qualified as A
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types qualified as AT
-import Data.List (find)
+import Data.List (find, nub)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -47,6 +48,8 @@ import Products.AirborneOta.Client (
 import Products.AirborneOta.Queries (AirborneEventRow (..), insertAirborneEvent, listAirborneEvents)
 import Products.AirborneOta.Types (AppRef (..), ConcludeReq (..), CreateAppReq (..), RampReq (..))
 import Products.AirborneOta.Types.Permission (OtaPermission (..))
+import Products.Autopilot.Mobile.Queries.AppCatalog (appGrantKey, findAppByAirborneRef, listAppCatalog)
+import Products.Autopilot.Mobile.Types.Storage (AppCatalogT (..))
 import Products.Types (allPermissionsText)
 import Servant
 
@@ -270,8 +273,14 @@ accessH ap = do
                     then pure (\_ -> allPermissionsText "airborne-ota")
                     else do
                         pairs <- computeEffectivePermissionsForAppGroups (apPersonId ap) "airborne-ota" [r | (_, _, r) <- refs]
-                        let m = pairs
-                        pure (\ref -> fromMaybe [] (lookup ref m))
+                        -- Unified per-app grants: OTA_* perms carried by an
+                        -- autopilot "<name>/<platform>" grant on the mapped app.
+                        catalog <- listAppCatalog
+                        let keysFor ref = [appGrantKey (acName a) (acPlatform a) | a <- catalog, acAirborneAppRef a == Just ref]
+                            uniKeys = nub (concatMap (\(_, _, r) -> keysFor r) refs)
+                        uniPairs <- computeEffectivePermissionsForAppGroups (apPersonId ap) "autopilot" uniKeys
+                        let uniFor ref = [p | k <- keysFor ref, p <- fromMaybe [] (lookup k uniPairs), "OTA_" `T.isPrefixOf` p]
+                        pure (\ref -> nub (fromMaybe [] (lookup ref pairs) <> uniFor ref))
             let visible =
                     [ object ["appRef" .= ref, "org" .= org, "app" .= app, "permissions" .= perms]
                     | (org, app, ref) <- refs
@@ -352,7 +361,7 @@ requireProductLevelAppManage ap
 listReleasesH :: AuthedPerson -> Text -> Maybe Int -> Maybe Int -> Maybe Text -> Maybe Text -> Flow Value
 listReleasesH ap app page count status mDim = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <-
         airborneRequest
             Http.GET
@@ -367,14 +376,14 @@ listReleasesH ap app page count status mDim = do
 getReleaseH :: AuthedPerson -> Text -> Text -> Flow Value
 getReleaseH ap app rid = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <- airborneRequest Http.GET ("/api/releases/" <> pathSeg rid) (scopeHeaders row) [] Nothing
     expectOk r
 
 rampH :: AuthedPerson -> Text -> Text -> RampReq -> Flow Value
 rampH ap app rid req = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_RELEASE_RAMP) ap app
+    requireOtaPermission (Proxy @'OTA_RELEASE_RAMP) ap app
     preflightRamp row rid req
     let body =
             object
@@ -402,8 +411,8 @@ upstream 500 instead of a clear refusal.
 preflightRamp :: AppRef -> Text -> RampReq -> Flow ()
 preflightRamp row rid req = do
     let pct = rampTrafficPercentage req
-    unless (pct >= 0 && pct <= 100) $
-        throwM (BadRequest "trafficPercentage must be between 0 and 100")
+    unless (pct >= 0 && pct <= 50) $
+        throwM (BadRequest "trafficPercentage must be between 0 and 50 (100% only via conclude)")
     cur <-
         expectOk
             =<< airborneRequest Http.GET ("/api/releases/" <> pathSeg rid) (scopeHeaders row) [] Nothing
@@ -439,7 +448,7 @@ preflightRamp row rid req = do
 concludeH :: AuthedPerson -> Text -> Text -> ConcludeReq -> Flow Value
 concludeH ap app rid req = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_RELEASE_CONCLUDE) ap app
+    requireOtaPermission (Proxy @'OTA_RELEASE_CONCLUDE) ap app
     let body =
             object
                 [ "chosen_variant" .= concChosenVariant req
@@ -453,7 +462,7 @@ concludeH ap app rid req = do
 discardH :: AuthedPerson -> Text -> Text -> Flow Value
 discardH ap app rid = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_RELEASE_DISCARD) ap app
+    requireOtaPermission (Proxy @'OTA_RELEASE_DISCARD) ap app
     let body = object ["change_reason" .= stampReason ap "discard" Nothing]
         endpoint = "/api/releases/" <> pathSeg rid <> "/discard"
     r <- airborneRequest Http.POST endpoint (scopeHeaders row) [] (Just body)
@@ -466,7 +475,7 @@ discardH ap app rid = do
 listPackagesH :: AuthedPerson -> Text -> Maybe Int -> Maybe Int -> Maybe Text -> Flow Value
 listPackagesH ap app page count search = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <-
         airborneRequest
             Http.GET
@@ -479,7 +488,7 @@ listPackagesH ap app page count search = do
 listFilesH :: AuthedPerson -> Text -> Maybe Int -> Maybe Int -> Maybe Text -> Maybe Text -> Flow Value
 listFilesH ap app page count search tag = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <-
         airborneRequest
             Http.GET
@@ -504,7 +513,7 @@ listFileGroupsH ::
     AuthedPerson -> Text -> Maybe Int -> Maybe Int -> Maybe Text -> Maybe Text -> Flow Value
 listFileGroupsH ap app page count search tags = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <-
         airborneRequest
             Http.GET
@@ -522,7 +531,7 @@ listFileGroupsH ap app page count search tags = do
 listFileTagsH :: AuthedPerson -> Text -> Maybe Int -> Maybe Int -> Flow Value
 listFileTagsH ap app page count = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <-
         airborneRequest
             Http.GET
@@ -551,14 +560,14 @@ runMutation ap app action endpoint mBody act = do
 createReleaseH :: AuthedPerson -> Text -> Value -> Flow Value
 createReleaseH ap app body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_RELEASE_CREATE) ap app
+    requireOtaPermission (Proxy @'OTA_RELEASE_CREATE) ap app
     runMutation ap app "RELEASE_CREATE" "/api/releases" (Just body) $
         airborneRequest Http.POST "/api/releases" (scopeHeaders row) [] (Just body)
 
 updateReleaseH :: AuthedPerson -> Text -> Text -> Value -> Flow Value
 updateReleaseH ap app rid body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_RELEASE_CREATE) ap app
+    requireOtaPermission (Proxy @'OTA_RELEASE_CREATE) ap app
     let endpoint = "/api/releases/" <> pathSeg rid
     runMutation ap app "RELEASE_UPDATE" endpoint (Just body) $
         airborneRequest Http.PUT endpoint (scopeHeaders row) [] (Just body)
@@ -569,7 +578,7 @@ org/app path segments). x-dimension narrows to a targeted variant.
 serveConfigH :: AuthedPerson -> Text -> Maybe Text -> Flow Value
 serveConfigH ap app mDim = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     let endpoint = "/api/releases/" <> pathSeg (arOrg row) <> "/" <> pathSeg (arApp row)
     r <- airborneRequest Http.GET endpoint (dimHeader mDim) [] Nothing
     expectOk r
@@ -577,14 +586,14 @@ serveConfigH ap app mDim = do
 createPackageH :: AuthedPerson -> Text -> Value -> Flow Value
 createPackageH ap app body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_PACKAGE_MANAGE) ap app
+    requireOtaPermission (Proxy @'OTA_PACKAGE_MANAGE) ap app
     runMutation ap app "PACKAGE_CREATE" "/api/packages" (Just body) $
         airborneRequest Http.POST "/api/packages" (scopeHeaders row) [] (Just body)
 
 getPackageH :: AuthedPerson -> Text -> Maybe Text -> Flow Value
 getPackageH ap app pkgKey = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     key <- maybe (throwM (BadRequest "package_key is required")) pure pkgKey
     r <- airborneRequest Http.GET "/api/packages" (scopeHeaders row) [("package_key", Just key)] Nothing
     expectOk r
@@ -592,14 +601,14 @@ getPackageH ap app pkgKey = do
 createFileH :: AuthedPerson -> Text -> Value -> Flow Value
 createFileH ap app body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_FILE_MANAGE) ap app
+    requireOtaPermission (Proxy @'OTA_FILE_MANAGE) ap app
     runMutation ap app "FILE_CREATE" "/api/file" (Just body) $
         airborneRequest Http.POST "/api/file" (scopeHeaders row) [] (Just body)
 
 updateFileTagH :: AuthedPerson -> Text -> Text -> Value -> Flow Value
 updateFileTagH ap app fileKey body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_FILE_MANAGE) ap app
+    requireOtaPermission (Proxy @'OTA_FILE_MANAGE) ap app
     let endpoint = "/api/file/" <> pathSeg fileKey
     runMutation ap app "FILE_TAG" endpoint (Just body) $
         airborneRequest Http.PATCH endpoint (scopeHeaders row) [] (Just body)
@@ -615,7 +624,7 @@ dimensionBase = "/api/organisations/applications/dimension"
 listDimensionsH :: AuthedPerson -> Text -> Maybe Int -> Maybe Int -> Flow Value
 listDimensionsH ap app page count = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     -- page/count <= 0 upstream is a Superposition 400 flattened to a 500.
     r <-
         airborneRequest
@@ -629,7 +638,7 @@ listDimensionsH ap app page count = do
 createDimensionH :: AuthedPerson -> Text -> Value -> Flow Value
 createDimensionH ap app body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
+    requireOtaPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
     -- "release-view" collides with upstream's dimension/release-view sub-router
     -- (registered before the /{dimension}/cohort scope) — GET .../release-view/cohort
     -- would resolve as a release-view lookup, not this dimension's cohort schema.
@@ -647,7 +656,7 @@ required upstream body field — stamp the SCC actor into it either way.
 updateDimensionH :: AuthedPerson -> Text -> Text -> Value -> Flow Value
 updateDimensionH ap app dim body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
+    requireOtaPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
     let stamped = stampBodyReason ap ("update dimension " <> dim) body
         endpoint = dimensionBase <> "/" <> pathSeg dim
     runMutation ap app "DIMENSION_UPDATE" endpoint (Just stamped) $
@@ -656,14 +665,14 @@ updateDimensionH ap app dim body = do
 getCohortH :: AuthedPerson -> Text -> Text -> Flow Value
 getCohortH ap app dim = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <- airborneRequest Http.GET (dimensionBase <> "/" <> pathSeg dim <> "/cohort") (scopeHeaders row) [] Nothing
     expectOk r
 
 createCheckpointH :: AuthedPerson -> Text -> Text -> Value -> Flow Value
 createCheckpointH ap app dim body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
+    requireOtaPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
     let endpoint = dimensionBase <> "/" <> pathSeg dim <> "/cohort/checkpoint"
     runMutation ap app "COHORT_CHECKPOINT_CREATE" endpoint (Just body) $
         airborneRequest Http.POST endpoint (scopeHeaders row) [] (Just body)
@@ -671,7 +680,7 @@ createCheckpointH ap app dim body = do
 createGroupH :: AuthedPerson -> Text -> Text -> Value -> Flow Value
 createGroupH ap app dim body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
+    requireOtaPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
     let endpoint = dimensionBase <> "/" <> pathSeg dim <> "/cohort/group"
     runMutation ap app "COHORT_GROUP_CREATE" endpoint (Just body) $
         airborneRequest Http.POST endpoint (scopeHeaders row) [] (Just body)
@@ -679,14 +688,14 @@ createGroupH ap app dim body = do
 getCohortPriorityH :: AuthedPerson -> Text -> Text -> Flow Value
 getCohortPriorityH ap app dim = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <- airborneRequest Http.GET (dimensionBase <> "/" <> pathSeg dim <> "/cohort/group/priority") (scopeHeaders row) [] Nothing
     expectOk r
 
 updateCohortPriorityH :: AuthedPerson -> Text -> Text -> Value -> Flow Value
 updateCohortPriorityH ap app dim body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
+    requireOtaPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
     let endpoint = dimensionBase <> "/" <> pathSeg dim <> "/cohort/group/priority"
     runMutation ap app "COHORT_PRIORITY_UPDATE" endpoint (Just body) $
         airborneRequest Http.PUT endpoint (scopeHeaders row) [] (Just body)
@@ -697,7 +706,7 @@ propertiesBase = "/api/organisations/applications/properties"
 getPropertiesSchemaH :: AuthedPerson -> Text -> Maybe Text -> Flow Value
 getPropertiesSchemaH ap app mDim = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <- airborneRequest Http.GET (propertiesBase <> "/schema") (scopeHeaders row <> dimHeader mDim) [] Nothing
     expectOk r
 
@@ -707,7 +716,7 @@ deleted. The UI always sends the complete desired map (read-modify-write).
 putPropertiesSchemaH :: AuthedPerson -> Text -> Value -> Flow Value
 putPropertiesSchemaH ap app body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
+    requireOtaPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
     let endpoint = propertiesBase <> "/schema"
     runMutation ap app "PROPERTIES_SCHEMA_UPDATE" endpoint (Just body) $
         airborneRequest Http.PUT endpoint (scopeHeaders row) [] (Just body)
@@ -715,7 +724,7 @@ putPropertiesSchemaH ap app body = do
 listPropertiesH :: AuthedPerson -> Text -> Maybe Text -> Flow Value
 listPropertiesH ap app mDim = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <- airborneRequest Http.GET (propertiesBase <> "/list") (scopeHeaders row <> dimHeader mDim) [] Nothing
     expectOk r
 
@@ -725,7 +734,7 @@ viewsBase = "/api/organisations/applications/dimension/release-view"
 listViewsH :: AuthedPerson -> Text -> Maybe Int -> Maybe Int -> Flow Value
 listViewsH ap app page count = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     -- count <= 0 upstream is a division-by-zero/Postgres error, not a 400.
     r <-
         airborneRequest
@@ -739,14 +748,14 @@ listViewsH ap app page count = do
 createViewH :: AuthedPerson -> Text -> Value -> Flow Value
 createViewH ap app body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
+    requireOtaPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
     runMutation ap app "VIEW_CREATE" viewsBase (Just body) $
         airborneRequest Http.POST viewsBase (scopeHeaders row) [] (Just body)
 
 updateViewH :: AuthedPerson -> Text -> Text -> Value -> Flow Value
 updateViewH ap app viewId body = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
+    requireOtaPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
     let endpoint = viewsBase <> "/" <> pathSeg viewId
     runMutation ap app "VIEW_UPDATE" endpoint (Just body) $
         airborneRequest Http.PUT endpoint (scopeHeaders row) [] (Just body)
@@ -754,7 +763,7 @@ updateViewH ap app viewId body = do
 deleteViewH :: AuthedPerson -> Text -> Text -> Flow Value
 deleteViewH ap app viewId = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
+    requireOtaPermission (Proxy @'OTA_CONFIG_MANAGE) ap app
     let endpoint = viewsBase <> "/" <> pathSeg viewId
     runMutation ap app "VIEW_DELETE" endpoint Nothing $
         airborneRequest Http.DELETE endpoint (scopeHeaders row) [] Nothing
@@ -779,7 +788,7 @@ analyticsAdoptionH ::
     AuthedPerson -> Text -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
 analyticsAdoptionH ap app interval startDate endDate date releaseId = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <-
         analyticsRequest
             Http.GET
@@ -797,21 +806,21 @@ analyticsAdoptionH ap app interval startDate endDate date releaseId = do
 analyticsVersionsH :: AuthedPerson -> Text -> Maybe Int -> Flow Value
 analyticsVersionsH ap app days = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <- analyticsRequest Http.GET "/analytics/versions" (analyticsScope row <> [("days", tshow <$> days)])
     expectOk r
 
 analyticsActiveDevicesH :: AuthedPerson -> Text -> Maybe Int -> Flow Value
 analyticsActiveDevicesH ap app days = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <- analyticsRequest Http.GET "/analytics/active-devices" (analyticsScope row <> [("days", tshow <$> days)])
     expectOk r
 
 analyticsFailuresH :: AuthedPerson -> Text -> Maybe Int -> Maybe Text -> Flow Value
 analyticsFailuresH ap app days releaseId = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <-
         analyticsRequest
             Http.GET
@@ -825,7 +834,7 @@ we still proxy it so the tile reflects real data once airborne implements it.
 analyticsPerformanceH :: AuthedPerson -> Text -> Maybe Int -> Maybe Text -> Flow Value
 analyticsPerformanceH ap app days releaseId = do
     row <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     r <-
         analyticsRequest
             Http.GET
@@ -852,6 +861,18 @@ resolveApp ref = case T.breakOn "~" ref of
 -- | Compose the composite ref from an org/app pair (inverse of 'resolveApp').
 appRefOf :: Text -> Text -> Text
 appRefOf org app = org <> "~" <> app
+
+{- | Per-app OTA permission check honouring BOTH grant vocabularies: the
+legacy per-ref airborne-ota grant, and the unified per-app autopilot grant
+keyed @\<name\>\/\<platform\>@ (resolved through app_catalog.airborne_app_ref;
+refs with no catalog row simply have no alias and fall back to legacy-only).
+-}
+requireOtaPermission ::
+    forall perm. (KnownPermission perm) => Proxy perm -> AuthedPerson -> Text -> Flow ()
+requireOtaPermission proxy ap ref = do
+    mApp <- findAppByAirborneRef ref
+    let unified = [("autopilot", appGrantKey (acName a) (acPlatform a)) | Just a <- [mApp]]
+    requireDeploymentPermissionScopes proxy ap (("airborne-ota", ref) : unified)
 
 scopeHeaders :: AppRef -> [(Text, Text)]
 scopeHeaders ref =
@@ -917,7 +938,7 @@ everywhere else, so for most mutations THIS is the only record of who acted.
 listEventsH :: AuthedPerson -> Text -> Maybe Int -> Maybe Int -> Maybe Text -> Flow Value
 listEventsH ap app mPage mCount mAction = do
     _ <- resolveApp app
-    requireDeploymentPermission (Proxy @'OTA_VIEW) ap app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
     let page = max 1 (fromMaybe 1 mPage)
         count = max 1 (min eventsMaxCount (fromMaybe 20 mCount))
     rows <- listAirborneEvents (Just app) mAction page count

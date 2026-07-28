@@ -27,6 +27,17 @@ import Products.Autopilot.Mobile.Handlers.Groups (
     resendGroupChangelogH,
  )
 import Products.Autopilot.Mobile.Handlers.Live
+import Products.Autopilot.Mobile.Handlers.Ota (
+    abandonOtaPushH,
+    attachPackageH,
+    dispatchOtaH,
+    getGroupOtaH,
+    otaPushJobsH,
+    releaseOtaH,
+    releaseOtaPackageH,
+    resolveOtaProvenanceH,
+    adoptOtaBranchH,
+ )
 import Products.Autopilot.Mobile.Handlers.Release
 import Products.Autopilot.Mobile.Handlers.Revert (
     RevertDiffResp,
@@ -70,6 +81,21 @@ import Products.Autopilot.Mobile.Handlers.StoreMonitor (
     storeMonitorH,
  )
 import Products.Autopilot.Mobile.Handlers.Versions
+import Products.Autopilot.Mobile.Types.Ota (
+    OtaAdoptBranchReq,
+    OtaAttachReq,
+    OtaDispatchReq,
+    OtaDispatchResp,
+    OtaGroupResp,
+    OtaPackageReleaseReq,
+    OtaProvAnchor,
+    OtaProvReq,
+    OtaProvResp,
+    OtaPushResp,
+    OtaReleaseReq,
+    OtaReleaseResp,
+    OtaRunJobsResp,
+ )
 import Products.Autopilot.Types.Permission (AutopilotPermission (..))
 import Servant
 import Shared.API.Response (APISuccess)
@@ -79,6 +105,12 @@ type MobileAPI =
         :> "apps"
         :> Protected 'AP_RELEASE_VIEW
         :> Get '[JSON] [AppCatalogEntryResp]
+        -- Per-app effective permissions (unified grant model) — the
+        -- frontend's source for per-row button states.
+        :<|> "mobile"
+            :> "access"
+            :> Protected 'AP_RELEASE_VIEW
+            :> Get '[JSON] MobileAccessResp
         :<|> "mobile"
             :> "apps"
             :> Protected 'AP_MOBILE_APP_MANAGE
@@ -291,10 +323,85 @@ type MobileAPI =
             :> "resend"
             :> Protected 'AP_RELEASE_CREATE
             :> Post '[JSON] ChangelogSlackState
+        -- ── OTA inside mobile releases (docs/OTA_MOBILE_RELEASE_INTEGRATION.md §5.4) ──
+        :<|> "mobile"
+            :> "groups"
+            :> Capture "groupId" Text
+            :> "ota"
+            :> Protected 'AP_RELEASE_VIEW
+            :> Get '[JSON] OtaGroupResp
+        :<|> "mobile"
+            :> "groups"
+            :> Capture "groupId" Text
+            :> "ota"
+            :> "dispatch"
+            :> Protected 'AP_MOBILE_DISPATCH
+            :> ReqBody '[JSON] OtaDispatchReq
+            :> Post '[JSON] OtaDispatchResp
+        -- Release creation is route-gated by view only; the handler enforces
+        -- airborne-ota grants (OTA_RELEASE_CREATE [+RAMP]) on the push's ref.
+        :<|> "mobile"
+            :> "ota"
+            :> "pushes"
+            :> Capture "pushId" Text
+            :> "release"
+            :> Protected 'AP_RELEASE_VIEW
+            :> ReqBody '[JSON] OtaReleaseReq
+            :> Post '[JSON] OtaReleaseResp
+        -- Live CI run matrix for a push — build progress without GitHub.
+        :<|> "mobile"
+            :> "ota"
+            :> "pushes"
+            :> Capture "pushId" Text
+            :> "jobs"
+            :> Protected 'AP_RELEASE_VIEW
+            :> Get '[JSON] OtaRunJobsResp
+        :<|> "mobile"
+            :> "ota"
+            :> "pushes"
+            :> Capture "pushId" Text
+            :> "abandon"
+            :> Protected 'AP_MOBILE_DISPATCH
+            :> Post '[JSON] OtaPushResp
+        :<|> "mobile"
+            :> "ota"
+            :> "pushes"
+            :> Capture "pushId" Text
+            :> "attach-package"
+            :> Protected 'AP_MOBILE_DISPATCH
+            :> ReqBody '[JSON] OtaAttachReq
+            :> Post '[JSON] OtaPushResp
+        -- Package-born release (no push row) — lineage-gated in the handler.
+        :<|> "mobile"
+            :> "groups"
+            :> Capture "groupId" Text
+            :> "ota"
+            :> "release"
+            :> Protected 'AP_RELEASE_VIEW
+            :> ReqBody '[JSON] OtaPackageReleaseReq
+            :> Post '[JSON] OtaReleaseResp
+        -- ── OTA provenance (git-tag ledger, doc §11b) ──
+        :<|> "mobile"
+            :> "groups"
+            :> Capture "groupId" Text
+            :> "ota"
+            :> "provenance"
+            :> Protected 'AP_RELEASE_VIEW
+            :> ReqBody '[JSON] OtaProvReq
+            :> Post '[JSON] OtaProvResp
+        :<|> "mobile"
+            :> "groups"
+            :> Capture "groupId" Text
+            :> "ota"
+            :> "adopt-branch"
+            :> Protected 'AP_MOBILE_APP_MANAGE
+            :> ReqBody '[JSON] OtaAdoptBranchReq
+            :> Post '[JSON] OtaProvAnchor
 
 mobileServer :: ServerT MobileAPI Flow
 mobileServer =
     listAppsH
+        :<|> mobileAccessH
         :<|> createAppH
         :<|> patchAppH
         :<|> previewVersionsH
@@ -332,3 +439,13 @@ mobileServer =
         :<|> (\ap mSince -> listGroupsH ap mSince)
         :<|> (\gid ap -> groupDetailH ap gid)
         :<|> (\gid ap -> resendGroupChangelogH ap gid)
+        -- ── OTA inside mobile releases ──
+        :<|> (\gid ap -> getGroupOtaH ap gid)
+        :<|> (\gid ap req -> dispatchOtaH ap gid req)
+        :<|> (\pid ap req -> releaseOtaH ap pid req)
+        :<|> (\pid ap -> otaPushJobsH ap pid)
+        :<|> (\pid ap -> abandonOtaPushH ap pid)
+        :<|> (\pid ap req -> attachPackageH ap pid req)
+        :<|> (\gid ap req -> releaseOtaPackageH ap gid req)
+        :<|> (\gid ap req -> resolveOtaProvenanceH ap gid req)
+        :<|> (\gid ap req -> adoptOtaBranchH ap gid req)

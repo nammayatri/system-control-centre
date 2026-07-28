@@ -1,5 +1,3 @@
-{-# LANGUAGE FlexibleInstances #-}
-
 module Core.DB.Connection (
     mkDBEnv,
     runDB,
@@ -11,9 +9,9 @@ where
 import Core.Config (Config (..))
 import Core.Environment (DBEnv (..))
 import Core.Logging (logDebugG)
-import Data.ByteString.Char8 qualified as BS
+import qualified Data.ByteString.Char8 as BS
 import Data.Pool (defaultPoolConfig, newPool, withResource)
-import Data.Text (Text, pack)
+import Data.Text (pack)
 import Database.Beam.Postgres (Pg, runBeamPostgresDebug)
 import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 
@@ -32,21 +30,12 @@ always invoked but 'logDebugG' drops it otherwise).
 runBeamLogged :: Connection -> Pg a -> IO a
 runBeamLogged conn = runBeamPostgresDebug logSql conn
   where
-    -- runBeamPostgresDebug's callback is (String -> IO ()) on Hackage
-    -- beam-postgres (CI/Docker) but (Text -> IO ()) on the fork some nix
-    -- shells resolve. Polymorphic via SqlLogStr so GHC picks whichever the
-    -- linked library demands — never pin this to a concrete string type.
-    logSql :: (SqlLogStr s) => s -> IO ()
-    logSql s = logDebugG ("[SQL] " <> toLogText s)
-
-class SqlLogStr s where
-    toLogText :: s -> Text
-
-instance SqlLogStr String where
-    toLogText = pack
-
-instance SqlLogStr Text where
-    toLogText = id
+    -- Keep this callback typed as String, not Text: the CI/Docker image builds
+    -- beam-postgres from Hackage, whose runBeamPostgresDebug takes (String -> IO ()).
+    -- (A local nix shell may resolve a Text-callback fork, but the shipping build
+    -- is String — retyping this to Text breaks the CI build.)
+    logSql :: String -> IO ()
+    logSql s = logDebugG ("[SQL] " <> pack s)
 
 withConn :: DBEnv -> (Connection -> IO a) -> IO a
 withConn DBEnv{..} = withResource dbPool

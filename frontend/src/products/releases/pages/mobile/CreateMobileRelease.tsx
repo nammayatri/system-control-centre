@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { usePermissions } from '../../../../core/auth/PermissionsContext';
 import { AlertTriangle, Smartphone, Apple, Check, Cpu, GitBranch, ChevronDown, Search, GitCommit, ExternalLink, X } from 'lucide-react';
 import {
   useMobileApps,
@@ -117,10 +118,15 @@ export default function CreateMobileRelease() {
   const copyOnly = searchParams.get('only')?.split(',').filter(Boolean);
   const { data: copyGroup } = useMobileGroup(copyFrom);
 
-  // Filter to enabled apps only — disabled apps live in the catalog but
-  // shouldn't be selectable for new releases.
+  // Filter to enabled apps the user may create releases for — per-app grants
+  // ("<name>/<platform>") narrow the picker; product-role holders see all.
+  const { hasPermission } = usePermissions();
   const enabledApps: AppCatalogEntry[] = useMemo(
-    () => (apps || []).filter((a) => a.enabled),
+    () =>
+      (apps || []).filter(
+        (a) => a.enabled && hasPermission('autopilot', 'RELEASE_CREATE', `${a.name}/${a.platform}`),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [apps],
   );
   // Consumer/Provider collapsible groups for the picker below.

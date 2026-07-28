@@ -90,6 +90,9 @@ data GroupListItem = GroupListItem
     , gliLabel :: Maybe Text
     , gliCreatedAt :: UTCTime
     , gliCreatedBy :: Text
+    , gliSourceRef :: Maybe Text
+    -- ^ The group's source branch (uniform per group; from any member that
+    -- has one) — the group-switcher dropdown shows it next to the id.
     , gliSummary :: GroupSummary
     , gliMembers :: [GroupMemberLite]
     }
@@ -269,6 +272,7 @@ toListItem enrich (gid, label, pairs) =
             [] -> fallbackTime
             ds -> minimum ds
         , gliCreatedBy = fromMaybe "" (listToMaybe (map createdBy members))
+        , gliSourceRef = listToMaybe (mapMaybe sourceRef members)
         , gliSummary = deriveGroupSummary (map toFact members)
         , gliMembers = map toLite members
         }

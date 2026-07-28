@@ -275,10 +275,30 @@ computeEffectivePermissions :: (MonadFlow m) => PersonAuth -> Text -> UUID -> m 
 computeEffectivePermissions person productSlug roleId =
   withDb $ \db -> computeEffectivePermissionsIO db person productSlug roleId
 
+{- | The fleet-wide mobile grant key: matches every per-app mobile key
+\"\<name\>\/\<platform\>\" (those always contain \'\/\'; server deployment
+names never do, so the wildcard can never leak into BE scopes). Precedence:
+exact app key > wildcard > product-level baseline.
+-}
+mobileWildcard :: Text
+mobileWildcard = "mobile/*"
+
+-- | The deployment row governing a scope key: exact match first, then the
+-- mobile wildcard for per-app mobile keys.
+deploymentRowFor :: Text -> Text -> [DeploymentAccess] -> Maybe DeploymentAccess
+deploymentRowFor productSlug appGroup deploymentAccesses =
+  let forSlug = filter ((== productSlug) . daProductSlug) deploymentAccesses
+      exact = find ((== appGroup) . daAppGroup) forSlug
+      wildcard
+        | "/" `T.isInfixOf` appGroup && appGroup /= mobileWildcard =
+            find ((== mobileWildcard) . daAppGroup) forSlug
+        | otherwise = Nothing
+   in maybe wildcard Just exact
+
 computeEffectivePermissionsForAppGroupIO :: DBEnv -> UUID -> Text -> Text -> IO [Text]
 computeEffectivePermissionsForAppGroupIO db pid productSlug appGroup = do
   deploymentAccesses <- findDeploymentAccessForPersonIO db pid
-  case find (\da -> daProductSlug da == productSlug && daAppGroup da == appGroup) deploymentAccesses of
+  case deploymentRowFor productSlug appGroup deploymentAccesses of
     Just da -> do
       basePerms <- getRolePermissions db productSlug (daRoleId da)
       applyOverridesIO db pid productSlug basePerms
@@ -311,8 +331,7 @@ computeEffectivePermissionsForAppGroups pid productSlug appGroups =
     productBase <- case find (\pa -> paProductSlug pa == productSlug) productAccesses of
       Just pa -> applyOverridesIO db pid productSlug =<< getRolePermissions db productSlug (paRoleId pa)
       Nothing -> pure []
-    let deployRole ag =
-          daRoleId <$> find (\da -> daProductSlug da == productSlug && daAppGroup da == ag) deploymentAccesses
+    let deployRole ag = daRoleId <$> deploymentRowFor productSlug ag deploymentAccesses
     mapM
       ( \ag -> case deployRole ag of
           Just roleId -> do

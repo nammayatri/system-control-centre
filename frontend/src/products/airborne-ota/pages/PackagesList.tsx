@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ChevronLeft, ChevronRight, Plug, Plus, Rocket, Search } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { useOtaAccess, useOtaPackages } from '../hooks';
+import { useOtaAccess, useOtaIndexCreatedAt, useOtaPackages } from '../hooks';
+import { formatDate } from '../../../lib/utils';
 import { OtaAppHeader } from '../components/OtaAppHeader';
 import { Badge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
@@ -63,6 +64,13 @@ export default function PackagesList() {
 
   const rows = data?.data ?? [];
   const totalPages = data?.total_pages ?? 1;
+
+  // Upstream package rows have no timestamp; the index file's created_at is
+  // the package's creation time (the bundle is uploaded when it's created).
+  const { data: createdByIndex } = useOtaIndexCreatedAt(
+    app,
+    rows.map((p) => (p.index != null ? String(p.index) : '')).filter(Boolean),
+  );
 
   // Tiles mirror the airborne dashboard exactly, including its quirks: all
   // three are computed from the CURRENT PAGE only, and "Release Usage" is the
@@ -148,7 +156,7 @@ export default function PackagesList() {
           </div>
         ) : isLoading ? (
           <div className="dark:invert">
-            <TableSkeleton rows={6} cols={4} />
+            <TableSkeleton rows={6} cols={5} />
           </div>
         ) : rows.length === 0 ? (
           <div className="py-16 text-center text-zinc-400 dark:text-zinc-500 text-sm">
@@ -163,6 +171,7 @@ export default function PackagesList() {
                   <th className="py-3 px-4">Index</th>
                   <th className="py-3 px-4 w-24">Version</th>
                   <th className="py-3 px-4 w-28">Files</th>
+                  <th className="py-3 px-4 w-44">Created</th>
                 </tr>
               </thead>
               <tbody className="text-sm">
@@ -190,6 +199,9 @@ export default function PackagesList() {
                     </td>
                     <td className="py-3 px-4 text-zinc-500 dark:text-zinc-400 text-xs whitespace-nowrap">
                       {p.files?.length ?? 0} files
+                    </td>
+                    <td className="py-3 px-4 font-mono text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap">
+                      {p.index != null ? formatDate(createdByIndex?.[String(p.index)]) : '—'}
                     </td>
                   </tr>
                 ))}

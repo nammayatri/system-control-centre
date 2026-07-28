@@ -17,13 +17,12 @@ import {
 } from '../api';
 import { fetchProducts as fetchAppGroups, mobileApi } from '../../../products/releases/api';
 import type { AppCatalogEntry } from '../../../products/releases/types';
-import { fetchOtaAppGroups } from '../../../products/airborne-ota/api';
 import type { MultiSelectOption } from '../../../shared/ui/multi-select';
 
 // Grantable app namespaces ("surfaces"). Backend + Mobile share the autopilot
 // product slug but draw apps from different sources; Airborne is its own
-// product. Mobile grants are stored but NOT yet enforced by the backend.
-type AccessSurfaceId = 'backend' | 'mobile' | 'airborne';
+// product. Mobile grants ("<name>/<platform>") are enforced by the backend.
+type AccessSurfaceId = 'backend' | 'mobile';
 const ACCESS_SURFACES: {
   id: AccessSurfaceId;
   label: string;
@@ -31,8 +30,10 @@ const ACCESS_SURFACES: {
   enforced: boolean;
 }[] = [
   { id: 'backend', label: 'Autopilot', productSlug: 'autopilot', enforced: true },
-  { id: 'mobile', label: 'Mobile Releases', productSlug: 'autopilot', enforced: false },
-  { id: 'airborne', label: 'Airborne OTA', productSlug: 'airborne-ota', enforced: true },
+  // Mobile grants are per (app, platform): app_group = "<name>/<platform>".
+  // One grant covers that app row's builds AND its airborne OTA — there is no
+  // separate OTA surface (existing legacy per-ref airborne grants still work).
+  { id: 'mobile', label: 'Mobile Releases (incl. OTA)', productSlug: 'autopilot', enforced: true },
 ];
 import { Button } from '../../../shared/ui/button';
 import { Badge } from '../../../shared/ui/badge';
@@ -96,10 +97,23 @@ const UserDetail: React.FC = () => {
     queryFn: fetchAdminProducts,
   });
 
+  // Product-level access is granted under autopilot only: its roles carry the
+  // OTA permission family too (unified model), so airborne-ota is never
+  // offered here — per-app OTA access goes through Scoped Access instead.
+  const grantableProducts = (products as any[])
+    .filter((p) => (p.slug || p) !== 'airborne-ota')
+    .map((p) => {
+      const slug = p.slug || p;
+      return {
+        value: slug,
+        label: slug === 'autopilot' ? 'autopilot (backend · mobile · OTA)' : p.name || slug,
+      };
+    });
+
   // ── App-access surfaces ──────────────────────────────────────────
   // A "surface" is a grantable app namespace. Backend + Mobile share the
   // autopilot product slug but draw apps from different sources; Airborne is
-  // its own product. Mobile is not yet enforced by the backend (see note).
+  // its own product. Mobile grants are per (app, platform) and enforced.
   const surface = ACCESS_SURFACES.find((s) => s.id === assignSurface);
   const deployProductSlug = surface?.productSlug ?? '';
 
@@ -113,12 +127,6 @@ const UserDetail: React.FC = () => {
     queryFn: () => mobileApi.listApps(),
     enabled: assignSurface === 'mobile',
   });
-  const { data: otaAppGroups = [] } = useQuery({
-    queryKey: ['ota-app-groups'],
-    queryFn: fetchOtaAppGroups,
-    enabled: assignSurface === 'airborne',
-  });
-
   // Apps this user is already granted for the selected surface's product →
   // shown disabled in the multi-select.
   const grantedForProduct = new Set(
@@ -132,19 +140,26 @@ const UserDetail: React.FC = () => {
   const surfaceAppOptions: MultiSelectOption[] =
     assignSurface === 'backend'
       ? (backendAppGroups as string[]).map((ag) => markGranted({ value: ag, label: ag }))
-      : assignSurface === 'mobile'
-        ? Object.values(
-            (mobileApps as AppCatalogEntry[]).reduce<Record<string, MultiSelectOption>>((acc, a) => {
-              // one option per app name (spans platforms), grouped by surface
-              acc[a.name] ??= markGranted({
-                value: a.name,
-                label: (a.displayLabel || a.name).replace(/\s*\((Customer|Driver)[^)]*\)/i, '').trim(),
-                group: a.surface === 'driver' ? 'Driver' : 'Customer',
-              });
-              return acc;
-            }, {}),
-          )
-        : (otaAppGroups as MultiSelectOption[]).map(markGranted);
+      : [
+          // Fleet-wide wildcard: one grant row covering every current AND
+          // future mobile app (builds + OTA). Never matches BE deployments.
+          markGranted({
+            value: 'mobile/*',
+            label: 'All mobile apps',
+            hint: 'wildcard — every current and future app · platform, incl. OTA',
+            group: 'Fleet',
+          }),
+          ...(mobileApps as AppCatalogEntry[]).map((a) =>
+            // one option per (app, platform) — the unified grant key; the hint
+            // names the airborne app this grant's OTA side maps to.
+            markGranted({
+              value: `${a.name}/${a.platform}`,
+              label: `${(a.displayLabel || a.name).replace(/\s*\((Customer|Driver)[^)]*\)/i, '').trim()} · ${a.platform}`,
+              hint: a.airborneAppRef ? `OTA: ${a.airborneAppRef}` : 'no OTA (builds only)',
+              group: a.surface === 'driver' ? 'Driver' : 'Customer',
+            }),
+          ),
+        ];
 
   const { data: productRoles = [] } = useQuery({
     queryKey: ['admin-product-roles', assignProduct],
@@ -760,10 +775,7 @@ const UserDetail: React.FC = () => {
                   setAssignProduct(e.target.value);
                   setAssignRoleId('');
                 }}
-                options={products.map((p: any) => ({
-                  value: p.slug || p,
-                  label: p.name || p.slug || p,
-                }))}
+                options={grantableProducts}
               />
               <SelectInput
                 label="Role"
@@ -856,7 +868,7 @@ const UserDetail: React.FC = () => {
                   options={surfaceAppOptions}
                   value={assignDeployApps}
                   onChange={setAssignDeployApps}
-                  groupOrder={['movingtech', 'driver', 'Customer', 'Driver']}
+                  groupOrder={['Fleet', 'Customer', 'Driver']}
                   emptyText="No apps available for this surface."
                 />
               )}
@@ -930,10 +942,7 @@ const UserDetail: React.FC = () => {
                   setOverrideProduct(e.target.value);
                   setSelectedOverridePerms([]);
                 }}
-                options={products.map((p: any) => ({
-                  value: p.slug || p,
-                  label: p.name || p.slug || p,
-                }))}
+                options={grantableProducts}
               />
 
               {/* Override type */}

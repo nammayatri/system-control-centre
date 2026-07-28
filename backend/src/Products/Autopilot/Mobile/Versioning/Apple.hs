@@ -49,6 +49,7 @@ module Products.Autopilot.Mobile.Versioning.Apple (
     firstWhatsNew,
     loadAscCreds,
     loadAscCredsFor,
+    lookupAscAppId,
     mintAscToken,
     renderAscErr,
 
@@ -839,6 +840,10 @@ instance FromJSON AscVersionsResp where
 parseAscVersion :: LBS.ByteString -> Maybe AscVersion
 parseAscVersion bs = decode bs >>= \(AscVersionsResp vs) -> listToMaybe vs
 
+-- | Parse an @appStoreVersions@ list → every version {id, appStoreState}. Pure.
+parseAscVersions :: LBS.ByteString -> [AscVersion]
+parseAscVersions bs = maybe [] (\(AscVersionsResp vs) -> vs) (decode bs)
+
 newtype CreatedId = CreatedId Text
 
 instance FromJSON CreatedId where
@@ -926,6 +931,14 @@ withAscApp creds bundleId k =
     mintAscToken creds >>? \token ->
         lookupAppByBundleId token bundleId >>? \appId -> k token appId
 
+{- | Best-effort bundle id → numeric ASC app id, for App Store Connect deep
+links in operator guidance. Cache-served after the first hit; Nothing on any
+error — callers must read fine without it.
+-}
+lookupAscAppId :: (MonadFlow m) => AscCreds -> Text -> m (Maybe Text)
+lookupAscAppId creds bundleId =
+    liftIO $ either (const Nothing) Just <$> withAscApp creds bundleId (\_ appId -> pure (Right appId))
+
 -- | GET the IOS @appStoreVersion@ for @versionString@ → {id, appStoreState}.
 getAppStoreVersion :: Text -> Text -> Text -> IO (Either AscError AscVersion)
 getAppStoreVersion token appId versionString = do
@@ -948,8 +961,9 @@ getAppStoreVersion token appId versionString = do
 -- flow works for provider apps. Consumer iOS already has the version (fastlane
 -- ran @upload_to_app_store@), so for it this is a plain lookup.
 
-{- | Find the App Store version for @versionString@, or create it + attach the
-latest TestFlight build when it doesn't exist yet (provider iOS).
+{- | Find the App Store version for @versionString@; else adopt the parked
+editable version if one exists (rename + re-point at OUR build); else create
+it + attach the latest TestFlight build (provider iOS).
 -}
 ensureAppStoreVersion :: Text -> Text -> Text -> IO (Either AscError AscVersion)
 ensureAppStoreVersion token appId versionString =
@@ -958,12 +972,69 @@ ensureAppStoreVersion token appId versionString =
         -- run that created it but failed to attach) → make sure it actually has a
         -- build before submitting; a buildless version can't be reviewed.
         Right ver -> ensureBuildAttached token appId versionString ver
-        -- No version yet (provider iOS / store-sync) → create it, then attach.
+        -- No version with OUR versionString. Apple allows one editable version
+        -- per platform, so a parked one (a canceled release back in "Prepare for
+        -- Submission", or a rejected one) makes a blind create 409. Adopt it
+        -- instead — rename it to our versionString and FORCE-attach our build
+        -- (its attached build predates the rename and would ship the wrong
+        -- binary). The API twin of editing the version in the ASC UI. Only when
+        -- no editable version exists do we create a fresh one.
         Left (AscVersionNotFound _) ->
-            createAppStoreVersion token appId versionString >>? \_ ->
-                getAppStoreVersion token appId versionString >>? \ver ->
-                    ensureBuildAttached token appId versionString ver
+            findAdoptableVersion token appId >>? \case
+                Just parked ->
+                    renameAppStoreVersion token (avId parked) versionString >>? \_ ->
+                        getLatestBuildIdForVersion token appId versionString >>? \case
+                            Nothing ->
+                                pure
+                                    ( Left
+                                        ( AscBuildNotReady
+                                            ("no usable TestFlight build for version " <> versionString <> " to attach")
+                                        )
+                                    )
+                            Just buildId ->
+                                attachBuildToVersion token (avId parked) buildId >>? \_ ->
+                                    pure (Right parked)
+                Nothing ->
+                    createAppStoreVersion token appId versionString >>? \_ ->
+                        getAppStoreVersion token appId versionString >>? \ver ->
+                            ensureBuildAttached token appId versionString ver
         Left e -> pure (Left e)
+
+{- | The version occupying Apple's one-editable-version slot, if any — a state
+where the ASC UI (and API) allow editing the version string and build. In-flight
+(in review / pending release) and live versions are NOT adoptable.
+-}
+findAdoptableVersion :: Text -> Text -> IO (Either AscError (Maybe AscVersion))
+findAdoptableVersion token appId =
+    ascGet
+        (ascBase <> "/apps/" <> appId <> "/appStoreVersions?filter%5Bplatform%5D=IOS&limit=10")
+        token
+        "asc-version-adopt-scan"
+        >>? \b -> pure (Right (find (\v -> avState v `elem` adoptableStates) (parseAscVersions b)))
+
+adoptableStates :: [Text]
+adoptableStates =
+    [ "PREPARE_FOR_SUBMISSION"
+    , "DEVELOPER_REJECTED"
+    , "REJECTED"
+    , "METADATA_REJECTED"
+    , "INVALID_BINARY"
+    ]
+
+-- | PATCH an editable version's @versionString@ — the API twin of the ASC UI rename.
+renameAppStoreVersion :: Text -> Text -> Text -> IO (Either AscError ())
+renameAppStoreVersion token versionId versionString =
+    let body =
+            encode $
+                object
+                    [ "data"
+                        .= object
+                            [ "type" .= ("appStoreVersions" :: Text)
+                            , "id" .= versionId
+                            , "attributes" .= object ["versionString" .= versionString]
+                            ]
+                    ]
+     in void <$> ascSend PATCH (ascBase <> "/appStoreVersions/" <> versionId) token body "asc-version-rename"
 
 {- | Ensure the App Store version has a (version-matching) build attached.
 

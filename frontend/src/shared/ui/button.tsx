@@ -8,13 +8,15 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   fullWidth?: boolean;
 }
 
+// hover/active are enabled-gated so a disabled button (which now keeps
+// pointer events for the not-allowed cursor + tooltips) never restyles.
 const variants: Record<string, string> = {
-  primary: 'bg-zinc-900 text-white hover:bg-zinc-800 active:bg-zinc-950 border border-zinc-900',
-  secondary: 'bg-white text-zinc-700 border border-zinc-300 hover:bg-zinc-50 active:bg-zinc-100',
-  danger: 'bg-red-600 text-white hover:bg-red-700 active:bg-red-800 border border-red-600',
-  ghost: 'text-zinc-600 hover:bg-zinc-100 active:bg-zinc-200 border border-transparent',
-  outline: 'border border-zinc-300 text-zinc-700 hover:bg-zinc-50 bg-white',
-  success: 'bg-emerald-600 text-white hover:bg-emerald-700 active:bg-emerald-800 border border-emerald-600',
+  primary: 'bg-zinc-900 text-white enabled:hover:bg-zinc-800 enabled:active:bg-zinc-950 border border-zinc-900',
+  secondary: 'bg-white text-zinc-700 border border-zinc-300 enabled:hover:bg-zinc-50 enabled:active:bg-zinc-100',
+  danger: 'bg-red-600 text-white enabled:hover:bg-red-700 enabled:active:bg-red-800 border border-red-600',
+  ghost: 'text-zinc-600 enabled:hover:bg-zinc-100 enabled:active:bg-zinc-200 border border-transparent',
+  outline: 'border border-zinc-300 text-zinc-700 enabled:hover:bg-zinc-50 bg-white',
+  success: 'bg-emerald-600 text-white enabled:hover:bg-emerald-700 enabled:active:bg-emerald-800 border border-emerald-600',
 };
 
 // Mobile-first sizing: tap targets >= 40px on mobile, can shrink on sm+ for density.
@@ -38,7 +40,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         'inline-flex items-center justify-center rounded-lg font-medium cursor-pointer whitespace-nowrap',
         'transition-colors duration-150',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 focus-visible:ring-offset-1',
-        'disabled:opacity-50 disabled:pointer-events-none',
+        'disabled:opacity-50 disabled:cursor-not-allowed',
         fullWidth && 'w-full',
         variants[variant],
         sizes[size],

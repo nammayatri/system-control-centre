@@ -153,6 +153,28 @@ export function useOtaAllFiles(app: string | undefined) {
   });
 }
 
+// Package rows carry no created_at upstream, but a package's `index` IS a file
+// key and files do. One files query per unique index path (all versions of an
+// index share it) yields an id → created_at map; versions beyond the 200-file
+// clamp resolve to nothing and render "—".
+export function useOtaIndexCreatedAt(app: string | undefined, indexKeys: string[]) {
+  const paths = [...new Set(indexKeys.map((k) => k.split('@version:')[0]).filter(Boolean))].sort();
+  return useQuery({
+    queryKey: ['ota-index-created', app, paths.join('|')],
+    queryFn: async () => {
+      const map: Record<string, string> = {};
+      const results = await Promise.all(
+        paths.map((p) => fetchOtaFiles(app!, { page: 1, count: PICKER_COUNT, search: p })),
+      );
+      for (const r of results)
+        for (const f of r.files ?? []) if (f.id && f.created_at) map[f.id] = f.created_at;
+      return map;
+    },
+    enabled: !!app && paths.length > 0,
+    staleTime: 60_000,
+  });
+}
+
 export function useOtaPackageDetail(app: string | undefined, packageKey: string | undefined) {
   return useQuery({
     queryKey: ['ota-package-detail', app, packageKey],

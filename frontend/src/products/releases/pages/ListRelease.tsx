@@ -130,15 +130,29 @@ export const MOBILE_STATUS_OPTIONS: { value: string; label: string }[] = [
 // active (INPROGRESS), else the terminal raw status. Mirrors what the Status
 // column shows, so filtering by a value matches the visible badge.
 function mobileStatusCategory(r: APRelease): string {
+  // The canonical backend phase (the badge's own source) wins when present:
+  // store-sync rows carry SCC statuses (COMPLETED/INPROGRESS) that say nothing
+  // about the store lifecycle — e.g. a "Ready to promote" internal snapshot is
+  // status COMPLETED and would wrongly bucket as 'completed'. Mirrors
+  // memberBucket (GroupsHome) so groups view and history agree.
+  const ph = r.release_context?.display_phase ?? '';
+  if (ph === 'rejected') return 'rejected';
+  if (r.status === 'REVERTED') return 'reverted';
+  if (
+    ABORTED_STATUSES.includes(r.status) ||
+    ['build_failed', 'aborted', 'user_aborted', 'discarded'].includes(ph)
+  )
+    return 'aborted';
+  if (ph === 'rolling_out' || ph === 'halted') return 'rollout';
+  if (ph === 'internal_held') return 'promote';
+  if (ph === 'in_review') return 'review';
+  if (ph === 'approved') return 'approved';
+  if (['live', 'distributed', 'superseded'].includes(ph)) return 'completed';
+  // No phase (pre-lifecycle rows): the original stage/status derivation.
   const stage = stageOf(lifecycleFromRelease(r));
-  // A COMPLETED store-sync snapshot can be mirroring a live production rollout
-  // (rollout_status in metadata) — bucket it by the lifecycle stage so the filter
-  // matches the visible "Rolling out" badge, not the raw COMPLETED status.
   if (stage === 'rollout') return 'rollout';
   if (r.status === 'INPROGRESS') return stage === 'none' ? 'building' : stage;
   if (r.status === 'COMPLETED') return 'completed';
-  if (r.status === 'REVERTED') return 'reverted';
-  if (ABORTED_STATUSES.includes(r.status)) return 'aborted';
   return r.status.toLowerCase();
 }
 

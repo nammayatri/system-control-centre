@@ -53,8 +53,14 @@ permissionToText (AutopilotPerm p) = autopilotPermissionToText p
 permissionToText (OtaPerm p) = otaPermissionToText p
 
 -- | All permissions for a given product.
+--
+-- Autopilot's universe includes the OTA family: the unified per-app grant
+-- model scopes airborne-ota permissions under autopilot roles/grants
+-- (app_group \"\<name\>\/\<platform\>\"), so the system role tiers
+-- (Admin\/Manager\/Viewer) tier both families via the shared
+-- isViewPerm\/isManagerRestrictedPerm filters.
 allPermissions :: ProductSlug -> [Permission]
-allPermissions Autopilot = map AutopilotPerm [minBound .. maxBound]
+allPermissions Autopilot = map AutopilotPerm [minBound .. maxBound] <> map OtaPerm [minBound .. maxBound]
 allPermissions AirborneOta = map OtaPerm [minBound .. maxBound]
 
 -- | All permissions as Text for a product.

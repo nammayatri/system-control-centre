@@ -287,7 +287,8 @@ addOverrideH userId mAuth (Object obj) = do
           if overrideType /= "GRANT" && overrideType /= "DENY"
             then throwM $ BadRequest "overrideType must be GRANT or DENY"
             else do
-              -- Validate permission against ADT (no DB lookup needed)
+              -- Validate permission against ADT (no DB lookup needed).
+              -- Autopilot's universe includes OTA_* (unified per-app grants).
               let validPerms = allPermissionsText productSlug
               if permAction `notElem` validPerms
                 then throwM $ BadRequest ("Invalid permission for product: " <> permAction)
@@ -372,7 +373,8 @@ listPermissionsH slug mAuth = do
   case mAdmin of
     Nothing -> throwM $ PermissionDenied "Superadmin required"
     Just _ -> do
-      -- Permissions are derived from ADTs — no DB query needed
+      -- Permissions are derived from ADTs — no DB query needed.
+      -- (Autopilot's universe includes OTA_* for unified per-app grants.)
       let perms = allPermissionsText slug
       pure $ object ["permissions" .= map (\p -> object ["action" .= p]) perms]
 
