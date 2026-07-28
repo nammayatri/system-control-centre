@@ -141,11 +141,9 @@ const RoleDetail: React.FC = () => {
             <span className="text-sm text-zinc-500">{productSlug}</span>
           </div>
         </div>
-        {!isSystem && (
-          <Button onClick={() => updateMut.mutate()} loading={updateMut.isPending} disabled={!dirty}>
-            Save Changes
-          </Button>
-        )}
+        <Button onClick={() => updateMut.mutate()} loading={updateMut.isPending} disabled={!dirty}>
+          Save Changes
+        </Button>
       </div>
 
       {/* Role info card */}
@@ -172,20 +170,16 @@ const RoleDetail: React.FC = () => {
           </div>
           <div>
             <span className="text-zinc-400 text-[11px] uppercase tracking-wider block">Description</span>
-            {isSystem ? (
-              <div className="text-zinc-800 mt-0.5">{role.description || '-'}</div>
-            ) : (
-              <input
-                type="text"
-                value={description}
-                onChange={(e) => {
-                  setDescription(e.target.value);
-                  setDirty(true);
-                }}
-                className="mt-0.5 w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
-                placeholder="Add a description"
-              />
-            )}
+            <input
+              type="text"
+              value={description}
+              onChange={(e) => {
+                setDescription(e.target.value);
+                setDirty(true);
+              }}
+              className="mt-0.5 w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
+              placeholder="Add a description"
+            />
           </div>
         </div>
       </div>
@@ -196,47 +190,27 @@ const RoleDetail: React.FC = () => {
           Permissions ({selectedPerms.length})
         </h2>
 
-        {isSystem ? (
-          // System roles: read-only permission list
-          <div>
-            {selectedPerms.length > 0 ? (
-              <div className="flex flex-wrap gap-1.5">
-                {selectedPerms.map((perm) => (
-                  <Badge key={perm} variant="default" size="sm">
-                    {perm}
-                  </Badge>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-zinc-400">No permissions assigned to this role.</p>
-            )}
+        {permList.length > 0 ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
+            {permList.map((perm) => (
+              <label
+                key={perm}
+                className="flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-zinc-50 cursor-pointer transition-colors duration-150"
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedPerms.includes(perm)}
+                  onChange={() => togglePerm(perm)}
+                  className="rounded border-zinc-300 accent-zinc-900 cursor-pointer"
+                />
+                <span className="text-sm text-zinc-700 font-mono">
+                  {perm}
+                </span>
+              </label>
+            ))}
           </div>
         ) : (
-          // Custom roles: editable checklist
-          <div>
-            {permList.length > 0 ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
-                {permList.map((perm) => (
-                  <label
-                    key={perm}
-                    className="flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-zinc-50 cursor-pointer transition-colors duration-150"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedPerms.includes(perm)}
-                      onChange={() => togglePerm(perm)}
-                      className="rounded border-zinc-300 accent-zinc-900 cursor-pointer"
-                    />
-                    <span className="text-sm text-zinc-700 font-mono">
-                      {perm}
-                    </span>
-                  </label>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-zinc-400">No permissions available for this product.</p>
-            )}
-          </div>
+          <p className="text-sm text-zinc-400">No permissions available for this product.</p>
         )}
       </div>
     </div>
