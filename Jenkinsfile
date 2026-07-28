@@ -34,6 +34,10 @@ pipeline {
     AWS_ACCOUNT_PROD = '147728078333'
     API_URL_AWS_PROD = '/api'   // relative → same-origin as serving host
 
+    AWS_REGION_EUROPE = 'eu-central-1'
+    AWS_ACCOUNT_EUROPE = '619048610435'
+    API_URL_AWS_EUROPE = '/api'   // relative → same-origin as serving host
+
     GCP_PROJECT_MASTER = 'ny-sandbox'
     GCP_AR_MASTER       = "asia-south1-docker.pkg.dev/${GCP_PROJECT_MASTER}"
     API_URL_GCP_MASTER  = '/api'   // relative → same-origin as serving host
@@ -104,6 +108,19 @@ pipeline {
             buildAndPushFrontend("${env.AWS_ACCOUNT_PROD}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/autopilot-frontend:${env.TAG}", env.API_URL_AWS_PROD)
           } else {
             buildAndPushBackend("${env.AWS_ACCOUNT_PROD}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/autopilot-haskell:${env.TAG}")
+          }
+        }
+      }
+    }
+
+    stage('Deploy to AWS Europe (6190...)') {
+      steps {
+        script {
+          ecrLogin(env.AWS_ACCOUNT_EUROPE, env.AWS_REGION_EUROPE)
+          if (params.app == 'autopilot-frontend') {
+            buildAndPushFrontend("${env.AWS_ACCOUNT_EUROPE}.dkr.ecr.${env.AWS_REGION_EUROPE}.amazonaws.com/autopilot-frontend:${env.TAG}", env.API_URL_AWS_EUROPE)
+          } else {
+            buildAndPushBackend("${env.AWS_ACCOUNT_EUROPE}.dkr.ecr.${env.AWS_REGION_EUROPE}.amazonaws.com/autopilot-haskell:${env.TAG}")
           }
         }
       }
