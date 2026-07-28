@@ -49,17 +49,30 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
     );
   }, [products]);
 
+  // airborne-ota permissions may be carried by autopilot grants (the unified
+  // per-app model) — mirror of the backend's aliasGrantSlugs.
+  const otaAliasHas = (action: string): boolean => {
+    if (permMap['autopilot']?.includes(action)) return true;
+    const groups = deploymentPermMap['autopilot'];
+    return !!groups && Object.values(groups).some((perms) => perms.includes(action));
+  };
+
   const hasPermission = (product: string, action: string, appGroup?: string): boolean => {
     if (isAdmin) return true;
     if (appGroup) {
-      const deployPerms = deploymentPermMap[product]?.[appGroup];
+      // Exact per-app grant wins; 'mobile/*' covers every "<name>/<platform>"
+      // mobile key (server deployment names never contain '/').
+      const productMap = deploymentPermMap[product];
+      const deployPerms =
+        productMap?.[appGroup] ??
+        (appGroup.includes('/') && appGroup !== 'mobile/*' ? productMap?.['mobile/*'] : undefined);
       if (deployPerms) {
         return deployPerms.includes(action) || deployPerms.includes('*');
       }
     }
     const perms = permMap[product];
-    if (!perms) return false;
-    return perms.includes(action) || perms.includes('*');
+    if (perms && (perms.includes(action) || perms.includes('*'))) return true;
+    return product === 'airborne-ota' && otaAliasHas(action);
   };
 
   const hasAnyPermission = (product: string, actions: string[], appGroup?: string): boolean => {
@@ -69,14 +82,22 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
   const hasAnyDeploymentPermission = (product: string, action: string): boolean => {
     if (isAdmin) return true;
     const groups = deploymentPermMap[product];
-    if (!groups) return false;
-    return Object.values(groups).some((perms) => perms.includes(action) || perms.includes('*'));
+    if (groups && Object.values(groups).some((perms) => perms.includes(action) || perms.includes('*')))
+      return true;
+    return product === 'airborne-ota' && otaAliasHas(action);
   };
 
   const hasAnyDeploymentAccess = (product: string): boolean => {
     if (isAdmin) return true;
     const groups = deploymentPermMap[product];
-    return !!groups && Object.keys(groups).length > 0;
+    if (!!groups && Object.keys(groups).length > 0) return true;
+    // Autopilot grants carrying any OTA_* perm confer airborne-ota access.
+    if (product === 'airborne-ota') {
+      if (permMap['autopilot']?.some((x) => x.startsWith('OTA_'))) return true;
+      const ap = deploymentPermMap['autopilot'];
+      return !!ap && Object.values(ap).some((perms) => perms.some((x) => x.startsWith('OTA_')));
+    }
+    return false;
   };
 
   return (

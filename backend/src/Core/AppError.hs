@@ -38,7 +38,8 @@ where
 
 import Control.Exception (Exception (..))
 import Control.Monad.Catch (MonadThrow, throwM)
-import Data.Aeson (ToJSON (..), encode, object, (.=))
+import Data.Aeson (ToJSON (..), Value (..), encode, object, (.=))
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import Data.Typeable (Typeable, cast)
@@ -58,6 +59,22 @@ errorResponseJSON status code message tag =
 
 jsonHeaders :: [Header]
 jsonHeaders = [("Content-Type", "application/json")]
+
+-- | Standard envelope with the extra object's fields merged in (envelope keys
+-- win on collision, so @status@/@code@/@message@/@tag@ stay authoritative).
+mergeEnvelope :: Text -> Text -> Text -> Value -> Value
+mergeEnvelope code message tag extra =
+    case (envelope, extra) of
+        (Object env, Object ex) -> Object (KM.union env ex)
+        _ -> envelope
+  where
+    envelope =
+        object
+            [ "status" .= ("ERROR" :: Text)
+            , "code" .= code
+            , "message" .= message
+            , "tag" .= tag
+            ]
 
 {- | Root exception; the global handler in 'Core.Server.toHandler'
 catches this and dispatches via 'toServantError'.
@@ -81,6 +98,10 @@ data APIError
     | BadRequest Text
     | Forbidden Text
     | Conflict Text
+    | ConflictWithPayload Text Text Value
+    -- ^ 409 with a structured body: (code, message, extra object) — the extra
+    -- object's fields are merged into the standard error envelope, so a client
+    -- can read typed data (e.g. the OTA @ongoing@ release list) off the 409.
     | InvalidTransition Text
     | InternalError Text
     deriving (Show, Typeable)
@@ -98,6 +119,7 @@ instance ToAppError APIError where
     toErrorCode (BadRequest _) = "BAD_REQUEST"
     toErrorCode (Forbidden _) = "FORBIDDEN"
     toErrorCode (Conflict _) = "CONFLICT"
+    toErrorCode (ConflictWithPayload code _ _) = code
     toErrorCode (InvalidTransition _) = "INVALID_TRANSITION"
     toErrorCode (InternalError _) = "INTERNAL_ERROR"
 
@@ -105,20 +127,26 @@ instance ToAppError APIError where
     toErrorMessage (BadRequest msg) = msg
     toErrorMessage (Forbidden msg) = msg
     toErrorMessage (Conflict msg) = msg
+    toErrorMessage (ConflictWithPayload _ msg _) = msg
     toErrorMessage (InvalidTransition msg) = msg
     toErrorMessage (InternalError msg) = msg
 
     toServantError err =
         base
-            { errBody = errorResponseJSON "ERROR" (toErrorCode err) (toErrorMessage err) (toErrorTag err)
+            { errBody = body
             , errHeaders = jsonHeaders
             }
       where
+        body = case err of
+            ConflictWithPayload code msg extra ->
+                encode (mergeEnvelope code msg (toErrorTag err) extra)
+            _ -> errorResponseJSON "ERROR" (toErrorCode err) (toErrorMessage err) (toErrorTag err)
         base = case err of
             NotFound _ -> err404
             BadRequest _ -> err400
             Forbidden _ -> err403
             Conflict _ -> err409
+            ConflictWithPayload{} -> err409
             InvalidTransition _ -> ServerError 422 "Unprocessable Entity" "" []
             InternalError _ -> err500
 

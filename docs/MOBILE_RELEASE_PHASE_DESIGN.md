@@ -968,3 +968,32 @@ at an unpublished release, not a bug.
   (rollout reconcile + external-review mapping).
 - `frontend/src/products/releases/components/mobileStage.ts` — the FE `stageOf`
   precedence `displayStatus` centralises.
+
+## 14. iOS promote — Apple's one-in-flight version slot (added 2026-07-27)
+
+Apple allows **one in-flight `appStoreVersion` per app** (in review OR approved &
+awaiting release), and its public API **cannot cancel an approved pending release**
+("cancel this release" is ASC-UI-only; `reviewSubmissions.canceled` works only in
+READY_FOR_REVIEW/WAITING_FOR_REVIEW/IN_REVIEW; `appStoreVersionReleaseRequests`
+has POST only). SCC handles the whole failure surface (`Handlers/Rollout.hs` +
+`Versioning/Apple.hs`):
+
+- **Pre-flight gate** (promoteH, iOS): promoting a DIFFERENT version while OUR
+  incoming slot holds an `in_review` or `approved` row is refused up front with
+  guidance (Release-from-SCC vs withdraw/cancel) and a best-effort ASC deep link
+  (`lookupAscAppId`; the FE lifts a trailing "Open: <url>" into a toast action).
+  `rejected` rows deliberately FAIL OPEN — a rejected/canceled version may or may
+  not still occupy Apple's slot, and our row can't tell; a genuine conflict comes
+  back as the mapped 409. Same-version rebuilds always pass (find-and-reuse).
+- **Mapped 409**: an upstream "You cannot create a new version of the App in the
+  current state" (e.g. the pending version was submitted outside SCC) renders as
+  operator guidance instead of the raw JSON blob (`promoteSubmitErr`).
+- **Adopt-and-rename** (`ensureAppStoreVersion`): when no version matches our
+  versionString but a **parked editable** version occupies the slot
+  (PREPARE_FOR_SUBMISSION / DEVELOPER_REJECTED / REJECTED / METADATA_REJECTED /
+  INVALID_BINARY — e.g. a canceled pending release falls back to Prepare for
+  Submission), SCC renames it to our versionString (PATCH `versionString`) and
+  **force-attaches** the matching TestFlight build (the parked version's attached
+  build predates the rename and would ship the wrong binary). In-flight and live
+  versions are never adopted. Idempotent: if rename succeeds but attach fails, a
+  retry finds the renamed version and completes via the normal attach path.

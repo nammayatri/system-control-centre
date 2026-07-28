@@ -33,13 +33,18 @@ module Products.Autopilot.Mobile.Github (
     dispatchRunCandidates,
     findRunWithJob,
     Job (..),
+    JobStep (..),
     JobsResp (..),
 
     -- * Operations
     dispatchWorkflow,
     listWorkflowRuns,
+    listWorkflowRunsForSha,
     listJobs,
     listTags,
+    listTagsWithShas,
+    compareCommits,
+    CommitComparison (..),
     listBranches,
     cancelRun,
     createGitRef,
@@ -74,6 +79,7 @@ import Data.Aeson (
     encode,
     object,
     withObject,
+    (.!=),
     (.:),
     (.:?),
     (.=),
@@ -82,7 +88,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
 import Data.List (sortOn)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -124,6 +130,9 @@ data WorkflowRun = WorkflowRun
     -- ^ SHA of HEAD at dispatch time. Returned by GH on every run.
     -- Captured into 'release_tracker.commit_sha' so revert flows can
     -- look up exactly which commit a release built from.
+    , wrHeadBranch :: Maybe Text
+    -- ^ Branch the run was dispatched on. OTA run correlation filters
+    -- candidates on this to reject runs dispatched from other branches.
     }
     deriving (Show, Generic)
 
@@ -139,6 +148,7 @@ instance FromJSON WorkflowRun where
             <*> o .: "name"
             <*> o .:? "display_title"
             <*> o .: "head_sha"
+            <*> o .:? "head_branch"
 
 newtype WorkflowRunsResp = WorkflowRunsResp {wrrRuns :: [WorkflowRun]}
     deriving (Show)
@@ -186,6 +196,27 @@ findRunWithJob creds owner repo jobName = go . take 3
             _ -> go rs
 
 -- | One row from @\/actions\/runs\/{run_id}\/jobs@.
+-- | One step of a CI job (checkout, build, upload …).
+data JobStep = JobStep
+    { jsName :: Text
+    , jsStatus :: Text
+    , jsConclusion :: Maybe Text
+    , jsNumber :: Int
+    , jsStartedAt :: Maybe UTCTime
+    , jsCompletedAt :: Maybe UTCTime
+    }
+    deriving (Show, Generic)
+
+instance FromJSON JobStep where
+    parseJSON = withObject "JobStep" $ \o ->
+        JobStep
+            <$> o .: "name"
+            <*> o .: "status"
+            <*> o .:? "conclusion"
+            <*> o .: "number"
+            <*> o .:? "started_at"
+            <*> o .:? "completed_at"
+
 data Job = Job
     { jId :: Int64
     , jName :: Text
@@ -194,6 +225,7 @@ data Job = Job
     , jStartedAt :: Maybe UTCTime
     , jCompletedAt :: Maybe UTCTime
     , jHtmlUrl :: Text
+    , jSteps :: [JobStep]
     }
     deriving (Show, Generic)
 
@@ -207,6 +239,7 @@ instance FromJSON Job where
             <*> o .:? "started_at"
             <*> o .:? "completed_at"
             <*> o .: "html_url"
+            <*> (o .:? "steps" .!= [])
 
 newtype JobsResp = JobsResp {jrJobs :: [Job]}
     deriving (Show)
@@ -316,6 +349,40 @@ listWorkflowRuns creds owner repo workflowFile = do
         Right r -> Right (wrrRuns r)
         Left e -> Left ("listWorkflowRuns: " <> renderHttpError e)
 
+{- | Runs of ONE workflow file filtered to an exact head commit — the build
+event record for that sha. @head_branch@ of the (unanimous) result is the
+branch the build was actually created from; no @event@ filter, a build can
+arrive via dispatch or push.
+-}
+listWorkflowRunsForSha ::
+    (MonadFlow m) =>
+    GhAppCreds ->
+    Text -> -- owner
+    Text -> -- repo
+    Text -> -- workflowFile
+    Text -> -- head sha
+    m (Either Text [WorkflowRun])
+listWorkflowRunsForSha creds owner repo workflowFile sha = do
+    token <- getInstallationToken creds
+    let url =
+            apiBase owner repo
+                <> "/actions/workflows/"
+                <> workflowFilenameOnly workflowFile
+                <> "/runs?head_sha="
+                <> sha
+                <> "&per_page=30"
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = ghHeaders token
+                , reqTimeout = Seconds 30
+                , reqLogTag = "gh-runs-sha"
+                }
+    resp <- liftIO (httpJson @WorkflowRunsResp req)
+    pure $ case resp of
+        Right r -> Right (wrrRuns r)
+        Left e -> Left ("listWorkflowRunsForSha: " <> renderHttpError e)
+
 -- | List the jobs of a specific run.
 listJobs ::
     (MonadFlow m) =>
@@ -363,6 +430,95 @@ listTags creds owner repo prefix = do
     pure $ case resp of
         Right xs -> Right (map riRef xs)
         Left e -> Left ("listTags: " <> renderHttpError e)
+
+{- | Like 'listTags' but returns @(tagName, targetCommitSha)@ pairs, with
+the @refs\/tags\/@ prefix stripped. Lightweight tags point straight at a
+commit; annotated tags point at a tag object, dereferenced here with one
+extra call each (@\/git\/tags\/{sha}@). A failed deref drops that tag
+rather than failing the listing.
+-}
+listTagsWithShas ::
+    (MonadFlow m) =>
+    GhAppCreds ->
+    Text -> -- owner
+    Text -> -- repo
+    Text -> -- prefix (passed verbatim after refs/tags/)
+    m (Either Text [(Text, Text)])
+listTagsWithShas creds owner repo prefix = do
+    token <- getInstallationToken creds
+    let url = apiBase owner repo <> "/git/matching-refs/tags/" <> prefix
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = ghHeaders token
+                , reqTimeout = Seconds 30
+                , reqLogTag = "gh-tags-sha"
+                }
+    resp <- liftIO (httpJson @[TagRefItem] req)
+    case resp of
+        Left e -> pure (Left ("listTagsWithShas: " <> renderHttpError e))
+        Right xs -> do
+            pairs <- mapM (derefTag token) xs
+            pure (Right (catMaybes pairs))
+  where
+    stripRefPrefix r = fromMaybe r (T.stripPrefix "refs/tags/" r)
+    derefTag token TagRefItem{triRef = ref, triSha = sha, triType = ty}
+        | ty /= "tag" = pure (Just (stripRefPrefix ref, sha))
+        | otherwise = do
+            let req =
+                    (defaultReq (apiBase owner repo <> "/git/tags/" <> sha))
+                        { reqMethod = GET
+                        , reqHeaders = ghHeaders token
+                        , reqTimeout = Seconds 30
+                        , reqLogTag = "gh-tag-deref"
+                        }
+            r <- liftIO (httpJson @TagObjectResp req)
+            pure $ case r of
+                Right TagObjectResp{torSha = target} -> Just (stripRefPrefix ref, target)
+                Left _ -> Nothing
+
+-- | Result of @\/compare\/{base}...{head}@ — the git-ancestry verdict between
+-- two commits. Both shas are immutable, so callers may cache this forever.
+data CommitComparison = CommitComparison
+    { ccStatus :: Text -- "identical" | "ahead" | "behind" | "diverged"
+    , ccAheadBy :: Int
+    , ccBehindBy :: Int
+    }
+    deriving (Show)
+
+instance FromJSON CommitComparison where
+    parseJSON = withObject "CommitComparison" $ \o ->
+        CommitComparison
+            <$> o .: "status"
+            <*> o .: "ahead_by"
+            <*> o .: "behind_by"
+
+{- | Relate two commits by ancestry: is @head@ identical to \/ ahead of \/
+behind \/ diverged from @base@? Powers OTA provenance ("was this bundle built
+on top of this native build's commit?").
+-}
+compareCommits ::
+    (MonadFlow m) =>
+    GhAppCreds ->
+    Text -> -- owner
+    Text -> -- repo
+    Text -> -- base sha
+    Text -> -- head sha
+    m (Either Text CommitComparison)
+compareCommits creds owner repo base headSha = do
+    token <- getInstallationToken creds
+    let url = apiBase owner repo <> "/compare/" <> base <> "..." <> headSha
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = ghHeaders token
+                , reqTimeout = Seconds 30
+                , reqLogTag = "gh-compare"
+                }
+    resp <- liftIO (httpJson @CommitComparison req)
+    pure $ case resp of
+        Right c -> Right c
+        Left e -> Left ("compareCommits: " <> renderHttpError e)
 
 -- | One entry from @\/repos\/{owner}\/{repo}\/branches@.
 data BranchInfo = BranchInfo
@@ -570,6 +726,30 @@ newtype RefItem = RefItem {riRef :: Text}
 
 instance FromJSON RefItem where
     parseJSON = withObject "RefItem" $ \o -> RefItem <$> o .: "ref"
+
+-- | Same endpoint, keeping the target object for sha correlation.
+data TagRefItem = TagRefItem
+    { triRef :: Text
+    , triSha :: Text
+    , triType :: Text -- "commit" (lightweight) | "tag" (annotated)
+    }
+    deriving (Show)
+
+instance FromJSON TagRefItem where
+    parseJSON = withObject "TagRefItem" $ \o -> do
+        ref <- o .: "ref"
+        obj <- o .: "object"
+        (sha, ty) <- withObject "TagRefObject" (\t -> (,) <$> t .: "sha" <*> t .: "type") obj
+        pure TagRefItem{triRef = ref, triSha = sha, triType = ty}
+
+-- | Annotated tag object (@\/git\/tags\/{sha}@) — its @object.sha@ is the commit.
+newtype TagObjectResp = TagObjectResp {torSha :: Text}
+    deriving (Show)
+
+instance FromJSON TagObjectResp where
+    parseJSON = withObject "TagObjectResp" $ \o -> do
+        obj <- o .: "object"
+        TagObjectResp <$> withObject "TagObjectTarget" (.: "sha") obj
 
 data BranchRefItem = BranchRefItem
     { briRef :: Text

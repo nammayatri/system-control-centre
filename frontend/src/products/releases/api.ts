@@ -1626,6 +1626,8 @@ export interface MobileGroupListItem {
     label?: string | null;
     createdAt: string;
     createdBy: string;
+    /** Group source branch — shown in the group-switcher dropdown. */
+    sourceRef?: string | null;
     summary: MobileGroupSummary;
     members: MobileGroupMemberLite[];
 }

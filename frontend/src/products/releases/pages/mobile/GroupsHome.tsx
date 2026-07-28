@@ -15,6 +15,7 @@ import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { formatBuildCode, inFlightPhaseLabel } from '../../utils';
 import { cn, formatDate } from '../../../../lib/utils';
 import ListRelease, { MOBILE_STATUS_OPTIONS, TIME_RANGE_OPTIONS, getDateRange } from '../ListRelease';
+import { AppSlotView } from './AppSlotView';
 import type { TimeRange } from '../ListRelease';
 
 /**
@@ -211,11 +212,19 @@ export default function GroupsHome() {
   // KPI cards) stays mounted; only the table section below swaps.
   const [params, setParams] = useSearchParams();
   const showHistory = params.get('view') === 'history';
+  // Row grouping: app-first slot view (default) vs release-group view.
+  const showGroups = params.get('view') === 'groups';
   // Pushed (not replaced) so the browser Back/Forward buttons walk the
   // groups ⇄ history toggle like real navigation.
   const setShowHistory = (on: boolean) => {
     const next = new URLSearchParams(params);
     if (on) next.set('view', 'history');
+    else next.delete('view');
+    setParams(next);
+  };
+  const setShowGroups = (on: boolean) => {
+    const next = new URLSearchParams(params);
+    if (on) next.set('view', 'groups');
     else next.delete('view');
     setParams(next);
   };
@@ -359,16 +368,24 @@ export default function GroupsHome() {
     return Array.from(names).sort();
   }, [catalogApps, groups, fromStore]);
 
+  // Member-level filter conjunction, shared by the group filter and the
+  // auto-expand highlight so both agree on what "matches" means.
+  const memberMatchesFilters = (m: MobileGroupMemberLite) =>
+    (!appFilter || m.app === appFilter) &&
+    (!surfaceFilter || m.surface === surfaceFilter) &&
+    (!platformFilter || m.platform === platformFilter) &&
+    (!statusFilter || memberBucket(m) === statusFilter);
+
   const visibleGroups = useMemo(() => {
     // Clamp to the SELECTED time range (the fetch window is wider so the status
     // filter can match, but the operator only wants their chosen window shown).
     let list = augmentedGroups.filter((g) => withinSelected(g.createdAt));
-    if (appFilter) list = list.filter((g) => g.members.some((m) => m.app === appFilter));
-    if (surfaceFilter) list = list.filter((g) => g.members.some((m) => m.surface === surfaceFilter));
-    if (platformFilter) list = list.filter((g) => g.members.some((m) => m.platform === platformFilter));
-    // A group matches a status when ANY member does — builds inside groups
-    // stay findable; matching groups auto-expand below.
-    if (statusFilter) list = list.filter((g) => g.members.some((m) => memberBucket(m) === statusFilter));
+    // ONE member must satisfy ALL member-level filters TOGETHER. Independent
+    // per-filter .some() calls let a group match "app A + status S" through two
+    // different members (filtering OdishaYatri + Ready-to-promote surfaced a
+    // group whose OdishaYatri build FAILED while its Lynx sibling was ready).
+    if (appFilter || surfaceFilter || platformFilter || statusFilter)
+      list = list.filter((g) => g.members.some(memberMatchesFilters));
     if (search.trim()) {
       const q = search.trim().toLowerCase();
       list = list.filter(
@@ -425,11 +442,11 @@ export default function GroupsHome() {
     setExpanded(
       new Set(
         groups
-          .filter((g) => g.members.some((m) => memberBucket(m) === statusFilter))
+          .filter((g) => g.members.some(memberMatchesFilters))
           .map((g) => g.groupId),
       ),
     );
-  }, [statusFilter, groups]);
+  }, [statusFilter, appFilter, surfaceFilter, platformFilter, groups]);
 
   return (
     <div className="flex flex-col flex-1 w-full space-y-4">
@@ -527,13 +544,47 @@ export default function GroupsHome() {
           ))}
         </select>
         <span className="ml-auto inline-flex items-center gap-4">
+          {!showHistory && (
+            <div
+              className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-0.5"
+              role="tablist"
+              aria-label="Row grouping"
+            >
+              <button
+                role="tab"
+                aria-selected={!showGroups}
+                onClick={() => setShowGroups(false)}
+                className={cn(
+                  'px-2.5 py-1 text-xs rounded-md cursor-pointer transition-colors',
+                  !showGroups
+                    ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200'
+                    : 'text-zinc-500 hover:text-zinc-800',
+                )}
+              >
+                Apps
+              </button>
+              <button
+                role="tab"
+                aria-selected={showGroups}
+                onClick={() => setShowGroups(true)}
+                className={cn(
+                  'px-2.5 py-1 text-xs rounded-md cursor-pointer transition-colors',
+                  showGroups
+                    ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200'
+                    : 'text-zinc-500 hover:text-zinc-800',
+                )}
+              >
+                Groups
+              </button>
+            </div>
+          )}
           <button
             onClick={() => setShowHistory(!showHistory)}
             className="text-xs text-zinc-500 hover:text-zinc-900 underline underline-offset-2 inline-flex items-center gap-1"
           >
             {showHistory ? (
               <>
-                <ArrowLeft className="w-3.5 h-3.5" /> Release groups
+                <ArrowLeft className="w-3.5 h-3.5" /> Back to releases
               </>
             ) : (
               'Full history →'
@@ -555,7 +606,7 @@ export default function GroupsHome() {
             toIso,
           }}
         />
-      ) : (
+      ) : showGroups ? (
         <div className="bg-white rounded-xl border border-zinc-200">
           {isError ? (
             <div className="py-16 text-center space-y-3">
@@ -677,6 +728,23 @@ export default function GroupsHome() {
             </div>
           )}
         </div>
+      ) : (
+        <AppSlotView
+          apps={catalogApps}
+          releases={releases}
+          loading={releasesLoading}
+          filters={{
+            search,
+            app: appFilter,
+            surface: surfaceFilter,
+            platform: platformFilter,
+            status: statusFilter,
+          }}
+          onOpen={(r) => {
+            const gid = r.release_context?.release_group_id;
+            navigate(gid ? `/mobile/groups/${gid}` : `/mobile/releases/${r.id}`);
+          }}
+        />
       )}
     </div>
   );

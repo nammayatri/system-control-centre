@@ -25,6 +25,7 @@ module Core.Auth.Protected
     KnownPermission (..),
     AuthedPerson (..),
     requireDeploymentPermission,
+    requireDeploymentPermissionScopes,
     checkPersonPermission,
   )
 where
@@ -230,7 +231,12 @@ checkPersonPermission prodSlug permText person
                   apProductAccesses = accesses
                 }
         else do
-          deploymentGranted <- hasAnyDeploymentPermission (personId person) prodSlug permText
+          -- A deployment grant under the product itself, or under an alias
+          -- product whose roles may carry this product's permissions (the
+          -- unified per-app mobile grant: autopilot roles carry OTA_*).
+          let slugs = prodSlug : aliasGrantSlugs prodSlug
+          deploymentGranted <-
+            orM [hasAnyDeploymentPermission (personId person) s permText | s <- slugs]
           if deploymentGranted
             then
               pure $
@@ -245,6 +251,16 @@ checkPersonPermission prodSlug permText person
               if any (\pa -> paProductSlug pa == prodSlug) accesses
                 then pure $ Left (err403, "Permission denied: " <> permText)
                 else pure $ Left (err403, "No access to product: " <> prodSlug)
+  where
+    orM [] = pure False
+    orM (m : ms) = m >>= \b -> if b then pure True else orM ms
+
+-- | Products whose deployment grants may satisfy another product's
+-- permission check. Sole case today: airborne-ota permissions carried by a
+-- unified per-app autopilot grant (\"\<name\>\/\<platform\>\").
+aliasGrantSlugs :: Text -> [Text]
+aliasGrantSlugs "airborne-ota" = ["autopilot"]
+aliasGrantSlugs _ = []
 
 requireDeploymentPermission ::
   (KnownPermission perm, MonadFlow m) =>
@@ -252,15 +268,30 @@ requireDeploymentPermission ::
   AuthedPerson ->
   Text ->
   m ()
-requireDeploymentPermission proxy ap appGroup
+requireDeploymentPermission proxy ap appGroup =
+  requireDeploymentPermissionScopes proxy ap [(permissionProduct proxy, appGroup)]
+
+-- | Multi-scope variant: the permission may be satisfied under ANY of the
+-- given (product_slug, app_group) scopes. Used where one grant vocabulary
+-- aliases another — e.g. an OTA check accepts the legacy per-ref
+-- airborne-ota grant OR the unified per-app autopilot grant
+-- (\"\<name\>\/\<platform\>\").
+requireDeploymentPermissionScopes ::
+  (KnownPermission perm, MonadFlow m) =>
+  Proxy perm ->
+  AuthedPerson ->
+  [(Text, Text)] ->
+  m ()
+requireDeploymentPermissionScopes proxy ap scopes
   | apIsSuperadmin ap = pure ()
-  | otherwise = do
-      let prodSlug = permissionProduct proxy
-          permText = permissionName proxy
-      perms <- computeEffectivePermissionsForAppGroup (apPersonId ap) prodSlug appGroup
-      if permText `elem` perms
-        then pure ()
-        else throwM (PermissionDenied (appGroup <> ": " <> permText))
+  | otherwise = go scopes
+  where
+    permText = permissionName proxy
+    denied = T.intercalate " | " (map snd scopes) <> ": " <> permText
+    go [] = throwM (PermissionDenied denied)
+    go ((slug, key) : rest) = do
+      perms <- computeEffectivePermissionsForAppGroup (apPersonId ap) slug key
+      if permText `elem` perms then pure () else go rest
 
 -- | Extract the bearer token; accepts @"Bearer xyz"@ or bare @"xyz"@.
 extractBearer :: Maybe B.ByteString -> Maybe Text

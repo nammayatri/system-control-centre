@@ -80,8 +80,12 @@ const byApp = (a: Eligible, b: Eligible) =>
 
 export function MobileBulkPanel() {
   const { hasPermission } = usePermissions();
-  const canPromote = hasPermission('autopilot', 'RELEASE_PROMOTE');
-  const canRollout = hasPermission('autopilot', 'RELEASE_ROLLOUT');
+  // Per-app grant keys (unified model): a worklist row only appears when the
+  // user can act on that app — bulk is an action surface, not a read surface.
+  const canPromoteFor = (e: Eligible) =>
+    hasPermission('autopilot', 'RELEASE_PROMOTE', `${e.r.appGroup}/${e.r.env}`);
+  const canRolloutFor = (e: Eligible) =>
+    hasPermission('autopilot', 'RELEASE_ROLLOUT', `${e.r.appGroup}/${e.r.env}`);
 
   // A stable 30-day window captures every in-flight (recently-updated) release
   // needing action. Memoised so the query key doesn't churn every render.
@@ -115,9 +119,10 @@ export function MobileBulkPanel() {
       if (!cur || (e.r.date_created ?? '') > (cur.r.date_created ?? '')) latest.set(key, e);
     }
     return {
-      promotable: [...latest.values()].sort(byApp),
-      rollable: elig.filter(isRollable).sort(byApp),
+      promotable: [...latest.values()].filter(canPromoteFor).sort(byApp),
+      rollable: elig.filter(isRollable).filter(canRolloutFor).sort(byApp),
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [releases]);
 
   const [open, setOpen] = useState(true);
@@ -129,8 +134,8 @@ export function MobileBulkPanel() {
   const selPromote = promotable.filter((e) => sel.has(e.r.id)).map((e) => e.r);
   const selRollout = rollable.filter((e) => sel.has(e.r.id)).map((e) => e.r);
 
-  const showPromoteSection = PROMOTE_ENABLED && canPromote && promotable.length > 0;
-  const showRolloutSection = canRollout && rollable.length > 0;
+  const showPromoteSection = PROMOTE_ENABLED && promotable.length > 0;
+  const showRolloutSection = rollable.length > 0;
   const total = (showPromoteSection ? promotable.length : 0) + (showRolloutSection ? rollable.length : 0);
 
   if (total === 0 || (!showPromoteSection && !showRolloutSection)) return null;

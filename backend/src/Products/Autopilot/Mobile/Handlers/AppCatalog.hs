@@ -1,5 +1,7 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE TypeApplications #-}
 
 {- | HTTP handlers for the @app_catalog@ endpoints (list/create/patch).
 
@@ -9,23 +11,34 @@ and patch require 'AP_MOBILE_APP_MANAGE' (admin).
 module Products.Autopilot.Mobile.Handlers.AppCatalog (
     AppCatalogEntryResp (..),
     LatestBuildResp (..),
+    MobileAccessEntry (..),
+    MobileAccessResp (..),
     NewAppReq (..),
     PatchAppReq (..),
     listAppsH,
     createAppH,
     patchAppH,
+    mobileAccessH,
 ) where
 
 import Control.Monad.Catch (throwM)
 import Core.AppError (APIError (..))
-import Core.Auth.Protected (AuthedPerson)
+import Core.Auth.Protected (AuthedPerson (..))
+import Core.Auth.Queries (computeEffectivePermissionsForAppGroups)
 import Core.Environment (Flow)
 import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericToJSON)
 import Data.Int (Int32)
+import Data.List (nub)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
+import qualified Data.Text as T
+import Data.Proxy (Proxy (..))
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
+import Products.Autopilot.Mobile.Auth (requireAppPerm, requireProductPerm)
+import Products.Autopilot.Types.Permission (AutopilotPermission (..))
+import Products.Types (allPermissionsText)
 import Products.Autopilot.Mobile.Queries.AppCatalog
 import Products.Autopilot.Mobile.Queries.StoreStatus (listStoreStatus)
 import Products.Autopilot.Mobile.Types.Storage
@@ -55,6 +68,7 @@ data AppCatalogEntryResp = AppCatalogEntryResp
     , packageName :: Maybe Text
     , displayLabel :: Maybe Text
     , firebaseProjectId :: Maybe Text
+    , airborneAppRef :: Maybe Text
     , enabled :: Bool
     , createdAt :: UTCTime
     , latestReleaseBuild :: Maybe LatestBuildResp
@@ -94,12 +108,71 @@ data PatchAppReq = PatchAppReq
     , packageName :: Maybe Text
     , firebaseProjectId :: Maybe Text
     , workflowPath :: Maybe Text
+    , airborneAppRef :: Maybe Text
+    -- ^ "" clears; "<org>~<app>" sets (admin backfill for store-synced apps).
     }
     deriving (Generic, Show)
 
 instance ToJSON PatchAppReq where
     toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 instance FromJSON PatchAppReq
+
+-- | One app row's effective per-app permissions (unified grant model).
+data MobileAccessEntry = MobileAccessEntry
+    { name :: Text
+    , surface :: Text
+    , platform :: Text
+    , airborneAppRef :: Maybe Text
+    , mobilePerms :: [Text]
+    , otaPerms :: [Text]
+    }
+    deriving (Generic, Show)
+
+instance ToJSON MobileAccessEntry where
+    toJSON = genericToJSON defaultOptions{omitNothingFields = True}
+instance FromJSON MobileAccessEntry
+
+newtype MobileAccessResp = MobileAccessResp {apps :: [MobileAccessEntry]}
+    deriving (Generic, Show)
+
+instance ToJSON MobileAccessResp
+instance FromJSON MobileAccessResp
+
+{- | GET /mobile/access — the frontend's single source for per-app button
+states. Per catalog row: effective perms from the unified autopilot grant
+(\"\<name\>\/\<platform\>\") unioned with the legacy per-ref airborne-ota
+grant; product-level role holders get their baseline on every row (the
+fallback inside computeEffectivePermissionsForAppGroups).
+-}
+mobileAccessH :: AuthedPerson -> Flow MobileAccessResp
+mobileAccessH ap = do
+    catalog <- listAppCatalog
+    let keyOf :: AppCatalog -> Text
+        keyOf a = appGrantKey (acName a) (acPlatform a)
+    permsFor <-
+        if apIsSuperadmin ap
+            then pure (\_ -> allPermissionsText "autopilot")
+            else do
+                uni <- computeEffectivePermissionsForAppGroups (apPersonId ap) "autopilot" (nub (map keyOf catalog))
+                legacy <- computeEffectivePermissionsForAppGroups (apPersonId ap) "airborne-ota" (nub (mapMaybe acAirborneAppRef catalog))
+                pure $ \a ->
+                    fromMaybe [] (lookup (keyOf a) uni)
+                        <> maybe [] (\r -> fromMaybe [] (lookup r legacy)) (acAirborneAppRef a)
+    pure $
+        MobileAccessResp
+            [ MobileAccessEntry
+                { name = acName a
+                , surface = acSurface a
+                , platform = acPlatform a
+                , airborneAppRef = acAirborneAppRef a
+                -- Autopilot wire names carry no prefix; OTA_* identifies the
+                -- airborne family — everything else is a mobile-build perm.
+                , mobilePerms = nub (filter (not . ("OTA_" `T.isPrefixOf`)) ps)
+                , otaPerms = nub (filter ("OTA_" `T.isPrefixOf`) ps)
+                }
+            | a <- catalog
+            , let ps = permsFor a
+            ]
 
 -- | Convert a 'LatestBuildRow' (from the raw SQL query) to the JSON-facing response type.
 toBuildResp :: LatestBuildRow -> LatestBuildResp
@@ -149,6 +222,7 @@ toResp storeMap buildMap r =
             , packageName = acPackageName r
             , displayLabel = acDisplayLabel r
             , firebaseProjectId = acFirebaseProjectId r
+            , airborneAppRef = acAirborneAppRef r
             , enabled = acEnabled r
             , createdAt = acCreatedAt r
             , latestReleaseBuild = toBuildResp <$> releaseRow
@@ -170,6 +244,7 @@ toRespNoBuild r =
         , packageName = acPackageName r
         , displayLabel = acDisplayLabel r
         , firebaseProjectId = acFirebaseProjectId r
+        , airborneAppRef = acAirborneAppRef r
         , enabled = acEnabled r
         , createdAt = acCreatedAt r
         , latestReleaseBuild = Nothing
@@ -191,8 +266,11 @@ listAppsH _ap = do
         storeMap = Map.fromList [((ssAppCatalogId s, ssTrack s), s) | s <- statuses]
     pure (map (toResp storeMap buildMap) apps)
 
+-- | Creating catalog rows is fleet-level: product-level grant only, the
+-- per-app deployment fallback must not qualify.
 createAppH :: AuthedPerson -> NewAppReq -> Flow AppCatalogEntryResp
-createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, workflowPath = w, packageName = pkg, displayLabel = d, firebaseProjectId = fbp, enabled = e} =
+createAppH ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, workflowPath = w, packageName = pkg, displayLabel = d, firebaseProjectId = fbp, enabled = e} = do
+    requireProductPerm (Proxy @'AP_MOBILE_APP_MANAGE) ap
     let row =
             NewAppCatalogRow
                 { nacName = n
@@ -205,10 +283,14 @@ createAppH _ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, wo
                 , nacFirebaseProjectId = fbp
                 , nacEnabled = e
                 }
-     in toRespNoBuild <$> insertAppCatalog row
+    toRespNoBuild <$> insertAppCatalog row
 
+-- | Editing a catalog row (enable/disable, OTA ref, workflow…) is per-app:
+-- an Admin grant on that row's "<name>/<platform>" key (or product-level).
 patchAppH :: AuthedPerson -> Int32 -> PatchAppReq -> Flow AppCatalogEntryResp
-patchAppH _ap aid PatchAppReq{enabled = e, displayLabel = d, packageName = pkg, firebaseProjectId = fbp, workflowPath = w} = do
+patchAppH ap aid PatchAppReq{enabled = e, displayLabel = d, packageName = pkg, firebaseProjectId = fbp, workflowPath = w, airborneAppRef = ref} = do
+    target <- findAppCatalogById aid >>= maybe (throwM $ NotFound "app_catalog row not found") pure
+    requireAppPerm (Proxy @'AP_MOBILE_APP_MANAGE) ap (acName target) (acPlatform target)
     let patch =
             PatchAppCatalogRow
                 { pacEnabled = e
@@ -216,6 +298,7 @@ patchAppH _ap aid PatchAppReq{enabled = e, displayLabel = d, packageName = pkg, 
                 , pacPackageName = pkg
                 , pacFirebaseProjectId = fbp
                 , pacWorkflowPath = w
+                , pacAirborneAppRef = ref
                 }
     mResult <- updateAppCatalog aid patch
     case mResult of

@@ -43,6 +43,7 @@ module Products.Autopilot.Mobile.Workflow (
     selectBuildTag,
     codeFromTag,
     electDispatchLeader,
+    tryAdvisoryLockShared,
 ) where
 
 import Control.Exception (Exception, SomeException, fromException, throwIO, try)

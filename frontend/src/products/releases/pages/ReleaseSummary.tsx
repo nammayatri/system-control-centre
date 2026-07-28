@@ -26,13 +26,16 @@ import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { AiReleasePanel } from '../components/AiReleasePanel';
 import { MobileRolloutPanel } from '../components/MobileRolloutPanel';
+import { OtaPanel } from '../components/ota/OtaPanel';
+import { useGroupOta } from '../otaApi';
+import { usePermissions } from '../../../core/auth/PermissionsContext';
 import { BrandLogo } from '../components/BrandLogo';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import {
   Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap,
   Search, Trash2, ChevronRight as ChevronRightIcon, FastForward, RotateCw,
   ExternalLink, Network, BarChart3, Pencil, Lock, Save, Info,
-  Undo2, ArrowUpRight, Apple, GitBranch, Send, Flame,
+  Undo2, ArrowUpRight, Apple, GitBranch, Send, Flame, Rocket,
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
@@ -918,6 +921,15 @@ const ReleaseSummary: React.FC = () => {
   // still-loading) release so the hook stays above the early returns; it shares
   // the ['mobile-rollout', id] cache with the rollout panel below (deduped).
   const rolloutQ = useMobileRollout(id, release?.tracker_type === 'MobileBuild');
+  // OTA panel data — keyed off the row's release group; stays above the early
+  // returns (rules of hooks). Disabled for debug builds / rows without a group.
+  const otaQ = useGroupOta(
+    release?.tracker_type === 'MobileBuild'
+      ? (release?.release_context?.release_group_id ?? undefined)
+      : undefined,
+    release?.release_context?.build_type !== 'debug',
+  );
+  const { hasPermission: hasPerm } = usePermissions();
   const immRevertSyncMut = useImmediateRevertWithSync();
   const updateTrackerMut = useUpdateTracker();
   const dispatchMobileMut = useDispatchMobileReleases();
@@ -1010,6 +1022,13 @@ const ReleaseSummary: React.FC = () => {
   // early-return (rules of hooks). These are pure reads of `release`.
   const isMobile = category === 'MobileBuild';
 
+  // Which OTA card belongs on this page (unmapped apps → none).
+  const otaCapable = otaQ.data?.available
+    ? otaQ.data.capableApps.find(
+        (c) => c.appName === release.appGroup && c.platform === release.env,
+      )
+    : undefined;
+
   // Operator-facing badge for a mobile release in the promote→rollout lifecycle.
   // We override the raw engine status only when it's the misleading one —
   // INPROGRESS (nothing's progressing — it's awaiting a human; and it is NOT a
@@ -1027,8 +1046,14 @@ const ReleaseSummary: React.FC = () => {
   // The one canonical backend displayStatus (rollout.rdStatusLabel) — null while the
   // build is still 'building' so the generic runner controls stay shown until it's
   // sitting on the store (same behaviour the old mobileDisplayStatus null gave).
+  // Also wins for a COMPLETED live-mirror row the store says is actively rolling
+  // out / halted (console-published ramp): the store-derived detail is the truth,
+  // not the row's stamped "Released · 100%".
+  const activeStorePhase = ['rolling_out', 'halted'].includes(rollout?.rdPhase ?? '');
   const mobileStatus =
-    rollout && (s === 'INPROGRESS' || isPromotableSnapshot) && rollout.rdPhase !== 'building'
+    rollout &&
+    (s === 'INPROGRESS' || isPromotableSnapshot || activeStorePhase) &&
+    rollout.rdPhase !== 'building'
       ? { label: rollout.rdStatusLabel, variant: rollout.rdStatusVariant }
       : null;
   // Shared-run blast radius: abort cancels the whole GitHub run, so warn which
@@ -1066,6 +1091,59 @@ const ReleaseSummary: React.FC = () => {
   // of X"; `metadata.reverted_by` = "X has been reverted by this row".
   const revertsTarget = release.revertsReleaseId || null;
   const revertedByTarget = release.metadata?.reverted_by || null;
+
+  // Time/meta/k8s card grid — leads the summary for backend releases; for
+  // mobile it's low-signal bookkeeping (mostly dashes), so it trails the page.
+  const metaInfoCards = (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 mb-6">
+      {[
+        {
+          title: 'TIME SCHEDULE',
+          rows: [
+            { label: 'Created at', value: formatDate(release.date_created) },
+            { label: 'Scheduled time', value: formatDate(release.schedule_time) },
+            { label: 'Last Updated', value: formatDate(release.last_updated) },
+            { label: 'Start time', value: formatDate(release.start_time) },
+            { label: 'End time', value: formatDate(release.end_time) },
+          ],
+        },
+        {
+          title: 'META DATA',
+          rows: [
+            { label: 'Priority', value: String(release.priority ?? 0) },
+            { label: 'Env', value: release.env },
+            { label: 'Mode', value: release.mode },
+            { label: 'Approved', value: release.is_approved ? 'Yes' : 'No' },
+            { label: 'Approved By', value: release.is_approved ? (release.approved_by || release.release_manager || '-') : '-' },
+            { label: 'Info', value: release.info },
+          ],
+        },
+        {
+          title: 'K8S INFO',
+          rows: [
+            { label: 'Release ID', value: release.id },
+            { label: 'Cluster', value: release.release_context?.cluster },
+            { label: 'Category', value: category },
+            { label: 'Rollout Strategy', value: release.rollout_strategy ? (Array.isArray(release.rollout_strategy) ? `${release.rollout_strategy.length} stages` : 'Custom') : '-' },
+            { label: 'Pods Scale Down Status', value: release.release_context?.pods_scale_down_status },
+            { label: 'Global ID', value: release.global_id },
+          ],
+        },
+      ].map((card, ci) => (
+        <div key={ci} className="bg-zinc-50 rounded-xl border border-zinc-100 p-4 text-sm">
+          <h3 className="font-semibold text-zinc-500 uppercase text-[11px] tracking-wider mb-3">{card.title}</h3>
+          <dl className="space-y-2.5">
+            {card.rows.map((r, ri) => (
+              <div key={ri}>
+                <dt className="text-zinc-400 text-xs">{r.label}</dt>
+                <dd className={cn('text-zinc-800 font-medium mt-0.5 break-all', r.label === 'Release ID' && 'font-mono text-xs')}>{r.value || '-'}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      ))}
+    </div>
+  );
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
@@ -1173,6 +1251,16 @@ const ReleaseSummary: React.FC = () => {
                   ? 'TestFlight'
                   : 'Internal'}
             </Badge>
+          )}
+          {/* Source branch — shown only when known (SCC-built or auto/-manually
+              resolved); store-sync rows without one show nothing here. */}
+          {isMobile && release.sourceRef && (
+            <span
+              className="inline-flex items-center gap-1 text-[11px] text-zinc-500 font-mono border border-zinc-200 rounded px-1.5 py-0.5"
+              title={`Source branch: ${release.sourceRef}`}
+            >
+              <GitBranch className="w-3 h-3 text-zinc-400" /> {release.sourceRef}
+            </span>
           )}
           {isFirebaseInternal(release) && <FirebaseInternalBadge />}
           {(release.release_context?.revert === 1 || revertsTarget) && <Badge variant="purple" dot>REVERT</Badge>}
@@ -1378,6 +1466,7 @@ const ReleaseSummary: React.FC = () => {
               <div className="mb-6">
                 <MobileRolloutPanel
                   releaseId={id!}
+                  appKey={`${release.appGroup}/${release.env}`}
                   aiNotes={{
                     app: release.appGroup,
                     surface: release.service,
@@ -1397,54 +1486,44 @@ const ReleaseSummary: React.FC = () => {
                 />
               </div>
             )}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 mb-6">
-              {[
-                {
-                  title: 'TIME SCHEDULE',
-                  rows: [
-                    { label: 'Created at', value: formatDate(release.date_created) },
-                    { label: 'Scheduled time', value: formatDate(release.schedule_time) },
-                    { label: 'Last Updated', value: formatDate(release.last_updated) },
-                    { label: 'Start time', value: formatDate(release.start_time) },
-                    { label: 'End time', value: formatDate(release.end_time) },
-                  ],
-                },
-                {
-                  title: 'META DATA',
-                  rows: [
-                    { label: 'Priority', value: String(release.priority ?? 0) },
-                    { label: 'Env', value: release.env },
-                    { label: 'Mode', value: release.mode },
-                    { label: 'Approved', value: release.is_approved ? 'Yes' : 'No' },
-                    { label: 'Approved By', value: release.is_approved ? (release.approved_by || release.release_manager || '-') : '-' },
-                    { label: 'Info', value: release.info },
-                  ],
-                },
-                {
-                  title: 'K8S INFO',
-                  rows: [
-                    { label: 'Release ID', value: release.id },
-                    { label: 'Cluster', value: release.release_context?.cluster },
-                    { label: 'Category', value: category },
-                    { label: 'Rollout Strategy', value: release.rollout_strategy ? (Array.isArray(release.rollout_strategy) ? `${release.rollout_strategy.length} stages` : 'Custom') : '-' },
-                    { label: 'Pods Scale Down Status', value: release.release_context?.pods_scale_down_status },
-                    { label: 'Global ID', value: release.global_id },
-                  ],
-                },
-              ].map((card, ci) => (
-                <div key={ci} className="bg-zinc-50 rounded-xl border border-zinc-100 p-4 text-sm">
-                  <h3 className="font-semibold text-zinc-500 uppercase text-[11px] tracking-wider mb-3">{card.title}</h3>
-                  <dl className="space-y-2.5">
-                    {card.rows.map((r, ri) => (
-                      <div key={ri}>
-                        <dt className="text-zinc-400 text-xs">{r.label}</dt>
-                        <dd className={cn('text-zinc-800 font-medium mt-0.5 break-all', r.label === 'Release ID' && 'font-mono text-xs')}>{r.value || '-'}</dd>
-                      </div>
-                    ))}
-                  </dl>
+            {/* OTA bundle control — same OtaPanel as the group page, one card
+                for this row's (app, platform). Store-sync rows (no sourceRef)
+                get the operate-only variant. */}
+            {/* No airborne app for this row — say so instead of silently
+                omitting the OTA card (provider apps: not offered; consumer
+                apps: mapping missing in the catalog). */}
+            {isMobile &&
+              !otaCapable &&
+              otaQ.data &&
+              release.release_context?.build_type !== 'debug' && (
+                <div className="mb-6 flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-xs text-zinc-500">
+                  <Rocket className="w-3.5 h-3.5 text-zinc-400" />
+                  {release.service === 'driver'
+                    ? 'No OTA — airborne is not available for provider apps.'
+                    : 'No OTA — this app has no airborne app mapped (set "OTA ref" in Mobile Apps admin).'}
                 </div>
-              ))}
-            </div>
+              )}
+            {isMobile && otaCapable && (
+              <div className="mb-6">
+                <OtaPanel
+                  groupId={release.release_context?.release_group_id ?? ''}
+                  appName={release.appGroup}
+                  platform={release.env}
+                  airborneAppRef={otaCapable.airborneAppRef}
+                  sourceRef={release.sourceRef ?? null}
+                  nativeVersion={release.new_version ?? null}
+                  buildSuperseded={otaCapable.superseded}
+                  pushEligible={otaCapable.pushEligible}
+                  ineligibleReason={otaCapable.ineligibleReason}
+                  pushes={otaQ.data?.rows ?? []}
+                  links={otaQ.data?.links ?? []}
+                  activePush={otaQ.data?.activePush ?? null}
+                  canDispatch={hasPerm('autopilot', 'MOBILE_DISPATCH', `${release.appGroup}/${release.env}`)}
+                  onChanged={() => void otaQ.refetch()}
+                />
+              </div>
+            )}
+            {!isMobile && metaInfoCards}
 
             {/* Mobile releases skip the K8s-specific summary blocks. They have
                 no pods, no rollout strategy, no env diff — instead we show a
@@ -1511,6 +1590,9 @@ const ReleaseSummary: React.FC = () => {
                 {globalId && <InfoField label="Global ID" value={globalId} mono />}
               </div>
             </div>
+
+            {/* For mobile the time/meta/k8s cards are trailing bookkeeping. */}
+            {isMobile && metaInfoCards}
           </div>
         )}
 

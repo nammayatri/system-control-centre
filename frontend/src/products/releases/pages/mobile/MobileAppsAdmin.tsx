@@ -92,6 +92,73 @@ const BuildCell = ({ build, label }: { build?: LatestBuild | null; label: string
   );
 };
 
+// Inline editor for the airborne composite ref ("<org>~<app>") — the app's
+// OTA identity. Empty save clears it (backend treats "" as NULL).
+function OtaRefCell({
+  app,
+  pending,
+  onSave,
+}: {
+  app: AppCatalogEntry;
+  pending: boolean;
+  onSave: (value: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(app.airborneAppRef ?? '');
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          setValue(app.airborneAppRef ?? '');
+          setEditing(true);
+        }}
+        className="font-mono text-[11px] text-zinc-500 hover:text-zinc-800 max-w-[160px] truncate block text-left"
+        title={app.airborneAppRef ? `${app.airborneAppRef} — click to edit` : 'No OTA mapping — click to set'}
+      >
+        {app.airborneAppRef ?? '—'}
+      </button>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1">
+      <input
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="org~app"
+        autoFocus
+        disabled={pending}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            onSave(value.trim());
+            setEditing(false);
+          }
+          if (e.key === 'Escape') setEditing(false);
+        }}
+        className="w-36 rounded border border-zinc-300 px-1.5 py-0.5 text-[11px] font-mono"
+      />
+      <button
+        type="button"
+        disabled={pending}
+        onClick={() => {
+          onSave(value.trim());
+          setEditing(false);
+        }}
+        className="text-[11px] text-violet-600 hover:underline"
+      >
+        Save
+      </button>
+      <button
+        type="button"
+        onClick={() => setEditing(false)}
+        className="text-[11px] text-zinc-400 hover:text-zinc-600"
+      >
+        ✕
+      </button>
+    </span>
+  );
+}
+
 export default function MobileAppsAdmin() {
   const { data: rawApps = [], isLoading, error } = useMobileApps();
   const qc = useQueryClient();
@@ -162,6 +229,7 @@ export default function MobileAppsAdmin() {
                     <th className="py-3 px-4">Platform</th>
                     <th className="py-3 px-4">Workflows</th>
                     <th className="py-3 px-4">Package</th>
+                    <th className="py-3 px-4">OTA ref</th>
                     <th className="py-3 px-4">Latest Release</th>
                   </tr>
                 </thead>
@@ -222,6 +290,15 @@ export default function MobileAppsAdmin() {
                             </td>
                             <td className="py-3 px-4 font-mono text-[11px] text-zinc-500 max-w-[140px] truncate" title={app.packageName ?? undefined}>
                               {app.packageName ?? '—'}
+                            </td>
+                            <td className="py-3 px-4">
+                              <OtaRefCell
+                                app={app}
+                                pending={pendingId === app.id}
+                                onSave={(v) =>
+                                  patchMutation.mutate({ id: app.id, body: { airborneAppRef: v } })
+                                }
+                              />
                             </td>
                             <td className="py-3 px-4"><BuildCell build={app.latestReleaseBuild} label="release" /></td>
                           </tr>

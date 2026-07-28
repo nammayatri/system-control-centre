@@ -42,12 +42,6 @@ const CARDS: { key: string; label: string; dot: string; hint: string }[] = [
     hint: 'Staged rollout in progress (or halted mid-rollout).',
   },
   {
-    key: 'completed',
-    label: 'Completed',
-    dot: 'bg-emerald-600',
-    hint: 'Workflow finished: live on the store, distributed, or superseded.',
-  },
-  {
     key: 'aborted',
     label: 'Failed',
     dot: 'bg-red-500',
@@ -111,16 +105,7 @@ export function MobileBuildKpis({
   );
 
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-3 sm:gap-4">
-      {card({
-        key: 'total',
-        label: `Total Builds${windowLabel ? ` (${windowLabel})` : ''}`,
-        dot: 'bg-zinc-400',
-        hint: 'Every build in this window — SCC-built and store-synced alike.',
-        value: releases.length,
-        isActive: false,
-        onClick: onSelect ? () => onSelect('') : undefined,
-      })}
+    <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3 sm:gap-4">
       {CARDS.map((c) =>
         card({
           ...c,
