@@ -318,10 +318,12 @@ listRolesForProduct productSlug = withDb $ \db -> withConn db $ \conn -> do
   pure $
     map
       ( \RoleRow {..} ->
-          let perms = case (rrIsSystemRole, rrPermissions) of
-                (True, _) -> defaultPermissionsText productSlug rrName
-                (False, Just (PGArray ps)) -> ps
-                (False, Nothing) -> []
+          let perms = case rrPermissions of
+                Just (PGArray ps@(_ : _)) -> ps
+                _ ->
+                  if rrIsSystemRole
+                    then defaultPermissionsText productSlug rrName
+                    else []
            in RoleDetail rrId rrName rrDescription rrIsSystemRole perms
       )
       roleRows
