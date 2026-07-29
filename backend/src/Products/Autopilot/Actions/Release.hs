@@ -342,6 +342,9 @@ injectStoreState cellsByApp pair@(tracker, mts) =
 createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseH ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
     requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_CREATE) ap appGroup
+    customStagger <- usesCustomStagger appGroup service mode rolloutStrategy
+    when customStagger $
+        requireDeploymentPermission (Proxy :: Proxy 'AP_MANAGE_STAGGER) ap appGroup
     -- System-triggered (cross-cluster sync) requests already carry the real
     -- release manager's email in the payload; only stamp the authenticated
     -- caller's email for direct, user-initiated creates.
@@ -728,10 +731,7 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{
                 , syncXPomeriumJwt = mXPomeriumJwt
                 , changelogSlackOptIn = postChangelogSlack
                 }
-        reqMode = case mode of
-            Just "MANUAL" -> MANUAL
-            Just "manual" -> MANUAL
-            _ -> AUTO
+        reqMode = parseReqMode mode
     approveAll <- isApproveAllReleases
     now <- liftIO getCurrentTime
     let isFromSync = fromMaybe False isSystemTriggered
@@ -1135,6 +1135,17 @@ updateTrackerH ap rid req = do
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
             requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_UPDATE) ap (NT.appGroup tracker)
+            let strategyChanged = case req.rolloutStrategy of
+                    Just newStr -> newStr /= NT.rolloutStrategy tracker
+                    Nothing -> False
+                -- Compare the mode ADT, not its derived Show: an authorization
+                -- decision must not hinge on a constructor name staying in step
+                -- with the wire format.
+                modeChanged = case req.mode of
+                    Just "MANUAL" -> NT.mode tracker /= MANUAL
+                    _ -> False
+            when (strategyChanged || modeChanged) $
+                requireDeploymentPermission (Proxy :: Proxy 'AP_MANAGE_STAGGER) ap (NT.appGroup tracker)
             let oldStatus = NT.status tracker
                 oldStatusText = releaseStatusToText oldStatus
             -- Validate the update request against rollout-strategy invariants
@@ -1346,6 +1357,52 @@ validateOptionalStrategyText label (Just t)
             Right steps -> case validateStrategyShape steps of
                 Left err -> Left (label <> " strategy invalid: " <> err)
                 Right () -> Right ()
+
+{- | The single place that turns a request's @mode@ string into the 'Mode'
+ADT. The wire accepts both @"MANUAL"@ and @"manual"@, so anything deciding
+whether a request is manual -- including the 'AP_MANAGE_STAGGER' gate -- must
+go through here rather than comparing the raw text, or it drifts from the
+parser and a lowercase payload walks past it.
+-}
+parseReqMode :: Maybe Text -> Mode
+parseReqMode (Just "MANUAL") = MANUAL
+parseReqMode (Just "manual") = MANUAL
+parseReqMode _ = AUTO
+
+{- | Does a create request configure a rollout stagger of its own, rather than
+just replaying the service's saved default? Gates 'AP_MANAGE_STAGGER'.
+
+Two ways to configure one: choose MANUAL mode, or send stages that differ from
+the service's configured strategy. The second check is the one that matters --
+on create the request's @rolloutStrategy@ is stored verbatim after shape
+validation, with no standard-strategy substitution for AUTO, so gating on mode
+alone would let @{"mode": "AUTO", "rollout_strategy": [...]}@ through.
+
+Presence of the field cannot be the signal: the create form always posts a
+@rollout_strategy@ array, pre-filled from the service config, so every ordinary
+AUTO create would be rejected.
+
+Only percentages and cooloffs are compared. Pod counts are recalculated
+client-side from live HPA replicas on each submit, so they routinely differ
+from the stored config without the user having touched a stage.
+
+Fails open when the service has no configured strategy, or when the stored one
+is a legacy shape 'decodeStrategyText' cannot read: with no baseline there is
+nothing to call a deviation from. MANUAL mode is still gated either way.
+-}
+usesCustomStagger :: Text -> Text -> Maybe Text -> [RolloutStep] -> Flow Bool
+usesCustomStagger appGroup' service' mMode steps
+    | parseReqMode mMode == MANUAL = pure True
+    | null steps = pure False
+    | otherwise = do
+        mCfg <- findServiceByProductAndName appGroup' service'
+        pure $ case mCfg >>= S.dcRolloutStrategy of
+            Nothing -> False
+            Just raw -> case decodeStrategyText raw of
+                Left _ -> False
+                Right baseline -> stageShape steps /= stageShape baseline
+  where
+    stageShape = map (\s -> (rolloutPercent s, cooloffMinutes s))
 
 {- | Identify the first mid-flight-forbidden field set in the request, if any.
 During INPROGRESS/PAUSED/etc only @status@, @rolloutStrategy@, @mode@, and
