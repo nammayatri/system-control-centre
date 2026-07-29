@@ -60,6 +60,7 @@ toProductConfigResponse p =
         , productType = fromMaybe "SERVICE" (S.dcAppGroupType p)
         , productAcronym = fromMaybe "" (S.dcAppGroupAcronym p)
         , needInfraApproval = S.dcNeedInfraApproval p
+        , aiChangelogEnabled = S.dcAiChangelogEnabled p
         , cluster = S.dcCluster p
         , namespace = S.dcNamespace p
         , vsName = S.dcVsName p
@@ -80,7 +81,7 @@ getProductConfigH _ap pid = do
         Just p -> pure $ toJSON (toProductConfigResponse p)
 
 updateProductConfigH :: AuthedPerson -> Int32 -> UpsertProductReq -> Flow APIResponse
-updateProductConfigH ap pathId UpsertProductReq{appGroup = appGroup', cluster = cluster', namespace = namespace', vsName = vsName', productType = productType', productAcronym = productAcronym', syncCluster = syncCluster', needInfraApproval = needInfraApproval', slackChannel = slackChannel', repoName = repoName'} =
+updateProductConfigH ap pathId UpsertProductReq{appGroup = appGroup', cluster = cluster', namespace = namespace', vsName = vsName', productType = productType', productAcronym = productAcronym', syncCluster = syncCluster', needInfraApproval = needInfraApproval', aiChangelogEnabled = aiChangelogEnabled', slackChannel = slackChannel', repoName = repoName'} =
     upsertProductH
         ap
         UpsertProductReq
@@ -93,6 +94,7 @@ updateProductConfigH ap pathId UpsertProductReq{appGroup = appGroup', cluster = 
             , productAcronym = productAcronym'
             , syncCluster = syncCluster'
             , needInfraApproval = needInfraApproval'
+            , aiChangelogEnabled = aiChangelogEnabled'
             , slackChannel = slackChannel'
             , repoName = repoName'
             }

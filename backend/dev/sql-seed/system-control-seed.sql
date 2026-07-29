@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS deployment_config (
   product_type TEXT,
   sync_cluster TEXT,
   need_infra_approval BOOLEAN,
+  ai_changelog_enabled BOOLEAN,
   vs_locked_by TEXT,
   vs_lock_timestamp TIMESTAMPTZ,
   service_host TEXT,

@@ -58,6 +58,7 @@ data UpsertProductReq = UpsertProductReq
     , productAcronym :: Text
     , syncCluster :: Maybe Text
     , needInfraApproval :: Maybe Bool
+    , aiChangelogEnabled :: Maybe Bool
     , slackChannel :: Maybe Text
     , repoName :: Maybe Text
     }
@@ -76,6 +77,7 @@ instance FromJSON UpsertProductReq where
             <*> (v .:? "productAcronym" >>= \mv -> case mv of Just x -> pure x; Nothing -> v .:? "product_acronym" .!= "")
             <*> (v .:? "syncCluster" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "sync_cluster")
             <*> (v .:? "needInfraApproval" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "need_infra_approval")
+            <*> (v .:? "aiChangelogEnabled" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "ai_changelog_enabled")
             <*> (v .:? "slackChannel" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "slack_channel")
             <*> (v .:? "repoName" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "repo_name")
 
@@ -550,6 +552,7 @@ data ProductConfigResponse = ProductConfigResponse
     , productType :: Text
     , productAcronym :: Text
     , needInfraApproval :: Maybe Bool
+    , aiChangelogEnabled :: Maybe Bool
     , cluster :: Maybe Text
     , namespace :: Maybe Text
     , vsName :: Maybe Text

@@ -136,7 +136,7 @@ upsertProductH ap req = do
     case normalizeProductType req.productType of
         Left err -> pure $ APIResponse "ERROR" err
         Right canonical -> do
-            upsertProduct req.appGroup req.cluster req.namespace req.vsName canonical req.productAcronym req.syncCluster req.needInfraApproval req.slackChannel req.repoName
+            upsertProduct req.appGroup req.cluster req.namespace req.vsName canonical req.productAcronym req.syncCluster req.needInfraApproval req.slackChannel req.repoName req.aiChangelogEnabled
             pure $ APIResponse "SUCCESS" "product_config upserted"
 
 {- | Map any incoming productType string to the canonical 'ReleaseCategory'

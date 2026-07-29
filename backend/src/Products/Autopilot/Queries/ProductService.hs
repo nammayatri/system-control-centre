@@ -187,8 +187,11 @@ upsertProduct ::
     Maybe Bool ->
     Maybe Text ->
     Maybe Text ->
+    -- | @ai_changelog_enabled@. Kept last, away from @needInfraApproval@: two adjacent
+    -- @Maybe Bool@ params would let a transposed call site compile silently.
+    Maybe Bool ->
     m ()
-upsertProduct productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval slackChannel' repoName' = withDb $ \db -> do
+upsertProduct productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval slackChannel' repoName' aiChangelogEnabled' = withDb $ \db -> do
     withConn db $ \conn ->
         withTransaction conn $ do
             runBeamLogged conn $
@@ -210,6 +213,7 @@ upsertProduct productName' cluster' namespace' vsName' productType' productAcron
                                 , dcAppGroupType = val_ (Just productType')
                                 , dcSyncCluster = val_ syncCluster'
                                 , dcNeedInfraApproval = val_ needInfraApproval
+                                , dcAiChangelogEnabled = val_ aiChangelogEnabled'
                                 , dcVsLockedBy = val_ Nothing
                                 , dcVsLockTimestamp = val_ Nothing
                                 , dcServiceHost = val_ Nothing
@@ -258,6 +262,7 @@ upsertService rolloutStrategy decisionConfig serviceName' product' sType service
                                 , dcAppGroupType = val_ Nothing
                                 , dcSyncCluster = val_ Nothing
                                 , dcNeedInfraApproval = val_ Nothing
+                                , dcAiChangelogEnabled = val_ Nothing
                                 , dcVsLockedBy = val_ Nothing
                                 , dcVsLockTimestamp = val_ Nothing
                                 , dcServiceHost = val_ serviceHost'
