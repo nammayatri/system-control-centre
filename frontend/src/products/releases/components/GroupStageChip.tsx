@@ -1,5 +1,6 @@
 import type { MobileGroupMemberLite, MobileGroupSummary } from '../api';
 import { Badge } from '../../../shared/ui/badge';
+import { cn } from '../../../lib/utils';
 
 /**
  * THE release-group stage vocabulary — one map of names and colors shared by
@@ -9,32 +10,32 @@ import { Badge } from '../../../shared/ui/badge';
 
 // member phase slug -> chip (mirrors the per-release badge vocabulary)
 export const MEMBER_PHASE_CHIP: Record<string, { label: string; cls: string }> = {
-  building: { label: 'Building', cls: 'bg-blue-50 text-blue-800 border-blue-200' },
-  internal_held: { label: 'Ready to promote', cls: 'bg-violet-50 text-violet-800 border-violet-200' },
-  in_review: { label: 'In review', cls: 'bg-sky-50 text-sky-800 border-sky-200' },
-  approved: { label: 'Approved · held', cls: 'bg-emerald-50 text-emerald-800 border-emerald-200' },
-  rolling_out: { label: 'Rolling out', cls: 'bg-blue-50 text-blue-800 border-blue-200' },
-  halted: { label: 'Halted', cls: 'bg-orange-50 text-orange-800 border-orange-200' },
-  live: { label: 'Live', cls: 'bg-green-50 text-green-800 border-green-200' },
-  distributed: { label: 'Distributed', cls: 'bg-green-50 text-green-800 border-green-200' },
-  superseded: { label: 'Superseded', cls: 'bg-zinc-100 text-zinc-600 border-zinc-200' },
-  rejected: { label: 'Rejected', cls: 'bg-rose-50 text-rose-800 border-rose-200' },
-  build_failed: { label: 'Failed', cls: 'bg-rose-50 text-rose-800 border-rose-200' },
-  aborted: { label: 'Aborted', cls: 'bg-rose-50 text-rose-800 border-rose-200' },
-  user_aborted: { label: 'User aborted', cls: 'bg-rose-50 text-rose-800 border-rose-200' },
+  building: { label: 'Building', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+  internal_held: { label: 'Ready to promote', cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+  in_review: { label: 'In review', cls: 'bg-violet-50 text-violet-700 border-violet-200' },
+  approved: { label: 'Approved · held', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  rolling_out: { label: 'Rolling out', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  halted: { label: 'Halted', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+  live: { label: 'Live', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  distributed: { label: 'Distributed', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  superseded: { label: 'Superseded', cls: 'bg-zinc-100 text-zinc-500 border-zinc-200' },
+  rejected: { label: 'Rejected', cls: 'bg-red-50 text-red-700 border-red-200' },
+  build_failed: { label: 'Failed', cls: 'bg-red-50 text-red-700 border-red-200' },
+  aborted: { label: 'Aborted', cls: 'bg-red-50 text-red-700 border-red-200' },
+  user_aborted: { label: 'User aborted', cls: 'bg-red-50 text-red-700 border-red-200' },
   discarded: { label: 'Discarded', cls: 'bg-zinc-100 text-zinc-500 border-zinc-200' },
 };
 
 // group stage slug -> chip
 export const STAGE_CHIP: Record<string, { label: string; cls: string }> = {
-  approval: { label: 'Pending approval', cls: 'bg-zinc-100 text-zinc-700 border-zinc-200' },
-  dispatch: { label: 'Ready to dispatch', cls: 'bg-emerald-50 text-emerald-800 border-emerald-200' },
-  building: { label: 'Building', cls: 'bg-blue-50 text-blue-800 border-blue-200' },
-  promote: { label: 'Ready to promote', cls: 'bg-violet-50 text-violet-800 border-violet-200' },
-  in_review: { label: 'In review', cls: 'bg-sky-50 text-sky-800 border-sky-200' },
-  releasing: { label: 'Ready to release', cls: 'bg-emerald-50 text-emerald-800 border-emerald-200' },
-  rolling_out: { label: 'Rolling out', cls: 'bg-blue-50 text-blue-800 border-blue-200' },
-  done: { label: 'Completed', cls: 'bg-green-50 text-green-800 border-green-200' },
+  approval: { label: 'Pending approval', cls: 'bg-zinc-100 text-zinc-600 border-zinc-200' },
+  dispatch: { label: 'Ready to dispatch', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  building: { label: 'Building', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+  promote: { label: 'Ready to promote', cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+  in_review: { label: 'In review', cls: 'bg-violet-50 text-violet-700 border-violet-200' },
+  releasing: { label: 'Ready to release', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  rolling_out: { label: 'Rolling out', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  done: { label: 'Completed', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
 };
 
 const TROUBLE_SLUGS = ['build_failed', 'aborted', 'user_aborted', 'rejected', 'discarded'];
@@ -99,17 +100,28 @@ export function GroupStageChip({
     if (present.length > 1) return TROUBLE_BADGE.build_failed; // mixed -> "Failed"
     return { label: 'Ended', variant: 'muted' as BadgeVariant };
   };
-  const badge =
-    summary.stage === 'done' && shipped === 0
-      ? failedBadge()
-      : (STAGE_BADGE[summary.stage] ?? STAGE_BADGE.building);
+  const failed = summary.stage === 'done' && shipped === 0;
+  const badge = failed ? failedBadge() : (STAGE_BADGE[summary.stage] ?? STAGE_BADGE.building);
+  const cls = failed
+    ? 'bg-red-50 text-red-700 border-red-200'
+    : (STAGE_CHIP[summary.stage] ?? STAGE_CHIP.building).cls;
+  const pulse = !failed && ['building', 'in_review', 'rolling_out', 'releasing'].includes(summary.stage);
   return (
-    <span className="inline-flex items-center gap-1.5 flex-wrap">
-      <Badge variant={badge.variant} dot>
-        {badge.label}
-        {pctSuffix}
-        {summary.stage === 'done' && shipped > 0 && total > 1 ? ` · ${shipped}/${total} shipped` : ''}
-      </Badge>
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide border rounded-full px-2 py-0.5',
+        cls,
+      )}
+    >
+      <span
+        className={cn(
+          'w-1.5 h-1.5 rounded-full bg-current opacity-70',
+          pulse && 'animate-pulse motion-reduce:animate-none',
+        )}
+      />
+      {badge.label}
+      {pctSuffix}
+      {summary.stage === 'done' && shipped > 0 && total > 1 ? ` · ${shipped}/${total} shipped` : ''}
     </span>
   );
 }

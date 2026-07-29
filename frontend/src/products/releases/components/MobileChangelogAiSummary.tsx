@@ -76,6 +76,34 @@ function renderWithMentions(text: string) {
  * (AI · model / Auto-generated / Generating), and the AI version reveals with a
  * fade/slide so the swap feels intentional.
  */
+
+/**
+ * Commit range of the per-app changelog summary — same query key as the panel,
+ * so it reads the shared cache (no extra request). For placing the base → head
+ * chips OUTSIDE the panel (e.g. next to a section eyebrow).
+ */
+export function useChangelogAiRange(
+  app: string,
+  surface: string,
+  platform: string,
+  branch: string,
+  versionName = '',
+  versionCode = '',
+  base = 'production',
+) {
+  const q = useQuery({
+    queryKey: ['mobile-changelog-ai', app, surface, platform, branch, base, versionName, versionCode],
+    queryFn: () => mobileApi.changelogAiSummary(app, surface, platform, branch, base, versionName, versionCode),
+    enabled: !!(app && surface && platform && branch),
+    staleTime: 15 * 1000,
+  });
+  return {
+    baseRef: q.data?.baseRef ?? null,
+    headRef: q.data?.headRef ?? null,
+    compareUrl: q.data?.compareUrl ?? null,
+  };
+}
+
 export function MobileChangelogAiSummary({
   app = '',
   surface = '',

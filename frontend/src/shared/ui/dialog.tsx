@@ -14,7 +14,7 @@ export const DialogOverlay = React.forwardRef<
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
-      'fixed inset-0 z-40 bg-black/50',
+      'fixed inset-0 z-50 bg-zinc-950/50 backdrop-blur-[2px]',
       'data-[state=open]:animate-in data-[state=open]:fade-in-0',
       'data-[state=closed]:animate-out data-[state=closed]:fade-out-0',
       'duration-200',
@@ -53,7 +53,7 @@ export const DialogContent = React.forwardRef<
       ref={ref}
       className={cn(
         // Base
-        'fixed z-50 bg-white flex flex-col shadow-sm',
+        'fixed z-50 bg-white flex flex-col shadow-2xl',
         // Mobile: bottom sheet (full width, anchored to bottom)
         fullScreenOnMobile
           ? 'inset-x-0 bottom-0 max-h-[92vh] w-full rounded-t-2xl border-t border-zinc-200'
