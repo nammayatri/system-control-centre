@@ -348,6 +348,15 @@ const CreateRelease: React.FC = () => {
     }
   }, [formData.appGroup, formData.service, isClone, isUpdate]);
 
+  // Without MANAGE_STAGGER, pin mode to AUTO instead of letting the form submit
+  // a MANUAL the backend rejects — clone prefills mode from the source release.
+  // Waits for appGroup (hasPermission answers differently before it is set) and
+  // skips update, where the real mode stays visible and round-trips unchanged.
+  useEffect(() => {
+    if (isUpdate || !formData.appGroup || canManageStagger) return;
+    setFormData(prev => (prev.mode === 'AUTO' ? prev : { ...prev, mode: 'AUTO' }));
+  }, [isUpdate, formData.appGroup, canManageStagger]);
+
   // Recalculate Min Pods (while locked) whenever the stage percentages change —
   // service select, the user editing a stage's %, adding/removing a stage, or
   // loading a cloned release's stages all land here since they all change this
@@ -539,14 +548,17 @@ const CreateRelease: React.FC = () => {
       // accepts a wider set, but we still only surface the editable subset in
       // this form. The changelog is a generated diff link and read-only, so it
       // is never sent from here.
-      const updates: Record<string, unknown> = {
-        mode: formData.mode,
-        rolloutStrategy: stages.map(s => ({
+      const updates: Record<string, unknown> = { mode: formData.mode };
+      // Only send stages the user could actually have edited: the backend gate is
+      // an equality check, so round-tripping untouched stages would 403 a restricted
+      // user the moment anything normalizes them.
+      if (canManageStagger) {
+        updates.rolloutStrategy = stages.map(s => ({
           rolloutPercent: s.rollout,
           cooloffMinutes: s.cooloff,
           podCount: s.pods,
-        })),
-      };
+        }));
+      }
       if (!isMidFlight) {
         updates.description = formData.description;
         updates.priority = parseInt(formData.priority, 10) || 0;
@@ -738,7 +750,7 @@ const CreateRelease: React.FC = () => {
               </div>
               <div>
                 <FieldLabel>Mode</FieldLabel>
-                <select name="mode" value={formData.mode} onChange={handleInputChange} className={cn(inputClass, 'cursor-pointer')}>
+                <select name="mode" value={formData.mode} onChange={handleInputChange} disabled={!canManageStagger} title={!canManageStagger ? 'Requires MANAGE_STAGGER permission' : undefined} className={canManageStagger ? cn(inputClass, 'cursor-pointer') : disabledInputClass}>
                   <option value="AUTO">AUTO</option>
                   <option value="MANUAL">MANUAL</option>
                 </select>
