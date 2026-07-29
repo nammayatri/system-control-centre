@@ -57,7 +57,6 @@ import Core.DB.Connection (withConn)
 import Core.Environment (Flow, forkFlow, getConfig, getDBEnv, logInfo)
 import Core.Logging (logErrorG)
 import Data.Aeson (Value (..), object, toJSON, (.=))
-import Core.Auth.Queries (computeEffectivePermissionsForAppGroup)
 import Data.Aeson qualified as A
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
@@ -343,24 +342,23 @@ injectStoreState cellsByApp pair@(tracker, mts) =
 createReleaseH :: AuthedPerson -> Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseH ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq{..} = do
     requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_CREATE) ap appGroup
-    perms <- computeEffectivePermissionsForAppGroup (apPersonId ap) "autopilot" appGroup
-    if mode == Just "MANUAL" && "MANAGE_STAGGER" `notElem` perms
-        then throwM $ Forbidden "Requires MANAGE_STAGGER permission for custom rollout stages"
-        else do
-        -- System-triggered (cross-cluster sync) requests already carry the real
-        -- release manager's email in the payload; only stamp the authenticated
-        -- caller's email for direct, user-initiated creates.
-        let stampedReq = req{createdBy = apEmail ap} :: K8sCreateReleaseReq
-            req' = if fromMaybe False isSystemTriggered then req else stampedReq
-        case globalId of
-            Just gid | not (T.null gid) -> do
-                existing <- findReleaseTrackerByGlobalId gid
-                case existing of
-                    Just (existingTracker, _) -> do
-                        logInfo $ "Idempotent receive: tracker already exists for global_id=" <> gid
-                        pure $ APIResponse "SUCCESS" ("Tracker already exists: " <> NT.releaseId existingTracker)
-                    Nothing -> normalCreatePath req'
-            _ -> normalCreatePath req'
+    customStagger <- usesCustomStagger appGroup service mode rolloutStrategy
+    when customStagger $
+        requireDeploymentPermission (Proxy :: Proxy 'AP_MANAGE_STAGGER) ap appGroup
+    -- System-triggered (cross-cluster sync) requests already carry the real
+    -- release manager's email in the payload; only stamp the authenticated
+    -- caller's email for direct, user-initiated creates.
+    let stampedReq = req{createdBy = apEmail ap} :: K8sCreateReleaseReq
+        req' = if fromMaybe False isSystemTriggered then req else stampedReq
+    case globalId of
+        Just gid | not (T.null gid) -> do
+            existing <- findReleaseTrackerByGlobalId gid
+            case existing of
+                Just (existingTracker, _) -> do
+                    logInfo $ "Idempotent receive: tracker already exists for global_id=" <> gid
+                    pure $ APIResponse "SUCCESS" ("Tracker already exists: " <> NT.releaseId existingTracker)
+                Nothing -> normalCreatePath req'
+        _ -> normalCreatePath req'
   where
     normalCreatePath r = createReleaseHBody mXForwardedEmail mXPomeriumJwt r
 
@@ -733,10 +731,7 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{
                 , syncXPomeriumJwt = mXPomeriumJwt
                 , changelogSlackOptIn = postChangelogSlack
                 }
-        reqMode = case mode of
-            Just "MANUAL" -> MANUAL
-            Just "manual" -> MANUAL
-            _ -> AUTO
+        reqMode = parseReqMode mode
     approveAll <- isApproveAllReleases
     now <- liftIO getCurrentTime
     let isFromSync = fromMaybe False isSystemTriggered
@@ -1140,82 +1135,83 @@ updateTrackerH ap rid req = do
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
             requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_UPDATE) ap (NT.appGroup tracker)
-            perms <- computeEffectivePermissionsForAppGroup (apPersonId ap) "autopilot" (NT.appGroup tracker)
             let strategyChanged = case req.rolloutStrategy of
-                                    Just newStr -> newStr /= NT.rolloutStrategy tracker
-                                    Nothing -> False
-            let modeChanged = case req.mode of
-                                Just newMode -> newMode == "MANUAL" && T.pack (show (NT.mode tracker)) /= "MANUAL"
-                                Nothing -> False
-            if (strategyChanged || modeChanged) && "MANAGE_STAGGER" `notElem` perms
-                then throwM $ Forbidden "Requires MANAGE_STAGGER permission to modify rollout stages"
-                else do
-                let oldStatus = NT.status tracker
-                    oldStatusText = releaseStatusToText oldStatus
-                -- Validate the update request against rollout-strategy invariants
-                -- and mid-flight immutability rules. A broken strategy shape or a
-                -- disallowed field modification is always rejected up-front, so
-                -- the downstream apply/DB path never sees inconsistent data.
-                case validateUpdateRequest tracker req of
-                    Left err -> pure $ APIResponse "ERROR" err
-                    Right () -> do
-                        let (updatedTracker, updatedTargetState) = applyUpdates tracker mTargetState req
-                        case (req :: K8sUpdateTrackerReq).status of
-                            Just newStatusText -> do
-                                let newStatus = parseReleaseStatus newStatusText
-                                if newStatus == oldStatus
-                                    then do
-                                        -- Same status: just update other fields, but guard against concurrent status change
-                                        ok <- conditionalUpdateTracker updatedTracker updatedTargetState oldStatusText
-                                        if ok
-                                            then do
-                                                insertReleaseEvent rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
-                                                notifyReleaseUpdated updatedTracker "fields updated"
-                                                pure $ APIResponse "SUCCESS" "Tracker updated"
-                                            else pure staleTrackerError
-                                    else
-                                        if not (validateStatusTransition oldStatus newStatus)
-                                            then pure $ APIResponse "ERROR" ("Invalid status transition: " <> T.pack (show oldStatus) <> " -> " <> newStatusText)
-                                            else do
-                                                ok <- conditionalUpdateTracker updatedTracker updatedTargetState oldStatusText
-                                                if ok
-                                                    then do
-                                                        -- Production parity: NOTIFICATION / STATUS_UPDATED
-                                                        logStatusUpdated updatedTracker ("Tracker marked as " <> newStatusText)
-                                                        -- Send status-specific Slack notifications
-                                                        case newStatus of
-                                                            PAUSED -> notifyReleasePaused updatedTracker
-                                                            INPROGRESS -> notifyReleaseResumed updatedTracker
-                                                            ABORTING -> notifyReleaseAborted updatedTracker
-                                                            COMPLETED -> notifyReleaseCompleted updatedTracker updatedTargetState
-                                                            _ -> notifyReleaseUpdated updatedTracker ("status changed to " <> newStatusText)
-                                                        -- Bug fix #3 (round 4): re-attach the workflow on PAUSED→INPROGRESS.
-                                                        -- Backend restart while paused leaves the in-memory worker dead.
-                                                        -- The user-facing resume must re-fork dispatchWorkflow so the
-                                                        -- rollout continues. Race-safety (round 7 audit B6 verified):
-                                                        -- the conditionalUpdateTracker CAS above is the gate — only the
-                                                        -- single caller that wins the atomic PAUSED→INPROGRESS UPDATE
-                                                        -- reaches this fork. Rapid 5x resume calls all see PAUSED, all
-                                                        -- attempt the CAS, exactly one transitions, the other 4 get
-                                                        -- staleTrackerError. So no fork-storm is possible here.
-                                                        when (oldStatus == PAUSED && newStatus == INPROGRESS) $
-                                                            void $
-                                                                forkFlow $ do
-                                                                    r <- dispatchWorkflow updatedTracker updatedTargetState
-                                                                    case r of
-                                                                        Right _ -> logInfo $ "[resume] workflow re-attached for " <> rid
-                                                                        Left e -> logInfo $ "[resume] workflow exited for " <> rid <> ": " <> T.pack (show e)
-                                                        pure $ APIResponse "SUCCESS" "Tracker updated"
-                                                    else pure staleTrackerError
-                            Nothing -> do
-                                -- No status change requested, but guard against concurrent status change
-                                ok <- conditionalUpdateTracker updatedTracker updatedTargetState oldStatusText
-                                if ok
-                                    then do
-                                        insertReleaseEvent rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
-                                        notifyReleaseUpdated updatedTracker "status/fields updated"
-                                        pure $ APIResponse "SUCCESS" "Tracker updated"
-                                    else pure staleTrackerError
+                    Just newStr -> newStr /= NT.rolloutStrategy tracker
+                    Nothing -> False
+                -- Compare the mode ADT, not its derived Show: an authorization
+                -- decision must not hinge on a constructor name staying in step
+                -- with the wire format.
+                modeChanged = case req.mode of
+                    Just "MANUAL" -> NT.mode tracker /= MANUAL
+                    _ -> False
+            when (strategyChanged || modeChanged) $
+                requireDeploymentPermission (Proxy :: Proxy 'AP_MANAGE_STAGGER) ap (NT.appGroup tracker)
+            let oldStatus = NT.status tracker
+                oldStatusText = releaseStatusToText oldStatus
+            -- Validate the update request against rollout-strategy invariants
+            -- and mid-flight immutability rules. A broken strategy shape or a
+            -- disallowed field modification is always rejected up-front, so
+            -- the downstream apply/DB path never sees inconsistent data.
+            case validateUpdateRequest tracker req of
+                Left err -> pure $ APIResponse "ERROR" err
+                Right () -> do
+                    let (updatedTracker, updatedTargetState) = applyUpdates tracker mTargetState req
+                    case (req :: K8sUpdateTrackerReq).status of
+                        Just newStatusText -> do
+                            let newStatus = parseReleaseStatus newStatusText
+                            if newStatus == oldStatus
+                                then do
+                                    -- Same status: just update other fields, but guard against concurrent status change
+                                    ok <- conditionalUpdateTracker updatedTracker updatedTargetState oldStatusText
+                                    if ok
+                                        then do
+                                            insertReleaseEvent rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
+                                            notifyReleaseUpdated updatedTracker "fields updated"
+                                            pure $ APIResponse "SUCCESS" "Tracker updated"
+                                        else pure staleTrackerError
+                                else
+                                    if not (validateStatusTransition oldStatus newStatus)
+                                        then pure $ APIResponse "ERROR" ("Invalid status transition: " <> T.pack (show oldStatus) <> " -> " <> newStatusText)
+                                        else do
+                                            ok <- conditionalUpdateTracker updatedTracker updatedTargetState oldStatusText
+                                            if ok
+                                                then do
+                                                    -- Production parity: NOTIFICATION / STATUS_UPDATED
+                                                    logStatusUpdated updatedTracker ("Tracker marked as " <> newStatusText)
+                                                    -- Send status-specific Slack notifications
+                                                    case newStatus of
+                                                        PAUSED -> notifyReleasePaused updatedTracker
+                                                        INPROGRESS -> notifyReleaseResumed updatedTracker
+                                                        ABORTING -> notifyReleaseAborted updatedTracker
+                                                        COMPLETED -> notifyReleaseCompleted updatedTracker updatedTargetState
+                                                        _ -> notifyReleaseUpdated updatedTracker ("status changed to " <> newStatusText)
+                                                    -- Bug fix #3 (round 4): re-attach the workflow on PAUSED→INPROGRESS.
+                                                    -- Backend restart while paused leaves the in-memory worker dead.
+                                                    -- The user-facing resume must re-fork dispatchWorkflow so the
+                                                    -- rollout continues. Race-safety (round 7 audit B6 verified):
+                                                    -- the conditionalUpdateTracker CAS above is the gate — only the
+                                                    -- single caller that wins the atomic PAUSED→INPROGRESS UPDATE
+                                                    -- reaches this fork. Rapid 5x resume calls all see PAUSED, all
+                                                    -- attempt the CAS, exactly one transitions, the other 4 get
+                                                    -- staleTrackerError. So no fork-storm is possible here.
+                                                    when (oldStatus == PAUSED && newStatus == INPROGRESS) $
+                                                        void $
+                                                            forkFlow $ do
+                                                                r <- dispatchWorkflow updatedTracker updatedTargetState
+                                                                case r of
+                                                                    Right _ -> logInfo $ "[resume] workflow re-attached for " <> rid
+                                                                    Left e -> logInfo $ "[resume] workflow exited for " <> rid <> ": " <> T.pack (show e)
+                                                    pure $ APIResponse "SUCCESS" "Tracker updated"
+                                                else pure staleTrackerError
+                        Nothing -> do
+                            -- No status change requested, but guard against concurrent status change
+                            ok <- conditionalUpdateTracker updatedTracker updatedTargetState oldStatusText
+                            if ok
+                                then do
+                                    insertReleaseEvent rid "BUSINESS" "TRACKER_UPDATED" (toJSON updatedTracker)
+                                    notifyReleaseUpdated updatedTracker "status/fields updated"
+                                    pure $ APIResponse "SUCCESS" "Tracker updated"
+                                else pure staleTrackerError
 
 {- | Validate an incoming 'K8sUpdateTrackerReq' against two independent sets
 of rules, returning @Left reason@ on the first failure.
@@ -1361,6 +1357,52 @@ validateOptionalStrategyText label (Just t)
             Right steps -> case validateStrategyShape steps of
                 Left err -> Left (label <> " strategy invalid: " <> err)
                 Right () -> Right ()
+
+{- | The single place that turns a request's @mode@ string into the 'Mode'
+ADT. The wire accepts both @"MANUAL"@ and @"manual"@, so anything deciding
+whether a request is manual -- including the 'AP_MANAGE_STAGGER' gate -- must
+go through here rather than comparing the raw text, or it drifts from the
+parser and a lowercase payload walks past it.
+-}
+parseReqMode :: Maybe Text -> Mode
+parseReqMode (Just "MANUAL") = MANUAL
+parseReqMode (Just "manual") = MANUAL
+parseReqMode _ = AUTO
+
+{- | Does a create request configure a rollout stagger of its own, rather than
+just replaying the service's saved default? Gates 'AP_MANAGE_STAGGER'.
+
+Two ways to configure one: choose MANUAL mode, or send stages that differ from
+the service's configured strategy. The second check is the one that matters --
+on create the request's @rolloutStrategy@ is stored verbatim after shape
+validation, with no standard-strategy substitution for AUTO, so gating on mode
+alone would let @{"mode": "AUTO", "rollout_strategy": [...]}@ through.
+
+Presence of the field cannot be the signal: the create form always posts a
+@rollout_strategy@ array, pre-filled from the service config, so every ordinary
+AUTO create would be rejected.
+
+Only percentages and cooloffs are compared. Pod counts are recalculated
+client-side from live HPA replicas on each submit, so they routinely differ
+from the stored config without the user having touched a stage.
+
+Fails open when the service has no configured strategy, or when the stored one
+is a legacy shape 'decodeStrategyText' cannot read: with no baseline there is
+nothing to call a deviation from. MANUAL mode is still gated either way.
+-}
+usesCustomStagger :: Text -> Text -> Maybe Text -> [RolloutStep] -> Flow Bool
+usesCustomStagger appGroup' service' mMode steps
+    | parseReqMode mMode == MANUAL = pure True
+    | null steps = pure False
+    | otherwise = do
+        mCfg <- findServiceByProductAndName appGroup' service'
+        pure $ case mCfg >>= S.dcRolloutStrategy of
+            Nothing -> False
+            Just raw -> case decodeStrategyText raw of
+                Left _ -> False
+                Right baseline -> stageShape steps /= stageShape baseline
+  where
+    stageShape = map (\s -> (rolloutPercent s, cooloffMinutes s))
 
 {- | Identify the first mid-flight-forbidden field set in the request, if any.
 During INPROGRESS/PAUSED/etc only @status@, @rolloutStrategy@, @mode@, and
