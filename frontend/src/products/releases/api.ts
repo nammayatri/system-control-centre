@@ -263,6 +263,7 @@ export interface ProductConfig {
     product_type: string;
     sync_cluster?: string | null;
     need_infra_approval?: number;
+    ai_changelog_enabled?: number;
     vs_locked_by?: string | null;
     slack_channel?: string | null;
 }
@@ -568,6 +569,7 @@ export async function fetchProductConfigs(): Promise<ProductConfig[]> {
         repo_name: p.repoName || '',
         sync_cluster: p.syncCluster || p.sync_cluster || null,
         need_infra_approval: p.needInfraApproval ? 1 : 0,
+        ai_changelog_enabled: p.aiChangelogEnabled ? 1 : 0,
         slack_channel: p.slackChannel ?? p.slack_channel ?? null,
         vs_locked_by: p.vsLockedBy || null,
     }));
@@ -951,6 +953,7 @@ export async function createProductConfig(payload: Partial<ProductConfig>): Prom
         repoName: payload.repo_name,
         syncCluster: payload.sync_cluster,
         needInfraApproval: payload.need_infra_approval ? true : false,
+        aiChangelogEnabled: payload.ai_changelog_enabled ? true : false,
         slackChannel: payload.slack_channel || null,
     };
     const { data } = await apiClient.post('/products/config', body);
@@ -970,6 +973,7 @@ export async function updateProductConfig(id: number, payload: Partial<ProductCo
         repoName: payload.repo_name,
         syncCluster: payload.sync_cluster,
         needInfraApproval: payload.need_infra_approval ? true : false,
+        aiChangelogEnabled: payload.ai_changelog_enabled ? true : false,
         slackChannel: payload.slack_channel || null,
     };
     const { data } = await apiClient.put(`/products/config/${id}`, body);

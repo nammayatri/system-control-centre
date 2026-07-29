@@ -31,6 +31,7 @@ data DeploymentConfigT f = DeploymentConfigT
     , dcAppGroupType :: Columnar f (Maybe Text)
     , dcSyncCluster :: Columnar f (Maybe Text)
     , dcNeedInfraApproval :: Columnar f (Maybe Bool)
+    , dcAiChangelogEnabled :: Columnar f (Maybe Bool)
     , dcVsLockedBy :: Columnar f (Maybe Text)
     , dcVsLockTimestamp :: Columnar f (Maybe UTCTime)
     , -- Service-level fields (service IS NOT NULL)
@@ -167,6 +168,7 @@ autopilotDb =
                             , dcAppGroupType = fieldNamed "product_type"
                             , dcSyncCluster = fieldNamed "sync_cluster"
                             , dcNeedInfraApproval = fieldNamed "need_infra_approval"
+                            , dcAiChangelogEnabled = fieldNamed "ai_changelog_enabled"
                             , dcVsLockedBy = fieldNamed "vs_locked_by"
                             , dcVsLockTimestamp = fieldNamed "vs_lock_timestamp"
                             , dcServiceHost = fieldNamed "service_host"

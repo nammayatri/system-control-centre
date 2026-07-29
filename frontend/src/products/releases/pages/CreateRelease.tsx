@@ -146,8 +146,9 @@ const CreateRelease: React.FC = () => {
     { rollout: 100, cooloff: 10, pods: 2 },
   ]);
   const [isReleaseSync, setIsReleaseSync] = useState(false);
-  // Opt-in (default OFF): post AI changelog notes to the release's Slack thread
-  // once it completes. Backend acts on it only for BackendService releases.
+  // Opt-in: post AI changelog notes to the release's Slack thread once it completes.
+  // Seeded per app group from deployment config (ai_changelog_enabled) by the effect
+  // below; off until a group is picked. Backend acts on it only for BackendService.
   const [postChangelogSlack, setPostChangelogSlack] = useState(false);
   const [isSecondaryEnvSwitch, setIsSecondaryEnvSwitch] = useState(false);
   const [secondaryEnvData, setSecondaryEnvData] = useState('');
@@ -316,6 +317,21 @@ const CreateRelease: React.FC = () => {
       setSyncCluster(config?.sync_cluster || '');
     } else setSyncCluster('');
   }, [formData.appGroup, productConfigs]);
+
+  // Seed the AI changelog toggle from the app group's deployment config; the user may
+  // flip it for this release without affecting the config. Ref-guarded so a background
+  // refetch of productConfigs (staleTime 300s) can't clobber a manual choice.
+  const changelogSeededFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (isUpdate) return;                     // toggle isn't rendered in update mode
+    const group = formData.appGroup;
+    if (!group) { changelogSeededFor.current = null; setPostChangelogSlack(false); return; }
+    if (changelogSeededFor.current === group) return;
+    const config = productConfigs.find((c: ProductConfig) => c.appGroup === group);
+    if (!config) return;                      // configs not loaded yet — seed on a later pass
+    changelogSeededFor.current = group;
+    setPostChangelogSlack(!!config.ai_changelog_enabled);
+  }, [formData.appGroup, productConfigs, isUpdate]);
 
   // Load rollout stages from service config on service select (skip clone/update — those use existing stages).
   // Pod counts are auto-recalculated separately, below, whenever the loaded stages' percentages settle.

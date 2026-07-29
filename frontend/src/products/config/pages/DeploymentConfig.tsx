@@ -29,6 +29,7 @@ interface GroupWithServices {
 const EMPTY_GROUP_FORM: Partial<ProductConfig> = {
   appGroup: '', cluster: '', namespace: '', vs_name: '',
   product_acronym: '', product_type: 'BackendService', sync_cluster: '', need_infra_approval: 0,
+  ai_changelog_enabled: 0,
   repo_name: '',
 };
 
@@ -281,6 +282,7 @@ const DeploymentConfig: React.FC = () => {
                   <th className="py-3 px-4">Sync Cluster</th>
                   <th className="py-3 px-4">Slack</th>
                   <th className="py-3 px-4">Infra Approval</th>
+                  <th className="py-3 px-4">AI Changelog</th>
                   <th className="py-3 px-4">VS Locked</th>
                   <th className="py-3 px-4 w-24 text-center">Actions</th>
                 </tr>
@@ -335,6 +337,11 @@ const DeploymentConfig: React.FC = () => {
                           </Badge>
                         </td>
                         <td className="py-3 px-4">
+                          <Badge variant={group.ai_changelog_enabled ? 'blue' : 'default'} size="sm">
+                            {group.ai_changelog_enabled ? 'Yes' : 'No'}
+                          </Badge>
+                        </td>
+                        <td className="py-3 px-4">
                           {group.vs_locked_by ? (
                             <Badge variant="danger" size="sm">{group.vs_locked_by}</Badge>
                           ) : (
@@ -369,7 +376,7 @@ const DeploymentConfig: React.FC = () => {
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Type</td>
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Rollout Strategy</td>
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Revert Strategy</td>
-                          <td className="py-2 px-4" colSpan={4}></td>
+                          <td className="py-2 px-4" colSpan={6}></td>
                           <td className="py-2 px-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider text-center">Actions</td>
                         </tr>
                       )}
@@ -403,7 +410,7 @@ const DeploymentConfig: React.FC = () => {
                           <td className="py-2.5 px-4 font-mono text-[11px] text-zinc-500 max-w-[180px] truncate" title={svc.revert_strategy}>
                             {truncateJson(svc.revert_strategy || '')}
                           </td>
-                          <td className="py-2.5 px-4" colSpan={4}></td>
+                          <td className="py-2.5 px-4" colSpan={6}></td>
                           <td className="py-2.5 px-4 text-center">
                             <div className="flex items-center justify-center gap-1">
                               <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={group.appGroup}>
@@ -428,7 +435,7 @@ const DeploymentConfig: React.FC = () => {
                       {isExpanded && (
                         <tr className="border-b border-zinc-100 bg-zinc-50/10">
                           <td className="py-2 px-4"></td>
-                          <td className="py-2 px-4" colSpan={11}>
+                          <td className="py-2 px-4" colSpan={12}>
                             <div className="flex items-center">
                               <div className="border-l-2 border-zinc-200 h-5 mr-3"></div>
                               <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={group.appGroup}>
@@ -501,6 +508,7 @@ const DeploymentConfig: React.FC = () => {
                     <div className="flex items-center gap-2 mt-2 ml-6 flex-wrap">
                       <Badge variant={typeBadgeVariant(group.product_type)} size="sm">{group.product_type || '-'}</Badge>
                       {group.need_infra_approval ? <Badge variant="warning" size="sm">Infra Approval</Badge> : null}
+                      {group.ai_changelog_enabled ? <Badge variant="blue" size="sm">AI Changelog</Badge> : null}
                       {group.vs_locked_by ? <Badge variant="danger" size="sm">Locked: {group.vs_locked_by}</Badge> : null}
                     </div>
                   </div>
@@ -665,15 +673,29 @@ const DeploymentConfig: React.FC = () => {
                   <p className="text-[10px] text-zinc-400 mt-1">owner/repo — used to prefill release changelogs with a GitHub diff link</p>
                 </div>
               </div>
-              <label className="flex items-center gap-2.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={!!groupForm.need_infra_approval}
-                  onChange={e => setGroupForm(prev => ({ ...prev, need_infra_approval: e.target.checked ? 1 : 0 }))}
-                  className="rounded border-zinc-300 accent-zinc-900"
-                />
-                <span className="text-sm text-zinc-700">Requires Infra Approval</span>
-              </label>
+              <div className="flex flex-col gap-2.5">
+                <label className="flex items-center gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!groupForm.need_infra_approval}
+                    onChange={e => setGroupForm(prev => ({ ...prev, need_infra_approval: e.target.checked ? 1 : 0 }))}
+                    className="rounded border-zinc-300 accent-zinc-900"
+                  />
+                  <span className="text-sm text-zinc-700">Requires Infra Approval</span>
+                </label>
+                <div>
+                  <label className="flex items-center gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!!groupForm.ai_changelog_enabled}
+                      onChange={e => setGroupForm(prev => ({ ...prev, ai_changelog_enabled: e.target.checked ? 1 : 0 }))}
+                      className="rounded border-zinc-300 accent-zinc-900"
+                    />
+                    <span className="text-sm text-zinc-700">AI Changelog to Slack by default</span>
+                  </label>
+                  <p className="text-[10px] text-zinc-400 mt-1">Pre-selects the AI changelog toggle on new releases for this app group. Can still be turned off per release.</p>
+                </div>
+              </div>
             </div>
           </DialogBody>
           <DialogFooter>
