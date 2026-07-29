@@ -201,12 +201,17 @@ getRunningSchedulerVersion cfg ns svcHost = do
     lookupTxt key obj = case KM.lookup (K.fromText key) obj of Just (String t) -> Just t; _ -> Nothing
     maxByReady a b = if snd a < snd b then b else a
 
-{- | Fetch envs from the first container of the currently running
-deployment (resolved from the VirtualService's active subset).
--}
-getDeploymentEnvs :: Config -> Text -> Text -> Text -> IO (Either K8sError Value)
-getDeploymentEnvs cfg ns vsName svcHost = do
-    versionRes <- getRunningVersionFromVS cfg ns vsName svcHost
+getDeploymentEnvs :: Config -> Text -> Text -> Text -> Bool -> IO (Either K8sError Value)
+getDeploymentEnvs cfg ns vsName svcHost isScheduler = do
+    versionRes <-
+        if isScheduler
+            then do
+                r <- getRunningSchedulerVersion cfg ns svcHost
+                pure $ case r of
+                    Left err -> Left (K8sError err)
+                    Right Nothing -> Left (K8sError ("No running scheduler deployment found for service " <> svcHost))
+                    Right (Just v) -> Right v
+            else getRunningVersionFromVS cfg ns vsName svcHost
     case versionRes of
         Left err -> pure (Left err)
         Right runningVersion -> do

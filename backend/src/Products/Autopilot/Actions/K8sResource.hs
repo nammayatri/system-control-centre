@@ -191,7 +191,8 @@ fetchEnvsH _ap mProduct _mEnv mService = do
                     let svcHost = case svc of
                             Just s -> fromMaybe service' (getServiceHost s)
                             Nothing -> service'
-                    envResult <- liftIO $ getDeploymentEnvs cfg (getProductNamespace pCfg) (getProductVsName pCfg) svcHost
+                        isScheduler = either (const False) (== "BackendScheduler") (normalizeProductType (fromMaybe "" (S.dcAppGroupType pCfg)))
+                    envResult <- liftIO $ getDeploymentEnvs cfg (getProductNamespace pCfg) (getProductVsName pCfg) svcHost isScheduler
                     case envResult of
                         Left _ -> pure $ A.toJSON ([] :: [Value])
                         Right envJson -> pure envJson
