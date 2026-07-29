@@ -158,8 +158,8 @@ export async function releaseOtaPush(pushId: string, body: OtaReleaseReq): Promi
   return data;
 }
 
-export async function abandonOtaPush(pushId: string): Promise<OtaPushRow> {
-  const { data } = await apiClient.post(`/mobile/ota/pushes/${encodeURIComponent(pushId)}/abandon`);
+export async function cancelOtaPush(pushId: string): Promise<OtaPushRow> {
+  const { data } = await apiClient.post(`/mobile/ota/pushes/${encodeURIComponent(pushId)}/cancel`);
   return data;
 }
 

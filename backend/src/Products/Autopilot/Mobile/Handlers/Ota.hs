@@ -23,7 +23,7 @@ module Products.Autopilot.Mobile.Handlers.Ota (
     dispatchOtaH,
     releaseOtaH,
     releaseOtaPackageH,
-    abandonOtaPushH,
+    cancelOtaPushH,
     otaPushJobsH,
     attachPackageH,
     resolveOtaProvenanceH,
@@ -76,6 +76,7 @@ import Products.Autopilot.Mobile.Github (
     jsName,
     jsStartedAt,
     jsStatus,
+    cancelRun,
     listJobs,
     listTagsWithShas,
     listWorkflowRuns,
@@ -830,15 +831,35 @@ releaseOtaPackageH ap gid OtaPackageReleaseReq{airborneAppRef = reqRef, packageV
     orElseM a b = maybe b Just a
 
 
--- ─── POST /mobile/ota/pushes/:pushId/abandon ───────────────────────
+-- ─── POST /mobile/ota/pushes/:pushId/cancel ────────────────────────
 
-abandonOtaPushH :: AuthedPerson -> Text -> Flow OtaPushResp
-abandonOtaPushH ap pid = do
+{- | Cancel a stuck\/unwanted push: best-effort cancels the bound GitHub run,
+then marks the row FAILED — which releases the per-group dispatch lock. A
+run-cancel failure (run already finished, creds unavailable) must not keep
+the queue locked, so it's logged and ignored.
+-}
+cancelOtaPushH :: AuthedPerson -> Text -> Flow OtaPushResp
+cancelOtaPushH ap pid = do
     p <- findOtaPushById pid >>= maybe (throwM (NotFound "OTA push not found")) pure
     requireAppPerm (Proxy @'AP_MOBILE_DISPATCH) ap (opAppName p) (opPlatform p)
     when (opStatus p `elem` (["BUNDLE_PUSHED", "FAILED"] :: [Text])) $
         throwM (BadRequest "push is already terminal")
-    markOtaPushStatus pid "FAILED" (Just ("abandoned by " <> apEmail ap))
+    forM_ (opExternalRunId p) $ \runId ->
+        ( do
+            catalog <- listAppCatalog
+            let ownerRepo =
+                    maybe "nammayatri/ny-react-native" acGithubRepo $
+                        find (\a -> acName a == opAppName p && acPlatform a == opPlatform p) catalog
+                (owner, repo) = splitRepo ownerRepo
+            creds <- loadGhCreds
+            res <- cancelRun creds owner repo (T.pack (show runId))
+            case res of
+                Left err -> logWarning ("[OTA] cancelRun failed (ignored): " <> err)
+                Right () -> logInfo ("[OTA] cancelled CI run " <> T.pack (show runId) <> " for push " <> pid)
+        )
+            `catch` \(e :: SomeException) ->
+                logWarning ("[OTA] cancelRun error (ignored): " <> T.pack (show e))
+    markOtaPushStatus pid "FAILED" (Just ("cancelled by " <> apEmail ap))
     p' <- findOtaPushById pid >>= maybe (throwM (NotFound "OTA push not found")) pure
     pure (pushToResp Nothing p')
 

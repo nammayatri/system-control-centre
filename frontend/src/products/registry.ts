@@ -113,6 +113,7 @@ import GroupsHome, { GroupsHomeRedirect, MobileReleaseHistory } from './releases
 import ReleaseGroupDetail from './releases/pages/mobile/ReleaseGroupDetail';
 import MobileAppsAdmin from './releases/pages/mobile/MobileAppsAdmin';
 import MobileRevert from './releases/pages/mobile/MobileRevert';
+import MobileReleaseSummary from './releases/pages/mobile/summary/MobileReleaseSummary';
 import StoreMonitor from './releases/pages/mobile/StoreMonitor';
 import LiveReleases from './releases/pages/LiveReleases';
 
@@ -217,7 +218,7 @@ const mobileProduct: ProductDefinition = {
     { path: 'releases',            component: GroupsHome },
     { path: 'releases/history',    component: MobileReleaseHistory },
     { path: 'releases/new',        component: CreateMobileRelease, permission: 'RELEASE_CREATE' },
-    { path: 'releases/:id',        component: ReleaseSummary },
+    { path: 'releases/:id',        component: MobileReleaseSummary },
     { path: 'releases/:id/revert', component: MobileRevert,        permission: 'RELEASE_REVERT' },
     { path: 'releases/live',       component: LiveReleases },
     { path: 'releases/monitor',    component: StoreMonitor },

@@ -1,18 +1,27 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, ChevronDown, ChevronLeft, ChevronRight, Plus, Search } from 'lucide-react';
+import { ArrowLeft, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
+import {
+  AndroidLogoIcon,
+  AppleLogoIcon,
+  ArrowsClockwiseIcon,
+  ArrowUpRightIcon,
+  MagnifyingGlassIcon,
+  PlusIcon,
+  XIcon,
+} from '@phosphor-icons/react';
 import { useMobileApps, useMobileGroups, useReleases } from '../../hooks';
 import type { APRelease, MobileGroupListItem, MobileGroupMemberLite, MobileGroupSummary } from '../../api';
 import { BrandLogo } from '../../components/BrandLogo';
 import { GroupStageChip, MEMBER_PHASE_CHIP } from '../../components/GroupStageChip';
 import { MobileBuildKpis } from '../../components/MobileBuildKpis';
 import { PlatformBadge } from '../../components/PlatformBadge';
-import { StoreSyncBanner } from '../../components/StoreSync';
+import { StoreSyncBanner, useStoreSync } from '../../components/StoreSync';
 import { PermissionGate } from '../../../../core/auth/PermissionGate';
 import { Button } from '../../../../shared/ui/button';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
-import { formatBuildCode, inFlightPhaseLabel } from '../../utils';
+import { formatBuildCode, inFlightPhaseLabel, relativeAge } from '../../utils';
 import { cn, formatDate } from '../../../../lib/utils';
 import ListRelease, { MOBILE_STATUS_OPTIONS, TIME_RANGE_OPTIONS, getDateRange } from '../ListRelease';
 import { AppSlotView } from './AppSlotView';
@@ -68,12 +77,46 @@ function MemberPhaseChip({ member }: { member: MobileGroupMemberLite }) {
     // page reads as one family.
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 text-[10px] sm:text-[11px] font-medium uppercase tracking-wide border rounded-md px-2 py-0.5',
+        'inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide border rounded-full px-2 py-0.5',
         chip.cls,
       )}
     >
-      <span className={cn('w-1.5 h-1.5 rounded-full bg-current opacity-70', pulsing && 'status-pulse')} />
+      <span className={cn('w-1.5 h-1.5 rounded-full bg-current opacity-70', pulsing && 'animate-pulse motion-reduce:animate-none')} />
       {chip.label}
+    </span>
+  );
+}
+
+
+
+// The one obvious next verb for a member — violet actionable, muted waiting.
+function memberNextStep(m: MobileGroupMemberLite): { label: string; muted?: boolean } | null {
+  if (m.status === 'CREATED') return { label: m.approved ? 'Dispatch' : 'Approve' };
+  switch (m.phase) {
+    case 'internal_held':
+      return { label: 'Promote' };
+    case 'approved':
+      return { label: 'Release' };
+    case 'halted':
+      return { label: 'Resume' };
+    case 'in_review':
+      return m.platform === 'ios' ? { label: 'Waiting on review', muted: true } : { label: 'Mark approved' };
+    case 'building':
+      return { label: 'Building…', muted: true };
+    case 'rolling_out':
+      return { label: 'Ramp' };
+    default:
+      return null;
+  }
+}
+
+// "synced 2m ago" freshness whisper in the header (store_status cache truth).
+function SyncedAgo() {
+  const { available, hasApps, lastSyncedAt } = useStoreSync({ auto: false });
+  if (!available || !hasApps || !lastSyncedAt) return null;
+  return (
+    <span className="hidden sm:flex items-center gap-1.5 text-xs text-zinc-400">
+      <ArrowsClockwiseIcon size={13} aria-hidden="true" /> synced {relativeAge(lastSyncedAt)}
     </span>
   );
 }
@@ -229,6 +272,18 @@ export default function GroupsHome() {
     setParams(next);
   };
   const [search, setSearch] = useState('');
+  const searchRef = useRef<HTMLInputElement>(null);
+  // ⌘K / Ctrl+K focuses the search box.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
   const [appFilter, setAppFilter] = useState('');
   const [surfaceFilter, setSurfaceFilter] = useState('');
   const [platformFilter, setPlatformFilter] = useState('');
@@ -452,16 +507,24 @@ export default function GroupsHome() {
     <div className="flex flex-col flex-1 w-full space-y-4">
       <header className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-lg sm:text-xl font-semibold text-zinc-900">Releases</h1>
-          <p className="text-xs text-zinc-500 mt-1">
-            One row per release group — open a group to approve, dispatch and promote its apps.
+          <h1 className="text-lg sm:text-xl font-bold tracking-tight text-zinc-900">Releases</h1>
+          <p className="text-xs text-zinc-500 mt-1.5">
+            {showGroups
+              ? 'One row per release group — open a group to approve, dispatch and promote its apps.'
+              : 'One row per app — expand for its store slots, or switch to Groups to work a release wave.'}
           </p>
         </div>
-        <PermissionGate product="autopilot" permission="RELEASE_CREATE">
-          <Button onClick={() => navigate('/mobile/releases/new')}>
-            <Plus className="w-4 h-4" /> Create Release
-          </Button>
-        </PermissionGate>
+        <span className="flex items-center gap-3">
+          <SyncedAgo />
+          <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+          <button
+            onClick={() => navigate('/mobile/releases/new')}
+            className="bg-violet-600 text-white px-4 py-2 text-sm font-bold rounded-lg shadow-sm shadow-violet-200 hover:bg-violet-700 transition-all flex items-center gap-1.5 cursor-pointer active:scale-[0.98]"
+          >
+            <PlusIcon size={14} weight="bold" aria-hidden="true" /> Create Release
+          </button>
+          </PermissionGate>
+        </span>
       </header>
 
       <StoreSyncBanner />
@@ -479,20 +542,24 @@ export default function GroupsHome() {
 
       {/* ONE fixed filter toolbar for both views — toggling history swaps only
           the table below; every filter here drives whichever table is shown. */}
-      <div className="bg-white rounded-xl border border-zinc-200 px-4 py-3 sm:px-6 flex items-center gap-2 flex-wrap">
+      <div className="card-surface px-3 py-2.5 flex items-center gap-2 flex-nowrap overflow-x-auto">
         <div className="relative">
-          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
+          <MagnifyingGlassIcon size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" aria-hidden="true" />
           <input
+            ref={searchRef}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search releases / apps / versions…"
-            className="pl-9 pr-3 py-2 text-sm border border-zinc-200 rounded-lg w-64 focus:outline-none focus:ring-2 focus:ring-zinc-300"
+            className="pl-9 pr-12 py-1.5 text-sm border border-zinc-200 rounded-lg w-44 min-w-36 xl:w-56 bg-white focus:outline-none focus:ring-2 focus:ring-violet-200 focus:border-violet-400 transition-all"
           />
+          <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[9px] font-mono text-zinc-400 bg-zinc-100 border border-zinc-200 rounded px-1 py-0.5 pointer-events-none">
+            ⌘K
+          </span>
         </div>
         <select
           value={appFilter}
           onChange={(e) => setAppFilter(e.target.value)}
-          className="text-sm border border-zinc-200 rounded-lg px-3 py-2 bg-white text-zinc-700"
+          className="text-sm border border-zinc-200 rounded-lg px-2.5 py-1.5 bg-white text-zinc-700 shrink-0 cursor-pointer"
         >
           <option value="">All Apps</option>
           {appNames.map((a) => (
@@ -501,28 +568,55 @@ export default function GroupsHome() {
             </option>
           ))}
         </select>
-        <select
-          value={surfaceFilter}
-          onChange={(e) => setSurfaceFilter(e.target.value)}
-          className="text-sm border border-zinc-200 rounded-lg px-3 py-2 bg-white text-zinc-700"
-        >
-          <option value="">All Surfaces</option>
-          <option value="customer">Consumer</option>
-          <option value="driver">Provider</option>
-        </select>
-        <select
-          value={platformFilter}
-          onChange={(e) => setPlatformFilter(e.target.value)}
-          className="text-sm border border-zinc-200 rounded-lg px-3 py-2 bg-white text-zinc-700"
-        >
-          <option value="">All Platforms</option>
-          <option value="android">Android</option>
-          <option value="ios">iOS</option>
-        </select>
+        <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 inline-flex shrink-0" role="tablist" aria-label="Surface filter">
+          {[
+            { v: '', label: 'All' },
+            { v: 'customer', label: 'Consumer' },
+            { v: 'driver', label: 'Provider' },
+          ].map((o) => (
+            <button
+              key={o.v}
+              role="tab"
+              aria-selected={surfaceFilter === o.v}
+              onClick={() => setSurfaceFilter(o.v)}
+              className={cn(
+                'px-2 py-1 text-xs rounded-md cursor-pointer transition-colors whitespace-nowrap',
+                surfaceFilter === o.v
+                  ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200 font-bold'
+                  : 'text-zinc-500 hover:text-zinc-800 font-medium',
+              )}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+        <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 inline-flex shrink-0" role="tablist" aria-label="Platform filter">
+          {[
+            { v: '', label: 'All', icon: null },
+            { v: 'android', label: 'Android', icon: <AndroidLogoIcon size={13} weight="fill" className="text-emerald-600" aria-hidden="true" /> },
+            { v: 'ios', label: 'iOS', icon: <AppleLogoIcon size={13} weight="fill" className="text-zinc-700" aria-hidden="true" /> },
+          ].map((o) => (
+            <button
+              key={o.v}
+              role="tab"
+              aria-selected={platformFilter === o.v}
+              onClick={() => setPlatformFilter(o.v)}
+              className={cn(
+                'px-2 py-1 text-xs rounded-md cursor-pointer transition-colors flex items-center gap-1 whitespace-nowrap',
+                platformFilter === o.v
+                  ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200 font-bold'
+                  : 'text-zinc-500 hover:text-zinc-800 font-medium',
+              )}
+            >
+              {o.icon}
+              {o.label}
+            </button>
+          ))}
+        </div>
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="text-sm border border-zinc-200 rounded-lg px-3 py-2 bg-white text-zinc-700"
+          className="text-sm border border-zinc-200 rounded-lg px-2.5 py-1.5 bg-white text-zinc-700 shrink-0 cursor-pointer"
         >
           <option value="">All Statuses</option>
           {MOBILE_STATUS_OPTIONS.map((o) => (
@@ -534,7 +628,7 @@ export default function GroupsHome() {
         <select
           value={timeRange}
           onChange={(e) => setTimeRange(e.target.value as TimeRange | 'all_time')}
-          className="text-sm border border-zinc-200 rounded-lg px-3 py-2 bg-white text-zinc-700"
+          className="text-sm border border-zinc-200 rounded-lg px-2.5 py-1.5 bg-white text-zinc-700 shrink-0 cursor-pointer"
         >
           <option value="all_time">All time</option>
           {TIME_RANGE_OPTIONS.filter((o) => o.value !== 'custom').map((o) => (
@@ -543,7 +637,7 @@ export default function GroupsHome() {
             </option>
           ))}
         </select>
-        <span className="ml-auto inline-flex items-center gap-4">
+        <span className="ml-auto inline-flex items-center gap-3 shrink-0 pl-2">
           {!showHistory && (
             <div
               className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-0.5"
@@ -555,10 +649,10 @@ export default function GroupsHome() {
                 aria-selected={!showGroups}
                 onClick={() => setShowGroups(false)}
                 className={cn(
-                  'px-2.5 py-1 text-xs rounded-md cursor-pointer transition-colors',
+                  'px-3 py-1 text-xs rounded-md cursor-pointer transition-colors',
                   !showGroups
-                    ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200'
-                    : 'text-zinc-500 hover:text-zinc-800',
+                    ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200 font-bold'
+                    : 'text-zinc-500 hover:text-zinc-800 font-medium',
                 )}
               >
                 Apps
@@ -568,10 +662,10 @@ export default function GroupsHome() {
                 aria-selected={showGroups}
                 onClick={() => setShowGroups(true)}
                 className={cn(
-                  'px-2.5 py-1 text-xs rounded-md cursor-pointer transition-colors',
+                  'px-3 py-1 text-xs rounded-md cursor-pointer transition-colors',
                   showGroups
-                    ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200'
-                    : 'text-zinc-500 hover:text-zinc-800',
+                    ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200 font-bold'
+                    : 'text-zinc-500 hover:text-zinc-800 font-medium',
                 )}
               >
                 Groups
@@ -580,7 +674,7 @@ export default function GroupsHome() {
           )}
           <button
             onClick={() => setShowHistory(!showHistory)}
-            className="text-xs text-zinc-500 hover:text-zinc-900 underline underline-offset-2 inline-flex items-center gap-1"
+            className="text-xs font-medium text-zinc-500 hover:text-zinc-900 underline underline-offset-2 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
           >
             {showHistory ? (
               <>
@@ -593,9 +687,29 @@ export default function GroupsHome() {
         </span>
       </div>
 
+      {statusFilter && !showHistory && (
+        <div className="flex items-center gap-2 text-xs px-1">
+          <span className="bg-violet-600 text-white font-bold px-2.5 py-1 rounded-full flex items-center gap-1.5">
+            {MOBILE_STATUS_OPTIONS.find((o) => o.value === statusFilter)?.label ?? statusFilter}
+            <button
+              onClick={() => setStatusFilter('')}
+              aria-label="Clear status filter"
+              className="opacity-80 hover:opacity-100 cursor-pointer"
+            >
+              <XIcon size={11} weight="bold" aria-hidden="true" />
+            </button>
+          </span>
+          {showGroups && <span className="text-zinc-400">matching groups auto-expanded below</span>}
+        </div>
+      )}
+
       {showHistory ? (
-        <ListRelease
-          slim
+        <div className="card-surface overflow-hidden">
+          <div className="px-4 py-2 bg-zinc-50 border-b border-zinc-100 text-[10px] font-bold text-zinc-500 uppercase tracking-widest">
+            Full history — every build, including superseded &amp; aborted
+          </div>
+          <ListRelease
+            slim
           slimFilters={{
             search,
             app: appFilter,
@@ -604,10 +718,11 @@ export default function GroupsHome() {
             status: statusFilter,
             fromIso,
             toIso,
-          }}
-        />
+            }}
+          />
+        </div>
       ) : showGroups ? (
-        <div className="bg-white rounded-xl border border-zinc-200">
+        <div className="card-surface overflow-hidden">
           {isError ? (
             <div className="py-16 text-center space-y-3">
               <p className="text-sm text-zinc-600">
@@ -636,17 +751,13 @@ export default function GroupsHome() {
             <div className="overflow-x-auto">
               <table className="w-full text-left whitespace-nowrap">
                 <thead>
-                  <tr className="bg-zinc-50 border-b border-zinc-200 text-[11px] text-zinc-500 font-medium uppercase tracking-wider">
-                    <th className="py-3 px-4 w-10 hidden lg:table-cell">#</th>
-                    <th className="py-3 px-4">App / Group</th>
-                    <th className="py-3 px-4 hidden md:table-cell">Surface</th>
-                    <th className="py-3 px-4">Platform</th>
-                    <th className="py-3 px-4 hidden lg:table-cell">Apps</th>
-                    <th className="py-3 px-4">Version</th>
-                    <th className="py-3 px-4">Status</th>
-                    <th className="py-3 px-4 hidden xl:table-cell">Release Manager</th>
-                    <th className="py-3 px-4 hidden md:table-cell">Created At</th>
-                    <th className="py-3 px-4">Actions</th>
+                  <tr className="bg-zinc-50 border-b border-zinc-200 text-[10px] text-zinc-500 font-bold uppercase tracking-widest">
+                    <th className="py-3 pl-4 w-8" />
+                    <th className="py-3 px-4">Release group</th>
+                    <th className="py-3 px-4">Apps</th>
+                    <th className="py-3 px-4">Stage</th>
+                    <th className="py-3 px-4 hidden md:table-cell">Created</th>
+                    <th className="py-3 px-4 text-right">Open</th>
                   </tr>
                 </thead>
                 <tbody className="text-sm">
@@ -660,7 +771,13 @@ export default function GroupsHome() {
                         expanded={expanded.has(row.g.groupId)}
                         matchBucket={statusFilter || null}
                         onToggle={() => toggleExpanded(row.g.groupId)}
-                        onOpen={() => navigate(`/mobile/groups/${row.g.groupId}`)}
+                        onOpen={() =>
+                          navigate(
+                            row.g.members.length === 1
+                              ? `/mobile/releases/${row.g.members[0].releaseId}`
+                              : `/mobile/groups/${row.g.groupId}`,
+                          )
+                        }
                         onOpenMember={(rid) => navigate(`/mobile/releases/${rid}`)}
                       />
                     ) : (
@@ -669,12 +786,9 @@ export default function GroupsHome() {
                         index={startIndex + idx + 1}
                         release={row.r}
                         zebra={idx % 2 === 1}
-                        // Consistent with group rows: open the group console (its
-                        // singleton store-sync group), not the release summary.
-                        onOpen={() => {
-                          const gid = row.r.release_context?.release_group_id;
-                          navigate(gid ? `/mobile/groups/${gid}` : `/mobile/releases/${row.r.id}`);
-                        }}
+                        // A store-detected row is a single build — its summary
+                        // page is the console; the singleton group adds nothing.
+                        onOpen={() => navigate(`/mobile/releases/${row.r.id}`)}
                       />
                     ),
                   )}
@@ -684,47 +798,65 @@ export default function GroupsHome() {
           )}
 
           {!isLoading && allRows.length > 0 && (
-            <div className="px-3 sm:px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-zinc-100">
-              <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs sm:text-sm text-zinc-500">
-                  Showing {startIndex + 1}-{Math.min(startIndex + itemsPerPage, allRows.length)} of {allRows.length}
-                </span>
+            <div className="px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-zinc-100 text-xs text-zinc-500">
+              <span className="flex items-center gap-2">
+                Rows
                 <select
                   value={itemsPerPage}
                   onChange={(e) => {
                     setItemsPerPage(Number(e.target.value));
                     setCurrentPage(1);
                   }}
-                  className="border border-zinc-300 rounded-lg px-2 py-1 text-xs text-zinc-600 cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-400"
+                  className="border border-zinc-200 rounded-md px-2 py-1 bg-white cursor-pointer focus:outline-none focus:ring-2 focus:ring-violet-200"
                 >
                   {[10, 25, 50].map((n) => (
                     <option key={n} value={n}>
-                      {n} / page
+                      {n}
                     </option>
                   ))}
                 </select>
-              </div>
-              <div className="flex items-center gap-1">
+                <span className="font-mono">
+                  {startIndex + 1}–{Math.min(startIndex + itemsPerPage, allRows.length)} of {allRows.length}
+                </span>
+              </span>
+              <span className="flex items-center gap-1">
                 <button
                   onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                   disabled={currentPage === 1}
-                  className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors"
+                  className="w-7 h-7 rounded-md border border-zinc-200 bg-white flex items-center justify-center text-zinc-400 hover:text-zinc-900 hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors"
                   aria-label="Previous page"
                 >
-                  <ChevronLeft className="w-4 h-4" />
+                  <ChevronLeft className="w-3.5 h-3.5" />
                 </button>
-                <span className="text-xs text-zinc-500 px-3 font-mono">
-                  {currentPage} / {totalPages}
-                </span>
+                {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
+                  const start = Math.max(1, Math.min(currentPage - 2, totalPages - 4));
+                  return start + i;
+                })
+                  .filter((n) => n <= totalPages)
+                  .map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => setCurrentPage(n)}
+                      className={cn(
+                        'w-7 h-7 rounded-md font-mono flex items-center justify-center transition-colors',
+                        n === currentPage
+                          ? 'bg-zinc-900 text-white font-bold'
+                          : 'border border-zinc-200 bg-white hover:bg-zinc-50 cursor-pointer',
+                      )}
+                      aria-current={n === currentPage ? 'page' : undefined}
+                    >
+                      {n}
+                    </button>
+                  ))}
                 <button
                   onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
                   disabled={currentPage === totalPages}
-                  className="h-9 w-9 flex items-center justify-center border border-zinc-300 rounded-lg hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors"
+                  className="w-7 h-7 rounded-md border border-zinc-200 bg-white flex items-center justify-center text-zinc-400 hover:text-zinc-900 hover:bg-zinc-50 disabled:opacity-40 disabled:pointer-events-none cursor-pointer transition-colors"
                   aria-label="Next page"
                 >
-                  <ChevronRight className="w-4 h-4" />
+                  <ChevronRight className="w-3.5 h-3.5" />
                 </button>
-              </div>
+              </span>
             </div>
           )}
         </div>
@@ -741,8 +873,14 @@ export default function GroupsHome() {
             status: statusFilter,
           }}
           onOpen={(r) => {
+            // Single-build groups skip the group console — the summary page IS
+            // the console for one app; the wave view only earns its click for
+            // multi-app groups.
             const gid = r.release_context?.release_group_id;
-            navigate(gid ? `/mobile/groups/${gid}` : `/mobile/releases/${r.id}`);
+            const g = gid ? groups.find((x) => x.groupId === gid) : undefined;
+            navigate(
+              gid && g && g.members.length > 1 ? `/mobile/groups/${gid}` : `/mobile/releases/${r.id}`,
+            );
           }}
         />
       )}
@@ -910,90 +1048,74 @@ function GroupRow({
         members.length > 1 && '[box-shadow:inset_3px_0_0_0_#a78bfa]',
       )}
     >
-      <td className="py-3 px-4 text-xs text-zinc-400 hidden lg:table-cell">{index}</td>
-      <td className="py-3 px-4">
-        <span className="inline-flex items-center gap-2 font-medium text-zinc-800">
-          {/* Chevron only for multi-app groups. Single-app groups render no
-              chevron AND no spacer, so their logo aligns with the store rows. */}
-          {members.length > 1 && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                cancelPreview();
-                onToggle();
-              }}
-              aria-expanded={expanded}
-              aria-controls={membersRowId}
-              aria-label={expanded ? 'Collapse apps in this group' : 'Expand apps in this group'}
-              className={cn(
-                'h-6 w-6 -ml-1 flex items-center justify-center rounded-md transition-all',
-                expanded
-                  ? 'bg-violet-100 text-violet-700 hover:bg-violet-200'
-                  : 'text-zinc-400 hover:bg-zinc-200/60 hover:text-zinc-700',
-              )}
-            >
-              <ChevronDown
-                className={cn('w-4 h-4 transition-transform duration-200', !expanded && '-rotate-90')}
-              />
-            </button>
-          )}
-          <span className="flex -space-x-1.5">
-            {shown.map((m) => (
-              <span key={m.releaseId} className="rounded-full ring-1 ring-zinc-200 bg-white">
-                <BrandLogo
-                  brand={m.app}
-                  surface={m.surface === 'driver' ? 'driver' : undefined}
-                  size="sm"
-                />
-              </span>
-            ))}
-          </span>
-          <span className="min-w-0">
-            <span className="block truncate">{waveLabel(group)}</span>
-            {uniqueApps.length > 1 && (
-              <span
-                className="block text-[11px] font-normal text-zinc-400 truncate max-w-[280px]"
-                title={uniqueApps.join(', ')}
-              >
-                {uniqueApps.join(' · ')}
-              </span>
+      <td className="py-3 pl-4">
+        {members.length > 1 ? (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              cancelPreview();
+              onToggle();
+            }}
+            aria-expanded={expanded}
+            aria-controls={membersRowId}
+            aria-label={expanded ? 'Collapse apps in this group' : 'Expand apps in this group'}
+            className={cn(
+              'h-6 w-6 -ml-1 flex items-center justify-center rounded-md transition-all cursor-pointer',
+              expanded
+                ? 'bg-violet-100 text-violet-700 hover:bg-violet-200'
+                : 'text-zinc-400 hover:bg-zinc-200/60 hover:text-zinc-700',
             )}
-          </span>
-        </span>
-      </td>
-      <td className="py-3 px-4 text-xs text-zinc-600 hidden md:table-cell">
-        {Array.from(new Set(members.map((m) => surfaceLabel(m.surface)))).join(' · ')}
+          >
+            <ChevronDown
+              className={cn('w-4 h-4 transition-transform duration-200', !expanded && '-rotate-90')}
+            />
+          </button>
+        ) : (
+          <span className="h-6 w-5 -ml-1 inline-block" aria-hidden />
+        )}
       </td>
       <td className="py-3 px-4">
-        <span className="inline-flex items-center gap-1.5">
-          {platforms.map((p) => (
-            <PlatformBadge key={p} platform={p} isMobile />
-          ))}
+        <span className="flex flex-col leading-tight min-w-0">
+          <span className="font-medium text-zinc-800 truncate">{waveLabel(group)}</span>
+          <span className="text-[10px] text-zinc-400 font-mono truncate" title={group.groupId}>
+            {group.groupId.slice(0, 8)}…
+            {group.createdBy ? ` · ${group.createdBy}` : ''}
+          </span>
         </span>
       </td>
-      <td className="py-3 px-4 text-xs text-zinc-600 hidden lg:table-cell">{members.length}</td>
-      <td className="py-3 px-4 text-xs text-zinc-600" title={wv.full}>
-        <span className="font-mono">{wv.lead}</span>
-        {wv.moreCount > 0 && (
-          <span className="ml-1.5 inline-flex items-center rounded-full bg-zinc-100 text-zinc-500 px-1.5 py-px text-[10px] font-medium align-middle">
-            +{wv.moreCount} more
-          </span>
-        )}
+      <td className="py-3 px-4">
+        <span className="flex -space-x-1.5">
+          {shown.map((m) => (
+            <span key={m.releaseId} className="rounded-full ring-2 ring-white bg-white">
+              <BrandLogo
+                brand={m.app}
+                surface={m.surface === 'driver' ? 'driver' : undefined}
+                size="sm"
+              />
+            </span>
+          ))}
+          {members.length > shown.length && (
+            <span className="w-6 h-6 bg-zinc-100 border border-zinc-200 rounded-full ring-2 ring-white flex items-center justify-center text-[9px] font-bold text-zinc-500">
+              +{members.length - shown.length}
+            </span>
+          )}
+        </span>
       </td>
       <td className="py-3 px-4">
         <GroupStageChip summary={group.summary} total={group.members.length} members={group.members} />
       </td>
-      <td className="py-3 px-4 text-xs text-zinc-600 hidden xl:table-cell">{group.createdBy || '—'}</td>
-      <td className="py-3 px-4 font-mono text-xs text-zinc-600 hidden md:table-cell">{formatDate(group.createdAt)}</td>
-      <td className="py-3 px-4">
+      <td className="py-3 px-4 font-mono text-[11px] text-zinc-500 hidden md:table-cell">{formatDate(group.createdAt)}</td>
+      <td className="py-3 px-4 text-right">
         <button
           onClick={(e) => {
             e.stopPropagation();
             onOpen();
           }}
-          className="text-xs text-zinc-600 hover:text-zinc-900 underline"
+          title="Open group"
+          aria-label={`Open ${waveLabel(group)}`}
+          className="text-zinc-400 hover:text-zinc-900 cursor-pointer"
         >
-          Open
+          <ArrowUpRightIcon size={16} weight="bold" aria-hidden="true" />
         </button>
       </td>
     </tr>
@@ -1006,64 +1128,59 @@ function GroupRow({
         opens for a single-app group (nothing to expand). */}
     {members.length > 1 && (
     <tr aria-hidden={!expanded} className={cn(!expanded && 'border-0')}>
-      <td colSpan={10} className="p-0">
+      <td colSpan={6} className="p-0">
         <div id={membersRowId} className={cn('expand-panel', expanded && 'open')}>
           <div>
-            <div className="mx-4 sm:mx-6 mb-3 mt-1 ml-12 sm:ml-14 rounded-xl border border-zinc-200 bg-white shadow-sm overflow-hidden border-l-[3px] border-l-violet-300">
-              <div className="px-4 py-2 bg-zinc-50/80 border-b border-zinc-100 flex items-center justify-between">
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
-                  Apps in this group · {members.length}
-                </span>
-                <span className="text-[10px] text-zinc-400">click an app for its release page</span>
-              </div>
-              {/* key retriggers the stagger animation on every open */}
-              <div key={String(expanded)} className="divide-y divide-zinc-100">
-                {members.map((m, i) => (
-                  <button
-                    key={m.releaseId}
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onOpenMember(m.releaseId);
-                    }}
-                    aria-label={`Open ${m.app} ${m.platform} release`}
-                    className={cn(
-                      'group/member w-full text-left flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors hover:bg-violet-50/40',
-                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-400',
-                      expanded && `animate-fadeInUp stagger-${Math.min(i + 1, 5)}`,
-                      // the member the status filter matched
-                      matchBucket != null &&
-                        memberBucket(m) === matchBucket &&
-                        'bg-violet-50/70 [box-shadow:inset_3px_0_0_0_#8b5cf6]',
-                    )}
-                  >
-                    <BrandLogo
-                      brand={m.app}
-                      surface={m.surface === 'driver' ? 'driver' : undefined}
-                      size="sm"
-                    />
-                    <span className="min-w-0">
-                      <span className="block text-sm font-medium text-zinc-800 truncate">
-                        {m.app}
+            <div className="flex flex-col gap-1.5 pl-1 border-l-2 border-violet-200 ml-6 my-2 mr-4">
+                {members.map((m) => {
+                  const matched = matchBucket != null && memberBucket(m) === matchBucket;
+                  const next = memberNextStep(m);
+                  return (
+                    <button
+                      key={m.releaseId}
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenMember(m.releaseId);
+                      }}
+                      aria-label={`Open ${m.app} ${m.platform} release`}
+                      className={cn(
+                        'w-full text-left flex items-center gap-3 pl-3 pr-2 py-1 text-xs cursor-pointer transition-colors rounded-md',
+                        'hover:bg-violet-50/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-400',
+                        matched && 'bg-violet-50/60',
+                      )}
+                    >
+                      <span className="font-medium text-zinc-700 w-32 truncate">{m.app}</span>
+                      <span className="text-[10px] text-zinc-500 inline-flex items-center gap-1">
+                        {m.platform === 'ios' ? (
+                          <AppleLogoIcon size={11} weight="fill" className="text-zinc-600" aria-hidden="true" />
+                        ) : (
+                          <AndroidLogoIcon size={11} weight="fill" className="text-emerald-600" aria-hidden="true" />
+                        )}{' '}
+                        {m.platform}
                       </span>
-                      <span className="block text-[11px] text-zinc-400">
-                        {surfaceLabel(m.surface)}
-                      </span>
-                    </span>
-                    <PlatformBadge platform={m.platform} isMobile />
-                    <span className="ml-auto inline-flex items-center gap-3">
-                      <span className="font-mono text-xs text-zinc-600 bg-zinc-100 rounded-md px-2 py-1">
+                      <span className="font-mono font-medium text-zinc-800">
                         {m.version || '—'} {formatBuildCode(m.versionCode)}
                       </span>
                       <MemberPhaseChip member={m} />
-                      <span className="text-xs text-zinc-400 group-hover/member:text-violet-700 group-focus-visible/member:text-violet-700 transition-colors whitespace-nowrap">
-                        Open →
+                      {matched && <span className="text-[9px] text-violet-600 font-bold uppercase">← matches filter</span>}
+                      <span className="ml-auto inline-flex items-center gap-2">
+                        {next && (
+                          <span
+                            className={cn(
+                              'text-[9px] font-bold uppercase',
+                              next.muted ? 'text-zinc-400' : 'text-violet-600',
+                            )}
+                          >
+                            {next.muted ? next.label : `→ ${next.label}`}
+                          </span>
+                        )}
+                        <ArrowUpRightIcon size={13} weight="bold" className="text-zinc-400 shrink-0" aria-hidden="true" />
                       </span>
-                    </span>
-                  </button>
-                ))}
+                    </button>
+                  );
+                })}
               </div>
-            </div>
           </div>
         </div>
       </td>
@@ -1107,51 +1224,58 @@ function StoreItemRow({
         zebra ? 'bg-zinc-50/50' : 'bg-white',
       )}
     >
-      <td className="py-3 px-4 text-xs text-zinc-400 hidden lg:table-cell">{index}</td>
+      <td className="py-3 pl-4"><span className="h-6 w-5 -ml-1 inline-block" aria-hidden /></td>
       <td className="py-3 px-4">
-        <span className="inline-flex items-center gap-2 font-medium text-zinc-800">
-          <BrandLogo
-            brand={release.appGroup}
-            surface={release.service === 'driver' ? 'driver' : undefined}
-            size="sm"
-          />
-          {release.appGroup}
-        </span>
-      </td>
-      <td className="py-3 px-4 text-xs text-zinc-600 hidden md:table-cell">{surfaceLabel(release.service)}</td>
-      <td className="py-3 px-4">
-        <PlatformBadge platform={release.env} isMobile />
-      </td>
-      <td className="py-3 px-4 text-xs text-zinc-600 hidden lg:table-cell">1</td>
-      <td className="py-3 px-4 font-mono text-xs text-zinc-600">
-        {release.new_version} {formatBuildCode(release.release_context?.version_code)}
-      </td>
-      <td className="py-3 px-4">
-        <span className="inline-flex items-center gap-1.5 flex-wrap">
-          <span className="inline-flex items-center text-[10px] sm:text-[11px] font-medium uppercase tracking-wide border rounded-md px-2 py-0.5 bg-amber-50 text-amber-800 border-amber-200">
-            From store
+        <span className="flex flex-col leading-tight min-w-0">
+          <span className="font-medium text-zinc-800 flex items-center gap-2 min-w-0">
+            <span className="truncate">{release.appGroup}</span>
+            <span
+              className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-amber-800 shrink-0"
+              title="Found on the store — not created through SCC"
+            >
+              Detected on store
+            </span>
           </span>
-          <span
-            className={cn(
-              'inline-flex items-center text-[10px] sm:text-[11px] font-medium uppercase tracking-wide border rounded-md px-2 py-0.5',
-              stateChip.cls,
+          <span className="text-[10px] text-zinc-400 font-mono flex items-center gap-1">
+            {release.env === 'ios' ? (
+              <AppleLogoIcon size={10} weight="fill" className="text-zinc-600" aria-hidden="true" />
+            ) : (
+              <AndroidLogoIcon size={10} weight="fill" className="text-emerald-600" aria-hidden="true" />
             )}
-          >
-            {stateChip.label}
+            {release.env} · {release.new_version} {formatBuildCode(release.release_context?.version_code)}
           </span>
         </span>
       </td>
-      <td className="py-3 px-4 text-xs text-zinc-600 hidden xl:table-cell">store-sync</td>
-      <td className="py-3 px-4 font-mono text-xs text-zinc-600 hidden md:table-cell">{formatDate(release.date_created)}</td>
       <td className="py-3 px-4">
+        <BrandLogo
+          brand={release.appGroup}
+          surface={release.service === 'driver' ? 'driver' : undefined}
+          size="sm"
+        />
+      </td>
+      <td className="py-3 px-4">
+        <span
+          className={cn(
+            'inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide border rounded-full px-2 py-0.5',
+            stateChip.cls,
+          )}
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-current opacity-70" />
+          {stateChip.label}
+        </span>
+      </td>
+      <td className="py-3 px-4 font-mono text-[11px] text-zinc-500 hidden md:table-cell">{formatDate(release.date_created)}</td>
+      <td className="py-3 px-4 text-right">
         <button
           onClick={(e) => {
             e.stopPropagation();
             onOpen();
           }}
-          className="text-xs text-zinc-600 hover:text-zinc-900 underline"
+          title="Open"
+          aria-label={`Open ${release.appGroup}`}
+          className="text-zinc-400 hover:text-zinc-900 cursor-pointer"
         >
-          Open
+          <ArrowUpRightIcon size={16} weight="bold" aria-hidden="true" />
         </button>
       </td>
     </tr>

@@ -803,6 +803,12 @@ data AiSummaryResp = AiSummaryResp
     , usableCount :: Maybe Int
     -- ^ Combined only: # of selected apps that had a comparable last release
     -- (the others contribute no changelog). Lets the UI label the real count.
+    , baseRef :: Maybe Text
+    -- ^ The compare base the changelog was generated FROM (tag when known).
+    , headRef :: Maybe Text
+    -- ^ The compare head (the branch being released).
+    , compareUrl :: Maybe Text
+    -- ^ GitHub compare link for the exact range.
     }
     deriving (Generic, Show)
 
@@ -819,6 +825,9 @@ aiUnavailable r =
         , summaryShort = Nothing
         , model = Nothing
         , usableCount = Nothing
+        , baseRef = Nothing
+        , headRef = Nothing
+        , compareUrl = Nothing
         }
 
 renderCommitsForAi :: [CommitInfo] -> Text
@@ -844,6 +853,9 @@ stateResp st longTxt shortTxt mModel =
         , summaryShort = if T.null (T.strip shortTxt) then Nothing else Just shortTxt
         , model = mModel
         , usableCount = Nothing
+        , baseRef = Nothing
+        , headRef = Nothing
+        , compareUrl = Nothing
         }
 
 changelogAiSummaryH :: AuthedPerson -> Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Maybe Text -> Flow AiSummaryResp
@@ -856,11 +868,13 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
     case findLastReleaseBuild builds appName surface platform of
         Nothing -> pure (aiUnavailable "no prior release build to compare against")
         Just lb -> do
-            (baseRef, _, _) <- resolveChangelogBase mBase ac lb
-            if T.null baseRef
+            (chBaseRef, chBaseTag, _) <- resolveChangelogBase mBase ac lb
+            if T.null chBaseRef
                 then pure (aiUnavailable "no base ref to compare against")
                 else do
-                    result <- compareRefs creds owner repo baseRef branch
+                    result <- compareRefs creds owner repo chBaseRef branch
+                    let cmpUrl = "https://github.com/" <> owner <> "/" <> repo <> "/compare/" <> chBaseRef <> "..." <> branch
+                        withRange r = r{baseRef = Just (fromMaybe chBaseRef chBaseTag), headRef = Just branch, compareUrl = Just cmpUrl}
                     case result of
                         Left e -> pure (aiUnavailable ("changelog fetch failed: " <> e))
                         Right cr -> do
@@ -890,7 +904,7 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
                             case mRow of
                                 -- Done → return the AI (or cached deterministic) result.
                                 Just ("ready", mLong, mShort, mModel, _) ->
-                                    pure (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel)
+                                    pure (withRange (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel))
                                 -- Not ready → ensure a DETACHED generation is running and return
                                 -- immediately. The work outlives this request and the browser tab.
                                 _ -> do
@@ -899,7 +913,7 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
                                         Left _ -> do
                                             -- AI off/unconfigured: the deterministic changelog IS the result.
                                             upsertReleaseSummary contentKey detLong detShort "" n
-                                            pure (stateResp "ready" detLong detShort Nothing)
+                                            pure (withRange (stateResp "ready" detLong detShort Nothing))
                                         Right cfg -> do
                                             -- One generator per content key; reclaims a failed row or a
                                             -- pending row orphaned by a restart (see 'claimReleaseSummary').
@@ -916,7 +930,7 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
                                             -- A concurrent generation may have just finished; otherwise
                                             -- report pending with the deterministic placeholder.
                                             st <- lookupReleaseSummary contentKey
-                                            pure $ case st of
+                                            pure $ withRange $ case st of
                                                 Just ("ready", mLong, mShort, mModel, _) ->
                                                     stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel
                                                 _ -> stateResp "pending" detLong "" Nothing

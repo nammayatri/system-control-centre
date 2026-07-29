@@ -1,10 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown } from 'lucide-react';
+import { AndroidLogoIcon, AppleLogoIcon, ArrowUpRightIcon } from '@phosphor-icons/react';
 import type { APRelease } from '../../api';
 import type { AppCatalogEntry, LatestBuild } from '../../types';
 import { BrandLogo } from '../../components/BrandLogo';
 import { MEMBER_PHASE_CHIP } from '../../components/GroupStageChip';
-import { PlatformBadge } from '../../components/PlatformBadge';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { formatBuildCode } from '../../utils';
 import { cn, formatDate } from '../../../../lib/utils';
@@ -49,7 +49,7 @@ function StoreLiveChip() {
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 text-[10px] sm:text-[11px] font-medium uppercase tracking-wide border rounded-md px-2 py-0.5',
+        'inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide border rounded-full px-2 py-0.5',
         base.cls,
       )}
     >
@@ -64,11 +64,11 @@ function PhaseChip({ release, pulsing }: { release: APRelease; pulsing?: boolean
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 text-[10px] sm:text-[11px] font-medium uppercase tracking-wide border rounded-md px-2 py-0.5',
+        'inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide border rounded-full px-2 py-0.5',
         chip.cls,
       )}
     >
-      <span className={cn('w-1.5 h-1.5 rounded-full bg-current opacity-70', pulsing && 'status-pulse')} />
+      <span className={cn('w-1.5 h-1.5 rounded-full bg-current opacity-70', pulsing && 'animate-pulse motion-reduce:animate-none')} />
       {chip.label}
     </span>
   );
@@ -157,9 +157,29 @@ export function AppSlotView({ apps, releases, loading, filters, onOpen }: AppSlo
     return out.sort((a, b) => rank(b) - rank(a) || a.app.name.localeCompare(b.app.name));
   }, [apps, releases, filters]);
 
+  // Status filtering targets SLOTS: auto-expand the matching apps so the
+  // matching lanes (and their "matches filter" tag) are visible, not hidden
+  // behind a chevron — same behavior as the groups view.
+  useEffect(() => {
+    if (!filters.status) return;
+    setExpanded(
+      new Set(
+        perApp
+          .filter((row) =>
+            SLOT_DEFS.some((def) => {
+              const r = row.slots[def.key];
+              return r != null && SLOT_STATUS_BUCKET[phaseOf(r)] === filters.status;
+            }),
+          )
+          .map((row) => `${row.app.name}-${row.app.surface}-${row.app.platform}`),
+      ),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters.status, filters.app, filters.surface, filters.platform, apps, releases]);
+
   if (loading) {
     return (
-      <div className="bg-white rounded-xl border border-zinc-200">
+      <div className="card-surface overflow-hidden">
         <TableSkeleton rows={8} cols={6} />
       </div>
     );
@@ -167,25 +187,24 @@ export function AppSlotView({ apps, releases, loading, filters, onOpen }: AppSlo
 
   if (perApp.length === 0) {
     return (
-      <div className="bg-white rounded-xl border border-zinc-200 py-16 text-center text-sm text-zinc-500">
+      <div className="card-surface py-16 text-center text-sm text-zinc-500">
         No apps match the current filters.
       </div>
     );
   }
 
   return (
-    <div className="bg-white rounded-xl border border-zinc-200 overflow-x-auto">
+    <div className="card-surface overflow-hidden">
+      <div className="overflow-x-auto">
       <table className="w-full text-left" aria-label="Releases by app">
         <thead>
-          <tr className="bg-zinc-50 border-b border-zinc-200 text-[11px] text-zinc-500 font-medium uppercase tracking-wider">
-            <th className="py-3 px-4 hidden lg:table-cell w-10">#</th>
+          <tr className="bg-zinc-50 border-b border-zinc-200 text-[10px] text-zinc-500 font-bold uppercase tracking-widest">
+            <th className="py-3 pl-4 w-8" />
             <th className="py-3 px-4">App</th>
-            <th className="py-3 px-4 hidden md:table-cell">Surface</th>
-            <th className="py-3 px-4">Platform</th>
-            <th className="py-3 px-4">Version</th>
             <th className="py-3 px-4">Status</th>
+            <th className="py-3 px-4">Version</th>
             <th className="py-3 px-4 hidden md:table-cell">Created</th>
-            <th className="py-3 px-4 w-16">Actions</th>
+            <th className="py-3 px-4 text-right">Open</th>
           </tr>
         </thead>
         <tbody className="text-sm">
@@ -195,6 +214,7 @@ export function AppSlotView({ apps, releases, loading, filters, onOpen }: AppSlo
               index={i + 1}
               row={row}
               zebra={i % 2 === 1}
+              filtersStatus={filters.status}
               expanded={expanded.has(`${row.app.name}-${row.app.surface}-${row.app.platform}`)}
               onToggle={() => toggle(`${row.app.name}-${row.app.surface}-${row.app.platform}`)}
               onOpen={onOpen}
@@ -202,6 +222,7 @@ export function AppSlotView({ apps, releases, loading, filters, onOpen }: AppSlo
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -211,6 +232,7 @@ function AppRow({
   row,
   zebra,
   expanded,
+  filtersStatus = '',
   onToggle,
   onOpen,
 }: {
@@ -218,6 +240,7 @@ function AppRow({
   row: AppSlots;
   zebra: boolean;
   expanded: boolean;
+  filtersStatus?: string;
   onToggle: () => void;
   onOpen: (r: APRelease) => void;
 }) {
@@ -233,175 +256,210 @@ function AppRow({
           'transition-colors',
           expandable && 'cursor-pointer',
           expanded
-            ? 'bg-emerald-50/40 hover:bg-emerald-50/60'
+            ? 'bg-violet-50/40 hover:bg-violet-50/60'
             : cn('border-b border-zinc-100 hover:bg-zinc-50', zebra ? 'bg-zinc-50/50' : 'bg-white'),
         )}
       >
-        <td className="py-3 px-4 text-xs text-zinc-400 hidden lg:table-cell">{index}</td>
+        <td className="py-3 pl-4">
+          {expandable ? (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggle();
+              }}
+              aria-expanded={expanded}
+              aria-controls={panelId}
+              aria-label={expanded ? 'Collapse release slots' : 'Expand release slots'}
+              className={cn(
+                'h-6 w-6 -ml-1 flex items-center justify-center rounded-md transition-all cursor-pointer',
+                expanded
+                  ? 'bg-violet-100 text-violet-700 hover:bg-violet-200'
+                  : 'text-zinc-400 hover:bg-zinc-200/60 hover:text-zinc-700',
+              )}
+            >
+              <ChevronDown
+                className={cn('w-4 h-4 transition-transform duration-200', !expanded && '-rotate-90')}
+              />
+            </button>
+          ) : (
+            <span className="h-6 w-5 -ml-1 inline-block" aria-hidden />
+          )}
+        </td>
         <td className="py-3 px-4">
-          <span className="inline-flex items-center gap-2 font-medium text-zinc-800">
-            {expandable ? (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onToggle();
-                }}
-                aria-expanded={expanded}
-                aria-controls={panelId}
-                aria-label={expanded ? 'Collapse release slots' : 'Expand release slots'}
-                className={cn(
-                  'h-6 w-6 -ml-1 flex items-center justify-center rounded-md transition-all',
-                  expanded
-                    ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
-                    : 'text-zinc-400 hover:bg-zinc-200/60 hover:text-zinc-700',
-                )}
-              >
-                <ChevronDown
-                  className={cn('w-4 h-4 transition-transform duration-200', !expanded && '-rotate-90')}
-                />
-              </button>
-            ) : (
-              <span className="h-6 w-5 -ml-1" aria-hidden />
-            )}
+          <span className="inline-flex items-center gap-2.5">
             <BrandLogo brand={app.name} surface={app.surface === 'driver' ? 'driver' : undefined} size="sm" />
-            <span className="min-w-0">
-              <span className="block truncate">{app.displayLabel || app.name}</span>
+            <span className="flex flex-col leading-tight min-w-0">
+              <span className="font-medium text-zinc-800 truncate">{app.displayLabel || app.name}</span>
+              <span className="text-[10px] text-zinc-400 font-medium flex items-center gap-1">
+                {SURFACE_LABEL[app.surface] ?? app.surface} ·{' '}
+                {app.platform === 'ios' ? (
+                  <AppleLogoIcon size={11} weight="fill" className="text-zinc-600" aria-hidden="true" />
+                ) : (
+                  <AndroidLogoIcon size={11} weight="fill" className="text-emerald-600" aria-hidden="true" />
+                )}{' '}
+                {app.platform}
+              </span>
             </span>
           </span>
         </td>
-        <td className="py-3 px-4 text-xs text-zinc-600 hidden md:table-cell">
-          {SURFACE_LABEL[app.surface] ?? app.surface}
-        </td>
         <td className="py-3 px-4">
-          <PlatformBadge platform={app.platform} isMobile />
+          <span className="inline-flex flex-col gap-1 leading-none">
+            <span className="inline-flex items-center gap-1.5 flex-wrap">
+              {primary ? (
+                <PhaseChip release={primary} pulsing={pulsing} />
+              ) : storeLive ? (
+                <StoreLiveChip />
+              ) : (
+                <span className="text-xs text-zinc-400">no active builds</span>
+              )}
+              {!slots.live && storeLive && primary && (
+                <span
+                  className="text-[9px] font-mono text-zinc-400 border border-zinc-200 rounded px-1.5 py-0.5"
+                  title="Store cache: version live on production"
+                >
+                  store: v{storeLive.version} live
+                </span>
+              )}
+            </span>
+            {primary &&
+              primary.env === 'ios' &&
+              ['rolling_out', 'halted'].includes(phaseOf(primary)) &&
+              primary.release_context?.rollout_percent != null && (
+                (() => {
+                  const pct = Number(primary.release_context.rollout_percent);
+                  const ladder = [1, 2, 5, 10, 20, 50, 100];
+                  const idx = ladder.findIndex((p) => p >= pct);
+                  const day = idx === -1 ? 7 : idx + 1;
+                  return (
+                    <span className="inline-flex items-center gap-0.5 pl-1" title={`Apple 7-day phased release — day ${day} of 7 (${pct}%)`}>
+                      {ladder.map((p, i) => (
+                        <span key={p} className={cn('w-1.5 h-1.5 rounded-full', i < day ? 'bg-sky-500' : 'bg-zinc-200')} />
+                      ))}
+                      <span className="text-[9px] font-mono text-sky-600 ml-1">{pct}%</span>
+                    </span>
+                  );
+                })()
+              )}
+            {primary && primary.env !== 'ios' && ['rolling_out', 'halted'].includes(phaseOf(primary)) && primary.release_context?.rollout_percent != null && (
+              <span
+                className="inline-flex items-center gap-1.5 pl-0.5"
+                title={`Staged rollout — ${+Number(primary.release_context.rollout_percent).toFixed(2)}% of users`}
+              >
+                <span className="w-24 h-1.5 rounded-full bg-zinc-100 overflow-hidden">
+                  <span
+                    className={cn('block h-full rounded-full', phaseOf(primary) === 'halted' ? 'bg-amber-500' : 'bg-emerald-500')}
+                    style={{ width: `${Math.max(2, Math.min(100, Number(primary.release_context.rollout_percent)))}%` }}
+                  />
+                </span>
+                <span className={cn('text-[9px] font-mono', phaseOf(primary) === 'halted' ? 'text-amber-600' : 'text-emerald-600')}>
+                  {+Number(primary.release_context.rollout_percent).toFixed(2)}%
+                </span>
+              </span>
+            )}
+          </span>
         </td>
-        <td className="py-3 px-4 font-mono text-xs text-zinc-600 whitespace-nowrap">
+        <td className="py-3 px-4 font-mono text-xs font-bold text-zinc-800 whitespace-nowrap">
           {primary ? (
             <>
-              {primary.new_version} {formatBuildCode(primary.release_context?.version_code)}
+              {primary.new_version}{' '}
+              <span className="text-zinc-400 font-medium">{formatBuildCode(primary.release_context?.version_code)}</span>
             </>
           ) : storeLive ? (
             <>
-              {storeLive.version} {formatBuildCode(storeLive.versionCode)}
+              {storeLive.version}{' '}
+              <span className="text-zinc-400 font-medium">{formatBuildCode(storeLive.versionCode)}</span>
             </>
           ) : (
             '—'
           )}
         </td>
-        <td className="py-3 px-4">
-          {primary ? (
-            <PhaseChip release={primary} pulsing={pulsing} />
-          ) : storeLive ? (
-            <StoreLiveChip />
-          ) : (
-            <span className="text-xs text-zinc-400">no active builds</span>
-          )}
-        </td>
-        <td className="py-3 px-4 font-mono text-xs text-zinc-500 whitespace-nowrap hidden md:table-cell">
+        <td className="py-3 px-4 font-mono text-[11px] text-zinc-500 whitespace-nowrap hidden md:table-cell">
           {primary ? formatDate(primary.date_created) : '—'}
         </td>
-        <td className="py-3 px-4">
+        <td className="py-3 px-4 text-right">
           {primary && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
                 onOpen(primary);
               }}
-              className="text-xs text-zinc-600 hover:text-zinc-900 underline"
+              title="Open"
+              aria-label={`Open ${app.name}`}
+              className="text-zinc-400 hover:text-zinc-900 cursor-pointer"
             >
-              Open
+              <ArrowUpRightIcon size={16} weight="bold" aria-hidden="true" />
             </button>
           )}
         </td>
       </tr>
 
-      {/* Slot sub-rows — same inset-panel pattern as the group expansion. */}
+      {/* Slot sub-rows — mockup lane list (violet-edged inset). */}
       {expandable && (
-        <tr aria-hidden={!expanded} className={cn(!expanded && 'border-0')}>
-          <td colSpan={8} className="p-0">
+        <tr aria-hidden={!expanded} className={cn(!expanded && 'border-0', expanded && 'bg-zinc-50/60 border-b border-zinc-100')}>
+          <td colSpan={6} className="p-0">
             <div id={panelId} className={cn('expand-panel', expanded && 'open')}>
               <div>
-                <div className="mx-4 sm:mx-6 mb-3 mt-1 ml-12 sm:ml-14 rounded-xl border border-zinc-200 bg-white shadow-sm overflow-hidden border-l-[3px] border-l-emerald-300">
-                  <div className="px-4 py-2 bg-zinc-50/80 border-b border-zinc-100 flex items-center justify-between">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
-                      Release slots · live → in review → internal
-                    </span>
-                    <span className="text-[10px] text-zinc-400">click a slot for its release page</span>
-                  </div>
-                  <div key={String(expanded)} className="divide-y divide-zinc-100">
-                    {SLOT_DEFS.map((def, i) => {
-                      const r = slots[def.key];
-                      if (!r && def.key === 'live' && storeLive) {
-                        // Store-truth fallback: live on the store, but shipped
-                        // before SCC tracked this app — no release page behind it.
-                        return (
-                          <div
-                            key={def.key}
-                            className={cn(
-                              'flex items-center gap-3 px-4 py-2.5',
-                              expanded && `animate-fadeInUp stagger-${Math.min(i + 1, 5)}`,
-                            )}
-                          >
-                            <span className="w-20 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
-                              {def.label}
-                            </span>
-                            <span className="font-mono text-xs text-zinc-600 bg-zinc-100 rounded-md px-2 py-1">
-                              {storeLive.version} {formatBuildCode(storeLive.versionCode)}
-                            </span>
-                            <StoreLiveChip />
-                            <span className="ml-auto text-[11px] text-zinc-400 whitespace-nowrap">
-                              observed on store · pre-SCC release
-                            </span>
-                          </div>
-                        );
-                      }
-                      if (!r) {
-                        return (
-                          <div
-                            key={def.key}
-                            className="flex items-center gap-3 px-4 py-2.5 text-zinc-300"
-                          >
-                            <span className="w-20 text-[10px] font-semibold uppercase tracking-wider">
-                              {def.label}
-                            </span>
-                            <span className="text-xs">—</span>
-                          </div>
-                        );
-                      }
+                <div className="flex flex-col gap-1.5 pl-1 border-l-2 border-violet-200 ml-6 my-2 mr-4">
+                  {SLOT_DEFS.map((def) => {
+                    const r = slots[def.key];
+                    const laneCls =
+                      def.key === 'live'
+                        ? 'text-emerald-600'
+                        : def.key === 'incoming'
+                          ? 'text-violet-600'
+                          : 'text-blue-600';
+                    const laneLabel = def.key === 'incoming' ? 'Review' : def.label;
+                    if (!r && def.key === 'live' && storeLive) {
                       return (
-                        <button
-                          key={def.key}
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onOpen(r);
-                          }}
-                          aria-label={`Open ${app.name} ${def.label} release`}
-                          className={cn(
-                            'group/slot w-full text-left flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors hover:bg-emerald-50/40',
-                            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-400',
-                            expanded && `animate-fadeInUp stagger-${Math.min(i + 1, 5)}`,
-                          )}
-                        >
-                          <span className="w-20 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
-                            {def.label}
+                        <div key={def.key} className="flex items-center gap-3 pl-3 py-1 text-xs">
+                          <span className={cn('w-14 text-[9px] font-bold uppercase tracking-wider', laneCls)}>{laneLabel}</span>
+                          <span className="font-mono font-medium text-zinc-800">
+                            {storeLive.version} {formatBuildCode(storeLive.versionCode)}
                           </span>
-                          <span className="font-mono text-xs text-zinc-600 bg-zinc-100 rounded-md px-2 py-1">
-                            {r.new_version} {formatBuildCode(r.release_context?.version_code)}
+                          <StoreLiveChip />
+                          <span className="ml-auto text-[10px] text-zinc-400 whitespace-nowrap">
+                            observed on store · pre-SCC release
                           </span>
-                          <PhaseChip release={r} />
-                          <span className="ml-auto inline-flex items-center gap-3">
-                            <span className="font-mono text-[11px] text-zinc-400 whitespace-nowrap hidden sm:inline">
-                              {formatDate(r.date_created)}
-                            </span>
-                            <span className="text-xs text-zinc-400 group-hover/slot:text-emerald-700 transition-colors whitespace-nowrap">
-                              Open →
-                            </span>
-                          </span>
-                        </button>
+                        </div>
                       );
-                    })}
-                  </div>
+                    }
+                    if (!r) {
+                      return (
+                        <div key={def.key} className="flex items-center gap-3 pl-3 py-1 text-xs text-zinc-300">
+                          <span className="w-14 text-[9px] font-bold uppercase tracking-wider">{laneLabel}</span>
+                          <span>—</span>
+                        </div>
+                      );
+                    }
+                    const matches = !!filtersStatus && SLOT_STATUS_BUCKET[phaseOf(r)] === filtersStatus;
+                    return (
+                      <button
+                        key={def.key}
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpen(r);
+                        }}
+                        aria-label={`Open ${app.name} ${laneLabel} release`}
+                        className={cn(
+                          'w-full text-left flex items-center gap-3 pl-3 pr-2 py-1 text-xs cursor-pointer transition-colors rounded-md',
+                          'hover:bg-violet-50/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-400',
+                          matches && 'bg-violet-50/60',
+                        )}
+                      >
+                        <span className={cn('w-14 text-[9px] font-bold uppercase tracking-wider', laneCls)}>{laneLabel}</span>
+                        <span className="font-mono font-medium text-zinc-800">
+                          {r.new_version} {formatBuildCode(r.release_context?.version_code)}
+                        </span>
+                        <PhaseChip release={r} />
+                        {matches && <span className="text-[9px] text-violet-600 font-bold uppercase">← matches filter</span>}
+                        <span className="ml-auto font-mono text-[10px] text-zinc-400 whitespace-nowrap">
+                          {formatDate(r.date_created)}
+                        </span>
+                        <ArrowUpRightIcon size={13} weight="bold" className="text-zinc-400 shrink-0" aria-hidden="true" />
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             </div>

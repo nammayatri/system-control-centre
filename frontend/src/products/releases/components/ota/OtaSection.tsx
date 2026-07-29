@@ -1,12 +1,20 @@
 // Group-page OTA section in the page's own grammar: select rows → verb from
 // the toolbar (same as the builds table above it). One row per capable
 // (app, platform); expand a row for the full per-app card (history, metrics,
-// attach/abandon). Toolbar verbs run sequentially over the selection with
+// attach/cancel). Toolbar verbs run sequentially over the selection with
 // per-app verdicts, mirroring the native bulk actions.
 import { Fragment, useMemo, useState } from 'react';
 import { useQueries } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { ChevronDown, ChevronRight, ExternalLink, Rocket, Upload } from 'lucide-react';
+import {
+  ArrowSquareOutIcon,
+  CircleNotchIcon,
+  CaretDownIcon,
+  CaretRightIcon,
+  LockKeyIcon,
+  RocketLaunchIcon,
+  UploadSimpleIcon,
+} from '@phosphor-icons/react';
 import { Link } from 'react-router-dom';
 import { Button } from '../../../../shared/ui/button';
 import { Spinner } from '../../../../shared/ui/spinner';
@@ -42,12 +50,8 @@ import {
   type OtaReleaseReq,
 } from '../../otaApi';
 import {
-  Chip,
-  OtaPanel,
   OtaReleaseComposer,
   OtaSupersedeDialog,
-  PUSH_CHIP,
-  REL_CHIP,
   dimsLabel,
   dimsOf,
   errMsg,
@@ -58,8 +62,25 @@ import {
   trafficOf,
   type ReleasablePkg,
 } from './OtaPanel';
+import { OtaFlow } from '../../pages/mobile/summary/OtaFlow';
+import { OtaLifecyclePanel } from './OtaLifecyclePanel';
 
 const keyOf = (c: { appName: string; platform: string }) => `${c.appName}|${c.platform}`;
+
+
+// Mockup square badges (design family: OtaFlow's PUSH_BADGE/REL_BADGE).
+const REL_BADGE: Record<string, string> = {
+  CREATED: 'bg-sky-100 text-sky-800',
+  INPROGRESS: 'bg-emerald-100 text-emerald-800',
+  CONCLUDED: 'bg-emerald-100 text-emerald-800',
+  DISCARDED: 'bg-zinc-100 text-zinc-600',
+};
+const PUSH_BADGE: Record<string, string> = {
+  DISPATCHED: 'text-sky-800 bg-sky-100',
+  RUNNING: 'text-amber-800 bg-amber-100',
+  BUNDLE_PUSHED: 'text-emerald-800 bg-emerald-100',
+  FAILED: 'text-red-800 bg-red-100',
+};
 
 interface RowData {
   capable: OtaCapableApp;
@@ -107,7 +128,11 @@ export function OtaSection({
   const [busyVerb, setBusyVerb] = useState<string | null>(null);
   const [rampOpen, setRampOpen] = useState(false);
   const [rampPct, setRampPct] = useState('10');
-  const [composer, setComposer] = useState<{ row: RowData; pkg: ReleasablePkg } | null>(null);
+  const [composer, setComposer] = useState<{
+    row: RowData;
+    pkg: ReleasablePkg;
+    editing?: { releaseId: string; lockedDims: Record<string, unknown> };
+  } | null>(null);
   const [conflict, setConflict] = useState<{
     row: RowData;
     pkg: ReleasablePkg;
@@ -388,6 +413,28 @@ export function OtaSection({
     }
   };
 
+  // Single-app re-dispatch (the failed-state "Retry push" verb) — same
+  // workflow inputs as the toolbar push, scoped to one (app, platform).
+  const doPushFor = async (r: RowData) => {
+    if (busyVerb) return;
+    setBusyVerb('Push');
+    try {
+      await dispatchGroupOta(groupId, {
+        versionBump: bump,
+        apps: [r.capable.appName],
+        platforms: [r.capable.platform],
+        notifySlack,
+        runner,
+      });
+      toast.success(`OTA bundle push dispatched (${bump}) — ${r.capable.appName} ${r.capable.platform}`);
+      onChanged();
+    } catch (e) {
+      toast.error(errMsg(e, 'dispatch failed'));
+    } finally {
+      setBusyVerb(null);
+    }
+  };
+
   const doRampBatch = async (pct: number) => {
     setRampOpen(false);
     await runBatch(
@@ -494,11 +541,11 @@ export function OtaSection({
   })();
 
   return (
-    <div className="bg-white rounded-lg border border-zinc-200 border-t-2 border-t-violet-400">
-      {/* Toolbar — same grammar as BUILD/ROLLOUT rows above */}
-      <div className="flex items-center gap-2 flex-wrap px-4 py-3 border-b border-zinc-100 bg-zinc-50">
-        <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-zinc-600">
-          <Rocket className="h-3.5 w-3.5 text-violet-500" /> OTA
+    <div className="bg-white rounded-xl border border-zinc-200 border-l-[6px] border-l-violet-500 overflow-hidden shadow-[0_4px_12px_-4px_rgba(0,0,0,0.05)]">
+      {/* Toolbar — push form + selection verbs (violet OTA identity) */}
+      <div className="flex items-center gap-2 flex-wrap px-4 py-3 border-b border-violet-100 bg-violet-50/50">
+        <span className="inline-flex items-center gap-1 bg-violet-100 text-violet-800 border border-violet-200 text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider shadow-sm">
+          <RocketLaunchIcon size={11} weight="fill" className="text-violet-600" aria-hidden="true" /> OTA
         </span>
         <label
           className="inline-flex items-center gap-1.5 text-[11px] text-zinc-600"
@@ -546,15 +593,23 @@ export function OtaSection({
         </label>
         <Button
           size="sm"
-          className="bg-[#EAFCF5] border-emerald-200 text-emerald-900 enabled:hover:bg-[#D9F7EA] enabled:active:bg-emerald-100"
+          className="bg-zinc-900 text-white border-zinc-900 enabled:hover:bg-zinc-800 disabled:bg-zinc-100 disabled:text-zinc-400 disabled:border-zinc-200"
           disabled={pushState.disabled}
           onClick={doPush}
           title={pushState.title}
         >
-          <Upload className="h-3.5 w-3.5 mr-1" />
-          {busyVerb === 'Push' ? 'Dispatching…' : 'Push bundle'}
+          {pushState.disabled && ota.activePush ? (
+            <LockKeyIcon size={13} weight="bold" className="mr-1" aria-hidden="true" />
+          ) : (
+            <UploadSimpleIcon size={13} weight="bold" className="mr-1" aria-hidden="true" />
+          )}
+          {busyVerb === 'Push'
+            ? 'Dispatching…'
+            : pushState.disabled && ota.activePush
+              ? 'Queue locked'
+              : 'Push bundle'}
         </Button>
-        <div className="h-5 w-px bg-zinc-200 mx-1" />
+        <div className="h-5 w-px bg-violet-200/70 mx-1" />
         <Button
           size="sm"
           variant="secondary"
@@ -593,6 +648,7 @@ export function OtaSection({
         <Button
           size="sm"
           variant="secondary"
+          className="text-red-600 border-red-200 enabled:hover:bg-red-50"
           disabled={verbState(concludeWhy(true)).disabled}
           title={verbState(concludeWhy(true)).title}
           onClick={() => void doConcludeBatch(true)}
@@ -602,18 +658,28 @@ export function OtaSection({
         <Button
           size="sm"
           variant="secondary"
-          className="text-red-600 enabled:hover:bg-red-50"
+          className="text-red-600 border-red-200 enabled:hover:bg-red-50"
           disabled={verbState(discardWhy).disabled}
           title={verbState(discardWhy).title}
           onClick={() => void doDiscardBatch()}
         >
           Discard
         </Button>
-        {ota.activePush && (
-          <span className="text-[11px] text-amber-700 ml-auto">
-            push active · group {ota.activePush.groupId.slice(0, 8)} · {ota.activePush.dispatchedBy}
-          </span>
-        )}
+        <span className="ml-auto inline-flex items-center gap-3">
+          {(busyVerb != null ||
+            releaseQs.some((q) => q.isFetching) ||
+            packagesQs.some((q) => q.isFetching)) && (
+            <span className="inline-flex items-center gap-1.5 text-[11px] text-violet-600 font-medium">
+              <CircleNotchIcon size={13} weight="bold" className="animate-spin" aria-hidden="true" />
+              {busyVerb ? `${busyVerb}…` : 'syncing…'}
+            </span>
+          )}
+          {ota.activePush && (
+            <span className="text-[11px] text-amber-700">
+              push active · group {ota.activePush.groupId.slice(0, 8)} · {ota.activePush.dispatchedBy}
+            </span>
+          )}
+        </span>
       </div>
 
       {/* Table */}
@@ -690,20 +756,16 @@ export function OtaSection({
                       )
                     ) : (
                       <div className="flex items-center gap-2 flex-wrap">
-                        <Chip
-                          label={statusOf(rel)}
-                          cls={REL_CHIP[statusOf(rel)] ?? 'bg-zinc-100 text-zinc-600 border-zinc-200'}
-                        />
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${REL_BADGE[statusOf(rel)] ?? 'bg-zinc-100 text-zinc-600'}`}
+                        >
+                          {statusOf(rel) === 'INPROGRESS' ? `Live ${trafficOf(rel) ?? 0}%` : statusOf(rel) === 'CREATED' ? 'Created · not ramped' : statusOf(rel)}
+                        </span>
                         <span className="text-xs font-mono font-semibold text-zinc-800">
                           pkg v{pkgVersionOf(rel) ?? '?'}
                         </span>
                         {pkgTagOf(rel) && (
                           <span className="text-[11px] font-mono text-zinc-600">{pkgTagOf(rel)}</span>
-                        )}
-                        {statusOf(rel) === 'INPROGRESS' && (
-                          <span className="text-xs font-semibold text-violet-700">
-                            {trafficOf(rel) ?? 0}%
-                          </span>
                         )}
                         {rel.id && (
                           <Link
@@ -712,7 +774,7 @@ export function OtaSection({
                             className="text-violet-600 hover:text-violet-800"
                             title={`Open release ${rel.id} in Airborne`}
                           >
-                            <ExternalLink className="h-3 w-3" />
+                            <ArrowSquareOutIcon size={12} aria-hidden="true" />
                           </Link>
                         )}
                         <span className="text-[11px] text-zinc-600">{dimsLabel(dimsOf(rel))}</span>
@@ -727,7 +789,9 @@ export function OtaSection({
                   <td className="py-2.5">
                     {r.latestPush ? (
                       <div className="flex items-center gap-2">
-                        <Chip label={r.latestPush.status} cls={PUSH_CHIP[r.latestPush.status]} />
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${PUSH_BADGE[r.latestPush.status]}`}>
+                          {r.latestPush.status}
+                        </span>
                         {r.latestPush.packageVersion != null && (
                           <span className="text-xs font-mono text-zinc-700">
                             pkg v{r.latestPush.packageVersion}
@@ -762,30 +826,43 @@ export function OtaSection({
                       }}
                       className="inline-flex items-center gap-0.5 text-xs text-zinc-600 hover:text-zinc-900"
                     >
-                      {isExp ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                      {isExp ? <CaretDownIcon size={13} weight="bold" aria-hidden="true" /> : <CaretRightIcon size={13} weight="bold" aria-hidden="true" />}
                       Details
                     </button>
                   </td>
                 </tr>
                 {isExp && (
                   <tr>
-                    <td colSpan={5} className="p-3 bg-zinc-50/50">
-                      <OtaPanel
+                    <td colSpan={5} className="p-4 bg-zinc-50/60">
+                      <OtaLifecyclePanel
+                        loading={r.releasesLoading}
+                        prov={provQs[refs.indexOf(r.capable.airborneAppRef)]?.data?.packages ?? []}
+                        foreignPkgCount={
+                          (packagesQs[refs.indexOf(r.capable.airborneAppRef)]?.data?.data ?? []).filter(
+                            (pk) =>
+                              typeof pk.version === 'number' &&
+                              !r.eligiblePkgs.some((e) => e.version === pk.version),
+                          ).length
+                        }
                         groupId={groupId}
                         appName={r.capable.appName}
                         platform={r.capable.platform}
                         airborneAppRef={r.capable.airborneAppRef}
-                        hideIdentity
-                        sourceRef={r.sourceRef}
-                        nativeVersion={nativeVersionFor(r.capable.appName, r.capable.platform)}
-                        buildSuperseded={r.capable.superseded}
-                        pushEligible={r.capable.pushEligible}
-                        ineligibleReason={r.capable.ineligibleReason}
-                        pushes={ota.rows}
-                        links={ota.links}
-                        activePush={ota.activePush ?? null}
+                        pushes={ota.rows.filter(
+                          (p) => p.appName === r.capable.appName && p.platform === r.capable.platform,
+                        )}
+                        ongoing={r.ongoing}
+                        foreignOngoing={r.foreignOngoing}
+                        releases={releaseQs[refs.indexOf(r.capable.airborneAppRef)]?.data?.data ?? []}
+                        eligiblePkgs={r.eligiblePkgs}
+                        perms={r.perms}
                         canDispatch={canDispatchFor(r.capable.appName, r.capable.platform)}
-                        hideBranchPrompt
+                        nativeVersion={nativeVersionFor(r.capable.appName, r.capable.platform)}
+                        onRelease={(pkg) => setComposer({ row: r, pkg })}
+                        onEdit={(rel, pkg) =>
+                          rel.id && setComposer({ row: r, pkg, editing: { releaseId: rel.id, lockedDims: dimsOf(rel) } })
+                        }
+                        onRetryPush={() => void doPushFor(r)}
                         onChanged={onChanged}
                       />
                     </td>
@@ -794,31 +871,32 @@ export function OtaSection({
               </Fragment>
             );
           })}
-          {/* Members with no airborne app — inert, with the reason. */}
-          {unmapped.map((u) => (
-            <tr key={`${u.appName}|${u.platform}`} className="border-t border-zinc-100 opacity-60">
-              <td className="px-3 py-2.5" />
-              <td className="px-2 py-2.5">
-                <span className="inline-flex items-center gap-2">
-                  <BrandLogo brand={u.appName} surface={u.surface === 'driver' ? 'driver' : undefined} size="sm" />
-                  <span className="text-sm font-medium text-zinc-600">{u.appName}</span>
-                  <span className="text-xs text-zinc-600">{u.platform}</span>
-                </span>
-              </td>
-              <td className="px-3 py-2.5 text-xs text-zinc-600" colSpan={3}>
-                {u.surface === 'driver'
-                  ? 'no OTA — airborne is not available for provider apps'
-                  : 'no OTA — no airborne app mapped (set "OTA ref" in Mobile Apps admin)'}
-              </td>
-            </tr>
-          ))}
         </tbody>
       </table>
+
+      {/* Unmapped apps footer (desktop) — the mockup's compact "not OTA-capable"
+          line, instead of inert table rows. */}
+      {unmapped.length > 0 && (
+        <div className="hidden md:block bg-zinc-50 border-t border-zinc-100 px-4 py-2 text-[10px] text-zinc-600 font-medium">
+          Not OTA-capable:{' '}
+          {unmapped.map((u, i) => (
+            <span key={`${u.appName}|${u.platform}`}>
+              {i > 0 && ' · '}
+              <span className="font-mono text-zinc-700">
+                {u.appName} {u.platform}
+              </span>
+            </span>
+          ))}
+          {unmapped.every((u) => u.surface === 'driver')
+            ? ' — airborne is not available for provider apps.'
+            : ' — no Airborne app mapped (set “OTA ref” in Mobile Apps admin).'}
+        </div>
+      )}
 
       {/* Mobile fallback: the cards */}
       <div className="md:hidden p-3 space-y-3">
         {rows.map((r) => (
-          <OtaPanel
+          <OtaFlow
             key={keyOf(r.capable)}
             groupId={groupId}
             appName={r.capable.appName}
@@ -833,7 +911,6 @@ export function OtaSection({
             links={ota.links}
             activePush={ota.activePush ?? null}
             canDispatch={canDispatchFor(r.capable.appName, r.capable.platform)}
-            hideBranchPrompt
             onChanged={onChanged}
           />
         ))}
@@ -923,8 +1000,13 @@ export function OtaSection({
               (r) => pkgVersionOf(r) ?? 0,
             ),
           )}
+          editing={composer.editing}
           onClose={() => setComposer(null)}
           onSubmit={(pkg, req) => void submitRelease(composer.row, pkg, req)}
+          onSaved={() => {
+            setComposer(null);
+            onChanged();
+          }}
         />
       )}
 

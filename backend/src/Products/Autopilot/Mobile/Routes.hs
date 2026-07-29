@@ -28,7 +28,7 @@ import Products.Autopilot.Mobile.Handlers.Groups (
  )
 import Products.Autopilot.Mobile.Handlers.Live
 import Products.Autopilot.Mobile.Handlers.Ota (
-    abandonOtaPushH,
+    cancelOtaPushH,
     attachPackageH,
     dispatchOtaH,
     getGroupOtaH,
@@ -360,7 +360,7 @@ type MobileAPI =
             :> "ota"
             :> "pushes"
             :> Capture "pushId" Text
-            :> "abandon"
+            :> "cancel"
             :> Protected 'AP_MOBILE_DISPATCH
             :> Post '[JSON] OtaPushResp
         :<|> "mobile"
@@ -444,7 +444,7 @@ mobileServer =
         :<|> (\gid ap req -> dispatchOtaH ap gid req)
         :<|> (\pid ap req -> releaseOtaH ap pid req)
         :<|> (\pid ap -> otaPushJobsH ap pid)
-        :<|> (\pid ap -> abandonOtaPushH ap pid)
+        :<|> (\pid ap -> cancelOtaPushH ap pid)
         :<|> (\pid ap req -> attachPackageH ap pid req)
         :<|> (\gid ap req -> releaseOtaPackageH ap gid req)
         :<|> (\gid ap req -> resolveOtaProvenanceH ap gid req)

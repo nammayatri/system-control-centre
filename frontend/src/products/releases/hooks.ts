@@ -433,6 +433,12 @@ export function useMobileRollout(releaseId: string | undefined, enabled: boolean
     queryKey: ['mobile-rollout', releaseId],
     queryFn: () => mobileApi.getRolloutDetail(releaseId!),
     enabled: !!releaseId && enabled,
+    // Poll only while a review/rollout is actively in flight (panel parity).
+    refetchInterval: (query) => {
+      const st = query.state.data?.rdMbStatus;
+      const active = ['MBSubmittingForReview', 'MBInReview', 'MBReviewApproved', 'MBRollingOut'];
+      return st && active.includes(st) ? 15_000 : false;
+    },
     retry: false,
     staleTime: 5000,
   });

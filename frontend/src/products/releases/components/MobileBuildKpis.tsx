@@ -1,16 +1,24 @@
 import { useMemo } from 'react';
+import { FunnelSimpleIcon, XIcon } from '@phosphor-icons/react';
 import type { APRelease } from '../api';
 import { cn } from '../../../lib/utils';
 
 /**
- * The mobile-build KPI strip. Counts EVERY mobile release row (SCC-built and
- * store-synced alike), never groups. Buckets come from the caller's `bucketOf`
- * — GroupsHome passes its storeBucket, the SAME function the status filter
- * uses — so a card's count always equals the rows its click filters to.
- * Cards are buttons: click applies that status filter, click again (or Total)
- * clears it.
+ * The pipeline tiles (v4: docs/design/mobile-releases-home-mockup-v1.html).
+ * Counts EVERY mobile release row (SCC-built and store-synced alike), never
+ * groups. Buckets come from the caller's `bucketOf` — GroupsHome passes its
+ * storeBucket, the SAME function the status filter uses — so a tile's count
+ * always equals the rows its click filters to. Click applies the filter,
+ * click again clears it.
  */
-const CARDS: { key: string; label: string; dot: string; hint: string }[] = [
+const CARDS: {
+  key: string;
+  label: string;
+  dot: string;
+  pulse?: boolean;
+  danger?: boolean;
+  hint: string;
+}[] = [
   {
     key: 'building',
     label: 'Building',
@@ -19,45 +27,46 @@ const CARDS: { key: string; label: string; dot: string; hint: string }[] = [
   },
   {
     key: 'promote',
-    label: 'Ready to Promote',
-    dot: 'bg-violet-500',
+    label: 'Ready to promote',
+    dot: 'bg-blue-500',
     hint: 'Built and held — waiting on you to promote to store review.',
   },
   {
     key: 'review',
-    label: 'In Review',
-    dot: 'bg-sky-500',
+    label: 'In review',
+    dot: 'bg-violet-500',
+    pulse: true,
     hint: 'Submitted and sitting in store review.',
   },
   {
     key: 'approved',
-    label: 'Approved · Held',
-    dot: 'bg-emerald-500',
+    label: 'Approved · held',
+    dot: 'bg-emerald-400',
     hint: 'Passed review, held — waiting for you to release.',
   },
   {
     key: 'rollout',
-    label: 'Rolling Out',
-    dot: 'bg-blue-500',
+    label: 'Rolling out',
+    dot: 'bg-emerald-500',
+    pulse: true,
     hint: 'Staged rollout in progress (or halted mid-rollout).',
   },
   {
     key: 'aborted',
     label: 'Failed',
     dot: 'bg-red-500',
+    danger: true,
     hint: 'Ended without shipping: build failures, aborts and discards.',
   },
 ];
 
 export function MobileBuildKpis({
   releases,
-  windowLabel,
   bucketOf,
   active = '',
   onSelect,
 }: {
   releases: APRelease[];
-  windowLabel?: string;
   // The SAME bucket fn the list's status filter uses (GroupsHome.storeBucket).
   bucketOf: (r: APRelease) => string;
   active?: string;
@@ -73,47 +82,69 @@ export function MobileBuildKpis({
   }, [releases, bucketOf]);
 
   const clickable = !!onSelect;
-  const card = (opts: {
-    key: string;
-    label: string;
-    dot: string;
-    hint: string;
-    value: number;
-    isActive: boolean;
-    onClick?: () => void;
-  }) => (
-    <button
-      key={opts.key}
-      type="button"
-      title={clickable ? `${opts.hint}\nClick to filter the list.` : opts.hint}
-      onClick={opts.onClick}
-      disabled={!clickable}
-      className={cn(
-        'bg-white border rounded-xl px-4 py-3 sm:px-5 sm:py-4 flex flex-col justify-between min-h-[72px] sm:min-h-[80px] text-left transition-colors',
-        opts.isActive ? 'border-violet-400 ring-2 ring-violet-200' : 'border-zinc-200',
-        clickable && !opts.isActive && 'hover:border-zinc-300 hover:bg-zinc-50/50 cursor-pointer',
-      )}
-    >
-      <span className="text-[10px] sm:text-[11px] font-medium text-zinc-500 uppercase tracking-wider">
-        {opts.label}
-      </span>
-      <div className="flex items-center gap-2 mt-1">
-        <span className={cn('w-1.5 h-1.5 rounded-full', opts.dot)} />
-        <span className="text-xl sm:text-2xl font-bold text-zinc-900">{opts.value}</span>
-      </div>
-    </button>
-  );
-
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3 sm:gap-4">
-      {CARDS.map((c) =>
-        card({
-          ...c,
-          value: counts[c.key] ?? 0,
-          isActive: active === c.key,
-          onClick: onSelect ? () => onSelect(active === c.key ? '' : c.key) : undefined,
-        }),
+    <section>
+      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
+        {CARDS.map((c) => {
+          const value = counts[c.key] ?? 0;
+          const isActive = active === c.key;
+          return (
+            <button
+              key={c.key}
+              type="button"
+              title={clickable ? `${c.hint}\nClick to filter the list.` : c.hint}
+              onClick={onSelect ? () => onSelect(isActive ? '' : c.key) : undefined}
+              disabled={!clickable}
+              className={cn(
+                'card-surface p-4 text-left relative group transition-all',
+                clickable && 'cursor-pointer',
+                isActive
+                  ? 'shadow-[0_0_0_3px_rgba(124,58,237,0.15)]'
+                  : clickable &&
+                      'hover:-translate-y-px hover:shadow-[0_0_0_3px_rgba(124,58,237,0.08),0_4px_12px_-6px_rgba(0,0,0,0.12)]',
+              )}
+              style={{ borderColor: isActive ? '#7c3aed' : '#d4d4d8' }}
+            >
+              {clickable && !isActive && (
+                <FunnelSimpleIcon
+                  size={14}
+                  weight="bold"
+                  className={cn(
+                    'absolute top-2.5 right-2.5 text-zinc-300 transition-colors',
+                    c.danger ? 'group-hover:text-red-400' : 'group-hover:text-violet-500',
+                  )}
+                  aria-hidden="true"
+                />
+              )}
+              {isActive && (
+                <span className="absolute top-2 right-2 inline-flex items-center gap-1 bg-violet-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">
+                  filtering <XIcon size={9} weight="bold" aria-hidden="true" />
+                </span>
+              )}
+              <span className={cn('eyebrow', c.danger && 'text-red-500')} style={c.danger ? { color: '#ef4444' } : undefined}>
+                {c.label}
+              </span>
+              <div className="flex items-center gap-2 mt-1.5">
+                <span
+                  className={cn(
+                    'w-2 h-2 rounded-full',
+                    c.dot,
+                    c.pulse && value > 0 && 'animate-pulse-slow motion-reduce:animate-none',
+                  )}
+                />
+                <span className={cn('text-2xl font-bold font-mono', c.danger ? 'text-red-600' : 'text-zinc-900')}>
+                  {value}
+                </span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      {clickable && (
+        <p className="text-[10px] text-zinc-400 mt-1.5 px-1">
+          Click a tile to filter the list below — click again to clear.
+        </p>
       )}
-    </div>
+    </section>
   );
 }

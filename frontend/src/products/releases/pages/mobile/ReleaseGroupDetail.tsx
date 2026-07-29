@@ -1,6 +1,28 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, CheckCircle2, ChevronDown, Copy, GitBranch, Rocket, Send, Smartphone, Apple, Cpu, Info, Trash2, Undo2 } from 'lucide-react';
+import {
+  AndroidLogoIcon,
+  AppleLogoIcon,
+  ArrowsClockwiseIcon,
+  ArrowUpRightIcon,
+  ArrowUUpLeftIcon,
+  CaretRightIcon,
+  CheckCircleIcon,
+  CheckIcon,
+  CheckSquareIcon,
+  CopyIcon,
+  CursorClickIcon,
+  GitBranchIcon,
+  InfoIcon,
+  PaperPlaneTiltIcon,
+  PauseIcon,
+  PlayIcon,
+  PlusIcon,
+  RocketLaunchIcon,
+  TrashIcon,
+  XCircleIcon,
+  XIcon,
+} from '@phosphor-icons/react';
 import { useMobileGroup, useDispatchMobileReleases } from '../../hooks';
 import { useGroupOta } from '../../otaApi';
 import { OtaSection } from '../../components/ota/OtaSection';
@@ -18,9 +40,8 @@ import {
   DialogTitle,
 } from '../../../../shared/ui/dialog';
 import { useAuth } from '../../../../core/auth/AuthContext';
-import { GroupStageChip } from '../../components/GroupStageChip';
-import { ReleaseStatusBadge } from '../../components/ReleaseStatusBadge';
 import { BrandLogo } from '../../components/BrandLogo';
+import { V4StatusPill } from '../../components/V4StatusPill';
 import { versionWithBuild } from '../../utils';
 import { Button } from '../../../../shared/ui/button';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
@@ -33,8 +54,8 @@ import type { APRelease } from '../../api';
 // origin of this mapping.
 const PlatformIcon = ({ platform }: { platform: string }) =>
   platform === 'ios'
-    ? <Apple className="w-4 h-4 text-zinc-500" />
-    : <Cpu className="w-4 h-4 text-emerald-600" />;
+    ? <AppleLogoIcon size={14} weight="fill" className="text-zinc-700" aria-hidden="true" />
+    : <AndroidLogoIcon size={14} weight="fill" className="text-emerald-600" aria-hidden="true" />;
 
 // Mirrors the backend dispatch grouping (Handlers/Release.hs): consumer rows
 // share one GH run per (surface, platform); provider (driver) rows additionally
@@ -58,100 +79,234 @@ const STAGE_STEP: Record<string, number> = {
   done: 6,
 };
 
-type StepMarks = Record<number, { ok: number; failed: number }>;
+// ── Fleet Rail — the release lifecycle as one wide card, member counts pinned
+// to the step they sit at (matches docs/design/release-group-detail-mockup-v1). ─
+type RailTone = 'violet' | 'amber' | 'blue' | 'emerald' | 'sky';
+const RAIL_TONE: Record<RailTone, { border: string; text: string; ping: string }> = {
+  violet: { border: 'border-violet-500', text: 'text-violet-700', ping: 'border-violet-400' },
+  amber: { border: 'border-amber-500', text: 'text-amber-700', ping: 'border-amber-400' },
+  blue: { border: 'border-blue-500', text: 'text-blue-700', ping: 'border-blue-400' },
+  emerald: { border: 'border-emerald-500', text: 'text-emerald-700', ping: 'border-emerald-400' },
+  sky: { border: 'border-sky-500', text: 'text-sky-700', ping: 'border-sky-400' },
+};
+const RAIL_LABELS: { label: string; tone: RailTone; word: string }[] = [
+  { label: 'Draft', tone: 'emerald', word: '' },
+  { label: 'Approve', tone: 'violet', word: 'await' },
+  { label: 'Build', tone: 'amber', word: 'here' },
+  { label: 'Promote', tone: 'blue', word: 'held' },
+  { label: 'Review', tone: 'violet', word: 'in review' },
+  { label: 'Rollout', tone: 'emerald', word: 'rolling' },
+  { label: 'Live', tone: 'emerald', word: 'live' },
+];
 
-function GroupStepper({
-  stage,
-  failedStep = null,
-  marks = null,
-  marksLabel = null,
+export type RailMarks = Record<number, { ok: number; failed: number; sup: number }>;
+
+/**
+ * The fleet rail — pinned to where MEMBERS actually are (rowMark), never a
+ * blended group stage: a step holding members gets a count ring (red X when
+ * every member there failed), steps behind the furthest member read done,
+ * steps ahead read todo. Scoped to the selection when one exists.
+ */
+function FleetRail({
+  marks,
+  total,
+  selectionCount = 0,
 }: {
-  stage?: string;
-  // Step index where a fully-failed group died (Failed marker renders THERE,
-  // not at the end — a build failure never reached Promote, let alone Live).
-  failedStep?: number | null;
-  // step index -> counts of rows sitting there. Non-empty switches the
-  // stepper from "group stage" to "where are the apps": one bright dot per
-  // occupied stage, ×n on the label when several share it.
-  marks?: StepMarks | null;
-  // Prefix shown in marks mode ("Selected" when a selection narrows the
-  // marks; null for the everyone view).
-  marksLabel?: string | null;
+  marks: RailMarks | null;
+  total: number;
+  selectionCount?: number;
 }) {
-  const selMode = !!marks && Object.keys(marks).length > 0;
-  if (!stage && !selMode) return null;
-  const active = failedStep ?? STAGE_STEP[stage ?? ''] ?? 2;
-  const failed = failedStep != null;
-  const maxMark = selMode ? Math.max(...Object.keys(marks!).map(Number)) : -1;
-  const aria = selMode
-    ? `${marksLabel ?? 'Apps'}: ` +
-      Object.entries(marks!)
-        .map(([i, m]) => `${m.ok + m.failed} at ${STEPS[Number(i)]}${m.failed > 0 ? ' (failed)' : ''}`)
-        .join(', ')
-    : failed
-      ? `Failed during ${STEPS[active]}`
-      : `Release progress: ${STEPS[active]}`;
+  const stepKeys = Object.keys(marks ?? {}).map(Number);
+  const maxMark = stepKeys.length > 0 ? Math.max(...stepKeys) : 0;
+  const failedOnly = (m?: { ok: number; failed: number; sup: number }) =>
+    !!m && m.failed > 0 && m.ok === 0 && m.sup === 0;
+  // Whole fleet superseded → the rail is history: complete but overtaken,
+  // muted to zinc end to end (summary-page parity).
+  const allSup =
+    stepKeys.length === 1 && (marks?.[6]?.sup ?? 0) === total && total > 0;
+  const progressPct = allSup ? 100 : Math.max(6, Math.min(100, (maxMark / (RAIL_LABELS.length - 1)) * 100));
+  const lineRed = !allSup && failedOnly(marks?.[maxMark]);
   return (
-    <div className="hidden md:flex items-start" aria-label={aria}>
-      {selMode && marksLabel && (
-        <span className="text-[9px] font-semibold uppercase tracking-wider text-violet-600 mr-1.5 mt-[3px] select-none">
-          {marksLabel}
-        </span>
-      )}
-      {STEPS.map((s, i) => {
-        const m = selMode ? marks![i] : undefined;
-        const isActive = selMode ? !!m : i === active;
-        const isFilled = selMode ? i <= maxMark : i <= active;
-        const isRose = selMode ? !!m && m.ok === 0 && m.failed > 0 : failed && i === active;
-        const count = m ? m.ok + m.failed : 0;
-        const label = !selMode && failed && i === active ? 'Failed' : s;
-        return (
-          <span key={s} className="flex items-start">
-            {i > 0 && (
-              <span
-                className={cn('h-px w-4 lg:w-6 mt-[5px]', isFilled ? 'bg-violet-400' : 'bg-zinc-200')}
-              />
-            )}
-            <span
-              className="flex flex-col items-center gap-1 w-12"
-              title={
-                selMode && m
-                  ? `${count} selected app${count === 1 ? '' : 's'} at ${s}`
-                  : !selMode && failed && i === active
-                    ? `Failed during ${s}`
-                    : undefined
-              }
-            >
-              <span
-                className={cn(
-                  'w-2.5 h-2.5 rounded-full transition-colors',
-                  isActive
-                    ? isRose
-                      ? 'bg-rose-500 ring-4 ring-rose-100'
-                      : 'bg-violet-600 ring-4 ring-violet-100'
-                    : isFilled
-                      ? 'bg-violet-400'
-                      : 'bg-zinc-200',
+    <section className="stagger-item card-surface px-6 py-8" style={{ ['--index' as string]: 1 }}>
+      <div className="flex items-center justify-between mb-6">
+        <p className="eyebrow">Release Lifecycle · Fleet of {total}</p>
+        {selectionCount > 0 && (
+          <p className="text-[10px] font-bold text-violet-600 uppercase tracking-widest">
+            scoped to selection · {selectionCount}
+          </p>
+        )}
+      </div>
+      <div className="relative w-full">
+        <div className="absolute top-5 left-0 right-0 h-0.5 bg-zinc-200 z-0" />
+        <div
+          className={cn(
+            'absolute top-5 left-0 h-0.5 z-10 transition-all duration-500',
+            lineRed ? 'bg-red-500' : allSup ? 'bg-zinc-300' : 'bg-emerald-500',
+          )}
+          style={{ width: `${progressPct}%` }}
+        />
+        <div className="relative z-20 flex justify-between items-start w-full">
+          {RAIL_LABELS.map((step, i) => {
+            const m = marks?.[i];
+            const tone = RAIL_TONE[step.tone];
+            const isRose = failedOnly(m);
+            const isLast = i === RAIL_LABELS.length - 1;
+            // Live step truth: ticked when members genuinely serve; a
+            // superseded-only step reads "superseded", never 100%.
+            const liveDone = !allSup && isLast && !!m && m.ok > 0;
+            const supOnly = isLast && !!m && m.ok === 0 && m.failed === 0 && m.sup > 0;
+            const captionAllSup = allSup && isLast ? 'superseded' : null;
+            const caption = captionAllSup
+              ? captionAllSup
+              : !m
+              ? null
+              : isRose
+                ? `${m.failed} failed`
+                : isLast
+                  ? [
+                      m.ok > 0 ? (m.ok === total && m.sup === 0 ? '100%' : `${m.ok} live`) : null,
+                      m.sup > 0 ? `${m.sup} superseded` : null,
+                      m.failed > 0 ? `${m.failed} failed` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
+                  : m.failed > 0
+                    ? `${m.ok} · ${m.failed} failed`
+                    : step.word
+                      ? `${m.ok} ${step.word}`
+                      : String(m.ok);
+            return (
+              <div key={step.label} className="flex flex-col items-center gap-2 w-16">
+                {allSup ? (
+                  <div className="w-10 h-10 rounded-full bg-zinc-200 border-2 border-white flex items-center justify-center text-zinc-400 shadow-sm">
+                    <CheckIcon size={16} weight="bold" aria-hidden="true" />
+                  </div>
+                ) : isRose ? (
+                  <div className="w-10 h-10 rounded-full bg-red-50 border-2 border-red-500 flex items-center justify-center text-red-500 relative">
+                    <div className="absolute inset-0 rounded-full border-2 border-red-300 animate-ping opacity-50 z-[-1] motion-reduce:animate-none" />
+                    <XIcon size={16} weight="bold" aria-hidden="true" />
+                  </div>
+                ) : liveDone ? (
+                  <div className="w-10 h-10 rounded-full bg-emerald-500 border-2 border-white flex items-center justify-center text-white shadow-md">
+                    <CheckIcon size={16} weight="bold" aria-hidden="true" />
+                  </div>
+                ) : supOnly ? (
+                  <div
+                    className="w-10 h-10 rounded-full bg-zinc-200 border-2 border-white flex items-center justify-center text-zinc-500 shadow-sm"
+                    title="This build shipped, then a newer version took over"
+                  >
+                    <CheckIcon size={16} weight="bold" aria-hidden="true" />
+                  </div>
+                ) : m ? (
+                  <div
+                    className={cn(
+                      'w-10 h-10 rounded-full bg-white border-[3px] flex items-center justify-center relative',
+                      tone.border,
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        'absolute inset-0 rounded-full border-2 animate-ping opacity-50 z-[-1] motion-reduce:animate-none',
+                        tone.ping,
+                      )}
+                    />
+                    <span className={cn('text-[11px] font-mono font-bold', tone.text)}>{m.ok + m.failed}</span>
+                  </div>
+                ) : i < maxMark || (i === 0 && stepKeys.length > 0) ? (
+                  <div className="w-10 h-10 rounded-full bg-emerald-500 border-2 border-white flex items-center justify-center text-white shadow-md">
+                    <CheckIcon size={16} weight="bold" aria-hidden="true" />
+                  </div>
+                ) : (
+                  <div className="w-10 h-10 rounded-full bg-zinc-100 border-2 border-white flex items-center justify-center">
+                    <div className="w-2 h-2 rounded-full bg-zinc-300" />
+                  </div>
                 )}
-              />
-              <span
-                className={cn(
-                  'text-[9px] leading-none whitespace-nowrap',
-                  isActive
-                    ? isRose
-                      ? 'text-rose-600 font-semibold'
-                      : 'text-violet-700 font-semibold'
-                    : 'text-zinc-400',
-                )}
-              >
-                {label}
-                {selMode && count > 1 ? ` ×${count}` : ''}
-              </span>
-            </span>
-          </span>
-        );
-      })}
-    </div>
+                <div className="text-center">
+                  <span
+                    className={cn(
+                      'block text-[11px] leading-tight',
+                      allSup ? 'font-bold text-zinc-500' : m || i < maxMark ? 'font-bold text-zinc-700' : 'font-medium text-zinc-400',
+                    )}
+                  >
+                    {step.label}
+                  </span>
+                  {caption && (
+                    <span
+                      className={cn(
+                        'block text-[10px] font-bold uppercase mt-1',
+                        allSup || supOnly ? 'text-zinc-500' : isRose ? 'text-red-600' : m && m.failed > 0 ? 'text-red-600' : tone.text,
+                      )}
+                    >
+                      {caption}
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+
+// THE mockup stage pill — one summary chip in the identity row, derived from
+// the same server summary the home row uses (stage + phase counts).
+function StagePill({
+  stage,
+  counts,
+  pending,
+  total,
+  failed,
+}: {
+  stage: string;
+  counts: Record<string, number>;
+  pending: number;
+  total: number;
+  failed: boolean;
+}) {
+  const live = (counts['live'] ?? 0) + (counts['distributed'] ?? 0);
+  const base =
+    'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider border';
+  if (stage === 'done' && failed && live === 0)
+    return (
+      <span className={cn(base, 'bg-red-50 border-red-200 text-red-700')}>
+        <XCircleIcon size={12} weight="bold" aria-hidden="true" /> Aborted
+      </span>
+    );
+  if (stage === 'done' && live === 0 && (counts['superseded'] ?? 0) > 0)
+    return (
+      <span className={cn(base, 'bg-zinc-100 border-zinc-200 text-zinc-600')}>
+        Superseded · {counts['superseded']}/{total}
+      </span>
+    );
+  if (stage === 'done')
+    return <span className={cn(base, 'bg-emerald-50 border-emerald-200 text-emerald-700')}>Live · {live}/{total}</span>;
+  if (stage === 'releasing' || stage === 'rolling_out') {
+    const n = (counts['rolling_out'] ?? 0) + (counts['halted'] ?? 0) + (counts['approved'] ?? 0);
+    return (
+      <span className={cn(base, 'bg-emerald-50 border-emerald-200 text-emerald-700')}>
+        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse-slow motion-reduce:animate-none" /> Rolling out {n}/{total}
+      </span>
+    );
+  }
+  if (stage === 'promote' || stage === 'in_review')
+    return (
+      <span className={cn(base, 'bg-violet-50 border-violet-200 text-violet-700')}>
+        <span className="w-2 h-2 rounded-full bg-violet-500 animate-pulse-slow motion-reduce:animate-none" /> Store stage
+      </span>
+    );
+  if (stage === 'building' || stage === 'dispatch')
+    return (
+      <span className={cn(base, 'bg-amber-50 border-amber-200 text-amber-700')}>
+        <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse-slow motion-reduce:animate-none" /> Building {counts['building'] ?? 0}
+      </span>
+    );
+  return (
+    <span className={cn(base, 'bg-zinc-100 border-zinc-200 text-zinc-600')}>
+      <span className="w-2 h-2 rounded-full bg-zinc-400" /> Draft · {total - pending}/{total} approved
+    </span>
   );
 }
 
@@ -261,6 +416,39 @@ export default function ReleaseGroupDetail() {
   // ── Per-verb eligibility (mirrors the backend guards, so the UI never
   // offers what the server would reject; the server still re-checks). ──
   const phaseOf = (r: APRelease) => r.release_context?.display_phase ?? '';
+
+  // Where each member sits on the 7-step rail (0 Draft … 6 Live). Dead rows
+  // pin RED at the stage the abort/failure interrupted (wf-status memory).
+  const ROW_STEP: Record<string, number> = {
+    building: 2,
+    internal_held: 3,
+    in_review: 4,
+    approved: 5,
+    rolling_out: 5,
+    halted: 5,
+    live: 6,
+    distributed: 6,
+    superseded: 6,
+  };
+  const rowMark = (r: APRelease): { step: number; failed: boolean; superseded?: boolean } => {
+    if (phaseOf(r) === 'superseded') return { step: 6, failed: false, superseded: true };
+    if (phaseOf(r) === 'rejected') return { step: 4, failed: true };
+    if (['ABORTED', 'USER_ABORTED', 'GCLT_ABORTED', 'DISCARDED', 'REVERTED'].includes(r.status)) {
+      const wf = r.release_context?.mb_wf_status ?? '';
+      const step = ['MBReviewApproved', 'MBRollingOut'].includes(wf)
+        ? 5
+        : ['MBSubmittingForReview', 'MBInReview'].includes(wf)
+          ? 4
+          : wf === 'MBTagPushed'
+            ? 3
+            : 2;
+      return { step, failed: true };
+    }
+    // Draft rows: pending approval sits at Approve, approved-held at Build.
+    if (r.status === 'CREATED') return { step: r.is_approved === 1 ? 2 : 1, failed: false };
+    return { step: ROW_STEP[phaseOf(r)] ?? 2, failed: false };
+  };
+
   const VERB_ELIGIBLE: Record<string, (r: APRelease) => boolean> = {
     approve: (r) => r.status === 'CREATED' && r.is_approved !== 1,
     // A stamped row is already in the runner's hands — re-dispatch would fork
@@ -292,6 +480,24 @@ export default function ReleaseGroupDetail() {
     () => groupReleases.filter((r) => selectedIds.has(r.id)),
     [groupReleases, selectedIds],
   );
+
+  // Rail marks: the selection when there is one, otherwise EVERY member — the
+  // rail always shows where apps actually are, never a blended stage that
+  // hides a straggler.
+  const railMarks = useMemo<RailMarks | null>(() => {
+    const rows = selectedRows.length > 0 ? selectedRows : groupReleases;
+    if (rows.length === 0) return null;
+    const marks: RailMarks = {};
+    for (const r of rows) {
+      const { step, failed, superseded } = rowMark(r);
+      if (!marks[step]) marks[step] = { ok: 0, failed: 0, sup: 0 };
+      if (failed) marks[step].failed++;
+      else if (superseded) marks[step].sup++;
+      else marks[step].ok++;
+    }
+    return marks;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRows, groupReleases]);
   // Toolbar segments render only when at least one of their verbs is currently
   // performable on ANY member — dead segments are noise. RECOVER always shows
   // (Copy is performable on every group).
@@ -303,18 +509,6 @@ export default function ReleaseGroupDetail() {
   // Which verb button is being hovered — its target rows highlight, the rest
   // dim, so "Approve (2)" visibly means THESE two rows.
   const [hoveredVerb, setHoveredVerb] = useState<string | null>(null);
-  // The release-group panel collapses on header click; the header line (title,
-  // stage chip, group id, branch) stays visible either way. A healthy FINISHED
-  // group (everything shipped, nothing needing attention) starts collapsed —
-  // there's nothing left to operate on. Applied once; the user's toggle wins after.
-  const [groupPanelOpen, setGroupPanelOpen] = useState(true);
-  const panelDefaultApplied = useRef(false);
-  useEffect(() => {
-    if (panelDefaultApplied.current || !group?.summary) return;
-    panelDefaultApplied.current = true;
-    if (group.summary.stage === 'done' && (group.summary.attention?.length ?? 0) === 0)
-      setGroupPanelOpen(false);
-  }, [group?.summary]);
 
   // Each row's next lifecycle action, shown as a chip so the mapping from
   // buttons to rows is readable without hovering anything.
@@ -338,51 +532,29 @@ export default function ReleaseGroupDetail() {
     return null;
   };
   // ── Where does a row sit on the stepper? Same vocabulary as the badges. ──
-  const ROW_STEP: Record<string, number> = {
-    building: 2,
-    internal_held: 3,
-    in_review: 4,
-    approved: 5,
-    rolling_out: 5,
-    halted: 5,
-    live: 6,
-    distributed: 6,
-    superseded: 6,
-  };
-  const rowMark = (r: APRelease): { step: number; failed: boolean } => {
-    if (phaseOf(r) === 'rejected') return { step: 4, failed: true };
-    // Dead rows mark rose at the stage the abort/failure interrupted.
-    if (['ABORTED', 'USER_ABORTED', 'GCLT_ABORTED', 'DISCARDED', 'REVERTED'].includes(r.status)) {
-      const wf = r.release_context?.mb_wf_status ?? '';
-      const step = ['MBReviewApproved', 'MBRollingOut'].includes(wf)
-        ? 5
-        : ['MBSubmittingForReview', 'MBInReview'].includes(wf)
-          ? 4
-          : wf === 'MBTagPushed'
-            ? 3
-            : 2;
-      return { step, failed: true };
-    }
-    // Draft rows: pending approval sits at Approve, approved-held at Build.
-    if (r.status === 'CREATED') return { step: r.is_approved === 1 ? 2 : 1, failed: false };
-    return { step: ROW_STEP[phaseOf(r)] ?? 2, failed: false };
-  };
-  // Stepper marks: the selection when there is one, otherwise EVERY member —
-  // the corner always shows where apps actually are, never a single blended
-  // stage that hides a straggler.
-  const stepperMarks = useMemo(() => {
-    const rows = selectedRows.length > 0 ? selectedRows : groupReleases;
-    if (rows.length === 0) return null;
-    const marks: Record<number, { ok: number; failed: number }> = {};
-    for (const r of rows) {
-      const { step, failed } = rowMark(r);
-      if (!marks[step]) marks[step] = { ok: 0, failed: 0 };
-      if (failed) marks[step].failed++;
-      else marks[step].ok++;
-    }
-    return marks;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRows, groupReleases]);
+  // Fleet Rail data: drafts still awaiting approval + platform split (the rest
+  // of the per-step counts come from the server-derived summary.counts).
+  const pendingApprovals = useMemo(
+    () => groupReleases.filter((r) => r.status === 'CREATED' && r.is_approved !== 1).length,
+    [groupReleases],
+  );
+  const platformSplit = useMemo(() => {
+    const android = groupReleases.filter((r) => r.env === 'android').length;
+    const ios = groupReleases.filter((r) => r.env === 'ios').length;
+    return { android, ios };
+  }, [groupReleases]);
+  const groupFailedStep = useMemo(() => {
+    const c = group?.summary?.counts ?? {};
+    const shipped = (c['live'] ?? 0) + (c['superseded'] ?? 0) + (c['distributed'] ?? 0);
+    if (group?.summary?.stage !== 'done' || shipped > 0) return null;
+    const wfStep = (wf: string): number => {
+      if (['MBReviewApproved', 'MBRollingOut'].includes(wf)) return 5;
+      if (['MBSubmittingForReview', 'MBInReview'].includes(wf)) return 4;
+      if (wf === 'MBTagPushed') return 3;
+      return 2;
+    };
+    return Math.max(2, ...groupReleases.map((r) => wfStep(r.release_context?.mb_wf_status ?? '')));
+  }, [group, groupReleases]);
 
   // Selected rows a verb can actually act on.
   const eligibleSelected = (verb: string) => selectedRows.filter(VERB_ELIGIBLE[verb]);
@@ -555,30 +727,9 @@ export default function ReleaseGroupDetail() {
   };
 
   // ── Stage-bar building blocks (closures over selection/eligibility) ──
-  // Light per-GROUP tints (one hue per toolbar segment, destructive = red)
-  // so the bar reads as zones without turning into a rainbow. The suggested
-  // next step keeps the solid primary fill.
-  const buildTint = 'bg-emerald-50 border-emerald-200 text-emerald-800 enabled:hover:bg-emerald-100';
-  const reviewTint = 'bg-violet-50 border-violet-200 text-violet-800 enabled:hover:bg-violet-100';
-  const rolloutTint = 'bg-sky-50 border-sky-200 text-sky-800 enabled:hover:bg-sky-100';
-  const recoverTint = 'bg-amber-50 border-amber-200 text-amber-800 enabled:hover:bg-amber-100';
-  const dangerTint = 'bg-red-50 border-red-200 text-red-700 enabled:hover:bg-red-100';
-  const VERB_COLOR: Record<string, string> = {
-    approve: buildTint,
-    dispatch: buildTint,
-    discard: dangerTint,
-    promote: reviewTint,
-    markApproved: reviewTint,
-    markRejected: dangerTint,
-    withdraw: reviewTint,
-    release: rolloutTint,
-    rollout: rolloutTint,
-    halt: rolloutTint,
-    resume: rolloutTint,
-    releaseAll: rolloutTint,
-    revert: recoverTint,
-  };
-
+  // Destructive verbs read red; every other verb is neutral white with the
+  // suggested next step (primary) getting the solid blue fill.
+  const DANGER_VERBS = new Set(['discard', 'markRejected', 'revert']);
   const VerbButton = ({
     verb,
     label,
@@ -605,7 +756,9 @@ export default function ReleaseGroupDetail() {
         ? emptyReason ?? 'Nothing eligible'
         : undefined
       : disabledReason(verb);
+    const loading = busyVerb === verb;
     const disabled = n === 0 || (busyVerb !== null && busyVerb !== verb);
+    const danger = DANGER_VERBS.has(verb);
     const names = targets.map((r) => `${r.appGroup} ${r.env}`).join(', ');
     return (
       // span carries the tooltip — disabled buttons swallow mouse events
@@ -614,18 +767,34 @@ export default function ReleaseGroupDetail() {
         onMouseEnter={() => setHoveredVerb(verb)}
         onMouseLeave={() => setHoveredVerb(null)}
       >
-        <Button
-          size="sm"
-          variant={primary ? 'primary' : 'secondary'}
-          className={primary ? undefined : VERB_COLOR[verb]}
+        <button
           onClick={onClick}
-          loading={busyVerb === verb}
           disabled={disabled}
+          className={cn(
+            // Mockup color states: armed (has targets) = violet tint, danger =
+            // red tint, the recommended primary verb = solid violet (solid red
+            // when destructive), idle = quiet zinc outline.
+            'verbbtn px-3 py-1.5 text-xs font-bold rounded-lg border bg-white shadow-sm inline-flex items-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed active:scale-[0.98]',
+            primary
+              ? 'border-blue-300 text-blue-700 enabled:hover:bg-blue-50'
+              : danger
+                ? 'border-red-200 text-red-600 enabled:hover:bg-red-50'
+                : 'border-zinc-200 text-zinc-700 enabled:hover:bg-zinc-50',
+          )}
         >
-          {icon}
+          {loading ? <ArrowsClockwiseIcon size={14} className="animate-spin" aria-hidden="true" /> : icon}
           {label}
-          {n > 0 ? ` (${n})` : ''}
-        </Button>
+          {n > 0 && (
+            <span
+              className={cn(
+                'rounded px-1 text-[9px] font-mono font-bold',
+                primary ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-500',
+              )}
+            >
+              {n}
+            </span>
+          )}
+        </button>
       </span>
     );
   };
@@ -641,167 +810,196 @@ export default function ReleaseGroupDetail() {
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
-      <div className="flex items-center gap-2 mb-4">
-        <Link
-          to="/mobile/releases"
-          className="inline-flex items-center gap-1 text-sm text-zinc-600 hover:text-zinc-900"
+      {/* Breadcrumb + freshness */}
+      <div className="flex items-center justify-between mb-4 text-xs">
+        <div className="flex items-center gap-2 font-medium text-zinc-500 min-w-0">
+          <Link to="/mobile/releases" className="hover:text-zinc-900 shrink-0 cursor-pointer">
+            Mobile releases
+          </Link>
+          <CaretRightIcon size={10} aria-hidden="true" />
+          <button
+            onClick={() => {
+              void navigator.clipboard.writeText(groupId ?? '');
+              toast.success('Group ID copied');
+            }}
+            title={`${groupId} — click to copy`}
+            className="font-mono text-zinc-700 bg-zinc-100 hover:bg-zinc-200 px-1.5 py-0.5 rounded transition-colors cursor-copy"
+          >
+            {groupId?.slice(0, 8)}… ⧉
+          </button>
+        </div>
+        <button
+          onClick={() => void refetch()}
+          title="Refresh"
+          aria-label="Refresh"
+          className="text-zinc-500 hover:text-zinc-900"
         >
-          <ArrowLeft className="w-4 h-4" /> Mobile releases
-        </Link>
+          <ArrowsClockwiseIcon size={14} className={isLoading ? 'animate-spin' : ''} aria-hidden="true" />
+        </button>
       </div>
 
-      <div className="bg-white rounded-xl border border-zinc-200">
-        <header
-          onClick={() => setGroupPanelOpen((o) => !o)}
-          aria-expanded={groupPanelOpen}
-          title={groupPanelOpen ? 'Collapse release group' : 'Expand release group'}
-          className={`px-4 py-3 sm:px-6 sm:py-4 flex flex-wrap items-center justify-between gap-3 cursor-pointer select-none hover:bg-zinc-50/60 transition-colors ${groupPanelOpen ? 'border-b border-zinc-100' : 'rounded-xl'}`}
-        >
-          <div className="min-w-0">
-            <h1 className="text-base sm:text-lg font-semibold text-zinc-900 flex items-center gap-2 flex-wrap">
-              {/* Left expand chevron — same affordance as every expandable row. */}
-              <span
-                aria-hidden
-                className={`h-6 w-6 -ml-1 flex items-center justify-center rounded-md transition-all ${
-                  groupPanelOpen
-                    ? 'bg-violet-100 text-violet-700'
-                    : 'text-zinc-400 hover:bg-zinc-200/60 hover:text-zinc-700'
-                }`}
-              >
-                <ChevronDown
-                  className={`w-4 h-4 transition-transform duration-200 ${groupPanelOpen ? '' : '-rotate-90'}`}
-                />
-              </span>
-              <Smartphone className="w-4 h-4 text-violet-600" />
-              {group?.label || 'Release group'}
-              {/* THE stage chip — same component + server derivation as the
-                  home row and the stepper, so no surface can disagree. */}
+      {/* Identity row — fleet avatar stack, title, stage chip, fleet summary */}
+      <div className="stagger-item flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6" style={{ ['--index' as string]: 0 }}>
+        <div className="flex flex-wrap items-center gap-4 min-w-0">
+          {/* Fleet avatar stack — up to 3 distinct apps in the group */}
+          <div className="flex -space-x-2.5 shrink-0">
+            {Array.from(new Map(groupReleases.map((r) => [r.appGroup, r])).values())
+              .slice(0, 3)
+              .map((r, i) => (
+                <div
+                  key={r.appGroup}
+                  className="ring-2 ring-white rounded-lg"
+                  style={{ zIndex: 30 - i * 10 }}
+                >
+                  <BrandLogo brand={r.appGroup} surface={r.service === 'driver' ? 'driver' : undefined} size="lg" />
+                </div>
+              ))}
+          </div>
+          <div className="flex flex-col min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h1 className="text-lg font-bold leading-none tracking-tight text-zinc-900">
+                {group?.label || 'Release group'}
+              </h1>
               {group?.summary && (
-                <GroupStageChip summary={group.summary} total={groupReleases.length} />
+                <StagePill
+                  stage={group.summary.stage}
+                  counts={group.summary.counts}
+                  pending={pendingApprovals}
+                  total={groupReleases.length}
+                  failed={groupFailedStep != null}
+                />
               )}
-            </h1>
-            <div className="flex items-center gap-2 mt-0.5">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void navigator.clipboard.writeText(groupId ?? '');
-                  toast.success('Group ID copied');
-                }}
-                title={groupId}
-                className="inline-flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-700 font-mono border border-zinc-200 rounded px-1.5 py-0.5 transition-colors"
-              >
-                {groupId?.slice(0, 8)}… ⧉
-              </button>
-              {groupBranch ? (
+            </div>
+            {/* Fleet summary line */}
+            <div className="flex items-center gap-2 mt-1.5 flex-wrap text-[11px] text-zinc-500">
+              <span className="font-mono font-bold text-zinc-800 text-sm">
+                {groupReleases.length} build{groupReleases.length === 1 ? '' : 's'}
+              </span>
+              {platformSplit.android > 0 && <span>· {platformSplit.android} android</span>}
+              {platformSplit.ios > 0 && <span>· {platformSplit.ios} ios</span>}
+              {/* Branch always in the chip — the git icon makes it unambiguous,
+                  and the title never shows the branch, so no duplication. */}
+              {groupBranch && (
                 <span
-                  className="inline-flex items-center gap-1 text-[11px] text-zinc-500 font-mono border border-zinc-200 rounded px-1.5 py-0.5"
+                  className="bg-zinc-100 text-zinc-800 font-mono font-bold px-2 py-0.5 rounded inline-flex items-center gap-1 border border-zinc-200"
                   title={`Source branch: ${groupBranch}`}
                 >
-                  <GitBranch className="w-3 h-3 text-zinc-400" /> {groupBranch}
+                  <GitBranchIcon size={12} className="text-zinc-500" aria-hidden="true" /> {groupBranch}
                 </span>
-              ) : null}
-              {/* Missing-branch prompt lives in the banner right below —
-                  one affordance, not a pill + banner + card triplet. */}
-              {/* Changelog → Slack outcome: only for groups that opted in. A
-                  failed post surfaces the reason + a one-click Resend. */}
+              )}
               {slack?.state === 'failed' && (
                 <span className="inline-flex items-center gap-1.5">
                   <span
                     title={slack.error ?? undefined}
-                    className="inline-flex items-center gap-1 text-[11px] font-medium rounded-full border border-rose-200 bg-rose-50 text-rose-700 px-2 py-0.5"
+                    className="inline-flex items-center gap-1 font-medium rounded-full border border-rose-200 bg-rose-50 text-rose-700 px-2 py-0.5"
                   >
-                    <Send className="w-3 h-3" /> Changelog → Slack failed
+                    <PaperPlaneTiltIcon size={12} aria-hidden="true" /> Changelog → Slack failed
                   </span>
                   <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleResendSlack();
-                    }}
+                    onClick={() => handleResendSlack()}
                     disabled={resendingSlack}
-                    className="inline-flex items-center gap-1 text-[11px] font-medium rounded-full border border-violet-300 text-violet-700 hover:bg-violet-50 px-2 py-0.5 transition-colors disabled:opacity-50"
+                    className="inline-flex items-center gap-1 font-bold rounded-full border border-violet-300 text-violet-700 hover:bg-violet-50 px-2 py-0.5 transition-colors disabled:opacity-50"
                   >
-                    {resendingSlack ? 'Sending…' : 'Resend to Slack'}
+                    {resendingSlack ? 'Sending…' : 'Resend'}
                   </button>
                 </span>
               )}
               {slack?.state === 'sent' && (
-                <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600" title="Changelog posted to Slack">
-                  <CheckCircle2 className="w-3 h-3" /> Sent to Slack
+                <span className="inline-flex items-center gap-1 text-emerald-600 font-medium" title="Changelog posted to Slack">
+                  <CheckCircleIcon size={12} weight="fill" aria-hidden="true" /> Sent to Slack
                 </span>
               )}
             </div>
           </div>
-          <GroupStepper
-            stage={group?.summary?.stage}
-            marks={stepperMarks}
-            marksLabel={selectedRows.length > 0 ? 'Selected' : null}
-            failedStep={(() => {
-              const c = group?.summary?.counts ?? {};
-              const shipped = (c['live'] ?? 0) + (c['superseded'] ?? 0) + (c['distributed'] ?? 0);
-              if (group?.summary?.stage !== 'done' || shipped > 0) return null;
-              // How far did the furthest member get before dying? The wf
-              // status remembers the stage the abort/failure interrupted.
-              const wfStep = (wf: string): number => {
-                if (['MBReviewApproved', 'MBRollingOut'].includes(wf)) return 5; // Rollout
-                if (['MBSubmittingForReview', 'MBInReview'].includes(wf)) return 4; // Review
-                if (wf === 'MBTagPushed') return 3; // died held before/at Promote
-                return 2; // Build (never produced an artifact)
-              };
-              return Math.max(
-                2,
-                ...groupReleases.map((r) => wfStep(r.release_context?.mb_wf_status ?? '')),
-              );
-            })()}
-          />
-        </header>
-
-        {groupPanelOpen && (
-        <>
-
-        {/* Missing source branch — same banner as the OTA card, surfaced at
-            the top so it's never discovered only after expanding a row. */}
-        {branchPickTarget && (
-          <div className="mx-4 sm:mx-6 mt-3 flex items-center justify-between gap-3 rounded-lg border border-sky-200 bg-sky-50/60 px-3 py-2">
-            <span className="text-xs text-sky-900">
-              Imported from store — no source branch known
-              {branchPickApp ? ` for ${branchPickApp.appName} · ${branchPickApp.platform}` : ''}. OTA
-              bundle pushes need a branch.
-            </span>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <PermissionGate product="autopilot" permission="RELEASE_CREATE">
             <button
-              onClick={() => setHeaderPickerOpen(true)}
-              className="shrink-0 inline-flex items-center gap-1 text-xs font-medium rounded-md border border-sky-300 bg-white text-sky-700 hover:bg-sky-100 px-2.5 py-1 transition-colors"
+              onClick={() => navigate('/mobile/releases/new')}
+              className="bg-white border border-zinc-200 text-zinc-600 px-3 py-1.5 text-sm font-semibold rounded-lg shadow-sm hover:bg-zinc-50 transition-all inline-flex items-center gap-1.5"
             >
-              <GitBranch className="w-3.5 h-3.5" /> Set source branch
+              <PlusIcon size={14} weight="bold" aria-hidden="true" /> New release
             </button>
-          </div>
-        )}
+          </PermissionGate>
+        </div>
+      </div>
 
-        {/* ── Stage action bar: EVERY stage verb, always visible — disabled
-            (never hidden) when the selection can't take that action. The
-            segments mirror the stepper: Build → Store review → Rollout.
-            The container-level mouseleave is the stuck-hover safety net: the
-            per-button spans remount on every poll re-render (VerbButton is
-            component-local), which can swallow their own onMouseLeave. ── */}
+      {/* Fleet Rail */}
+      {groupReleases.length > 0 && (
+        <FleetRail
+          marks={railMarks}
+          total={selectedRows.length > 0 ? selectedRows.length : groupReleases.length}
+          selectionCount={selectedRows.length}
+        />
+      )}
+
+      {/* Missing source branch — standalone banner, surfaced at the top so
+          it's never discovered only after expanding a row. */}
+      {branchPickTarget && (
         <div
-          onMouseLeave={() => setHoveredVerb(null)}
-          className="px-4 py-2.5 sm:px-6 border-b border-zinc-100 flex flex-wrap items-center gap-x-4 gap-y-2"
+          className="stagger-item flex items-center justify-between gap-3 rounded-lg border border-sky-200 bg-sky-50/60 px-4 py-2.5 mt-6"
+          style={{ ['--index' as string]: 2 }}
         >
+          <span className="text-xs text-sky-900 flex items-center gap-2">
+            <InfoIcon size={14} weight="fill" className="text-sky-500 shrink-0" aria-hidden="true" />
+            Imported from store — no source branch known
+            {branchPickApp ? ` for ${branchPickApp.appName} · ${branchPickApp.platform}` : ''}. OTA
+            bundle pushes need a branch.
+          </span>
+          <button
+            onClick={() => setHeaderPickerOpen(true)}
+            className="shrink-0 inline-flex items-center gap-1 text-xs font-bold rounded-md border border-sky-300 bg-white text-sky-700 hover:bg-sky-100 px-2.5 py-1 transition-colors"
+          >
+            <GitBranchIcon size={14} aria-hidden="true" /> Set source branch
+          </button>
+        </div>
+      )}
+
+      {/* ── Command bar (card): EVERY stage verb, always visible — disabled
+          (never hidden) when the selection can't take that action. Segments
+          mirror the stepper: Build → Store review → Rollout → Recover. The
+          container-level mouseleave is the stuck-hover safety net (VerbButton
+          spans remount on every poll and can swallow their own onMouseLeave). ── */}
+      <section
+        onMouseLeave={() => setHoveredVerb(null)}
+        className="stagger-item card-surface px-4 py-3 flex flex-wrap items-center gap-x-5 gap-y-3 mt-6"
+        style={{ ['--index' as string]: 3 }}
+      >
+        {/* Selection state — verbs act on the rows selected in the table. */}
+        {selectedRows.length > 0 ? (
+          <span className="inline-flex items-center gap-2 border border-blue-200 bg-blue-50 text-blue-700 text-[11px] font-bold px-2.5 py-1.5 rounded-lg">
+            <CheckSquareIcon size={14} weight="bold" aria-hidden="true" /> {selectedRows.length} selected
+            <button
+              onClick={() => setSelectedIds(new Set())}
+              className="text-blue-500 hover:text-blue-700 text-[9px] font-bold uppercase tracking-wide underline underline-offset-2"
+            >
+              clear
+            </button>
+          </span>
+        ) : (
+          <span
+            className="inline-flex items-center gap-1.5 border border-dashed border-zinc-300 text-zinc-400 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg"
+            title="Verbs act on the rows you select in the table below"
+          >
+            <CursorClickIcon size={14} weight="bold" aria-hidden="true" /> Select rows below — verbs act on your selection
+          </span>
+        )}
+        <span className="w-px h-6 bg-zinc-200 hidden sm:block" />
+
           {showBuildSeg && (
           <span className="inline-flex items-center gap-2">
-            <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-400 select-none">
-              Build
-            </span>
+            <span className="eyebrow">Build</span>
             <VerbButton
               verb="approve"
               label="Approve"
-              icon={<CheckCircle2 className="w-4 h-4" />}
+              icon={<CheckCircleIcon size={15} weight="bold" aria-hidden="true" />}
               primary={group?.summary?.primaryVerb === 'approve'}
               onClick={onApproveSelected}
             />
             <VerbButton
               verb="dispatch"
               label="Dispatch"
-              icon={<Send className="w-4 h-4" />}
+              icon={<PaperPlaneTiltIcon size={15} weight="bold" aria-hidden="true" />}
               primary={group?.summary?.primaryVerb === 'dispatch'}
               onClick={onDispatchSelected}
             />
@@ -811,7 +1009,7 @@ export default function ReleaseGroupDetail() {
               <VerbButton
                 verb="discard"
                 label="Discard"
-                icon={<Trash2 className="w-4 h-4" />}
+                icon={<TrashIcon size={15} weight="bold" aria-hidden="true" />}
                 onClick={() => {
                   const targets = eligibleSelected('discard');
                   if (
@@ -829,9 +1027,7 @@ export default function ReleaseGroupDetail() {
           <>
           {showBuildSeg && <span className="w-px h-6 bg-zinc-200 hidden sm:block" />}
           <span className="inline-flex items-center gap-2">
-            <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-400 select-none">
-              Store review
-            </span>
+            <span className="eyebrow">Store review</span>
             <VerbButton
               verb="promote"
               label="Promote"
@@ -854,7 +1050,7 @@ export default function ReleaseGroupDetail() {
             />
             <VerbButton
               verb="withdraw"
-              label="Withdraw (iOS)"
+              label="Withdraw iOS"
               onClick={() => {
                 if (window.confirm(`Withdraw ${eligibleSelected('withdraw').length} iOS app(s) from App Store review?`))
                   void runPerId('withdraw', eligibleSelected('withdraw'), mobileApi.withdraw, 'Withdrew');
@@ -869,14 +1065,12 @@ export default function ReleaseGroupDetail() {
             <span className="w-px h-6 bg-zinc-200 hidden sm:block" />
           )}
           <span className="inline-flex items-center gap-2">
-            <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-400 select-none">
-              Rollout
-            </span>
+            <span className="eyebrow">Rollout</span>
             {/* "Release" starts shipping the approved iOS build — a rollout
                 action, so it sits with the rollout controls. */}
             <VerbButton
               verb="release"
-              label="Release (iOS)"
+              label="Release iOS"
               primary={group?.summary?.primaryVerb === 'release_or_rollout'}
               onClick={() =>
                 runPerId('release', eligibleSelected('release'), mobileApi.releaseApproved, 'Released')
@@ -891,11 +1085,13 @@ export default function ReleaseGroupDetail() {
             <VerbButton
               verb="halt"
               label="Halt"
+              icon={<PauseIcon size={15} weight="bold" aria-hidden="true" />}
               onClick={() => runPerId('halt', eligibleSelected('halt'), mobileApi.rolloutHalt, 'Halted')}
             />
             <VerbButton
               verb="resume"
               label="Resume"
+              icon={<PlayIcon size={15} weight="bold" aria-hidden="true" />}
               onClick={() => runPerId('resume', eligibleSelected('resume'), mobileApi.rolloutResume, 'Resumed')}
             />
             <VerbButton
@@ -913,14 +1109,12 @@ export default function ReleaseGroupDetail() {
             <span className="w-px h-6 bg-zinc-200 hidden sm:block" />
           )}
           <span className="inline-flex items-center gap-2">
-            <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-400 select-none">
-              Recover
-            </span>
+            <span className="eyebrow">Recover</span>
             <PermissionGate product="autopilot" permission="RELEASE_REVERT">
               <VerbButton
                 verb="revert"
                 label="Revert"
-                icon={<Undo2 className="w-4 h-4" />}
+                icon={<ArrowUUpLeftIcon size={15} weight="bold" aria-hidden="true" />}
                 targets={revertTargets}
                 emptyReason={
                   selectedRows.length > 0
@@ -945,9 +1139,7 @@ export default function ReleaseGroupDetail() {
                     : "Start a new release with this group's apps and changelog prefilled"
                 }
               >
-                <Button
-                  variant="secondary"
-                  size="sm"
+                <button
                   onClick={() => {
                     const only =
                       selectedRows.length > 0
@@ -955,35 +1147,43 @@ export default function ReleaseGroupDetail() {
                         : '';
                     navigate(`/mobile/releases/new?copyFrom=${groupId}${only}`);
                   }}
+                  className="verbbtn px-3 py-1.5 text-xs font-bold rounded-lg border border-zinc-200 bg-white text-zinc-700 shadow-sm inline-flex items-center gap-1.5 transition-colors hover:bg-zinc-50 active:scale-[0.98]"
                 >
-                  <Copy className="w-4 h-4" />
+                  <CopyIcon size={15} weight="bold" aria-hidden="true" />
                   Copy{selectedRows.length > 0 ? ` (${copyTargets.length})` : ''}
-                </Button>
+                </button>
               </span>
             </PermissionGate>
           </span>
-        </div>
+      </section>
 
-        {/* Dispatch preview: teaches the one-vs-many-runs semantics at selection
-            time — apps selected TOGETHER share one GitHub run per platform. */}
-        {dispatchPreview && (
-          <div className="px-4 py-2.5 sm:px-6 border-b border-blue-100 bg-blue-50/60 text-xs text-blue-900 flex flex-wrap items-center gap-x-2 gap-y-1">
-            <Send className="w-3.5 h-3.5 shrink-0" />
-            <span className="font-semibold">
+      {/* Dispatch preview — standalone banner: one-vs-many-runs at selection
+          time (apps selected TOGETHER share one GitHub run per platform). */}
+      {dispatchPreview && (
+        <div
+          className="stagger-item flex items-start gap-2.5 rounded-lg border border-blue-100 bg-blue-50/70 px-4 py-3 text-xs text-blue-900 mt-6"
+          style={{ ['--index' as string]: 4 }}
+        >
+          <PaperPlaneTiltIcon size={16} weight="fill" className="shrink-0 mt-0.5 text-blue-500" aria-hidden="true" />
+          <div>
+            <span className="font-bold">
               {dispatchPreview.apps} app{dispatchPreview.apps === 1 ? '' : 's'} selected →{' '}
               {dispatchPreview.runs} build run{dispatchPreview.runs === 1 ? '' : 's'}
             </span>
-            <span className="text-blue-700">({dispatchPreview.parts.join(' · ')})</span>
-            <span className="text-blue-700/80">
-              — apps in a shared run build together, each at its own version;
-              un-selected apps stay here and dispatch later as a separate run.
-            </span>
+            <span className="text-blue-700"> ({dispatchPreview.parts.join(' · ')})</span>
+            <p className="text-blue-700/80 mt-0.5">
+              Apps in a shared run build together, each at its own version; un-selected apps stay
+              here and dispatch later as a separate run.
+            </p>
           </div>
-        )}
+        </div>
+      )}
 
+      {/* Fleet table (card) */}
+      <section className="stagger-item card-surface overflow-hidden mt-6" style={{ ['--index' as string]: 5 }}>
         {groupingMissing && (
           <div className="px-4 py-3 sm:px-6 border-b border-amber-200 bg-amber-50 text-amber-800 text-xs flex gap-2 items-start">
-            <Info className="w-4 h-4 mt-0.5 shrink-0" />
+            <InfoIcon size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
             <span>
               No release group found for this ID — it may have been created
               before the group column existed,
@@ -1000,10 +1200,21 @@ export default function ReleaseGroupDetail() {
           </div>
         ) : (
           <>
+            {/* Select-to-act hint — the table rows are what the command-bar
+                verbs operate on. */}
+            <div className="px-4 py-2 bg-violet-50/50 border-b border-violet-100 flex items-center gap-1.5">
+              <CursorClickIcon size={14} weight="bold" className="text-violet-500 shrink-0" aria-hidden="true" />
+              <span className="text-[10px] font-bold text-violet-700 uppercase tracking-wider">
+                Click rows to select
+              </span>
+              <span className="text-[10px] font-medium text-violet-600/80">
+                — selected apps are what the verbs above act on · hover a verb to preview its targets
+              </span>
+            </div>
             <div className="hidden md:block overflow-x-auto">
               <table className="w-full text-left whitespace-nowrap">
                 <thead>
-                  <tr className="bg-zinc-50 border-b border-zinc-200 text-[11px] text-zinc-500 font-medium uppercase tracking-wider">
+                  <tr className="bg-zinc-50 border-b border-zinc-200 text-[10px] text-zinc-500 font-bold uppercase tracking-widest">
                     <th className="py-3 px-4 w-10">
                       <input
                         type="checkbox"
@@ -1013,39 +1224,34 @@ export default function ReleaseGroupDetail() {
                       />
                     </th>
                     <th className="py-3 px-4">App</th>
-                    <th className="py-3 px-4">Surface</th>
                     <th className="py-3 px-4">Platform</th>
                     <th className="py-3 px-4">Version</th>
                     <th className="py-3 px-4">Status</th>
                     <th className="py-3 px-4">Next step</th>
-                    <th className="py-3 px-4">Actions</th>
+                    <th className="py-3 px-4 text-right">Open</th>
                   </tr>
                 </thead>
                 <tbody className="text-sm">
                   {groupReleases.map((r) => {
                     const checked = selectedIds.has(r.id);
-                    // Revert targets the whole group when nothing is selected.
-                    const inScope =
-                      checked || (hoveredVerb === 'revert' && selectedIds.size === 0);
-                    // Can the hovered verb apply to this row at all? Fading
-                    // keys off ELIGIBILITY — a selectable row never greys just
-                    // because it isn't selected yet.
+                    // Hovering a verb previews its CANDIDATES: every row the
+                    // verb can apply to glows (selected or not), the rest fade.
+                    // Discoverable — you see what a verb targets before selecting.
                     const eligibleForHovered =
                       hoveredVerb != null && !!VERB_ELIGIBLE[hoveredVerb]?.(r);
-                    const verbTarget = eligibleForHovered && inScope;
                     return (
                       <tr
                         key={r.id}
                         onClick={() => toggleOne(r.id)}
+                        // Selected rows: neutral highlight + a blue inset edge.
+                        style={checked ? { boxShadow: 'inset 3px 0 0 #8b5cf6' } : undefined}
                         className={cn(
                           'border-b border-zinc-100 transition-all cursor-pointer',
                           checked
                             ? 'bg-violet-50/50 hover:bg-violet-50/70'
                             : 'bg-white hover:bg-zinc-50',
-                          // hovering a verb button: rows it would act on glow;
-                          // rows it CANNOT apply to fade; eligible-but-unselected
-                          // rows stay normal (select them and the verb works).
-                          verbTarget && 'bg-violet-100/80 hover:bg-violet-100/80',
+                          // hover a verb → every eligible row glows; ineligible fade.
+                          eligibleForHovered && 'bg-violet-100/80 hover:bg-violet-100/80',
                           hoveredVerb != null && !eligibleForHovered && 'opacity-40',
                         )}
                       >
@@ -1055,25 +1261,32 @@ export default function ReleaseGroupDetail() {
                             checked={checked}
                             onChange={() => toggleOne(r.id)}
                             onClick={(e) => e.stopPropagation()}
-                            className="rounded border-zinc-300 accent-zinc-900"
+                            className={cn('rounded border-zinc-300', checked ? 'accent-violet-600' : 'accent-zinc-900')}
                           />
                         </td>
-                        <td className="py-3 px-4 font-medium text-zinc-800">
-                          <span className="inline-flex items-center gap-2">
+                        <td className="py-3 px-4">
+                          <span className="inline-flex items-center gap-2.5">
                             <BrandLogo brand={r.appGroup} surface={r.service === 'driver' ? 'driver' : undefined} size="sm" />
-                            {r.appGroup}
+                            <span className="font-medium text-zinc-800">
+                              {r.appGroup}{' '}
+                              <span className="font-medium text-zinc-400 text-xs">· {r.service === 'driver' ? 'provider' : 'consumer'}</span>
+                            </span>
                           </span>
                         </td>
-                        <td className="py-3 px-4 text-xs text-zinc-600">{r.service}</td>
                         <td className="py-3 px-4">
                           <span className="inline-flex items-center gap-1.5 text-xs text-zinc-600">
                             <PlatformIcon platform={r.env} /> {r.env}
                           </span>
                         </td>
-                        <td className="py-3 px-4 font-mono text-xs text-zinc-600">{versionWithBuild(r)}</td>
+                        <td className="py-3 px-4 font-mono text-xs font-bold text-zinc-800">
+                          {r.new_version}{' '}
+                          {r.release_context?.version_code != null && (
+                            <span className="text-zinc-400 font-medium">+{r.release_context.version_code}</span>
+                          )}
+                        </td>
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <ReleaseStatusBadge release={r} />
+                            <V4StatusPill release={r} />
                             {/* Draft approval gates Dispatch — after dispatch every
                                 build is approved by definition, so the chip only
                                 renders while the row is still a draft. */}
@@ -1109,15 +1322,17 @@ export default function ReleaseGroupDetail() {
                             <span className="text-xs text-zinc-300">—</span>
                           )}
                         </td>
-                        <td className="py-3 px-4">
+                        <td className="py-3 px-4 text-right">
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
                               navigate(`/mobile/releases/${r.id}`);
                             }}
-                            className="text-xs text-zinc-600 hover:text-zinc-900 underline"
+                            title="Open release"
+                            aria-label={`Open ${r.appGroup} ${r.env}`}
+                            className="text-zinc-400 hover:text-zinc-900 cursor-pointer"
                           >
-                            Open
+                            <ArrowUpRightIcon size={16} weight="bold" aria-hidden="true" />
                           </button>
                         </td>
                       </tr>
@@ -1135,7 +1350,7 @@ export default function ReleaseGroupDetail() {
                   <div
                     key={r.id}
                     onClick={() => toggleOne(r.id)}
-                    className={cn('p-4 cursor-pointer transition-colors', checked && 'bg-violet-50/50')}
+                    className={cn('p-4 cursor-pointer transition-colors', checked && 'bg-zinc-100')}
                   >
                     <div className="flex items-start gap-3">
                       <input
@@ -1157,7 +1372,7 @@ export default function ReleaseGroupDetail() {
                           </span>
                         </div>
                         <div className="flex items-center gap-1.5 flex-wrap mt-2">
-                          <ReleaseStatusBadge release={r} />
+                          <V4StatusPill release={r} />
                           {r.is_approved === 1 && r.status === 'CREATED' && (
                             <span className="rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-emerald-700 text-white">
                               APPROVED
@@ -1188,10 +1403,7 @@ export default function ReleaseGroupDetail() {
             </div>
           </>
         )}
-        </>
-        )}
-
-      </div>
+      </section>
 
       {/* ── OTA bundles — its own section below the release group; debug
           groups stay silent, but a production group with NO mapped apps says
@@ -1200,20 +1412,20 @@ export default function ReleaseGroupDetail() {
         otaQ.data &&
         groupReleases.length > 0 &&
         groupReleases[0]?.release_context?.build_type !== 'debug' && (
-          <div className="mt-12 flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-xs text-zinc-500">
-            <Rocket className="w-3.5 h-3.5 text-zinc-400" />
+          <div className="stagger-item mt-12 flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-xs text-zinc-500">
+            <RocketLaunchIcon size={14} weight="duotone" className="text-zinc-400" aria-hidden="true" />
             {groupReleases.every((r) => r.service === 'driver')
               ? 'No OTA — airborne is not available for provider apps.'
               : 'No OTA — none of this group’s apps have an airborne app mapped (set "OTA ref" in Mobile Apps admin).'}
           </div>
         )}
       {otaAvailable && otaQ.data && (
-        <div className="mt-12">
+        <div className="stagger-item mt-12">
           <h2 className="flex items-baseline gap-2 mb-2">
-            <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-violet-700">
-              <Rocket className="w-4 h-4" /> OTA bundles
+            <span className="inline-flex items-center gap-1.5 text-sm font-bold text-violet-700">
+              <RocketLaunchIcon size={16} weight="fill" aria-hidden="true" /> OTA bundles
             </span>
-            <span className="text-xs text-zinc-600">
+            <span className="text-xs text-zinc-500">
               over-the-air JS bundles · separate from the store builds above
             </span>
           </h2>

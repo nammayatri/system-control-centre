@@ -1220,6 +1220,10 @@ export interface ChangelogSummaryResp {
     // Combined only: # of selected apps that had a comparable last release.
     // < the selected count ⇒ some apps had no base; the summary names them.
     usableCount?: number | null;
+    // Commit range the changelog was generated from (per-app endpoint only).
+    baseRef?: string | null;
+    headRef?: string | null;
+    compareUrl?: string | null;
 }
 
 export async function releaseAiSummary(id: string, force = false): Promise<AiResp> {
