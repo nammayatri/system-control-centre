@@ -181,6 +181,25 @@ export async function fetchDeploymentAccessRoster(): Promise<DeploymentRosterEnt
   return Array.isArray(data) ? data : data.deploymentAccess || [];
 }
 
+// One flat product-level grant — a whole product, no app group. The product-scope
+// twin of DeploymentRosterEntry.
+export interface ProductRosterEntry {
+  productSlug: string;
+  personId: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  roleId: string;
+  roleName: string;
+}
+
+// Reverse lookup ("who has access to product X") for the Access Control board.
+// Returns every slug in the table — callers filter to the one they render.
+export async function fetchProductAccessRoster(): Promise<ProductRosterEntry[]> {
+  const { data } = await apiClient.get('/admin/product-access');
+  return Array.isArray(data) ? data : data.productAccess || [];
+}
+
 // ─── Admin: Permission Overrides ─────────────────────────────────
 
 export async function addPermissionOverride(

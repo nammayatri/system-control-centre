@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
 import {
   Users, Shield, KeyRound, ChevronLeft,
   PanelLeftClose, PanelLeft, X,
@@ -138,17 +137,12 @@ const AdminLayout: React.FC = () => {
       <div className="flex-1 flex flex-col h-screen overflow-hidden min-w-0">
         <TopBar onOpenMobileNav={() => setMobileOpen(true)} />
         <main className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5 lg:px-8 lg:py-6">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={location.pathname}
-              initial={{ opacity: 0, y: 4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2, ease: 'easeOut' }}
-            >
-              <Outlet />
-            </motion.div>
-          </AnimatePresence>
+          {/* No page-transition animation on purpose. An AnimatePresence fade here
+              gated mounting the incoming route on the outgoing one's exit finishing,
+              which a page running its own layout animations (the Access Control
+              board) could leave unresolved — the content area then stayed blank
+              until you navigated again. */}
+          <Outlet />
         </main>
       </div>
     </div>

@@ -3,20 +3,25 @@ import { motion, useReducedMotion } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   fetchDeploymentAccessRoster,
+  fetchProductAccessRoster,
   fetchUsers,
   fetchAdminProducts,
   fetchProductRoles,
   assignDeploymentRole,
   revokeDeploymentAccess,
+  assignRole,
+  revokeProductAccess,
   type DeploymentRosterEntry,
+  type ProductRosterEntry,
 } from '../api';
 import { fetchProducts as fetchAppGroups } from '../../../products/releases/api';
+import { useAuth } from '../../auth/AuthContext';
 import { Badge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
-import { ChevronDown, Search, UserPlus, X, GripVertical } from 'lucide-react';
+import { ChevronDown, Search, UserPlus, X, GripVertical, Lock, AlertTriangle } from 'lucide-react';
 
 // Fixed left→right swim lanes. Custom (non-system) roles land in an extra
 // read-only "Other" lane rendered only when such grants exist.
@@ -33,9 +38,37 @@ const LANE_BADGE: Record<string, 'default' | 'info' | 'purple' | 'muted'> = {
 // appGroup → personId → roleName. The board's working state.
 type Board = Record<string, Record<string, string>>;
 
+// `data.error` is the API's error envelope; falls back to the transport message.
+const errMessage = (err: unknown, fallback = 'Request failed'): string =>
+  (err as any)?.response?.data?.error || (err as any)?.message || fallback;
+
+// The board thinks in lane names; the assign APIs take role ids.
+const roleIdsByName = (rs: any[]): Record<string, string> =>
+  Object.fromEntries(rs.map((r) => [r.name, String(r.id)]));
+
+// Two scopes: product-wide grants (sc_person_product_access, Autopilot tab) and
+// per-app-group grants (sc_person_deployment_access, Deployment tab). Both live
+// in one Board, product scope keyed under a sentinel no real app group can use,
+// so lanes, drag/drop, keyboard moves and the pending diff need no branching —
+// only the persist step distinguishes the two.
+const PRODUCT_SCOPE = '__product__';
+const AUTOPILOT_SLUG = 'autopilot';
+type Tab = 'autopilot' | 'deployment';
+const TABS: { key: Tab; label: string }[] = [
+  { key: 'autopilot', label: 'Autopilot' },
+  { key: 'deployment', label: 'Deployment' },
+];
+
 type PendingChange =
   | { type: 'assign'; personId: string; roleName: string }
   | { type: 'revoke'; personId: string };
+
+// Removing a product grant from someone who also holds deployment grants is
+// undone by ensureDefaultProductAccess on their next deployment write.
+const HINT_RESEEDED =
+  'This user also has deployment grants, which keep working. Their product access comes back the next time any of those grants is saved — revoke them on the Deployment tab to remove access for good.';
+const HINT_SELF =
+  "This is your own access — changing it here would lock you out of the admin console. Ask another admin, or edit it from this user's detail page.";
 
 // Physical slide between lanes. Kept module-level so the reference is stable.
 const CARD_SPRING = { type: 'spring', stiffness: 500, damping: 40 } as const;
@@ -53,6 +86,11 @@ interface UserCardProps {
   role: string; // current lane/role name, for the aria-label
   isDragging: boolean;
   roleBadge?: string; // shown for custom-role ("Other") cards
+  removeHint?: string; // hover note on ✕ — advisory, never blocks removal
+  // Makes the card read-only (no drag / ← → / ✕) and explains why on hover.
+  // Set for the signed-in admin's own product grant: editing it would revoke
+  // their own admin-console access, since isAdmin derives from that row.
+  lockedReason?: string;
   reducedMotion: boolean;
   pendingFocusRef: React.MutableRefObject<string | null>;
   onDragStart: (e: React.DragEvent) => void;
@@ -67,6 +105,8 @@ const UserCard: React.FC<UserCardProps> = ({
   role,
   isDragging,
   roleBadge,
+  removeHint,
+  lockedReason,
   reducedMotion,
   pendingFocusRef,
   onDragStart,
@@ -74,6 +114,8 @@ const UserCard: React.FC<UserCardProps> = ({
   onRemove,
   onKeyDown,
 }) => {
+  const locked = !!lockedReason;
+
   // Restore focus to exactly the card that just moved (it remounts in the new
   // lane, losing focus). Only fires right after a keyboard move — never steals
   // focus on unrelated re-renders (e.g. typing in a lane's search).
@@ -91,10 +133,10 @@ const UserCard: React.FC<UserCardProps> = ({
   // onDragStart/onDragEnd typings on `motion.div`, so we keep native DnD off it.
   return (
     <div
-      draggable
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      className="cursor-grab active:cursor-grabbing"
+      draggable={!locked}
+      onDragStart={locked ? undefined : onDragStart}
+      onDragEnd={locked ? undefined : onDragEnd}
+      className={locked ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'}
     >
       <motion.div
         layout
@@ -103,14 +145,22 @@ const UserCard: React.FC<UserCardProps> = ({
         ref={setFocusRef}
         tabIndex={0}
         role="button"
-        aria-label={`${info.name} — ${role}. Use left and right arrow keys to change lane.`}
-        onKeyDown={onKeyDown}
+        title={lockedReason}
+        aria-label={`${info.name} — ${role}. ${
+          lockedReason || 'Use left and right arrow keys to change lane.'
+        }`}
+        onKeyDown={locked ? undefined : onKeyDown}
         className={cn(
-          'group flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-2.5 py-2 transition-shadow hover:shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-offset-1',
+          'group flex items-center gap-2 rounded-lg border border-zinc-200 px-2.5 py-2 transition-shadow focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-offset-1',
+          locked ? 'border-dashed bg-zinc-50' : 'bg-white hover:shadow-sm',
           isDragging && 'opacity-40'
         )}
       >
-        <GripVertical className="w-3.5 h-3.5 text-zinc-300 shrink-0" />
+        {locked ? (
+          <Lock className="w-3.5 h-3.5 text-zinc-300 shrink-0" />
+        ) : (
+          <GripVertical className="w-3.5 h-3.5 text-zinc-300 shrink-0" />
+        )}
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium text-zinc-800 truncate">{info.name}</div>
           <div className="text-[11px] text-zinc-400 font-mono truncate">{info.email}</div>
@@ -120,14 +170,21 @@ const UserCard: React.FC<UserCardProps> = ({
             </Badge>
           )}
         </div>
-        <button
-          type="button"
-          onClick={onRemove}
-          className="shrink-0 w-6 h-6 flex items-center justify-center rounded text-zinc-300 hover:text-red-600 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100 cursor-pointer"
-          aria-label="Remove from deployment"
-        >
-          <X className="w-3.5 h-3.5" />
-        </button>
+        {locked ? (
+          <Badge variant="muted" size="sm" className="shrink-0">
+            You
+          </Badge>
+        ) : (
+          <button
+            type="button"
+            onClick={onRemove}
+            title={removeHint}
+            aria-label={removeHint ? `Remove — ${removeHint}` : 'Remove from deployment'}
+            className="shrink-0 w-6 h-6 flex items-center justify-center rounded text-zinc-300 hover:text-red-600 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        )}
       </motion.div>
     </div>
   );
@@ -135,41 +192,52 @@ const UserCard: React.FC<UserCardProps> = ({
 
 const AccessControl: React.FC = () => {
   const queryClient = useQueryClient();
+  const { user: currentUser } = useAuth();
 
-  const { data: roster = [], isLoading: rosterLoading } = useQuery({
-    queryKey: ['deployment-access-roster'],
-    queryFn: fetchDeploymentAccessRoster,
-  });
-  const { data: appGroups = [], isLoading: appGroupsLoading } = useQuery({
-    queryKey: ['app-groups'],
-    queryFn: fetchAppGroups,
-  });
-  const { data: users = [] } = useQuery({
-    queryKey: ['admin-users'],
-    queryFn: fetchUsers,
-  });
-  const { data: adminProducts = [] } = useQuery({
-    queryKey: ['admin-products'],
-    queryFn: fetchAdminProducts,
-  });
+  // Held as query objects, not just data, so the render can branch on isError.
+  const rosterQ = useQuery({ queryKey: ['deployment-access-roster'], queryFn: fetchDeploymentAccessRoster });
+  const productRosterQ = useQuery({ queryKey: ['product-access-roster'], queryFn: fetchProductAccessRoster });
+  const appGroupsQ = useQuery({ queryKey: ['app-groups'], queryFn: fetchAppGroups });
+  const usersQ = useQuery({ queryKey: ['admin-users'], queryFn: fetchUsers });
+  const adminProductsQ = useQuery({ queryKey: ['admin-products'], queryFn: fetchAdminProducts });
+  const roster = rosterQ.data ?? [];
+  const productRoster = productRosterQ.data ?? [];
+  const appGroups = appGroupsQ.data ?? [];
+  const users = usersQ.data ?? [];
+  const adminProducts = adminProductsQ.data ?? [];
 
   // Deployment access is scoped to a product; today there is exactly one
   // (autopilot), so a single roles list maps every lane name → roleId.
   const defaultProductSlug: string = adminProducts[0]?.slug || 'autopilot';
-  const { data: roles = [] } = useQuery({
+  const rolesQ = useQuery({
     queryKey: ['admin-product-roles', defaultProductSlug],
     queryFn: () => fetchProductRoles(defaultProductSlug),
     enabled: !!defaultProductSlug,
   });
+  // The product board must map lane → roleId through Autopilot's roles, not
+  // whichever product sorts first: assignRoleH accepts any roleId for any
+  // productSlug without checking they match. Shares the key above while autopilot
+  // is the only product, so this costs no extra request.
+  const autopilotRolesQ = useQuery({
+    queryKey: ['admin-product-roles', AUTOPILOT_SLUG],
+    queryFn: () => fetchProductRoles(AUTOPILOT_SLUG),
+  });
+  const roles = rolesQ.data ?? [];
+  const autopilotRoles = autopilotRolesQ.data ?? [];
 
   // ── Derived lookups ────────────────────────────────────────────────
+  // sc_person_product_access has no FK to the product registry, so it can hold
+  // slugs the app no longer serves — keep only autopilot's.
   const original: Board = useMemo(() => {
-    const m: Board = {};
-    for (const e of roster as DeploymentRosterEntry[]) {
-      (m[e.appGroup] ||= {})[e.personId] = e.roleName;
+    const m: Board = { [PRODUCT_SCOPE]: {} };
+    for (const e of roster) (m[e.appGroup] ||= {})[e.personId] = e.roleName;
+    for (const e of productRoster) {
+      if (e.productSlug === AUTOPILOT_SLUG) m[PRODUCT_SCOPE][e.personId] = e.roleName;
     }
     return m;
-  }, [roster]);
+  }, [roster, productRoster]);
+
+  const hasDeploymentGrant = useMemo(() => new Set(roster.map((e) => e.personId)), [roster]);
 
   const personInfoById = useMemo(() => {
     const m: Record<string, { name: string; email: string }> = {};
@@ -177,33 +245,33 @@ const AccessControl: React.FC = () => {
       const name = u.name || `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email;
       m[u.id] = { name, email: u.email };
     }
-    // Roster may reference users the list didn't include — fall back to it.
-    for (const e of roster as DeploymentRosterEntry[]) {
+    // Rosters may reference users the list didn't include — fall back to them.
+    for (const e of [...roster, ...productRoster] as (DeploymentRosterEntry | ProductRosterEntry)[]) {
       if (!m[e.personId]) {
         const name = `${e.firstName || ''} ${e.lastName || ''}`.trim() || e.email;
         m[e.personId] = { name, email: e.email };
       }
     }
     return m;
-  }, [users, roster]);
+  }, [users, roster, productRoster]);
 
-  const roleIdByName = useMemo(() => {
-    const m: Record<string, string> = {};
-    for (const r of roles as any[]) m[r.name] = String(r.id);
-    return m;
-  }, [roles]);
+  const roleIdByName = useMemo(() => roleIdsByName(roles), [roles]);
+  const autopilotRoleIdByName = useMemo(() => roleIdsByName(autopilotRoles), [autopilotRoles]);
 
   const productSlugByAg = useMemo(() => {
     const m: Record<string, string> = {};
-    for (const e of roster as DeploymentRosterEntry[]) m[e.appGroup] = e.productSlug;
+    for (const e of roster) m[e.appGroup] = e.productSlug;
     return m;
   }, [roster]);
   const productSlugFor = (ag: string) => productSlugByAg[ag] || defaultProductSlug;
 
   // Every deployment worth listing: configured app groups ∪ any that already
-  // carry a grant, sorted alphabetically.
+  // carry a grant, sorted alphabetically. PRODUCT_SCOPE isn't a deployment.
   const allAgs = useMemo(() => {
-    const s = new Set<string>([...(appGroups as string[]), ...Object.keys(original)]);
+    const s = new Set<string>([
+      ...(appGroups as string[]),
+      ...Object.keys(original).filter((k) => k !== PRODUCT_SCOPE),
+    ]);
     return [...s].sort((a, b) => a.localeCompare(b));
   }, [appGroups, original]);
 
@@ -217,6 +285,7 @@ const AccessControl: React.FC = () => {
 
   // ── UI state ────────────────────────────────────────────────────────
   const reducedMotion = useReducedMotion() ?? false;
+  const [tab, setTab] = useState<Tab>('autopilot');
   const [search, setSearch] = useState('');
   const [openAgs, setOpenAgs] = useState<Record<string, boolean>>({});
   // Which lane (deployment + role) has its "add user" search open. At most one.
@@ -272,25 +341,36 @@ const AccessControl: React.FC = () => {
   // ── Persist ─────────────────────────────────────────────────────────
   const confirmMut = useMutation({
     mutationFn: async ({ ag, changes }: { ag: string; changes: PendingChange[] }) => {
-      const productSlug = productSlugFor(ag);
+      const isProduct = ag === PRODUCT_SCOPE;
+      const productSlug = isProduct ? AUTOPILOT_SLUG : productSlugFor(ag);
+      const roleIds = isProduct ? autopilotRoleIdByName : roleIdByName;
       for (const c of changes) {
         if (c.type === 'assign') {
-          const roleId = roleIdByName[c.roleName];
+          const roleId = roleIds[c.roleName];
           if (!roleId) throw new Error(`No role id for "${c.roleName}"`);
-          await assignDeploymentRole(c.personId, { productSlug, appGroup: ag, roleId });
+          if (isProduct) await assignRole(c.personId, { productSlug, roleId });
+          else await assignDeploymentRole(c.personId, { productSlug, appGroup: ag, roleId });
         } else {
-          await revokeDeploymentAccess(c.personId, productSlug, ag);
+          if (isProduct) await revokeProductAccess(c.personId, productSlug);
+          else await revokeDeploymentAccess(c.personId, productSlug, ag);
         }
       }
     },
     onSuccess: (_d, vars) => {
+      const scope = vars.ag === PRODUCT_SCOPE ? 'Autopilot' : vars.ag;
       toast.success(
-        `Saved ${vars.changes.length} change${vars.changes.length > 1 ? 's' : ''} for ${vars.ag}`
+        `Saved ${vars.changes.length} change${vars.changes.length > 1 ? 's' : ''} for ${scope}`
       );
-      queryClient.invalidateQueries({ queryKey: ['deployment-access-roster'] });
     },
-    onError: (err: any) =>
-      toast.error(err?.response?.data?.error || err.message || 'Failed to save changes'),
+    onError: (err) => toast.error(errMessage(err, 'Failed to save changes')),
+    // Changes apply one at a time, so a failure partway through leaves the earlier
+    // ones persisted — refetch on both outcomes or the board keeps showing saved
+    // changes as pending. Both rosters: either scope's write can seed a row in the
+    // other via ensureDefaultProductAccess.
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['deployment-access-roster'] });
+      queryClient.invalidateQueries({ queryKey: ['product-access-roster'] });
+    },
   });
 
   // ── Drag & drop (native HTML5) ──────────────────────────────────────
@@ -358,6 +438,7 @@ const AccessControl: React.FC = () => {
   // Bridge the module-level UserCard to this deployment's handlers/lookups.
   const renderCard = (ag: string, personId: string, role: string, roleBadge?: string) => {
     const key = `${ag}:${personId}`;
+    const isProduct = ag === PRODUCT_SCOPE;
     return (
       <UserCard
         key={personId}
@@ -366,6 +447,8 @@ const AccessControl: React.FC = () => {
         role={role}
         isDragging={draggingKey === key}
         roleBadge={roleBadge}
+        removeHint={isProduct && hasDeploymentGrant.has(personId) ? HINT_RESEEDED : undefined}
+        lockedReason={isProduct && personId === currentUser?.id ? HINT_SELF : undefined}
         reducedMotion={reducedMotion}
         pendingFocusRef={pendingFocusRef}
         onDragStart={onDragStart(ag, personId)}
@@ -376,7 +459,10 @@ const AccessControl: React.FC = () => {
     );
   };
 
-  if (rosterLoading || appGroupsLoading) {
+  // The board can't be drawn without these three, so treat a failure as fatal:
+  // falling through would render an empty board reading as "nobody has access".
+  const boardQueries = [rosterQ, productRosterQ, appGroupsQ];
+  if (boardQueries.some((q) => q.isLoading)) {
     return (
       <div className="flex flex-col w-full space-y-4">
         <CardSkeleton />
@@ -386,7 +472,45 @@ const AccessControl: React.FC = () => {
     );
   }
 
+  const fatal = boardQueries.find((q) => q.isError);
+  if (fatal) {
+    return (
+      <div className="flex flex-col w-full">
+        <h1 className="text-lg sm:text-xl font-semibold text-zinc-900 mb-4">Access Control</h1>
+        <div className="bg-white rounded-xl border border-zinc-200 py-16 px-6 text-center">
+          <AlertTriangle className="w-8 h-8 text-amber-500 mx-auto mb-3" />
+          <p className="text-sm font-medium text-zinc-800 mb-1">Couldn't load access data</p>
+          <p className="text-xs text-zinc-500 mb-5">{errMessage(fatal.error)}</p>
+          <Button size="sm" variant="secondary" onClick={() => boardQueries.forEach((q) => q.isError && q.refetch())}>
+            Retry
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // Non-fatal, but each breaks one action — name it, so Confirm doesn't fail
+  // later with an opaque "No role id for …".
+  const degradedQueries = [usersQ, rolesQ, autopilotRolesQ];
+  const degraded = [
+    usersQ.isError && "The user list didn't load, so the ＋ lane picker will be empty.",
+    (rolesQ.isError || autopilotRolesQ.isError) && "Role data didn't load, so saving changes will fail.",
+  ].filter(Boolean) as string[];
+
   const visibleAgs = allAgs.filter((ag) => !search || ag.toLowerCase().includes(search.toLowerCase()));
+
+  // The search box filters deployment names on the Deployment tab; on Autopilot
+  // there are none, so it filters users within the lanes instead.
+  const isProductTab = tab === 'autopilot';
+  const shownAgs = isProductTab ? [PRODUCT_SCOPE] : visibleAgs;
+  const matchesUserSearch = (pid: string) => {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    const info = personInfoById[pid];
+    return (
+      (info?.name || '').toLowerCase().includes(q) || (info?.email || '').toLowerCase().includes(q)
+    );
+  };
 
   return (
     <div className="flex flex-col w-full pb-12">
@@ -397,32 +521,85 @@ const AccessControl: React.FC = () => {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
           <input
             type="text"
-            placeholder="Search deployments"
+            placeholder={isProductTab ? 'Search users' : 'Search deployments'}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="pl-9 pr-4 h-10 sm:h-9 w-full sm:w-64 border border-zinc-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150"
           />
         </div>
       </div>
-      <p className="text-sm text-zinc-500 mb-4 sm:mb-5">
+      <p className="text-sm text-zinc-500 mb-4">
         Drag a user — or select a card and press ← / → — to move them between Viewer, Manager and
         Admin and restage their role, then Confirm to save. Add a user to a lane with the ＋ icon in
-        its header. Only explicit deployment-level grants are shown.
+        its header.{' '}
+        {isProductTab
+          ? 'These grants cover all of Autopilot, independent of any app group.'
+          : 'Only explicit deployment-level grants are shown.'}
       </p>
 
-      {visibleAgs.length === 0 ? (
+      {/* Scope tabs */}
+      <div
+        className="flex items-center gap-1.5 mb-4 sm:mb-5 flex-wrap"
+        role="tablist"
+        aria-label="Access control scope"
+      >
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            aria-selected={tab === t.key}
+            // Clear the query: it means different things per tab, so carrying it
+            // across would silently hide cards.
+            onClick={() => {
+              setTab(t.key);
+              setSearch('');
+            }}
+            className={cn(
+              'inline-flex items-center h-8 px-3 rounded-full text-xs font-medium border cursor-pointer transition-colors duration-150',
+              tab === t.key
+                ? 'bg-zinc-900 text-white border-zinc-900'
+                : 'bg-white text-zinc-600 border-zinc-300 hover:bg-zinc-50'
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {degraded.length > 0 && (
+        <div className="flex items-start gap-2 mb-4 px-3 py-2.5 rounded-lg border border-amber-200 bg-amber-50">
+          <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0 text-xs text-amber-800 space-y-0.5">
+            {degraded.map((line) => (
+              <div key={line}>{line}</div>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => degradedQueries.forEach((q) => q.isError && q.refetch())}
+            className="shrink-0 text-xs font-medium text-amber-900 underline hover:no-underline cursor-pointer"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {shownAgs.length === 0 ? (
         <div className="bg-white rounded-xl border border-zinc-200 py-16 text-center text-zinc-400 text-sm">
           No deployments found.
         </div>
       ) : (
         <div className="space-y-3">
-          {visibleAgs.map((ag) => {
+          {shownAgs.map((ag) => {
+            const isProductScope = ag === PRODUCT_SCOPE;
             const cur = draft[ag] || {};
             const memberIds = Object.keys(cur);
             const changes = changesFor(ag);
-            const isOpen = !!openAgs[ag];
+            const isOpen = isProductScope || !!openAgs[ag]; // product board is the whole tab
             const otherIds = memberIds
               .filter((pid) => !SYSTEM_LANES.includes(cur[pid] as LaneRole))
+              .filter((pid) => (isProductScope ? matchesUserSearch(pid) : true))
               .sort(sortByName);
             const availableUsers = (users as any[])
               .filter((u) => !(u.id in cur))
@@ -433,28 +610,41 @@ const AccessControl: React.FC = () => {
                 return name.includes(q) || (u.email || '').toLowerCase().includes(q);
               });
             const savingThis = confirmMut.isPending && confirmMut.variables?.ag === ag;
+            // Count what's on screen: the product board's lanes are search-filtered.
+            const headerCount = isProductScope ? memberIds.filter(matchesUserSearch).length : memberIds.length;
+            const header = (
+              <>
+                <span className="text-sm font-semibold text-zinc-800">
+                  {isProductScope ? 'Autopilot — product access' : ag}
+                </span>
+                <Badge variant="muted" size="sm">
+                  {headerCount} {headerCount === 1 ? 'user' : 'users'}
+                </Badge>
+                {changes.length > 0 && (
+                  <Badge variant="warning" size="sm" dot>
+                    {changes.length} pending
+                  </Badge>
+                )}
+              </>
+            );
 
             return (
               <div key={ag} className="rounded-xl border border-zinc-200 bg-white overflow-hidden">
-                {/* Accordion header */}
-                <button
-                  type="button"
-                  onClick={() => toggleAg(ag)}
-                  className="w-full flex items-center gap-2.5 px-4 py-3 hover:bg-zinc-50 transition-colors"
-                >
-                  <ChevronDown
-                    className={cn('w-4 h-4 text-zinc-400 transition-transform', !isOpen && '-rotate-90')}
-                  />
-                  <span className="text-sm font-semibold text-zinc-800">{ag}</span>
-                  <Badge variant="muted" size="sm">
-                    {memberIds.length} {memberIds.length === 1 ? 'user' : 'users'}
-                  </Badge>
-                  {changes.length > 0 && (
-                    <Badge variant="warning" size="sm" dot>
-                      {changes.length} pending
-                    </Badge>
-                  )}
-                </button>
+                {/* Collapse toggle per deployment; plain label for the product board. */}
+                {isProductScope ? (
+                  <div className="w-full flex items-center gap-2.5 px-4 py-3">{header}</div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => toggleAg(ag)}
+                    className="w-full flex items-center gap-2.5 px-4 py-3 hover:bg-zinc-50 transition-colors"
+                  >
+                    <ChevronDown
+                      className={cn('w-4 h-4 text-zinc-400 transition-transform', !isOpen && '-rotate-90')}
+                    />
+                    {header}
+                  </button>
+                )}
 
                 {isOpen && (
                   <div className="border-t border-zinc-100 p-3 sm:p-4 bg-zinc-50/50">
@@ -486,7 +676,10 @@ const AccessControl: React.FC = () => {
                     {/* Board: swim lanes */}
                     <div className="flex gap-3 overflow-x-auto pb-1">
                       {SYSTEM_LANES.map((role) => {
-                        const laneIds = memberIds.filter((pid) => cur[pid] === role).sort(sortByName);
+                        const laneIds = memberIds
+                          .filter((pid) => cur[pid] === role)
+                          .filter((pid) => (isProductScope ? matchesUserSearch(pid) : true))
+                          .sort(sortByName);
                         const isDragTarget = dragOver?.ag === ag && dragOver.role === role;
                         const isAddHere = addOpen?.ag === ag && addOpen.role === role;
                         return (
