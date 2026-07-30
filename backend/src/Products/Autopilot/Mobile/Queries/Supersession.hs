@@ -86,8 +86,10 @@ supersedePreviousLive appGroup surface platform excludeRid = withDb $ \db -> do
     pure ids
 
 {- | Rule B, version-aware (audit defect 3): drop OTHER incoming builds that are
-STRICTLY OLDER than the taker (version first, code within a version; unknown
-codes never retire). Keeps review_status so the history row still reads its
+STRICTLY OLDER than the taker. Ordering is platform-conditional (see
+'convergeMobileSlots'): Android compares by CODE alone — the only thing Play
+enforces — while iOS compares version first, code within a version. Unknown
+codes never retire. Keeps review_status so the history row still reads its
 last review state. A newer incoming build is never touched — the promote gate
 blocks the taker instead. Returns the affected ids.
 -}
@@ -95,19 +97,33 @@ retireOlderIncoming ::
     (MonadFlow m) => Text -> Text -> Text -> Text -> Text -> Maybe Int32 -> m [Text]
 retireOlderIncoming appGroup surface platform excludeRid takerVersion takerCode =
     withDb $ \db -> withConn db $ \conn ->
-        map fromOnly
-            <$> query
-                conn
-                "UPDATE release_tracker rt SET status = 'COMPLETED', rollout_status = 'superseded' \
-                \WHERE rt.category = 'MobileBuild' AND rt.app_group = ? AND rt.service = ? AND rt.env = ? \
-                \  AND rt.store_track = 'production' AND rt.review_status IS NOT NULL \
-                \  AND rt.rollout_status IS NULL AND rt.status = 'INPROGRESS' AND rt.id <> ? \
-                \  AND ( mobile_version_key(rt.new_version) < mobile_version_key(?) \
-                \        OR ( mobile_version_key(rt.new_version) = mobile_version_key(?) \
-                \             AND ?::int IS NOT NULL AND rt.version_code IS NOT NULL \
-                \             AND rt.version_code < ?::int ) ) \
-                \RETURNING rt.id"
-                (appGroup, surface, platform, excludeRid, takerVersion, takerVersion, takerCode, takerCode)
+        if platform == "android"
+            then
+                map fromOnly
+                    <$> query
+                        conn
+                        "UPDATE release_tracker rt SET status = 'COMPLETED', rollout_status = 'superseded' \
+                        \WHERE rt.category = 'MobileBuild' AND rt.app_group = ? AND rt.service = ? AND rt.env = ? \
+                        \  AND rt.store_track = 'production' AND rt.review_status IS NOT NULL \
+                        \  AND rt.rollout_status IS NULL AND rt.status = 'INPROGRESS' AND rt.id <> ? \
+                        \  AND ?::int IS NOT NULL AND rt.version_code IS NOT NULL \
+                        \  AND rt.version_code < ?::int \
+                        \RETURNING rt.id"
+                        (appGroup, surface, platform, excludeRid, takerCode, takerCode)
+            else
+                map fromOnly
+                    <$> query
+                        conn
+                        "UPDATE release_tracker rt SET status = 'COMPLETED', rollout_status = 'superseded' \
+                        \WHERE rt.category = 'MobileBuild' AND rt.app_group = ? AND rt.service = ? AND rt.env = ? \
+                        \  AND rt.store_track = 'production' AND rt.review_status IS NOT NULL \
+                        \  AND rt.rollout_status IS NULL AND rt.status = 'INPROGRESS' AND rt.id <> ? \
+                        \  AND ( mobile_version_key(rt.new_version) < mobile_version_key(?) \
+                        \        OR ( mobile_version_key(rt.new_version) = mobile_version_key(?) \
+                        \             AND ?::int IS NOT NULL AND rt.version_code IS NOT NULL \
+                        \             AND rt.version_code < ?::int ) ) \
+                        \RETURNING rt.id"
+                        (appGroup, surface, platform, excludeRid, takerVersion, takerVersion, takerCode, takerCode)
 
 {- | Same-version REBUILD supersession. A rebuild of the live version (same
 version string, different build code — e.g. 3.3.107+4 replacing 3.3.107+3)
@@ -166,6 +182,13 @@ review kept for history; 30-min grace for a just-promoted row); observed
 INTERNAL builds below live or older than the newest internal. Never touches
 the live build's own rows, NULL-code same-version rows, or mid-build rows.
 The SQL mirrors scripts/converge-mobile-slots-inspect.sql — keep in lockstep.
+
+Ordering is PLATFORM-CONDITIONAL. Android version codes are globally monotonic
+and are the only thing Play enforces (a build whose code is at or below
+production can never ship; the marketing version name is free-form and can go
+backwards) — so Android compares by CODE alone, and rows with no code are left
+untouched rather than name-guessed. iOS build numbers (CFBundleVersion) reset
+per marketing version, so iOS keeps version-first, code-as-tiebreak.
 -}
 convergeMobileSlots ::
     (MonadFlow m) =>
@@ -174,15 +197,67 @@ convergeMobileSlots ::
     Text ->
     Maybe (Text, Maybe Int32) ->
     m ([Text], [Text], [Text])
-convergeMobileSlots appGroup surface platform mAnchor = withDb $ \db -> withConn db $ \conn -> do
-    let mV = fst <$> mAnchor
-        mC = snd =<< mAnchor
-        params = (appGroup, surface, platform, mV, mV, mV, mC, mC)
-    live <- map fromOnly <$> query conn liveSql params
-    incoming <- map fromOnly <$> query conn incomingSql params
-    held <- map fromOnly <$> query conn internalSql params
-    pure (live, incoming, held)
+convergeMobileSlots appGroup surface platform mAnchor = withDb $ \db -> withConn db $ \conn ->
+    if platform == "android"
+        then do
+            let mC = snd =<< mAnchor
+                params = (appGroup, surface, platform, mC, mC)
+            live <- map fromOnly <$> query conn liveSqlCode params
+            incoming <- map fromOnly <$> query conn incomingSqlCode params
+            held <- map fromOnly <$> query conn internalSqlCode params
+            pure (live, incoming, held)
+        else do
+            let mV = fst <$> mAnchor
+                mC = snd =<< mAnchor
+                params = (appGroup, surface, platform, mV, mV, mV, mC, mC)
+            live <- map fromOnly <$> query conn liveSql params
+            incoming <- map fromOnly <$> query conn incomingSql params
+            held <- map fromOnly <$> query conn internalSql params
+            pure (live, incoming, held)
   where
+    liveSqlCode =
+        "UPDATE release_tracker rt SET status = 'COMPLETED', rollout_status = 'superseded' \
+        \WHERE rt.category = 'MobileBuild' AND rt.app_group = ? AND rt.service = ? AND rt.env = ? \
+        \  AND rt.store_track = 'production' \
+        \  AND ( rt.rollout_status IN ('rolling_out','halted','completed') \
+        \        OR ( rt.rollout_status IS NULL AND rt.review_status IS NULL \
+        \             AND rt.status = 'COMPLETED' ) ) \
+        \  AND ?::int IS NOT NULL \
+        \  AND rt.version_code IS NOT NULL AND rt.version_code < ?::int \
+        \RETURNING rt.id"
+    incomingSqlCode =
+        "WITH incoming AS ( \
+        \  SELECT id, version_code \
+        \  FROM release_tracker \
+        \  WHERE category = 'MobileBuild' AND app_group = ? AND service = ? AND env = ? \
+        \    AND store_track = 'production' AND review_status IS NOT NULL \
+        \    AND rollout_status IS NULL AND status IN ('INPROGRESS','COMPLETED') \
+        \    AND last_updated < now() - interval '30 minutes' \
+        \    AND version_code IS NOT NULL ), \
+        \best AS ( SELECT version_code AS bcode FROM incoming \
+        \          ORDER BY version_code DESC LIMIT 1 ) \
+        \UPDATE release_tracker rt SET status = 'COMPLETED', rollout_status = 'superseded' \
+        \FROM incoming i LEFT JOIN best b ON TRUE \
+        \WHERE rt.id = i.id \
+        \  AND ( ( ?::int IS NOT NULL AND i.version_code <= ?::int ) \
+        \     OR i.version_code < b.bcode ) \
+        \RETURNING rt.id"
+    internalSqlCode =
+        "WITH held AS ( \
+        \  SELECT id, version_code \
+        \  FROM release_tracker \
+        \  WHERE category = 'MobileBuild' AND app_group = ? AND service = ? AND env = ? \
+        \    AND store_track IN ('internal','testflight') AND review_status IS NULL \
+        \    AND rollout_status IS NULL AND status IN ('INPROGRESS','COMPLETED') \
+        \    AND version_code IS NOT NULL ), \
+        \best AS ( SELECT version_code AS bcode FROM held \
+        \          ORDER BY version_code DESC LIMIT 1 ) \
+        \UPDATE release_tracker rt SET status = 'COMPLETED', rollout_status = 'superseded' \
+        \FROM held h LEFT JOIN best b ON TRUE \
+        \WHERE rt.id = h.id \
+        \  AND ( ( ?::int IS NOT NULL AND h.version_code < ?::int ) \
+        \     OR h.version_code < b.bcode ) \
+        \RETURNING rt.id"
     liveSql =
         "UPDATE release_tracker rt SET status = 'COMPLETED', rollout_status = 'superseded' \
         \WHERE rt.category = 'MobileBuild' AND rt.app_group = ? AND rt.service = ? AND rt.env = ? \
@@ -249,12 +324,17 @@ bestActiveInternalBuild appGroup surface platform = withDb $ \db -> withConn db 
     rows <-
         query
             conn
-            "SELECT id, version_code FROM release_tracker \
-            \WHERE category = 'MobileBuild' AND app_group = ? AND service = ? AND env = ? \
-            \  AND store_track IN ('internal','testflight') AND review_status IS NULL \
-            \  AND rollout_status IS NULL AND status IN ('INPROGRESS','COMPLETED') \
-            \  AND version_code IS NOT NULL \
-            \ORDER BY mobile_version_key(new_version) DESC, version_code DESC LIMIT 1"
+            ( "SELECT id, version_code FROM release_tracker \
+              \WHERE category = 'MobileBuild' AND app_group = ? AND service = ? AND env = ? \
+              \  AND store_track IN ('internal','testflight') AND review_status IS NULL \
+              \  AND rollout_status IS NULL AND status IN ('INPROGRESS','COMPLETED') \
+              \  AND version_code IS NOT NULL "
+                -- Android: codes are the global order; iOS: version first (codes reset).
+                <> ( if platform == "android"
+                        then "ORDER BY version_code DESC, mobile_version_key(new_version) DESC LIMIT 1"
+                        else "ORDER BY mobile_version_key(new_version) DESC, version_code DESC LIMIT 1"
+                   )
+            )
             (appGroup, surface, platform)
     pure $ case rows of
         [(rid, code)] -> Just (rid, code)

@@ -317,6 +317,7 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                   mbcChangelogSummaryShort = case fmap T.strip mShort of
                     Just s | not (T.null s) -> Just s
                     _ -> Nothing
+                , mbcStoreObserved = Nothing
                 }
         target =
             MobileBuildTargetState
@@ -864,76 +865,85 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
     creds <- loadGhCreds
     let owner = gitOwner ac
         repo = gitRepo ac
-    builds <- fetchLatestBuildsForApp appName surface platform
-    case findLastReleaseBuild builds appName surface platform of
+    -- Explicit ref base ("ref:<git-ref>"): store-sync rows diff
+    -- previous-build-tag → this-build-tag directly; no track/leading-build
+    -- resolution involved (and none may exist for an imported row).
+    mPair <- case mBase >>= T.stripPrefix "ref:" of
+        Just r -> pure (Just (r, Just r))
+        Nothing -> do
+            builds <- fetchLatestBuildsForApp appName surface platform
+            case findLastReleaseBuild builds appName surface platform of
+                Nothing -> pure Nothing
+                Just lb -> do
+                    (chBaseRef, chBaseTag, _) <- resolveChangelogBase mBase ac lb
+                    pure (Just (chBaseRef, chBaseTag))
+    case mPair of
         Nothing -> pure (aiUnavailable "no prior release build to compare against")
-        Just lb -> do
-            (chBaseRef, chBaseTag, _) <- resolveChangelogBase mBase ac lb
-            if T.null chBaseRef
-                then pure (aiUnavailable "no base ref to compare against")
-                else do
-                    result <- compareRefs creds owner repo chBaseRef branch
-                    let cmpUrl = "https://github.com/" <> owner <> "/" <> repo <> "/compare/" <> chBaseRef <> "..." <> branch
-                        withRange r = r{baseRef = Just (fromMaybe chBaseRef chBaseTag), headRef = Just branch, compareUrl = Just cmpUrl}
-                    case result of
-                        Left e -> pure (aiUnavailable ("changelog fetch failed: " <> e))
-                        Right cr -> do
-                            let commits = filter (not . isBotCommit) (crCommits cr)
-                                -- Drop automation plumbing, then scope to the selected
-                                -- app's surface (drop the other side; keep this + shared).
-                                items = CL.filterCommitsForSurface surface (CL.dropAutomationCommits (map toCommitItem commits))
-                                detLong = CL.renderLongSummary items
-                                n = length items
-                                excluded = length commits - n
-                                vName = maybe "" T.strip mVersionName
-                                vCode = maybe "" T.strip mVersionCode
-                                versionStr
-                                    | T.null vName = ""
-                                    | T.null vCode = "v" <> vName
-                                    | otherwise = "v" <> vName <> "+" <> vCode
-                                appLabel = appName <> " (" <> CL.ownSideLabel surface <> ")"
-                                -- Generic one-liner for summary_short when AI is off or
-                                -- every model fails (no app name — usable as release notes).
-                                detShort = CL.renderShortSummary items
-                                -- "rn7" = generation version. Bump it whenever the
-                                -- prompt/format changes so cached rows invalidate.
-                                contentKey =
-                                    computePromptHash $
-                                        T.intercalate "\US" ["rn7", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
-                            mRow <- lookupReleaseSummary contentKey
-                            case mRow of
-                                -- Done → return the AI (or cached deterministic) result.
-                                Just ("ready", mLong, mShort, mModel, _) ->
-                                    pure (withRange (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel))
-                                -- Not ready → ensure a DETACHED generation is running and return
-                                -- immediately. The work outlives this request and the browser tab.
-                                _ -> do
-                                    ecfg <- loadAiConfig
-                                    case ecfg of
-                                        Left _ -> do
-                                            -- AI off/unconfigured: the deterministic changelog IS the result.
-                                            upsertReleaseSummary contentKey detLong detShort "" n
-                                            pure (withRange (stateResp "ready" detLong detShort Nothing))
-                                        Right cfg -> do
-                                            -- One generator per content key; reclaims a failed row or a
-                                            -- pending row orphaned by a restart (see 'claimReleaseSummary').
-                                            claimed <- claimReleaseSummary contentKey detLong n
-                                            when claimed $
-                                                void $
-                                                    forkFlow $ do
-                                                        mRes <- generateWithFallback (apEmail ap) cfg appLabel versionStr excluded (CL.otherSideLabel surface) items
-                                                        case mRes of
-                                                            Just (lng, sht, usedModel) -> upsertReleaseSummary contentKey lng sht usedModel n
-                                                            -- Every model failed → store the deterministic
-                                                            -- changelog as the ready result (model="" ⇒ "auto").
-                                                            Nothing -> upsertReleaseSummary contentKey detLong detShort "" n
-                                            -- A concurrent generation may have just finished; otherwise
-                                            -- report pending with the deterministic placeholder.
-                                            st <- lookupReleaseSummary contentKey
-                                            pure $ withRange $ case st of
-                                                Just ("ready", mLong, mShort, mModel, _) ->
-                                                    stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel
-                                                _ -> stateResp "pending" detLong "" Nothing
+        Just (chBaseRef, chBaseTag)
+            | T.null chBaseRef -> pure (aiUnavailable "no base ref to compare against")
+            | otherwise -> do
+                result <- compareRefs creds owner repo chBaseRef branch
+                let cmpUrl = "https://github.com/" <> owner <> "/" <> repo <> "/compare/" <> chBaseRef <> "..." <> branch
+                    withRange r = r{baseRef = Just (fromMaybe chBaseRef chBaseTag), headRef = Just branch, compareUrl = Just cmpUrl}
+                case result of
+                    Left e -> pure (aiUnavailable ("changelog fetch failed: " <> e))
+                    Right cr -> do
+                        let commits = filter (not . isBotCommit) (crCommits cr)
+                            -- Drop automation plumbing, then scope to the selected
+                            -- app's surface (drop the other side; keep this + shared).
+                            items = CL.filterCommitsForSurface surface (CL.dropAutomationCommits (map toCommitItem commits))
+                            detLong = CL.renderLongSummary items
+                            n = length items
+                            excluded = length commits - n
+                            vName = maybe "" T.strip mVersionName
+                            vCode = maybe "" T.strip mVersionCode
+                            versionStr
+                                | T.null vName = ""
+                                | T.null vCode = "v" <> vName
+                                | otherwise = "v" <> vName <> "+" <> vCode
+                            appLabel = appName <> " (" <> CL.ownSideLabel surface <> ")"
+                            -- Generic one-liner for summary_short when AI is off or
+                            -- every model fails (no app name — usable as release notes).
+                            detShort = CL.renderShortSummary items
+                            -- "rn7" = generation version. Bump it whenever the
+                            -- prompt/format changes so cached rows invalidate.
+                            contentKey =
+                                computePromptHash $
+                                    T.intercalate "\US" ["rn7", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
+                        mRow <- lookupReleaseSummary contentKey
+                        case mRow of
+                            -- Done → return the AI (or cached deterministic) result.
+                            Just ("ready", mLong, mShort, mModel, _) ->
+                                pure (withRange (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel))
+                            -- Not ready → ensure a DETACHED generation is running and return
+                            -- immediately. The work outlives this request and the browser tab.
+                            _ -> do
+                                ecfg <- loadAiConfig
+                                case ecfg of
+                                    Left _ -> do
+                                        -- AI off/unconfigured: the deterministic changelog IS the result.
+                                        upsertReleaseSummary contentKey detLong detShort "" n
+                                        pure (withRange (stateResp "ready" detLong detShort Nothing))
+                                    Right cfg -> do
+                                        -- One generator per content key; reclaims a failed row or a
+                                        -- pending row orphaned by a restart (see 'claimReleaseSummary').
+                                        claimed <- claimReleaseSummary contentKey detLong n
+                                        when claimed $
+                                            void $
+                                                forkFlow $ do
+                                                    mRes <- generateWithFallback (apEmail ap) cfg appLabel versionStr excluded (CL.otherSideLabel surface) items
+                                                    case mRes of
+                                                        Just (lng, sht, usedModel) -> upsertReleaseSummary contentKey lng sht usedModel n
+                                                        -- Every model failed → store the deterministic
+                                                        -- changelog as the ready result (model="" ⇒ "auto").
+                                                        Nothing -> upsertReleaseSummary contentKey detLong detShort "" n
+                                        -- A concurrent generation may have just finished; otherwise
+                                        -- report pending with the deterministic placeholder.
+                                        st <- lookupReleaseSummary contentKey
+                                        pure $ withRange $ case st of
+                                            Just ("ready", mLong, mShort, mModel, _) ->
+                                                stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel
+                                            _ -> stateResp "pending" detLong "" Nothing
 
 -- ─── Combined multi-app AI changelog summary ─────────────────────
 --

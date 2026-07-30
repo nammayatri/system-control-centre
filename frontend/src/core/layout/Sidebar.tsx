@@ -19,6 +19,7 @@ import {
   CloudDownload,
   LayoutGrid,
   Link2,
+  Activity,
 } from 'lucide-react';
 import nyLogo from '../../assets/ny-logo.svg';
 import { cn } from '../../lib/utils';
@@ -37,6 +38,7 @@ const iconMap: Record<string, React.ReactNode> = {
   CloudDownload: <CloudDownload className="w-4 h-4" />,
   LayoutGrid: <LayoutGrid className="w-3.5 h-3.5" />,
   Link2: <Link2 className="w-3.5 h-3.5" />,
+  Activity: <Activity className="w-3.5 h-3.5" />,
 };
 
 interface SidebarProps {

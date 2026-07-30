@@ -99,6 +99,14 @@ The UI inherits this 1:1: one card per (app, platform), everything in it fetched
 > - **Metrics row**: downloads / applied / rollbacks+failures (7d) per ongoing release; renders nothing when analytics is unconfigured.
 > - **Admin**: `MobileAppsAdmin` has an inline "OTA ref" editor (`PATCH /mobile/apps/:id {airborneAppRef}`; "" clears). **Runner pool** is chosen in the push UI (a selector defaulting to `ios-debug`, `rasmalai-new` as the alternative) and sent with every dispatch — the old `ota_runner_pool` server_config knob is REMOVED; a bare API call omitting `runner` falls back to `ios-debug` in code. Caveat: old release branches whose workflow file predates the `runner` input 422 on dispatch (GH validates inputs against the workflow at the dispatched ref).
 >
+> **Implementation deltas (2026-07-29/30):**
+> - **Provenance is a build-level module now** (`Mobile/Provenance.hs`): anchor recovery, Tier-1 branch-from-CI-run resolution, and verified branch adoption moved out of `Handlers/Ota.hs` (which imports them). Two release-scoped routes with NO group/OTA prerequisites: `GET /mobile/releases/:id/provenance` (resolves + NULL-only backfills `commit_sha`, runs Tier-1 branch resolution in the same round trip, and returns `previousTag` — see below) and `POST /mobile/releases/:id/adopt-branch` (same containment verification + `acknowledgeMismatch` flow). The branch picker is release-scoped (works for builds with no OTA mapping); with no anchor commit it states why and disables adoption — still no unverified escape hatch. The summary page's Build Identity card resolves live on open (spinners on the commit/branch lines; values appear without a reload; the release query invalidates so the OTA gate updates itself).
+> - **Store-sync changelog = previous-build-tag → this-build-tag.** The AI changelog for store-sync rows no longer uses the create-page recipe (which rendered a backwards `this-tag → branch-head` range). `previousTag` is the highest ledger tag strictly below this build (Android by code, iOS by version-then-code); the AI endpoint accepts `base=ref:<tag>` to diff exactly that range. No resolvable previous tag → the AI summary block is hidden entirely (never a wrong range).
+> - **Build-state gate (create vs operate).** A draft / still-building / discarded / failed native build cannot CREATE OTA work: push dispatch and package-release are rejected server-side (`otaReleaseBlockReason`), and `OtaCapableApp.releaseBlocked` carries the human reason ("build failed", "build still in progress", …) shown on group rows ("⚠ OTA blocked · …"), panels, and the summary card banner. Ramp and Edit are also blocked (UI-level — the ramp proxy has no build context) with the reason in place: on a blocked build you can only wind DOWN. Conclude / Revert / Discard of ongoing releases stay live always — incident recovery on the previous build's traffic is never locked out.
+> - **Abandon → Cancel.** `POST /mobile/ota/pushes/:id/abandon` renamed to `…/cancel`; `cancelOtaPushH` best-effort cancels the bound GitHub run before marking the row FAILED ("cancelled by <email>").
+> - **Pre-SCC live builds get real rows.** Store sync mints a STORE_SYNC row for the live production version even when it predates SCC (`ensureLiveProductionRow`, marked `store_observed` in context so it never anchors latest-build selection) — so the live build has a summary page and an OTA panel instead of an inert "observed on store" line. `source_ref` is NOT stamped at mint; the provenance resolver recovers commit + branch on first open.
+> - **Summary card parity**: the CREATED-release card shows the ramp control (first ramp is what starts serving); the OTA header shows the airborne mapping ref in dark mono beside the badge (watermark removed); the panel shows a spinner while the OTA access query loads instead of flashing "no airborne access".
+
 > **Implementation deltas (2026-07-27):**
 > - **Runner is per-dispatch UI state** (see Admin bullet above): `ota_runner_pool` server_config removed; both push toolbars default the selector to `ios-debug` and always send it.
 > - **Tag resolution is newest-first** (Decision E note): same-commit re-pushes no longer resolve to the previous package.
@@ -252,7 +260,7 @@ The card derives this from the existing `/airborne/access` response (per-ref per
 
 **Step 1 — fix on the branch.** Commit the JS fix to `release/2026-07` (the group's `source_ref`). SCC shows the push's `commit_sha` beside the native build's sha, so branch drift is visible.
 
-**Step 2 — Push bundle.** On the group page, OTA section → **Push bundle** → pick bump (patch) → confirm. SCC records expectation rows and dispatches the CI workflow on the branch. If another OTA push is active anywhere, you get a clear 409 — wait or ask its owner to abandon it.
+**Step 2 — Push bundle.** On the group page, OTA section → **Push bundle** → pick bump (patch) → confirm. SCC records expectation rows and dispatches the CI workflow on the branch. If another OTA push is active anywhere, you get a clear 409 — wait or ask its owner to cancel it.
 
 **Step 3 — wait for green.** The card polls every 15s while active: `DISPATCHED` (run being located) → `RUNNING` (link to the GitHub run) → `BUNDLE_PUSHED` with the resolved package version (e.g. pkg v15). On `FAILED`, the reason (job failed / run cancelled / timed out) is on the row; push again when fixed. If the build succeeded but the package didn't auto-resolve, the **Attach package version** verb fixes it manually.
 
@@ -327,7 +335,7 @@ sequenceDiagram
     BE-->>UI: rows + links + capableApps (never 500s on convergence errors)
 ```
 
-Escape hatches so a push can never wedge the system: **abandon** (force a stuck row terminal — reopens the global dispatch guard) and **attach package version** (manual resolution, validated against the live package list; both audited).
+Escape hatches so a push can never wedge the system: **cancel** (force a stuck row terminal — also cancels the bound GitHub run; reopens the global dispatch guard) and **attach package version** (manual resolution, validated against the live package list; both audited).
 
 ## Flow C — Create a release (the one new composition endpoint)
 
@@ -425,7 +433,7 @@ The mobile frontend imports the airborne product's **api functions only** (not i
 | `0046-ota-push.sql` | `app_catalog.airborne_app_ref` + prod seeds; `ota_push`; `ota_release_link` |
 | `Mobile/Types/Ota.hs` | status ADT, req/resp types |
 | `Mobile/Queries/OtaPush.hs` | `ota_push` / `ota_release_link` CRUD (raw SQL, AirborneOta.Queries idiom) |
-| `Mobile/Handlers/Ota.hs` | dispatch (global lock), convergence, release composition + conflict preflight, attach/abandon verbs, group status assembly |
+| `Mobile/Handlers/Ota.hs` | dispatch (global lock), convergence, release composition + conflict preflight, attach/cancel verbs, group status assembly (provenance core imported from `Mobile/Provenance.hs`) |
 | `Products.AirborneOta.Client` (imported) | authenticated airborne calls — one-way dep, shares the PAT single-flight cache |
 | `Products.AirborneOta.Queries.insertAirborneEvent` (imported) | audit parity for composed create/ramp |
 | `Mobile/Github.hs` (reused) | `dispatchWorkflow`, run candidates (+`head_branch` filter), job polling, tag listing |
@@ -463,7 +471,8 @@ POST /mobile/ota/pushes/:pushId/release               route: 'AP_RELEASE_VIEW; i
         ongoing: [{ airborneReleaseId, status, packageVersion?, trafficPercentage?,
                     dimensions?, link? }] }           -- link resolved globally when SCC-created
 
-POST /mobile/ota/pushes/:pushId/abandon               Protected 'AP_MOBILE_DISPATCH
+POST /mobile/ota/pushes/:pushId/cancel                Protected 'AP_MOBILE_DISPATCH
+     -- (was /abandon) also best-effort cancels the bound GitHub run
 POST /mobile/ota/pushes/:pushId/attach-package        Protected 'AP_MOBILE_DISPATCH
      { packageVersion }                               -- validated against live package list; audited
 ```
@@ -485,6 +494,15 @@ POST /mobile/groups/:gid/ota/adopt-branch         'AP_MOBILE_APP_MANAGE
      { airborneAppRef, branch, acknowledgeMismatch? } -- server re-validates containment;
 → OtaProvAnchor                                       -- mismatch → 409 BRANCH_NOT_CONTAINING
                                                       -- unless explicitly acknowledged
+
+-- Build-level (release-scoped; no group/OTA prerequisites — Mobile/Provenance.hs):
+GET  /mobile/releases/:id/provenance              'AP_RELEASE_VIEW
+→ { commitSha?, sourceRef?, resolvedVia,              -- NULL-only backfills commit_sha +
+    previousTag? }                                    -- source_ref (Tier-1 CI-run branch);
+                                                      -- previousTag = ledger tag below this
+                                                      -- build (store-sync changelog base)
+POST /mobile/releases/:id/adopt-branch            'AP_MOBILE_APP_MANAGE
+     { branch, acknowledgeMismatch? }                 -- same verified-adopt core
 ```
 
 (A `GET …/ota/branches` candidates endpoint existed briefly and was **removed** — the picker is search-first via the existing `/mobile/branches` search.) `PATCH /mobile/apps/:id` additionally accepts `airborneAppRef` ("" clears).
@@ -550,10 +568,10 @@ Links are **never deleted** on conclude/discard — the history list shows every
 ## 5.8 RBAC — unified per-app grants (revised 2026-07-24)
 
 - **One grant covers both surfaces.** A `sc_person_deployment_access` row `(autopilot, app_group="<name>/<platform>")` — or the fleet-wide wildcard `"mobile/*"` (matches every mobile key, structurally never a BE deployment: mobile keys contain `/`, server names don't) — carries BOTH families. `allPermissions Autopilot` includes the OTA family, so system **Admin/Manager/Viewer** tier both (Manager lacks `OTA_RELEASE_DISCARD`/`OTA_APP_MANAGE`; Viewer = views + `OTA_VIEW`). Precedence: exact app key > `mobile/*` > product-level baseline (`deploymentRowFor`). Wire names: autopilot perms have NO `AP_` prefix; `OTA_*` keeps its prefix.
-- **Build verbs** (`MOBILE_DISPATCH`: dispatch/abandon/attach; promote/rollout/revert/create) are enforced **per app row** in the handlers (`requireAppPerm[All]`); reads are visible-but-inert. `MOBILE_APP_MANAGE`: catalog edit is per-app, catalog create and fleet enumeration are product-level-only (`requireProductPerm`).
+- **Build verbs** (`MOBILE_DISPATCH`: dispatch/cancel/attach; promote/rollout/revert/create) are enforced **per app row** in the handlers (`requireAppPerm[All]`); reads are visible-but-inert. `MOBILE_APP_MANAGE`: catalog edit is per-app, catalog create and fleet enumeration are product-level-only (`requireProductPerm`).
 - **OTA verbs** accept the legacy per-ref airborne-ota grant OR the unified autopilot grant (`requireOtaPermission` / `requireOtaPerm` — ref resolved to its app row via `airborne_app_ref`; `aliasGrantSlugs "airborne-ota" = ["autopilot"]` at the route-level product gate). Legacy per-ref grants remain the escape hatch for refs with no catalog row; the admin UI no longer offers airborne-ota as a grantable product/surface.
 - **Frontend gating**: `/airborne/access` (per-ref sets, unified-grant-aware) for OTA panels; `GET /mobile/access` (per-row `mobilePerms`/`otaPerms`) plus `hasPermission(product, action, "<name>/<platform>")` (deployment-first with wildcard + alias fallbacks) for mobile verbs; OTA fetches use `retry:false` and degrade the card on 403.
-- **Audit**: composed create/ramp write `airborne_events` with the SCC actor (parity with airborne routes); dispatch/abandon/attach are recorded on `ota_push` rows (actor columns) — `change_reason` stamped wherever upstream accepts it.
+- **Audit**: composed create/ramp write `airborne_events` with the SCC actor (parity with airborne routes); dispatch/cancel/attach are recorded on `ota_push` rows (actor columns) — `change_reason` stamped wherever upstream accepts it.
 
 ## 5.9 Caching
 

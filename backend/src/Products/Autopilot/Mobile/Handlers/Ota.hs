@@ -83,12 +83,13 @@ import Products.Autopilot.Mobile.Github (
     listWorkflowRunsForSha,
  )
 import Products.Autopilot.Mobile.Github.Auth (GhAppCreds, loadGhCreds)
+import Products.Autopilot.Mobile.Provenance (ancestryCacheRef, cacheGet, cachePut, resolveAnchor, resolveMissingBranchesViaRuns, splitRepo, verifyAndAdoptBranch)
 import Products.Autopilot.Mobile.Auth (requireAppPerm, requireAppPermAll)
 import Products.Autopilot.Mobile.Queries.AppCatalog (appGrantKey, findAppByAirborneRef, listAppCatalog, listEnabledAppCatalog, normalizeAppSegment)
 import Products.Autopilot.Types.Permission (AutopilotPermission (..))
 import Products.Autopilot.Mobile.Queries.OtaPush
 import Products.Autopilot.Mobile.Queries.StoreStatus (StoreCell (..), storeCellsForApp)
-import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..), isDebugBuildType, mbcBuildType)
+import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..), MobileBuildWFStatus (..), isDebugBuildType, mbcBuildType)
 import Products.Autopilot.Mobile.Types.Ota
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..))
 import Products.Autopilot.Mobile.Workflow (tryAdvisoryLockShared)
@@ -138,11 +139,6 @@ nsOf = snd . refParts
 
 runsBaseFor :: Text -> Text
 runsBaseFor ownerRepo = "https://github.com/" <> ownerRepo <> "/actions/runs"
-
-splitRepo :: Text -> (Text, Text)
-splitRepo ownerRepo = case T.breakOn "/" ownerRepo of
-    (o, rest) | not (T.null rest) -> (o, T.drop 1 rest)
-    _ -> (ownerRepo, "")
 
 -- JSON spelunking on opaque upstream bodies.
 vKey :: Text -> Value -> Maybe Value
@@ -265,18 +261,51 @@ pushEligibility rt ac
                     , False
                     )
 
+{- | Build-state gate for CREATING OTA pushes\/releases: a draft, still-building,
+discarded, or failed native build has no shippable artifact to hang an OTA on.
+Deliberately NOT applied to operate verbs (ramp\/conclude\/revert\/discard of
+ONGOING releases) — those act on the namespace's live releases, usually the
+previous build's, and must keep working during incidents.
+-}
+otaReleaseBlockReason :: Rel.ReleaseTracker -> Maybe MobileBuildTargetState -> Maybe Text
+otaReleaseBlockReason rt mts = case Rel.status rt of
+    Rel.CREATED -> Just "build not started (draft)"
+    Rel.DISCARDED -> Just "build discarded"
+    Rel.DISCARDING -> Just "build discarded"
+    Rel.ABORTED -> Just "build failed"
+    Rel.ABORTING -> Just "build failed"
+    Rel.GCLT_ABORTED -> Just "build failed"
+    Rel.USER_ABORTED -> Just "build aborted by user"
+    Rel.INPROGRESS
+        | Just ts <- mts
+        , mbWfStatus ts `elem` [MBInit, MBVersionResolved, MBDispatched, MBRunIdResolved, MBBuilding] ->
+            Just "build still in progress"
+    _ -> Nothing
+
+-- | The parsed mobile target state of a group member, by release id.
+memberTargetOf :: GroupCtx -> Rel.ReleaseTracker -> Maybe MobileBuildTargetState
+memberTargetOf ctx rt =
+    listToMaybe
+        [ s
+        | (m, Just ts) <- gcMembers ctx
+        , Rel.releaseId m == Rel.releaseId rt
+        , MobileBuildState s <- [ts]
+        ]
+
 capableAppsResp :: GroupCtx -> Flow [OtaCapableApp]
 capableAppsResp ctx =
     forM (gcCapable ctx) $ \(rt, ac) -> do
         (elig, reason, sup) <- pushEligibility rt ac
+        let blocked = otaReleaseBlockReason rt (memberTargetOf ctx rt)
         pure
             OtaCapableApp
                 { appName = Rel.appGroup rt
                 , platform = Rel.env rt
                 , airborneAppRef = fromMaybe "" (acAirborneAppRef ac)
-                , pushEligible = elig
-                , ineligibleReason = reason
+                , pushEligible = elig && blocked == Nothing
+                , ineligibleReason = maybe reason Just blocked
                 , superseded = sup
+                , releaseBlocked = blocked
                 }
 
 -- ─── GET /mobile/groups/:gid/ota ───────────────────────────────────
@@ -524,7 +553,11 @@ dispatchOtaH ap gid OtaDispatchReq{versionBump = bump, apps = mApps, platforms =
     when (null selected) $ throwM (BadRequest "selection matches no capable app")
     gated <- forM selected $ \(rt, ac) -> do
         (elig, reason, _) <- pushEligibility rt ac
-        pure (rt, ac, elig, reason)
+        -- Build-state gate first: a draft/building/discarded/failed build
+        -- cannot take a push regardless of store presence.
+        pure $ case otaReleaseBlockReason rt (memberTargetOf ctx rt) of
+            Just why -> (rt, ac, False, Just why)
+            Nothing -> (rt, ac, elig, reason)
     let ineligible = [(rt, reason) | (rt, _, False, reason) <- gated]
     unless (null ineligible) $
         throwM . BadRequest $
@@ -773,6 +806,8 @@ releaseOtaPackageH ap gid OtaPackageReleaseReq{airborneAppRef = reqRef, packageV
     (rt, ac) <-
         maybe (throwM (NotFound ("no app with airborne ref " <> reqRef <> " in this group"))) pure $
             find (\(_, a) -> acAirborneAppRef a == Just reqRef) (gcCapable ctx)
+    forM_ (otaReleaseBlockReason rt (memberTargetOf ctx rt)) $ \why ->
+        throwM (BadRequest ("OTA release blocked: " <> why <> " — this build has no shippable artifact"))
     mCreds <- (Just <$> loadGhCreds) `catch` \(_ :: SomeException) -> pure Nothing
     anchorRes <- resolveAnchor mCreds rt ac
     base <-
@@ -941,145 +976,6 @@ attachPackageH ap pid (OtaAttachReq pkgVersion) = do
 pkgShaCacheRef :: IORef (Map.Map (Text, Int) (Maybe Text, Maybe Text))
 pkgShaCacheRef = unsafePerformIO (newIORef Map.empty)
 
-{-# NOINLINE ancestryCacheRef #-}
-
--- | (repo, baseSha, headSha) → (relation, aheadBy, behindBy). Immutable pair.
-ancestryCacheRef :: IORef (Map.Map (Text, Text, Text) (Text, Maybe Int, Maybe Int))
-ancestryCacheRef = unsafePerformIO (newIORef Map.empty)
-
-{-# NOINLINE anchorNegCacheRef #-}
-
--- | Release ids whose native-tag anchor lookup came up empty this process.
-anchorNegCacheRef :: IORef (Map.Map Text ())
-anchorNegCacheRef = unsafePerformIO (newIORef Map.empty)
-
-{-# NOINLINE branchRunCacheRef #-}
-
-{- | (repo, workflowPath, sha) → run-derived branch verdict. @Just b@ = the
-sha's build runs unanimously name branch b; @Nothing@ = no runs or
-disagreeing branches (retried only after a restart — a late run for an old
-sha is not a thing). Run facts are immutable, so entries never invalidate.
--}
-branchRunCacheRef :: IORef (Map.Map (Text, Text, Text) (Maybe Text))
-branchRunCacheRef = unsafePerformIO (newIORef Map.empty)
-
-cacheGet :: (Ord k) => IORef (Map.Map k v) -> k -> Flow (Maybe v)
-cacheGet ref k = Map.lookup k <$> liftIO (readIORef ref)
-
-cachePut :: (Ord k) => IORef (Map.Map k v) -> k -> v -> Flow ()
-cachePut ref k v = liftIO (atomicModifyIORef' ref (\m -> (Map.insert k v m, ())))
-
-{- | Tier-1 branch resolution (§11b follow-up): a build's workflow run
-records @head_branch@ — the branch the build was ACTUALLY created from, not
-a containment guess. For every capable row with an anchor commit but no
-source_ref, look up the app's own workflow runs for that exact sha; when
-every run agrees on one branch, backfill @release_tracker.source_ref@
-(NULL-only). No runs / disagreeing runs (a same-sha rebuild off another
-branch) → leave NULL for the human picker. Returns True if anything was
-written, so the caller can reload the group view.
--}
-resolveMissingBranchesViaRuns :: [(Rel.ReleaseTracker, AppCatalog)] -> Flow Bool
-resolveMissingBranchesViaRuns pairs = do
-    let targets =
-            [ (rt, ac, sha)
-            | (rt, ac) <- pairs
-            , Nothing <- [Rel.sourceRef rt]
-            , Just sha <- [Rel.commitSha rt]
-            ]
-    if null targets
-        then pure False
-        else do
-            mCreds <- (Just <$> loadGhCreds) `catch` \(_ :: SomeException) -> pure Nothing
-            case mCreds of
-                Nothing -> pure False
-                Just creds -> or <$> forM targets (resolveOne creds)
-  where
-    resolveOne :: GhAppCreds -> (Rel.ReleaseTracker, AppCatalog, Text) -> Flow Bool
-    resolveOne creds (rt, ac, sha) = do
-        let key = (acGithubRepo ac, acWorkflowPath ac, sha)
-        cached <- cacheGet branchRunCacheRef key
-        case cached of
-            Just verdict -> writeVerdict rt verdict
-            Nothing -> do
-                let (owner, repo) = splitRepo (acGithubRepo ac)
-                eRuns <- listWorkflowRunsForSha creds owner repo (acWorkflowPath ac) sha
-                case eRuns of
-                    -- Transient upstream trouble: no cache entry, retried next GET.
-                    Left err -> False <$ logWarning ("[OTA] branch-run lookup failed for " <> sha <> ": " <> err)
-                    Right runs -> do
-                        let branches = nub (mapMaybe wrHeadBranch runs)
-                        verdict <- case branches of
-                            [b] -> pure (Just b)
-                            [] -> Nothing <$ logInfo ("[OTA] no build runs recorded for " <> sha <> " — branch stays unresolved")
-                            bs ->
-                                Nothing
-                                    <$ logInfo
-                                        ("[OTA] ambiguous build branches for " <> sha <> " (" <> T.intercalate ", " bs <> ") — leaving to the picker")
-                        cachePut branchRunCacheRef key verdict
-                        writeVerdict rt verdict
-    writeVerdict _ Nothing = pure False
-    writeVerdict rt (Just b) = do
-        ok <- setTrackerSourceRef (Rel.releaseId rt) b
-        when ok $
-            logInfo ("[OTA] source_ref auto-resolved via CI run: " <> Rel.appGroup rt <> "/" <> Rel.env rt <> " ← " <> b)
-        pure ok
-
-{- | The build anchor: which commit was this row's native binary cut from?
-SCC-built rows carry it already; store-sync rows recover it ONCE from the
-native tag ledger — consumer (@\<seg\>\/prod\/\<platform\>\/v\<ver\>+\<code\>@)
-or provider (@\<App\>-v\<ver\>-\<code\>@) — and backfill the column, the lazy
-half of §11b (no bulk job needed).
--}
-resolveAnchor :: Maybe GhAppCreds -> Rel.ReleaseTracker -> AppCatalog -> Flow OtaProvAnchor
-resolveAnchor mCreds rt ac = case Rel.commitSha rt of
-    Just sha -> pure (OtaProvAnchor (Just sha) (Rel.sourceRef rt) "scc")
-    Nothing -> do
-        neg <- cacheGet anchorNegCacheRef (Rel.releaseId rt)
-        case (neg, mCreds) of
-            (Just _, _) -> pure noAnchor
-            (_, Nothing) -> pure noAnchor
-            (Nothing, Just creds) -> do
-                -- Consumer tags: <seg>/prod/<platform>/v<ver>+<code>;
-                -- provider tags: <AppName>-v<ver>-<code>.
-                let (owner, repo) = splitRepo (acGithubRepo ac)
-                    isDriver = acSurface ac == "driver"
-                    prefix
-                        | isDriver = acName ac <> "-v" <> Rel.newVersion rt <> "-"
-                        | otherwise =
-                            normalizeAppSegment (acName ac)
-                                <> "/prod/"
-                                <> acPlatform ac
-                                <> "/v"
-                                <> Rel.newVersion rt
-                eTags <- listTagsWithShas creds owner repo prefix
-                case eTags of
-                    Left err -> do
-                        logWarning ("[OTA] anchor tag lookup failed: " <> err)
-                        pure noAnchor -- transient: NOT negative-cached
-                    Right tags -> do
-                        let coded
-                                | isDriver = [(n, sha) | (n, sha) <- tags, prefix `T.isPrefixOf` n]
-                                | otherwise = [(n, sha) | (n, sha) <- tags, n == prefix || (prefix <> "+") `T.isPrefixOf` n]
-                            exactName c
-                                | isDriver = prefix <> T.pack (show c)
-                                | otherwise = prefix <> "+" <> T.pack (show c)
-                            hit = case Rel.versionCode rt of
-                                Just c -> lookup (exactName c) coded
-                                -- code unknown: highest code wins (selectBuildTag rule)
-                                Nothing -> case coded of
-                                    [] -> Nothing
-                                    _ -> Just (snd (last coded))
-                        case hit of
-                            Just sha -> do
-                                backfillTrackerCommitSha (Rel.releaseId rt) sha
-                                logInfo ("[OTA] anchored " <> Rel.appGroup rt <> "/" <> Rel.env rt <> " v" <> Rel.newVersion rt <> " @ " <> T.take 9 sha)
-                                pure (OtaProvAnchor (Just sha) (Rel.sourceRef rt) "native-tag")
-                            Nothing -> do
-                                cachePut anchorNegCacheRef (Rel.releaseId rt) ()
-                                pure noAnchor
-  where
-    noAnchor = OtaProvAnchor Nothing (Rel.sourceRef rt) "none"
-
 -- | Ancestry of @headSha@ relative to @base@ — cached forever (immutable pair).
 ancestryFor :: Maybe GhAppCreds -> Text -> Text -> Text -> Flow (Text, Maybe Int, Maybe Int)
 ancestryFor mCreds ownerRepo base headSha
@@ -1168,9 +1064,9 @@ resolveOtaProvenanceH _ap gid OtaProvReq{airborneAppRef = reqRef, packages = req
     orElseM a b = maybe b Just a
     anchorCommit (OtaProvAnchor s _ _) = s
 
-{- | Record the USER's branch pick on a row with no source_ref (store-sync).
-Server-side re-validates containment before writing — the pick must be true,
-not just picked. NULL-only write; SCC-built rows are never rewritten.
+{- | Record the USER's branch pick on a row with no source_ref (store-sync),
+group-scoped by airborne ref. Delegates to the shared build-level core in
+'Products.Autopilot.Mobile.Provenance'.
 -}
 adoptOtaBranchH :: AuthedPerson -> Text -> OtaAdoptBranchReq -> Flow OtaProvAnchor
 adoptOtaBranchH ap gid OtaAdoptBranchReq{airborneAppRef = reqRef, branch = pick, acknowledgeMismatch = mAck} = do
@@ -1179,44 +1075,4 @@ adoptOtaBranchH ap gid OtaAdoptBranchReq{airborneAppRef = reqRef, branch = pick,
         maybe (throwM (NotFound ("no app with airborne ref " <> reqRef <> " in this group"))) pure $
             find (\(_, a) -> acAirborneAppRef a == Just reqRef) (gcCapable ctx)
     requireAppPerm (Proxy @'AP_MOBILE_APP_MANAGE) ap (acName ac) (acPlatform ac)
-    when (isJust (Rel.sourceRef rt)) $
-        throwM (BadRequest "row already has a source branch")
-    mCreds <- (Just <$> loadGhCreds) `catch` \(_ :: SomeException) -> pure Nothing
-    creds <- maybe (throwM (InternalError "GitHub credentials unavailable")) pure mCreds
-    anchorRes <- resolveAnchor mCreds rt ac
-    base <-
-        maybe (throwM (BadRequest "no anchor commit for this build — cannot validate the branch")) pure $
-            (\(OtaProvAnchor s _ _) -> s) anchorRes
-    let (owner, repo) = splitRepo (acGithubRepo ac)
-    -- Branch heads move: validate against the name directly, uncached.
-    eCmp <- compareCommits creds owner repo base pick
-    let contained cc = ccStatus cc `elem` (["identical", "ahead"] :: [Text])
-        ack = mAck == Just True
-        adopt warned = do
-            ok <- setTrackerSourceRef (Rel.releaseId rt) pick
-            unless ok $ throwM (Conflict "source branch was set concurrently — reload")
-            (if warned then logWarning else logInfo) $
-                "[OTA] "
-                    <> apEmail ap
-                    <> " adopted branch "
-                    <> pick
-                    <> " for "
-                    <> Rel.appGroup rt
-                    <> "/"
-                    <> Rel.env rt
-                    <> (if warned then " DESPITE the branch not containing the build commit" else "")
-            pure (OtaProvAnchor (Just base) (Just pick) "adopted")
-    case eCmp of
-        Left err -> throwM (BadRequest ("cannot validate branch " <> pick <> ": " <> err))
-        Right cc
-            | contained cc -> adopt False
-            -- Acknowledged mismatch: legitimate after a squash-merge (the
-            -- original sha survives on no branch) — the user owns the call.
-            | ack -> adopt True
-            | otherwise ->
-                throwM
-                    ( ConflictWithPayload
-                        "BRANCH_NOT_CONTAINING"
-                        ("branch " <> pick <> " does not contain this build's commit — likely squash-merged, or the wrong branch")
-                        (object ["relation" .= ccStatus cc, "aheadBy" .= ccAheadBy cc, "behindBy" .= ccBehindBy cc])
-                    )
+    verifyAndAdoptBranch ap rt ac pick mAck

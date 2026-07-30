@@ -28,6 +28,10 @@ const SLOT_DEFS: { key: SlotKey; label: string; phases: string[] }[] = [
 
 const phaseOf = (r: APRelease): string => r.release_context?.display_phase ?? '';
 
+// Dead rows keep their stale display_phase (an aborted promote still says
+// 'internal_held') — they must never claim a store lane.
+const DEAD_STATUS = new Set(['ABORTED', 'USER_ABORTED', 'GCLT_ABORTED', 'DISCARDED', 'REVERTED']);
+
 const newestFirst = (a: APRelease, b: APRelease) =>
   (b.date_created || '').localeCompare(a.date_created || '');
 
@@ -129,7 +133,10 @@ export function AppSlotView({ apps, releases, loading, filters, onOpen }: AppSlo
       if (filters.platform && app.platform !== filters.platform) continue;
       const rows = (byApp.get(`${app.name}|${app.surface}|${app.platform}`) ?? []).sort(newestFirst);
       const slots = Object.fromEntries(
-        SLOT_DEFS.map((def) => [def.key, rows.find((r) => def.phases.includes(phaseOf(r))) ?? null]),
+        SLOT_DEFS.map((def) => [
+          def.key,
+          rows.find((r) => !DEAD_STATUS.has(r.status) && def.phases.includes(phaseOf(r))) ?? null,
+        ]),
       ) as Record<SlotKey, APRelease | null>;
       const occupied = SLOT_DEFS.map((d) => slots[d.key]).filter(Boolean) as APRelease[];
       const storeLive =
@@ -161,7 +168,11 @@ export function AppSlotView({ apps, releases, loading, filters, onOpen }: AppSlo
   // matching lanes (and their "matches filter" tag) are visible, not hidden
   // behind a chevron — same behavior as the groups view.
   useEffect(() => {
-    if (!filters.status) return;
+    // Filter cleared → collapse what the filter opened.
+    if (!filters.status) {
+      setExpanded(new Set());
+      return;
+    }
     setExpanded(
       new Set(
         perApp

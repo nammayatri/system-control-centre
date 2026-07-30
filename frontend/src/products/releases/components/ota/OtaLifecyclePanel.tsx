@@ -50,6 +50,9 @@ import { fullStamp, shortDate } from '../../pages/mobile/summary/dates';
 export interface OtaLifecyclePanelProps {
   /** Release state still on its first fetch — show a loader, not a wrong state. */
   loading?: boolean;
+  /** Reason the native build's state blocks CREATING pushes/releases
+   *  (draft/building/discarded/failed). Operate verbs stay live. */
+  releaseBlocked?: string | null;
   groupId: string;
   appName: string;
   platform: string;
@@ -95,6 +98,7 @@ const runIdOf = (p: OtaPushRow): string =>
 export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
   const {
     loading = false,
+    releaseBlocked = null,
     groupId,
     airborneAppRef: ref,
     pushes,
@@ -445,13 +449,17 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
             <div className="flex items-center gap-2 mt-auto pt-2">
               <button
                 onClick={() => onRelease(readyPkg)}
-                disabled={!can('OTA_RELEASE_CREATE')}
-                title={can('OTA_RELEASE_CREATE') ? undefined : 'Requires OTA_RELEASE_CREATE'}
+                disabled={!can('OTA_RELEASE_CREATE') || !!releaseBlocked}
+                title={releaseBlocked ? `OTA release blocked — ${releaseBlocked}` : can('OTA_RELEASE_CREATE') ? undefined : 'Requires OTA_RELEASE_CREATE'}
                 className="bg-violet-600 text-white px-4 py-2 text-[11px] font-bold rounded-lg shadow-sm hover:bg-violet-700 flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <RocketLaunchIcon size={13} weight="fill" aria-hidden="true" /> Release…
               </button>
-              <span className="text-[10px] text-zinc-400">opens the composer — pick targeting &amp; initial traffic (max 50%)</span>
+              {releaseBlocked ? (
+                <span className="text-[10px] font-semibold text-red-500">blocked — {releaseBlocked}</span>
+              ) : (
+                <span className="text-[10px] text-zinc-400">opens the composer — pick targeting &amp; initial traffic (max 50%)</span>
+              )}
             </div>
           </div>
           <div className="lg:col-span-5 bg-white rounded-lg border border-zinc-200 p-4 flex flex-col gap-2">
@@ -471,7 +479,8 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
                     )}
                     <button
                       onClick={() => onRelease(pk)}
-                      disabled={!can('OTA_RELEASE_CREATE')}
+                      disabled={!can('OTA_RELEASE_CREATE') || !!releaseBlocked}
+                      title={releaseBlocked ? `OTA release blocked — ${releaseBlocked}` : undefined}
                       className={cn('text-zinc-500 font-bold hover:text-zinc-900 cursor-pointer disabled:opacity-40', !born && 'ml-auto')}
                     >
                       New release
@@ -540,7 +549,8 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
                 />
                 <button
                   onClick={() => doRamp(created)}
-                  disabled={!can('OTA_RELEASE_RAMP') || busy != null}
+                  disabled={!can('OTA_RELEASE_RAMP') || busy != null || !!releaseBlocked}
+                  title={releaseBlocked ? `Ramping blocked — ${releaseBlocked}; discard is the way out` : undefined}
                   className="bg-violet-600 text-white font-bold text-[10px] px-2.5 py-1 rounded hover:bg-violet-700 cursor-pointer disabled:opacity-50"
                 >
                   Ramp
@@ -550,7 +560,8 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
                 onClick={() =>
                   onEdit(created, { version: pkgVersionOf(created) ?? 0, tag: pkgTagOf(created) })
                 }
-                disabled={!can('OTA_RELEASE_CREATE')}
+                disabled={!can('OTA_RELEASE_CREATE') || !!releaseBlocked}
+                title={releaseBlocked ? `Editing blocked — ${releaseBlocked}` : undefined}
                 className="bg-white border border-zinc-200 text-zinc-700 px-3 py-1.5 text-[10px] font-bold rounded hover:bg-zinc-50 cursor-pointer disabled:opacity-50"
               >
                 Edit
@@ -563,6 +574,11 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
                 Discard
               </button>
             </div>
+            {releaseBlocked && (
+              <p className="text-[10px] font-semibold text-red-500 mt-1.5">
+                ramp/edit blocked — {releaseBlocked}; only Discard (or operating older releases) is available
+              </p>
+            )}
           </div>
           <div className="lg:col-span-5 bg-white rounded-lg border border-zinc-200 p-4 flex flex-col gap-2.5">
             <span className={eyebrowCls}>Before you ramp</span>
@@ -663,7 +679,8 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
                   />
                   <button
                     onClick={() => doRamp(live)}
-                    disabled={busy != null}
+                    disabled={busy != null || !!releaseBlocked}
+                    title={releaseBlocked ? `Ramping blocked — ${releaseBlocked}; wind down via Conclude/Revert` : undefined}
                     className="bg-white border border-zinc-300 text-zinc-700 font-bold text-[10px] px-2 py-0.5 rounded hover:bg-zinc-50 cursor-pointer disabled:opacity-50"
                   >
                     Ramp
@@ -784,7 +801,8 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
                   </span>
                   <button
                     onClick={() => onRelease(readyPkg)}
-                    disabled={!can('OTA_RELEASE_CREATE')}
+                    disabled={!can('OTA_RELEASE_CREATE') || !!releaseBlocked}
+                    title={releaseBlocked ? `OTA release blocked — ${releaseBlocked}` : undefined}
                     className="ml-auto text-zinc-500 font-bold hover:text-zinc-900 cursor-pointer disabled:opacity-40"
                   >
                     Release again

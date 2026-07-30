@@ -359,7 +359,9 @@ toLatestBuildRow :: (Text, Text, Text, Text, Maybe Text, UTCTime, Text, Maybe Te
 toLatestBuildRow (ag, suf, plt, ver, sha, ca, ctxText, mMeta) = do
     mbts <- parseMobileTargetState (Just ctxText)
     let ctx = mbContext mbts
-    pure
+    -- store_observed rows (builds SCC only saw live on the store, e.g. pre-SCC)
+    -- must never anchor latest-build selection — the leading SCC build does.
+    if mbcStoreObserved ctx == Just True then Nothing else pure
         LatestBuildRow
             { lbrAppGroup = ag
             , lbrSurface = suf

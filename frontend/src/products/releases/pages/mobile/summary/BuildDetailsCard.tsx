@@ -1,10 +1,15 @@
+import { useEffect, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowUpRightIcon,
+  CircleNotchIcon,
   GitBranchIcon,
   GithubLogoIcon,
   SparkleIcon,
   TagIcon,
 } from '@phosphor-icons/react';
+import { fetchReleaseProvenance } from '../../../otaApi';
+import { OtaBranchPicker } from '../../../components/ota/OtaPanel';
 import type { APRelease, RolloutEvent } from '../../../api';
 import type { AppCatalogEntry, LatestBuild } from '../../../types';
 import { MobileChangelogAiSummary, useChangelogAiRange } from '../../../components/MobileChangelogAiSummary';
@@ -56,18 +61,19 @@ const FieldLabel = ({ children }: { children: React.ReactNode }) => (
 
 
 /** base → head chips for the AI summary eyebrow — reads the panel's cache. */
-function AiRangeChips({ release }: { release: APRelease }) {
+function AiRangeChips({ release, base = 'production', head }: { release: APRelease; base?: string; head?: string }) {
   const { baseRef, headRef, compareUrl } = useChangelogAiRange(
     release.appGroup,
     release.service,
     release.env,
-    release.sourceRef ?? '',
+    head ?? release.sourceRef ?? '',
     release.new_version ?? '',
     release.env === 'ios'
       ? ''
       : release.release_context?.version_code != null
         ? String(release.release_context.version_code)
         : '',
+    base,
   );
   if (!baseRef) return null;
   return (
@@ -131,7 +137,32 @@ export function ProvenanceCard({
 }) {
   const { ghRunUrl, tagPushed, githubRepo: bcRepo } = breadcrumbsOf(release);
   const githubRepo = bcRepo || matchedApp?.githubRepo;
-  const sha = release.commitSha || undefined;
+  const qc = useQueryClient();
+  const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+  // Missing commit (store-observed row): recover it from the build tag once —
+  // the server NULL-only backfills the column, so this resolves at most once.
+  const provQ = useQuery({
+    queryKey: ['mobile-release-prov', release.id],
+    queryFn: () => fetchReleaseProvenance(release.id),
+    enabled: !release.commitSha,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+  const sha = release.commitSha || provQ.data?.commitSha || undefined;
+  const shaRecovering = !release.commitSha && provQ.isLoading;
+  // Branch may be auto-resolved server-side (CI-run head_branch) in the same
+  // round trip — show it live, no reload needed.
+  const branch = release.sourceRef || provQ.data?.sourceRef || undefined;
+  // The resolve NULL-only backfills commit_sha/source_ref onto the row —
+  // refresh the release object so the whole page (OTA gate, header) updates.
+  useEffect(() => {
+    if (
+      (provQ.data?.commitSha && !release.commitSha) ||
+      (provQ.data?.sourceRef && !release.sourceRef)
+    )
+      void qc.invalidateQueries({ queryKey: ['release', release.id] });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provQ.data]);
   const stage = stageEventsOf(events);
   const started = stage.find((e) => e.label === 'BUILD_STARTED')?.timestamp;
   const completed = stage.find((e) => e.label === 'BUILD_COMPLETED')?.timestamp;
@@ -156,7 +187,12 @@ export function ProvenanceCard({
           <FieldLabel>Source Baseline Commit</FieldLabel>
           <div className="flex items-center gap-2 text-sm font-mono text-zinc-800">
             <GithubLogoIcon size={16} weight="bold" aria-hidden="true" />
-            {sha && githubRepo ? (
+            {shaRecovering ? (
+              <span className="flex items-center gap-1.5 text-zinc-400 text-xs font-sans">
+                <CircleNotchIcon size={13} weight="bold" className="animate-spin" aria-hidden="true" />
+                recovering from build tag…
+              </span>
+            ) : sha && githubRepo ? (
               <a
                 href={`https://github.com/${githubRepo}/commit/${sha}`}
                 target="_blank"
@@ -166,7 +202,9 @@ export function ProvenanceCard({
                 {sha.slice(0, 7)}
               </a>
             ) : (
-              <span>{sha ? sha.slice(0, 7) : '-'}</span>
+              <span title={!sha ? 'Not recoverable from the tag ledger' : undefined}>
+                {sha ? sha.slice(0, 7) : '-'}
+              </span>
             )}
           </div>
         </div>
@@ -211,7 +249,22 @@ export function ProvenanceCard({
           <FieldLabel>Source Branch</FieldLabel>
           <div className="flex items-center gap-2 text-sm font-mono text-zinc-800 min-w-0">
             <GitBranchIcon size={14} className="text-zinc-400 shrink-0" aria-hidden="true" />
-            <span className="truncate">{release.sourceRef || '-'}</span>
+            {branch ? (
+              <span className="truncate">{branch}</span>
+            ) : shaRecovering ? (
+              <span className="flex items-center gap-1.5 text-zinc-400 text-xs font-sans">
+                <CircleNotchIcon size={13} weight="bold" className="animate-spin" aria-hidden="true" />
+                resolving from CI run…
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setBranchPickerOpen(true)}
+                className="text-blue-600 hover:underline cursor-pointer text-xs font-sans font-medium"
+              >
+                pick branch{sha ? '' : ' (commit unknown)'}
+              </button>
+            )}
           </div>
         </div>
         <div className="flex flex-col gap-1">
@@ -246,6 +299,16 @@ export function ProvenanceCard({
           )}
         </div>
       )}
+      {branchPickerOpen && (
+        <OtaBranchPicker
+          releaseId={release.id}
+          onClose={() => setBranchPickerOpen(false)}
+          onAdopted={() => {
+            void qc.invalidateQueries({ queryKey: ['release', release.id] });
+            void qc.invalidateQueries({ queryKey: ['mobile-release-prov', release.id] });
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -268,7 +331,27 @@ export function ChangelogCard({ release, index = 0 }: { release: APRelease; inde
     .split('\n')
     .map((l) => l.replace(/^[-*•\s]+/, '').trim())
     .filter(Boolean);
-  if (lines.length === 0 && !release.sourceRef) return null;
+  // Store-observed rows have no meaningful branch range — their changelog is
+  // previous-build-tag → this-build-tag from the ledger (both real commits).
+  // No previous tag resolvable → no AI summary at all (never a wrong range).
+  const storeSync = release.mode === 'STORE_SYNC' || release.release_manager === 'store-sync';
+  const thisTag = breadcrumbsOf(release).tagPushed;
+  const prevQ = useQuery({
+    queryKey: ['mobile-release-prov', release.id],
+    queryFn: () => fetchReleaseProvenance(release.id),
+    enabled: storeSync && !!thisTag,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+  const prevTag = prevQ.data?.previousTag;
+  const aiRange = storeSync
+    ? prevTag && thisTag
+      ? { base: `ref:${prevTag}`, head: thisTag }
+      : null
+    : release.sourceRef
+      ? { base: 'production', head: release.sourceRef }
+      : null;
+  if (lines.length === 0 && !aiRange && !(storeSync && thisTag && prevQ.isLoading)) return null;
 
   return (
     <div className="card-surface p-6 stagger-item" style={{ '--index': index } as React.CSSProperties}>
@@ -300,13 +383,19 @@ export function ChangelogCard({ release, index = 0 }: { release: APRelease; inde
         <p className="text-xs text-zinc-400">No changelog recorded for this build.</p>
       )}
 
-      {release.sourceRef && (
+      {storeSync && thisTag && prevQ.isLoading && (
+        <div className="mt-4 flex items-center gap-2 text-xs text-zinc-400">
+          <CircleNotchIcon size={13} weight="bold" className="animate-spin" aria-hidden="true" />
+          resolving previous build for changelog…
+        </div>
+      )}
+      {aiRange && (
         <div className="mt-4 bg-violet-50/60 border border-violet-100 rounded-lg p-3">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <span className="text-[9px] font-bold uppercase tracking-wider text-violet-600 flex items-center gap-1">
               <SparkleIcon size={10} weight="fill" aria-hidden="true" /> AI summary
             </span>
-            <AiRangeChips release={release} />
+            <AiRangeChips release={release} base={aiRange.base} head={aiRange.head} />
           </div>
           <div className="mt-1">
             {/* versionCode mirrors the create-time AI-summary cache key: iOS is
@@ -315,7 +404,8 @@ export function ChangelogCard({ release, index = 0 }: { release: APRelease; inde
               app={release.appGroup}
               surface={release.service}
               platform={release.env}
-              branch={release.sourceRef}
+              branch={aiRange.head}
+              base={aiRange.base}
               versionName={release.new_version}
               versionCode={
                 release.env === 'ios'

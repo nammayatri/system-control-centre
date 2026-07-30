@@ -183,6 +183,7 @@ export function SummaryHeader({
                 }
               >
                 <FireIcon weight="fill" size={12} aria-hidden="true" /> Crashlytics
+                <ArrowSquareOutIcon size={11} className="opacity-70" aria-hidden="true" />
               </a>
             )}
             {KIBANA_URL && (

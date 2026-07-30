@@ -74,74 +74,6 @@ const deriveSyncStatus = (events: RolloutEvent[], releaseStatus: string): SyncSt
   return null;
 };
 
-const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
-  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
-  const [eventSearch, setEventSearch] = useState('');
-
-  const toggleRow = (idx: number) => {
-    setExpandedRows(prev => { const next = new Set(prev); if (next.has(idx)) next.delete(idx); else next.add(idx); return next; });
-  };
-
-  const sorted = [...events]
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
-    .filter(e => !eventSearch || e.label?.toLowerCase().includes(eventSearch.toLowerCase()) || e.category?.toLowerCase().includes(eventSearch.toLowerCase()) || e.data?.toLowerCase().includes(eventSearch.toLowerCase()));
-
-  return (
-    <div className="p-4 sm:p-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
-        <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">Release Events</h3>
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" />
-          <input type="text" placeholder="Filter events..." value={eventSearch} onChange={(e) => setEventSearch(e.target.value)}
-            className="pl-8 pr-3 h-10 sm:h-9 border border-zinc-300 rounded-lg text-sm w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent transition-shadow duration-150" />
-        </div>
-      </div>
-      {sorted.length > 0 ? (
-        <div className="overflow-x-auto -mx-4 sm:mx-0">
-          <table className="w-full text-sm text-left border-collapse">
-            <thead>
-              <tr className="bg-zinc-50 border-y border-zinc-200 text-[12px] text-zinc-500 font-medium uppercase tracking-wider">
-                <th className="py-2 px-3 w-8"></th>
-                <th className="py-2 px-3">#</th>
-                <th className="py-2 px-3">Timestamp</th>
-                <th className="py-2 px-3">Category</th>
-                <th className="py-2 px-3">Label</th>
-                <th className="py-2 px-3">Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((evt, idx) => (
-                <React.Fragment key={idx}>
-                  <tr className={cn('border-b border-zinc-100 cursor-pointer hover:bg-zinc-100 transition-colors duration-150', idx % 2 === 1 ? 'bg-zinc-50' : 'bg-white')} onClick={() => toggleRow(idx)}>
-                    <td className="py-2 px-3 text-zinc-400"><span className={`inline-block transition-transform duration-200 text-xs ${expandedRows.has(idx) ? 'rotate-90' : ''}`}>&#9654;</span></td>
-                    <td className="py-2 px-3 text-zinc-400 font-mono text-xs">{idx + 1}</td>
-                    <td className="py-2 px-3 font-mono text-xs text-zinc-500 whitespace-nowrap">{formatDate(evt.timestamp)}</td>
-                    <td className="py-2 px-3">
-                      <Badge variant={evt.category === 'BUSINESS' ? 'info' : evt.category === 'DECISION_ENGINE' ? 'purple' : evt.category === 'NOTIFICATION' ? 'success' : 'default'} size="sm">
-                        {evt.category}
-                      </Badge>
-                    </td>
-                    <td className="py-2 px-3 font-mono text-xs">{evt.label}</td>
-                    <td className="py-2 px-3 text-xs text-zinc-500 max-w-xs truncate" title={evt.data}>{evt.data?.slice(0, 40)}{(evt.data?.length || 0) > 40 ? '...' : ''}</td>
-                  </tr>
-                  {expandedRows.has(idx) && (
-                    <tr className="border-b border-zinc-100 bg-zinc-50">
-                      <td colSpan={6} className="px-6 py-3">
-                        <pre className="text-xs font-mono bg-zinc-50 text-zinc-800 border border-zinc-200 p-4 rounded-lg overflow-x-auto max-h-60 whitespace-pre-wrap break-all">{tryFormatJson(evt.data)}</pre>
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p className="text-sm text-zinc-400">No events recorded.</p>
-      )}
-    </div>
-  );
-};
 
 // Backend returns YAML; legacy records may still be (double-encoded) JSON — convert those to YAML.
 const formatDiff = (raw: string): string => {
@@ -842,7 +774,7 @@ const ReleaseSummary: React.FC = () => {
           </div>
           <StatusBadge status={release.status} />
           {(release.release_context?.revert === 1 || release.revertsReleaseId) && <Badge variant="purple" dot>REVERT</Badge>}
-          {!isMobile && release.sync_enabled === 'true' && (() => {
+          {release.sync_enabled === 'true' && (() => {
             const syncStatus = deriveSyncStatus(events, release.status);
             return syncStatus ? <Badge variant={syncStatus.variant} dot>{syncStatus.label}</Badge> : null;
           })()}
@@ -935,30 +867,6 @@ const ReleaseSummary: React.FC = () => {
               </PermissionGate>
             </>
           )}
-          {/* Mobile releases use a dedicated revert flow: opens a modal,
-              loads a draft from the BE, lets the operator review the
-              previous-good commit + auto-generated changelog, and POSTs
-              a new release row with source_ref pointing at the previous
-              good tag. The K8s-specific "Immediate Revert" and
-              "Also revert in other cloud" controls don't apply. */}
-          {s === 'COMPLETED' && isMobile && !revertedByTarget
-            && !revertsTarget
-            && release.release_context?.build_type !== 'debug' && (
-              <PermissionGate product="autopilot" permission="RELEASE_REVERT" appGroup={release.appGroup}>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="border-violet-300 text-violet-700 hover:bg-violet-50"
-                  onClick={() => navigate(`/mobile/releases/${id}/revert`)}
-                >
-                  <Undo2 className="w-3.5 h-3.5" /> Revert
-                </Button>
-              </PermissionGate>
-            )}
-          {/* Restart is backend-only: it restarts a k8s Deployment. Mobile builds
-              are GitHub Actions runs with no k8s deployment, so the endpoint fails
-              for them — hide it until a mobile restart (re-dispatch) is built.
-              See docs/MOBILE_RELEASE_FUTURE_SCOPE.md → "Mobile build restart". */}
           { (s === 'ABORTED' || s === 'USER_ABORTED' || s === 'GCLT_ABORTED' || s === 'REVERTED') && (
             <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={release.appGroup}>
               <Button size="sm" variant="outline" className="border-blue-300 text-blue-700 hover:bg-blue-50" loading={restartMut.isPending} onClick={() => doAction('restart', () => restartMut.mutateAsync(id!))}><RotateCw className="w-3.5 h-3.5" /> Restart</Button>

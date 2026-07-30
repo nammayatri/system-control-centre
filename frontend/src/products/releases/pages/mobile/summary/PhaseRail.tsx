@@ -209,7 +209,7 @@ export function PhaseRail({
       : `Release complete: all ${n} steps done`;
 
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto px-6 -mx-6 py-5 -my-5">
       <div className="relative w-full min-w-140">
         {/* Base + progress lines (mockup: absolute 2px rails behind the dots) */}
         <div aria-hidden="true" className="absolute top-5 left-0 right-0 h-0.5 bg-zinc-200 z-0" />

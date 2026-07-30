@@ -48,6 +48,7 @@ module Products.Autopilot.Mobile.Queries.Tracker
     -- Revert helpers
     fetchRevertCandidates,
     findMobileReleaseById,
+    rowToDomain,
     parseMobileTargetState,
     insertMobileRevertTracker,
     markReleaseRevertedBy,

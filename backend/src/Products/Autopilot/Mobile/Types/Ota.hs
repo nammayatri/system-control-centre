@@ -201,6 +201,10 @@ data OtaCapableApp = OtaCapableApp
     , superseded :: Bool
     -- ^ build was replaced on the store — the composer nudges version
     -- targeting so straggler hotfixes don't serve newer natives untargeted
+    , releaseBlocked :: Maybe Text
+    -- ^ Just reason when the native build's state (draft \/ building \/
+    -- discarded \/ failed) forbids CREATING pushes\/releases from it. Operate
+    -- verbs on ongoing releases stay allowed.
     }
     deriving (Show, Generic)
 

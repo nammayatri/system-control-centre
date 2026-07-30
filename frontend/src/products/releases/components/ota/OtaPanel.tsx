@@ -33,10 +33,10 @@ import { concludeOtaRelease,
   fetchOtaPackageDetail,
 } from '../../../airborne-ota/api';
 import type { OtaRelease } from '../../../airborne-ota/types';
-import { adoptOtaBranch,
+import { adoptReleaseBranch,
+  fetchReleaseProvenance,
   releaseOtaPackage,
   releaseOtaPush,
-  resolveOtaProvenance,
   type OtaLinkRow,
   type OtaOngoingConflict,
   type OtaProvPkg,
@@ -218,27 +218,29 @@ export interface ReleasablePkg {
 // §11b branch picker — search-first: type/search any branch, adopt it, and
 // the server verifies containment of the build commit. Not contained (e.g.
 // squash-merge rewrote the sha) ⇒ explicit warning + "Adopt anyway".
+// Release-scoped (build-level): works without any OTA/group context.
 export function OtaBranchPicker({
-  groupId,
-  appRef,
+  releaseId,
   onClose,
   onAdopted,
 }: {
-  groupId: string;
-  appRef: string;
+  releaseId: string;
   onClose: () => void;
   onAdopted: () => void;
 }) {
   const [search, setSearch] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [mismatch, setMismatch] = useState<{ branch: string; relation: string } | null>(null);
-  // Anchor only (empty package list) — no branch scanning on open.
+  // Anchor only — no branch scanning on open.
   const anchorQ = useQuery({
-    queryKey: ['mobile-ota-anchor', groupId, appRef],
-    queryFn: () => resolveOtaProvenance(groupId, appRef, []),
+    queryKey: ['mobile-release-prov', releaseId],
+    queryFn: () => fetchReleaseProvenance(releaseId),
     retry: false,
     staleTime: 5 * 60_000,
   });
+  // No recovered commit ⇒ containment can't be verified; the server refuses
+  // adoption, so the UI says why instead of offering dead buttons.
+  const noAnchor = !anchorQ.isLoading && !anchorQ.data?.commitSha;
   const branchesQ = useQuery({
     queryKey: ['mobile-ota-branch-search', search],
     queryFn: () => mobileApi.listBranches(search || undefined),
@@ -250,7 +252,7 @@ export function OtaBranchPicker({
   const adopt = async (branch: string, ack = false) => {
     setBusy(branch);
     try {
-      await adoptOtaBranch(groupId, appRef, branch, ack);
+      await adoptReleaseBranch(releaseId, branch, ack);
       toast.success(`Source branch set to ${branch}`);
       onAdopted();
       onClose();
@@ -272,13 +274,24 @@ export function OtaBranchPicker({
           <DialogTitle>Pick the source branch</DialogTitle>
         </DialogHeader>
         <DialogBody className="space-y-2">
-          <p className="text-xs text-zinc-600">
-            Search any branch; on adopt, SCC verifies it contains this build's commit
-            {anchorQ.data?.anchor.commitSha && (
-              <span className="font-mono text-zinc-600"> {anchorQ.data.anchor.commitSha.slice(0, 9)}</span>
-            )}
-            . A branch that doesn't contain it gets a warning, not a silent pass.
-          </p>
+          {anchorQ.isLoading ? (
+            <div className="py-1">
+              <Spinner size="sm" label="Recovering this build's commit from its tag…" />
+            </div>
+          ) : noAnchor ? (
+            <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              This build's commit could not be recovered from the tag ledger, so a branch cannot be
+              verified against it. Branch adoption is disabled for this build.
+            </div>
+          ) : (
+            <p className="text-xs text-zinc-600">
+              Search any branch; on adopt, SCC verifies it contains this build's commit
+              {anchorQ.data?.commitSha && (
+                <span className="font-mono text-zinc-600"> {anchorQ.data.commitSha.slice(0, 9)}</span>
+              )}
+              . A branch that doesn't contain it gets a warning, not a silent pass.
+            </p>
+          )}
           <input
             value={search}
             onChange={(e) => {
@@ -320,7 +333,7 @@ export function OtaBranchPicker({
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={busy !== null}
+                    disabled={busy !== null || anchorQ.isLoading || noAnchor}
                     onClick={() => adopt(b.name)}
                   >
                     {busy === b.name ? 'Verifying…' : 'Adopt'}

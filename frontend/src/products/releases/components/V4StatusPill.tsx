@@ -40,10 +40,12 @@ const RAW_STATUS_VARIANT: Record<string, string> = {
 export function mobileDisplayOf(release: APRelease, suppressPromote = false): { label: string; variant: string } {
   const ctx = release.release_context;
   const phase = ctx?.display_phase;
-  const promotable = phase === 'internal_held' && !isFirebaseInternal(release);
-  if (promotable && (suppressPromote || ctx?.promotable === false)) return { label: 'Superseded', variant: 'default' };
+  // Terminal truth FIRST — a dead row still carries its stale phase (an aborted
+  // promote keeps display_phase 'internal_held'), and must never read from it.
   if (release.status === 'USER_ABORTED') return { label: 'User aborted', variant: 'danger' };
   if (release.status === 'ABORTED' && phase !== 'rejected') return { label: 'Failed', variant: 'danger' };
+  const promotable = phase === 'internal_held' && !isFirebaseInternal(release);
+  if (promotable && (suppressPromote || ctx?.promotable === false)) return { label: 'Superseded', variant: 'default' };
   const override =
     release.status === 'INPROGRESS' ||
     ['rolling_out', 'halted', 'superseded', 'live', 'rejected', 'aborted', 'build_failed'].includes(phase ?? '') ||

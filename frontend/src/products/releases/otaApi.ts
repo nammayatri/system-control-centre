@@ -47,6 +47,9 @@ export interface OtaCapableApp {
   ineligibleReason?: string;
   /** Build replaced on the store — composer nudges version targeting. */
   superseded?: boolean;
+  /** Reason the build's state (draft/building/discarded/failed) forbids
+   *  creating pushes/releases. Operate verbs on ongoing releases stay live. */
+  releaseBlocked?: string;
 }
 
 export interface OtaActivePush {
@@ -229,6 +232,32 @@ export async function adoptOtaBranch(
     `/mobile/groups/${encodeURIComponent(groupId)}/ota/adopt-branch`,
     { airborneAppRef, branch, acknowledgeMismatch },
   );
+  return data;
+}
+
+// ── Build-level provenance (release-scoped — works without OTA/groups) ──
+
+export interface ReleaseProvResp extends OtaProvAnchor {
+  /** Previous build's tag from the ledger — the changelog base for store-sync
+   *  rows (prev-tag → this-tag = "what shipped in this build"). */
+  previousTag?: string;
+}
+
+/** Resolve (and server-side backfill) the anchor commit for one mobile build. */
+export async function fetchReleaseProvenance(releaseId: string): Promise<ReleaseProvResp> {
+  const { data } = await apiClient.get(`/mobile/releases/${encodeURIComponent(releaseId)}/provenance`);
+  return data;
+}
+
+export async function adoptReleaseBranch(
+  releaseId: string,
+  branch: string,
+  acknowledgeMismatch = false,
+): Promise<OtaProvAnchor> {
+  const { data } = await apiClient.post(`/mobile/releases/${encodeURIComponent(releaseId)}/adopt-branch`, {
+    branch,
+    acknowledgeMismatch,
+  });
   return data;
 }
 
