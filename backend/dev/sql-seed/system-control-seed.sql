@@ -230,13 +230,14 @@ ON CONFLICT DO NOTHING;
 -- by Core.Secrets — see loadGhCreds / loadPlayCreds / loadAscCreds. Keeping them
 -- out of server_config keeps them off the /server-config API and the frontend.
 
--- Section 3: Grant new perms on existing system roles
+-- Section 3: (removed) MOBILE_DISPATCH / MOBILE_APP_MANAGE are now part of the
+-- Autopilot permission ADT (allPermissions Autopilot), so system roles derive
+-- them automatically. Materialising a partial array onto system roles is worse
+-- than useless: the runtime resolver ignores it for system roles, but it used
+-- to shadow the ADT-derived list in the admin "role permissions" preview.
+-- Keep system-role rows' permissions NULL so both paths read the ADT.
 UPDATE sc_role
-   SET permissions = array_append(permissions, 'MOBILE_DISPATCH')
- WHERE product_slug = 'autopilot' AND name IN ('Admin','Manager')
-   AND NOT ('MOBILE_DISPATCH' = ANY(permissions));
-
-UPDATE sc_role
-   SET permissions = array_append(permissions, 'MOBILE_APP_MANAGE')
- WHERE product_slug = 'autopilot' AND name = 'Admin'
-   AND NOT ('MOBILE_APP_MANAGE' = ANY(permissions));
+   SET permissions = NULL
+ WHERE product_slug = 'autopilot'
+   AND name IN ('Admin', 'Manager', 'Viewer')
+   AND is_system_role;

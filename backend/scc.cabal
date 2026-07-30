@@ -67,15 +67,21 @@ library
       Products.Autopilot.Notifications
       Products.Autopilot.ReleaseChangelog
       Products.Autopilot.K8s.VirtualService
+      Products.Autopilot.Mobile.Auth
       Products.Autopilot.Mobile.Types
+      Products.Autopilot.Mobile.Types.Ota
       Products.Autopilot.Mobile.Types.Storage
       Products.Autopilot.Mobile.Lifecycle.BuildKind
       Products.Autopilot.Mobile.Lifecycle.Phase
       Products.Autopilot.Mobile.Queries.AppCatalog
       Products.Autopilot.Mobile.Queries.Tracker
+      Products.Autopilot.Mobile.Queries.OtaPush
       Products.Autopilot.Mobile.Queries.StoreStatus
       Products.Autopilot.Mobile.Queries.Supersession
       Products.Autopilot.Mobile.Handlers.AppCatalog
+      Products.Autopilot.Mobile.Handlers.Activity
+      Products.Autopilot.Mobile.Handlers.Ota
+      Products.Autopilot.Mobile.Provenance
       Products.Autopilot.Mobile.Handlers.Live
       Products.Autopilot.Mobile.Handlers.Release
       Products.Autopilot.Mobile.Handlers.Rollout
@@ -98,6 +104,12 @@ library
       Products.Autopilot.Queries.ProductService
       Products.Autopilot.Queries.ReleaseTracker
       Products.Autopilot.Queries.VsEditTracker
+      Products.AirborneOta.Client
+      Products.AirborneOta.Keepalive
+      Products.AirborneOta.Queries
+      Products.AirborneOta.Routes
+      Products.AirborneOta.Types
+      Products.AirborneOta.Types.Permission
       Products.Autopilot.Actions.ABValidation
       Products.Autopilot.Actions.Config
       Products.Autopilot.Actions.ConfigMap

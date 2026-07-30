@@ -4,6 +4,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeApplications #-}
 
 {- | HTTP handlers for the user-facing mobile release endpoints.
 
@@ -61,6 +62,9 @@ import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Catch (throwM)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..))
+import Data.Proxy (Proxy (..))
+import Products.Autopilot.Mobile.Auth (requireAppPermAll)
+import Products.Autopilot.Types.Permission (AutopilotPermission (..))
 import Core.DB.Connection (runDB)
 import Core.Environment (Flow, forkFlow, withDb)
 import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericParseJSON, genericToJSON, object, (.=))
@@ -209,6 +213,7 @@ createMobileReleasesH ap CreateMobileReleasesReq{..} = do
     unless (null missing) $
         throwM $
             BadRequest ("unknown app_catalog_id(s): " <> T.intercalate ", " (map (T.pack . show) missing))
+    requireAppPermAll (Proxy @'AP_RELEASE_CREATE) ap [(acName a, acPlatform a) | a <- apps]
     -- ── Build all rows, then insert atomically ──
     -- Build type is fixed per deployment env (master = debug, prod = release)
     -- via the mobile_build_type config flag — not chosen by the caller.
@@ -218,7 +223,11 @@ createMobileReleasesH ap CreateMobileReleasesReq{..} = do
     -- Denormalize the optional group label onto every member row (a group has
     -- no table of its own — the label lives where the group lives).
     let mLabel = releaseGroupLabel >>= \l -> let t = T.strip l in if T.null t then Nothing else Just t
-    built0 <- mapM (buildRow ap appById groupId changeLog buildType destination sourceRef now) items
+    -- Persist the EFFECTIVE branch: dispatch has always defaulted an absent
+    -- ref to "main" (Workflow fromMaybe) — record that fact on the row instead
+    -- of leaving NULL, so the table never under-reports what was built.
+    let effectiveSourceRef = Just (fromMaybe "main" sourceRef)
+    built0 <- mapM (buildRow ap appById groupId changeLog buildType destination effectiveSourceRef now) items
     let built = [(r{rtReleaseGroupLabel = mLabel}, s) | (r, s) <- built0]
     -- Friendly duplicate check: a build is identified by (version name + build number)
     -- (migration 0035). If that exact pair already exists, reject with a clear message
@@ -308,6 +317,7 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                   mbcChangelogSummaryShort = case fmap T.strip mShort of
                     Just s | not (T.null s) -> Just s
                     _ -> Nothing
+                , mbcStoreObserved = Nothing
                 }
         target =
             MobileBuildTargetState
@@ -368,7 +378,7 @@ instance FromJSON DispatchMobileReleasesResp
 -- ─── Dispatch handler ─────────────────────────────────────────────
 
 dispatchMobileReleasesH :: AuthedPerson -> DispatchMobileReleasesReq -> Flow DispatchMobileReleasesResp
-dispatchMobileReleasesH _ap DispatchMobileReleasesReq{releaseIds = rids} = do
+dispatchMobileReleasesH ap DispatchMobileReleasesReq{releaseIds = rids} = do
     -- Phase-1 kill-switch (per spec): until @mobile_dispatch_enabled@
     -- flips to "true" the SCC stays a no-op for mobile — the row exists
     -- but no GH workflow is dispatched and no runner work is started.
@@ -404,6 +414,7 @@ dispatchMobileReleasesH _ap DispatchMobileReleasesReq{releaseIds = rids} = do
         Map.fromList . map (\a -> ((acName a, acSurface a, acPlatform a), a))
             <$> listAppCatalog
     loaded <- mapM (validateForDispatch trackerById acByKey) rids
+    requireAppPermAll (Proxy @'AP_MOBILE_DISPATCH) ap [(acName ac, acPlatform ac) | (_, ac, _) <- loaded]
     -- Group by (github_repo, workflow_path, surface, platform). Each
     -- group maps to one workflow_dispatch — siblings in a group are
     -- tied to the same dispatch_id so the workflow can run them as one
@@ -520,6 +531,11 @@ dispatchOne ((_, wfPath, _, _), triples) = do
     let rids = sortOn Prelude.id [releaseId rt | (rt, _, _) <- triples]
     -- Single SQL UPDATE so all sibling rows in the group share the
     -- dispatch_id atomically. Status stays CREATED (see haddock above).
+    -- Compare-and-swap on dispatch_id IS NULL: the up-front guard is
+    -- read-then-write, so two concurrent dispatch calls could both pass it —
+    -- a re-stamp after the runner already fired the first workflow makes the
+    -- row look fresh again and forks a SECOND CI run. The predicate makes the
+    -- second writer a no-op instead.
     withDb $ \db ->
         runDB db $
             runUpdate $
@@ -531,7 +547,7 @@ dispatchOne ((_, wfPath, _, _), triples) = do
                             , rtUpdatedAt rt <-. val_ now
                             ]
                     )
-                    (\rt -> rtId rt `in_` map val_ rids)
+                    (\rt -> rtId rt `in_` map val_ rids &&. isNothing_ (rtDispatchId rt))
     -- Per-row business event so the audit trail records who entered which dispatch.
     mapM_ (logDispatchEvent did) triples
     pure
@@ -788,6 +804,12 @@ data AiSummaryResp = AiSummaryResp
     , usableCount :: Maybe Int
     -- ^ Combined only: # of selected apps that had a comparable last release
     -- (the others contribute no changelog). Lets the UI label the real count.
+    , baseRef :: Maybe Text
+    -- ^ The compare base the changelog was generated FROM (tag when known).
+    , headRef :: Maybe Text
+    -- ^ The compare head (the branch being released).
+    , compareUrl :: Maybe Text
+    -- ^ GitHub compare link for the exact range.
     }
     deriving (Generic, Show)
 
@@ -804,6 +826,9 @@ aiUnavailable r =
         , summaryShort = Nothing
         , model = Nothing
         , usableCount = Nothing
+        , baseRef = Nothing
+        , headRef = Nothing
+        , compareUrl = Nothing
         }
 
 renderCommitsForAi :: [CommitInfo] -> Text
@@ -829,6 +854,9 @@ stateResp st longTxt shortTxt mModel =
         , summaryShort = if T.null (T.strip shortTxt) then Nothing else Just shortTxt
         , model = mModel
         , usableCount = Nothing
+        , baseRef = Nothing
+        , headRef = Nothing
+        , compareUrl = Nothing
         }
 
 changelogAiSummaryH :: AuthedPerson -> Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Maybe Text -> Flow AiSummaryResp
@@ -837,74 +865,85 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
     creds <- loadGhCreds
     let owner = gitOwner ac
         repo = gitRepo ac
-    builds <- fetchLatestBuildsForApp appName surface platform
-    case findLastReleaseBuild builds appName surface platform of
+    -- Explicit ref base ("ref:<git-ref>"): store-sync rows diff
+    -- previous-build-tag → this-build-tag directly; no track/leading-build
+    -- resolution involved (and none may exist for an imported row).
+    mPair <- case mBase >>= T.stripPrefix "ref:" of
+        Just r -> pure (Just (r, Just r))
+        Nothing -> do
+            builds <- fetchLatestBuildsForApp appName surface platform
+            case findLastReleaseBuild builds appName surface platform of
+                Nothing -> pure Nothing
+                Just lb -> do
+                    (chBaseRef, chBaseTag, _) <- resolveChangelogBase mBase ac lb
+                    pure (Just (chBaseRef, chBaseTag))
+    case mPair of
         Nothing -> pure (aiUnavailable "no prior release build to compare against")
-        Just lb -> do
-            (baseRef, _, _) <- resolveChangelogBase mBase ac lb
-            if T.null baseRef
-                then pure (aiUnavailable "no base ref to compare against")
-                else do
-                    result <- compareRefs creds owner repo baseRef branch
-                    case result of
-                        Left e -> pure (aiUnavailable ("changelog fetch failed: " <> e))
-                        Right cr -> do
-                            let commits = filter (not . isBotCommit) (crCommits cr)
-                                -- Drop automation plumbing, then scope to the selected
-                                -- app's surface (drop the other side; keep this + shared).
-                                items = CL.filterCommitsForSurface surface (CL.dropAutomationCommits (map toCommitItem commits))
-                                detLong = CL.renderLongSummary items
-                                n = length items
-                                excluded = length commits - n
-                                vName = maybe "" T.strip mVersionName
-                                vCode = maybe "" T.strip mVersionCode
-                                versionStr
-                                    | T.null vName = ""
-                                    | T.null vCode = "v" <> vName
-                                    | otherwise = "v" <> vName <> "+" <> vCode
-                                appLabel = appName <> " (" <> CL.ownSideLabel surface <> ")"
-                                -- Generic one-liner for summary_short when AI is off or
-                                -- every model fails (no app name — usable as release notes).
-                                detShort = CL.renderShortSummary items
-                                -- "rn7" = generation version. Bump it whenever the
-                                -- prompt/format changes so cached rows invalidate.
-                                contentKey =
-                                    computePromptHash $
-                                        T.intercalate "\US" ["rn7", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
-                            mRow <- lookupReleaseSummary contentKey
-                            case mRow of
-                                -- Done → return the AI (or cached deterministic) result.
-                                Just ("ready", mLong, mShort, mModel, _) ->
-                                    pure (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel)
-                                -- Not ready → ensure a DETACHED generation is running and return
-                                -- immediately. The work outlives this request and the browser tab.
-                                _ -> do
-                                    ecfg <- loadAiConfig
-                                    case ecfg of
-                                        Left _ -> do
-                                            -- AI off/unconfigured: the deterministic changelog IS the result.
-                                            upsertReleaseSummary contentKey detLong detShort "" n
-                                            pure (stateResp "ready" detLong detShort Nothing)
-                                        Right cfg -> do
-                                            -- One generator per content key; reclaims a failed row or a
-                                            -- pending row orphaned by a restart (see 'claimReleaseSummary').
-                                            claimed <- claimReleaseSummary contentKey detLong n
-                                            when claimed $
-                                                void $
-                                                    forkFlow $ do
-                                                        mRes <- generateWithFallback (apEmail ap) cfg appLabel versionStr excluded (CL.otherSideLabel surface) items
-                                                        case mRes of
-                                                            Just (lng, sht, usedModel) -> upsertReleaseSummary contentKey lng sht usedModel n
-                                                            -- Every model failed → store the deterministic
-                                                            -- changelog as the ready result (model="" ⇒ "auto").
-                                                            Nothing -> upsertReleaseSummary contentKey detLong detShort "" n
-                                            -- A concurrent generation may have just finished; otherwise
-                                            -- report pending with the deterministic placeholder.
-                                            st <- lookupReleaseSummary contentKey
-                                            pure $ case st of
-                                                Just ("ready", mLong, mShort, mModel, _) ->
-                                                    stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel
-                                                _ -> stateResp "pending" detLong "" Nothing
+        Just (chBaseRef, chBaseTag)
+            | T.null chBaseRef -> pure (aiUnavailable "no base ref to compare against")
+            | otherwise -> do
+                result <- compareRefs creds owner repo chBaseRef branch
+                let cmpUrl = "https://github.com/" <> owner <> "/" <> repo <> "/compare/" <> chBaseRef <> "..." <> branch
+                    withRange r = r{baseRef = Just (fromMaybe chBaseRef chBaseTag), headRef = Just branch, compareUrl = Just cmpUrl}
+                case result of
+                    Left e -> pure (aiUnavailable ("changelog fetch failed: " <> e))
+                    Right cr -> do
+                        let commits = filter (not . isBotCommit) (crCommits cr)
+                            -- Drop automation plumbing, then scope to the selected
+                            -- app's surface (drop the other side; keep this + shared).
+                            items = CL.filterCommitsForSurface surface (CL.dropAutomationCommits (map toCommitItem commits))
+                            detLong = CL.renderLongSummary items
+                            n = length items
+                            excluded = length commits - n
+                            vName = maybe "" T.strip mVersionName
+                            vCode = maybe "" T.strip mVersionCode
+                            versionStr
+                                | T.null vName = ""
+                                | T.null vCode = "v" <> vName
+                                | otherwise = "v" <> vName <> "+" <> vCode
+                            appLabel = appName <> " (" <> CL.ownSideLabel surface <> ")"
+                            -- Generic one-liner for summary_short when AI is off or
+                            -- every model fails (no app name — usable as release notes).
+                            detShort = CL.renderShortSummary items
+                            -- "rn7" = generation version. Bump it whenever the
+                            -- prompt/format changes so cached rows invalidate.
+                            contentKey =
+                                computePromptHash $
+                                    T.intercalate "\US" ["rn7", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
+                        mRow <- lookupReleaseSummary contentKey
+                        case mRow of
+                            -- Done → return the AI (or cached deterministic) result.
+                            Just ("ready", mLong, mShort, mModel, _) ->
+                                pure (withRange (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel))
+                            -- Not ready → ensure a DETACHED generation is running and return
+                            -- immediately. The work outlives this request and the browser tab.
+                            _ -> do
+                                ecfg <- loadAiConfig
+                                case ecfg of
+                                    Left _ -> do
+                                        -- AI off/unconfigured: the deterministic changelog IS the result.
+                                        upsertReleaseSummary contentKey detLong detShort "" n
+                                        pure (withRange (stateResp "ready" detLong detShort Nothing))
+                                    Right cfg -> do
+                                        -- One generator per content key; reclaims a failed row or a
+                                        -- pending row orphaned by a restart (see 'claimReleaseSummary').
+                                        claimed <- claimReleaseSummary contentKey detLong n
+                                        when claimed $
+                                            void $
+                                                forkFlow $ do
+                                                    mRes <- generateWithFallback (apEmail ap) cfg appLabel versionStr excluded (CL.otherSideLabel surface) items
+                                                    case mRes of
+                                                        Just (lng, sht, usedModel) -> upsertReleaseSummary contentKey lng sht usedModel n
+                                                        -- Every model failed → store the deterministic
+                                                        -- changelog as the ready result (model="" ⇒ "auto").
+                                                        Nothing -> upsertReleaseSummary contentKey detLong detShort "" n
+                                        -- A concurrent generation may have just finished; otherwise
+                                        -- report pending with the deterministic placeholder.
+                                        st <- lookupReleaseSummary contentKey
+                                        pure $ withRange $ case st of
+                                            Just ("ready", mLong, mShort, mModel, _) ->
+                                                stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel
+                                            _ -> stateResp "pending" detLong "" Nothing
 
 -- ─── Combined multi-app AI changelog summary ─────────────────────
 --

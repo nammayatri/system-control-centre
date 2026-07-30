@@ -15,10 +15,30 @@ import {
   fetchProductPermissions,
   fetchProductRoles,
 } from '../api';
-import { fetchProducts as fetchAppGroups } from '../../../products/releases/api';
+import { fetchProducts as fetchAppGroups, mobileApi } from '../../../products/releases/api';
+import type { AppCatalogEntry } from '../../../products/releases/types';
+import type { MultiSelectOption } from '../../../shared/ui/multi-select';
+
+// Grantable app namespaces ("surfaces"). Backend + Mobile share the autopilot
+// product slug but draw apps from different sources; Airborne is its own
+// product. Mobile grants ("<name>/<platform>") are enforced by the backend.
+type AccessSurfaceId = 'backend' | 'mobile';
+const ACCESS_SURFACES: {
+  id: AccessSurfaceId;
+  label: string;
+  productSlug: string;
+  enforced: boolean;
+}[] = [
+  { id: 'backend', label: 'Autopilot', productSlug: 'autopilot', enforced: true },
+  // Mobile grants are per (app, platform): app_group = "<name>/<platform>".
+  // One grant covers that app row's builds AND its airborne OTA — there is no
+  // separate OTA surface (existing legacy per-ref airborne grants still work).
+  { id: 'mobile', label: 'Mobile Releases (incl. OTA)', productSlug: 'autopilot', enforced: true },
+];
 import { Button } from '../../../shared/ui/button';
 import { Badge } from '../../../shared/ui/badge';
 import { Input, SelectInput } from '../../../shared/ui/input';
+import { MultiSelect } from '../../../shared/ui/multi-select';
 import { CardSkeleton } from '../../../shared/ui/skeleton';
 import {
   Dialog,
@@ -52,8 +72,8 @@ const UserDetail: React.FC = () => {
   const [assignProduct, setAssignProduct] = useState('');
   const [assignRoleId, setAssignRoleId] = useState('');
 
-  const [assignDeployProduct, setAssignDeployProduct] = useState('');
-  const [assignDeployAppGroup, setAssignDeployAppGroup] = useState('');
+  const [assignSurface, setAssignSurface] = useState<AccessSurfaceId | ''>('');
+  const [assignDeployApps, setAssignDeployApps] = useState<string[]>([]);
   const [assignDeployRoleId, setAssignDeployRoleId] = useState('');
 
   // Override form — multi-select
@@ -77,10 +97,69 @@ const UserDetail: React.FC = () => {
     queryFn: fetchAdminProducts,
   });
 
-  const { data: appGroups = [] } = useQuery({
+  // Product-level access is granted under autopilot only: its roles carry the
+  // OTA permission family too (unified model), so airborne-ota is never
+  // offered here — per-app OTA access goes through Scoped Access instead.
+  const grantableProducts = (products as any[])
+    .filter((p) => (p.slug || p) !== 'airborne-ota')
+    .map((p) => {
+      const slug = p.slug || p;
+      return {
+        value: slug,
+        label: slug === 'autopilot' ? 'autopilot (backend · mobile · OTA)' : p.name || slug,
+      };
+    });
+
+  // ── App-access surfaces ──────────────────────────────────────────
+  // A "surface" is a grantable app namespace. Backend + Mobile share the
+  // autopilot product slug but draw apps from different sources; Airborne is
+  // its own product. Mobile grants are per (app, platform) and enforced.
+  const surface = ACCESS_SURFACES.find((s) => s.id === assignSurface);
+  const deployProductSlug = surface?.productSlug ?? '';
+
+  const { data: backendAppGroups = [] } = useQuery({
     queryKey: ['app-groups'],
     queryFn: fetchAppGroups,
+    enabled: assignSurface === 'backend',
   });
+  const { data: mobileApps = [] } = useQuery({
+    queryKey: ['mobile-apps-catalog'],
+    queryFn: () => mobileApi.listApps(),
+    enabled: assignSurface === 'mobile',
+  });
+  // Apps this user is already granted for the selected surface's product →
+  // shown disabled in the multi-select.
+  const grantedForProduct = new Set(
+    (userDeploymentAccess as any[])
+      .filter((d) => d.productSlug === deployProductSlug)
+      .map((d) => d.appGroup),
+  );
+  const markGranted = (o: MultiSelectOption): MultiSelectOption =>
+    grantedForProduct.has(o.value) ? { ...o, disabled: true } : o;
+
+  const surfaceAppOptions: MultiSelectOption[] =
+    assignSurface === 'backend'
+      ? (backendAppGroups as string[]).map((ag) => markGranted({ value: ag, label: ag }))
+      : [
+          // Fleet-wide wildcard: one grant row covering every current AND
+          // future mobile app (builds + OTA). Never matches BE deployments.
+          markGranted({
+            value: 'mobile/*',
+            label: 'All mobile apps',
+            hint: 'wildcard — every current and future app · platform, incl. OTA',
+            group: 'Fleet',
+          }),
+          ...(mobileApps as AppCatalogEntry[]).map((a) =>
+            // one option per (app, platform) — the unified grant key; the hint
+            // names the airborne app this grant's OTA side maps to.
+            markGranted({
+              value: `${a.name}/${a.platform}`,
+              label: `${(a.displayLabel || a.name).replace(/\s*\((Customer|Driver)[^)]*\)/i, '').trim()} · ${a.platform}`,
+              hint: a.airborneAppRef ? `OTA: ${a.airborneAppRef}` : 'no OTA (builds only)',
+              group: a.surface === 'driver' ? 'Driver' : 'Customer',
+            }),
+          ),
+        ];
 
   const { data: productRoles = [] } = useQuery({
     queryKey: ['admin-product-roles', assignProduct],
@@ -89,9 +168,9 @@ const UserDetail: React.FC = () => {
   });
 
   const { data: deployProductRoles = [] } = useQuery({
-    queryKey: ['admin-product-roles', assignDeployProduct],
-    queryFn: () => fetchProductRoles(assignDeployProduct),
-    enabled: !!assignDeployProduct,
+    queryKey: ['admin-product-roles', deployProductSlug],
+    queryFn: () => fetchProductRoles(deployProductSlug),
+    enabled: !!deployProductSlug,
   });
 
   const { data: productPermissions = [] } = useQuery({
@@ -150,20 +229,39 @@ const UserDetail: React.FC = () => {
     onError: (err: any) => toast.error(err?.response?.data?.error || err.message || 'Failed to revoke access'),
   });
 
+  const resetDeployForm = () => {
+    setAssignDeploymentOpen(false);
+    setAssignSurface('');
+    setAssignDeployApps([]);
+    setAssignDeployRoleId('');
+  };
+
   const assignDeploymentMut = useMutation({
-    mutationFn: () =>
-      assignDeploymentRole(id!, {
-        productSlug: assignDeployProduct,
-        appGroup: assignDeployAppGroup,
-        roleId: assignDeployRoleId,
-      }),
-    onSuccess: () => {
-      toast.success('Deployment access assigned successfully');
+    // Grant one role across every selected app in the chosen surface.
+    mutationFn: async () => {
+      if (!deployProductSlug) throw new Error('Select a surface');
+      const results = await Promise.allSettled(
+        assignDeployApps.map((appGroup) =>
+          assignDeploymentRole(id!, {
+            productSlug: deployProductSlug,
+            appGroup,
+            roleId: assignDeployRoleId,
+          }),
+        ),
+      );
+      const failed = results.filter((r) => r.status === 'rejected').length;
+      return { total: assignDeployApps.length, failed };
+    },
+    onSuccess: ({ total, failed }) => {
       queryClient.invalidateQueries({ queryKey: ['admin-user', id] });
-      setAssignDeploymentOpen(false);
-      setAssignDeployProduct('');
-      setAssignDeployAppGroup('');
-      setAssignDeployRoleId('');
+      if (failed === 0) {
+        toast.success(total > 1 ? `Access granted for ${total} apps` : 'Deployment access assigned');
+        resetDeployForm();
+      } else if (failed < total) {
+        toast.warning(`Granted ${total - failed} of ${total}; ${failed} failed — check and retry`);
+      } else {
+        toast.error('Failed to assign deployment access');
+      }
     },
     onError: (err: any) => toast.error(err?.response?.data?.error || err.message || 'Failed to assign deployment access'),
   });
@@ -410,15 +508,15 @@ const UserDetail: React.FC = () => {
         )}
       </div>
 
-      {/* Deployment Access */}
+      {/* Scoped Access — role overrides scoped to a deployment / app across products */}
       <div className="bg-white rounded-xl border border-zinc-200 p-4 sm:p-5 mb-4 sm:mb-5">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
           <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">
-            Deployment Access
+            Scoped Access
           </h2>
           <Button size="sm" variant="secondary" onClick={() => setAssignDeploymentOpen(true)}>
             <Plus className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Add Deployment Access</span>
+            <span className="hidden sm:inline">Add Scoped Access</span>
             <span className="sm:hidden">Add Access</span>
           </Button>
         </div>
@@ -492,7 +590,7 @@ const UserDetail: React.FC = () => {
             </div>
           </>
         ) : (
-          <p className="text-sm text-zinc-400">No deployment-level access assigned. Product-level role applies to all deployments.</p>
+          <p className="text-sm text-zinc-400">No scoped access assigned. Product-level roles apply to every deployment and app.</p>
         )}
       </div>
 
@@ -677,10 +775,7 @@ const UserDetail: React.FC = () => {
                   setAssignProduct(e.target.value);
                   setAssignRoleId('');
                 }}
-                options={products.map((p: any) => ({
-                  value: p.slug || p,
-                  label: p.name || p.slug || p,
-                }))}
+                options={grantableProducts}
               />
               <SelectInput
                 label="Role"
@@ -726,18 +821,18 @@ const UserDetail: React.FC = () => {
       <Dialog open={assignDeploymentOpen} onOpenChange={setAssignDeploymentOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add Deployment Access</DialogTitle>
+            <DialogTitle>Add Scoped Access</DialogTitle>
             <DialogDescription>
-              Grant a role scoped to a single deployment (app group), e.g. Admin on BECKN.
-              This overrides the product-level role for that deployment only; other deployments
-              keep falling back to the product-level role.
+              Grant a role scoped to specific deployments or apps within a product. It
+              overrides the product-level role for those only; access to everything else
+              keeps using the product-level role.
             </DialogDescription>
           </DialogHeader>
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              if (!assignDeployProduct || !assignDeployAppGroup || !assignDeployRoleId) {
-                toast.error('Select a product, app group, and role');
+              if (!assignSurface || assignDeployApps.length === 0 || !assignDeployRoleId) {
+                toast.error('Select a surface, at least one app, and a role');
                 return;
               }
               assignDeploymentMut.mutate();
@@ -745,35 +840,43 @@ const UserDetail: React.FC = () => {
           >
             <DialogBody className="space-y-4">
               <SelectInput
-                label="Product"
+                label="Surface"
                 required
-                placeholder="Select a product"
-                value={assignDeployProduct}
+                placeholder="Select a surface"
+                value={assignSurface}
                 onChange={(e) => {
-                  setAssignDeployProduct(e.target.value);
+                  setAssignSurface(e.target.value as AccessSurfaceId);
                   setAssignDeployRoleId('');
+                  setAssignDeployApps([]);
                 }}
-                options={products.map((p: any) => ({
-                  value: p.slug || p,
-                  label: p.name || p.slug || p,
-                }))}
+                options={ACCESS_SURFACES.map((s) => ({ value: s.id, label: s.label }))}
               />
-              <SelectInput
-                label="App Group (Deployment)"
-                required
-                placeholder="Select an app group"
-                value={assignDeployAppGroup}
-                onChange={(e) => setAssignDeployAppGroup(e.target.value)}
-                options={appGroups.map((ag: string) => ({
-                  value: ag,
-                  label: ag,
-                }))}
-              />
+              {surface && !surface.enforced && (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  <span className="mt-0.5">⚠</span>
+                  <span>
+                    Mobile per-app access isn't enforced by the backend yet — grants are saved
+                    and become active once mobile handlers check per-app permission. Until then
+                    the product-level Mobile role governs access.
+                  </span>
+                </div>
+              )}
+              {assignSurface && (
+                <MultiSelect
+                  label={`${assignSurface === 'backend' ? 'Deployments' : 'Apps'} — grant this role across any number (${surfaceAppOptions.length})`}
+                  placeholder={assignSurface === 'backend' ? 'Search deployments…' : 'Search apps…'}
+                  options={surfaceAppOptions}
+                  value={assignDeployApps}
+                  onChange={setAssignDeployApps}
+                  groupOrder={['Fleet', 'Customer', 'Driver']}
+                  emptyText="No apps available for this surface."
+                />
+              )}
               <SelectInput
                 label="Role"
                 required
-                placeholder={assignDeployProduct ? 'Select a role' : 'Select a product first'}
-                disabled={!assignDeployProduct}
+                placeholder={assignSurface ? 'Select a role' : 'Select a surface first'}
+                disabled={!assignSurface}
                 value={assignDeployRoleId}
                 onChange={(e) => setAssignDeployRoleId(e.target.value)}
                 options={deployProductRoles.map((r: any) => ({
@@ -799,11 +902,13 @@ const UserDetail: React.FC = () => {
               )}
             </DialogBody>
             <DialogFooter>
-              <Button variant="secondary" type="button" onClick={() => setAssignDeploymentOpen(false)}>
+              <Button variant="secondary" type="button" onClick={resetDeployForm}>
                 Cancel
               </Button>
               <Button type="submit" loading={assignDeploymentMut.isPending}>
-                Assign
+                {assignDeployApps.length > 1
+                  ? `Assign to ${assignDeployApps.length} apps`
+                  : 'Assign'}
               </Button>
             </DialogFooter>
           </form>
@@ -837,10 +942,7 @@ const UserDetail: React.FC = () => {
                   setOverrideProduct(e.target.value);
                   setSelectedOverridePerms([]);
                 }}
-                options={products.map((p: any) => ({
-                  value: p.slug || p,
-                  label: p.name || p.slug || p,
-                }))}
+                options={grantableProducts}
               />
 
               {/* Override type */}

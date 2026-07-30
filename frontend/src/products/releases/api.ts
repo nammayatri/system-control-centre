@@ -1220,6 +1220,10 @@ export interface ChangelogSummaryResp {
     // Combined only: # of selected apps that had a comparable last release.
     // < the selected count ⇒ some apps had no base; the summary names them.
     usableCount?: number | null;
+    // Commit range the changelog was generated from (per-app endpoint only).
+    baseRef?: string | null;
+    headRef?: string | null;
+    compareUrl?: string | null;
 }
 
 export async function releaseAiSummary(id: string, force = false): Promise<AiResp> {
@@ -1291,6 +1295,47 @@ export interface PromoteReq {
 export interface PromoteResp {
     prResult: string;
     prWarning?: string | null; // non-fatal warning, e.g. phased release couldn't be enabled
+}
+
+
+// ── Fleet activity (docs/design/fleet-activity-mockup-v1.html) ─────
+
+export interface FleetActivityRow {
+    id: string;
+    at: string;
+    actor?: string | null;
+    source: 'release' | 'ota_push' | 'airborne' | string;
+    action: string;
+    app?: string | null;
+    platform?: string | null;
+    version?: string | null;
+    releaseId?: string | null;
+    groupId?: string | null;
+    detail?: Record<string, unknown> | null;
+}
+
+export interface FleetActivityResp {
+    rows: FleetActivityRow[];
+    nextBefore?: string | null;
+}
+
+export async function fetchFleetActivity(params: {
+    days?: number;
+    app?: string;
+    actor?: string;
+    q?: string;
+    before?: string;
+    limit?: number;
+}): Promise<FleetActivityResp> {
+    const qp: Record<string, string> = {};
+    if (params.days) qp.days = String(params.days);
+    if (params.app) qp.app = params.app;
+    if (params.actor) qp.actor = params.actor;
+    if (params.q) qp.q = params.q;
+    if (params.before) qp.before = params.before;
+    if (params.limit) qp.limit = String(params.limit);
+    const { data } = await apiClient.get('/mobile/activity', { params: qp });
+    return data;
 }
 
 // ── Bulk promote / rollout (one action over many apps) ──
@@ -1626,6 +1671,8 @@ export interface MobileGroupListItem {
     label?: string | null;
     createdAt: string;
     createdBy: string;
+    /** Group source branch — shown in the group-switcher dropdown. */
+    sourceRef?: string | null;
     summary: MobileGroupSummary;
     members: MobileGroupMemberLite[];
 }

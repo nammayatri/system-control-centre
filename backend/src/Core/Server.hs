@@ -27,6 +27,7 @@ import Network.Wai.Middleware.Cors (
     cors,
     simpleCorsResourcePolicy,
  )
+import Products.AirborneOta.Routes (AirborneAPI, airborneServer)
 import Products.Autopilot.Routes (CoreAPI, coreServer)
 import Servant
 
@@ -38,6 +39,7 @@ type FullAPI =
             :> Header "x-pomerium-jwt-assertion" Text
             :> Get '[JSON] Value
         :<|> "mcp" :> McpAPI
+        :<|> AirborneAPI
         :<|> CoreAPI
 
 fullApi :: Proxy FullAPI
@@ -72,7 +74,7 @@ mkApp st =
                     }
 
 fullServer :: ServerT FullAPI Flow
-fullServer = authServer :<|> adminServer :<|> pomeriumEmailH :<|> mcpServer :<|> coreServer
+fullServer = authServer :<|> adminServer :<|> pomeriumEmailH :<|> mcpServer :<|> airborneServer :<|> coreServer
 
 pomeriumEmailH :: Maybe Text -> Maybe Text -> Flow Value
 pomeriumEmailH mXFE mJwt = pure $ object ["email" .= resolvePomeriumEmail mXFE mJwt]

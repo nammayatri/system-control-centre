@@ -13,7 +13,8 @@ interface ProtectedRouteProps {
 
 export function ProtectedRoute({ product, permission, requireAdmin, children }: ProtectedRouteProps) {
   const { isAuthenticated, loading } = useAuth();
-  const { isAdmin, hasPermission, hasAnyDeploymentPermission, userPermissions } = usePermissions();
+  const { isAdmin, hasPermission, hasAnyDeploymentPermission, hasAnyDeploymentAccess, userPermissions } =
+    usePermissions();
 
   if (loading) {
     return (
@@ -37,7 +38,9 @@ export function ProtectedRoute({ product, permission, requireAdmin, children }: 
     );
   }
 
-  if (product && !isAdmin && !userPermissions[product]) {
+  // Product-level access OR any per-app grant lets the user in; the specific
+  // permission (and per-app scoping) is enforced below and server-side.
+  if (product && !isAdmin && !userPermissions[product] && !hasAnyDeploymentAccess(product)) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center py-20">
         <ShieldAlert className="w-12 h-12 text-zinc-300 mb-4" />

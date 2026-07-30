@@ -5,7 +5,7 @@ import { PRODUCT_REGISTRY } from '../../products/registry';
 import { motion } from 'framer-motion';
 import {
   Rocket, FileText, Settings, Shield, LogOut, Package,
-  ChevronRight, Globe, Layers, Server, Smartphone,
+  ChevronRight, Globe, Layers, Server, Smartphone, CloudDownload,
 } from 'lucide-react';
 
 const iconMap: Record<string, React.ReactNode> = {
@@ -17,15 +17,16 @@ const iconMap: Record<string, React.ReactNode> = {
   Layers: <Layers className="w-6 h-6" />,
   Server: <Server className="w-6 h-6" />,
   Smartphone: <Smartphone className="w-6 h-6" />,
+  CloudDownload: <CloudDownload className="w-6 h-6" />,
 };
 
 export default function LauncherPage() {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
-  const { isAdmin, hasPermission } = usePermissions();
+  const { isAdmin, hasPermission, hasAnyDeploymentAccess } = usePermissions();
 
-  const accessibleProducts = PRODUCT_REGISTRY.filter((p) =>
-    hasPermission(p.slug, p.viewPermission)
+  const accessibleProducts = PRODUCT_REGISTRY.filter(
+    (p) => hasPermission(p.slug, p.viewPermission) || hasAnyDeploymentAccess(p.slug)
   );
 
   return (

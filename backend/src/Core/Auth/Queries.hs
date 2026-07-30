@@ -12,6 +12,7 @@ module Core.Auth.Queries
     findDeploymentAccessForPerson,
     computeEffectivePermissions,
     computeEffectivePermissionsForAppGroup,
+    computeEffectivePermissionsForAppGroups,
     findAllProductsForPerson,
     findAllDeploymentPermsForPerson,
     hasAnyDeploymentPermission,
@@ -274,10 +275,30 @@ computeEffectivePermissions :: (MonadFlow m) => PersonAuth -> Text -> UUID -> m 
 computeEffectivePermissions person productSlug roleId =
   withDb $ \db -> computeEffectivePermissionsIO db person productSlug roleId
 
+{- | The fleet-wide mobile grant key: matches every per-app mobile key
+\"\<name\>\/\<platform\>\" (those always contain \'\/\'; server deployment
+names never do, so the wildcard can never leak into BE scopes). Precedence:
+exact app key > wildcard > product-level baseline.
+-}
+mobileWildcard :: Text
+mobileWildcard = "mobile/*"
+
+-- | The deployment row governing a scope key: exact match first, then the
+-- mobile wildcard for per-app mobile keys.
+deploymentRowFor :: Text -> Text -> [DeploymentAccess] -> Maybe DeploymentAccess
+deploymentRowFor productSlug appGroup deploymentAccesses =
+  let forSlug = filter ((== productSlug) . daProductSlug) deploymentAccesses
+      exact = find ((== appGroup) . daAppGroup) forSlug
+      wildcard
+        | "/" `T.isInfixOf` appGroup && appGroup /= mobileWildcard =
+            find ((== mobileWildcard) . daAppGroup) forSlug
+        | otherwise = Nothing
+   in maybe wildcard Just exact
+
 computeEffectivePermissionsForAppGroupIO :: DBEnv -> UUID -> Text -> Text -> IO [Text]
 computeEffectivePermissionsForAppGroupIO db pid productSlug appGroup = do
   deploymentAccesses <- findDeploymentAccessForPersonIO db pid
-  case find (\da -> daProductSlug da == productSlug && daAppGroup da == appGroup) deploymentAccesses of
+  case deploymentRowFor productSlug appGroup deploymentAccesses of
     Just da -> do
       basePerms <- getRolePermissions db productSlug (daRoleId da)
       applyOverridesIO db pid productSlug basePerms
@@ -292,6 +313,33 @@ computeEffectivePermissionsForAppGroupIO db pid productSlug appGroup = do
 computeEffectivePermissionsForAppGroup :: (MonadFlow m) => UUID -> Text -> Text -> m [Text]
 computeEffectivePermissionsForAppGroup pid productSlug appGroup =
   withDb $ \db -> computeEffectivePermissionsForAppGroupIO db pid productSlug appGroup
+
+{- | Batched 'computeEffectivePermissionsForAppGroup': fetches the person-wide
+access data (deployment + product access, plus the product-level baseline)
+ONCE, then computes each app group's effective perms from it. Semantics are
+identical to the per-group function — this just hoists the repeated person
+queries out of the loop when scoping a whole app list.
+-}
+computeEffectivePermissionsForAppGroups ::
+  (MonadFlow m) => UUID -> Text -> [Text] -> m [(Text, [Text])]
+computeEffectivePermissionsForAppGroups pid productSlug appGroups =
+  withDb $ \db -> do
+    deploymentAccesses <- findDeploymentAccessForPersonIO db pid
+    productAccesses <- findProductAccessForPersonIO db pid
+    -- Product-level baseline: identical for every app group WITHOUT a
+    -- deployment grant (the Nothing branch below doesn't depend on the group).
+    productBase <- case find (\pa -> paProductSlug pa == productSlug) productAccesses of
+      Just pa -> applyOverridesIO db pid productSlug =<< getRolePermissions db productSlug (paRoleId pa)
+      Nothing -> pure []
+    let deployRole ag = daRoleId <$> deploymentRowFor productSlug ag deploymentAccesses
+    mapM
+      ( \ag -> case deployRole ag of
+          Just roleId -> do
+            perms <- applyOverridesIO db pid productSlug =<< getRolePermissions db productSlug roleId
+            pure (ag, perms)
+          Nothing -> pure (ag, productBase)
+      )
+      appGroups
 
 -- | Get permissions for a role (PGArray — kept as raw SQL).
 getRolePermissions :: DBEnv -> Text -> UUID -> IO [Text]

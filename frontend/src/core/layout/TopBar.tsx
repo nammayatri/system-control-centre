@@ -34,9 +34,12 @@ function getBreadcrumbs(pathname: string): Crumb[] {
 
 interface TopBarProps {
   onOpenMobileNav?: () => void;
+  // Product-supplied controls rendered before the user menu (e.g. Airborne
+  // theme toggle). Rendered once per product; null for products without any.
+  headerActions?: React.ReactNode;
 }
 
-const TopBar: React.FC<TopBarProps> = ({ onOpenMobileNav }) => {
+const TopBar: React.FC<TopBarProps> = ({ onOpenMobileNav, headerActions }) => {
   const location = useLocation();
   const { user, logout } = useAuth();
   const [showMenu, setShowMenu] = useState(false);
@@ -57,12 +60,12 @@ const TopBar: React.FC<TopBarProps> = ({ onOpenMobileNav }) => {
   }, []);
 
   return (
-    <div className="h-14 bg-white border-b border-zinc-200 flex items-center justify-between px-3 sm:px-6 shrink-0 gap-3">
+    <div className="h-14 bg-white border-b border-zinc-200 dark:bg-[#0b0b0c] dark:border-zinc-800 flex items-center justify-between px-3 sm:px-6 shrink-0 gap-3">
       {/* Mobile hamburger */}
       {onOpenMobileNav && (
         <button
           onClick={onOpenMobileNav}
-          className="md:hidden h-10 w-10 -ml-1 flex items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-100 cursor-pointer transition-colors duration-150"
+          className="md:hidden h-10 w-10 -ml-1 flex items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800 cursor-pointer transition-colors duration-150"
           aria-label="Open menu"
         >
           <Menu className="w-5 h-5" />
@@ -71,7 +74,7 @@ const TopBar: React.FC<TopBarProps> = ({ onOpenMobileNav }) => {
 
       {/* Mobile: page title only */}
       <div className="md:hidden flex-1 min-w-0">
-        <span className="text-sm font-semibold text-zinc-900 truncate block">
+        <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 truncate block">
           {lastCrumb?.label || 'Dashboard'}
         </span>
       </div>
@@ -80,23 +83,26 @@ const TopBar: React.FC<TopBarProps> = ({ onOpenMobileNav }) => {
       <div className="hidden md:flex items-center text-sm flex-1 min-w-0 overflow-hidden">
         {breadcrumbs.map((crumb, i) => (
           <React.Fragment key={i}>
-            {i > 0 && <ChevronRight className="w-3.5 h-3.5 mx-1.5 text-zinc-300 shrink-0" />}
+            {i > 0 && <ChevronRight className="w-3.5 h-3.5 mx-1.5 text-zinc-300 dark:text-zinc-600 shrink-0" />}
             {crumb.to ? (
               <Link
                 to={crumb.to}
-                className="text-zinc-500 hover:text-zinc-800 transition-colors duration-150 cursor-pointer truncate"
+                className="text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 transition-colors duration-150 cursor-pointer truncate"
               >
                 {crumb.label}
               </Link>
             ) : (
-              <span className="text-zinc-800 font-medium truncate">{crumb.label}</span>
+              <span className="text-zinc-800 dark:text-zinc-100 font-medium truncate">{crumb.label}</span>
             )}
           </React.Fragment>
         ))}
         {breadcrumbs.length === 0 && (
-          <span className="text-zinc-800 font-medium">Dashboard</span>
+          <span className="text-zinc-800 dark:text-zinc-100 font-medium">Dashboard</span>
         )}
       </div>
+
+      {/* Product-supplied header controls (e.g. Airborne theme toggle) */}
+      {headerActions}
 
       {/* User menu */}
       <div className="relative shrink-0" ref={menuRef}>
@@ -104,8 +110,9 @@ const TopBar: React.FC<TopBarProps> = ({ onOpenMobileNav }) => {
           onClick={() => setShowMenu(!showMenu)}
           className={cn(
             'h-9 w-9 rounded-full bg-zinc-100 border border-zinc-200',
-            'flex items-center justify-center text-xs font-bold text-zinc-600',
-            'hover:bg-zinc-200 transition-colors duration-150 uppercase cursor-pointer',
+            'dark:bg-zinc-800 dark:border-zinc-700',
+            'flex items-center justify-center text-xs font-bold text-zinc-600 dark:text-zinc-300',
+            'hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors duration-150 uppercase cursor-pointer',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 focus-visible:ring-offset-1'
           )}
           aria-label="User menu"
@@ -113,22 +120,22 @@ const TopBar: React.FC<TopBarProps> = ({ onOpenMobileNav }) => {
           {user?.name?.[0] || user?.email?.[0] || '?'}
         </button>
         {showMenu && (
-          <div className="absolute right-0 top-full mt-2 w-56 bg-white border border-zinc-200 rounded-lg shadow-sm z-50 py-1">
-            <div className="px-3 py-2 border-b border-zinc-100">
-              <div className="text-sm font-medium text-zinc-800 truncate">{user?.name || 'User'}</div>
-              <div className="text-xs text-zinc-500 truncate">{user?.email}</div>
+          <div className="absolute right-0 top-full mt-2 w-56 bg-white border border-zinc-200 dark:bg-zinc-900 dark:border-zinc-800 rounded-lg shadow-sm z-50 py-1">
+            <div className="px-3 py-2 border-b border-zinc-100 dark:border-zinc-800">
+              <div className="text-sm font-medium text-zinc-800 dark:text-zinc-100 truncate">{user?.name || 'User'}</div>
+              <div className="text-xs text-zinc-500 dark:text-zinc-400 truncate">{user?.email}</div>
             </div>
             <Link
               to="/profile"
               onClick={() => setShowMenu(false)}
-              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors duration-150 cursor-pointer"
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors duration-150 cursor-pointer"
             >
               <KeyRound className="w-3.5 h-3.5" />
               Profile & MCP keys
             </Link>
             <button
               onClick={logout}
-              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors duration-150 cursor-pointer"
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40 transition-colors duration-150 cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" />
               Sign out

@@ -75,19 +75,29 @@ export function StoreSyncBanner({ className, auto = true }: { className?: string
     auto,
   });
   if (!available || !hasApps) return null;
-  const amber = cold || stale;
+  const amber = (cold || stale) && !refreshing;
   return (
     <div
       className={cn(
-        'flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs',
-        amber ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-zinc-200 bg-zinc-50 text-zinc-600',
+        'flex items-center justify-between gap-3 rounded-lg border px-4 py-2.5 text-xs',
+        refreshing
+          ? 'border-sky-100 bg-sky-50/60 text-sky-800'
+          : amber
+            ? 'border-amber-200 bg-amber-50 text-amber-800'
+            : 'border-zinc-200 bg-zinc-50 text-zinc-600',
         className,
       )}
     >
-      <span className="flex items-center gap-1.5">
-        {amber ? <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> : <Clock className="h-3.5 w-3.5 shrink-0" />}
+      <span className="flex items-center gap-2.5">
+        {refreshing ? (
+          <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-sky-500" />
+        ) : amber ? (
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+        ) : (
+          <Clock className="h-3.5 w-3.5 shrink-0" />
+        )}
         {refreshing
-          ? 'Refreshing store data…'
+          ? 'Refreshing store data — Play & App Store states update as each app syncs.'
           : cold
             ? 'Store data not synced yet — fetching the latest from the stores'
             : `Store data synced ${relativeAge(lastSyncedAt)}${stale ? ' — may be outdated' : ''}`}

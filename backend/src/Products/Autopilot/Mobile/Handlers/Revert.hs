@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeApplications #-}
 
 {- | HTTP handlers for mobile release revert.
 
@@ -51,6 +52,9 @@ import Control.Monad.Catch (throwM)
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..))
+import Data.Proxy (Proxy (..))
+import Products.Autopilot.Mobile.Auth (requireAppPerm)
+import Products.Autopilot.Types.Permission (AutopilotPermission (..))
 import Core.Environment (Flow)
 import Data.Aeson (FromJSON, ToJSON, object, (.=))
 import Data.Functor.Identity (Identity)
@@ -479,6 +483,7 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
     (bad, badState) <- case mBad of
         Just x -> pure x
         Nothing -> throwM $ BadRequest ("Mobile release not found: " <> releaseId')
+    requireAppPerm (Proxy @'AP_RELEASE_REVERT) ap (rtAppGroup bad) (rtEnv bad)
     case rtStatus bad of
         "COMPLETED" -> pure ()
         s -> throwM $ BadRequest ("Cannot revert release in status " <> s)
@@ -574,6 +579,7 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
                 , -- A revert is system-initiated; it never opts into a changelog post.
                   mbcChangelogSummary = Nothing
                 , mbcChangelogSummaryShort = Nothing
+                , mbcStoreObserved = Nothing
                 }
         targetState =
             MobileBuildTargetState

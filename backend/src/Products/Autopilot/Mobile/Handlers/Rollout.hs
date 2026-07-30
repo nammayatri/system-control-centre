@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -62,19 +63,24 @@ import Control.Applicative ((<|>))
 import Control.Exception (SomeException, displayException, fromException)
 import Control.Monad (forM_, unless, when)
 import Control.Monad.Catch (throwM)
-import qualified Control.Monad.Catch as MC
+import Control.Monad.Catch qualified as MC
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..), ToAppError (..))
 import Core.Auth.Protected (AuthedPerson (..))
+import Data.Proxy (Proxy (..))
+import Products.Autopilot.Mobile.Auth (requireAppPerm)
+import Products.Autopilot.Types.Permission (AutopilotPermission (..))
 import Core.Environment (Flow)
 import Data.Aeson (FromJSON, ToJSON, object, (.=))
 import Data.Int (Int32)
 import Data.List (find)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
+import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), abortable, displayStatusInferred, phaseFromFields, phaseSlug, variantSlug)
 import Products.Autopilot.Mobile.Queries.AppCatalog (storeTrackOf)
 import Products.Autopilot.Mobile.Queries.StoreStatus (
     findProductionLiveCell,
@@ -85,21 +91,19 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (
     setProductionRolloutStatus,
     storeCellsForApp,
  )
-import Products.Autopilot.Mobile.Queries.Supersession (retireOlderIncoming, supersedePreviousLive)
-import Products.Autopilot.Mobile.StoreSync (versionOlderThan)
-import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe, reviewInferredOf)
-import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
-import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), abortable, displayStatusInferred, phaseFromFields, phaseSlug, variantSlug)
+import Products.Autopilot.Mobile.Queries.Supersession (convergeMobileSlots, retireOlderIncoming, supersedePreviousLive)
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
     findMobileReleaseById,
     findRunSiblingsStillBuilding,
+    listIncomingMobileVersions,
     logEvent,
     markReleaseInProgress,
     retireOlderHeldInternal,
     setAscIds,
     setPhase,
  )
+import Products.Autopilot.Mobile.StoreSync (versionOlderThan)
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
@@ -108,12 +112,14 @@ import Products.Autopilot.Mobile.Types (
  )
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..))
 import Products.Autopilot.Mobile.Versioning.Apple (
+    AscError (..),
     cancelReviewSubmission,
     completePhasedRelease,
     enablePhasedRelease,
     getLiveReleaseNotes,
     getPhasedReleaseId,
     loadAscCredsFor,
+    lookupAscAppId,
     pausePhasedRelease,
     releaseApprovedVersion,
     renderAscErr,
@@ -134,6 +140,7 @@ import Products.Autopilot.Mobile.Versioning.Play (
     setTrackRollout,
     userFractionInRange,
  )
+import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe, reviewInferredOf)
 import Products.Autopilot.RuntimeConfig (getAndroidReviewRolloutFraction, getStoreRefreshCooldownSeconds, isStagedRolloutEnabled)
 import Products.Autopilot.Types.Storage.Schema (ReleaseTrackerRow, ReleaseTrackerT (..))
 import Shared.API.Response (APISuccess (..))
@@ -343,27 +350,35 @@ effectively-zero review fraction so approval exposes ~0 users. The release moves
 to @MBInReview@; the Phase-5 poll stage takes it from there (iOS auto, Android
 awaits the operator's mark-*).
 -}
-{- | True when this build is NOT ahead of production, so it can't be promoted. Compare by
-marketing VERSION first, then by build number WITHIN the same version:
 
-  * build version older than production         → not ahead (older release);
-  * same version AND build code <= prod code    → not ahead (already live / a rebuild that
-                                                  isn't newer).
+{- | True when this build is NOT ahead of production, so it can't be promoted.
+PLATFORM-CONDITIONAL ordering:
 
-Version-first is essential for iOS, where the build number (CFBundleVersion) resets per
-marketing version — so a newer version legitimately carries the same/lower code as the live
-one. Android version codes are monotonic, so either test works there. The single source of
-truth for the promote guard and the @rdPromotable@ flag. Reads the synced cache (no store
-call); fails OPEN when the production version is unknown, so it never blocks a promote it
-can't disprove.
+  * Android — when both codes are known, compare by BUILD CODE alone: Play only
+    enforces version codes (globally monotonic); the marketing version name is
+    free-form, can go backwards, and never overrules a code verdict. A code at
+    or below production's can never ship. Codes unknown → fall back to the
+    version-first test below (advisory check, so a name guess is acceptable).
+  * iOS — marketing VERSION first, then build number WITHIN the same version:
+    CFBundleVersion resets per marketing version, so a newer version
+    legitimately carries the same/lower code as the live one.
+
+The single source of truth for the promote guard and the @rdPromotable@ flag.
+Reads the synced cache (no store call); fails OPEN when the production version
+is unknown, so it never blocks a promote it can't disprove.
 -}
 atOrBelowProduction :: AppCatalog -> Text -> Maybe Int32 -> Flow Bool
 atOrBelowProduction ac buildVer mCode = do
     mProd <- findProductionStoreCell (acId ac) (acPlatform ac)
     pure $ case mProd of
-        Just (Just pVer, mpCode) ->
-            buildVer `versionOlderThan` pVer
-                || (buildVer == pVer && codeAtOrBelow mCode mpCode)
+        Just (Just pVer, mpCode)
+            | acPlatform ac == "android"
+            , Just b <- mCode
+            , Just p <- mpCode ->
+                b <= p
+            | otherwise ->
+                buildVer `versionOlderThan` pVer
+                    || (buildVer == pVer && codeAtOrBelow mCode mpCode)
         _ -> False
   where
     codeAtOrBelow (Just b) (Just p) = b <= p
@@ -402,6 +417,7 @@ promoteH :: AuthedPerson -> Text -> PromoteReq -> Flow PromoteResp
 promoteH ap rid PromoteReq{..} = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
+    requireAppPerm (Proxy @'AP_RELEASE_PROMOTE) ap (acName ac) (acPlatform ac)
     -- Promotable from either:
     --   • an SCC release held at build-complete (MBTagPushed); or
     --   • a store-sync INTERNAL / TestFlight snapshot not yet promoted (Option A) —
@@ -429,11 +445,76 @@ promoteH ap rid PromoteReq{..} = do
     notAhead <- atOrBelowProduction ac version (rtVersionCode row)
     when notAhead $
         bad ("Version " <> version <> " is not ahead of the production build — nothing to promote.")
+    -- Defect-6 fix: also gate against the INCOMING slot. This reads OUR rows
+    -- (DB truth, never a stale store cache), so failing closed is safe — and
+    -- blocking here is what lets Rule B stay strictly-older (a not-ahead
+    -- promote used to silently retire the NEWER in-review build).
+    incoming <- listIncomingMobileVersions
+    let mineIncoming =
+            [ i
+            | i <- incoming
+            , rtAppGroup i == rtAppGroup row
+            , rtService i == rtService row
+            , rtEnv i == rtEnv row
+            , rtId i /= rid
+            ]
+        -- Android: codes decide when both are known (names never overrule);
+        -- iOS / unknown codes: version-first with code tiebreak.
+        notAheadOfIncoming :: ReleaseTrackerRow -> Bool
+        notAheadOfIncoming i
+            | rtEnv row == "android"
+            , Just b <- rtVersionCode row
+            , Just p <- rtVersionCode i =
+                b <= p
+            | otherwise =
+                version `versionOlderThan` rtNewVersion i
+                    || ( version == rtNewVersion i
+                            && case (rtVersionCode row, rtVersionCode i) of
+                                (Just b, Just p) -> b <= p
+                                _ -> False
+                       )
+    forM_ (find notAheadOfIncoming mineIncoming) $ \i ->
+        bad
+            ( "Version "
+                <> version
+                <> " is not ahead of the build already in review ("
+                <> rtNewVersion i
+                <> maybe "" (\c -> " +" <> tshow c) (rtVersionCode i)
+                <> ") — withdraw it or promote a newer build."
+            )
+    -- iOS one-in-flight pre-flight: Apple allows a single in-flight appStoreVersion
+    -- per app and its API cannot cancel one that's already approved (that's UI-only),
+    -- so submitting a DIFFERENT version now would always 409 at ASC. Read OUR
+    -- incoming slot and answer with the next step instead of the raw 409. A
+    -- same-version rebuild passes — ensureAppStoreVersion reuses the version.
+    -- REJECTED rows pass too: a rejected/canceled version may or may not still
+    -- occupy Apple's slot (our row can't tell), so fail open — a genuine conflict
+    -- comes back as the mapped 409, and Rule B retires the old row on success.
+    when (rtEnv row == "ios") $
+        forM_ (find (\i -> rtNewVersion i /= version && rtReviewStatus i /= Just "rejected") mineIncoming) $ \i -> do
+            let inflight = rtNewVersion i <> maybe "" (\c -> " +" <> tshow c) (rtVersionCode i)
+            link <- ascConsoleLink ac
+            bad $
+                if rtReviewStatus i == Just "approved"
+                    then
+                        "Version "
+                            <> inflight
+                            <> " is approved and waiting to be released — Apple allows one in-flight version at a time. Release it from its row in SCC, or cancel the release in App Store Connect, then promote "
+                            <> version
+                            <> "."
+                            <> link
+                    else
+                        "Version "
+                            <> inflight
+                            <> " is already in review — Apple allows one in-flight version at a time. Withdraw it from its row in SCC (or wait for the verdict), then promote "
+                            <> version
+                            <> "."
+                            <> link
     if rtEnv row == "ios"
         then do
             creds <- loadAscCredsFor (acStoreAccount ac) >>= maybe (bad "App Store Connect credentials not configured.") pure
             submitVersionForReview creds storeId version prReleaseNotes
-                >>= either (\e -> bad ("App Store submit failed: " <> renderAscErr e)) pure
+                >>= either (\e -> bad =<< promoteSubmitErr ac version e) pure
             -- Phased release is opt-in and best-effort: a failure here must not
             -- undo the (already submitted) review — log it, surface a warning to
             -- the operator, and continue.
@@ -480,6 +561,36 @@ promoteH ap rid PromoteReq{..} = do
             logEvent rid "REVIEW_SUBMITTED" $
                 object ["store" .= ("play" :: Text), "actor" .= apEmail ap, "fraction" .= frac, "from_snapshot" .= isPrePromoteSnapshot]
             pure (PromoteResp "Success" Nothing)
+
+{- | Best-effort App Store Connect deep link appended to operator guidance (the
+FE lifts the trailing \" Open: <url>\" into a clickable toast action). Empty on
+any creds/lookup miss — every message must read fine without it.
+-}
+ascConsoleLink :: AppCatalog -> Flow Text
+ascConsoleLink ac =
+    loadAscCredsFor (acStoreAccount ac) >>= \case
+        Nothing -> pure ""
+        Just creds -> do
+            storeId <- storeIdOf ac
+            lookupAscAppId creds storeId >>= \case
+                Nothing -> pure ""
+                Just appId -> pure (" Open: https://appstoreconnect.apple.com/apps/" <> appId <> "/distribution")
+
+{- | Render an iOS submit failure for the operator. The one-in-flight 409 gets a
+friendly message — it still reaches here (past the pre-flight) when the pending
+version was submitted outside SCC, so we have no row for it.
+-}
+promoteSubmitErr :: AppCatalog -> Text -> AscError -> Flow Text
+promoteSubmitErr ac version = \case
+    AscHttpError 409 body
+        | "You cannot create a new version" `T.isInfixOf` body -> do
+            link <- ascConsoleLink ac
+            pure $
+                "Apple already has a version in flight (in review or approved & awaiting release), so "
+                    <> version
+                    <> " cannot be submitted yet. Release or cancel the pending version in App Store Connect, then retry."
+                    <> link
+    e -> pure ("App Store submit failed: " <> renderAscErr e)
 
 -- | GET /releases/:id/rollout — cached review + rollout state for the FE panel.
 
@@ -586,6 +697,7 @@ releaseH :: AuthedPerson -> Text -> Flow APISuccess
 releaseH ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
+    requireAppPerm (Proxy @'AP_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
     unless (rtEnv row == "ios") $ bad "Release is iOS-only; Android uses /rollout/set."
     unless (mbWfStatus target == MBReviewApproved) $
         bad ("Cannot release: state is " <> tshow (mbWfStatus target) <> ", expected approved (MBReviewApproved).")
@@ -624,6 +736,7 @@ releaseH ap rid = do
             mirrorProdReleased ac row target
             logEvent rid "ROLLOUT_RELEASED" (object ["store" .= ("asc" :: Text), "actor" .= apEmail ap, "phased" .= False])
     supersedePreviousLiveFor row -- Rule A: this version releasing supersedes the previous live one
+    convergeSlotsAfterGoLive row
     pure Success
 
 {- | POST /releases/:id/rollout/set — Android staged rollout. Sets the production
@@ -634,12 +747,13 @@ rolloutSetH :: AuthedPerson -> Text -> RolloutSetReq -> Flow APISuccess
 rolloutSetH ap rid RolloutSetReq{..} = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
+    requireAppPerm (Proxy @'AP_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
     unless (rtEnv row == "android") $ bad "/rollout/set is Android-only; iOS uses phased release."
     -- Adopt a rollout started OUTSIDE SCC: a store-sync snapshot SCC only OBSERVED as
     -- rolling out (mb_wf_status MBCompleted) can be taken over here, mirroring how a
     -- pre-promote internal snapshot is adopted in 'promoteH'. The normal lifecycle
     -- path keeps its guard.
-    let adopt = isObservedRollout row target
+    adopt <- isObservedRollout ac row target
     unless adopt $ ensureAndroidRollable (mbWfStatus target)
     when (rsPercent <= 0 || rsPercent > 100) $ bad "percent must be in (0, 100]."
     storeId <- storeIdOf ac
@@ -671,6 +785,7 @@ rolloutSetH ap rid RolloutSetReq{..} = do
         then mirrorProdReleased ac row target
         else mirrorProdRollout ac row target "inProgress" rsPercent
     supersedePreviousLiveFor row -- Rule A: this version rolling out supersedes the previous live one
+    convergeSlotsAfterGoLive row
     logEvent rid "ROLLOUT_SET" (object ["percent" .= rsPercent, "actor" .= apEmail ap, "adopted" .= adopt])
     pure Success
 
@@ -679,6 +794,7 @@ rolloutHaltH :: AuthedPerson -> Text -> Flow APISuccess
 rolloutHaltH ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
+    requireAppPerm (Proxy @'AP_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
     if rtEnv row == "ios"
         then do
             pid <- requirePhasedId row
@@ -699,6 +815,10 @@ rolloutHaltH ap rid = do
             frac <- liveAndroidFraction creds storeId (mbcVersionCode (mbContext target))
             haltTrackRollout creds storeId vc frac
                 >>= either (\e -> bad ("Play halt failed: " <> renderPlayErr e)) pure
+            -- Adopt an observed (Console-started) rollout on first action, same
+            -- as /rollout/set: INPROGRESS hands it to the Phase-7 reconciler.
+            adopt <- isObservedRollout ac row target
+            when adopt $ markReleaseInProgress rid
             now <- liftIO getCurrentTime
             setPhase now rid (Halted frac)
             -- Reflect the halt on the App Monitor immediately (it reads store_status,
@@ -712,6 +832,7 @@ rolloutResumeH :: AuthedPerson -> Text -> Flow APISuccess
 rolloutResumeH ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
+    requireAppPerm (Proxy @'AP_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
     if rtEnv row == "ios"
         then do
             pid <- requirePhasedId row
@@ -730,6 +851,8 @@ rolloutResumeH ap rid = do
             frac <- liveAndroidFraction creds storeId (mbcVersionCode (mbContext target))
             resumeTrackRollout creds storeId vc frac
                 >>= either (\e -> bad ("Play resume failed: " <> renderPlayErr e)) pure
+            adopt <- isObservedRollout ac row target
+            when adopt $ markReleaseInProgress rid
             now <- liftIO getCurrentTime
             setPhase now rid (RollingOut frac)
             -- Back to ramping on the monitor cache too.
@@ -745,6 +868,7 @@ rolloutReleaseAllH :: AuthedPerson -> Text -> Flow APISuccess
 rolloutReleaseAllH ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
+    requireAppPerm (Proxy @'AP_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
     storeId <- storeIdOf ac
     if rtEnv row == "ios"
         then do
@@ -764,6 +888,8 @@ rolloutReleaseAllH ap rid = do
                 >>= either (\e -> bad ("Play complete failed: " <> renderPlayErr e)) pure
     now <- liftIO getCurrentTime
     setPhase now rid Live
+    -- Closes audit defect 2: this handler previously fired no supersession.
+    convergeSlotsAfterGoLive row
     -- Reflect "fully live" on the App Monitor immediately (clears the review overlay).
     mirrorProdReleased ac row target
     logEvent rid "ROLLOUT_RELEASED_ALL" (object ["actor" .= apEmail ap])
@@ -777,6 +903,7 @@ markApprovedH :: AuthedPerson -> Text -> Flow APISuccess
 markApprovedH ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
+    requireAppPerm (Proxy @'AP_RELEASE_PROMOTE) ap (acName ac) (acPlatform ac)
     unless (rtEnv row == "android") $ bad "mark-approved is Android-only (iOS approval is auto-detected)."
     ensureInReview (mbWfStatus target)
     now <- liftIO getCurrentTime
@@ -791,6 +918,7 @@ markRejectedH :: AuthedPerson -> Text -> MarkRejectedReq -> Flow APISuccess
 markRejectedH ap rid MarkRejectedReq{..} = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
+    requireAppPerm (Proxy @'AP_RELEASE_PROMOTE) ap (acName ac) (acPlatform ac)
     unless (rtEnv row == "android") $ bad "mark-rejected is Android-only (iOS rejection is auto-detected)."
     when (T.null (T.strip mrReason)) $ bad "Rejection reason is required."
     ensureInReview (mbWfStatus target)
@@ -810,6 +938,7 @@ withdrawH :: AuthedPerson -> Text -> Flow APISuccess
 withdrawH ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
+    requireAppPerm (Proxy @'AP_RELEASE_PROMOTE) ap (acName ac) (acPlatform ac)
     unless (rtEnv row == "ios") $
         bad "Withdraw from review is iOS-only — Google Play has no API to cancel a review."
     ensureInReview (mbWfStatus target)
@@ -1000,24 +1129,42 @@ mirrorProdReleased :: AppCatalog -> ReleaseTrackerRow -> MobileBuildTargetState 
 mirrorProdReleased ac row target =
     setProductionReleased (acId ac) (rtEnv row) (rtNewVersion row) (mbcVersionCode (mbContext target))
 
--- | Rule A (migration 0034): @row@ just started rolling out, so freeze the previous
--- live version of this app and move it to history as @superseded@.
+{- | Rule A (migration 0034): @row@ just started rolling out, so freeze the previous
+live version of this app and move it to history as @superseded@.
+-}
 supersedePreviousLiveFor :: ReleaseTrackerRow -> Flow ()
 supersedePreviousLiveFor row = do
     ids <- supersedePreviousLive (rtAppGroup row) (rtService row) (rtEnv row) (rtId row)
     forM_ ids $ \i ->
         logEvent i "ROLLOUT_SUPERSEDED" (object ["by_version" .= rtNewVersion row, "reason" .= ("newer_version_rolling_out" :: Text)])
 
--- | Rule B (migration 0034): @row@ just entered the incoming (review) slot, so drop
--- any older incoming version of this app to history.
+{- | Post-go-live slot convergence anchored on the row that just went live:
+retires stale live-slot rows (incl. completed older versions), incoming rows
+not ahead of it, and overtaken internal builds — the gaps Rule A leaves.
+-}
+convergeSlotsAfterGoLive :: ReleaseTrackerRow -> Flow ()
+convergeSlotsAfterGoLive row = do
+    (live, incoming, held) <-
+        convergeMobileSlots
+            (rtAppGroup row)
+            (rtService row)
+            (rtEnv row)
+            (Just (rtNewVersion row, rtVersionCode row))
+    forM_ (live <> incoming <> held) $ \i ->
+        logEvent i "SLOT_CONVERGED" (object ["by_version" .= rtNewVersion row, "reason" .= ("go_live" :: Text)])
+
+{- | Rule B (migration 0034): @row@ just entered the incoming (review) slot, so drop
+any older incoming version of this app to history.
+-}
 retireOlderIncomingFor :: ReleaseTrackerRow -> Flow ()
 retireOlderIncomingFor row = do
-    ids <- retireOlderIncoming (rtAppGroup row) (rtService row) (rtEnv row) (rtId row)
+    ids <- retireOlderIncoming (rtAppGroup row) (rtService row) (rtEnv row) (rtId row) (rtNewVersion row) (rtVersionCode row)
     forM_ ids $ \i ->
         logEvent i "INCOMING_SUPERSEDED" (object ["by_version" .= rtNewVersion row])
 
--- | Rule C: @row@ is being promoted, so retire any OLDER held-on-internal build of
--- this app to history — a lower code can no longer reach production.
+{- | Rule C: @row@ is being promoted, so retire any OLDER held-on-internal build of
+this app to history — a lower code can no longer reach production.
+-}
 retireOlderHeldInternalFor :: ReleaseTrackerRow -> Flow ()
 retireOlderHeldInternalFor row = do
     ids <- retireOlderHeldInternal (rtAppGroup row) (rtService row) (rtEnv row) (rtId row) (rtVersionCode row)
@@ -1071,18 +1218,26 @@ ensureAndroidRollable = \case
     s -> bad ("Cannot set rollout from state " <> tshow s <> "; promote and approve the release first.")
 
 {- | An Android rollout that was started OUTSIDE SCC (in the Play Console) and that
-store-sync only OBSERVED: a @STORE_SYNC@ snapshot still at @MBCompleted@ but already
-reflecting an active production rollout (@rollout_status@ rolling_out / halted). Such
-a row can be ADOPTED by @/rollout/set@ — set the % and take it into SCC's lifecycle —
-without the 'ensureAndroidRollable' approval gate, since the Play review already
-happened out of band. A genuinely finished release (@rollout_status@ completed / NULL)
-is NOT matched, so it can't be mistaken for an in-flight rollout.
+store-sync only OBSERVED: a @STORE_SYNC@ snapshot still at @MBCompleted@ while the
+store shows an active production rollout. Such a row can be ADOPTED by the rollout
+verbs — act on it and take it into SCC's lifecycle — without the
+'ensureAndroidRollable' approval gate, since the Play review already happened out
+of band. The active-ramp check reads the @store_status@ CELL (the SSOT — since the
+store-status refactor, observation rows keep NULL rollout columns and the cell holds
+the truth; the old column check silently never fired, which surfaced as
+\"Cannot set rollout from state MBCompleted\" on a visibly rolling-out row). The row
+columns remain a fallback for legacy rows. A genuinely finished release (cell reads
+live/completed) is NOT matched, so it can't be mistaken for an in-flight rollout.
 -}
-isObservedRollout :: ReleaseTrackerRow -> MobileBuildTargetState -> Bool
-isObservedRollout row target =
-    rtMode row == Just "STORE_SYNC"
-        && mbWfStatus target == MBCompleted
-        && rtRolloutStatus row `elem` [Just "rolling_out", Just "halted"]
+isObservedRollout :: AppCatalog -> ReleaseTrackerRow -> MobileBuildTargetState -> Flow Bool
+isObservedRollout ac row target
+    | rtMode row == Just "STORE_SYNC" && mbWfStatus target == MBCompleted = do
+        cells <- storeCellsForApp (acId ac)
+        let mRollout = case resolveStoreState cells (rtNewVersion row) (rtVersionCode row) of
+                Just (mr, _, _) -> mr
+                Nothing -> rtRolloutStatus row
+        pure (mRollout `elem` [Just "rolling_out", Just "halted"])
+    | otherwise = pure False
 
 -- | mark-approved / mark-rejected are only valid while the review is pending.
 ensureInReview :: MobileBuildWFStatus -> Flow ()

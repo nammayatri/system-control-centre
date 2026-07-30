@@ -48,6 +48,7 @@ module Products.Autopilot.Mobile.Queries.Tracker
     -- Revert helpers
     fetchRevertCandidates,
     findMobileReleaseById,
+    rowToDomain,
     parseMobileTargetState,
     insertMobileRevertTracker,
     markReleaseRevertedBy,
@@ -524,7 +525,14 @@ retireOlderHeldInternal appGroup surface platform excludeRid (Just promotedCode)
         runUpdate $
           update
             (releaseTrackers autopilotDb)
-            (\rt -> rtStatus rt <-. val_ "COMPLETED")
+            ( \rt ->
+                mconcat
+                  [ rtStatus rt <-. val_ "COMPLETED",
+                    -- Visible stamp: badges read Superseded, not a lingering
+                    -- internal_held that the FE has to fake as superseded.
+                    rtRolloutStatus rt <-. val_ (Just "superseded")
+                  ]
+            )
             (\rt -> rtId rt ==. val_ i)
   pure ids
 

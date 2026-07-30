@@ -114,14 +114,16 @@ These tables **are** wired with real foreign keys. If you delete a user, their a
 
 ### Group B — Releases (the actual work)
 
-Lives in `Products/Autopilot/*`. Four tables.
+Lives in `Products/Autopilot/*`. Six tables.
 
 | Table | What it stores |
 |---|---|
 | `release_tracker` | **One row per release.** Backend rollouts, configmap changes, VS edits, mobile dispatches — all live here, distinguished by the `category` column. |
 | `release_events` | Append-only log of everything that happens to a release (status changes, k8s ops, snapshots, decisions). |
 | `deployment_config` | Static config per app-group and per-service (cluster, namespace, VirtualService name, rollout strategy, etc.). Releases read from this. |
-| `app_catalog` | List of mobile apps releasable through SCC. Was added with mobile support. |
+| `app_catalog` | List of mobile apps releasable through SCC. Was added with mobile support; `airborne_app_ref` (migration `0047`) joins an app row to its airborne OTA app (`<org>~<app>`, NULL = no OTA). |
+| `ota_push` | One OTA bundle-build expectation per (app, platform) per dispatch batch (migration `0047`): CI run binding, resolved package version, status `DISPATCHED/RUNNING/BUNDLE_PUSHED/FAILED`. Any `DISPATCHED/RUNNING` row blocks a new OTA dispatch (global serialization). |
+| `ota_release_link` | Identity + intent for SCC-created airborne releases (migration `0047`): which group/branch/package a release came from. Release *status* is never stored — always read live from airborne. |
 
 These tables have **no foreign keys at the DB level**. Joins are by column convention (more on this below). The Haskell code enforces consistency.
 
@@ -203,7 +205,11 @@ There are no foreign keys, but a few **partial unique indexes** on `release_trac
 |---|---|
 | `uq_release_tracker_service_inflight` (`0002`) | At most one **in-flight backend release** per `(app_group, service)` — scoped to backend categories (`BackendService`/`Scheduler`/`CronJob`/`Job`). **Note:** does *not* cover `MobileBuild`. |
 | `uq_release_tracker_store_sync` (`0021`) | No **duplicate store-sync rows** — unique on `(app_group, service, env, new_version) WHERE mode = 'STORE_SYNC'`. Backs `ON CONFLICT DO NOTHING` so concurrent sync passes dedup cleanly. |
+| `uq_release_tracker_external_review` (`0028`) | No **duplicate out-of-band-review rows** — unique on `(app_group, service, env) WHERE mode = 'EXTERNAL_REVIEW' AND status = 'INPROGRESS' AND rollout_status IS NULL`. At most one active "Pending review" / external-review row per app+surface+platform; once released (`rollout_status` set) the row leaves the index so a later in-flight version gets its own. Backs `ON CONFLICT DO NOTHING`. |
 | `uq_release_tracker_revert_inflight` (`0012`) | At most one **active revert** per bad release — unique on `reverts_release_id` while the revert is non-terminal. Terminal statuses free it again (so revert-of-a-revert and retry-after-failure stay possible). |
+| `uq_release_tracker_mobile_build` (`0034`, realigned by `0048`) | Cross-mode **build identity**: at most one `MobileBuild` row per `(app_group, service, env, new_version, version_code)`, regardless of origin. Partial on `version_code IS NOT NULL` so **version-less drafts never collide** — debug/master builds are created with no version (the debug workflow hard-codes one at build time). `0048` exists because early deployments carried a stricter COALESCE-keyed variant that also covered version-less rows and 23505'd the second debug draft; `CREATE INDEX IF NOT EXISTS` never repairs an existing index, so `0048` drops + recreates the canonical shape. |
+
+Also from migration `0046`: **`mobile_version_key(text)`**, an IMMUTABLE SQL function turning a version string into a `bigint[]` sort key (non-numeric segments read 0). It is the SQL twin of the Haskell `versionOlderThan` comparator, and the slot-convergence passes in `Queries/Supersession.hs` call it at runtime — it must exist before that code runs.
 
 ### Mobile-revert columns
 
@@ -214,6 +220,42 @@ Mobile revert adds three nullable columns to `release_tracker` (migration `0012-
 - **`reverts_release_id`** — for a revert row, the id of the release being reverted (drives the audit chain + the "Reverted by" / "Reverts" banners, and the in-flight index above).
 
 The rollback *target* itself isn't a column — it's resolved at draft time by **version order** (`version_code`, then semver), not stored. See the post-MVP design spec §1 "Rollback target resolution".
+
+### Staged-rollout columns
+
+Promote-to-review + staged rollout adds nine nullable columns to `release_tracker` (migration `0027-staged-rollout.sql`), all `NULL` until a release is promoted. The lifecycle they track: build done → **promote** (operator) → **in review** → **approved (held)** → **rolling out** (staged %) → completed.
+
+| Column | Meaning |
+|---|---|
+| `review_status` | `in_review` / `approved` / `rejected` (iOS, from `appStoreState`); `submitted` (Android, opaque review). |
+| `review_submitted_at` · `review_decided_at` | When the app was sent for review / when the outcome was recorded. |
+| `review_reject_reason` | Rejection text — auto from `appStoreState` (iOS) or operator-supplied (Android `mark-rejected`). |
+| `rollout_status` | `rolling_out` / `halted` / `completed`. |
+| `rollout_percent` | Current live % (Play `userFraction × 100`; Apple phased-ramp day → %). `DOUBLE PRECISION`. |
+| `store_rollout_history` | Reserved for a per-step rollout audit trail (unused in v1). |
+| `asc_version_id` · `asc_phased_id` | iOS App Store version id + phased-release id (cached so pause/resume/release-all act on the phased id directly). |
+
+Two partial indexes — `idx_rt_review_status` and `idx_rt_rollout_status` (each `WHERE … IS NOT NULL`) — keep the Phase-7 reconciler's "find active rollouts" scan cheap.
+
+**Out-of-band detection (2026-06-16).** Store sync also records reviews/rollouts started *outside* SCC, reusing these columns. A version in review (or pending publish) that SCC didn't submit is surfaced as a synthetic row with `mode = 'EXTERNAL_REVIEW'` (status `INPROGRESS`, no `dispatch_id`, deduped by `uq_release_tracker_external_review` above) — iOS reads the authoritative `appStoreState`, Android infers it from the production track (an `inProgress` release at the near-zero review fraction with a versionCode above the live `completed` one). A Console-started rollout (Android) or App Store Connect "Release" (iOS) on an SCC-promoted version is then *adopted* into the rollout columns (`rollout_status` / `rollout_percent` set, `asc_phased_id` backfilled for a phased iOS ramp). The Android approve/reject **decision** still isn't in the API, so it stays operator-marked (`mark-approved` / `mark-rejected`). Note `review_status` now also takes `in_review` / `approved` / `rejected` on Android external/inferred rows (not only `submitted`).
+
+These columns live **only on the Beam row** (`ReleaseTrackerT`), not the domain `ReleaseTracker` — so the list/detail JSON doesn't expose them; the frontend reads them via the dedicated `GET /releases/:id/rollout` endpoint instead. The fine-grained store lifecycle also lives in `mb_wf_status` inside the `target_state` JSON (`MBTagPushed → MBSubmittingForReview → MBInReview → MBReviewApproved → MBRollingOut → MBCompleted`, plus terminal `MBReviewRejected`). Gated entirely behind the `mobile_staged_rollout_enabled` config flag (default off).
+
+### Store-sync `metadata.store_track`
+
+Store-sync rows record **which store track** the build is the current latest on, in the
+`metadata` JSON as `{"store_track": "<track>"}`:
+
+- **`production`** — Android Play production track / iOS App Store live (serving users).
+- **`internal`** — Android Play internal-testing track (ahead of production, not live).
+- **`testflight`** — iOS TestFlight build (App Store live version not tracked by sync).
+
+`syncAndroid` records whichever of internal/production is ahead (by version code); `syncIos`
+records the TestFlight build. The frontend reads `metadata.store_track` to render a track badge
+(list / create / detail pages) and to decide whether a snapshot is **promotable** — a
+non-production (internal/TestFlight) snapshot can be promoted to production from SCC, which flips
+the row `COMPLETED → INPROGRESS` so the runner/reconciler drive the review→rollout lifecycle. See
+`docs/superpowers/plans/2026-05-18-mobile-releases-post-mvp.md` → "Store-Track Visibility + Snapshot Promote".
 
 ---
 

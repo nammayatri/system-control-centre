@@ -22,6 +22,8 @@ export type AppCatalogEntry = {
   packageName: string | null;
   displayLabel: string | null;
   firebaseProjectId: string | null;
+  // Airborne composite ref "<org>~<app>" — the app's OTA identity (null = no OTA).
+  airborneAppRef?: string | null;
   enabled: boolean;
   createdAt: string;
   latestReleaseBuild?: LatestBuild | null;

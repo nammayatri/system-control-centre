@@ -56,7 +56,7 @@ import Data.Aeson (object, (.=))
 import Data.Int (Int32)
 import Data.List (find)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
@@ -79,13 +79,16 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (
     setProductionRolloutStatus,
     upsertStoreStatus,
  )
+import Products.Autopilot.Mobile.Queries.Supersession (bestActiveInternalBuild, convergeMobileSlots, supersedeRebuiltSameVersion)
 import Products.Autopilot.Mobile.Queries.Tracker (
     adoptDraftAsStoreBuild,
     appCatalogForRowRaw,
+    applyExternalReviewPhase,
+    closeExternalReviewRow,
     completeExternalReviewRow,
     convergeStoreSyncRow,
-    findAdoptableDraft,
     findActiveRolloutReleases,
+    findAdoptableDraft,
     findExternalReviewRow,
     findExternalReviewRowForVersion,
     findMobileAwaitingRollout,
@@ -93,10 +96,9 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     logEvent,
     mkMobileTrackerRow,
     parseMobileTargetState,
+    retireOlderHeldInternal,
     sccActiveReleaseExistsForVersion,
     setAscIds,
-    applyExternalReviewPhase,
-    closeExternalReviewRow,
     setPhase,
     storeSyncRowExistsForVersion,
     updateStoreSyncBuildCode,
@@ -249,9 +251,14 @@ syncAppUnified mPlayCreds buildMap expected ac = do
                                         recordAndroidTracks ac existing internal production
                                     safely ("prod-row " <> acName ac) $
                                         ensureProductionRolloutRow ac (bodiesToSnapshots bodies)
+                                    safely ("live-row " <> acName ac) $
+                                        ensureLiveProductionRow ac (tiName production) (Just (tiCode production))
                                     safely ("external-review " <> acName ac) $
                                         reconcileAndroidExternalReviewFrom ac (bodiesToProdReleases bodies)
                                 reconcileAndroidRolloutsFrom ac (bodiesToProdReleases bodies)
+                                when (acEnabled ac) $
+                                    safely ("converge " <> acName ac) $
+                                        convergeSlotsForAc ac
                                 recordStoreSyncOk aid
                 _ -> noPkg >> logWarning ("[STORE_SYNC] No package id for " <> acName ac <> ", skipping")
         -- Resolve the ASC key for THIS app's account (multi-account: different Apple
@@ -277,11 +284,41 @@ syncAppUnified mPlayCreds buildMap expected ac = do
                                         syncIos creds ac existing
                                         syncIosExternalReview creds ac
                                     reconcileIosRollouts creds ac
+                                    when (acEnabled ac) $
+                                        safely ("converge " <> acName ac) $
+                                            convergeSlotsForAc ac
                                     recordStoreSyncOk aid
                     _ -> noPkg >> logWarning ("[STORE_SYNC] No bundle id for " <> acName ac <> ", skipping")
         p -> do
             recordStoreSyncError aid "api_error" ("Unknown platform " <> p)
             logWarning $ "[STORE_SYNC] Unknown platform " <> p <> " for " <> acName ac
+
+{- | End-of-sync slot convergence: keep one active row per slot, anchored on
+the production cell this pass just refreshed. Same pass, no extra store calls.
+-}
+convergeSlotsForAc :: AppCatalog -> Flow ()
+convergeSlotsForAc ac = do
+    mCell <- findProductionLiveCell (acId ac) (acPlatform ac)
+    let anchor = case mCell of
+            Just (Just v, mCode, _, _) -> Just (v, mCode)
+            _ -> Nothing
+    (live, incoming, held) <- convergeMobileSlots (acName ac) (acSurface ac) (acPlatform ac) anchor
+    -- Rule C on sync: stale SCC-built landed rows (store_track NULL) retire
+    -- against the surviving best internal build, not only at promote time.
+    sccHeld <-
+        bestActiveInternalBuild (acName ac) (acSurface ac) (acPlatform ac) >>= \case
+            Just (bestRid, bestCode) ->
+                retireOlderHeldInternal (acName ac) (acSurface ac) (acPlatform ac) bestRid (Just bestCode)
+            Nothing -> pure []
+    let tagged =
+            [("live", i) | i <- live]
+                <> [("incoming", i) | i <- incoming]
+                <> [("internal", i) | i <- held]
+                <> [("internal-scc", i) | i <- sccHeld]
+    forM_ tagged $ \(slot, rid) -> do
+        logInfo $ "[STORE_SYNC] " <> rid <> " superseded by slot convergence (" <> slot <> ")"
+        logEvent rid "SLOT_CONVERGED" $
+            object ["slot" .= (slot :: Text), "live_version" .= (fst <$> anchor), "live_code" .= (snd =<< anchor)]
 
 -- | True when this @release_tracker@ row belongs to the given app catalog entry.
 rowIsApp :: AppCatalog -> ReleaseTrackerRow -> Bool
@@ -425,6 +462,36 @@ ensureProductionRolloutRow ac snaps =
             && stsStatus s `elem` ["inProgress", "halted"]
             && maybe False (\pct -> pct >= androidRolloutFloorPercent && pct < 100) ((* 100) <$> stsFraction s)
 
+{- | Ensure the LIVE production version has its own tracker row even when it
+predates SCC: first sync only mints the LEADING track's version, so a build
+already fully live before SCC started watching exists only in @store_status@ —
+no summary page and no OTA anchor. The minted row is a normal STORE_SYNC
+singleton, but marked @store_observed@ so latest-build selection
+('latestBuildsFromRows') keeps anchoring on the leading SCC build; slot
+convergence retires it once a newer version goes live. Purely additive: it
+never supersedes or converges any other row. Skips identity-less reads (no
+build code) and versions that already have a row (exact identity, or a legacy
+code-less row that owns the version).
+-}
+ensureLiveProductionRow :: AppCatalog -> Text -> Maybe Int32 -> Flow ()
+ensureLiveProductionRow _ _ Nothing = pure ()
+ensureLiveProductionRow ac version (Just code)
+    | version == "0.0.0" = pure ()
+    | otherwise = do
+        mExact <- findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) version (Just code)
+        mAny <- findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) version Nothing
+        let codelessOwner = maybe False (isNothing . rtVersionCode) mAny
+        when (isNothing mExact && not codelessOwner) $ do
+            logInfo $
+                "[STORE_SYNC] Minting row for observed live build "
+                    <> acName ac
+                    <> " v"
+                    <> version
+                    <> "+"
+                    <> T.pack (show code)
+                    <> " (pre-SCC / out-of-band)"
+            insertSyntheticReleaseObs True ac version (Just code) "production"
+
 {- | Write an App Store PHASED production rollout's % to store_status (the SSOT the
 list/detail read) so it shows "Rolling out X%" / "Halted X%", not a stale TestFlight
 badge. This is the ONLY path that surfaces a phased release started in App Store
@@ -512,6 +579,21 @@ syncIos creds ac existing = do
                     -- Write an App Store PHASED rollout's % (incl. one started outside
                     -- SCC) to store_status so the list shows "Rolling out X%".
                     reflectIosPhasedRollout creds ac bundleId (fmap (\v -> (v, mProdCode)) mProdVer)
+                    forM_ mProdVer $ \pv ->
+                        safely ("live-row " <> acName ac) $
+                            ensureLiveProductionRow ac pv mProdCode
+                    -- A REBUILD of the live version (same version, new build code)
+                    -- is invisible to the version-level heals: Rule A skips
+                    -- completed rows and the stale-retire is version-strict, so
+                    -- the older build would read "Live" forever beside the real
+                    -- one. Supersede same-version rows whose code differs.
+                    case (mProdVer, mProdCode) of
+                        (Just pv, Just liveCode) -> do
+                            ids <- supersedeRebuiltSameVersion (acName ac) (acSurface ac) (acPlatform ac) pv liveCode
+                            forM_ ids $ \i -> do
+                                logInfo $ "[STORE_SYNC] " <> i <> " superseded: rebuild of " <> pv <> " live at code " <> T.pack (show liveCode)
+                                logEvent i "ROLLOUT_SUPERSEDED" $ object ["reason" .= ("same_version_rebuild" :: Text), "live_version" .= pv, "live_code" .= liveCode]
+                        _ -> pure ()
 
 {- | Insert-or-update an iOS store-sync snapshot for whichever track leads —
 TestFlight when a build exists, else production. Factored out so the live
@@ -538,11 +620,14 @@ recordIosSnapshot ac existing leadVer leadCode leadTrack =
                     unless bumped $ insertSyntheticRelease ac leadVer leadCode leadTrack
             _ -> pure ()
 
+-- Code-first (Play truth): a store build is newer iff its version code is
+-- higher — the marketing name never decides. Fallback to name difference only
+-- for a legacy code-less latest row, where the code can't be compared.
 isNewerAndroid :: TrackInfo -> Maybe LatestBuildRow -> Bool
 isNewerAndroid store Nothing = tiName store /= "0.0.0"
-isNewerAndroid store (Just lb)
-    | tiName store /= lbrVersion lb = tiName store /= "0.0.0"
-    | otherwise = tiCode store > fromMaybe 0 (lbrVersionCode lb)
+isNewerAndroid store (Just lb) = case lbrVersionCode lb of
+    Just c -> tiName store /= "0.0.0" && tiCode store > c
+    Nothing -> tiName store /= "0.0.0" && tiName store /= lbrVersion lb
 
 isNewerIos :: Text -> Maybe LatestBuildRow -> Bool
 isNewerIos _ Nothing = True
@@ -725,10 +810,13 @@ reconcileExternalReviewMapped ac mCode inferred existing mMapped = do
                     closeExternalReviewRow (rtId r) Superseded
                     logInfo $ "[STORE_SYNC] External review " <> rtId r <> " replaced by a newer submission — superseded"
                     logEvent (rtId r) "EXTERNAL_REVIEW_RETIRED" (object ["outcome" .= ("replaced" :: Text)])
+                -- No verdict is provable here (Play exposes none; a replaced
+                -- successor may simply be out of view) — stamp Superseded, not
+                -- Rejected. Real verdicts arrive via AscRejected / mark-rejected.
                 PendingWithdrawn -> do
-                    closeExternalReviewRow (rtId r) (Rejected "Removed from the store before publishing (rejected or withdrawn in the store console)")
-                    logInfo $ "[STORE_SYNC] External review " <> rtId r <> " left the store before publishing — rejected/withdrawn"
-                    logEvent (rtId r) "EXTERNAL_REVIEW_RETIRED" (object ["outcome" .= ("rejected_or_withdrawn" :: Text)])
+                    closeExternalReviewRow (rtId r) Superseded
+                    logInfo $ "[STORE_SYNC] External review " <> rtId r <> " left the store before publishing — superseded (withdrawn or replaced)"
+                    logEvent (rtId r) "EXTERNAL_REVIEW_RETIRED" (object ["outcome" .= ("withdrawn_or_replaced" :: Text)])
                 PendingParked -> pure ()
     case externalReviewAction inferred mExisting mMapped sccOwns of
         ExtNoop -> pure ()
@@ -745,8 +833,9 @@ reconcileExternalReviewMapped ac mCode inferred existing mMapped = do
             retire True
             insertExternalReviewRow ac mCode inferred version reviewStatus
 
--- | What to do with the external-review row this pass. The verdict string is the
--- single source — the wf mirror is derived from it at the write site.
+{- | What to do with the external-review row this pass. The verdict string is the
+single source — the wf mirror is derived from it at the write site.
+-}
 data ExternalReviewAction
     = ExtNoop
     | -- | complete the existing row
@@ -795,8 +884,9 @@ externalReviewAction inferred mExisting mMapped sccOwns = case mMapped of
     retireExisting = maybe ExtNoop (const ExtComplete) mExisting
     isOperatorDecided s = s == "approved" || s == "rejected"
 
--- | Map a review state to a verdict; 'Nothing' for states we don't surface
--- (prepare-for-submission / live / unknown).
+{- | Map a review state to a verdict; 'Nothing' for states we don't surface
+(prepare-for-submission / live / unknown).
+-}
 reviewStateToStatus :: AscReviewState -> Maybe Text
 reviewStateToStatus = \case
     AscWaitingForReview -> Just "in_review"
@@ -805,8 +895,9 @@ reviewStateToStatus = \case
     AscRejected _ -> Just "rejected"
     _ -> Nothing
 
--- | The wf mirror for an external verdict — the same mapping 'phaseToWfStatus'
--- projects, derived from the one verdict source.
+{- | The wf mirror for an external verdict — the same mapping 'phaseToWfStatus'
+projects, derived from the one verdict source.
+-}
 externalWf :: Text -> MobileBuildWFStatus
 externalWf = \case
     "approved" -> MBReviewApproved
@@ -862,6 +953,7 @@ insertExternalReviewRow ac mCode inferred version reviewStatus = do
                 , mbcDestination = Nothing
                 , mbcChangelogSummary = Nothing
                 , mbcChangelogSummaryShort = Nothing
+                , mbcStoreObserved = Nothing
                 }
         targetState =
             MobileBuildTargetState
@@ -922,7 +1014,19 @@ insertSyntheticRelease ::
     -- | store track: "production" | "internal" | "testflight"
     Text ->
     m ()
-insertSyntheticRelease ac version Nothing track =
+insertSyntheticRelease = insertSyntheticReleaseObs False
+
+-- | Observed-flag variant: True marks the minted row @store_observed@ (a build
+-- SCC only saw live on the store — see 'ensureLiveProductionRow').
+insertSyntheticReleaseObs ::
+    (MonadFlow m) =>
+    Bool ->
+    AppCatalog ->
+    Text ->
+    Maybe Int32 ->
+    Text ->
+    m ()
+insertSyntheticReleaseObs _ ac version Nothing track =
     logWarning $
         "[STORE_SYNC] Skipping identity-less synthetic release for "
             <> acName ac
@@ -931,13 +1035,13 @@ insertSyntheticRelease ac version Nothing track =
             <> " ("
             <> track
             <> "): no build code resolved; retrying next sync"
-insertSyntheticRelease ac version mCode@(Just code) track = do
+insertSyntheticReleaseObs observed ac version mCode@(Just code) track = do
     -- An SCC draft that claimed this exact (version, code) but was never
     -- dispatched means the build shipped OUTSIDE SCC: adopt the draft (skip
     -- its build stages) instead of leaving it stale with phantom
     -- approve/dispatch buttons and minting nothing (identity index).
     adopted <- adoptManualDraft ac version code track
-    unless adopted $ mintSyntheticRelease ac version mCode track
+    unless adopted $ mintSyntheticRelease observed ac version mCode track
 
 {- | Adopt a never-dispatched MANUAL draft whose identity just appeared on a
 store track: flip it to INPROGRESS + @MBTagPushed@ with the derived store tag —
@@ -991,8 +1095,8 @@ adoptManualDraft ac version code track = do
                 pure ok
         _ -> pure False
 
-mintSyntheticRelease :: (MonadFlow m) => AppCatalog -> Text -> Maybe Int32 -> Text -> m ()
-mintSyntheticRelease ac version mCode track = do
+mintSyntheticRelease :: (MonadFlow m) => Bool -> AppCatalog -> Text -> Maybe Int32 -> Text -> m ()
+mintSyntheticRelease observed ac version mCode track = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
@@ -1009,6 +1113,7 @@ mintSyntheticRelease ac version mCode track = do
                 , mbcDestination = Nothing
                 , mbcChangelogSummary = Nothing
                 , mbcChangelogSummaryShort = Nothing
+                , mbcStoreObserved = if observed then Just True else Nothing
                 }
         targetState =
             MobileBuildTargetState
@@ -1240,10 +1345,12 @@ resolveVanishedSubmission row code releases = do
                 close Superseded
                 logInfo $ "[ROLLOUT_SYNC] " <> rtId row <> " submission replaced on the production track — superseded"
                 logEvent (rtId row) "SUBMISSION_RETIRED" (object ["outcome" .= ("replaced" :: Text)])
+            -- Same rule as the external-review retire: no provable verdict →
+            -- Superseded, never a fabricated "Rejected".
             PendingWithdrawn -> do
-                close (Rejected "Removed from the production track before publishing (rejected or withdrawn in Play Console)")
-                logInfo $ "[ROLLOUT_SYNC] " <> rtId row <> " submission left the production track before publishing — rejected/withdrawn"
-                logEvent (rtId row) "SUBMISSION_RETIRED" (object ["outcome" .= ("rejected_or_withdrawn" :: Text)])
+                close Superseded
+                logInfo $ "[ROLLOUT_SYNC] " <> rtId row <> " submission left the production track before publishing — superseded (withdrawn or replaced)"
+                logEvent (rtId row) "SUBMISSION_RETIRED" (object ["outcome" .= ("withdrawn_or_replaced" :: Text)])
             -- Parked/Published require the code to be PRESENT — unreachable from
             -- the vanished arm; kept for totality.
             _ -> pure ()

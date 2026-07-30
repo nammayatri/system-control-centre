@@ -43,6 +43,7 @@ module Products.Autopilot.Mobile.Workflow (
     selectBuildTag,
     codeFromTag,
     electDispatchLeader,
+    tryAdvisoryLockShared,
 ) where
 
 import Control.Exception (Exception, SomeException, fromException, throwIO, try)
@@ -1766,6 +1767,7 @@ applyMobileTarget rs f =
                             , mbcDestination = Nothing
                             , mbcChangelogSummary = Nothing
                 , mbcChangelogSummaryShort = Nothing
+                , mbcStoreObserved = Nothing
                             }
                     , mbExternalRunId = Nothing
                     , mbMatrixJobStatus = Nothing

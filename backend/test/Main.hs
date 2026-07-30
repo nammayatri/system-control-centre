@@ -73,6 +73,7 @@ import Products.Autopilot.Mobile.Versioning.Apple (AscPhasedState (..), AscRevie
 import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), ProdTrackRelease (..), StoreTrackSnapshot (..), parseProdReleaseNotes, parseProdTrackReleases, parseRolloutState, parseTrackSnapshot, userFractionInRange)
 import Products.Autopilot.Queries.ReleaseTracker (keepSnapshot)
 import Products.Autopilot.Mobile.Workflow (codeFromTag, electDispatchLeader, reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
+import Products.AirborneOta.Types.Permission (OtaPermission (..))
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
 import qualified Products.Autopilot.Types.Target
@@ -442,7 +443,11 @@ testPermissions = do
         AutopilotPerm AP_PRODUCT_CONFIG_EDIT `notElem` viewerPerms
     assertBool "Viewer DOES NOT have FORCE_UNLOCK (superadmin)" $
         AutopilotPerm AP_FORCE_UNLOCK `notElem` viewerPerms
-    assertEqual "Viewer has exactly 3 permissions" 3 (length viewerPerms)
+    -- 3 autopilot view perms + OTA_VIEW (autopilot's universe includes the
+    -- OTA family for the unified per-app grant model).
+    assertBool "Viewer has OTA_VIEW" $
+        OtaPerm OTA_VIEW `elem` viewerPerms
+    assertEqual "Viewer has exactly 4 permissions" 4 (length viewerPerms)
 
     -- Manager = all except *_EDIT (per defaultPermissions in Products/Types.hs)
     assertBool "Manager has RELEASE_VIEW" $
@@ -463,9 +468,15 @@ testPermissions = do
         AutopilotPerm AP_MOBILE_APP_MANAGE `notElem` managerPerms
     assertBool "Manager has MOBILE_DISPATCH" $
         AutopilotPerm AP_MOBILE_DISPATCH `elem` managerPerms
+    assertBool "Manager has OTA_RELEASE_CREATE" $
+        OtaPerm OTA_RELEASE_CREATE `elem` managerPerms
+    assertBool "Manager DOES NOT have OTA_RELEASE_DISCARD" $
+        OtaPerm OTA_RELEASE_DISCARD `notElem` managerPerms
+    assertBool "Manager DOES NOT have OTA_APP_MANAGE" $
+        OtaPerm OTA_APP_MANAGE `notElem` managerPerms
     assertEqual
-        "Manager has all perms minus the 4 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE, MOBILE_APP_MANAGE)"
-        (length allPerms - 4)
+        "Manager has all perms minus the 6 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE, MOBILE_APP_MANAGE, OTA_RELEASE_DISCARD, OTA_APP_MANAGE)"
+        (length allPerms - 6)
         (length managerPerms)
 
     -- permissionToText round-trip for a few constructors
@@ -493,8 +504,8 @@ testPermissions = do
         (length allPerms)
         (length (defaultPermissionsText "autopilot" "Admin"))
     assertEqual
-        "defaultPermissionsText Viewer = 3"
-        3
+        "defaultPermissionsText Viewer = 4 (3 autopilot views + OTA_VIEW)"
+        4
         (length (defaultPermissionsText "autopilot" "Viewer"))
     assertBool "defaultPermissionsText unknown product is empty" $
         null (defaultPermissionsText "nonexistent" "Admin")
@@ -2179,6 +2190,7 @@ testDispatchRunCandidates = do
                 , wrName = ""
                 , wrDisplayTitle = Nothing
                 , wrHeadSha = ""
+                , wrHeadBranch = Nothing
                 }
         ids = map wrId . dispatchRunCandidates now
     assertEqual "in-window dispatch run matched" [1] (ids [mkRun 1 "workflow_dispatch" 10])
