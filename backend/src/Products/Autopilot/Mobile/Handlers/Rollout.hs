@@ -351,27 +351,34 @@ to @MBInReview@; the Phase-5 poll stage takes it from there (iOS auto, Android
 awaits the operator's mark-*).
 -}
 
-{- | True when this build is NOT ahead of production, so it can't be promoted. Compare by
-marketing VERSION first, then by build number WITHIN the same version:
+{- | True when this build is NOT ahead of production, so it can't be promoted.
+PLATFORM-CONDITIONAL ordering:
 
-  * build version older than production         → not ahead (older release);
-  * same version AND build code <= prod code    → not ahead (already live / a rebuild that
-                                                  isn't newer).
+  * Android — when both codes are known, compare by BUILD CODE alone: Play only
+    enforces version codes (globally monotonic); the marketing version name is
+    free-form, can go backwards, and never overrules a code verdict. A code at
+    or below production's can never ship. Codes unknown → fall back to the
+    version-first test below (advisory check, so a name guess is acceptable).
+  * iOS — marketing VERSION first, then build number WITHIN the same version:
+    CFBundleVersion resets per marketing version, so a newer version
+    legitimately carries the same/lower code as the live one.
 
-Version-first is essential for iOS, where the build number (CFBundleVersion) resets per
-marketing version — so a newer version legitimately carries the same/lower code as the live
-one. Android version codes are monotonic, so either test works there. The single source of
-truth for the promote guard and the @rdPromotable@ flag. Reads the synced cache (no store
-call); fails OPEN when the production version is unknown, so it never blocks a promote it
-can't disprove.
+The single source of truth for the promote guard and the @rdPromotable@ flag.
+Reads the synced cache (no store call); fails OPEN when the production version
+is unknown, so it never blocks a promote it can't disprove.
 -}
 atOrBelowProduction :: AppCatalog -> Text -> Maybe Int32 -> Flow Bool
 atOrBelowProduction ac buildVer mCode = do
     mProd <- findProductionStoreCell (acId ac) (acPlatform ac)
     pure $ case mProd of
-        Just (Just pVer, mpCode) ->
-            buildVer `versionOlderThan` pVer
-                || (buildVer == pVer && codeAtOrBelow mCode mpCode)
+        Just (Just pVer, mpCode)
+            | acPlatform ac == "android"
+            , Just b <- mCode
+            , Just p <- mpCode ->
+                b <= p
+            | otherwise ->
+                buildVer `versionOlderThan` pVer
+                    || (buildVer == pVer && codeAtOrBelow mCode mpCode)
         _ -> False
   where
     codeAtOrBelow (Just b) (Just p) = b <= p
@@ -451,14 +458,21 @@ promoteH ap rid PromoteReq{..} = do
             , rtEnv i == rtEnv row
             , rtId i /= rid
             ]
+        -- Android: codes decide when both are known (names never overrule);
+        -- iOS / unknown codes: version-first with code tiebreak.
         notAheadOfIncoming :: ReleaseTrackerRow -> Bool
-        notAheadOfIncoming i =
-            version `versionOlderThan` rtNewVersion i
-                || ( version == rtNewVersion i
-                        && case (rtVersionCode row, rtVersionCode i) of
-                            (Just b, Just p) -> b <= p
-                            _ -> False
-                   )
+        notAheadOfIncoming i
+            | rtEnv row == "android"
+            , Just b <- rtVersionCode row
+            , Just p <- rtVersionCode i =
+                b <= p
+            | otherwise =
+                version `versionOlderThan` rtNewVersion i
+                    || ( version == rtNewVersion i
+                            && case (rtVersionCode row, rtVersionCode i) of
+                                (Just b, Just p) -> b <= p
+                                _ -> False
+                       )
     forM_ (find notAheadOfIncoming mineIncoming) $ \i ->
         bad
             ( "Version "

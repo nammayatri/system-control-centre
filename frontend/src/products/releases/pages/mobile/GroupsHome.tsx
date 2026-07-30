@@ -755,6 +755,7 @@ export default function GroupsHome() {
                     <th className="py-3 pl-4 w-8" />
                     <th className="py-3 px-4">Release group</th>
                     <th className="py-3 px-4">Apps</th>
+                    <th className="py-3 px-4">Version</th>
                     <th className="py-3 px-4">Stage</th>
                     <th className="py-3 px-4 hidden md:table-cell">Created</th>
                     <th className="py-3 px-4 text-right">Open</th>
@@ -1101,6 +1102,14 @@ function GroupRow({
           )}
         </span>
       </td>
+      <td className="py-3 px-4 font-mono text-xs text-zinc-800" title={wv.full || undefined}>
+        {wv.lead}
+        {wv.moreCount > 0 && (
+          <span className="ml-1.5 text-[9px] font-sans font-bold text-zinc-500 bg-zinc-100 border border-zinc-200 rounded-full px-1.5 py-0.5 align-middle">
+            +{wv.moreCount}
+          </span>
+        )}
+      </td>
       <td className="py-3 px-4">
         <GroupStageChip summary={group.summary} total={group.members.length} members={group.members} />
       </td>
@@ -1128,7 +1137,7 @@ function GroupRow({
         opens for a single-app group (nothing to expand). */}
     {members.length > 1 && (
     <tr aria-hidden={!expanded} className={cn(!expanded && 'border-0')}>
-      <td colSpan={6} className="p-0">
+      <td colSpan={7} className="p-0">
         <div id={membersRowId} className={cn('expand-panel', expanded && 'open')}>
           <div>
             <div className="flex flex-col gap-1.5 pl-1 border-l-2 border-violet-200 ml-6 my-2 mr-4">
@@ -1236,13 +1245,13 @@ function StoreItemRow({
               Detected on store
             </span>
           </span>
-          <span className="text-[10px] text-zinc-400 font-mono flex items-center gap-1">
+          <span className="text-[10px] text-zinc-700 font-mono flex items-center gap-1">
             {release.env === 'ios' ? (
               <AppleLogoIcon size={10} weight="fill" className="text-zinc-600" aria-hidden="true" />
             ) : (
               <AndroidLogoIcon size={10} weight="fill" className="text-emerald-600" aria-hidden="true" />
             )}
-            {release.env} · {release.new_version} {formatBuildCode(release.release_context?.version_code)}
+            {release.env}
           </span>
         </span>
       </td>
@@ -1252,6 +1261,9 @@ function StoreItemRow({
           surface={release.service === 'driver' ? 'driver' : undefined}
           size="sm"
         />
+      </td>
+      <td className="py-3 px-4 font-mono text-xs text-zinc-800">
+        {release.new_version} {formatBuildCode(release.release_context?.version_code)}
       </td>
       <td className="py-3 px-4">
         <span

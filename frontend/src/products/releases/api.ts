@@ -1297,6 +1297,47 @@ export interface PromoteResp {
     prWarning?: string | null; // non-fatal warning, e.g. phased release couldn't be enabled
 }
 
+
+// ── Fleet activity (docs/design/fleet-activity-mockup-v1.html) ─────
+
+export interface FleetActivityRow {
+    id: string;
+    at: string;
+    actor?: string | null;
+    source: 'release' | 'ota_push' | 'airborne' | string;
+    action: string;
+    app?: string | null;
+    platform?: string | null;
+    version?: string | null;
+    releaseId?: string | null;
+    groupId?: string | null;
+    detail?: Record<string, unknown> | null;
+}
+
+export interface FleetActivityResp {
+    rows: FleetActivityRow[];
+    nextBefore?: string | null;
+}
+
+export async function fetchFleetActivity(params: {
+    days?: number;
+    app?: string;
+    actor?: string;
+    q?: string;
+    before?: string;
+    limit?: number;
+}): Promise<FleetActivityResp> {
+    const qp: Record<string, string> = {};
+    if (params.days) qp.days = String(params.days);
+    if (params.app) qp.app = params.app;
+    if (params.actor) qp.actor = params.actor;
+    if (params.q) qp.q = params.q;
+    if (params.before) qp.before = params.before;
+    if (params.limit) qp.limit = String(params.limit);
+    const { data } = await apiClient.get('/mobile/activity', { params: qp });
+    return data;
+}
+
 // ── Bulk promote / rollout (one action over many apps) ──
 export interface BulkPromoteItem {
     bpiReleaseId: string;

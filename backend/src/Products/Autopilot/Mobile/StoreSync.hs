@@ -56,7 +56,7 @@ import Data.Aeson (object, (.=))
 import Data.Int (Int32)
 import Data.List (find)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
@@ -251,6 +251,8 @@ syncAppUnified mPlayCreds buildMap expected ac = do
                                         recordAndroidTracks ac existing internal production
                                     safely ("prod-row " <> acName ac) $
                                         ensureProductionRolloutRow ac (bodiesToSnapshots bodies)
+                                    safely ("live-row " <> acName ac) $
+                                        ensureLiveProductionRow ac (tiName production) (Just (tiCode production))
                                     safely ("external-review " <> acName ac) $
                                         reconcileAndroidExternalReviewFrom ac (bodiesToProdReleases bodies)
                                 reconcileAndroidRolloutsFrom ac (bodiesToProdReleases bodies)
@@ -460,6 +462,36 @@ ensureProductionRolloutRow ac snaps =
             && stsStatus s `elem` ["inProgress", "halted"]
             && maybe False (\pct -> pct >= androidRolloutFloorPercent && pct < 100) ((* 100) <$> stsFraction s)
 
+{- | Ensure the LIVE production version has its own tracker row even when it
+predates SCC: first sync only mints the LEADING track's version, so a build
+already fully live before SCC started watching exists only in @store_status@ —
+no summary page and no OTA anchor. The minted row is a normal STORE_SYNC
+singleton, but marked @store_observed@ so latest-build selection
+('latestBuildsFromRows') keeps anchoring on the leading SCC build; slot
+convergence retires it once a newer version goes live. Purely additive: it
+never supersedes or converges any other row. Skips identity-less reads (no
+build code) and versions that already have a row (exact identity, or a legacy
+code-less row that owns the version).
+-}
+ensureLiveProductionRow :: AppCatalog -> Text -> Maybe Int32 -> Flow ()
+ensureLiveProductionRow _ _ Nothing = pure ()
+ensureLiveProductionRow ac version (Just code)
+    | version == "0.0.0" = pure ()
+    | otherwise = do
+        mExact <- findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) version (Just code)
+        mAny <- findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) version Nothing
+        let codelessOwner = maybe False (isNothing . rtVersionCode) mAny
+        when (isNothing mExact && not codelessOwner) $ do
+            logInfo $
+                "[STORE_SYNC] Minting row for observed live build "
+                    <> acName ac
+                    <> " v"
+                    <> version
+                    <> "+"
+                    <> T.pack (show code)
+                    <> " (pre-SCC / out-of-band)"
+            insertSyntheticReleaseObs True ac version (Just code) "production"
+
 {- | Write an App Store PHASED production rollout's % to store_status (the SSOT the
 list/detail read) so it shows "Rolling out X%" / "Halted X%", not a stale TestFlight
 badge. This is the ONLY path that surfaces a phased release started in App Store
@@ -547,6 +579,9 @@ syncIos creds ac existing = do
                     -- Write an App Store PHASED rollout's % (incl. one started outside
                     -- SCC) to store_status so the list shows "Rolling out X%".
                     reflectIosPhasedRollout creds ac bundleId (fmap (\v -> (v, mProdCode)) mProdVer)
+                    forM_ mProdVer $ \pv ->
+                        safely ("live-row " <> acName ac) $
+                            ensureLiveProductionRow ac pv mProdCode
                     -- A REBUILD of the live version (same version, new build code)
                     -- is invisible to the version-level heals: Rule A skips
                     -- completed rows and the stale-retire is version-strict, so
@@ -585,11 +620,14 @@ recordIosSnapshot ac existing leadVer leadCode leadTrack =
                     unless bumped $ insertSyntheticRelease ac leadVer leadCode leadTrack
             _ -> pure ()
 
+-- Code-first (Play truth): a store build is newer iff its version code is
+-- higher — the marketing name never decides. Fallback to name difference only
+-- for a legacy code-less latest row, where the code can't be compared.
 isNewerAndroid :: TrackInfo -> Maybe LatestBuildRow -> Bool
 isNewerAndroid store Nothing = tiName store /= "0.0.0"
-isNewerAndroid store (Just lb)
-    | tiName store /= lbrVersion lb = tiName store /= "0.0.0"
-    | otherwise = tiCode store > fromMaybe 0 (lbrVersionCode lb)
+isNewerAndroid store (Just lb) = case lbrVersionCode lb of
+    Just c -> tiName store /= "0.0.0" && tiCode store > c
+    Nothing -> tiName store /= "0.0.0" && tiName store /= lbrVersion lb
 
 isNewerIos :: Text -> Maybe LatestBuildRow -> Bool
 isNewerIos _ Nothing = True
@@ -915,6 +953,7 @@ insertExternalReviewRow ac mCode inferred version reviewStatus = do
                 , mbcDestination = Nothing
                 , mbcChangelogSummary = Nothing
                 , mbcChangelogSummaryShort = Nothing
+                , mbcStoreObserved = Nothing
                 }
         targetState =
             MobileBuildTargetState
@@ -975,7 +1014,19 @@ insertSyntheticRelease ::
     -- | store track: "production" | "internal" | "testflight"
     Text ->
     m ()
-insertSyntheticRelease ac version Nothing track =
+insertSyntheticRelease = insertSyntheticReleaseObs False
+
+-- | Observed-flag variant: True marks the minted row @store_observed@ (a build
+-- SCC only saw live on the store — see 'ensureLiveProductionRow').
+insertSyntheticReleaseObs ::
+    (MonadFlow m) =>
+    Bool ->
+    AppCatalog ->
+    Text ->
+    Maybe Int32 ->
+    Text ->
+    m ()
+insertSyntheticReleaseObs _ ac version Nothing track =
     logWarning $
         "[STORE_SYNC] Skipping identity-less synthetic release for "
             <> acName ac
@@ -984,13 +1035,13 @@ insertSyntheticRelease ac version Nothing track =
             <> " ("
             <> track
             <> "): no build code resolved; retrying next sync"
-insertSyntheticRelease ac version mCode@(Just code) track = do
+insertSyntheticReleaseObs observed ac version mCode@(Just code) track = do
     -- An SCC draft that claimed this exact (version, code) but was never
     -- dispatched means the build shipped OUTSIDE SCC: adopt the draft (skip
     -- its build stages) instead of leaving it stale with phantom
     -- approve/dispatch buttons and minting nothing (identity index).
     adopted <- adoptManualDraft ac version code track
-    unless adopted $ mintSyntheticRelease ac version mCode track
+    unless adopted $ mintSyntheticRelease observed ac version mCode track
 
 {- | Adopt a never-dispatched MANUAL draft whose identity just appeared on a
 store track: flip it to INPROGRESS + @MBTagPushed@ with the derived store tag —
@@ -1044,8 +1095,8 @@ adoptManualDraft ac version code track = do
                 pure ok
         _ -> pure False
 
-mintSyntheticRelease :: (MonadFlow m) => AppCatalog -> Text -> Maybe Int32 -> Text -> m ()
-mintSyntheticRelease ac version mCode track = do
+mintSyntheticRelease :: (MonadFlow m) => Bool -> AppCatalog -> Text -> Maybe Int32 -> Text -> m ()
+mintSyntheticRelease observed ac version mCode track = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
@@ -1062,6 +1113,7 @@ mintSyntheticRelease ac version mCode track = do
                 , mbcDestination = Nothing
                 , mbcChangelogSummary = Nothing
                 , mbcChangelogSummaryShort = Nothing
+                , mbcStoreObserved = if observed then Just True else Nothing
                 }
         targetState =
             MobileBuildTargetState

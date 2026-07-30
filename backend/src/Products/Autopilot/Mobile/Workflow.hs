@@ -1767,6 +1767,7 @@ applyMobileTarget rs f =
                             , mbcDestination = Nothing
                             , mbcChangelogSummary = Nothing
                 , mbcChangelogSummaryShort = Nothing
+                , mbcStoreObserved = Nothing
                             }
                     , mbExternalRunId = Nothing
                     , mbMatrixJobStatus = Nothing

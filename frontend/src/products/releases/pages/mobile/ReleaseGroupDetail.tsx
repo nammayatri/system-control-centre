@@ -28,7 +28,7 @@ import { useGroupOta } from '../../otaApi';
 import { OtaSection } from '../../components/ota/OtaSection';
 import { OtaBranchPicker } from '../../components/ota/OtaPanel';
 import { usePermissions } from '../../../../core/auth/PermissionsContext';
-import { approveRelease, createMobileRevert, discardRelease, getMobileRevertDraft, mobileApi } from '../../api';
+import { abortRelease, approveRelease, createMobileRevert, discardRelease, getMobileRevertDraft, mobileApi } from '../../api';
 import type { BulkActionResp, RevertDraft } from '../../api';
 import { PermissionGate } from '../../../../core/auth/PermissionGate';
 import {
@@ -40,6 +40,7 @@ import {
   DialogTitle,
 } from '../../../../shared/ui/dialog';
 import { useAuth } from '../../../../core/auth/AuthContext';
+import { useConfirm } from '../../../../shared/ui/confirm-dialog';
 import { BrandLogo } from '../../components/BrandLogo';
 import { V4StatusPill } from '../../components/V4StatusPill';
 import { versionWithBuild } from '../../utils';
@@ -324,6 +325,40 @@ export default function ReleaseGroupDetail() {
   // as normalized APRelease rows, any age (no 24h window), and the GET kicks
   // the backend's cooldown-gated store refresh for stale member apps.
   const { data: group, isLoading, isError, refetch } = useMobileGroup(groupId);
+  const confirmDialog = useConfirm();
+  const [cancellingBuild, setCancellingBuild] = useState<string | null>(null);
+
+  // Cancel a BUILDING member: abortability + shared-run blast radius come from
+  // the rollout detail (BE truth) — a shared GitHub run cancels siblings too,
+  // so those get the explicit warning popup before anything happens.
+  const cancelBuild = async (r: APRelease) => {
+    setCancellingBuild(r.id);
+    try {
+      const d = await mobileApi.getRolloutDetail(r.id);
+      if (!d.rdAbortable) {
+        toast.error('Too late to cancel — the build already produced artifacts. Use Revert instead.');
+        return;
+      }
+      const siblings = d.rdRunSiblings ?? [];
+      const ok = await confirmDialog({
+        title: 'Cancel build',
+        description: siblings.length
+          ? `This cancels the shared GitHub run. Still building in the same run and will ALSO be cancelled: ${siblings.join(', ')}.`
+          : `Cancel the ${r.appGroup} · ${r.env} build? The GitHub job is cancelled and this release is aborted.`,
+        confirmLabel: 'Cancel build',
+        cancelLabel: 'Keep building',
+        variant: 'danger',
+      });
+      if (!ok) return;
+      await abortRelease(r.id);
+      toast.success('Build cancellation initiated');
+      void refetch();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.message || err?.message || 'Could not cancel the build');
+    } finally {
+      setCancellingBuild(null);
+    }
+  };
 
   // OTA section data — the GET also drives backend push-status convergence.
   const otaQ = useGroupOta(groupId);
@@ -355,6 +390,13 @@ export default function ReleaseGroupDetail() {
         : null,
     [otaAvailable, otaQ.data, groupReleases],
   );
+  // The tracker row the header picker adopts a branch onto (build-level route).
+  const branchPickReleaseId = useMemo(() => {
+    if (!otaAvailable || !branchPickTarget) return null;
+    const c = otaQ.data!.capableApps.find((x) => x.airborneAppRef === branchPickTarget);
+    if (!c) return null;
+    return groupReleases.find((r) => r.appGroup === c.appName && r.env === c.platform)?.id ?? null;
+  }, [otaAvailable, otaQ.data, branchPickTarget, groupReleases]);
   const [headerPickerOpen, setHeaderPickerOpen] = useState(false);
   // Group members with no airborne app — shown inert in the OTA section so
   // "this app has no OTA" is visible instead of silently absent.
@@ -1307,16 +1349,32 @@ export default function ReleaseGroupDetail() {
                         </td>
                         <td className="py-3 px-4">
                           {nextStepOf(r) ? (
-                            <span
-                              className={cn(
-                                'inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide rounded-full border px-2 py-0.5',
-                                ['Waiting on review', 'Building…'].includes(nextStepOf(r)!)
-                                  ? 'text-zinc-400 border-zinc-200 bg-white'
-                                  : 'text-violet-700 border-violet-200 bg-violet-50',
+                            <span className="inline-flex items-center gap-1.5">
+                              <span
+                                className={cn(
+                                  'inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide rounded-full border px-2 py-0.5',
+                                  ['Waiting on review', 'Building…'].includes(nextStepOf(r)!)
+                                    ? 'text-zinc-400 border-zinc-200 bg-white'
+                                    : 'text-violet-700 border-violet-200 bg-violet-50',
+                                )}
+                              >
+                                {!['Waiting on review', 'Building…'].includes(nextStepOf(r)!) && '→'}{' '}
+                                {nextStepOf(r)}
+                              </span>
+                              {nextStepOf(r) === 'Building…' && hasPermission('autopilot', 'RELEASE_PAUSE', r.appGroup) && (
+                                <button
+                                  type="button"
+                                  disabled={cancellingBuild === r.id}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void cancelBuild(r);
+                                  }}
+                                  title="Cancel this build (aborts the GitHub job)"
+                                  className="text-[10px] font-bold uppercase tracking-wide rounded-full border border-red-200 bg-white text-red-600 px-2 py-0.5 hover:bg-red-50 transition-colors cursor-pointer disabled:opacity-50"
+                                >
+                                  {cancellingBuild === r.id ? 'Cancelling…' : 'Cancel'}
+                                </button>
                               )}
-                            >
-                              {!['Waiting on review', 'Building…'].includes(nextStepOf(r)!) && '→'}{' '}
-                              {nextStepOf(r)}
                             </span>
                           ) : (
                             <span className="text-xs text-zinc-300">—</span>
@@ -1436,6 +1494,9 @@ export default function ReleaseGroupDetail() {
               groupReleases.find((r) => r.appGroup === app && r.env === platform)?.sourceRef ??
               null
             }
+            releaseIdFor={(app, platform) =>
+              groupReleases.find((r) => r.appGroup === app && r.env === platform)?.id ?? null
+            }
             nativeVersionFor={(app, platform) =>
               groupReleases.find((r) => r.appGroup === app && r.env === platform)?.new_version ??
               null
@@ -1447,10 +1508,9 @@ export default function ReleaseGroupDetail() {
         </div>
       )}
 
-      {headerPickerOpen && branchPickTarget && (
+      {headerPickerOpen && branchPickReleaseId && (
         <OtaBranchPicker
-          groupId={groupId!}
-          appRef={branchPickTarget}
+          releaseId={branchPickReleaseId}
           onClose={() => setHeaderPickerOpen(false)}
           onAdopted={() => {
             void refetch();

@@ -33,6 +33,7 @@ import { ChangelogCard, ProvenanceCard } from './BuildDetailsCard';
 import { StoreReleaseCockpit } from './StoreReleaseCockpit';
 import { OtaFlow } from './OtaFlow';
 import { deriveScenario } from './scenario';
+import { mobileDisplayOf } from '../../../components/V4StatusPill';
 
 /**
  * Mobile Release Summary — v4 design (docs/design/
@@ -151,10 +152,14 @@ const MobileReleaseSummary = () => {
     rollout &&
     (s === 'INPROGRESS' || isPromotableSnapshot || activeStorePhase) &&
     rollout.rdPhase !== 'building';
-  const statusLabel =
-    (liveStatusWins ? rollout!.rdStatusLabel : null) ??
-    release.release_context?.display_label ??
-    cap(s.toLowerCase().replace(/_/g, ' '));
+  // Terminal rows must never show their stale display_label (an aborted promote
+  // still carries "Ready to promote") — canonical pill derivation wins there.
+  const isDead = ['ABORTED', 'USER_ABORTED', 'GCLT_ABORTED', 'DISCARDED', 'REVERTED'].includes(s);
+  const statusLabel = isDead
+    ? mobileDisplayOf(release).label
+    : ((liveStatusWins ? rollout!.rdStatusLabel : null) ??
+      release.release_context?.display_label ??
+      cap(s.toLowerCase().replace(/_/g, ' ')));
 
   // Shared-run blast radius: abort cancels the whole GitHub run, so warn which
   // sibling apps' still-running builds die with it (BE lists those only).
@@ -377,6 +382,7 @@ const MobileReleaseSummary = () => {
               {otaCapable ? (
                 <OtaFlow
                   groupId={groupId ?? ''}
+                  releaseId={release.id}
                   appName={release.appGroup}
                   platform={release.env}
                   airborneAppRef={otaCapable.airborneAppRef}
@@ -385,6 +391,7 @@ const MobileReleaseSummary = () => {
                   buildSuperseded={otaCapable.superseded}
                   pushEligible={otaCapable.pushEligible}
                   ineligibleReason={otaCapable.ineligibleReason}
+                  releaseBlocked={otaCapable.releaseBlocked ?? null}
                   pushes={otaQ.data?.rows ?? []}
                   links={otaQ.data?.links ?? []}
                   activePush={otaQ.data?.activePush ?? null}

@@ -354,12 +354,16 @@ listRolesForProduct productSlug = withDb $ \db -> withConn db $ \conn -> do
   pure $
     map
       ( \RoleRow {..} ->
-          let perms = case rrPermissions of
-                Just (PGArray ps@(_ : _)) -> ps
-                _ ->
-                  if rrIsSystemRole
-                    then defaultPermissionsText productSlug rrName
-                    else []
+          -- Mirror the runtime resolver (getRolePermissions): a system role
+          -- ALWAYS derives from the ADT, ignoring any stale sc_role.permissions
+          -- array. Only custom roles read the DB column. Without this, a seed
+          -- that materialised a partial array onto a system role makes this
+          -- preview disagree with the permissions actually enforced.
+          let perms
+                | rrIsSystemRole = defaultPermissionsText productSlug rrName
+                | otherwise = case rrPermissions of
+                    Just (PGArray ps) -> ps
+                    _ -> []
            in RoleDetail rrId rrName rrDescription rrIsSystemRole perms
       )
       roleRows

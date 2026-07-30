@@ -109,6 +109,7 @@ import airborneLogoDark from './airborne-ota/assets/airborne-logo-dark.svg';
 
 // ── Product: Mobile Releases ──────────────────────────────────────
 import CreateMobileRelease from './releases/pages/mobile/CreateMobileRelease';
+import FleetActivity from './releases/pages/mobile/FleetActivity';
 import GroupsHome, { GroupsHomeRedirect, MobileReleaseHistory } from './releases/pages/mobile/GroupsHome';
 import ReleaseGroupDetail from './releases/pages/mobile/ReleaseGroupDetail';
 import MobileAppsAdmin from './releases/pages/mobile/MobileAppsAdmin';
@@ -208,6 +209,7 @@ const mobileProduct: ProductDefinition = {
     { label: 'Releases',       path: '/mobile/releases',      icon: 'List' },
     { label: 'New Release',    path: '/mobile/releases/new',   icon: 'Plus' },
     { label: 'App Release Monitor',  path: '/mobile/releases/monitor', icon: 'Gauge' },
+    { label: 'Fleet Activity', path: '/mobile/activity',       icon: 'Activity' },
     { label: 'Apps',           path: '/mobile/apps',           icon: 'Package',
       permission: 'MOBILE_APP_MANAGE' },
     { label: 'Server Config', path: '/mobile/server-config',   icon: 'Settings' },
@@ -223,6 +225,7 @@ const mobileProduct: ProductDefinition = {
     { path: 'releases/live',       component: LiveReleases },
     { path: 'releases/monitor',    component: StoreMonitor },
     // Old groups list retired — the home page IS groups now; bookmarks survive.
+    { path: 'activity',            component: FleetActivity },
     { path: 'groups',              component: GroupsHomeRedirect },
     { path: 'groups/:groupId',     component: ReleaseGroupDetail },
     { path: 'apps',                component: MobileAppsAdmin,     permission: 'MOBILE_APP_MANAGE' },
@@ -231,6 +234,10 @@ const mobileProduct: ProductDefinition = {
   getBreadcrumbs: (parts) => {
     if (parts[0] !== 'mobile') return [];
     const crumbs: Crumb[] = [];
+    if (parts[1] === 'activity') {
+      crumbs.push({ label: 'Fleet Activity', to: '/mobile/activity' });
+      return crumbs;
+    }
     if (parts[1] === 'releases') {
       crumbs.push({ label: 'Releases', to: '/mobile/releases' });
       if (parts[2] === 'new') {

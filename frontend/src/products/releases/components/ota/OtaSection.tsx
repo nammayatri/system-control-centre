@@ -102,6 +102,7 @@ export function OtaSection({
   groupId,
   ota,
   sourceRefFor,
+  releaseIdFor,
   nativeVersionFor,
   canDispatchFor,
   unmapped = [],
@@ -110,6 +111,8 @@ export function OtaSection({
   groupId: string;
   ota: OtaGroupResp;
   sourceRefFor: (app: string, platform: string) => string | null;
+  /** Tracker row id per (app, platform) — anchors build-level provenance. */
+  releaseIdFor: (app: string, platform: string) => string | null;
   /** Native build version per (app, platform) — for the R7 seed rule. */
   nativeVersionFor: (app: string, platform: string) => string | null;
   /** Per-(app, platform) MOBILE_DISPATCH — unified per-app grants. */
@@ -288,6 +291,8 @@ export function OtaSection({
         ? (r.capable.ineligibleReason ?? 'not eligible')
         : null;
   const rampWhy = (r: RowData): string | null => {
+    // Blocked builds can only wind DOWN — conclude/revert/discard stay live.
+    if (r.capable.releaseBlocked) return `OTA blocked — ${r.capable.releaseBlocked}`;
     const s = soleOngoing(r);
     if (typeof s === 'string') return s;
     if (!r.perms.includes('OTA_RELEASE_RAMP')) return 'no RAMP permission';
@@ -493,10 +498,12 @@ export function OtaSection({
       },
     );
 
-  // Release… enables for one selected app with ≥1 this-build package.
+  // Release… enables for one selected app with ≥1 this-build package —
+  // never for a build whose state blocks OTA creation (draft/building/failed).
   const releaseTarget =
     selRows.length === 1 &&
     selRows[0].eligiblePkgs.length > 0 &&
+    !selRows[0].capable.releaseBlocked &&
     selRows[0].perms.includes('OTA_RELEASE_CREATE')
       ? selRows[0]
       : null;
@@ -726,14 +733,21 @@ export function OtaSection({
                       <BrandLogo brand={r.capable.appName} size="sm" />
                       <span className="font-medium text-zinc-900">{r.capable.appName}</span>
                       <span className="text-xs text-zinc-600">{r.capable.platform}</span>
-                      {!r.capable.pushEligible && (
+                      {r.capable.releaseBlocked ? (
+                        <span
+                          className="text-[10px] font-semibold text-red-500"
+                          title={`${r.capable.releaseBlocked} — OTA push/release disabled for this build; ongoing releases can still be operated`}
+                        >
+                          ⚠ OTA blocked · {r.capable.releaseBlocked}
+                        </span>
+                      ) : !r.capable.pushEligible ? (
                         <span
                           className="text-[10px] text-zinc-600"
                           title={r.capable.ineligibleReason}
                         >
                           ⓘ no push
                         </span>
-                      )}
+                      ) : null}
                     </div>
                   </td>
                   <td className="py-2.5">
@@ -836,6 +850,7 @@ export function OtaSection({
                     <td colSpan={5} className="p-4 bg-zinc-50/60">
                       <OtaLifecyclePanel
                         loading={r.releasesLoading}
+                        releaseBlocked={r.capable.releaseBlocked ?? null}
                         prov={provQs[refs.indexOf(r.capable.airborneAppRef)]?.data?.packages ?? []}
                         foreignPkgCount={
                           (packagesQs[refs.indexOf(r.capable.airborneAppRef)]?.data?.data ?? []).filter(
@@ -899,6 +914,7 @@ export function OtaSection({
           <OtaFlow
             key={keyOf(r.capable)}
             groupId={groupId}
+            releaseId={releaseIdFor(r.capable.appName, r.capable.platform) ?? ''}
             appName={r.capable.appName}
             platform={r.capable.platform}
             airborneAppRef={r.capable.airborneAppRef}
@@ -907,6 +923,7 @@ export function OtaSection({
             buildSuperseded={r.capable.superseded}
             pushEligible={r.capable.pushEligible}
             ineligibleReason={r.capable.ineligibleReason}
+            releaseBlocked={r.capable.releaseBlocked ?? null}
             pushes={ota.rows}
             links={ota.links}
             activePush={ota.activePush ?? null}

@@ -52,6 +52,10 @@ data MobileBuildContext = MobileBuildContext
     , mbcDestination :: Maybe Text
     , mbcChangelogSummary :: Maybe Text
     , mbcChangelogSummaryShort :: Maybe Text
+    , mbcStoreObserved :: Maybe Bool
+    -- ^ Just True on rows minted for a build SCC only OBSERVED live on the store
+    -- (pre-SCC / out-of-band). Excluded from latest-build selection so sync keeps
+    -- anchoring on the leading SCC build.
     }
     deriving (Eq, Show, Generic)
 
@@ -69,6 +73,7 @@ instance ToJSON MobileBuildContext where
             , "destination" .= mbcDestination c
             , "changelog_summary" .= mbcChangelogSummary c
             , "changelog_summary_short" .= mbcChangelogSummaryShort c
+            , "store_observed" .= mbcStoreObserved c
             ]
 
 instance FromJSON MobileBuildContext where
@@ -98,6 +103,7 @@ instance FromJSON MobileBuildContext where
             -- absent in rows persisted before this field → Nothing (not opted in)
             <*> o .:? "changelog_summary"
             <*> o .:? "changelog_summary_short"
+            <*> o .:? "store_observed"
 
 data MobileBuildWFStatus
     = MBInit

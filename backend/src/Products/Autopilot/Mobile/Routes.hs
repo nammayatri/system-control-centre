@@ -26,6 +26,7 @@ import Products.Autopilot.Mobile.Handlers.Groups (
     listGroupsH,
     resendGroupChangelogH,
  )
+import Products.Autopilot.Mobile.Handlers.Activity (ActivityResp, fleetActivityH)
 import Products.Autopilot.Mobile.Handlers.Live
 import Products.Autopilot.Mobile.Handlers.Ota (
     cancelOtaPushH,
@@ -38,6 +39,7 @@ import Products.Autopilot.Mobile.Handlers.Ota (
     resolveOtaProvenanceH,
     adoptOtaBranchH,
  )
+import Products.Autopilot.Mobile.Provenance (ReleaseAdoptBranchReq, ReleaseProvResp, adoptReleaseBranchH, releaseProvenanceH)
 import Products.Autopilot.Mobile.Handlers.Release
 import Products.Autopilot.Mobile.Handlers.Revert (
     RevertDiffResp,
@@ -364,6 +366,16 @@ type MobileAPI =
             :> Protected 'AP_MOBILE_DISPATCH
             :> Post '[JSON] OtaPushResp
         :<|> "mobile"
+            :> "activity"
+            :> Protected 'AP_RELEASE_VIEW
+            :> QueryParam "days" Int
+            :> QueryParam "app" Text
+            :> QueryParam "actor" Text
+            :> QueryParam "q" Text
+            :> QueryParam "before" UTCTime
+            :> QueryParam "limit" Int
+            :> Get '[JSON] ActivityResp
+        :<|> "mobile"
             :> "ota"
             :> "pushes"
             :> Capture "pushId" Text
@@ -396,6 +408,20 @@ type MobileAPI =
             :> "adopt-branch"
             :> Protected 'AP_MOBILE_APP_MANAGE
             :> ReqBody '[JSON] OtaAdoptBranchReq
+            :> Post '[JSON] OtaProvAnchor
+        -- ── Build provenance (release-scoped, OTA-free) ──
+        :<|> "mobile"
+            :> "releases"
+            :> Capture "releaseId" Text
+            :> "provenance"
+            :> Protected 'AP_RELEASE_VIEW
+            :> Get '[JSON] ReleaseProvResp
+        :<|> "mobile"
+            :> "releases"
+            :> Capture "releaseId" Text
+            :> "adopt-branch"
+            :> Protected 'AP_MOBILE_APP_MANAGE
+            :> ReqBody '[JSON] ReleaseAdoptBranchReq
             :> Post '[JSON] OtaProvAnchor
 
 mobileServer :: ServerT MobileAPI Flow
@@ -445,7 +471,10 @@ mobileServer =
         :<|> (\pid ap req -> releaseOtaH ap pid req)
         :<|> (\pid ap -> otaPushJobsH ap pid)
         :<|> (\pid ap -> cancelOtaPushH ap pid)
+        :<|> (\ap days app actor q before lim -> fleetActivityH ap days app actor q before lim)
         :<|> (\pid ap req -> attachPackageH ap pid req)
         :<|> (\gid ap req -> releaseOtaPackageH ap gid req)
         :<|> (\gid ap req -> resolveOtaProvenanceH ap gid req)
         :<|> (\gid ap req -> adoptOtaBranchH ap gid req)
+        :<|> (\rid ap -> releaseProvenanceH ap rid)
+        :<|> (\rid ap req -> adoptReleaseBranchH ap rid req)

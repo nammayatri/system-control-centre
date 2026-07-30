@@ -44,6 +44,7 @@ import {
   fetchOtaPushJobs,
   releaseOtaPackage,
   releaseOtaPush,
+  fetchReleaseProvenance,
   useOtaProvenance,
   OTA_RUNNER_POOLS,
   type OtaLinkRow,
@@ -72,11 +73,16 @@ import { fullStamp, shortDate } from './dates';
 
 export interface OtaFlowProps {
   groupId: string;
+  /** Tracker row id — anchors build-level provenance (commit recovery, branch adopt). */
+  releaseId: string;
   appName: string;
   platform: string;
   airborneAppRef: string;
   /** null ⇒ store-sync row: operate-only, push hidden. */
   sourceRef: string | null;
+  /** Reason the build's state (draft/building/discarded/failed) blocks
+   *  creating pushes/releases; operate verbs stay live. */
+  releaseBlocked?: string | null;
   pushEligible: boolean;
   ineligibleReason?: string;
   pushes: OtaPushRow[];
@@ -146,10 +152,12 @@ export function TargetChips({ dims }: { dims: Record<string, unknown> }) {
 export function OtaFlow(props: OtaFlowProps) {
   const {
     groupId,
+    releaseId,
     appName,
     platform,
     airborneAppRef: ref,
     sourceRef,
+    releaseBlocked = null,
     pushEligible,
     ineligibleReason,
     pushes,
@@ -247,6 +255,16 @@ export function OtaFlow(props: OtaFlowProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [packagesQ.data, releasesQ.data, pkgTagsQ.data]);
   const provQ = useOtaProvenance(groupId, ref, provReqs, hasView);
+  // Build-level anchor for a row with no source branch — needs neither OTA
+  // view nor packages (shared cache with the branch-picker dialog).
+  const anchorQ = useQuery({
+    queryKey: ['mobile-release-prov', releaseId],
+    queryFn: () => fetchReleaseProvenance(releaseId),
+    enabled: !sourceRef && !!releaseId,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+  const anchorSha = anchorQ.data?.commitSha ?? provQ.data?.anchor?.commitSha;
   const provOf = (v?: number): OtaProvPkg | undefined =>
     v == null ? undefined : provQ.data?.packages.find((p) => p.packageVersion === v);
 
@@ -425,7 +443,9 @@ export function OtaFlow(props: OtaFlowProps) {
     }
   };
 
-  const pushDisabledReason = !sourceRef
+  const pushDisabledReason = releaseBlocked
+    ? `OTA blocked — ${releaseBlocked}`
+    : !sourceRef
     ? 'Imported from store — no source branch to build from'
     : !pushEligible
       ? (ineligibleReason ?? 'Not eligible')
@@ -444,8 +464,13 @@ export function OtaFlow(props: OtaFlowProps) {
       <div className="bg-violet-50/50 p-4 border-b border-violet-100 relative overflow-hidden">
         <div className="relative z-10 w-full">
           <div className="flex justify-between items-center w-full">
-            <span className="bg-violet-100 text-violet-800 border border-violet-200 text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider flex items-center gap-1 shadow-sm">
-              <RocketLaunchIcon size={11} weight="fill" aria-hidden="true" /> OTA Bundle Target
+            <span className="flex items-center gap-2 min-w-0">
+              <span className="bg-violet-100 text-violet-800 border border-violet-200 text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider flex items-center gap-1 shadow-sm shrink-0">
+                <RocketLaunchIcon size={11} weight="fill" aria-hidden="true" /> OTA Bundle Target
+              </span>
+              <span className="font-mono text-[10px] text-zinc-800 truncate" title={`Airborne app mapping: ${ref}`}>
+                {ref}
+              </span>
             </span>
             <Link
               to={`/airborne/${encodeURIComponent(ref)}`}
@@ -461,39 +486,58 @@ export function OtaFlow(props: OtaFlowProps) {
               v{nativeVersion}
             </span>
           </p>
-          <div className="absolute right-0 bottom-0 text-[10px] font-mono text-violet-300 pointer-events-none opacity-50">
-            {ref}
-          </div>
         </div>
       </div>
 
+      {/* Build-state gate: draft/building/discarded/failed builds cannot
+          create pushes/releases; operating ongoing releases stays allowed. */}
+      {releaseBlocked && (
+        <div className="bg-red-50 border-b border-red-200 px-4 py-2.5 border-l-4 border-l-red-400">
+          <p className="text-[10px] font-bold text-red-800 uppercase tracking-wide flex items-baseline gap-1">
+            <WarningIcon size={11} weight="fill" aria-hidden="true" /> OTA disabled for this build
+          </p>
+          <p className="text-[11px] text-red-900 mt-0.5 leading-tight">
+            {releaseBlocked} — no shippable artifact to attach bundles to. Ongoing releases from
+            earlier builds can still be operated.
+          </p>
+        </div>
+      )}
       {/* Imported-from-store: no source branch — pushes need one (§11b). */}
       {!sourceRef && (
         <div className="bg-orange-50 border-b border-orange-200 px-4 py-3 border-l-4 border-l-orange-400">
           <p className="text-[10px] font-bold text-orange-800 uppercase tracking-wide mb-1 flex items-baseline gap-1">
             <WarningIcon size={11} weight="fill" aria-hidden="true" /> Imported From Store
           </p>
-          <p className="text-[11px] text-orange-900 mb-2 leading-tight">
-            No source branch known for compilation
-            {provQ.data?.anchor?.commitSha && (
-              <>
-                {' '}
-                (build commit <span className="font-mono">{provQ.data.anchor.commitSha.slice(0, 9)}</span> recovered)
-              </>
-            )}
-            . Set a verified origin branch to push bundles.
-          </p>
-          {provQ.data?.anchor?.commitSha ? (
-            <button
-              type="button"
-              onClick={() => setBranchPickerOpen(true)}
-              className="w-full bg-white border border-orange-200 text-orange-900 text-xs font-mono rounded px-2 py-1.5 outline-none shadow-sm cursor-pointer flex items-center justify-between gap-2 hover:bg-orange-50/50"
-            >
-              <span>commit {provQ.data.anchor.commitSha.slice(0, 9)} (recovered) — pick source branch</span>
-              <CaretDownIcon size={12} weight="bold" aria-hidden="true" />
-            </button>
+          {anchorQ.isLoading ? (
+            <div className="flex items-center gap-2 text-[11px] text-orange-800">
+              <CircleNotchIcon size={13} weight="bold" className="animate-spin shrink-0" aria-hidden="true" />
+              Recovering build commit from the tag ledger…
+            </div>
           ) : (
-            <span className="text-[11px] text-orange-700">no anchor commit — branch cannot be verified</span>
+            <>
+              <p className="text-[11px] text-orange-900 mb-2 leading-tight">
+                No source branch known for compilation
+                {anchorSha && (
+                  <>
+                    {' '}
+                    (build commit <span className="font-mono">{anchorSha.slice(0, 9)}</span> recovered)
+                  </>
+                )}
+                . Set a verified origin branch to push bundles.
+              </p>
+              {anchorSha ? (
+                <button
+                  type="button"
+                  onClick={() => setBranchPickerOpen(true)}
+                  className="w-full bg-white border border-orange-200 text-orange-900 text-xs font-mono rounded px-2 py-1.5 outline-none shadow-sm cursor-pointer flex items-center justify-between gap-2 hover:bg-orange-50/50"
+                >
+                  <span>commit {anchorSha.slice(0, 9)} (recovered) — pick source branch</span>
+                  <CaretDownIcon size={12} weight="bold" aria-hidden="true" />
+                </button>
+              ) : (
+                <span className="text-[11px] text-orange-700">no anchor commit — branch cannot be verified</span>
+              )}
+            </>
           )}
         </div>
       )}
@@ -561,7 +605,11 @@ export function OtaFlow(props: OtaFlowProps) {
       {/* Scrollable inner matrix */}
       <div className="p-4 flex flex-col gap-6">
         {/* 1. Active ongoing release cards — this build's only */}
-        {!hasView ? (
+        {access.isLoading ? (
+          <div className="border border-dashed border-zinc-200 rounded px-3 py-2.5">
+            <Spinner size="sm" label="Loading OTA view…" />
+          </div>
+        ) : !hasView ? (
           <p className="text-[11px] text-zinc-500 border border-dashed border-zinc-200 rounded px-3 py-2.5">
             You don&apos;t have airborne access for this app — push status only.
           </p>
@@ -661,8 +709,9 @@ export function OtaFlow(props: OtaFlowProps) {
 
                 <MetricsBlock appRef={ref} releaseId={r.id} enabled={live} />
 
-                {/* Ramp control */}
-                {live && can('OTA_RELEASE_RAMP') && (
+                {/* Ramp control — serving releases AND created ones (first ramp
+                    is what starts serving; parity with the group panel). */}
+                {can('OTA_RELEASE_RAMP') && (
                   <div className="px-3 pb-3">
                     <div className="bg-zinc-100 border border-zinc-200 rounded p-2 flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
@@ -680,73 +729,98 @@ export function OtaFlow(props: OtaFlowProps) {
                           aria-label="Ramp percentage"
                           className="w-14 h-6 text-xs text-center border border-zinc-300 rounded font-mono focus:ring-1 focus:ring-violet-400 outline-none bg-white"
                         />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const n = Number(rampFor === r.id ? rampPct : NaN);
-                            if (!Number.isFinite(n) || n < 0 || n > 50) {
-                              toast.error('Traffic must be 0–50 (100% only via Conclude)');
-                              return;
-                            }
-                            void doRamp(r.id!, n, trafficOf(r));
-                          }}
-                          className="bg-white border border-zinc-300 text-zinc-700 font-bold text-[10px] px-2 py-0.5 rounded hover:bg-zinc-50 cursor-pointer"
-                        >
-                          Ramp
-                        </button>
                       </div>
-                      <span className="text-[9px] text-zinc-400 text-right leading-tight">
-                        max 50% — 100% only via Conclude
+                      <span className={cn('text-[9px] text-right leading-tight', releaseBlocked ? 'text-red-500 font-semibold' : 'text-zinc-400')}>
+                        {releaseBlocked ? `ramp blocked — ${releaseBlocked}` : 'max 50% — 100% only via Conclude'}
                       </span>
                     </div>
                   </div>
                 )}
 
-                {/* Complete verb set (OTA disjoint) */}
-                {live && can('OTA_RELEASE_CONCLUDE') ? (
-                  <div className="grid grid-cols-2 gap-px bg-zinc-200 mt-auto border-t border-zinc-200">
+                {/* Complete verb set (OTA disjoint) — Ramp is a full-size
+                    segment like its siblings; the % input lives in the bar
+                    above. Conclude/Revert appear only once serving (live). */}
+                {(() => {
+                  const rampVerb = can('OTA_RELEASE_RAMP') && (
                     <button
                       type="button"
-                      onClick={() => doConclude(r, false)}
-                      className="col-span-1 py-2.5 bg-violet-600 text-white font-semibold text-xs transition-colors hover:bg-violet-700 cursor-pointer"
-                    >
-                      Conclude
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => doConclude(r, true)}
-                      className="col-span-1 py-2.5 bg-zinc-50 text-red-600 font-semibold text-xs transition-colors hover:bg-red-50 cursor-pointer"
-                    >
-                      Revert To…
-                    </button>
-                  </div>
-                ) : !live ? (
-                  <div className="grid grid-cols-2 gap-px bg-zinc-200 mt-auto border-t border-zinc-200">
-                    <button
-                      type="button"
-                      disabled={!can('OTA_RELEASE_CREATE')}
-                      onClick={() =>
-                        r.id &&
-                        setEditRelease({
-                          releaseId: r.id,
-                          pkg: { version: pkgVersionOf(r) ?? 0, tag: tagFor(r) },
-                          lockedDims: dimsOf(r),
-                        })
+                      disabled={!!releaseBlocked}
+                      title={
+                        releaseBlocked
+                          ? `Ramping blocked — ${releaseBlocked}${live ? '; wind down via Conclude/Revert' : '; discard is the way out'}`
+                          : undefined
                       }
+                      onClick={() => {
+                        const n = Number(rampFor === r.id ? rampPct : NaN);
+                        if (!Number.isFinite(n) || n < 0 || n > 50) {
+                          toast.error('Traffic must be 0–50 (100% only via Conclude)');
+                          return;
+                        }
+                        void doRamp(r.id!, n, trafficOf(r));
+                      }}
                       className="col-span-1 py-2.5 bg-violet-600 text-white font-semibold text-xs transition-colors hover:bg-violet-700 disabled:opacity-50 cursor-pointer disabled:cursor-default"
                     >
-                      Edit
+                      Ramp
                     </button>
-                    <button
-                      type="button"
-                      disabled={!can('OTA_RELEASE_DISCARD')}
-                      onClick={() => doDiscard(r)}
-                      className="col-span-1 py-2.5 bg-zinc-50 text-red-600 font-semibold text-xs transition-colors hover:bg-red-50 disabled:opacity-50 cursor-pointer disabled:cursor-default"
+                  );
+                  return live && can('OTA_RELEASE_CONCLUDE') ? (
+                    <div
+                      className={cn(
+                        'grid gap-px bg-zinc-200 mt-auto border-t border-zinc-200',
+                        rampVerb ? 'grid-cols-3' : 'grid-cols-2',
+                      )}
                     >
-                      Discard
-                    </button>
-                  </div>
-                ) : null}
+                      {rampVerb}
+                      <button
+                        type="button"
+                        onClick={() => doConclude(r, false)}
+                        className="col-span-1 py-2.5 bg-zinc-50 text-violet-700 font-semibold text-xs transition-colors hover:bg-violet-50 cursor-pointer"
+                      >
+                        Conclude
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => doConclude(r, true)}
+                        className="col-span-1 py-2.5 bg-zinc-50 text-red-600 font-semibold text-xs transition-colors hover:bg-red-50 cursor-pointer"
+                      >
+                        Revert To…
+                      </button>
+                    </div>
+                  ) : !live ? (
+                    <div
+                      className={cn(
+                        'grid gap-px bg-zinc-200 mt-auto border-t border-zinc-200',
+                        rampVerb ? 'grid-cols-3' : 'grid-cols-2',
+                      )}
+                    >
+                      {rampVerb}
+                      <button
+                        type="button"
+                        disabled={!can('OTA_RELEASE_CREATE') || !!releaseBlocked}
+                        title={releaseBlocked ? `Editing blocked — ${releaseBlocked}; discard is the way out` : undefined}
+                        onClick={() =>
+                          r.id &&
+                          setEditRelease({
+                            releaseId: r.id,
+                            pkg: { version: pkgVersionOf(r) ?? 0, tag: tagFor(r) },
+                            lockedDims: dimsOf(r),
+                          })
+                        }
+                        className="col-span-1 py-2.5 bg-zinc-50 text-zinc-700 font-semibold text-xs transition-colors hover:bg-zinc-100 disabled:opacity-50 cursor-pointer disabled:cursor-default"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!can('OTA_RELEASE_DISCARD')}
+                        onClick={() => doDiscard(r)}
+                        className="col-span-1 py-2.5 bg-zinc-50 text-red-600 font-semibold text-xs transition-colors hover:bg-red-50 disabled:opacity-50 cursor-pointer disabled:cursor-default"
+                      >
+                        Discard
+                      </button>
+                    </div>
+                  ) : null;
+                })()}
               </div>
             );
           })
@@ -824,7 +898,7 @@ export function OtaFlow(props: OtaFlowProps) {
                         <span className="text-[10px] text-zinc-400">
                           {pkgRels.length === 0 ? 'No releases from this package yet.' : 'No other active releases.'}
                         </span>
-                        {can('OTA_RELEASE_CREATE') && (
+                        {can('OTA_RELEASE_CREATE') && !releaseBlocked && (
                           <button
                             type="button"
                             onClick={() => setComposerFor(pk)}
@@ -854,7 +928,7 @@ export function OtaFlow(props: OtaFlowProps) {
                             link={myLinks.find((l) => l.packageVersion === pk.version)}
                           />
                           <span className="ml-auto" />
-                          {can('OTA_RELEASE_CREATE') && (
+                          {can('OTA_RELEASE_CREATE') && !releaseBlocked && (
                             <button
                               type="button"
                               onClick={() => setComposerFor(pk)}
@@ -1171,10 +1245,13 @@ export function OtaFlow(props: OtaFlowProps) {
 
       {branchPickerOpen && (
         <OtaBranchPicker
-          groupId={groupId}
-          appRef={ref}
+          releaseId={releaseId}
           onClose={() => setBranchPickerOpen(false)}
-          onAdopted={onChanged}
+          onAdopted={() => {
+            void qc.invalidateQueries({ queryKey: ['release', releaseId] });
+            void qc.invalidateQueries({ queryKey: ['mobile-release-prov', releaseId] });
+            onChanged();
+          }}
         />
       )}
 
