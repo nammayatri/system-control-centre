@@ -40,6 +40,8 @@ import Products.Autopilot.Mobile.Handlers.Ota (
     adoptOtaBranchH,
  )
 import Products.Autopilot.Mobile.Provenance (ReleaseAdoptBranchReq, ReleaseProvResp, adoptReleaseBranchH, releaseProvenanceH)
+import Products.Autopilot.Types (ReleaseTracker)
+import Products.Autopilot.Types.API (ReleaseEventResponse)
 import Products.Autopilot.Mobile.Handlers.Release
 import Products.Autopilot.Mobile.Handlers.Revert (
     RevertDiffResp,
@@ -98,65 +100,65 @@ import Products.Autopilot.Mobile.Types.Ota (
     OtaReleaseResp,
     OtaRunJobsResp,
  )
-import Products.Autopilot.Types.Permission (AutopilotPermission (..))
+import Products.Mobile.Types.Permission (MobilePermission (..))
 import Servant
 import Shared.API.Response (APISuccess)
 
 type MobileAPI =
     "mobile"
         :> "apps"
-        :> Protected 'AP_RELEASE_VIEW
+        :> Protected 'MB_RELEASE_VIEW
         :> Get '[JSON] [AppCatalogEntryResp]
         -- Per-app effective permissions (unified grant model) — the
         -- frontend's source for per-row button states.
         :<|> "mobile"
             :> "access"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> Get '[JSON] MobileAccessResp
         :<|> "mobile"
             :> "apps"
-            :> Protected 'AP_MOBILE_APP_MANAGE
+            :> Protected 'MB_MOBILE_APP_MANAGE
             :> ReqBody '[JSON] NewAppReq
             :> Post '[JSON] AppCatalogEntryResp
         :<|> "mobile"
             :> "apps"
-            :> Protected 'AP_MOBILE_APP_MANAGE
+            :> Protected 'MB_MOBILE_APP_MANAGE
             :> Capture "id" Int32
             :> ReqBody '[JSON] PatchAppReq
             :> Patch '[JSON] AppCatalogEntryResp
         :<|> "mobile"
             :> "versions"
             :> "preview"
-            :> Protected 'AP_RELEASE_CREATE
+            :> Protected 'MB_RELEASE_CREATE
             :> ReqBody '[JSON] PreviewVersionsReq
             :> Post '[JSON] PreviewVersionsResp
         :<|> "releases"
             :> "mobile"
             :> "create"
-            :> Protected 'AP_RELEASE_CREATE
+            :> Protected 'MB_RELEASE_CREATE
             :> ReqBody '[JSON] CreateMobileReleasesReq
             :> Post '[JSON] CreateMobileReleasesResp
         :<|> "releases"
             :> "mobile"
             :> "dispatch"
-            :> Protected 'AP_MOBILE_DISPATCH
+            :> Protected 'MB_MOBILE_DISPATCH
             :> ReqBody '[JSON] DispatchMobileReleasesReq
             :> Post '[JSON] DispatchMobileReleasesResp
         :<|> "releases"
             :> "live"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> QueryParam "category" Text
             :> Get '[JSON] LiveReleasesResp
         :<|> "mobile"
             :> "branches"
-            :> Protected 'AP_RELEASE_CREATE
+            :> Protected 'MB_RELEASE_CREATE
             :> QueryParam "q" Text
             :> Get '[JSON] BranchesResp
         -- Where does an existing (app, version, code) build live? Powers the
         -- "open the existing build" link on the create page's duplicate error.
         :<|> "mobile"
             :> "build-location"
-            :> Protected 'AP_RELEASE_CREATE
+            :> Protected 'MB_RELEASE_CREATE
             :> QueryParam' '[Required, Strict] "app" Text
             :> QueryParam' '[Required, Strict] "surface" Text
             :> QueryParam' '[Required, Strict] "platform" Text
@@ -165,7 +167,7 @@ type MobileAPI =
             :> Get '[JSON] BuildLocationResp
         :<|> "mobile"
             :> "changelog-preview"
-            :> Protected 'AP_RELEASE_CREATE
+            :> Protected 'MB_RELEASE_CREATE
             :> QueryParam' '[Required, Strict] "app" Text
             :> QueryParam' '[Required, Strict] "surface" Text
             :> QueryParam' '[Required, Strict] "platform" Text
@@ -174,7 +176,7 @@ type MobileAPI =
             :> Get '[JSON] ChangelogPreviewResp
         :<|> "mobile"
             :> "changelog-ai-summary"
-            :> Protected 'AP_AI_SUMMARIZE
+            :> Protected 'MB_AI_SUMMARIZE
             :> QueryParam' '[Required, Strict] "app" Text
             :> QueryParam' '[Required, Strict] "surface" Text
             :> QueryParam' '[Required, Strict] "platform" Text
@@ -187,110 +189,110 @@ type MobileAPI =
         -- per-app extras, computed by SHA set arithmetic, AI-summarized once.
         :<|> "mobile"
             :> "changelog-ai-summary-combined"
-            :> Protected 'AP_AI_SUMMARIZE
+            :> Protected 'MB_AI_SUMMARIZE
             :> ReqBody '[JSON] CombinedAiSummaryReq
             :> Post '[JSON] AiSummaryResp
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "mobile-revert"
             :> "draft"
-            :> Protected 'AP_RELEASE_REVERT
+            :> Protected 'MB_RELEASE_REVERT
             :> Get '[JSON] RevertDraft
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "mobile-revert"
-            :> Protected 'AP_RELEASE_REVERT
+            :> Protected 'MB_RELEASE_REVERT
             :> ReqBody '[JSON] RevertReq
             :> Post '[JSON] RevertResp
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "mobile-revert"
             :> "verify-commit"
-            :> Protected 'AP_RELEASE_REVERT
+            :> Protected 'MB_RELEASE_REVERT
             :> QueryParam' '[Required, Strict] "sha" Text
             :> Get '[JSON] VerifyCommitResp
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "mobile-revert"
             :> "diff"
-            :> Protected 'AP_RELEASE_REVERT
+            :> Protected 'MB_RELEASE_REVERT
             :> QueryParam' '[Required, Strict] "source" Text
             :> Get '[JSON] RevertDiffResp
         -- ── Promote-to-review + staged rollout (Phase 6) ──
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "promote-form"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> Get '[JSON] PromoteForm
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "promote"
-            :> Protected 'AP_RELEASE_PROMOTE
+            :> Protected 'MB_RELEASE_PROMOTE
             :> ReqBody '[JSON] PromoteReq
             :> Post '[JSON] PromoteResp
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "rollout"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> Get '[JSON] RolloutDetail
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "release"
-            :> Protected 'AP_RELEASE_ROLLOUT
+            :> Protected 'MB_RELEASE_ROLLOUT
             :> Post '[JSON] APISuccess
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "rollout"
             :> "set"
-            :> Protected 'AP_RELEASE_ROLLOUT
+            :> Protected 'MB_RELEASE_ROLLOUT
             :> ReqBody '[JSON] RolloutSetReq
             :> Post '[JSON] APISuccess
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "rollout"
             :> "halt"
-            :> Protected 'AP_RELEASE_ROLLOUT
+            :> Protected 'MB_RELEASE_ROLLOUT
             :> Post '[JSON] APISuccess
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "rollout"
             :> "resume"
-            :> Protected 'AP_RELEASE_ROLLOUT
+            :> Protected 'MB_RELEASE_ROLLOUT
             :> Post '[JSON] APISuccess
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "rollout"
             :> "release-all"
-            :> Protected 'AP_RELEASE_ROLLOUT
+            :> Protected 'MB_RELEASE_ROLLOUT
             :> Post '[JSON] APISuccess
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "review"
             :> "mark-approved"
-            :> Protected 'AP_RELEASE_PROMOTE
+            :> Protected 'MB_RELEASE_PROMOTE
             :> Post '[JSON] APISuccess
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "review"
             :> "mark-rejected"
-            :> Protected 'AP_RELEASE_PROMOTE
+            :> Protected 'MB_RELEASE_PROMOTE
             :> ReqBody '[JSON] MarkRejectedReq
             :> Post '[JSON] APISuccess
         :<|> "releases"
             :> Capture "releaseId" Text
             :> "withdraw"
-            :> Protected 'AP_RELEASE_PROMOTE
+            :> Protected 'MB_RELEASE_PROMOTE
             :> Post '[JSON] APISuccess
         -- ── App Release Monitoring (store-monitor) ──
         :<|> "mobile"
             :> "store-monitor"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> Get '[JSON] StoreMonitorResp
         :<|> "mobile"
             :> "store-monitor"
             :> Capture "appCatalogId" Int32
             :> "refresh"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> Post '[JSON] StoreMonitorAppResp
         -- ── Bulk promote / rollout (one action over many apps) ──
         -- Under the `mobile/bulk/*` literal namespace so they never collide with
@@ -298,46 +300,46 @@ type MobileAPI =
         :<|> "mobile"
             :> "bulk"
             :> "promote"
-            :> Protected 'AP_RELEASE_PROMOTE
+            :> Protected 'MB_RELEASE_PROMOTE
             :> ReqBody '[JSON] BulkPromoteReq
             :> Post '[JSON] BulkActionResp
         :<|> "mobile"
             :> "bulk"
             :> "rollout"
-            :> Protected 'AP_RELEASE_ROLLOUT
+            :> Protected 'MB_RELEASE_ROLLOUT
             :> ReqBody '[JSON] BulkRolloutReq
             :> Post '[JSON] BulkActionResp
         -- ── Release groups (fleet design §5, Phase 2 read model) ──
         :<|> "mobile"
             :> "groups"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> QueryParam "since" UTCTime
             :> Get '[JSON] GroupsListResp
         :<|> "mobile"
             :> "groups"
             :> Capture "groupId" Text
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> Get '[JSON] GroupDetailResp
         :<|> "mobile"
             :> "groups"
             :> Capture "groupId" Text
             :> "changelog-slack"
             :> "resend"
-            :> Protected 'AP_RELEASE_CREATE
+            :> Protected 'MB_RELEASE_CREATE
             :> Post '[JSON] ChangelogSlackState
         -- ── OTA inside mobile releases (docs/OTA_MOBILE_RELEASE_INTEGRATION.md §5.4) ──
         :<|> "mobile"
             :> "groups"
             :> Capture "groupId" Text
             :> "ota"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> Get '[JSON] OtaGroupResp
         :<|> "mobile"
             :> "groups"
             :> Capture "groupId" Text
             :> "ota"
             :> "dispatch"
-            :> Protected 'AP_MOBILE_DISPATCH
+            :> Protected 'MB_MOBILE_DISPATCH
             :> ReqBody '[JSON] OtaDispatchReq
             :> Post '[JSON] OtaDispatchResp
         -- Release creation is route-gated by view only; the handler enforces
@@ -347,7 +349,7 @@ type MobileAPI =
             :> "pushes"
             :> Capture "pushId" Text
             :> "release"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> ReqBody '[JSON] OtaReleaseReq
             :> Post '[JSON] OtaReleaseResp
         -- Live CI run matrix for a push — build progress without GitHub.
@@ -356,18 +358,18 @@ type MobileAPI =
             :> "pushes"
             :> Capture "pushId" Text
             :> "jobs"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> Get '[JSON] OtaRunJobsResp
         :<|> "mobile"
             :> "ota"
             :> "pushes"
             :> Capture "pushId" Text
             :> "cancel"
-            :> Protected 'AP_MOBILE_DISPATCH
+            :> Protected 'MB_MOBILE_DISPATCH
             :> Post '[JSON] OtaPushResp
         :<|> "mobile"
             :> "activity"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> QueryParam "days" Int
             :> QueryParam "app" Text
             :> QueryParam "actor" Text
@@ -380,7 +382,7 @@ type MobileAPI =
             :> "pushes"
             :> Capture "pushId" Text
             :> "attach-package"
-            :> Protected 'AP_MOBILE_DISPATCH
+            :> Protected 'MB_MOBILE_DISPATCH
             :> ReqBody '[JSON] OtaAttachReq
             :> Post '[JSON] OtaPushResp
         -- Package-born release (no push row) — lineage-gated in the handler.
@@ -389,7 +391,7 @@ type MobileAPI =
             :> Capture "groupId" Text
             :> "ota"
             :> "release"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> ReqBody '[JSON] OtaPackageReleaseReq
             :> Post '[JSON] OtaReleaseResp
         -- ── OTA provenance (git-tag ledger, doc §11b) ──
@@ -398,7 +400,7 @@ type MobileAPI =
             :> Capture "groupId" Text
             :> "ota"
             :> "provenance"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> ReqBody '[JSON] OtaProvReq
             :> Post '[JSON] OtaProvResp
         :<|> "mobile"
@@ -406,7 +408,7 @@ type MobileAPI =
             :> Capture "groupId" Text
             :> "ota"
             :> "adopt-branch"
-            :> Protected 'AP_MOBILE_APP_MANAGE
+            :> Protected 'MB_MOBILE_APP_MANAGE
             :> ReqBody '[JSON] OtaAdoptBranchReq
             :> Post '[JSON] OtaProvAnchor
         -- ── Build provenance (release-scoped, OTA-free) ──
@@ -414,15 +416,41 @@ type MobileAPI =
             :> "releases"
             :> Capture "releaseId" Text
             :> "provenance"
-            :> Protected 'AP_RELEASE_VIEW
+            :> Protected 'MB_RELEASE_VIEW
             :> Get '[JSON] ReleaseProvResp
         :<|> "mobile"
             :> "releases"
             :> Capture "releaseId" Text
             :> "adopt-branch"
-            :> Protected 'AP_MOBILE_APP_MANAGE
+            :> Protected 'MB_MOBILE_APP_MANAGE
             :> ReqBody '[JSON] ReleaseAdoptBranchReq
             :> Post '[JSON] OtaProvAnchor
+        -- ── Cancel a running build (MobileBuild rows only) ──
+        :<|> "mobile"
+            :> "releases"
+            :> Capture "releaseId" Text
+            :> "abort"
+            :> Protected 'MB_RELEASE_ABORT
+            :> Post '[JSON] APISuccess
+        -- ── Mobile-gated reads (product split): the shared /releases feed is
+        --    autopilot-gated, so mobile-only grants read through these. ──
+        :<|> "mobile"
+            :> "releases"
+            :> Protected 'MB_RELEASE_VIEW
+            :> QueryParam "from" Text
+            :> QueryParam "to" Text
+            :> Get '[JSON] [ReleaseTracker]
+        :<|> "mobile"
+            :> "releases"
+            :> Capture "releaseId" Text
+            :> Protected 'MB_RELEASE_VIEW
+            :> Get '[JSON] (Maybe ReleaseTracker)
+        :<|> "mobile"
+            :> "releases"
+            :> Capture "releaseId" Text
+            :> "events"
+            :> Protected 'MB_RELEASE_VIEW
+            :> Get '[JSON] [ReleaseEventResponse]
 
 mobileServer :: ServerT MobileAPI Flow
 mobileServer =
@@ -478,3 +506,7 @@ mobileServer =
         :<|> (\gid ap req -> adoptOtaBranchH ap gid req)
         :<|> (\rid ap -> releaseProvenanceH ap rid)
         :<|> (\rid ap req -> adoptReleaseBranchH ap rid req)
+        :<|> (\rid ap -> mobileAbortH ap rid)
+        :<|> mobileListReleasesH
+        :<|> (\rid ap -> mobileGetReleaseH ap rid)
+        :<|> (\rid ap -> mobileListEventsH ap rid)

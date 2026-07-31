@@ -12,7 +12,7 @@ modal opens client-side from a loaded card — no second request.
 @POST \/mobile\/store-monitor\/:id\/refresh@ — live re-poll ONE app, upsert the
 cache, and return its fresh card.
 
-Both gated by 'AP_RELEASE_VIEW' (the refresh is a read-tier action — it pulls
+Both gated by 'MB_RELEASE_VIEW' (the refresh is a read-tier action — it pulls
 fresh data, it doesn't mutate a release). Every app in the catalog appears —
 enabled or not — so the page shows releases for ALL apps.
 -}

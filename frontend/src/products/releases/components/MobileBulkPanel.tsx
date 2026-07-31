@@ -83,9 +83,9 @@ export function MobileBulkPanel() {
   // Per-app grant keys (unified model): a worklist row only appears when the
   // user can act on that app — bulk is an action surface, not a read surface.
   const canPromoteFor = (e: Eligible) =>
-    hasPermission('autopilot', 'RELEASE_PROMOTE', `${e.r.appGroup}/${e.r.env}`);
+    hasPermission('mobile', 'MB_RELEASE_PROMOTE', `${e.r.appGroup}/${e.r.env}`);
   const canRolloutFor = (e: Eligible) =>
-    hasPermission('autopilot', 'RELEASE_ROLLOUT', `${e.r.appGroup}/${e.r.env}`);
+    hasPermission('mobile', 'MB_RELEASE_ROLLOUT', `${e.r.appGroup}/${e.r.env}`);
 
   // A stable 30-day window captures every in-flight (recently-updated) release
   // needing action. Memoised so the query key doesn't churn every render.

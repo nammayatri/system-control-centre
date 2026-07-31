@@ -16,6 +16,7 @@ module Core.Admin.Types
     OverrideDetail (..),
     DeploymentAccessDetail (..),
     DeploymentRosterEntry (..),
+    ProductRosterEntry (..),
   )
 where
 
@@ -186,3 +187,19 @@ data DeploymentRosterEntry = DeploymentRosterEntry
   deriving (Show, Generic)
 
 instance ToJSON DeploymentRosterEntry
+
+-- | One product-level grant, joined with the person and role it points at.
+-- The product-scope twin of 'DeploymentRosterEntry' — same reverse lookup
+-- ("who has access to product X"), without an app group to scope it to.
+data ProductRosterEntry = ProductRosterEntry
+  { prProductSlug :: Text,
+    prPersonId :: UUID,
+    prFirstName :: Text,
+    prLastName :: Text,
+    prEmail :: Text,
+    prRoleId :: UUID,
+    prRoleName :: Text
+  }
+  deriving (Show, Generic)
+
+instance ToJSON ProductRosterEntry

@@ -231,12 +231,19 @@ checkPersonPermission prodSlug permText person
                   apProductAccesses = accesses
                 }
         else do
-          -- A deployment grant under the product itself, or under an alias
-          -- product whose roles may carry this product's permissions (the
-          -- unified per-app mobile grant: autopilot roles carry OTA_*).
+          -- An alias product's grant may carry this product's permissions
+          -- (unified model: mobile roles carry OTA_*). PRODUCT-LEVEL alias
+          -- access must count — a fleet-wide mobile Admin holds OTA_* for
+          -- every app, so this gate opens without any scoped row. Then the
+          -- deployment (scoped) grants under the product itself or an alias.
           let slugs = prodSlug : aliasGrantSlugs prodSlug
           deploymentGranted <-
-            orM [hasAnyDeploymentPermission (personId person) s permText | s <- slugs]
+            orM $
+              [ (permText `elem`) <$> computeEffectivePermissions person s (paRoleId pa)
+                | s <- aliasGrantSlugs prodSlug,
+                  pa <- filter (\a -> paProductSlug a == s) accesses
+              ]
+                <> [hasAnyDeploymentPermission (personId person) s permText | s <- slugs]
           if deploymentGranted
             then
               pure $
@@ -255,11 +262,11 @@ checkPersonPermission prodSlug permText person
     orM [] = pure False
     orM (m : ms) = m >>= \b -> if b then pure True else orM ms
 
--- | Products whose deployment grants may satisfy another product's
--- permission check. Sole case today: airborne-ota permissions carried by a
--- unified per-app autopilot grant (\"\<name\>\/\<platform\>\").
+-- | Products whose grants may satisfy another product's permission check.
+-- Sole case today: airborne-ota permissions carried by a mobile grant —
+-- product-level, or per-app (\"\<name\>\/\<platform\>\").
 aliasGrantSlugs :: Text -> [Text]
-aliasGrantSlugs "airborne-ota" = ["autopilot"]
+aliasGrantSlugs "airborne-ota" = ["mobile"]
 aliasGrantSlugs _ = []
 
 requireDeploymentPermission ::

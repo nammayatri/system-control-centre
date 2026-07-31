@@ -51,6 +51,8 @@ type AdminAPI =
     :<|> "products" :> Capture "slug" Text :> "permissions" :> Header "Authorization" Text :> Get '[JSON] Value
     -- Deployment access roster (reverse lookup: grants grouped by deployment)
     :<|> "deployment-access" :> Header "Authorization" Text :> Get '[JSON] Value
+    -- Product access roster (reverse lookup: product-wide grants, no app group)
+    :<|> "product-access" :> Header "Authorization" Text :> Get '[JSON] Value
 
 adminServer :: ServerT AdminAPI Flow
 adminServer =
@@ -72,6 +74,7 @@ adminServer =
     :<|> updateRoleH
     :<|> listPermissionsH
     :<|> listDeploymentAccessRosterH
+    :<|> listProductAccessRosterH
 
 -- ── Helpers ─────────────────────────────────────────────────────────
 
@@ -390,6 +393,18 @@ listDeploymentAccessRosterH mAuth = do
       entries <- listAllDeploymentAccess
       pure $ toJSON (map deploymentRosterEntryToJson entries)
 
+-- | The product-scope twin of listDeploymentAccessRosterH: every product-level
+-- grant with its person + role. Powers the Autopilot tab of the Access Control
+-- board, which shows product-wide access with no app group attached.
+listProductAccessRosterH :: Maybe Text -> Flow Value
+listProductAccessRosterH mAuth = do
+  mAdmin <- requireAdmin mAuth
+  case mAdmin of
+    Nothing -> throwM $ PermissionDenied "Superadmin required"
+    Just _ -> do
+      entries <- listAllProductAccess
+      pure $ toJSON (map productRosterEntryToJson entries)
+
 -- ── JSON serializers ────────────────────────────────────────────────
 
 personDetailToJson :: PersonDetail -> Value
@@ -444,4 +459,16 @@ deploymentRosterEntryToJson DeploymentRosterEntry {..} =
       "email" .= drEmail,
       "roleId" .= drRoleId,
       "roleName" .= drRoleName
+    ]
+
+productRosterEntryToJson :: ProductRosterEntry -> Value
+productRosterEntryToJson ProductRosterEntry {..} =
+  object
+    [ "productSlug" .= prProductSlug,
+      "personId" .= prPersonId,
+      "firstName" .= prFirstName,
+      "lastName" .= prLastName,
+      "email" .= prEmail,
+      "roleId" .= prRoleId,
+      "roleName" .= prRoleName
     ]

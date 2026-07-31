@@ -26,6 +26,7 @@ import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { useSearch } from '../../../shared/hooks';
 import { useOtaTheme } from '../theme';
 import { cn, formatDate } from '../../../lib/utils';
+import { OtaErrorState } from '../components/OtaErrorState';
 
 const PAGE_SIZE = 15;
 // How many tag chips to show on a collapsed group row before "+N".
@@ -237,8 +238,8 @@ export default function FilesList() {
         </header>
 
         {error && !data ? (
-          <div className="px-4 py-6 text-sm text-red-600 dark:text-red-400">
-            Failed to load files. Refresh to retry.
+          <div className="p-4">
+            <OtaErrorState error={error} what="files for this app" />
           </div>
         ) : isLoading ? (
           <div className="dark:invert">

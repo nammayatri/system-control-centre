@@ -15,6 +15,7 @@ module Core.Admin.Queries
     revokeDeploymentAccess,
     listDeploymentAccessForPerson,
     listAllDeploymentAccess,
+    listAllProductAccess,
     -- Permission overrides
     addPermissionOverride,
     removePermissionOverride,
@@ -256,6 +257,41 @@ listAllDeploymentAccess = withDb $ \db -> withConn db $ \conn -> do
   pure $
     map
       (\DeploymentRosterRow {..} -> DeploymentRosterEntry drrProductSlug drrAppGroup drrPersonId drrFirstName drrLastName drrEmail drrRoleId drrRoleName)
+      rows
+
+data ProductRosterRow = ProductRosterRow
+  { prrProductSlug :: Text,
+    prrPersonId :: UUID,
+    prrFirstName :: Text,
+    prrLastName :: Text,
+    prrEmail :: Text,
+    prrRoleId :: UUID,
+    prrRoleName :: Text
+  }
+  deriving (Show)
+
+instance FromRow ProductRosterRow where
+  fromRow = ProductRosterRow <$> field <*> field <*> field <*> field <*> field <*> field <*> field
+
+-- | Every product-level grant, joined with its person and role — the product
+-- scope twin of listAllDeploymentAccess. Note that assignDeploymentAccess
+-- seeds a Viewer row here via ensureDefaultProductAccess, so anyone holding a
+-- deployment grant shows up in this roster too.
+listAllProductAccess :: (MonadFlow m) => m [ProductRosterEntry]
+listAllProductAccess = withDb $ \db -> withConn db $ \conn -> do
+  rows <-
+    query_
+      conn
+      "SELECT ppa.product_slug, p.id, p.first_name, p.last_name, p.email, r.id, r.name \
+      \FROM sc_person_product_access ppa \
+      \JOIN sc_person p ON p.id = ppa.person_id \
+      \JOIN sc_role r ON r.id = ppa.role_id \
+      \WHERE p.is_active = true \
+      \ORDER BY r.name, p.first_name" ::
+      IO [ProductRosterRow]
+  pure $
+    map
+      (\ProductRosterRow {..} -> ProductRosterEntry prrProductSlug prrPersonId prrFirstName prrLastName prrEmail prrRoleId prrRoleName)
       rows
 
 -- ── Permission Overrides ────────────────────────────────────────────

@@ -196,7 +196,11 @@ export function MobileChangelogAiSummary({
         : { label: 'Auto-generated', cls: 'bg-zinc-100 text-zinc-600', spin: false };
 
   return (
-    <PermissionGate product="autopilot" permission="AI_SUMMARIZE">
+    <PermissionGate
+      product="mobile"
+      permission="MB_AI_SUMMARIZE"
+      appGroup={app && platform ? `${app}/${platform}` : undefined}
+    >
       <div className="mb-3 overflow-hidden rounded-md border border-violet-100 bg-violet-50/40">
         <div className="flex items-center justify-between gap-2 px-3 py-2">
           {/* The whole title bar is the collapse toggle (click anywhere to

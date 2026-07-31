@@ -29,6 +29,14 @@ module Products.Autopilot.Mobile.Handlers.Release (
     CreateMobileReleasesResp (..),
     createMobileReleasesH,
 
+    -- * Abort (cancel a running build)
+    mobileAbortH,
+
+    -- * Mobile-gated reads (product split: list/detail/events for mobile-only grants)
+    mobileListReleasesH,
+    mobileGetReleaseH,
+    mobileListEventsH,
+
     -- * Dispatch
     DispatchMobileReleasesReq (..),
     DispatchInfo (..),
@@ -63,8 +71,8 @@ import Control.Monad.Catch (throwM)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..))
 import Data.Proxy (Proxy (..))
-import Products.Autopilot.Mobile.Auth (requireAppPermAll)
-import Products.Autopilot.Types.Permission (AutopilotPermission (..))
+import Products.Autopilot.Mobile.Auth (requireAppPerm, requireAppPermAll)
+import Products.Mobile.Types.Permission (MobilePermission (..))
 import Core.DB.Connection (runDB)
 import Core.Environment (Flow, forkFlow, withDb)
 import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericParseJSON, genericToJSON, object, (.=))
@@ -104,7 +112,11 @@ import Products.Autopilot.Mobile.Types.Storage (
     AppCatalog,
     AppCatalogT (..),
  )
-import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, findDispatchedReleaseIds, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch)
+import Products.Autopilot.Actions.Release qualified as BE
+import Products.Autopilot.EventLog (logStatusUpdated)
+import Products.Autopilot.Types.API (ReleaseEventResponse)
+import Products.Autopilot.Notifications (notifyReleaseAborted)
+import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, conditionalUpdateTracker, findDispatchedReleaseIds, findReleaseTracker, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch)
 import Products.Autopilot.RuntimeConfig (getMobileBuildType)
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
@@ -117,10 +129,12 @@ import Products.Autopilot.Types.Storage.Schema (
     autopilotDb,
  )
 import Products.Autopilot.Types.Target (TargetState (..))
+import Products.Autopilot.Types.Workflow (ReleaseCategory (..))
 import qualified Shared.AI.Changelog as CL
 import Shared.AI.Config (loadAiConfig)
 import Shared.AI.Queries (claimReleaseSummary, computePromptHash, lookupReleaseSummary, upsertReleaseSummary)
 import Shared.AI.ReleaseSummary (generateCombinedWithFallback, generateWithFallback, renderCombinedDeterministic)
+import Shared.API.Response (APISuccess (..))
 import Shared.JSON (stripPrefixOptions)
 import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 
@@ -213,7 +227,7 @@ createMobileReleasesH ap CreateMobileReleasesReq{..} = do
     unless (null missing) $
         throwM $
             BadRequest ("unknown app_catalog_id(s): " <> T.intercalate ", " (map (T.pack . show) missing))
-    requireAppPermAll (Proxy @'AP_RELEASE_CREATE) ap [(acName a, acPlatform a) | a <- apps]
+    requireAppPermAll (Proxy @'MB_RELEASE_CREATE) ap [(acName a, acPlatform a) | a <- apps]
     -- ── Build all rows, then insert atomically ──
     -- Build type is fixed per deployment env (master = debug, prod = release)
     -- via the mobile_build_type config flag — not chosen by the caller.
@@ -414,7 +428,7 @@ dispatchMobileReleasesH ap DispatchMobileReleasesReq{releaseIds = rids} = do
         Map.fromList . map (\a -> ((acName a, acSurface a, acPlatform a), a))
             <$> listAppCatalog
     loaded <- mapM (validateForDispatch trackerById acByKey) rids
-    requireAppPermAll (Proxy @'AP_MOBILE_DISPATCH) ap [(acName ac, acPlatform ac) | (_, ac, _) <- loaded]
+    requireAppPermAll (Proxy @'MB_MOBILE_DISPATCH) ap [(acName ac, acPlatform ac) | (_, ac, _) <- loaded]
     -- Group by (github_repo, workflow_path, surface, platform). Each
     -- group maps to one workflow_dispatch — siblings in a group are
     -- tied to the same dispatch_id so the workflow can run them as one
@@ -789,7 +803,7 @@ buildLocationH _ap appName surface platform version mCode = do
 --
 -- Summarise the commits being released BEFORE the release exists. Reuses the
 -- same commit-gathering as 'changelogPreviewH'; the cache subject is the commit
--- RANGE (content-keyed), not a release id. Gated by 'AP_AI_SUMMARIZE'.
+-- RANGE (content-keyed), not a release id. Gated by 'MB_AI_SUMMARIZE'.
 
 data AiSummaryResp = AiSummaryResp
     { available :: Bool
@@ -1127,3 +1141,55 @@ changelogAiSummaryCombinedH ap req = do
                     eAll <- compareAllCommits creds owner repo baseRef branch
                     pure $ Right (either (const (crCommits cr)) Prelude.id eAll)
                 | otherwise -> pure (Right (crCommits cr))
+
+-- ── Abort (cancel a running build) ──────────────────────────────────
+
+{- | Cancel a RUNNING mobile build — the MobileBuild-only mirror of the shared
+tracker-update ABORTING transition, gated per-app ('MB_RELEASE_ABORT') so a
+scoped mobile grant can cancel its own app's builds without any autopilot
+access. Same CAS + notify machinery as the shared route: the build workflow
+sees ABORTING and cancels the GitHub run.
+-}
+mobileAbortH :: AuthedPerson -> Text -> Flow APISuccess
+mobileAbortH ap rid = do
+    m <- findReleaseTracker rid
+    case m of
+        Nothing -> throwM (NotFound "Release not found")
+        Just (tracker, mTargetState) -> do
+            unless (RT.category tracker == MobileBuild) $
+                throwM (BadRequest "Not a mobile build — cancel backend releases via the release update route")
+            requireAppPerm (Proxy @'MB_RELEASE_ABORT) ap (RT.appGroup tracker) (RT.env tracker)
+            let oldStatus = RT.status tracker
+                aborted = tracker{RT.status = ABORTING}
+            unless (RT.validateStatusTransition oldStatus ABORTING) $
+                throwM (BadRequest ("Invalid status transition: " <> T.pack (show oldStatus) <> " -> ABORTING"))
+            ok <- conditionalUpdateTracker aborted mTargetState (RT.releaseStatusText oldStatus)
+            unless ok $ throwM (BadRequest "Tracker was modified concurrently - please retry")
+            logStatusUpdated aborted "Tracker marked as ABORTING"
+            notifyReleaseAborted aborted
+            pure Success
+
+-- ── Mobile-gated reads (product split) ─────────────────────────────
+
+{- | The flat mobile release feed — the same listing as the shared BE route,
+but gated by MB_RELEASE_VIEW and pinned to the mobile category so a
+mobile-only grant can read it (the shared @GET /releases@ is autopilot-gated).
+-}
+mobileListReleasesH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow [RT.ReleaseTracker]
+mobileListReleasesH ap mFrom mTo = BE.listReleasesH ap mFrom mTo (Just "mobile")
+
+-- | Detail for one MOBILE release; BE rows do not leak through this gate.
+mobileGetReleaseH :: AuthedPerson -> Text -> Flow (Maybe RT.ReleaseTracker)
+mobileGetReleaseH ap rid = do
+    m <- BE.getReleaseH ap rid
+    pure $ case m of
+        Just t | RT.category t == MobileBuild -> Just t
+        _ -> Nothing
+
+-- | Events for one MOBILE release (404 for BE rows, same non-leak rule).
+mobileListEventsH :: AuthedPerson -> Text -> Flow [ReleaseEventResponse]
+mobileListEventsH ap rid = do
+    m <- mobileGetReleaseH ap rid
+    case m of
+        Nothing -> throwM (NotFound "Release not found")
+        Just _ -> BE.listEventsH ap rid

@@ -529,6 +529,13 @@ export async function fetchAPReleases(
     to: string,
     category?: ReleaseCategoryFilter,
 ): Promise<APRelease[]> {
+    // Mobile rides its own MB_RELEASE_VIEW-gated feed (product split) — the
+    // shared /releases endpoint is autopilot-gated and 403s mobile-only grants.
+    if (category === 'mobile') {
+        const { data } = await apiClient.get('/mobile/releases', { params: { from, to } });
+        const rows = Array.isArray(data) ? data : [];
+        return rows.map(normalizeRelease);
+    }
     const params: Record<string, string> = { from, to };
     if (category) params.category = category;
     const { data } = await apiClient.get('/releases', { params });
@@ -536,14 +543,16 @@ export async function fetchAPReleases(
     return rows.map(normalizeRelease);
 }
 
-export async function fetchReleaseDetails(id: string): Promise<APRelease> {
-    const { data } = await apiClient.get(`/releases/${id}`);
+export async function fetchReleaseDetails(id: string, opts?: { mobile?: boolean }): Promise<APRelease> {
+    const base = opts?.mobile ? '/mobile/releases' : '/releases';
+    const { data } = await apiClient.get(`${base}/${id}`);
     if (!data) throw new Error(`Release ${id} not found`);
     return normalizeRelease(data);
 }
 
-export async function fetchReleaseEvents(id: string): Promise<RolloutEvent[]> {
-    const { data } = await apiClient.get(`/releases/${id}/events`);
+export async function fetchReleaseEvents(id: string, opts?: { mobile?: boolean }): Promise<RolloutEvent[]> {
+    const base = opts?.mobile ? '/mobile/releases' : '/releases';
+    const { data } = await apiClient.get(`${base}/${id}/events`);
     if (!Array.isArray(data)) return [];
     return data.map((e: any) => ({
         category: e.category || '',
@@ -742,6 +751,12 @@ export async function updateTracker(releaseId: string, updates: Record<string, a
 export const pauseRelease = (id: string) => updateTracker(id, { status: 'PAUSED' });
 export const resumeRelease = (id: string) => updateTracker(id, { status: 'INPROGRESS' });
 export const abortRelease = (id: string) => updateTracker(id, { status: 'ABORTING' });
+// Mobile builds use the mobile-gated abort (MB_RELEASE_ABORT, per-app scope) —
+// works for scoped mobile grants that hold no autopilot access at all.
+export const abortMobileRelease = async (id: string) => {
+    const { data } = await apiClient.post(`/mobile/releases/${encodeURIComponent(id)}/abort`);
+    return data;
+};
 export const immediateRevert = (id: string, requestedBy?: string) =>
     revertRelease(id, requestedBy, undefined, true);
 

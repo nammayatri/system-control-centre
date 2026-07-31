@@ -3,7 +3,9 @@ import { ChevronDown } from 'lucide-react';
 import { AndroidLogoIcon, AppleLogoIcon, ArrowUpRightIcon } from '@phosphor-icons/react';
 import type { APRelease } from '../../api';
 import type { AppCatalogEntry, LatestBuild } from '../../types';
+import { useAuth } from '../../../../core/auth/AuthContext';
 import { BrandLogo } from '../../components/BrandLogo';
+import { ReleaseStatusBadge } from '../../components/ReleaseStatusBadge';
 import { MEMBER_PHASE_CHIP } from '../../components/GroupStageChip';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { formatBuildCode } from '../../utils';
@@ -87,6 +89,9 @@ interface AppSlots {
   // when no tracker row exists (versions shipped before SCC tracked the app).
   // Display-only — there is no release row/page behind it.
   storeLive: LatestBuild | null;
+  // Debug deployments have no store lifecycle: the row shows the newest build
+  // of ANY status and expansion lists these recent builds instead of lanes.
+  recent: APRelease[];
 }
 
 const SLOT_STATUS_BUCKET: Record<string, string> = {
@@ -107,6 +112,10 @@ export interface AppSlotViewProps {
 }
 
 export function AppSlotView({ apps, releases, loading, filters, onOpen }: AppSlotViewProps) {
+  // Debug deployments (mobile_build_type=debug) have no store lifecycle —
+  // rows become a latest-builds catalog instead of a store-slot cockpit.
+  const { buildType } = useAuth();
+  const debugDeploy = buildType === 'debug';
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const toggle = (key: string) =>
     setExpanded((prev) => {
@@ -140,17 +149,31 @@ export function AppSlotView({ apps, releases, loading, filters, onOpen }: AppSlo
       ) as Record<SlotKey, APRelease | null>;
       const occupied = SLOT_DEFS.map((d) => slots[d.key]).filter(Boolean) as APRelease[];
       const storeLive =
-        !slots.live && app.latestProdBuild?.version ? app.latestProdBuild : null;
+        !debugDeploy && !slots.live && app.latestProdBuild?.version ? app.latestProdBuild : null;
+      const recent = debugDeploy ? rows.slice(0, 4) : [];
       if (q) {
         const hay = [
           app.name,
           app.displayLabel ?? '',
           storeLive?.version ?? '',
-          ...occupied.map((r) => r.new_version ?? ''),
+          ...(debugDeploy ? recent : occupied).map((r) => r.new_version ?? ''),
         ]
           .join(' ')
           .toLowerCase();
         if (!hay.includes(q)) continue;
+      }
+      if (debugDeploy) {
+        // Building/Failed are the only tiles on debug — match by row status,
+        // not store phase (debug rows never enter store lanes).
+        const debugMatch =
+          filters.status === 'building'
+            ? rows.some((r) => !DEAD_STATUS.has(r.status) && phaseOf(r) !== 'build_failed')
+            : filters.status === 'aborted'
+              ? rows.some((r) => DEAD_STATUS.has(r.status) || phaseOf(r) === 'build_failed')
+              : true;
+        if (filters.status && !debugMatch) continue;
+        out.push({ app, slots, primary: rows[0] ?? null, count: rows.length, storeLive: null, recent });
+        continue;
       }
       if (
         filters.status &&
@@ -158,11 +181,12 @@ export function AppSlotView({ apps, releases, loading, filters, onOpen }: AppSlo
         !(filters.status === 'completed' && storeLive)
       )
         continue;
-      out.push({ app, slots, primary: occupied[0] ?? null, count: occupied.length, storeLive });
+      out.push({ app, slots, primary: occupied[0] ?? null, count: occupied.length, storeLive, recent });
     }
     const rank = (x: AppSlots) => (x.primary ? 2 : x.storeLive ? 1 : 0);
     return out.sort((a, b) => rank(b) - rank(a) || a.app.name.localeCompare(b.app.name));
-  }, [apps, releases, filters]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apps, releases, filters, debugDeploy]);
 
   // Status filtering targets SLOTS: auto-expand the matching apps so the
   // matching lanes (and their "matches filter" tag) are visible, not hidden
@@ -255,10 +279,14 @@ function AppRow({
   onToggle: () => void;
   onOpen: (r: APRelease) => void;
 }) {
-  const { app, slots, primary, count, storeLive } = row;
+  const { app, slots, primary, count, storeLive, recent } = row;
+  const { buildType } = useAuth();
+  const debugDeploy = buildType === 'debug';
   const panelId = `app-slots-${app.name}-${app.surface}-${app.platform}`.replace(/\s+/g, '-');
   const pulsing = primary != null && ['rolling_out', 'in_review'].includes(phaseOf(primary));
-  const expandable = count > 0 || storeLive != null;
+  // Debug: expansion lists recent builds — only worth a chevron beyond the
+  // newest one already on the row.
+  const expandable = debugDeploy ? recent.length > 1 : count > 0 || storeLive != null;
   return (
     <>
       <tr
@@ -317,11 +345,17 @@ function AppRow({
           <span className="inline-flex flex-col gap-1 leading-none">
             <span className="inline-flex items-center gap-1.5 flex-wrap">
               {primary ? (
-                <PhaseChip release={primary} pulsing={pulsing} />
+                debugDeploy ? (
+                  <ReleaseStatusBadge release={primary} />
+                ) : (
+                  <PhaseChip release={primary} pulsing={pulsing} />
+                )
               ) : storeLive ? (
                 <StoreLiveChip />
               ) : (
-                <span className="text-xs text-zinc-400">no active builds</span>
+                <span className="text-xs text-zinc-400">
+                  {debugDeploy ? 'no builds yet' : 'no active builds'}
+                </span>
               )}
               {!slots.live && storeLive && primary && (
                 <span
@@ -411,7 +445,33 @@ function AppRow({
             <div id={panelId} className={cn('expand-panel', expanded && 'open')}>
               <div>
                 <div className="flex flex-col gap-1.5 pl-1 border-l-2 border-violet-200 ml-6 my-2 mr-4">
-                  {SLOT_DEFS.map((def) => {
+                  {debugDeploy
+                    ? recent.map((r, ri) => (
+                        <div key={r.id} className="flex items-center gap-3 pl-3 py-1 text-xs">
+                          <span className="w-14 text-[9px] font-bold uppercase tracking-wider text-zinc-400">
+                            {ri === 0 ? 'Latest' : 'Build'}
+                          </span>
+                          <ReleaseStatusBadge release={r} />
+                          <span className="font-mono font-medium text-zinc-800">
+                            {r.new_version} {formatBuildCode(r.release_context?.version_code)}
+                          </span>
+                          <span className="ml-auto font-mono text-[10px] text-zinc-400 whitespace-nowrap">
+                            {formatDate(r.date_created)}
+                          </span>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onOpen(r);
+                            }}
+                            title="Open"
+                            aria-label={`Open build ${r.new_version}`}
+                            className="text-zinc-400 hover:text-zinc-900 cursor-pointer"
+                          >
+                            <ArrowUpRightIcon size={14} weight="bold" aria-hidden="true" />
+                          </button>
+                        </div>
+                      ))
+                    : SLOT_DEFS.map((def) => {
                     const r = slots[def.key];
                     const laneCls =
                       def.key === 'live'

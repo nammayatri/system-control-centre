@@ -141,6 +141,7 @@ library
       Products.Autopilot.Workflow.StageHelpers
       Products.Autopilot.Workflow.Types
       Products.ConfigCatalog
+      Products.Mobile.Types.Permission
       Products.Registry
       Products.Types
       Shared.API.Response

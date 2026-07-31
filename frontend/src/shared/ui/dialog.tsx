@@ -54,6 +54,11 @@ export const DialogContent = React.forwardRef<
       className={cn(
         // Base
         'fixed z-50 bg-white flex flex-col shadow-2xl',
+        // A direct-child <form> (Body+Footer wrapped for submit) must carry the
+        // flex chain, or min-height:auto makes it grow past max-h and the
+        // DialogBody scroll never engages — the dialog then clips off-screen
+        // on short viewports.
+        '[&>form]:flex [&>form]:flex-col [&>form]:min-h-0 [&>form]:overflow-hidden',
         // Mobile: bottom sheet (full width, anchored to bottom)
         fullScreenOnMobile
           ? 'inset-x-0 bottom-0 max-h-[92vh] w-full rounded-t-2xl border-t border-zinc-200'

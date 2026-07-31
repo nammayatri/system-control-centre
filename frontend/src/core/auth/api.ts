@@ -154,8 +154,8 @@ export async function revokeDeploymentAccess(
   productSlug: string,
   appGroup: string
 ): Promise<any> {
-  // appGroup may contain '/' (mobile keys "NammaYatri/android", wildcard
-  // "mobile/*") — encode so it stays one path segment.
+  // appGroup may contain '/' (mobile keys "NammaYatri/android") — encode so
+  // it stays one path segment.
   const { data } = await apiClient.delete(
     `/admin/users/${userId}/deployment-access/${productSlug}/${encodeURIComponent(appGroup)}`
   );
@@ -181,6 +181,25 @@ export interface DeploymentRosterEntry {
 export async function fetchDeploymentAccessRoster(): Promise<DeploymentRosterEntry[]> {
   const { data } = await apiClient.get('/admin/deployment-access');
   return Array.isArray(data) ? data : data.deploymentAccess || [];
+}
+
+// One flat product-level grant — a whole product, no app group. The product-scope
+// twin of DeploymentRosterEntry.
+export interface ProductRosterEntry {
+  productSlug: string;
+  personId: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  roleId: string;
+  roleName: string;
+}
+
+// Reverse lookup ("who has access to product X") for the Access Control board.
+// Returns every slug in the table — callers filter to the one they render.
+export async function fetchProductAccessRoster(): Promise<ProductRosterEntry[]> {
+  const { data } = await apiClient.get('/admin/product-access');
+  return Array.isArray(data) ? data : data.productAccess || [];
 }
 
 // ─── Admin: Permission Overrides ─────────────────────────────────

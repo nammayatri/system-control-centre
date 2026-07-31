@@ -67,10 +67,10 @@ export function useReleases(
   });
 }
 
-export function useRelease(id: string | undefined) {
+export function useRelease(id: string | undefined, opts?: { mobile?: boolean }) {
   return useQuery({
     queryKey: ['release', id],
-    queryFn: () => fetchReleaseDetails(id!),
+    queryFn: () => fetchReleaseDetails(id!, opts),
     refetchInterval: (query) => {
       const status = query.state.data?.status;
       if (!status) return 10000; // still loading, poll
@@ -81,13 +81,13 @@ export function useRelease(id: string | undefined) {
   });
 }
 
-export function useReleaseEvents(id: string | undefined) {
+export function useReleaseEvents(id: string | undefined, opts?: { mobile?: boolean }) {
   // Poll while the release is active; peek at the ['release', id] cache so terminal
   // releases stop refetching events.
   const qc = useQueryClient();
   return useQuery({
     queryKey: ['release-events', id],
-    queryFn: () => fetchReleaseEvents(id!),
+    queryFn: () => fetchReleaseEvents(id!, opts),
     refetchInterval: () => {
       const release = qc.getQueryData<any>(['release', id]);
       const status = release?.status;

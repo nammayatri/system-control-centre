@@ -5,8 +5,8 @@
 
 {- | HTTP handlers for the @app_catalog@ endpoints (list/create/patch).
 
-Permissions: list is gated by 'AP_RELEASE_VIEW' (any operator); create
-and patch require 'AP_MOBILE_APP_MANAGE' (admin).
+Permissions: list is gated by 'MB_RELEASE_VIEW' (any operator); create
+and patch require 'MB_MOBILE_APP_MANAGE' (admin).
 -}
 module Products.Autopilot.Mobile.Handlers.AppCatalog (
     AppCatalogEntryResp (..),
@@ -37,7 +37,7 @@ import Data.Proxy (Proxy (..))
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Auth (requireAppPerm, requireProductPerm)
-import Products.Autopilot.Types.Permission (AutopilotPermission (..))
+import Products.Mobile.Types.Permission (MobilePermission (..))
 import Products.Types (allPermissionsText)
 import Products.Autopilot.Mobile.Queries.AppCatalog
 import Products.Autopilot.Mobile.Queries.StoreStatus (listStoreStatus)
@@ -151,9 +151,9 @@ mobileAccessH ap = do
         keyOf a = appGrantKey (acName a) (acPlatform a)
     permsFor <-
         if apIsSuperadmin ap
-            then pure (\_ -> allPermissionsText "autopilot")
+            then pure (\_ -> allPermissionsText "mobile")
             else do
-                uni <- computeEffectivePermissionsForAppGroups (apPersonId ap) "autopilot" (nub (map keyOf catalog))
+                uni <- computeEffectivePermissionsForAppGroups (apPersonId ap) "mobile" (nub (map keyOf catalog))
                 legacy <- computeEffectivePermissionsForAppGroups (apPersonId ap) "airborne-ota" (nub (mapMaybe acAirborneAppRef catalog))
                 pure $ \a ->
                     fromMaybe [] (lookup (keyOf a) uni)
@@ -270,7 +270,7 @@ listAppsH _ap = do
 -- per-app deployment fallback must not qualify.
 createAppH :: AuthedPerson -> NewAppReq -> Flow AppCatalogEntryResp
 createAppH ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, workflowPath = w, packageName = pkg, displayLabel = d, firebaseProjectId = fbp, enabled = e} = do
-    requireProductPerm (Proxy @'AP_MOBILE_APP_MANAGE) ap
+    requireProductPerm (Proxy @'MB_MOBILE_APP_MANAGE) ap
     let row =
             NewAppCatalogRow
                 { nacName = n
@@ -290,7 +290,7 @@ createAppH ap NewAppReq{name = n, surface = s, platform = p, githubRepo = g, wor
 patchAppH :: AuthedPerson -> Int32 -> PatchAppReq -> Flow AppCatalogEntryResp
 patchAppH ap aid PatchAppReq{enabled = e, displayLabel = d, packageName = pkg, firebaseProjectId = fbp, workflowPath = w, airborneAppRef = ref} = do
     target <- findAppCatalogById aid >>= maybe (throwM $ NotFound "app_catalog row not found") pure
-    requireAppPerm (Proxy @'AP_MOBILE_APP_MANAGE) ap (acName target) (acPlatform target)
+    requireAppPerm (Proxy @'MB_MOBILE_APP_MANAGE) ap (acName target) (acPlatform target)
     let patch =
             PatchAppCatalogRow
                 { pacEnabled = e
