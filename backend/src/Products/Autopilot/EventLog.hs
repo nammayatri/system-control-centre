@@ -14,6 +14,7 @@ module Products.Autopilot.EventLog (
     logTrafficUpdatedWithMessage,
     logDecisionResult,
     logStatusUpdated,
+    logAbortTriggered,
     encodeProdRolloutHistory,
 
     -- * Event categories
@@ -44,6 +45,7 @@ module Products.Autopilot.EventLog (
     evConfigmapSyncRequest,
     evConfigmapSyncResponse,
     evConfigmapSyncFailed,
+    evAbortTriggered,
     evVsOld,
     evVsNew,
     evVsLockFailed,
@@ -165,6 +167,19 @@ logStatusUpdated rt message = do
                 ]
     insertReleaseEvent (releaseId rt) "NOTIFICATION" "STATUS_UPDATED" payload
 
+logAbortTriggered :: (MonadFlow m) => Text -> Text -> Text -> Text -> m ()
+logAbortTriggered rid triggeredBy actor reason =
+    insertReleaseEvent
+        rid
+        evCategoryBusiness
+        evAbortTriggered
+        ( object
+            [ "triggeredBy" .= triggeredBy
+            , "actor" .= actor
+            , "reason" .= reason
+            ]
+        )
+
 statusText :: ReleaseTracker -> Text
 statusText = releaseStatusToText . status
 
@@ -210,7 +225,8 @@ evTrafficUpdated
     , evRollbackRequested
     , evImmediateRevert
     , evRunnerPicked
-    , evCompleted ::
+    , evCompleted
+    , evAbortTriggered ::
         Text
 evTrafficUpdated = "TRAFFIC_UPDATED"
 evSyncRequest = "SYNC_REQUEST"
@@ -246,6 +262,7 @@ evRollbackRequested = "ROLLBACK_REQUESTED"
 evImmediateRevert = "IMMEDIATE_REVERT"
 evRunnerPicked = "RUNNER_PICKED"
 evCompleted = "COMPLETED"
+evAbortTriggered = "ABORT_TRIGGERED"
 
 evDecisionResult :: Text
 evDecisionResult = "DECISION_RESULT"
