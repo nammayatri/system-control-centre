@@ -18,7 +18,7 @@ Each row's resolution uses 'Mobile.Versioning.resolveNextVersion', so
 adding more platforms later means extending the dispatcher in one
 place rather than touching this handler.
 
-Permission: 'AP_RELEASE_CREATE' — same gate as planning a release. We
+Permission: 'MB_RELEASE_CREATE' — same gate as planning a release. We
 deliberately don't carve out a separate version-preview permission.
 -}
 module Products.Autopilot.Mobile.Handlers.Versions (
@@ -34,7 +34,6 @@ import Core.Environment (Flow)
 import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericToJSON)
 import Data.Int (Int32)
 import Data.Text (Text)
-import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Queries.AppCatalog (findAppCatalogById)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..))

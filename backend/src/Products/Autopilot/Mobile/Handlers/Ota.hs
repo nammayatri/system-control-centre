@@ -15,7 +15,7 @@ creation is the one composed mutation (Decision B): conflict preflight →
 upstream create → link row → audit → optional ramp. Everything else about
 releases is served by the airborne BFF, not here.
 
-Build verbs are autopilot RBAC ('AP_MOBILE_DISPATCH'); release creation
+Build verbs are autopilot RBAC ('MB_MOBILE_DISPATCH'); release creation
 checks airborne-ota grants per ref in-handler — no permission bridge.
 -}
 module Products.Autopilot.Mobile.Handlers.Ota (
@@ -86,7 +86,7 @@ import Products.Autopilot.Mobile.Github.Auth (GhAppCreds, loadGhCreds)
 import Products.Autopilot.Mobile.Provenance (ancestryCacheRef, cacheGet, cachePut, resolveAnchor, resolveMissingBranchesViaRuns, splitRepo, verifyAndAdoptBranch)
 import Products.Autopilot.Mobile.Auth (requireAppPerm, requireAppPermAll)
 import Products.Autopilot.Mobile.Queries.AppCatalog (appGrantKey, findAppByAirborneRef, listAppCatalog, listEnabledAppCatalog, normalizeAppSegment)
-import Products.Autopilot.Types.Permission (AutopilotPermission (..))
+import Products.Mobile.Types.Permission (MobilePermission (..))
 import Products.Autopilot.Mobile.Queries.OtaPush
 import Products.Autopilot.Mobile.Queries.StoreStatus (StoreCell (..), storeCellsForApp)
 import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..), MobileBuildWFStatus (..), isDebugBuildType, mbcBuildType)
@@ -131,7 +131,7 @@ app_catalog.airborne_app_ref).
 requireOtaPerm :: forall perm. (KnownPermission perm) => Proxy perm -> AuthedPerson -> Text -> Flow ()
 requireOtaPerm proxy ap ref = do
     mApp <- findAppByAirborneRef ref
-    let unified = [("autopilot", appGrantKey (acName a) (acPlatform a)) | Just a <- [mApp]]
+    let unified = [("mobile", appGrantKey (acName a) (acPlatform a)) | Just a <- [mApp]]
     requireDeploymentPermissionScopes proxy ap (("airborne-ota", ref) : unified)
 
 nsOf :: Text -> Text
@@ -567,7 +567,7 @@ dispatchOtaH ap gid OtaDispatchReq{versionBump = bump, apps = mApps, platforms =
                     [ Rel.appGroup rt <> "/" <> Rel.env rt <> " (" <> fromMaybe "not on store" r <> ")"
                     | (rt, r) <- ineligible
                     ]
-    requireAppPermAll (Proxy @'AP_MOBILE_DISPATCH) ap [(Rel.appGroup rt, Rel.env rt) | (rt, _, True, _) <- gated]
+    requireAppPermAll (Proxy @'MB_MOBILE_DISPATCH) ap [(Rel.appGroup rt, Rel.env rt) | (rt, _, True, _) <- gated]
     -- Global serialization (Decision D): advisory lock around check+insert+dispatch.
     gotLock <- tryAdvisoryLockShared "ota-dispatch"
     unless gotLock $ throwM (Conflict "another OTA dispatch is being processed — retry in a moment")
@@ -876,7 +876,7 @@ the queue locked, so it's logged and ignored.
 cancelOtaPushH :: AuthedPerson -> Text -> Flow OtaPushResp
 cancelOtaPushH ap pid = do
     p <- findOtaPushById pid >>= maybe (throwM (NotFound "OTA push not found")) pure
-    requireAppPerm (Proxy @'AP_MOBILE_DISPATCH) ap (opAppName p) (opPlatform p)
+    requireAppPerm (Proxy @'MB_MOBILE_DISPATCH) ap (opAppName p) (opPlatform p)
     when (opStatus p `elem` (["BUNDLE_PUSHED", "FAILED"] :: [Text])) $
         throwM (BadRequest "push is already terminal")
     forM_ (opExternalRunId p) $ \runId ->
@@ -946,7 +946,7 @@ otaPushJobsH _ap pid = do
 attachPackageH :: AuthedPerson -> Text -> OtaAttachReq -> Flow OtaPushResp
 attachPackageH ap pid (OtaAttachReq pkgVersion) = do
     p <- findOtaPushById pid >>= maybe (throwM (NotFound "OTA push not found")) pure
-    requireAppPerm (Proxy @'AP_MOBILE_DISPATCH) ap (opAppName p) (opPlatform p)
+    requireAppPerm (Proxy @'MB_MOBILE_DISPATCH) ap (opAppName p) (opPlatform p)
     let hdrs = scopeHdrs (opAirborneAppRef p)
     -- Validate against the live package list before trusting the operator.
     body <-
@@ -1074,5 +1074,5 @@ adoptOtaBranchH ap gid OtaAdoptBranchReq{airborneAppRef = reqRef, branch = pick,
     (rt, ac) <-
         maybe (throwM (NotFound ("no app with airborne ref " <> reqRef <> " in this group"))) pure $
             find (\(_, a) -> acAirborneAppRef a == Just reqRef) (gcCapable ctx)
-    requireAppPerm (Proxy @'AP_MOBILE_APP_MANAGE) ap (acName ac) (acPlatform ac)
+    requireAppPerm (Proxy @'MB_MOBILE_APP_MANAGE) ap (acName ac) (acPlatform ac)
     verifyAndAdoptBranch ap rt ac pick mAck

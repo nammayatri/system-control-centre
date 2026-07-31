@@ -7,6 +7,7 @@ import { OtaStatusBadge } from '../components/OtaStatusBadge';
 import { Skeleton } from '../../../shared/ui/skeleton';
 import { formatDate } from '../../../lib/utils';
 import { usePermissions } from '../../../core/auth/PermissionsContext';
+import { OtaErrorState } from '../components/OtaErrorState';
 
 const RECENT_COUNT = 5;
 
@@ -50,7 +51,7 @@ export default function OtaAppOverview() {
   // per-app join (the airborne↔mobile slug alignment is convention, not a
   // stored FK), so this links to the console, not a pre-filtered app.
   const canSeeMobile =
-    (userPermissions['autopilot']?.length ?? 0) > 0 || hasAnyDeploymentAccess('autopilot');
+    (userPermissions['mobile']?.length ?? 0) > 0 || hasAnyDeploymentAccess('mobile');
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12 space-y-4">
@@ -68,9 +69,7 @@ export default function OtaAppOverview() {
       )}
 
       {error && !data ? (
-        <div className="rounded-xl border border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950/40 px-4 py-3 text-sm text-red-700 dark:text-red-300">
-          Failed to load releases for this app. Refresh to retry.
-        </div>
+        <OtaErrorState error={error} what="this app" />
       ) : (
         <>
           {/* Stat cards */}

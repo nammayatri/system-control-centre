@@ -50,7 +50,7 @@ interface SidebarProps {
 
 const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle, onItemClick, forceExpanded }) => {
   const location = useLocation();
-  const { user } = useAuth();
+  const { user, buildType } = useAuth();
   const { isAdmin, hasPermission, hasAnyDeploymentAccess } = usePermissions();
 
   // When inside the mobile drawer, always behave as expanded.
@@ -77,7 +77,9 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle, onItemClick, for
   };
 
   const visibleProducts = PRODUCT_REGISTRY.filter(
-    (p) => hasPermission(p.slug, p.viewPermission) || hasAnyDeploymentAccess(p.slug)
+    (p) =>
+      !(p.hideOnDebug && buildType === 'debug') &&
+      (hasPermission(p.slug, p.viewPermission) || hasAnyDeploymentAccess(p.slug))
   );
 
   const renderProductSection = (product: ProductDefinition) => {

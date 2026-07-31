@@ -6,9 +6,9 @@
 {- | Per-app permission checks for mobile verbs (unified grant model).
 
 A grant is one sc_person_deployment_access row
-(product_slug=autopilot, app_group=\"\<name\>\/\<platform\>\") whose role may
-carry both AP_* and OTA_* permissions. 'requireAppPerm' passes for holders
-of that grant AND for product-level autopilot role holders — the fallback
+(product_slug=mobile, app_group=\"\<name\>\/\<platform\>\") whose role may
+carry both MB_* and OTA_* permissions. 'requireAppPerm' passes for holders
+of that grant AND for product-level mobile role holders — the fallback
 to the product baseline lives in 'computeEffectivePermissionsForAppGroup',
 so a fleet-wide role needs no special-casing here.
 -}
@@ -34,7 +34,7 @@ import Products.Autopilot.Mobile.Queries.AppCatalog (appGrantKey)
 requireAppPerm ::
     forall perm m. (KnownPermission perm, MonadFlow m) => Proxy perm -> AuthedPerson -> Text -> Text -> m ()
 requireAppPerm proxy ap name platform =
-    requireDeploymentPermissionScopes proxy ap [("autopilot", appGrantKey name platform)]
+    requireDeploymentPermissionScopes proxy ap [("mobile", appGrantKey name platform)]
 
 {- | Multi-target operations: every (name, platform) must be granted; the
 first refusal aborts naming the offending app, so a partially-granted

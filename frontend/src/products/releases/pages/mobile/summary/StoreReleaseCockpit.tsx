@@ -103,8 +103,8 @@ export function StoreReleaseCockpit({ release, rollout: d, scenario, statusLabel
   const stage = d ? stageOf(lifecycleFromRollout(d)) : 'none';
   const promoteReady = stage === 'promote' && !!d?.rdPromotable;
 
-  const canPromote = hasPermission('autopilot', 'RELEASE_PROMOTE', appKey);
-  const canRollout = hasPermission('autopilot', 'RELEASE_ROLLOUT', appKey);
+  const canPromote = hasPermission('mobile', 'MB_RELEASE_PROMOTE', appKey);
+  const canRollout = hasPermission('mobile', 'MB_RELEASE_ROLLOUT', appKey);
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['mobile-rollout', releaseId] });

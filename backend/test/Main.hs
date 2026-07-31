@@ -74,6 +74,7 @@ import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), ProdTra
 import Products.Autopilot.Queries.ReleaseTracker (keepSnapshot)
 import Products.Autopilot.Mobile.Workflow (codeFromTag, electDispatchLeader, reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
 import Products.AirborneOta.Types.Permission (OtaPermission (..))
+import Products.Mobile.Types.Permission (MobilePermission (..), mobilePermissionToText, textToMobilePermission)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
 import qualified Products.Autopilot.Types.Target
@@ -443,11 +444,10 @@ testPermissions = do
         AutopilotPerm AP_PRODUCT_CONFIG_EDIT `notElem` viewerPerms
     assertBool "Viewer DOES NOT have FORCE_UNLOCK (superadmin)" $
         AutopilotPerm AP_FORCE_UNLOCK `notElem` viewerPerms
-    -- 3 autopilot view perms + OTA_VIEW (autopilot's universe includes the
-    -- OTA family for the unified per-app grant model).
-    assertBool "Viewer has OTA_VIEW" $
-        OtaPerm OTA_VIEW `elem` viewerPerms
-    assertEqual "Viewer has exactly 4 permissions" 4 (length viewerPerms)
+    -- 2026-07-31 split: autopilot is backend-only — no OTA family here.
+    assertBool "Viewer DOES NOT have OTA_VIEW (moved to mobile)" $
+        OtaPerm OTA_VIEW `notElem` viewerPerms
+    assertEqual "Viewer has exactly 3 permissions" 3 (length viewerPerms)
 
     -- Manager = all except *_EDIT (per defaultPermissions in Products/Types.hs)
     assertBool "Manager has RELEASE_VIEW" $
@@ -464,20 +464,41 @@ testPermissions = do
         AutopilotPerm AP_SERVICE_CONFIG_EDIT `notElem` managerPerms
     assertBool "Manager DOES NOT have RELEASE_DELETE" $
         AutopilotPerm AP_RELEASE_DELETE `notElem` managerPerms
-    assertBool "Manager DOES NOT have MOBILE_APP_MANAGE" $
-        AutopilotPerm AP_MOBILE_APP_MANAGE `notElem` managerPerms
-    assertBool "Manager has MOBILE_DISPATCH" $
-        AutopilotPerm AP_MOBILE_DISPATCH `elem` managerPerms
-    assertBool "Manager has OTA_RELEASE_CREATE" $
-        OtaPerm OTA_RELEASE_CREATE `elem` managerPerms
-    assertBool "Manager DOES NOT have OTA_RELEASE_DISCARD" $
-        OtaPerm OTA_RELEASE_DISCARD `notElem` managerPerms
-    assertBool "Manager DOES NOT have OTA_APP_MANAGE" $
-        OtaPerm OTA_APP_MANAGE `notElem` managerPerms
     assertEqual
-        "Manager has all perms minus the 6 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE, MOBILE_APP_MANAGE, OTA_RELEASE_DISCARD, OTA_APP_MANAGE)"
-        (length allPerms - 6)
+        "Manager has all perms minus the 3 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE)"
+        (length allPerms - 3)
         (length managerPerms)
+
+    -- ── Mobile product (2026-07-31 split): MB_* + the whole OTA family ──
+    let mobileAll = allPermissions Mobile
+        mobileAdmin = defaultPermissions Admin Mobile
+        mobileManager = defaultPermissions Manager Mobile
+        mobileViewer = defaultPermissions Viewer Mobile
+    assertEqual "Mobile Admin == allPermissions Mobile" (sort mobileAll) (sort mobileAdmin)
+    assertEqual
+        "Mobile universe = 9 MB + 9 OTA"
+        18
+        (length mobileAll)
+    assertEqual
+        "Mobile Viewer = MB_RELEASE_VIEW + OTA_VIEW"
+        (sort [MobilePerm MB_RELEASE_VIEW, OtaPerm OTA_VIEW])
+        (sort mobileViewer)
+    assertBool "Mobile Manager has MB_MOBILE_DISPATCH" $
+        MobilePerm MB_MOBILE_DISPATCH `elem` mobileManager
+    assertBool "Mobile Manager has MB_RELEASE_ABORT" $
+        MobilePerm MB_RELEASE_ABORT `elem` mobileManager
+    assertBool "Mobile Manager has OTA_RELEASE_CREATE" $
+        OtaPerm OTA_RELEASE_CREATE `elem` mobileManager
+    assertBool "Mobile Manager DOES NOT have MB_MOBILE_APP_MANAGE" $
+        MobilePerm MB_MOBILE_APP_MANAGE `notElem` mobileManager
+    assertBool "Mobile Manager DOES NOT have OTA_RELEASE_DISCARD" $
+        OtaPerm OTA_RELEASE_DISCARD `notElem` mobileManager
+    assertBool "Mobile Manager DOES NOT have OTA_APP_MANAGE" $
+        OtaPerm OTA_APP_MANAGE `notElem` mobileManager
+    assertEqual
+        "Mobile Manager = all minus 3 restricted (MB_MOBILE_APP_MANAGE, OTA_RELEASE_DISCARD, OTA_APP_MANAGE)"
+        (length mobileAll - 3)
+        (length mobileManager)
 
     -- permissionToText round-trip for a few constructors
     assertEqual
@@ -504,9 +525,13 @@ testPermissions = do
         (length allPerms)
         (length (defaultPermissionsText "autopilot" "Admin"))
     assertEqual
-        "defaultPermissionsText Viewer = 4 (3 autopilot views + OTA_VIEW)"
-        4
+        "defaultPermissionsText Viewer = 3 (autopilot is backend-only post-split)"
+        3
         (length (defaultPermissionsText "autopilot" "Viewer"))
+    assertEqual
+        "defaultPermissionsText mobile Viewer = 2 (MB_RELEASE_VIEW + OTA_VIEW)"
+        2
+        (length (defaultPermissionsText "mobile" "Viewer"))
     assertBool "defaultPermissionsText unknown product is empty" $
         null (defaultPermissionsText "nonexistent" "Admin")
     assertBool "defaultPermissionsText unknown role is empty" $
@@ -915,25 +940,32 @@ testReleaseCategoryMobileBuild = do
 testMobilePermissionsExist :: IO ()
 testMobilePermissionsExist = do
     putStrLn "Mobile permissions: enum membership + text round-trip"
-    let perms = [minBound .. maxBound :: AutopilotPermission]
-    assertBool "AP_MOBILE_DISPATCH in enum" (AP_MOBILE_DISPATCH `elem` perms)
-    assertBool "AP_MOBILE_APP_MANAGE in enum" (AP_MOBILE_APP_MANAGE `elem` perms)
+    let perms = [minBound .. maxBound :: MobilePermission]
+    assertBool "MB_MOBILE_DISPATCH in enum" (MB_MOBILE_DISPATCH `elem` perms)
+    assertBool "MB_MOBILE_APP_MANAGE in enum" (MB_MOBILE_APP_MANAGE `elem` perms)
+    assertBool "MB_RELEASE_ABORT in enum" (MB_RELEASE_ABORT `elem` perms)
     assertEqual
-        "AP_MOBILE_DISPATCH textual"
-        "MOBILE_DISPATCH"
-        (autopilotPermissionToText AP_MOBILE_DISPATCH)
+        "MB_MOBILE_DISPATCH textual (wire == constructor)"
+        "MB_MOBILE_DISPATCH"
+        (mobilePermissionToText MB_MOBILE_DISPATCH)
     assertEqual
-        "AP_MOBILE_APP_MANAGE textual"
-        "MOBILE_APP_MANAGE"
-        (autopilotPermissionToText AP_MOBILE_APP_MANAGE)
+        "MB_RELEASE_ABORT textual (wire == constructor)"
+        "MB_RELEASE_ABORT"
+        (mobilePermissionToText MB_RELEASE_ABORT)
     assertEqual
-        "round-trip MOBILE_DISPATCH"
-        (Just AP_MOBILE_DISPATCH)
-        (textToAutopilotPermission "MOBILE_DISPATCH")
+        "round-trip MB_MOBILE_DISPATCH"
+        (Just MB_MOBILE_DISPATCH)
+        (textToMobilePermission "MB_MOBILE_DISPATCH")
     assertEqual
-        "round-trip MOBILE_APP_MANAGE"
-        (Just AP_MOBILE_APP_MANAGE)
-        (textToAutopilotPermission "MOBILE_APP_MANAGE")
+        "round-trip MB_MOBILE_APP_MANAGE"
+        (Just MB_MOBILE_APP_MANAGE)
+        (textToMobilePermission "MB_MOBILE_APP_MANAGE")
+    -- Old autopilot spellings are NOT in mobile's vocabulary (migration
+    -- rewrites them to MB_*).
+    assertEqual
+        "pre-split spelling rejected"
+        Nothing
+        (textToMobilePermission "MOBILE_DISPATCH")
 
 -- ============================================================================
 -- [18] MobileBuildWFStatus State Machine
@@ -1035,6 +1067,7 @@ testClaimsStoreIdentity = do
                 , mbcBuildType = bt
                 , mbcReleaseGroupId = "g"
                 , mbcMatrixJobName = "j"
+                , mbcStoreObserved = Nothing
                 , mbcOtaNamespace = Nothing
                 , mbcTagPushed = Nothing
                 , mbcDestination = dest
@@ -1190,6 +1223,7 @@ testMobileBuildContextJsonRoundTrip = do
                 , mbcBuildType = "release"
                 , mbcReleaseGroupId = "rg_abc"
                 , mbcMatrixJobName = "NammaYatri-Release"
+                , mbcStoreObserved = Nothing
                 , mbcOtaNamespace = Just "nammayatriv2"
                 , mbcTagPushed = Nothing
                 , mbcDestination = Nothing

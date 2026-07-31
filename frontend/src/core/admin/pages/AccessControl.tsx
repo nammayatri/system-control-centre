@@ -51,11 +51,22 @@ const roleIdsByName = (rs: any[]): Record<string, string> =>
 // in one Board, product scope keyed under a sentinel no real app group can use,
 // so lanes, drag/drop, keyboard moves and the pending diff need no branching —
 // only the persist step distinguishes the two.
-const PRODUCT_SCOPE = '__product__';
+// Product boards are keyed per slug so pending edits on one product's board
+// can never bleed into another's.
+const PRODUCT_SCOPE_PREFIX = '__product__:';
+const productScopeKey = (slug: string) => `${PRODUCT_SCOPE_PREFIX}${slug}`;
+const isProductScopeKey = (ag: string) => ag.startsWith(PRODUCT_SCOPE_PREFIX);
+const productSlugOfScope = (ag: string) => ag.slice(PRODUCT_SCOPE_PREFIX.length);
 const AUTOPILOT_SLUG = 'autopilot';
-type Tab = 'autopilot' | 'deployment';
+const MOBILE_SLUG = 'mobile';
+const PRODUCT_LABEL: Record<string, string> = {
+  [AUTOPILOT_SLUG]: 'Autopilot',
+  [MOBILE_SLUG]: 'Mobile (builds · OTA)',
+};
+type Tab = 'autopilot' | 'mobile' | 'deployment';
 const TABS: { key: Tab; label: string }[] = [
   { key: 'autopilot', label: 'Autopilot' },
+  { key: 'mobile', label: 'Mobile' },
   { key: 'deployment', label: 'Deployment' },
 ];
 
@@ -214,25 +225,33 @@ const AccessControl: React.FC = () => {
     queryFn: () => fetchProductRoles(defaultProductSlug),
     enabled: !!defaultProductSlug,
   });
-  // The product board must map lane → roleId through Autopilot's roles, not
-  // whichever product sorts first: assignRoleH accepts any roleId for any
-  // productSlug without checking they match. Shares the key above while autopilot
-  // is the only product, so this costs no extra request.
+  // Each product board must map lane → roleId through ITS OWN roles:
+  // assignRoleH accepts any roleId for any productSlug without checking they
+  // match.
   const autopilotRolesQ = useQuery({
     queryKey: ['admin-product-roles', AUTOPILOT_SLUG],
     queryFn: () => fetchProductRoles(AUTOPILOT_SLUG),
   });
+  const mobileRolesQ = useQuery({
+    queryKey: ['admin-product-roles', MOBILE_SLUG],
+    queryFn: () => fetchProductRoles(MOBILE_SLUG),
+  });
   const roles = rolesQ.data ?? [];
   const autopilotRoles = autopilotRolesQ.data ?? [];
+  const mobileRoles = mobileRolesQ.data ?? [];
 
   // ── Derived lookups ────────────────────────────────────────────────
   // sc_person_product_access has no FK to the product registry, so it can hold
-  // slugs the app no longer serves — keep only autopilot's.
+  // slugs the app no longer serves — keep only the boarded products'.
   const original: Board = useMemo(() => {
-    const m: Board = { [PRODUCT_SCOPE]: {} };
+    const m: Board = {
+      [productScopeKey(AUTOPILOT_SLUG)]: {},
+      [productScopeKey(MOBILE_SLUG)]: {},
+    };
     for (const e of roster) (m[e.appGroup] ||= {})[e.personId] = e.roleName;
     for (const e of productRoster) {
-      if (e.productSlug === AUTOPILOT_SLUG) m[PRODUCT_SCOPE][e.personId] = e.roleName;
+      if (e.productSlug === AUTOPILOT_SLUG || e.productSlug === MOBILE_SLUG)
+        m[productScopeKey(e.productSlug)][e.personId] = e.roleName;
     }
     return m;
   }, [roster, productRoster]);
@@ -256,7 +275,13 @@ const AccessControl: React.FC = () => {
   }, [users, roster, productRoster]);
 
   const roleIdByName = useMemo(() => roleIdsByName(roles), [roles]);
-  const autopilotRoleIdByName = useMemo(() => roleIdsByName(autopilotRoles), [autopilotRoles]);
+  const productRoleIdsBySlug = useMemo<Record<string, Record<string, string>>>(
+    () => ({
+      [AUTOPILOT_SLUG]: roleIdsByName(autopilotRoles),
+      [MOBILE_SLUG]: roleIdsByName(mobileRoles),
+    }),
+    [autopilotRoles, mobileRoles],
+  );
 
   const productSlugByAg = useMemo(() => {
     const m: Record<string, string> = {};
@@ -266,11 +291,11 @@ const AccessControl: React.FC = () => {
   const productSlugFor = (ag: string) => productSlugByAg[ag] || defaultProductSlug;
 
   // Every deployment worth listing: configured app groups ∪ any that already
-  // carry a grant, sorted alphabetically. PRODUCT_SCOPE isn't a deployment.
+  // carry a grant, sorted alphabetically. Product scopes aren't deployments.
   const allAgs = useMemo(() => {
     const s = new Set<string>([
       ...(appGroups as string[]),
-      ...Object.keys(original).filter((k) => k !== PRODUCT_SCOPE),
+      ...Object.keys(original).filter((k) => !isProductScopeKey(k)),
     ]);
     return [...s].sort((a, b) => a.localeCompare(b));
   }, [appGroups, original]);
@@ -341,9 +366,9 @@ const AccessControl: React.FC = () => {
   // ── Persist ─────────────────────────────────────────────────────────
   const confirmMut = useMutation({
     mutationFn: async ({ ag, changes }: { ag: string; changes: PendingChange[] }) => {
-      const isProduct = ag === PRODUCT_SCOPE;
-      const productSlug = isProduct ? AUTOPILOT_SLUG : productSlugFor(ag);
-      const roleIds = isProduct ? autopilotRoleIdByName : roleIdByName;
+      const isProduct = isProductScopeKey(ag);
+      const productSlug = isProduct ? productSlugOfScope(ag) : productSlugFor(ag);
+      const roleIds = isProduct ? (productRoleIdsBySlug[productSlug] ?? {}) : roleIdByName;
       for (const c of changes) {
         if (c.type === 'assign') {
           const roleId = roleIds[c.roleName];
@@ -357,7 +382,9 @@ const AccessControl: React.FC = () => {
       }
     },
     onSuccess: (_d, vars) => {
-      const scope = vars.ag === PRODUCT_SCOPE ? 'Autopilot' : vars.ag;
+      const scope = isProductScopeKey(vars.ag)
+        ? (PRODUCT_LABEL[productSlugOfScope(vars.ag)] ?? productSlugOfScope(vars.ag))
+        : vars.ag;
       toast.success(
         `Saved ${vars.changes.length} change${vars.changes.length > 1 ? 's' : ''} for ${scope}`
       );
@@ -438,7 +465,7 @@ const AccessControl: React.FC = () => {
   // Bridge the module-level UserCard to this deployment's handlers/lookups.
   const renderCard = (ag: string, personId: string, role: string, roleBadge?: string) => {
     const key = `${ag}:${personId}`;
-    const isProduct = ag === PRODUCT_SCOPE;
+    const isProduct = isProductScopeKey(ag);
     return (
       <UserCard
         key={personId}
@@ -499,10 +526,10 @@ const AccessControl: React.FC = () => {
 
   const visibleAgs = allAgs.filter((ag) => !search || ag.toLowerCase().includes(search.toLowerCase()));
 
-  // The search box filters deployment names on the Deployment tab; on Autopilot
-  // there are none, so it filters users within the lanes instead.
-  const isProductTab = tab === 'autopilot';
-  const shownAgs = isProductTab ? [PRODUCT_SCOPE] : visibleAgs;
+  // The search box filters deployment names on the Deployment tab; on product
+  // tabs there are none, so it filters users within the lanes instead.
+  const isProductTab = tab !== 'deployment';
+  const shownAgs = isProductTab ? [productScopeKey(tab)] : visibleAgs;
   const matchesUserSearch = (pid: string) => {
     if (!search) return true;
     const q = search.toLowerCase();
@@ -532,9 +559,11 @@ const AccessControl: React.FC = () => {
         Drag a user — or select a card and press ← / → — to move them between Viewer, Manager and
         Admin and restage their role, then Confirm to save. Add a user to a lane with the ＋ icon in
         its header.{' '}
-        {isProductTab
-          ? 'These grants cover all of Autopilot, independent of any app group.'
-          : 'Only explicit deployment-level grants are shown.'}
+        {tab === 'autopilot'
+          ? 'These grants cover all of Autopilot (backend), independent of any deployment.'
+          : tab === 'mobile'
+            ? 'These grants cover every mobile app fleet-wide — builds AND OTA. Per-app grants live on the user page.'
+            : 'Only explicit deployment-level grants are shown.'}
       </p>
 
       {/* Scope tabs */}
@@ -592,7 +621,7 @@ const AccessControl: React.FC = () => {
       ) : (
         <div className="space-y-3">
           {shownAgs.map((ag) => {
-            const isProductScope = ag === PRODUCT_SCOPE;
+            const isProductScope = isProductScopeKey(ag);
             const cur = draft[ag] || {};
             const memberIds = Object.keys(cur);
             const changes = changesFor(ag);
@@ -615,7 +644,9 @@ const AccessControl: React.FC = () => {
             const header = (
               <>
                 <span className="text-sm font-semibold text-zinc-800">
-                  {isProductScope ? 'Autopilot — product access' : ag}
+                  {isProductScope
+                    ? `${PRODUCT_LABEL[productSlugOfScope(ag)] ?? productSlugOfScope(ag)} — product access`
+                    : ag}
                 </span>
                 <Badge variant="muted" size="sm">
                   {headerCount} {headerCount === 1 ? 'user' : 'users'}

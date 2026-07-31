@@ -69,7 +69,7 @@ import Core.AppError (APIError (..), ToAppError (..))
 import Core.Auth.Protected (AuthedPerson (..))
 import Data.Proxy (Proxy (..))
 import Products.Autopilot.Mobile.Auth (requireAppPerm)
-import Products.Autopilot.Types.Permission (AutopilotPermission (..))
+import Products.Mobile.Types.Permission (MobilePermission (..))
 import Core.Environment (Flow)
 import Data.Aeson (FromJSON, ToJSON, object, (.=))
 import Data.Int (Int32)
@@ -417,7 +417,7 @@ promoteH :: AuthedPerson -> Text -> PromoteReq -> Flow PromoteResp
 promoteH ap rid PromoteReq{..} = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
-    requireAppPerm (Proxy @'AP_RELEASE_PROMOTE) ap (acName ac) (acPlatform ac)
+    requireAppPerm (Proxy @'MB_RELEASE_PROMOTE) ap (acName ac) (acPlatform ac)
     -- Promotable from either:
     --   • an SCC release held at build-complete (MBTagPushed); or
     --   • a store-sync INTERNAL / TestFlight snapshot not yet promoted (Option A) —
@@ -697,7 +697,7 @@ releaseH :: AuthedPerson -> Text -> Flow APISuccess
 releaseH ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
-    requireAppPerm (Proxy @'AP_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
+    requireAppPerm (Proxy @'MB_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
     unless (rtEnv row == "ios") $ bad "Release is iOS-only; Android uses /rollout/set."
     unless (mbWfStatus target == MBReviewApproved) $
         bad ("Cannot release: state is " <> tshow (mbWfStatus target) <> ", expected approved (MBReviewApproved).")
@@ -747,7 +747,7 @@ rolloutSetH :: AuthedPerson -> Text -> RolloutSetReq -> Flow APISuccess
 rolloutSetH ap rid RolloutSetReq{..} = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
-    requireAppPerm (Proxy @'AP_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
+    requireAppPerm (Proxy @'MB_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
     unless (rtEnv row == "android") $ bad "/rollout/set is Android-only; iOS uses phased release."
     -- Adopt a rollout started OUTSIDE SCC: a store-sync snapshot SCC only OBSERVED as
     -- rolling out (mb_wf_status MBCompleted) can be taken over here, mirroring how a
@@ -794,7 +794,7 @@ rolloutHaltH :: AuthedPerson -> Text -> Flow APISuccess
 rolloutHaltH ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
-    requireAppPerm (Proxy @'AP_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
+    requireAppPerm (Proxy @'MB_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
     if rtEnv row == "ios"
         then do
             pid <- requirePhasedId row
@@ -832,7 +832,7 @@ rolloutResumeH :: AuthedPerson -> Text -> Flow APISuccess
 rolloutResumeH ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
-    requireAppPerm (Proxy @'AP_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
+    requireAppPerm (Proxy @'MB_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
     if rtEnv row == "ios"
         then do
             pid <- requirePhasedId row
@@ -868,7 +868,7 @@ rolloutReleaseAllH :: AuthedPerson -> Text -> Flow APISuccess
 rolloutReleaseAllH ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
-    requireAppPerm (Proxy @'AP_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
+    requireAppPerm (Proxy @'MB_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
     storeId <- storeIdOf ac
     if rtEnv row == "ios"
         then do
@@ -903,7 +903,7 @@ markApprovedH :: AuthedPerson -> Text -> Flow APISuccess
 markApprovedH ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
-    requireAppPerm (Proxy @'AP_RELEASE_PROMOTE) ap (acName ac) (acPlatform ac)
+    requireAppPerm (Proxy @'MB_RELEASE_PROMOTE) ap (acName ac) (acPlatform ac)
     unless (rtEnv row == "android") $ bad "mark-approved is Android-only (iOS approval is auto-detected)."
     ensureInReview (mbWfStatus target)
     now <- liftIO getCurrentTime
@@ -918,7 +918,7 @@ markRejectedH :: AuthedPerson -> Text -> MarkRejectedReq -> Flow APISuccess
 markRejectedH ap rid MarkRejectedReq{..} = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
-    requireAppPerm (Proxy @'AP_RELEASE_PROMOTE) ap (acName ac) (acPlatform ac)
+    requireAppPerm (Proxy @'MB_RELEASE_PROMOTE) ap (acName ac) (acPlatform ac)
     unless (rtEnv row == "android") $ bad "mark-rejected is Android-only (iOS rejection is auto-detected)."
     when (T.null (T.strip mrReason)) $ bad "Rejection reason is required."
     ensureInReview (mbWfStatus target)
@@ -938,7 +938,7 @@ withdrawH :: AuthedPerson -> Text -> Flow APISuccess
 withdrawH ap rid = do
     requireStaged
     (row, target, ac) <- loadPromotable rid
-    requireAppPerm (Proxy @'AP_RELEASE_PROMOTE) ap (acName ac) (acPlatform ac)
+    requireAppPerm (Proxy @'MB_RELEASE_PROMOTE) ap (acName ac) (acPlatform ac)
     unless (rtEnv row == "ios") $
         bad "Withdraw from review is iOS-only — Google Play has no API to cancel a review."
     ensureInReview (mbWfStatus target)

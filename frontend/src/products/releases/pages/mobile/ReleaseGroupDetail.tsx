@@ -28,7 +28,7 @@ import { useGroupOta } from '../../otaApi';
 import { OtaSection } from '../../components/ota/OtaSection';
 import { OtaBranchPicker } from '../../components/ota/OtaPanel';
 import { usePermissions } from '../../../../core/auth/PermissionsContext';
-import { abortRelease, approveRelease, createMobileRevert, discardRelease, getMobileRevertDraft, mobileApi } from '../../api';
+import { abortMobileRelease, approveRelease, createMobileRevert, discardRelease, getMobileRevertDraft, mobileApi } from '../../api';
 import type { BulkActionResp, RevertDraft } from '../../api';
 import { PermissionGate } from '../../../../core/auth/PermissionGate';
 import {
@@ -350,7 +350,7 @@ export default function ReleaseGroupDetail() {
         variant: 'danger',
       });
       if (!ok) return;
-      await abortRelease(r.id);
+      await abortMobileRelease(r.id);
       toast.success('Build cancellation initiated');
       void refetch();
     } catch (err: any) {
@@ -361,12 +361,16 @@ export default function ReleaseGroupDetail() {
   };
 
   // OTA section data — the GET also drives backend push-status convergence.
-  const otaQ = useGroupOta(groupId);
+  // Debug groups have no OTA (backend returns available=false and blocks
+  // dispatch), so skip the query entirely: with otaQ.data undefined, neither
+  // the OTA section nor the "No OTA" placeholder can render for a debug build.
+  const groupIsDebug = (group?.members ?? [])[0]?.release_context?.build_type === 'debug';
+  const otaQ = useGroupOta(groupId, !groupIsDebug);
   const { hasPermission } = usePermissions();
   // Per-app grant key "<name>/<platform>" (unified model); falls back to the
   // product-level permission for fleet-wide role holders.
   const canOtaDispatchFor = (app: string, platform: string) =>
-    hasPermission('autopilot', 'MOBILE_DISPATCH', `${app}/${platform}`);
+    hasPermission('mobile', 'MB_MOBILE_DISPATCH', `${app}/${platform}`);
   const otaAvailable = !!otaQ.data?.available && otaQ.data.capableApps.length > 0;
 
   const groupReleases = useMemo(() => group?.members ?? [], [group]);
@@ -1361,7 +1365,7 @@ export default function ReleaseGroupDetail() {
                                 {!['Waiting on review', 'Building…'].includes(nextStepOf(r)!) && '→'}{' '}
                                 {nextStepOf(r)}
                               </span>
-                              {nextStepOf(r) === 'Building…' && hasPermission('autopilot', 'RELEASE_PAUSE', r.appGroup) && (
+                              {nextStepOf(r) === 'Building…' && hasPermission('mobile', 'MB_RELEASE_ABORT', `${r.appGroup}/${r.env}`) && (
                                 <button
                                   type="button"
                                   disabled={cancellingBuild === r.id}

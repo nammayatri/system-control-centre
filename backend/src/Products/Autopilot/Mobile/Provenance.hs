@@ -66,7 +66,7 @@ import Products.Autopilot.Mobile.Queries.OtaPush (backfillTrackerCommitSha, setT
 import Products.Autopilot.Mobile.Queries.Tracker (appCatalogForRowRaw, findMobileReleaseById, rowToDomain)
 import Products.Autopilot.Mobile.Types.Ota (OtaProvAnchor (..))
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..))
-import Products.Autopilot.Types.Permission (AutopilotPermission (..))
+import Products.Mobile.Types.Permission (MobilePermission (..))
 import Products.Autopilot.Types.Release qualified as Rel
 
 data ReleaseAdoptBranchReq = ReleaseAdoptBranchReq
@@ -335,7 +335,7 @@ adoptReleaseBranchH ap rid ReleaseAdoptBranchReq{branch = pick, acknowledgeMisma
     mRel <- findMobileReleaseById rid
     (row, _) <- maybe (throwM (NotFound ("Mobile release not found: " <> rid))) pure mRel
     ac <- appCatalogForRowRaw row
-    requireAppPerm (Proxy @'AP_MOBILE_APP_MANAGE) ap (acName ac) (acPlatform ac)
+    requireAppPerm (Proxy @'MB_MOBILE_APP_MANAGE) ap (acName ac) (acPlatform ac)
     verifyAndAdoptBranch ap (rowToDomain row) ac pick mAck
 
 {- | Shared adopt core (release- and OTA-scoped routes): resolve the anchor,

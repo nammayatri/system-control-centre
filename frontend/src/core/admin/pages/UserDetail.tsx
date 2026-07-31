@@ -29,11 +29,12 @@ const ACCESS_SURFACES: {
   productSlug: string;
   enforced: boolean;
 }[] = [
-  { id: 'backend', label: 'Autopilot', productSlug: 'autopilot', enforced: true },
-  // Mobile grants are per (app, platform): app_group = "<name>/<platform>".
-  // One grant covers that app row's builds AND its airborne OTA — there is no
-  // separate OTA surface (existing legacy per-ref airborne grants still work).
-  { id: 'mobile', label: 'Mobile Releases (incl. OTA)', productSlug: 'autopilot', enforced: true },
+  { id: 'backend', label: 'Autopilot (backend)', productSlug: 'autopilot', enforced: true },
+  // Mobile grants are per (app, platform): app_group = "<name>/<platform>",
+  // under the 'mobile' product (2026-07-31 split). One grant covers that app
+  // row's builds AND its airborne OTA — there is no separate OTA surface
+  // (existing legacy per-ref airborne grants still work).
+  { id: 'mobile', label: 'Mobile Releases (incl. OTA)', productSlug: 'mobile', enforced: true },
 ];
 import { Button } from '../../../shared/ui/button';
 import { Badge } from '../../../shared/ui/badge';
@@ -97,23 +98,28 @@ const UserDetail: React.FC = () => {
     queryFn: fetchAdminProducts,
   });
 
-  // Product-level access is granted under autopilot only: its roles carry the
-  // OTA permission family too (unified model), so airborne-ota is never
-  // offered here — per-app OTA access goes through Scoped Access instead.
+  // Product-level grants: autopilot = backend only; mobile = builds + OTA
+  // (its roles carry the OTA family). airborne-ota is never offered — mobile
+  // grants cover it, product-level or scoped.
   const grantableProducts = (products as any[])
     .filter((p) => (p.slug || p) !== 'airborne-ota')
     .map((p) => {
       const slug = p.slug || p;
       return {
         value: slug,
-        label: slug === 'autopilot' ? 'autopilot (backend · mobile · OTA)' : p.name || slug,
+        label:
+          slug === 'autopilot'
+            ? 'autopilot (backend)'
+            : slug === 'mobile'
+              ? 'mobile (builds · OTA)'
+              : p.name || slug,
       };
     });
 
   // ── App-access surfaces ──────────────────────────────────────────
-  // A "surface" is a grantable app namespace. Backend + Mobile share the
-  // autopilot product slug but draw apps from different sources; Airborne is
-  // its own product. Mobile grants are per (app, platform) and enforced.
+  // A "surface" is a grantable app namespace. Backend scopes live under
+  // 'autopilot' (deployment names), mobile scopes under 'mobile'
+  // ("<name>/<platform>"); Airborne is covered by mobile grants.
   const surface = ACCESS_SURFACES.find((s) => s.id === assignSurface);
   const deployProductSlug = surface?.productSlug ?? '';
 
@@ -141,14 +147,8 @@ const UserDetail: React.FC = () => {
     assignSurface === 'backend'
       ? (backendAppGroups as string[]).map((ag) => markGranted({ value: ag, label: ag }))
       : [
-          // Fleet-wide wildcard: one grant row covering every current AND
-          // future mobile app (builds + OTA). Never matches BE deployments.
-          markGranted({
-            value: 'mobile/*',
-            label: 'All mobile apps',
-            hint: 'wildcard — every current and future app · platform, incl. OTA',
-            group: 'Fleet',
-          }),
+          // Fleet-wide mobile access is a PRODUCT-level 'mobile' grant now
+          // (the old mobile/* wildcard was retired by the product split).
           ...(mobileApps as AppCatalogEntry[]).map((a) =>
             // one option per (app, platform) — the unified grant key; the hint
             // names the airborne app this grant's OTA side maps to.
