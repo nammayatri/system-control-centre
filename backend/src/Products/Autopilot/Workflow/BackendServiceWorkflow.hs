@@ -47,7 +47,7 @@ import Products.Autopilot.DecisionEngine (
     initiatePostMonitoringABDecisionForRelease,
     stopDecisionEngineHS,
  )
-import Products.Autopilot.EventLog (logDecisionResult, logStatusUpdated, logTrafficUpdated)
+import Products.Autopilot.EventLog (logAbortTriggered, logDecisionResult, logStatusUpdated, logTrafficUpdated)
 import Products.Autopilot.K8s.Deployment (
     buildApplyFileCommand,
     buildCloneDeploymentCommand,
@@ -415,6 +415,7 @@ runVsRolloutWithLock cfg ctx maxRetries oldW newW = do
                                 "VS_EDITOR_LOCK_TIMEOUT"
                                 (object ["attempts" .= attempt, "lockOwner" .= lockOwner, "reason" .= reason])
                             logWarning $ "[runVsRolloutWithLock] " <> reason
+                            logAbortTriggered (releaseId rt) "SYSTEM" "VS Editor Lock Timeout" reason
                             updateRT $ \r -> r{status = ABORTING}
                             currentRT <- getRT
                             currentTS <- gets targetState
@@ -1097,6 +1098,7 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                                         PromAbort reason -> do
                                                             logErrorS $ "[DECISION] Prometheus ABORT: " <> reason
                                                             logStatusUpdated freshRT ("ABORTING the release because prom query checks failing: " <> reason)
+                                                            logAbortTriggered (releaseId freshRT) "SYSTEM" "Prometheus Check" reason
                                                             lift $ notifyGenericThreadMessage freshRT ("Prometheus check ABORT: " <> reason)
                                                             updateRT $ \r -> r{status = ABORTING}
                                                             currentRT' <- getRT
@@ -1182,6 +1184,7 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                                         WaitForMoreIteration -> pure False
                                                         Abort -> do
                                                             logStatusUpdated rtForEvent "ABORTING the release because of the Decision Engine"
+                                                            logAbortTriggered (releaseId rtForEvent) "DECISION_ENGINE" "AB/HS Decision Engine" combinedResultText
                                                             updateRT $ \r -> r{status = ABORTING}
                                                             currentRT' <- getRT
                                                             currentTS' <- gets targetState

@@ -12,14 +12,16 @@ import Core.Config (Config (..))
 import Core.Environment (AppState (..), DBEnv, Flow, MonadFlow, forkFlow, getConfig, getDBEnv, logError, logInfo, logWarning, runFlow)
 import Core.Logging (logInfoIO, logWarningIO)
 import Core.Types.Time (threadDelaySec)
-import Data.Aeson (object, toJSON, (.=))
+import Data.Aeson (Value (..), object, toJSON, (.=))
+import Data.Aeson.Key qualified as K
+import Data.Aeson.KeyMap qualified as KM
 import Data.List (sortBy)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, listToMaybe)
 import Data.Ord (Down (..), comparing)
 import Data.Text qualified as T
 import Data.Time.Clock (NominalDiffTime, addUTCTime, getCurrentTime)
-import Products.Autopilot.EventLog (logStatusUpdated, logTrafficUpdatedWithMessage)
+import Products.Autopilot.EventLog (logAbortTriggered, logStatusUpdated, logTrafficUpdatedWithMessage)
 import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getDeploymentReplicaStatus)
 import Products.Autopilot.K8s.Execute (isNotFoundError, runCmd)
 import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax)
@@ -35,7 +37,7 @@ import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getMaxCleanupRetries, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
 import Products.Autopilot.Types
 import Products.Autopilot.Types qualified as NT
-import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, dcAppGroup)
+import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, ReleaseEvent, dcAppGroup, rePayload)
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (..), K8sReleaseContext (..), PodsScaleDownStatus (..))
 import Products.Autopilot.Types.Target.Kubernetes qualified as K8s
@@ -486,6 +488,7 @@ runReleaseWorkflow _cfg rtNew mts = do
                         then logWarning $ "[RUNNER] Workflow failed but tracker " <> releaseId rt <> " was concurrently modified — leaving as-is, the user state wins"
                         else do
                             insertReleaseEvent (releaseId rt) "BUSINESS" "FAILED" (toJSON (show err))
+                            logAbortTriggered (releaseId rt) "SYSTEM" "Workflow Failure" (T.pack (show err))
                             -- Julia parity (release/watcher.jl:342-521 per-type
                             -- failure handlers): VS traffic restore is meaningful
                             -- only for categories that actually flip a VS during
@@ -738,6 +741,13 @@ waitForFirstPodReady cfg ns depName = go (15 :: Int)
 -- Abort Handling
 -- ============================================================================
 
+abortTriggeredBy :: ReleaseEvent -> Maybe T.Text
+abortTriggeredBy ev = case rePayload ev of
+    Object o -> case KM.lookup (K.fromText "triggeredBy") o of
+        Just (String s) -> Just s
+        _ -> Nothing
+    _ -> Nothing
+
 handleAbortingRelease :: Config -> ReleaseTracker -> Maybe TargetState -> Flow ()
 handleAbortingRelease cfg rt mts = do
     logInfo $ "[handleAbortingRelease] Processing abort for " <> releaseId rt
@@ -755,12 +765,17 @@ handleAbortingRelease cfg rt mts = do
             -- now and the next poll doesn't leak the new deployment. Idempotent.
             scheduleNewDeploymentCleanup rt mts
     now <- liftIO getCurrentTime
+    mAbortTrigger <- findEventByLabel (releaseId rt) "ABORT_TRIGGERED"
+    let finalStatus = case mAbortTrigger >>= abortTriggeredBy of
+            Just "USER" -> USER_ABORTED
+            Just "DECISION_ENGINE" -> GCLT_ABORTED
+            _ -> ABORTED
     -- Terminalize the mobile wf-status too, so the build releases its (version,code)
     -- slot when appropriate and its badge matches the aborted status.
     let mts' = case (category rt, mts) of
             (MobileBuild, Just (MobileBuildState s)) -> Just (MobileBuildState s{mbWfStatus = MBAborted})
             _ -> mts
-        aborted = rt{status = USER_ABORTED, endTime = Just now}
+        aborted = rt{status = finalStatus, endTime = Just now}
     -- Round 8 audit C2: CAS against ABORTING. If a parallel runner instance
     -- or a user-initiated handler raced and already moved the row, log and
     -- skip — abort/restore was already done.

@@ -81,7 +81,7 @@ import Data.Yaml qualified as Yaml
 import Database.PostgreSQL.Simple (Only (..), SqlError (..), execute, withTransaction)
 import Products.Autopilot.DiffLink (buildDiffLink)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
-import Products.Autopilot.EventLog (logStatusUpdated)
+import Products.Autopilot.EventLog (logAbortTriggered, logStatusUpdated)
 import Products.Autopilot.K8s.Deployment (buildPatchDeploymentEnvsCommand, deploymentExists, getRunningSchedulerVersion)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
@@ -919,6 +919,7 @@ rollbackReleaseH ap rid TriggerReleaseReq{..} = do
                     if ok
                         then do
                             insertReleaseEvent rid "BUSINESS" "ROLLBACK_REQUESTED" (toJSON reason)
+                            logAbortTriggered rid "USER" (apEmail ap) (fromMaybe "" reason)
                             pure $ APIResponse "SUCCESS" "Rollback marked"
                         else pure staleTrackerError
 
@@ -1067,6 +1068,7 @@ revertReleaseH ap rid req = do
                         ""
                         Nothing -- revert tracker clears envOverrideData (see buildRevertedTracker)
                         "DEPLOYMENT_AFTER_PREVIEW"
+                    notifyReleaseCreated revertedTracker
                     notifyReleaseReverted revertedTracker
                     when (isImmediate && shouldSyncRevert) $
                         triggerImmediateRevertSync tracker mTargetState
