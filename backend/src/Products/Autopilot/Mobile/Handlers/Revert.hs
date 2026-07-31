@@ -6,7 +6,7 @@
 
 {- | HTTP handlers for mobile release revert.
 
-Four endpoints, all gated by @'AP_RELEASE_REVERT@:
+Four endpoints, all gated by @'MB_RELEASE_REVERT@:
 
 * @GET  \/releases\/:id\/mobile-revert\/draft@ — preview what the revert
   would look like. The rollback target is resolved by /version order/
@@ -54,7 +54,7 @@ import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..))
 import Data.Proxy (Proxy (..))
 import Products.Autopilot.Mobile.Auth (requireAppPerm)
-import Products.Autopilot.Types.Permission (AutopilotPermission (..))
+import Products.Mobile.Types.Permission (MobilePermission (..))
 import Core.Environment (Flow)
 import Data.Aeson (FromJSON, ToJSON, object, (.=))
 import Data.Functor.Identity (Identity)
@@ -483,7 +483,7 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
     (bad, badState) <- case mBad of
         Just x -> pure x
         Nothing -> throwM $ BadRequest ("Mobile release not found: " <> releaseId')
-    requireAppPerm (Proxy @'AP_RELEASE_REVERT) ap (rtAppGroup bad) (rtEnv bad)
+    requireAppPerm (Proxy @'MB_RELEASE_REVERT) ap (rtAppGroup bad) (rtEnv bad)
     case rtStatus bad of
         "COMPLETED" -> pure ()
         s -> throwM $ BadRequest ("Cannot revert release in status " <> s)

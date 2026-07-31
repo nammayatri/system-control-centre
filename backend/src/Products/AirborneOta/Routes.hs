@@ -278,7 +278,7 @@ accessH ap = do
                         catalog <- listAppCatalog
                         let keysFor ref = [appGrantKey (acName a) (acPlatform a) | a <- catalog, acAirborneAppRef a == Just ref]
                             uniKeys = nub (concatMap (\(_, _, r) -> keysFor r) refs)
-                        uniPairs <- computeEffectivePermissionsForAppGroups (apPersonId ap) "autopilot" uniKeys
+                        uniPairs <- computeEffectivePermissionsForAppGroups (apPersonId ap) "mobile" uniKeys
                         let uniFor ref = [p | k <- keysFor ref, p <- fromMaybe [] (lookup k uniPairs), "OTA_" `T.isPrefixOf` p]
                         pure (\ref -> nub (fromMaybe [] (lookup ref pairs) <> uniFor ref))
             let visible =
@@ -871,7 +871,7 @@ requireOtaPermission ::
     forall perm. (KnownPermission perm) => Proxy perm -> AuthedPerson -> Text -> Flow ()
 requireOtaPermission proxy ap ref = do
     mApp <- findAppByAirborneRef ref
-    let unified = [("autopilot", appGrantKey (acName a) (acPlatform a)) | Just a <- [mApp]]
+    let unified = [("mobile", appGrantKey (acName a) (acPlatform a)) | Just a <- [mApp]]
     requireDeploymentPermissionScopes proxy ap (("airborne-ota", ref) : unified)
 
 scopeHeaders :: AppRef -> [(Text, Text)]

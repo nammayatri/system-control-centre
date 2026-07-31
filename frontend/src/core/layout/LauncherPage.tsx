@@ -22,11 +22,13 @@ const iconMap: Record<string, React.ReactNode> = {
 
 export default function LauncherPage() {
   const navigate = useNavigate();
-  const { user, logout } = useAuth();
+  const { user, logout, buildType } = useAuth();
   const { isAdmin, hasPermission, hasAnyDeploymentAccess } = usePermissions();
 
   const accessibleProducts = PRODUCT_REGISTRY.filter(
-    (p) => hasPermission(p.slug, p.viewPermission) || hasAnyDeploymentAccess(p.slug)
+    (p) =>
+      !(p.hideOnDebug && buildType === 'debug') &&
+      (hasPermission(p.slug, p.viewPermission) || hasAnyDeploymentAccess(p.slug))
   );
 
   return (

@@ -43,6 +43,11 @@ export interface ProductDefinition {
   icon: string;            // Lucide icon name for sidebar section
   basePath: string;        // disjoint URL prefix: '/backend' or '/mobile'
   viewPermission: string;  // permission string required to see this product
+  // Optional: hide the launcher/sidebar tile on debug deployments
+  // (AuthContext buildType === 'debug', from the mobile_build_type config).
+  // Used for OTA, which is production-only. Routes stay registered so
+  // deep-links from mobile releases keep working on prod.
+  hideOnDebug?: boolean;
   navItems: ProductNavItem[];
   routes: ProductRoute[];
   getBreadcrumbs?: (parts: string[]) => Crumb[];
@@ -199,19 +204,19 @@ const backendProduct: ProductDefinition = {
 };
 
 const mobileProduct: ProductDefinition = {
-  slug: 'autopilot',
+  slug: 'mobile',
   label: 'Mobile Releases',
   description: 'React Native app releases via GitHub Actions',
   icon: 'Smartphone',
   basePath: '/mobile',
-  viewPermission: 'RELEASE_VIEW',
+  viewPermission: 'MB_RELEASE_VIEW',
   navItems: [
     { label: 'Releases',       path: '/mobile/releases',      icon: 'List' },
     { label: 'New Release',    path: '/mobile/releases/new',   icon: 'Plus' },
     { label: 'App Release Monitor',  path: '/mobile/releases/monitor', icon: 'Gauge' },
     { label: 'Fleet Activity', path: '/mobile/activity',       icon: 'Activity' },
     { label: 'Apps',           path: '/mobile/apps',           icon: 'Package',
-      permission: 'MOBILE_APP_MANAGE' },
+      permission: 'MB_MOBILE_APP_MANAGE' },
     { label: 'Server Config', path: '/mobile/server-config',   icon: 'Settings' },
     { label: 'Crashlytics',   path: 'https://console.firebase.google.com/project/_/crashlytics',
       icon: 'Flame', external: true },
@@ -219,16 +224,16 @@ const mobileProduct: ProductDefinition = {
   routes: [
     { path: 'releases',            component: GroupsHome },
     { path: 'releases/history',    component: MobileReleaseHistory },
-    { path: 'releases/new',        component: CreateMobileRelease, permission: 'RELEASE_CREATE' },
+    { path: 'releases/new',        component: CreateMobileRelease, permission: 'MB_RELEASE_CREATE' },
     { path: 'releases/:id',        component: MobileReleaseSummary },
-    { path: 'releases/:id/revert', component: MobileRevert,        permission: 'RELEASE_REVERT' },
+    { path: 'releases/:id/revert', component: MobileRevert,        permission: 'MB_RELEASE_REVERT' },
     { path: 'releases/live',       component: LiveReleases },
     { path: 'releases/monitor',    component: StoreMonitor },
     // Old groups list retired — the home page IS groups now; bookmarks survive.
     { path: 'activity',            component: FleetActivity },
     { path: 'groups',              component: GroupsHomeRedirect },
     { path: 'groups/:groupId',     component: ReleaseGroupDetail },
-    { path: 'apps',                component: MobileAppsAdmin,     permission: 'MOBILE_APP_MANAGE' },
+    { path: 'apps',                component: MobileAppsAdmin,     permission: 'MB_MOBILE_APP_MANAGE' },
     { path: 'server-config',       component: Configurations },
   ],
   getBreadcrumbs: (parts) => {
@@ -288,6 +293,8 @@ const airborneOtaProduct: ProductDefinition = {
   icon: 'CloudDownload',
   basePath: '/airborne',
   viewPermission: 'OTA_VIEW',
+  hideOnDebug: true, // OTA is production-only; hide the tile on debug deployments
+
   navItems: AIRBORNE_ROOT_NAV,
   navPill: true,
   ThemeWrapper: OtaThemeWrapper,
@@ -370,8 +377,9 @@ const airborneOtaProduct: ProductDefinition = {
 };
 
 // ── Registry ─────────────────────────────────────────────────────
-// Two tiles share slug='autopilot' so backend RBAC stays unified
-// while the dashboard surfaces the backend and mobile flows separately.
+// 2026-07-31 product split: 'autopilot' is backend-only; 'mobile' owns
+// builds + OTA (MB_* + OTA_* permission universe). Airborne OTA is its own
+// tile but is never grantable — mobile grants carry its permissions.
 // Admin Console is handled in App.tsx (not a product).
 
 export const PRODUCT_REGISTRY: ProductDefinition[] = [

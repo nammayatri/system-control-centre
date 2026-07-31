@@ -29,6 +29,7 @@ import {
 import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { useOtaTheme } from '../theme';
 import { cn } from '../../../lib/utils';
+import { OtaErrorState } from '../components/OtaErrorState';
 
 const primaryBtnDark = 'bg-airborne border-airborne text-white hover:bg-airborne-hover';
 const secondaryBtnDark = 'dark:bg-zinc-900 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800';
@@ -285,8 +286,8 @@ export default function CohortsPage() {
 
       {dimsQuery.error && !dimsQuery.data ? (
         <div className={cardCls}>
-          <div className="px-4 py-6 text-sm text-red-600 dark:text-red-400">
-            Failed to load dimensions. Refresh to retry.
+          <div className="p-4">
+            <OtaErrorState error={dimsQuery.error} what="dimensions for this app" />
           </div>
         </div>
       ) : dimsQuery.isLoading ? (

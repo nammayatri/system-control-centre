@@ -49,23 +49,21 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
     );
   }, [products]);
 
-  // airborne-ota permissions may be carried by autopilot grants (the unified
-  // per-app model) — mirror of the backend's aliasGrantSlugs.
+  // airborne-ota permissions may be carried by mobile grants (the unified
+  // model — product-level or per-app) — mirror of the backend's aliasGrantSlugs.
   const otaAliasHas = (action: string): boolean => {
-    if (permMap['autopilot']?.includes(action)) return true;
-    const groups = deploymentPermMap['autopilot'];
+    if (permMap['mobile']?.includes(action)) return true;
+    const groups = deploymentPermMap['mobile'];
     return !!groups && Object.values(groups).some((perms) => perms.includes(action));
   };
 
   const hasPermission = (product: string, action: string, appGroup?: string): boolean => {
     if (isAdmin) return true;
     if (appGroup) {
-      // Exact per-app grant wins; 'mobile/*' covers every "<name>/<platform>"
-      // mobile key (server deployment names never contain '/').
-      const productMap = deploymentPermMap[product];
-      const deployPerms =
-        productMap?.[appGroup] ??
-        (appGroup.includes('/') && appGroup !== 'mobile/*' ? productMap?.['mobile/*'] : undefined);
+      // Exact per-app grant wins; otherwise fall through to the product-level
+      // baseline below. (The 'mobile/*' wildcard was retired by the product
+      // split — a product-level 'mobile' grant is the fleet-wide form.)
+      const deployPerms = deploymentPermMap[product]?.[appGroup];
       if (deployPerms) {
         return deployPerms.includes(action) || deployPerms.includes('*');
       }
@@ -91,11 +89,11 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
     if (isAdmin) return true;
     const groups = deploymentPermMap[product];
     if (!!groups && Object.keys(groups).length > 0) return true;
-    // Autopilot grants carrying any OTA_* perm confer airborne-ota access.
+    // Mobile grants carrying any OTA_* perm confer airborne-ota access.
     if (product === 'airborne-ota') {
-      if (permMap['autopilot']?.some((x) => x.startsWith('OTA_'))) return true;
-      const ap = deploymentPermMap['autopilot'];
-      return !!ap && Object.values(ap).some((perms) => perms.some((x) => x.startsWith('OTA_')));
+      if (permMap['mobile']?.some((x) => x.startsWith('OTA_'))) return true;
+      const mb = deploymentPermMap['mobile'];
+      return !!mb && Object.values(mb).some((perms) => perms.some((x) => x.startsWith('OTA_')));
     }
     return false;
   };

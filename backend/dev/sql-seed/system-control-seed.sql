@@ -189,6 +189,14 @@ INSERT INTO sc_role (product_slug, name, description, is_system_role) VALUES
   ('autopilot', 'Viewer', 'Read-only access to Autopilot', true)
 ON CONFLICT (product_slug, name) DO NOTHING;
 
+-- System roles for the Mobile product (builds + OTA; 2026-07-31 split —
+-- autopilot is backend-only, mobile carries MB_* + OTA_* via the ADT)
+INSERT INTO sc_role (product_slug, name, description, is_system_role) VALUES
+  ('mobile', 'Admin', 'Full access to mobile builds + OTA', true),
+  ('mobile', 'Manager', 'Operate mobile builds + OTA (no app catalog manage, no OTA discard)', true),
+  ('mobile', 'Viewer', 'Read-only access to mobile builds + OTA', true)
+ON CONFLICT (product_slug, name) DO NOTHING;
+
 -- System roles for Config Manager product
 INSERT INTO sc_role (product_slug, name, description, is_system_role) VALUES
   ('config-manager', 'Admin', 'Full access to Config Manager', true),
@@ -207,6 +215,12 @@ INSERT INTO sc_person_product_access (person_id, product_slug, role_id)
 SELECT p.id, 'config-manager', r.id
 FROM sc_person p, sc_role r
 WHERE p.email = 'admin@juspay.in' AND r.product_slug = 'config-manager' AND r.name = 'Admin'
+ON CONFLICT (person_id, product_slug) DO NOTHING;
+
+INSERT INTO sc_person_product_access (person_id, product_slug, role_id)
+SELECT p.id, 'mobile', r.id
+FROM sc_person p, sc_role r
+WHERE p.email = 'admin@juspay.in' AND r.product_slug = 'mobile' AND r.name = 'Admin'
 ON CONFLICT (person_id, product_slug) DO NOTHING;
 
 -- ---------------------------------------------------------------

@@ -51,8 +51,8 @@ const MobileReleaseSummary = () => {
   const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'json'>('summary');
 
   // Polls every 10s until the release reaches a terminal status (hook-owned).
-  const { data: release, isLoading, isFetching, error, refetch } = useRelease(id);
-  const { data: events = [] } = useReleaseEvents(id);
+  const { data: release, isLoading, isFetching, error, refetch } = useRelease(id, { mobile: true });
+  const { data: events = [] } = useReleaseEvents(id, { mobile: true });
   const qc = useQueryClient();
   const { user: authUser } = useAuth();
   const actor = authUser?.email || 'admin';
@@ -395,7 +395,7 @@ const MobileReleaseSummary = () => {
                   pushes={otaQ.data?.rows ?? []}
                   links={otaQ.data?.links ?? []}
                   activePush={otaQ.data?.activePush ?? null}
-                  canDispatch={hasPerm('autopilot', 'MOBILE_DISPATCH', `${release.appGroup}/${release.env}`)}
+                  canDispatch={hasPerm('mobile', 'MB_MOBILE_DISPATCH', `${release.appGroup}/${release.env}`)}
                   onChanged={() => void otaQ.refetch()}
                 />
               ) : otaQ.data ? (

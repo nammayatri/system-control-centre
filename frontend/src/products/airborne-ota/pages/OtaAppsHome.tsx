@@ -22,6 +22,7 @@ import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { cn } from '../../../lib/utils';
 import logoDark from '../assets/airborne-logo-dark.svg';
 import logoLight from '../assets/airborne-logo-light.svg';
+import { OtaErrorState } from '../components/OtaErrorState';
 
 // Organization Overview — landing page mirroring airborne.juspay.in:
 // searchable application cards (selected org only) with an Open action.
@@ -52,6 +53,14 @@ export default function OtaAppsHome() {
         [a.app, a.org].filter(Boolean).some((v) => String(v).toLowerCase().includes(q)),
       )
     : orgApps;
+
+  // Segment by capability, never by visibility: apps where the caller holds
+  // any operate verb are "yours"; the rest came from the fleet-wide Viewer
+  // baseline and are view-only. One kind only → flat grid, no headers.
+  const isOperable = (perms: string[]) => perms.some((p) => p !== 'OTA_VIEW');
+  const yourApps = filtered.filter((a) => isOperable(a.permissions ?? []));
+  const viewOnlyApps = filtered.filter((a) => !isOperable(a.permissions ?? []));
+  const segmented = yourApps.length > 0 && viewOnlyApps.length > 0;
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
@@ -134,9 +143,7 @@ export default function OtaAppsHome() {
       </div>
 
       {error ? (
-        <div className="rounded-xl border border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950/40 px-4 py-3 text-sm text-red-700 dark:text-red-300">
-          Failed to load OTA apps. Refresh to retry.
-        </div>
+        <OtaErrorState error={error} what="OTA apps" />
       ) : isLoading ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 dark:invert">
           {Array.from({ length: 4 }).map((_, i) => (
@@ -170,15 +177,25 @@ export default function OtaAppsHome() {
           No applications match “{query.trim()}”.
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-          {filtered.map((a) => (
+        (() => {
+          const card = (a: (typeof filtered)[number], viewOnly: boolean) => (
             <div
               key={a.appRef}
-              className="bg-white border border-zinc-200 hover:bg-zinc-100 hover:border-airborne dark:bg-zinc-900 dark:border-zinc-800 dark:hover:bg-airborne-nav dark:hover:border-airborne rounded-xl p-4 sm:p-5 transition-colors duration-150"
+              className={cn(
+                'bg-white border border-zinc-200 hover:bg-zinc-100 hover:border-airborne dark:bg-zinc-900 dark:border-zinc-800 dark:hover:bg-airborne-nav dark:hover:border-airborne rounded-xl p-4 sm:p-5 transition-colors duration-150',
+                viewOnly && 'opacity-75 hover:opacity-100',
+              )}
             >
-              <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100 truncate">
-                {a.app}
-              </h3>
+              <div className="flex items-center gap-2 min-w-0">
+                <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+                  {a.app}
+                </h3>
+                {viewOnly && (
+                  <span className="shrink-0 rounded border border-zinc-200 bg-zinc-100 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400">
+                    View only
+                  </span>
+                )}
+              </div>
               <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-0.5 truncate">{a.org}</p>
               <div className="flex items-center justify-between mt-6">
                 <span className="inline-flex items-center gap-1.5 text-sm text-zinc-500 dark:text-zinc-400">
@@ -193,8 +210,34 @@ export default function OtaAppsHome() {
                 </Link>
               </div>
             </div>
-          ))}
-        </div>
+          );
+          const grid = (items: typeof filtered, viewOnly: boolean) => (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+              {items.map((a) => card(a, viewOnly))}
+            </div>
+          );
+          if (!segmented) {
+            // One kind only: flat grid; chips still mark view-only cards so a
+            // pure-viewer user knows why every verb will be inert.
+            return grid(filtered, yourApps.length === 0);
+          }
+          return (
+            <div className="space-y-6">
+              <div>
+                <h2 className="mb-2 text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                  Your apps · {yourApps.length}
+                </h2>
+                {grid(yourApps, false)}
+              </div>
+              <div>
+                <h2 className="mb-2 text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                  Other apps · view only · {viewOnlyApps.length}
+                </h2>
+                {grid(viewOnlyApps, true)}
+              </div>
+            </div>
+          );
+        })()
       )}
 
       {/* Create application — org-scoped upstream, so the org is the one the

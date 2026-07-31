@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { FunnelSimpleIcon, XIcon } from '@phosphor-icons/react';
 import type { APRelease } from '../api';
+import { useAuth } from '../../../core/auth/AuthContext';
 import { cn } from '../../../lib/utils';
 
 /**
@@ -81,11 +82,22 @@ export function MobileBuildKpis({
     return c;
   }, [releases, bucketOf]);
 
+  // Debug deployments have no store lifecycle — the four store tiles are
+  // permanently 0 there. Building + Failed are the real debug signals.
+  const { buildType } = useAuth();
+  const debugDeploy = buildType === 'debug';
+  const cards = debugDeploy ? CARDS.filter((c) => c.key === 'building' || c.key === 'aborted') : CARDS;
+
   const clickable = !!onSelect;
   return (
     <section>
-      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
-        {CARDS.map((c) => {
+      <div
+        className={cn(
+          'grid gap-3',
+          debugDeploy ? 'grid-cols-2 sm:max-w-md' : 'grid-cols-2 sm:grid-cols-3 xl:grid-cols-6',
+        )}
+      >
+        {cards.map((c) => {
           const value = counts[c.key] ?? 0;
           const isActive = active === c.key;
           return (

@@ -19,6 +19,7 @@ import { MobileBuildKpis } from '../../components/MobileBuildKpis';
 import { PlatformBadge } from '../../components/PlatformBadge';
 import { StoreSyncBanner, useStoreSync } from '../../components/StoreSync';
 import { PermissionGate } from '../../../../core/auth/PermissionGate';
+import { useAuth } from '../../../../core/auth/AuthContext';
 import { Button } from '../../../../shared/ui/button';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { formatBuildCode, inFlightPhaseLabel, relativeAge } from '../../utils';
@@ -113,7 +114,9 @@ function memberNextStep(m: MobileGroupMemberLite): { label: string; muted?: bool
 // "synced 2m ago" freshness whisper in the header (store_status cache truth).
 function SyncedAgo() {
   const { available, hasApps, lastSyncedAt } = useStoreSync({ auto: false });
-  if (!available || !hasApps || !lastSyncedAt) return null;
+  const { buildType } = useAuth();
+  // Debug deployments have no store sync — freshness is meaningless there.
+  if (buildType === 'debug' || !available || !hasApps || !lastSyncedAt) return null;
   return (
     <span className="hidden sm:flex items-center gap-1.5 text-xs text-zinc-400">
       <ArrowsClockwiseIcon size={13} aria-hidden="true" /> synced {relativeAge(lastSyncedAt)}

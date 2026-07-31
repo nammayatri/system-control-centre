@@ -124,7 +124,7 @@ export default function CreateMobileRelease() {
   const enabledApps: AppCatalogEntry[] = useMemo(
     () =>
       (apps || []).filter(
-        (a) => a.enabled && hasPermission('autopilot', 'RELEASE_CREATE', `${a.name}/${a.platform}`),
+        (a) => a.enabled && hasPermission('mobile', 'MB_RELEASE_CREATE', `${a.name}/${a.platform}`),
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [apps],
@@ -678,7 +678,15 @@ export default function CreateMobileRelease() {
                     className="w-full h-10 sm:h-9 border border-zinc-300 rounded-lg pl-9 pr-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-zinc-400"
                   />
                 </div>
-                {visibleGroups.length === 0 ? (
+                {enabledApps.length === 0 ? (
+                  // The route guard admits anyone holding MB_RELEASE_CREATE on
+                  // ANY scope — say why the picker is empty instead of implying
+                  // a bad search.
+                  <p className="px-1 py-6 text-center text-sm text-zinc-400">
+                    You don’t have create permission (MB_RELEASE_CREATE) on any
+                    enabled app — ask an admin for a mobile grant.
+                  </p>
+                ) : visibleGroups.length === 0 ? (
                   <p className="px-1 py-6 text-center text-sm text-zinc-400">
                     No apps match “{appSearch.trim()}”.
                   </p>
