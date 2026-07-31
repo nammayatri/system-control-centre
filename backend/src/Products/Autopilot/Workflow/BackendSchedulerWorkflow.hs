@@ -30,7 +30,9 @@ import Data.Text qualified as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import Products.Autopilot.K8s.Deployment
   ( buildCloneDeploymentCommand,
+    buildCloneDeploymentWithEnvsCommand,
     buildConfigMapApplyCommand,
+    buildPatchDeploymentEnvsCommand,
     buildScaleDeploymentCommand,
     buildScaleNamedDeploymentCommand,
     deploymentExists,
@@ -49,7 +51,7 @@ import Products.Autopilot.RuntimeConfig (isScaleDownPodsOnCompletion)
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
 import Products.Autopilot.Types.Release
   ( ReleaseStatus (..),
-    ReleaseTracker (appGroup, releaseId, rolloutHistory, rolloutStrategy, status),
+    ReleaseTracker (appGroup, envOverrideData, releaseId, rolloutHistory, rolloutStrategy, status),
     RolloutHistory (..),
     RolloutStep (..),
   )
@@ -210,6 +212,15 @@ prepareK8sResources = do
   ctx <- getK8sCtx
   logInfoS $ "PREPARING K8s resources for scheduler " <> appGroup rt
 
+  let isRevert = case revert ctx of
+        Just n -> n /= 0
+        Nothing -> False
+  when isRevert $ do
+    let revertHpaName = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
+    logInfoS $ "  [PREPARING] Revert release — deleting stale new HPA " <> revertHpaName
+    _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg (namespace ctx) revertHpaName)
+    pure ()
+
   let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
       knownOldVersion =
         not (T.null (oldVersion ctx))
@@ -242,6 +253,9 @@ prepareK8sResources = do
   -- actually exists before attempting the clone; fail early with a clear
   -- message instead of letting jq/kubectl emit a confusing NotFound error.
   updateK8sStatus BSCreateDeployment
+  let envOverride = case envOverrideData rt of
+        Just t | not (T.null t) -> Just t
+        _ -> Nothing
   newDepExists <- liftIO $ deploymentExists cfg (namespace ctx) (deploymentName ctx)
   -- When the new deployment already exists AND the old source deployment is still
   -- present, it means a previous release attempt left a stale deployment —
@@ -254,6 +268,12 @@ prepareK8sResources = do
       then do
         logInfoS "  Deployment already exists — ensuring replicas >= 1"
         _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
+        case envOverride of
+          Just envs -> do
+            logInfoS "  Deployment already exists; patching envs from envOverrideData"
+            _ <- runK8sIO $ executeWithRetry cfg (buildPatchDeploymentEnvsCommand cfg ctx envs)
+            pure ()
+          Nothing -> pure ()
         pure False
       else pure True
   resolvedSrcCtx <-
@@ -311,7 +331,14 @@ prepareK8sResources = do
             <> oldVersion srcCtx
             <> " newVersion="
             <> newVersion ctx
-        _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg srcCtx 1)
+        case envOverride of
+          Just envs -> do
+            logInfoS "  Cloning with envOverrideData injected"
+            _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentWithEnvsCommand cfg srcCtx envs 1)
+            pure ()
+          Nothing -> do
+            _ <- runK8sIO $ executeWithRetry cfg (buildCloneDeploymentCommand cfg srcCtx 1)
+            pure ()
         _ <- runK8sIO $ runCmd (buildScaleDeploymentCommand cfg ctx 1)
         -- Verify the cloned deployment has the expected image.
         -- This catches jq/container-name mismatches immediately as a visible event.
