@@ -292,11 +292,8 @@ findProductConfigById pid = withCloudDb $ \cloud db -> do
     runDB db $
       runSelectReturningList $
         select $ do
-          p <-
-            all_
-              (deploymentConfig autopilotDb)
-              guard_
-              (dcCloudType p ==. val_ cloud)
+          p <- all_ (deploymentConfig autopilotDb)
+          guard_ (dcCloudType p ==. val_ cloud)
           guard_ (dcId p ==. val_ pid)
           guard_ (isNothing_ (dcService p))
           pure p
@@ -326,11 +323,8 @@ findReleaseConfigById rid = withCloudDb $ \cloud db -> do
     runDB db $
       runSelectReturningList $
         select $ do
-          r <-
-            all_
-              (deploymentConfig autopilotDb)
-              guard_
-              (dcCloudType r ==. val_ cloud)
+          r <- all_ (deploymentConfig autopilotDb)
+          guard_ (dcCloudType r ==. val_ cloud)
           guard_ (dcId r ==. val_ rid)
           guard_ (isNothing_ (dcService r) ==. val_ False)
           pure r
