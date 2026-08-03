@@ -101,6 +101,11 @@ colorDefault = "#71717a"
 getSlackToken :: IO (Maybe String)
 getSlackToken = lookupEnv "SLACK_BOT_TOKEN"
 
+-- | Chat-API base, overridable to point the same Slack-shaped POST at a
+-- different Slack-compatible gateway (e.g. Xyne) without touching call sites.
+getSlackApiBase :: IO Text
+getSlackApiBase = T.pack . fromMaybe "https://slack.com/api" <$> lookupEnv "SLACK_API_BASE_URL"
+
 getDashboardUrl :: IO Text
 getDashboardUrl = do
   mUrl <- lookupEnv "DASHBOARD_URL"
@@ -135,6 +140,7 @@ sendSlackRichE channel fallbackText color blocks mThreadTs = do
       logWarningG "[SLACK] No SLACK_BOT_TOKEN env var set, skipping"
       pure (Left "no_slack_bot_token")
     Just token -> do
+      apiBase <- liftIO getSlackApiBase
       let attachment = object ["color" .= color, "blocks" .= blocks]
           baseBody =
             [ "channel" .= channel,
@@ -145,7 +151,7 @@ sendSlackRichE channel fallbackText color blocks mThreadTs = do
             Nothing -> baseBody
             Just threadTs -> ("thread_ts" .= threadTs) : baseBody
           req =
-            (defaultReq "https://slack.com/api/chat.postMessage")
+            (defaultReq (apiBase <> "/chat.postMessage"))
               { reqMethod = POST,
                 reqHeaders =
                   [ ("Authorization", "Bearer " <> T.pack token),
