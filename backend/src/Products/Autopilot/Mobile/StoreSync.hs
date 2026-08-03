@@ -40,6 +40,8 @@ module Products.Autopilot.Mobile.StoreSync (
 
     -- * Version ordering (semver-ish component compare; unit-tested via callers)
     versionOlderThan,
+    releaseOrderBehind,
+    atOrBelowProductionPure,
 ) where
 
 import Control.Applicative ((<|>))
@@ -393,6 +395,33 @@ versionOlderThan :: Text -> Text -> Bool
 versionOlderThan a b = comps a < comps b
   where
     comps = map (\p -> fromMaybe 0 (readMaybe (T.unpack p)) :: Int) . T.splitOn "."
+
+{- | THE release ordering (SSOT, both platforms): marketing version first, build
+code as the tiebreak WITHIN a version. True when (v, c) sits strictly behind
+production's (pv, pc) — such a build can never pass the promote gate, so every
+surface reads it Superseded and slot convergence retires it (the SQL twin is
+@mobile_version_key@-first with a code tiebreak). Codes unknown → fail open.
+-}
+releaseOrderBehind :: Text -> Maybe Int32 -> Text -> Maybe Int32 -> Bool
+releaseOrderBehind v c pv pc =
+    v `versionOlderThan` pv || (v == pv && codeAtOrBelow c pc)
+  where
+    codeAtOrBelow (Just b) (Just p) = b <= p
+    codeAtOrBelow _ _ = False
+
+{- | The full promote-gate predicate: behind in release order, OR — Android
+only — an artifact Play itself would reject (production requires a code above
+the live one regardless of version name; iOS codes reset per version, so no
+cross-version code check there). One function so the gate, the list's
+promotable flag and the summary's rdPromotable can never disagree again.
+-}
+atOrBelowProductionPure :: Text -> Text -> Maybe Int32 -> Text -> Maybe Int32 -> Bool
+atOrBelowProductionPure platform v c pv pc =
+    releaseOrderBehind v c pv pc || playRejects
+  where
+    playRejects = platform == "android" && case (c, pc) of
+        (Just b, Just p) -> b <= p
+        _ -> False
 
 {- | The live production rollout state of the release carrying THIS version code,
 selected from the full production-track release list — so a multi-release track

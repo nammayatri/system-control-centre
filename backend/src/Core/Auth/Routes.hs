@@ -134,11 +134,15 @@ resolveDeploymentConfig = do
     -- Mirrors isSlackEnabled; the mobile create form hides its "Send changelog to
     -- Slack" opt-in when this is false (no point offering a post that can't send).
     slackEnabled <- getConfigBoolForProduct "slack_enabled" (Just "autopilot") False
+    -- The changelog-to-Slack destination — surfaced so the create form can
+    -- SHOW where the post goes, not just that it can. Empty = unset.
+    slackChannel <- getConfigTextForProduct "mobile_slack_channel" (Just "autopilot") ""
     pure $
         object
             [ "env" .= T.pack envVal
             , "buildType" .= buildType
             , "slackEnabled" .= slackEnabled
+            , "slackChannel" .= slackChannel
             ]
 
 -- | POST /auth/logout

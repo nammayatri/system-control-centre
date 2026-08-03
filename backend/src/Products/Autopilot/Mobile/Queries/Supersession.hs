@@ -183,12 +183,17 @@ INTERNAL builds below live or older than the newest internal. Never touches
 the live build's own rows, NULL-code same-version rows, or mid-build rows.
 The SQL mirrors scripts/converge-mobile-slots-inspect.sql — keep in lockstep.
 
-Ordering is PLATFORM-CONDITIONAL. Android version codes are globally monotonic
-and are the only thing Play enforces (a build whose code is at or below
-production can never ship; the marketing version name is free-form and can go
-backwards) — so Android compares by CODE alone, and rows with no code are left
-untouched rather than name-guessed. iOS build numbers (CFBundleVersion) reset
-per marketing version, so iOS keeps version-first, code-as-tiebreak.
+Ordering (2026-08-03 SSOT): LIVE and HELD slots use the RELEASE ordering on
+BOTH platforms — version first ('mobile_version_key'), code as the tiebreak
+within a version — the same predicate as the promote gate
+('releaseOrderBehind'), so a row convergence keeps is always one the gate
+would let promote. Code-only comparison was retired for these slots after a
+prod incident: a later upload of an OLDER version line (3.0.23+266 beside
+live 3.1.0+225) carries the highest code, so code-first kept it "Ready to
+promote" forever while the gate refused it. Same-version rebuilds still
+resolve by code (the tiebreak). Android INCOMING keeps its code-only compare:
+review rows have their own reconcile lifecycle and a promoted taker's Rule-B
+retire already handles ordering there.
 -}
 convergeMobileSlots ::
     (MonadFlow m) =>
@@ -197,34 +202,18 @@ convergeMobileSlots ::
     Text ->
     Maybe (Text, Maybe Int32) ->
     m ([Text], [Text], [Text])
-convergeMobileSlots appGroup surface platform mAnchor = withDb $ \db -> withConn db $ \conn ->
-    if platform == "android"
-        then do
-            let mC = snd =<< mAnchor
-                params = (appGroup, surface, platform, mC, mC)
-            live <- map fromOnly <$> query conn liveSqlCode params
-            incoming <- map fromOnly <$> query conn incomingSqlCode params
-            held <- map fromOnly <$> query conn internalSqlCode params
-            pure (live, incoming, held)
-        else do
-            let mV = fst <$> mAnchor
-                mC = snd =<< mAnchor
-                params = (appGroup, surface, platform, mV, mV, mV, mC, mC)
-            live <- map fromOnly <$> query conn liveSql params
-            incoming <- map fromOnly <$> query conn incomingSql params
-            held <- map fromOnly <$> query conn internalSql params
-            pure (live, incoming, held)
+convergeMobileSlots appGroup surface platform mAnchor = withDb $ \db -> withConn db $ \conn -> do
+    let mV = fst <$> mAnchor
+        mC = snd =<< mAnchor
+        paramsV = (appGroup, surface, platform, mV, mV, mV, mC, mC)
+    live <- map fromOnly <$> query conn liveSql paramsV
+    incoming <-
+        if platform == "android"
+            then map fromOnly <$> query conn incomingSqlCode (appGroup, surface, platform, mC, mC)
+            else map fromOnly <$> query conn incomingSql paramsV
+    held <- map fromOnly <$> query conn internalSql paramsV
+    pure (live, incoming, held)
   where
-    liveSqlCode =
-        "UPDATE release_tracker rt SET status = 'COMPLETED', rollout_status = 'superseded' \
-        \WHERE rt.category = 'MobileBuild' AND rt.app_group = ? AND rt.service = ? AND rt.env = ? \
-        \  AND rt.store_track = 'production' \
-        \  AND ( rt.rollout_status IN ('rolling_out','halted','completed') \
-        \        OR ( rt.rollout_status IS NULL AND rt.review_status IS NULL \
-        \             AND rt.status = 'COMPLETED' ) ) \
-        \  AND ?::int IS NOT NULL \
-        \  AND rt.version_code IS NOT NULL AND rt.version_code < ?::int \
-        \RETURNING rt.id"
     incomingSqlCode =
         "WITH incoming AS ( \
         \  SELECT id, version_code \
@@ -241,22 +230,6 @@ convergeMobileSlots appGroup surface platform mAnchor = withDb $ \db -> withConn
         \WHERE rt.id = i.id \
         \  AND ( ( ?::int IS NOT NULL AND i.version_code <= ?::int ) \
         \     OR i.version_code < b.bcode ) \
-        \RETURNING rt.id"
-    internalSqlCode =
-        "WITH held AS ( \
-        \  SELECT id, version_code \
-        \  FROM release_tracker \
-        \  WHERE category = 'MobileBuild' AND app_group = ? AND service = ? AND env = ? \
-        \    AND store_track IN ('internal','testflight') AND review_status IS NULL \
-        \    AND rollout_status IS NULL AND status IN ('INPROGRESS','COMPLETED') \
-        \    AND version_code IS NOT NULL ), \
-        \best AS ( SELECT version_code AS bcode FROM held \
-        \          ORDER BY version_code DESC LIMIT 1 ) \
-        \UPDATE release_tracker rt SET status = 'COMPLETED', rollout_status = 'superseded' \
-        \FROM held h LEFT JOIN best b ON TRUE \
-        \WHERE rt.id = h.id \
-        \  AND ( ( ?::int IS NOT NULL AND h.version_code < ?::int ) \
-        \     OR h.version_code < b.bcode ) \
         \RETURNING rt.id"
     liveSql =
         "UPDATE release_tracker rt SET status = 'COMPLETED', rollout_status = 'superseded' \
@@ -329,11 +302,9 @@ bestActiveInternalBuild appGroup surface platform = withDb $ \db -> withConn db 
               \  AND store_track IN ('internal','testflight') AND review_status IS NULL \
               \  AND rollout_status IS NULL AND status IN ('INPROGRESS','COMPLETED') \
               \  AND version_code IS NOT NULL "
-                -- Android: codes are the global order; iOS: version first (codes reset).
-                <> ( if platform == "android"
-                        then "ORDER BY version_code DESC, mobile_version_key(new_version) DESC LIMIT 1"
-                        else "ORDER BY mobile_version_key(new_version) DESC, version_code DESC LIMIT 1"
-                   )
+                -- SSOT release ordering (both platforms): version first, code tiebreak
+                -- — same predicate the promote gate and slot convergence use.
+                <> "ORDER BY mobile_version_key(new_version) DESC, version_code DESC LIMIT 1"
             )
             (appGroup, surface, platform)
     pure $ case rows of

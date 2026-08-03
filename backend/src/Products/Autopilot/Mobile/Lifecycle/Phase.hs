@@ -20,6 +20,7 @@ module Products.Autopilot.Mobile.Lifecycle.Phase (
     pEngineStatus,
     phaseToWfStatus,
     phaseFromFields,
+    supersededIfBehind,
     isFailedTerminal,
     holdsStoreIdentity,
     promotableStage,
@@ -288,3 +289,14 @@ phaseFromFields kind wf review rollout pct track =
                     | otherwise -> Building
   where
     fromPct = maybe 0 (/ 100)
+
+{- | Fold the release-order verdict into a derived phase (§15, one label on
+every surface): an internal-held build sitting BEHIND production in release
+order can never pass the promote gate, so it reads Superseded everywhere —
+matching what slot convergence writes to the row on its next pass. Only
+InternalHeld folds; a blocked-but-current build in any other phase keeps its
+truthful label.
+-}
+supersededIfBehind :: Bool -> ReleasePhase -> ReleasePhase
+supersededIfBehind True InternalHeld = Superseded
+supersededIfBehind _ ph = ph

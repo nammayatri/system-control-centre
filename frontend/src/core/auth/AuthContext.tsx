@@ -18,6 +18,9 @@ interface AuthContextType {
   // Whether Slack posting is enabled (slack_enabled server_config). The mobile
   // create form hides its "Send changelog to Slack" opt-in when this is false.
   slackEnabled: boolean;
+  // The changelog-to-Slack destination channel (mobile_slack_channel config);
+  // null when unset — the create form shows WHERE the post goes.
+  slackChannel: string | null;
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
@@ -32,6 +35,7 @@ const AuthContext = createContext<AuthContextType>({
   env: 'UAT',
   buildType: 'release',
   slackEnabled: true,
+  slackChannel: null,
   login: async () => { },
   logout: () => { },
   isAuthenticated: false,
@@ -42,7 +46,7 @@ type BuildType = 'debug' | 'release';
 const asBuildType = (v: unknown): BuildType => (v === 'debug' ? 'debug' : 'release');
 
 // Hydrate from localStorage so the app paints an authed UI before the profile request returns.
-function loadCached(): { user: AuthUser | null; products: ProductAccess[]; deploymentAccess: DeploymentAccess[]; env: string; buildType: BuildType; slackEnabled: boolean } {
+function loadCached(): { user: AuthUser | null; products: ProductAccess[]; deploymentAccess: DeploymentAccess[]; env: string; buildType: BuildType; slackEnabled: boolean; slackChannel: string | null } {
   try {
     const user = JSON.parse(localStorage.getItem('auth_user') || 'null');
     const products = JSON.parse(localStorage.getItem('auth_products') || '[]');
@@ -52,9 +56,10 @@ function loadCached(): { user: AuthUser | null; products: ProductAccess[]; deplo
     // Default true unless explicitly cached false, so the opt-in isn't hidden
     // before the profile request confirms the config.
     const slackEnabled = localStorage.getItem('auth_slack_enabled') !== 'false';
-    return { user, products, deploymentAccess, env, buildType, slackEnabled };
+    const slackChannel = localStorage.getItem('auth_slack_channel') || null;
+    return { user, products, deploymentAccess, env, buildType, slackEnabled, slackChannel };
   } catch {
-    return { user: null, products: [], deploymentAccess: [], env: 'UAT', buildType: 'release', slackEnabled: true };
+    return { user: null, products: [], deploymentAccess: [], env: 'UAT', buildType: 'release', slackEnabled: true, slackChannel: null };
   }
 }
 
@@ -68,6 +73,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [env, setEnv] = useState<string>(cached.env);
   const [buildType, setBuildType] = useState<BuildType>(cached.buildType);
   const [slackEnabled, setSlackEnabled] = useState<boolean>(cached.slackEnabled);
+  const [slackChannel, setSlackChannel] = useState<string | null>(cached.slackChannel);
   const [loading, setLoading] = useState(!cached.user && !!storedToken);
 
   const clearAuth = useCallback(() => {
@@ -82,6 +88,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem('auth_env');
     localStorage.removeItem('auth_build_type');
     localStorage.removeItem('auth_slack_enabled');
+    localStorage.removeItem('auth_slack_channel');
   }, []);
 
   // Validate token on mount — only logout on 401, not network errors
@@ -100,6 +107,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const newEnv = data.config?.env || 'UAT';
         const newBuildType = asBuildType(data.config?.buildType);
         const newSlack = data.config?.slackEnabled ?? true;
+        const newChannel = (data.config?.slackChannel || '').trim() || null;
+        setSlackChannel(newChannel);
+        if (newChannel) localStorage.setItem('auth_slack_channel', newChannel);
+        else localStorage.removeItem('auth_slack_channel');
         setEnv(newEnv);
         setBuildType(newBuildType);
         setSlackEnabled(newSlack);
@@ -129,6 +140,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const newEnv = data.config?.env || 'UAT';
     const newBuildType = asBuildType(data.config?.buildType);
     const newSlack = data.config?.slackEnabled ?? true;
+    const newChannel = (data.config?.slackChannel || '').trim() || null;
+    setSlackChannel(newChannel);
+    if (newChannel) localStorage.setItem('auth_slack_channel', newChannel);
+    else localStorage.removeItem('auth_slack_channel');
     setEnv(newEnv);
     setBuildType(newBuildType);
     setSlackEnabled(newSlack);
@@ -157,6 +172,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         env,
         buildType,
         slackEnabled,
+        slackChannel,
         login,
         logout,
         isAuthenticated: !!token && !!user,
