@@ -379,4 +379,22 @@ autopilotConfigs =
         MobileGroup
         "How long generated summaries are cached, in hours."
         (Just "autopilot")
+    , ConfigEntry
+        "ai_config_review_enabled"
+        (BoolConfig True)
+        MobileGroup
+        "Run the AI breaking-change review when a ConfigMap (BackendConfig) deployment's config changes. Sub-gated under ai_enabled."
+        (Just "autopilot")
+    , ConfigEntry
+        "ai_config_review_rules_dir"
+        (TextConfig "dhall-configs/config-review-rules")
+        MobileGroup
+        "Directory holding the config-review rules Markdown. Resolved per app-group (<dir>/<appGroup>.md) with <dir>/default.md as fallback."
+        (Just "autopilot")
+    , ConfigEntry
+        "ai_deployment_review_enabled"
+        (BoolConfig True)
+        MobileGroup
+        "Run the AI breaking-change review on a BackendService release's env/resources/replicas changes. Shares the config-review rules"
+        (Just "autopilot")
     ]

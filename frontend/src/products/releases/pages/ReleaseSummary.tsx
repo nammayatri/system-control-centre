@@ -26,9 +26,10 @@ import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import {
   Copy, RefreshCw, Play, Pause, Square, RotateCcw, Check, X, Zap,
   Trash2, ChevronRight as ChevronRightIcon, FastForward, RotateCw,
-  ExternalLink, Network, BarChart3, Pencil, Lock, Save, Info,
+  ExternalLink, Network, BarChart3, Pencil, Lock, Save, Info, AlertTriangle,
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
+import ConfigReviewPanel, { useConfigReview, VerdictBadge } from '../../configmap/components/ConfigReviewPanel';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { toast } from 'sonner';
 import ReactDiffViewer from 'react-diff-viewer-continued';
@@ -561,7 +562,7 @@ const RolloutStrategyTab: React.FC<{
 const ReleaseSummary: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'env-diff' | 'json'>('summary');
+  const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'env-diff' | 'json' | 'ai-review'>('summary');
   const [showABModal, setShowABModal] = useState(false);
 
   const { data: release, isLoading, isFetching, error, refetch } = useRelease(id);
@@ -570,6 +571,9 @@ const ReleaseSummary: React.FC = () => {
   const qc = useQueryClient();
   const { user: authUser } = useAuth();
   const actor = authUser?.email || 'admin';
+  // AI env review (BackendService deployments). Drives the banner + approve-gate.
+  const { data: review } = useConfigReview(id || '', 'release');
+  const reviewBlocks = !!review?.available && review.blocksApproval;
   const doRefresh = useCallback(async () => {
     await Promise.all([
       refetch(),
@@ -619,13 +623,20 @@ const ReleaseSummary: React.FC = () => {
     isDanger = false,
     description?: string,
   ) => {
+    // Approving a release the AI flagged as risky (even after acknowledgement,
+    // which only unblocks the button): warn again in the confirm dialog.
+    const flaggedVerdict = review?.available ? review.verdict : undefined;
+    const riskyApproval =
+      label === 'approve' && (flaggedVerdict === 'POTENTIALLY_BREAKING' || flaggedVerdict === 'BREAKING');
+    const verdictPhrase = flaggedVerdict === 'BREAKING' ? 'breaking' : 'potentially breaking';
     const ok = await confirmAction({
       title: `${cap(label)} Release`,
-      description:
-        description ??
-        `Are you sure you want to ${label} this release? This action cannot be undone.`,
-      confirmLabel: cap(label),
-      variant: isDanger ? 'danger' : 'primary',
+      description: riskyApproval
+        ? `The AI review flagged this as a ${verdictPhrase} env change — there may be a risky env change here. Are you sure this change is correct and you want to approve it?`
+        : description ??
+          `Are you sure you want to ${label} this release? This action cannot be undone.`,
+      confirmLabel: riskyApproval ? 'Yes, approve anyway' : cap(label),
+      variant: isDanger || riskyApproval ? 'danger' : 'primary',
     });
     if (!ok) return;
     try { await fn(); } catch (err: any) {
@@ -675,6 +686,7 @@ const ReleaseSummary: React.FC = () => {
     { key: 'events' as const, label: 'Events' },
     { key: 'env-diff' as const, label: 'ENV Diff' },
     { key: 'json' as const, label: 'JSON Data' },
+    { key: 'ai-review' as const, label: 'AI Review' },
   ];
 
   const dockerImage = release.docker_image || release.release_context?.docker_image || '';
@@ -811,7 +823,11 @@ const ReleaseSummary: React.FC = () => {
         <div className="flex items-center gap-2 flex-wrap sm:justify-end">
           {s === 'CREATED' && release.is_approved === 0 && (
             <PermissionGate product="autopilot" permission="RELEASE_APPROVE" appGroup={release.appGroup}>
-              <Button size="sm" variant="success" loading={approveMut.isPending} onClick={() => doAction('approve', () => approveMut.mutateAsync({ releaseId: id!, approvedBy: actor }))}><Check className="w-3.5 h-3.5" /> Approve</Button>
+              <SimpleTooltip content={reviewBlocks ? 'AI review flagged this env change as potentially breaking — acknowledge the warning in the AI Review tab first' : 'Approve'}>
+                <span>
+                  <Button size="sm" variant="success" disabled={reviewBlocks} loading={approveMut.isPending} onClick={() => doAction('approve', () => approveMut.mutateAsync({ releaseId: id!, approvedBy: actor }))}><Check className="w-3.5 h-3.5" /> Approve</Button>
+                </span>
+              </SimpleTooltip>
             </PermissionGate>
           )}
           {s === 'CREATED' && (
@@ -882,6 +898,20 @@ const ReleaseSummary: React.FC = () => {
         </div>
       </div>
 
+      {reviewBlocks && (
+        <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
+          <div className="flex items-start gap-2.5 text-sm text-amber-800">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>
+              AI review flagged this env change as {review?.verdict && <VerdictBadge verdict={review.verdict} />}. Approval is blocked until an operator acknowledges the warning.
+            </span>
+          </div>
+          <Button size="sm" variant="outline" className="border-amber-300 text-amber-800 hover:bg-amber-100 shrink-0" onClick={() => setActiveTab('ai-review')}>
+            Review &amp; acknowledge
+          </Button>
+        </div>
+      )}
+
       <div className="bg-white rounded-xl border border-zinc-200">
         <div className="flex border-b border-zinc-200 px-2 sm:px-5 overflow-x-auto">
           {tabs.map(tab => (
@@ -928,6 +958,8 @@ const ReleaseSummary: React.FC = () => {
         )}
 
         {activeTab === 'events' && <ReleaseEventsTab events={events} />}
+
+        {activeTab === 'ai-review' && <ConfigReviewPanel id={id!} appGroup={release.appGroup} resource="release" />}
 
         {activeTab === 'env-diff' && <EnvDiffTab releaseId={id!} />}
 
