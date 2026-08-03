@@ -667,6 +667,37 @@ export async function updateConfigMap(id: string, updates: Record<string, any>):
     return data;
 }
 
+export type ConfigReviewVerdict = 'SAFE' | 'POTENTIALLY_BREAKING' | 'BREAKING';
+
+export interface ConfigReviewResp {
+    available: boolean;
+    reason?: string | null;
+    verdict?: ConfigReviewVerdict | null;
+    summary?: string | null;
+    model?: string | null;
+    cached?: boolean | null;
+    reviewedAt?: string | null;
+    ackBy?: string | null;
+    ackAt?: string | null;
+    blocksApproval: boolean;
+}
+
+// Deployment (BackendService) release env review.
+export async function fetchReleaseReview(id: string): Promise<ConfigReviewResp> {
+    const { data } = await apiClient.get(`/tracker/release/${encodeURIComponent(id)}/ai/review`);
+    return data;
+}
+
+export async function runReleaseReview(id: string, force = false): Promise<ConfigReviewResp> {
+    const { data } = await apiClient.post(`/tracker/release/${encodeURIComponent(id)}/ai/review`, { force });
+    return data;
+}
+
+export async function acknowledgeReleaseReview(id: string): Promise<ConfigReviewResp> {
+    const { data } = await apiClient.post(`/tracker/release/${encodeURIComponent(id)}/ai/review/ack`, {});
+    return data;
+}
+
 // ── Release CRUD ───────────────────────────────────────────────────
 
 export async function createRelease(isNewService: boolean, payload: any): Promise<any> {

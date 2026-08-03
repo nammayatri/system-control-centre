@@ -55,6 +55,7 @@ module Products.Autopilot.Queries.ReleaseTracker (
 
     -- * Misc / Update helpers
     updateReleaseTrackerSlackThreadTs,
+    updateReleaseTrackerMetadata,
     touchReleaseHeartbeat,
 
     -- * Row conversion
@@ -1161,6 +1162,21 @@ guard makes the UPDATE atomic under MVCC, so concurrent notifications
 can't race-overwrite each other's thread ids. Best-effort; callers don't
 need to check the row count.
 -}
+
+{- | Overwrite the whole @metadata@ JSON column for a tracker. A targeted
+single-column write (no status CAS) so the AI config-review layer can stamp its
+verdict/acknowledgement onto @metadata.ai_review@ from a background thread
+-}
+updateReleaseTrackerMetadata :: (MonadFlow m) => Text -> Value -> m ()
+updateReleaseTrackerMetadata rid meta = withDb $ \db ->
+    withConn db $ \conn -> do
+        _ <-
+            execute
+                conn
+                "UPDATE release_tracker SET metadata = ? WHERE id = ?"
+                (encodeJsonText meta, rid)
+        pure ()
+
 updateReleaseTrackerSlackThreadTs :: (MonadFlow m) => Text -> Text -> m ()
 updateReleaseTrackerSlackThreadTs rid value = withDb $ \db ->
     withConn db $ \conn -> do

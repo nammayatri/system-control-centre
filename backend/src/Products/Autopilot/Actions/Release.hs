@@ -79,6 +79,8 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import Data.Yaml qualified as Yaml
 import Database.PostgreSQL.Simple (Only (..), SqlError (..), execute, withTransaction)
+import Products.Autopilot.ConfigDiff (extractConfigMapDataSection)
+import Products.Autopilot.ConfigReview (reviewBlocksApproval, runConfigReview)
 import Products.Autopilot.DiffLink (buildDiffLink)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
 import Products.Autopilot.EventLog (logAbortTriggered, logStatusUpdated)
@@ -843,6 +845,8 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{
                 envOverrideData
                 "DEPLOYMENT_AFTER_PREVIEW"
             notifyReleaseCreated tracker
+            -- Kick off the AI env review in the background
+            void $ forkFlow $ void $ runConfigReview createdBy tracker False
             pure $ APIResponse "SUCCESS" ("Tracker created: " <> rid)
 
 getReleaseH :: AuthedPerson -> Text -> Flow (Maybe ReleaseTracker)
@@ -864,6 +868,9 @@ approveReleaseH ap rid req = do
                     if NT.isApproved tracker
                         then throwM $ BadRequest ("Release already approved by " <> fromMaybe "unknown" (NT.approvedBy tracker) <> ". Cannot approve again.")
                         else do
+                            when (reviewBlocksApproval tracker) $
+                                throwM $
+                                    BadRequest "AI review flagged this deployment's env change as potentially breaking — acknowledge the warning in the AI Review tab before approving."
                             let approver = req.approvedBy
                                 infraApproval = req.isInfraApproved
                                 updated =
@@ -2424,11 +2431,3 @@ staggerInfoH rid = do
 Input: full K8s YAML like "apiVersion: v1\ndata:\n  app.conf: |-\n    ...\nkind: ..."
 Output: JSON like "{\"app.conf\":\"...\"}" so it matches the tracker's file format.
 -}
-extractConfigMapDataSection :: Text -> Text
-extractConfigMapDataSection yamlText =
-    case Yaml.decodeEither' (TE.encodeUtf8 yamlText) :: Either Yaml.ParseException Value of
-        Right (Object obj) ->
-            case KM.lookup (K.fromText "data") obj of
-                Just dataVal -> TE.decodeUtf8 (LBS.toStrict (A.encode dataVal))
-                Nothing -> yamlText
-        _ -> yamlText

@@ -21,9 +21,10 @@ import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import GHC.Generics (Generic)
 
--- | Resolved AI config (from server_config + the SC_AI_API_KEY env secret).
--- Deliberately small: thinking-disable, timeout, and retry are fixed behaviours in
--- 'Shared.AI.Provider'/'Shared.AI.ReleaseSummary', not operator knobs.
+{- | Resolved AI config (from server_config + the SC_AI_API_KEY env secret).
+Deliberately small: thinking-disable, timeout, and retry are fixed behaviours in
+'Shared.AI.Provider'/'Shared.AI.ReleaseSummary', not operator knobs.
+-}
 data AiConfig = AiConfig
     { aiBaseUrl :: Text
     , aiApiKey :: Text
@@ -48,13 +49,14 @@ data AiCompletionResult = AiCompletionResult
     , acrOutputTokens :: Int32
     }
 
-data AiTask = TaskChangelogSummary | TaskReleaseRisk | TaskFreeformQA
+data AiTask = TaskChangelogSummary | TaskReleaseRisk | TaskFreeformQA | TaskConfigReview
     deriving (Eq, Show)
 
 taskText :: AiTask -> Text
 taskText TaskChangelogSummary = "changelog_summary"
 taskText TaskReleaseRisk = "release_risk"
 taskText TaskFreeformQA = "freeform_qa"
+taskText TaskConfigReview = "config_review"
 
 -- | What is being summarised: a release id, or a changelog commit range, etc.
 data AiSubject = AiSubject

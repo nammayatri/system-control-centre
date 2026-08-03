@@ -76,6 +76,9 @@ COPY --from=build /usr/local/bin/scc /usr/local/bin/scc
 COPY --from=build /app/dev/sql-seed     /srv/scc/dev/sql-seed
 COPY --from=build /app/dev/migrations   /srv/scc/dev/migrations
 
+# AI config-review rules (non-secret, static review guidance).
+COPY --from=build /app/dhall-configs/config-review-rules /srv/scc/dhall-configs/config-review-rules
+
 # NOTE: dhall-configs/ is intentionally NOT baked into the image (matches
 # NammaYatri's pattern). The container is environment-agnostic — production
 # mounts the dhall file at runtime via a k8s Secret/ConfigMap volume and

@@ -14,9 +14,10 @@ import { CardSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { SimpleTooltip } from '../../../shared/ui/tooltip';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
-import { RefreshCw, Copy, Check, Pause, Play, X, Square, RotateCcw, RotateCw, FastForward } from 'lucide-react';
+import { RefreshCw, Copy, Check, Pause, Play, X, Square, RotateCcw, RotateCw, FastForward, AlertTriangle } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
+import ConfigReviewPanel, { useConfigReview, VerdictBadge } from '../components/ConfigReviewPanel';
 
 function formatConfigMapContent(raw: string): string {
   try {
@@ -111,6 +112,9 @@ const ConfigMapSummary: React.FC = () => {
     enabled: !!id,
   });
 
+  const { data: review } = useConfigReview(id);
+  const reviewBlocks = !!review?.available && review.blocksApproval;
+
   const actionMut = useMutation({
     mutationFn: async (body: Record<string, unknown>) => {
       return updateConfigMap(id, body);
@@ -122,11 +126,18 @@ const ConfigMapSummary: React.FC = () => {
   const confirmAction = useConfirm();
   const handleAction = async (action: string) => {
     const isDanger = ['Abort', 'Discard', 'Revert'].includes(action);
+    // If the AI review flagged this config as risky, warn again on approval
+    const flaggedVerdict = review?.available ? review.verdict : undefined;
+    const riskyApproval =
+      action === 'Approve' && (flaggedVerdict === 'POTENTIALLY_BREAKING' || flaggedVerdict === 'BREAKING');
+    const verdictPhrase = flaggedVerdict === 'BREAKING' ? 'breaking' : 'potentially breaking';
     const ok = await confirmAction({
       title: `${action} ConfigMap Release`,
-      description: `Are you sure you want to ${action.toLowerCase()} this ConfigMap release?`,
-      confirmLabel: `Yes, ${action}`,
-      variant: isDanger ? 'danger' : 'primary',
+      description: riskyApproval
+        ? `The AI review flagged this as a ${verdictPhrase} config change — there may be a risky env change here. Are you sure this change is correct and you want to approve it?`
+        : `Are you sure you want to ${action.toLowerCase()} this ConfigMap release?`,
+      confirmLabel: riskyApproval ? 'Yes, approve anyway' : `Yes, ${action}`,
+      variant: isDanger || riskyApproval ? 'danger' : 'primary',
     });
     if (!ok) return;
     let body: Record<string, unknown> = {};
@@ -155,7 +166,7 @@ const ConfigMapSummary: React.FC = () => {
   }
   if (!data) return <div className="p-10 text-center text-red-500">ConfigMap not found.</div>;
 
-  const tabs = ['Summary', 'Event Data', 'Json Data', 'ConfigMap Diff'];
+  const tabs = ['Summary', 'Event Data', 'Json Data', 'ConfigMap Diff', 'AI Review'];
   const events: ConfigMapEvent[] = releaseEvents.length > 0
     ? releaseEvents.map(e => ({ category: e.category, label: e.label, data: e.data, timestamp: e.timestamp }))
     : (data.events as ConfigMapEvent[] | undefined) || [];
@@ -174,7 +185,11 @@ const ConfigMapSummary: React.FC = () => {
         <div className="flex items-center gap-2 flex-wrap sm:justify-end">
           {data.status === 'CREATED' && data.is_approved === 0 && (
             <PermissionGate product="autopilot" permission="RELEASE_UPDATE" appGroup={data.appGroup}>
-              <Button size="sm" variant="success" onClick={() => handleAction('Approve')} loading={actionMut.isPending}><Check className="w-3.5 h-3.5" /> Approve</Button>
+              <SimpleTooltip content={reviewBlocks ? 'AI review flagged this change as potentially breaking — acknowledge the warning in the AI Review tab first' : 'Approve'}>
+                <span>
+                  <Button size="sm" variant="success" disabled={reviewBlocks} onClick={() => handleAction('Approve')} loading={actionMut.isPending}><Check className="w-3.5 h-3.5" /> Approve</Button>
+                </span>
+              </SimpleTooltip>
             </PermissionGate>
           )}
           {data.status === 'INPROGRESS' && (
@@ -208,6 +223,20 @@ const ConfigMapSummary: React.FC = () => {
           </SimpleTooltip>
         </div>
       </div>
+
+      {reviewBlocks && (
+        <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
+          <div className="flex items-start gap-2.5 text-sm text-amber-800">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>
+              AI review flagged this config change as {review?.verdict && <VerdictBadge verdict={review.verdict} />}. Approval is blocked until an operator acknowledges the warning.
+            </span>
+          </div>
+          <Button size="sm" variant="outline" className="border-amber-300 text-amber-800 hover:bg-amber-100 shrink-0" onClick={() => setActiveTab('AI Review')}>
+            Review &amp; acknowledge
+          </Button>
+        </div>
+      )}
 
       <div className="bg-white rounded-xl border border-zinc-200">
         <div className="flex border-b border-zinc-200 px-2 sm:px-5 overflow-x-auto">
@@ -279,6 +308,8 @@ const ConfigMapSummary: React.FC = () => {
         )}
 
         {activeTab === 'ConfigMap Diff' && <ConfigMapDiffTab releaseId={id} />}
+
+        {activeTab === 'AI Review' && <ConfigReviewPanel id={id} appGroup={data.appGroup} />}
       </div>
 
       <div className="flex justify-end pt-5">
