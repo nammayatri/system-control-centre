@@ -26,6 +26,9 @@ flake.lock
 
 # Dhall configs are NOT baked into the runtime image (matches NammaYatri's
 # pattern). Production mounts a real dhall file at runtime via k8s Secret.
-# Excluded from the build context entirely so a developer's local
-# secrets.dhall can never leak into the image.
-dhall-configs/
+# Exclude the dhall files so a developer's local secrets.dhall can never leak
+# into the image — but KEEP config-review-rules/, the non-secret static AI
+# review rules the Dockerfile bakes in (COPY .../config-review-rules).
+dhall-configs/*
+!dhall-configs/config-review-rules
+!dhall-configs/config-review-rules/**
