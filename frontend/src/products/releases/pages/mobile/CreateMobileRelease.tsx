@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { usePermissions } from '../../../../core/auth/PermissionsContext';
-import { AlertTriangle, Smartphone, Apple, Check, Cpu, GitBranch, ChevronDown, Search, GitCommit, ExternalLink, X } from 'lucide-react';
+import { AlertTriangle, Smartphone, Apple, Bug, Check, Cpu, Flame, GitBranch, ChevronDown, MousePointerClick, Rocket, Search, GitCommit, ExternalLink, X, Slack } from 'lucide-react';
 import {
   useMobileApps,
   useMobileBranches,
@@ -106,7 +107,7 @@ const storeBuildsForApp = (a: AppCatalogEntry): LatestBuild[] => {
 
 export default function CreateMobileRelease() {
   const navigate = useNavigate();
-  const { buildType: deployBuildType, slackEnabled } = useAuth();
+  const { buildType: deployBuildType, slackEnabled, slackChannel } = useAuth();
   const { data: apps, isLoading: appsLoading, error: appsError } = useMobileApps();
   // "Copy as new release": ?copyFrom=<groupId> prefills the form from an
   // existing group — same apps/changelog/destination, FRESH auto versions,
@@ -582,28 +583,64 @@ export default function CreateMobileRelease() {
   };
 
   return (
-    // No trailing page padding: the sticky bar is the last element and its own
-    // wrapper cancels <main>'s bottom padding so it never "detaches" at scroll end.
-    <div className="flex flex-col flex-1 w-full">
-      <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-6 max-w-4xl">
+    // v4 layout: page header, then a 12-col grid — picker + changelog left,
+    // the sticky Release Plan rail (the confirm surface) right.
+    <div className="flex flex-col flex-1 w-full pb-10">
+      <form onSubmit={handleSubmit} className="w-full">
 
         {/* Store versions shown below come from the on-demand cache; auto-refreshes
             on open when cold/stale so the base build per track is current. */}
         <StoreSyncBanner />
 
-        {/* ─── Apps card ─────────────────────────────── */}
-        <section className="bg-white rounded-xl border border-zinc-200">
-          <header className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
-            <h2 className="text-base sm:text-lg font-semibold text-zinc-900">
-              Apps
-              <span className="ml-2 text-xs font-normal text-zinc-500">
-                {selectedIds.length} selected
+        {/* ─── Page header (v4) ── */}
+        <div className="stagger-item mt-4 mb-5" style={{ '--index': 0 } as CSSProperties}>
+          <div className="eyebrow mb-1">Mobile releases · {isDebug ? 'debug' : 'release'} build</div>
+          <div className="flex items-end justify-between gap-4 flex-wrap">
+            <div>
+              <h1 className="text-2xl font-black tracking-tight text-zinc-900">New release wave</h1>
+              <p className="text-sm text-zinc-500 mt-1">
+                Pick apps, confirm versions, dispatch to GitHub Actions — one wave, one group.
+              </p>
+            </div>
+            {isDebug ? (
+              <span className="inline-flex items-center gap-1.5 bg-amber-50 border border-amber-200 text-amber-700 text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-full">
+                <Bug className="w-3 h-3" /> Debug · Firebase distribution
               </span>
-            </h2>
-            <p className="text-xs text-zinc-500 mt-0.5">
-              Pick the apps to release. Versions auto-fill from the latest live
-              version.
-            </p>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 text-emerald-700 text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-full">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> Release · store-bound
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
+          <div className="xl:col-span-7 space-y-5 min-w-0">
+
+        {/* ─── Apps card ─────────────────────────────── */}
+        <section className="card-surface stagger-item" style={{ '--index': 1 } as CSSProperties}>
+          <header className="px-4 sm:px-6 pt-5 pb-4 flex items-center justify-between gap-3 border-b border-zinc-100">
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="w-6 h-6 rounded-full bg-violet-600 text-white text-[11px] font-black flex items-center justify-center shrink-0">1</span>
+              <div className="min-w-0">
+                <h2 className="text-sm font-bold text-zinc-900">Apps</h2>
+                <p className="text-[11px] text-zinc-500">
+                  {isDebug
+                    ? 'Debug builds version themselves at build time — just pick apps.'
+                    : 'Versions auto-fill from the latest store build.'}
+                </p>
+              </div>
+            </div>
+            <span
+              className={cn(
+                'inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-full border shrink-0',
+                selectedIds.length > 0
+                  ? 'bg-violet-50 border-violet-200 text-violet-700'
+                  : 'bg-zinc-100 border-zinc-200 text-zinc-500',
+              )}
+            >
+              {selectedIds.length} selected
+            </span>
           </header>
           <div className="p-4 sm:p-6">
             {appsLoading ? (
@@ -626,47 +663,7 @@ export default function CreateMobileRelease() {
               </div>
             ) : (
               <div className="space-y-2.5">
-                {/* Selected apps as removable chips — the at-a-glance view while
-                    the surface groups stay collapsed. × deselects that app. */}
-                {selectedIds.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    {selectedIds.map((id) => {
-                      const a = enabledApps.find((x) => x.id === id);
-                      if (!a) return null;
-                      const name = (a.displayLabel || a.name).replace(/ (Android|iOS)\)$/i, ')');
-                      return (
-                        <span
-                          key={id}
-                          className="inline-flex items-center gap-1 h-7 pl-2.5 pr-1 rounded-full border border-violet-300 bg-violet-50 text-xs font-medium text-violet-900"
-                        >
-                          {a.platform === 'ios' ? (
-                            <Apple className="w-3 h-3 text-violet-500" />
-                          ) : (
-                            <Cpu className="w-3 h-3 text-emerald-600" />
-                          )}
-                          <span className="truncate max-w-[180px]">{name}</span>
-                          <button
-                            type="button"
-                            aria-label={`Remove ${name} (${a.platform})`}
-                            title="Deselect"
-                            onClick={() => toggleApp(id)}
-                            className="inline-flex items-center justify-center w-5 h-5 rounded-full text-violet-500 hover:bg-violet-200 hover:text-violet-800 transition-colors"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                        </span>
-                      );
-                    })}
-                    <button
-                      type="button"
-                      onClick={() => setSelectedIds([])}
-                      className="text-[11px] font-medium text-zinc-400 hover:text-zinc-700 px-1"
-                    >
-                      Clear all
-                    </button>
-                  </div>
-                )}
-                {/* App search — filters the tiles below by name / surface / platform. */}
+                {/* App search — filters the rows below by name / surface / platform. */}
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 pointer-events-none" />
                   <input
@@ -678,6 +675,59 @@ export default function CreateMobileRelease() {
                     className="w-full h-10 sm:h-9 border border-zinc-300 rounded-lg pl-9 pr-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-zinc-400"
                   />
                 </div>
+                {/* Selection tray — the selection lives HERE, not in the groups:
+                    see and edit it without ever expanding a group. */}
+                {selectedIds.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-violet-100 bg-violet-50/40 px-2.5 py-2">
+                    <span className="eyebrow mr-1 text-violet-600">Selected</span>
+                    {selectedIds.map((id) => {
+                      const a = enabledApps.find((x) => x.id === id);
+                      if (!a) return null;
+                      const name = (a.displayLabel || a.name).replace(/\s*\(.*$/, '');
+                      return (
+                        <span
+                          key={id}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white py-0.5 pl-1 pr-1 shadow-sm"
+                        >
+                          <BrandLogo
+                            brand={a.displayLabel || a.name}
+                            surface={a.surface === 'driver' ? 'driver' : undefined}
+                            size="sm"
+                            platform={a.platform === 'ios' ? 'ios' : 'android'}
+                            className="scale-[0.85]"
+                          />
+                          <span className="truncate max-w-[160px] text-[11px] font-bold text-zinc-800">{name}</span>
+                          <span
+                            className={cn(
+                              'rounded-sm px-1 py-px text-[8px] font-bold uppercase tracking-wide',
+                              a.surface === 'driver'
+                                ? 'bg-indigo-50 text-indigo-500'
+                                : 'bg-zinc-100 text-zinc-400',
+                            )}
+                          >
+                            {a.surface === 'driver' ? 'provider' : 'consumer'}
+                          </span>
+                          <button
+                            type="button"
+                            aria-label={`Remove ${name} (${a.surface === 'driver' ? 'provider' : 'consumer'} ${a.platform})`}
+                            title="Deselect"
+                            onClick={() => toggleApp(id)}
+                            className="flex h-4 w-4 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-red-50 hover:text-red-600"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </span>
+                      );
+                    })}
+                    <button
+                      type="button"
+                      onClick={() => setSelectedIds([])}
+                      className="ml-auto text-[10px] font-bold uppercase tracking-wide text-zinc-400 transition-colors hover:text-red-600"
+                    >
+                      Clear all
+                    </button>
+                  </div>
+                )}
                 {enabledApps.length === 0 ? (
                   // The route guard admits anyone holding MB_RELEASE_CREATE on
                   // ANY scope — say why the picker is empty instead of implying
@@ -701,136 +751,75 @@ export default function CreateMobileRelease() {
                       onToggle={() => toggle(g.key)}
                       badge={
                         groupSel > 0 ? (
-                          <span className="text-[11px] font-medium text-zinc-900">
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-violet-600">
                             {groupSel} selected
                           </span>
                         ) : null
                       }
                     >
-                      {(() => {
-                        // Merge the surface's per-platform rows into ONE tile per
-                        // app (keyed by the catalyst `name`), showing Android +
-                        // iOS side by side. Each platform is still independently
-                        // selectable (its own appCatalogId). Android-only apps
-                        // (no iOS row) just leave the iOS cell empty.
-                        const order: string[] = [];
-                        const byName = new Map<
-                          string,
-                          { label: string; byPlat: Record<string, (typeof g.apps)[number]> }
-                        >();
-                        for (const app of g.apps) {
-                          if (!byName.has(app.name)) {
-                            order.push(app.name);
-                            byName.set(app.name, {
-                              // Strip the trailing platform word so the tile title
-                              // reads "Odisha Yatri (Driver)" not "(Driver Android)".
-                              label: (app.displayLabel || app.name).replace(/ (Android|iOS)\)$/i, ')'),
-                              byPlat: {},
-                            });
-                          }
-                          byName.get(app.name)!.byPlat[app.platform] = app;
-                        }
-                        return (
-                          <ul className="space-y-2">
-                            {order.map((name) => {
-                              const { label, byPlat } = byName.get(name)!;
-                              const entries = Object.values(byPlat);
-                              const anySel = entries.some((a) => selectedIds.includes(a.id));
-                              return (
-                                <li key={name}>
-                                  <div
-                                    className={cn(
-                                      'rounded-lg border px-3 py-2.5 transition-all',
-                                      anySel
-                                        ? 'border-violet-300 bg-violet-50/40 shadow-sm'
-                                        : 'border-zinc-200 hover:border-zinc-300',
+                      <ul className="-m-2 divide-y divide-zinc-100 sm:-m-3">
+                        {g.apps.map((app) => {
+                          const sel = selectedIds.includes(app.id);
+                          const stores = storeBuildsForApp(app);
+                          const name = (app.displayLabel || app.name).replace(/\s*\(.*$/, '');
+                          const ios = app.platform === 'ios';
+                          return (
+                            <li key={app.id}>
+                              <label
+                                className={cn(
+                                  'flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors sm:px-4',
+                                  sel ? 'bg-violet-50/60' : 'hover:bg-zinc-50',
+                                )}
+                                style={sel ? { boxShadow: 'inset 3px 0 0 #7c3aed' } : undefined}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={sel}
+                                  onChange={() => toggleApp(app.id)}
+                                  className="peer sr-only"
+                                />
+                                <span
+                                  className={cn(
+                                    'flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded border-[1.5px] transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-violet-300',
+                                    sel ? 'border-violet-600 bg-violet-600' : 'border-zinc-300 bg-white',
+                                  )}
+                                >
+                                  {sel && <Check className="h-3 w-3 text-white" strokeWidth={3.5} />}
+                                </span>
+                                <BrandLogo
+                                  brand={app.displayLabel || app.name}
+                                  surface={app.surface === 'driver' ? 'driver' : undefined}
+                                  size="md"
+                                  platform={ios ? 'ios' : 'android'}
+                                />
+                                <span className="flex min-w-0 flex-col leading-tight">
+                                  <span className="truncate text-[13px] font-bold text-zinc-800">{name}</span>
+                                  <span className="flex items-center gap-1 text-[10px] font-medium text-zinc-400">
+                                    {app.surface === 'driver' ? 'provider' : 'consumer'} ·{' '}
+                                    {ios ? (
+                                      <span className="inline-flex items-center gap-0.5 font-semibold text-zinc-700">
+                                        <Apple className="h-2.5 w-2.5" /> ios
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-0.5 font-semibold text-emerald-600">
+                                        <Cpu className="h-2.5 w-2.5" /> android
+                                      </span>
                                     )}
-                                  >
-                                    <div className="flex items-center justify-between gap-3">
-                                      <div className="flex min-w-0 items-center gap-2">
-                                        <BrandLogo
-                                          brand={label}
-                                          surface={g.key === 'driver' ? 'driver' : undefined}
-                                          size="sm"
-                                        />
-                                        <div className="text-sm font-medium text-zinc-900 truncate">{label}</div>
-                                      </div>
-                                      {/* Platform toggles styled EXACTLY like the shared
-                                          Button (sm): secondary when off, primary + ✓ when on. */}
-                                      <div className="flex items-center gap-1.5 shrink-0">
-                                        {(['android', 'ios'] as const).map((plat) => {
-                                          const app = byPlat[plat];
-                                          if (!app) return null;
-                                          const sel = selectedIds.includes(app.id);
-                                          return (
-                                            <label
-                                              key={plat}
-                                              title={`${app.displayLabel || app.name}`}
-                                              className={cn(
-                                                // `relative` is REQUIRED: the child <input> uses `sr-only`
-                                                // (position:absolute) and must stay contained here, not
-                                                // escape <main>'s overflow-y-auto via <html>.
-                                                'relative inline-flex items-center justify-center rounded-lg font-medium cursor-pointer whitespace-nowrap select-none',
-                                                'transition-colors duration-150 h-9 sm:h-8 px-3 text-[13px] gap-1.5',
-                                                sel
-                                                  ? 'bg-violet-50 text-violet-900 border border-violet-300 hover:bg-violet-100'
-                                                  : 'bg-white text-zinc-700 border border-zinc-300 hover:bg-zinc-50 active:bg-zinc-100',
-                                              )}
-                                            >
-                                              <input
-                                                type="checkbox"
-                                                checked={sel}
-                                                onChange={() => toggleApp(app.id)}
-                                                className="sr-only peer"
-                                              />
-                                              <span className="absolute inset-0 rounded-lg pointer-events-none peer-focus-visible:ring-2 peer-focus-visible:ring-zinc-400 peer-focus-visible:ring-offset-1" />
-                                              {/* Checkbox square: the "this is a selection" cue. */}
-                                              <span
-                                                className={cn(
-                                                  'flex items-center justify-center w-4 h-4 rounded-[4px] border-[1.5px] shrink-0 transition-colors',
-                                                  sel ? 'bg-violet-600 border-violet-600' : 'bg-white border-zinc-400',
-                                                )}
-                                              >
-                                                {sel && <Check className="w-3 h-3 text-white" strokeWidth={3.5} />}
-                                              </span>
-                                              {plat === 'ios' ? (
-                                                <Apple className={cn('w-3.5 h-3.5', sel ? 'text-violet-700' : 'text-zinc-500')} />
-                                              ) : (
-                                                <Cpu className={cn('w-3.5 h-3.5', sel ? 'text-violet-700' : 'text-emerald-600')} />
-                                              )}
-                                              {plat === 'ios' ? 'iOS' : 'Android'}
-                                            </label>
-                                          );
-                                        })}
-                                      </div>
-                                    </div>
-                                    {entries.some((a) => storeBuildsForApp(a).length || a.latestDebugBuild) && (
-                                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-2">
-                                        {entries.map((a) => {
-                                          const stores = storeBuildsForApp(a);
-                                          return stores.length || a.latestDebugBuild ? (
-                                            <div key={a.id} className="inline-flex items-center gap-1">
-                                              <span className="text-[10px] uppercase tracking-wide text-zinc-400">
-                                                {a.platform === 'ios' ? 'iOS' : 'And'}
-                                              </span>
-                                              {stores.map((b, i) => (
-                                                <LatestBuildBadge key={i} build={b} label="release" platform={a.platform} />
-                                              ))}
-                                              {a.latestDebugBuild && (
-                                                <LatestBuildBadge build={a.latestDebugBuild} label="debug" platform={a.platform} />
-                                              )}
-                                            </div>
-                                          ) : null;
-                                        })}
-                                      </div>
-                                    )}
-                                  </div>
-                                </li>
-                              );
-                            })}
-                          </ul>
-                        );
-                      })()}
+                                  </span>
+                                </span>
+                                <span className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
+                                  {stores.map((b, i) => (
+                                    <LatestBuildBadge key={i} build={b} label="release" platform={app.platform} />
+                                  ))}
+                                  {app.latestDebugBuild && (
+                                    <LatestBuildBadge build={app.latestDebugBuild} label="debug" platform={app.platform} />
+                                  )}
+                                </span>
+                              </label>
+                            </li>
+                          );
+                        })}
+                      </ul>
                     </CollapsibleGroup>
                   );
                 })}
@@ -839,15 +828,29 @@ export default function CreateMobileRelease() {
           </div>
         </section>
 
+        {/* ─── Source & changelog (v4 composite card) ── */}
+        <section className="card-surface stagger-item" style={{ '--index': 2 } as CSSProperties}>
+          <header className="px-4 sm:px-6 pt-5 pb-4 flex items-center gap-3 border-b border-zinc-100">
+            <span className="w-6 h-6 rounded-full bg-violet-600 text-white text-[11px] font-black flex items-center justify-center shrink-0">2</span>
+            <div>
+              <h2 className="text-sm font-bold text-zinc-900">Source &amp; changelog</h2>
+              <p className="text-[11px] text-zinc-500">
+                {isDebug
+                  ? 'One branch for the whole wave — commits are diffed from the last debug build.'
+                  : "One branch for the whole wave — the changelog is diffed from each app's live version."}
+              </p>
+            </div>
+          </header>
+
         {/* ─── Source branch — one row, combobox always visible ── */}
-        <section className="bg-white rounded-xl border border-zinc-200 px-4 py-2.5 sm:px-6">
+        <div className="px-4 py-3 sm:px-6 border-b border-zinc-100">
           <div className="flex items-center gap-3 flex-wrap">
             <div
-              className="flex items-center gap-2 text-sm shrink-0"
+              className="flex items-center gap-2 shrink-0 w-20"
               title="Branch or tag the workflow will check out. Defaults to main."
             >
-              <GitBranch className="w-4 h-4 text-zinc-500" />
-              <span className="font-medium text-zinc-900">Source</span>
+              <GitBranch className="w-3.5 h-3.5 text-zinc-400" />
+              <span className="eyebrow">Branch</span>
             </div>
             <div className="relative flex-1 min-w-[200px] max-w-sm" ref={branchContainerRef}>
               <div className="relative">
@@ -931,6 +934,14 @@ export default function CreateMobileRelease() {
                 </ul>
               )}
             </div>
+            {(() => {
+              const picked = (branchesData ?? []).find((b) => b.name === effSourceRef);
+              return picked ? (
+                <span className="inline-flex items-center gap-1 text-[10px] font-mono text-zinc-400 shrink-0">
+                  <GitCommit className="w-3 h-3" /> {picked.sha.slice(0, 7)}
+                </span>
+              ) : null;
+            })()}
             {effSourceRef !== 'main' && (
               <>
                 <span className="inline-flex items-center gap-1 text-xs text-amber-700 shrink-0">
@@ -953,7 +964,7 @@ export default function CreateMobileRelease() {
               </>
             )}
           </div>
-        </section>
+        </div>
 
         {/* ─── Changelog preview (per-app tabs, release builds only) ── */}
         {!isDebug && changelogApps.length > 0 && (() => {
@@ -962,11 +973,11 @@ export default function CreateMobileRelease() {
           const app = changelogApps[safeTab];
           if (!q || !app) return null;
           return (
-            <section className="bg-white rounded-xl border border-zinc-200">
+            <div className="border-b border-zinc-100">
               <header className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
                 <div className="flex items-center justify-between gap-3">
-                  <h2 className="text-base sm:text-lg font-semibold text-zinc-900 flex items-center gap-2">
-                    <GitCommit className="w-4 h-4 text-zinc-500" />
+                  <h2 className="text-sm font-bold text-zinc-900 flex items-center gap-2">
+                    <GitCommit className="w-4 h-4 text-zinc-400" />
                     Commits since last release
                   </h2>
                   <div className="flex items-center gap-2 shrink-0">
@@ -1046,35 +1057,61 @@ export default function CreateMobileRelease() {
               </header>
 
               <div className="p-4 sm:p-6">
-                {/* Opt-in for the post-build Slack changelog. Hidden for debug
-                    builds (never posted) and when Slack is disabled in config;
-                    enabled ONLY when a summary exists — a build with no comparable
-                    base produces none, and we never post an empty changelog. */}
-                {!isDebug && slackEnabled && (
-                  <label
-                    className={cn(
-                      'mb-3 flex items-start gap-2 text-xs select-none',
-                      hasChangelogSummary ? 'text-zinc-600 cursor-pointer' : 'text-zinc-400 cursor-not-allowed',
-                    )}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={sendChangelogSlack && hasChangelogSummary}
-                      disabled={!hasChangelogSummary}
-                      onChange={(e) => setSendChangelogSlack(e.target.checked)}
-                      className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-300 text-violet-600 focus:ring-violet-400 disabled:opacity-50"
-                    />
-                    <span>
-                      Send changelog summary to Slack after build
-                      <span className="block text-[11px] text-zinc-400">
-                        {hasChangelogSummary
-                          ? 'Posts once per release — one message for the whole group, after the builds finish.'
-                          : 'Generate a changelog summary first — needs at least one app with a comparable last release.'}
-                      </span>
-                    </span>
-                  </label>
-                )}
-                {changelogApps.length > 1 ? (
+                {/* Slack is a DESTINATION of the AI changelog — it rides inside
+                    the summary card (topSlot), not as a detached checkbox.
+                    Hidden for debug builds and when Slack is disabled in config;
+                    enabled ONLY when a summary exists. */}
+                {(() => {
+                  const slackOn = sendChangelogSlack && hasChangelogSummary;
+                  // Bare channel names get the '#'; already-prefixed names and raw
+                  // channel IDs (C…/G…) pass through untouched.
+                  const channelLabel = slackChannel
+                    ? slackChannel.startsWith('#') || /^[CG][A-Z0-9]{6,}$/.test(slackChannel)
+                      ? slackChannel
+                      : `#${slackChannel}`
+                    : null;
+                  const slackSlot =
+                    !isDebug && slackEnabled ? (
+                      <div className="mx-3 mb-2.5 rounded-md border border-violet-100 bg-white/60 px-3 py-2">
+                        <label
+                          className={cn(
+                            'flex items-center gap-2.5 select-none',
+                            hasChangelogSummary ? 'cursor-pointer' : 'cursor-not-allowed opacity-60',
+                          )}
+                          title={hasChangelogSummary ? undefined : 'Generate a changelog summary first — needs at least one app with a comparable last release.'}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={slackOn}
+                            disabled={!hasChangelogSummary}
+                            onChange={(e) => setSendChangelogSlack(e.target.checked)}
+                            className="peer sr-only"
+                          />
+                          <span
+                            aria-hidden
+                            className={cn(
+                              'relative h-[18px] w-8 shrink-0 rounded-full transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-violet-300',
+                              slackOn ? 'bg-violet-600' : 'bg-zinc-300',
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                'absolute top-0.5 h-3.5 w-3.5 rounded-full bg-white shadow transition-[left] duration-150',
+                                slackOn ? 'left-[15px]' : 'left-0.5',
+                              )}
+                            />
+                          </span>
+                          <Slack className="h-[15px] w-[15px] shrink-0 text-violet-500" />
+                          <span className="min-w-0 text-xs font-medium text-zinc-700">
+                            Post this changelog to Slack when the builds land
+                          </span>
+                          {channelLabel && (
+                            <span className="ml-auto shrink-0 font-mono text-[10px] text-zinc-400">{channelLabel}</span>
+                          )}
+                        </label>
+                      </div>
+                    ) : undefined;
+                  return changelogApps.length > 1 ? (
                   // Multi-app: ONE combined summary for the whole selection —
                   // common changes + labeled per-app extras; every app submits
                   // this same text. The per-app tabs below still browse commits.
@@ -1093,7 +1130,7 @@ export default function CreateMobileRelease() {
                     })}
                     branch={effSourceRef}
                     base={changelogBase}
-                    defaultCollapsed
+                    topSlot={slackSlot}
                     onSummary={(long, short) => {
                       setCombinedSummary(long);
                       if (short) setCombinedShort(short);
@@ -1108,14 +1145,15 @@ export default function CreateMobileRelease() {
                     base={changelogBase}
                     versionName={versionEdits[app.id]?.versionName || ''}
                     versionCode={versionEdits[app.id]?.versionCode || ''}
-                    defaultCollapsed
+                    topSlot={slackSlot}
                     onSummary={(text, short) => {
                       setSummaryByApp((m) => (m[app.id] === text ? m : { ...m, [app.id]: text }));
                       if (short)
                         setShortByApp((m) => (m[app.id] === short ? m : { ...m, [app.id]: short }));
                     }}
                   />
-                ) : null}
+                ) : null;
+                })()}
 
                 {/* Per-app commit browser: the combined summary above is the
                     headline; these tabs are for digging into ONE app's diff,
@@ -1289,22 +1327,120 @@ export default function CreateMobileRelease() {
                   );
                 })()}
               </div>
-            </section>
+            </div>
           );
         })()}
 
-        {/* ─── Versions card (hidden for debug builds) ── */}
-        {selectedIds.length > 0 && !isDebug && (
-          <section className="bg-white rounded-xl border border-zinc-200">
-            <header className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100 flex items-center justify-between gap-3">
-              <h2 className="text-base sm:text-lg font-semibold text-zinc-900">
-                Versions
-              </h2>
-              {previewQuery.isFetching && (
-                <span className="text-xs text-zinc-400">Loading suggestions…</span>
+        {/* ─── Workflow changelog ───────────────────── */}
+        <div>
+          <div className="px-4 sm:px-6 py-4">
+            <div className="mb-1.5 flex items-center justify-between gap-3 flex-wrap">
+              <span className="eyebrow">Workflow notes</span>
+              <span className="text-[10px] text-zinc-400">
+                passed to the build workflow · replace the default for real notes
+              </span>
+            </div>
+            <Textarea
+              value={changeLog}
+              onChange={(e) => setChangeLog(e.target.value)}
+              placeholder="Describe what's in this release…"
+              rows={1}
+              required
+              className="font-mono text-[12px]"
+            />
+          </div>
+        </div>
+        </section>
+          </div>
+
+          {/* ─── Release plan — sticky confirm surface (v4) ── */}
+          <aside className="xl:col-span-5 xl:sticky xl:top-4 min-w-0">
+            <section className="card-surface stagger-item overflow-visible" style={{ '--index': 3 } as CSSProperties}>
+              <header className="px-4 sm:px-5 pt-4 pb-3.5 border-b border-zinc-100 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="eyebrow mb-1">Release plan</div>
+                  {selectedIds.length === 0 ? (
+                    <h2 className="text-sm font-bold text-zinc-400">Nothing planned yet</h2>
+                  ) : (
+                    <h2 className="text-sm font-bold text-zinc-900 flex items-center gap-2.5 min-w-0">
+                      <span className="flex -space-x-2 shrink-0">
+                        {selectedIds.slice(0, 4).map((id) => {
+                          const a = enabledApps.find((x) => x.id === id);
+                          return a ? (
+                            <BrandLogo
+                              key={id}
+                              brand={a.displayLabel || a.name}
+                              surface={a.surface === 'driver' ? 'driver' : undefined}
+                              size="sm"
+                              className="ring-2 ring-white rounded-lg"
+                            />
+                          ) : null;
+                        })}
+                        {selectedIds.length > 4 && (
+                          <span className="h-6 w-6 rounded-lg bg-zinc-100 ring-2 ring-white text-[9px] font-bold text-zinc-500 flex items-center justify-center">
+                            +{selectedIds.length - 4}
+                          </span>
+                        )}
+                      </span>
+                      <span className="truncate">
+                        {selectedIds.length} app{selectedIds.length === 1 ? '' : 's'} ·{' '}
+                        <code className="font-mono">{effSourceRef}</code> ·{' '}
+                        {isDebug ? <span className="text-amber-600">debug</span> : 'release'}
+                      </span>
+                    </h2>
+                  )}
+                </div>
+                <Rocket className="w-5 h-5 text-violet-500 shrink-0" />
+              </header>
+
+              {selectedIds.length === 0 && (
+                <div className="px-5 py-10 text-center">
+                  <MousePointerClick className="w-7 h-7 text-zinc-300 mx-auto" />
+                  <p className="text-sm font-semibold text-zinc-600 mt-2">Your wave builds here</p>
+                  <p className="text-[11px] text-zinc-400 mt-1 max-w-[250px] mx-auto">
+                    {isDebug
+                      ? 'Pick apps on the left — debug builds version themselves at build time.'
+                      : "Pick apps on the left — versions and build numbers auto-fill from each app's latest store build."}
+                  </p>
+                </div>
               )}
-            </header>
-            <div className="p-4 sm:p-6 space-y-3">
+
+              {/* Debug: no inputs — every build versions itself (CalVer). */}
+              {selectedIds.length > 0 && isDebug && (
+                <div className="border-b border-zinc-100 divide-y divide-zinc-50">
+                  {selectedIds.map((id) => {
+                    const app = enabledApps.find((a) => a.id === id);
+                    if (!app) return null;
+                    return (
+                      <div key={id} className="px-4 sm:px-5 py-3 flex items-center gap-3">
+                        <BrandLogo
+                          brand={app.displayLabel || app.name}
+                          surface={app.surface === 'driver' ? 'driver' : undefined}
+                          size="sm"
+                          platform={app.platform === 'ios' ? 'ios' : 'android'}
+                        />
+                        <span className="flex flex-col leading-tight min-w-0 flex-1">
+                          <span className="text-[13px] font-bold text-zinc-800 truncate">
+                            {(app.displayLabel || app.name).replace(/ (Android|iOS)\)$/i, ')')}
+                          </span>
+                          <span className="text-[10px] text-zinc-400">versions itself at build time — no store, no review</span>
+                        </span>
+                        <span className="inline-flex items-center gap-1 h-7 px-2 rounded-md border border-amber-200 bg-amber-50 text-[11px] font-mono font-bold text-amber-800">
+                          auto · per build
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+            {/* Versions — the plan rows (hidden for debug builds) */}
+        {selectedIds.length > 0 && !isDebug && (
+          <div className="border-b border-zinc-100">
+            {previewQuery.isFetching && (
+              <div className="px-4 sm:px-5 pt-2.5 text-[11px] text-zinc-400">Loading suggestions…</div>
+            )}
+            <div className="px-4 sm:px-5 py-3.5 space-y-3">
               {selectedIds.map((id) => {
                 const app = enabledApps.find((a) => a.id === id);
                 if (!app) return null;
@@ -1316,56 +1452,74 @@ export default function CreateMobileRelease() {
                 // Show a clear read-only row instead of inputs the operator shouldn't fill.
                 if (isFirebaseId(id)) {
                   return (
-                    <div
-                      key={id}
-                      className="rounded-lg border border-amber-200 bg-amber-50/50 px-3 py-2.5"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider">
-                          {app.displayLabel || app.name}
-                          <span className="text-zinc-400 ml-1.5 normal-case font-normal tracking-normal">
-                            ({app.surface} {app.platform})
-                          </span>
-                        </label>
-                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-800 border border-amber-200">
-                          Firebase
+                    <div key={id} className="flex items-center gap-3">
+                      <BrandLogo
+                        brand={app.displayLabel || app.name}
+                        surface={app.surface === 'driver' ? 'driver' : undefined}
+                        size="sm"
+                        platform="android"
+                      />
+                      <div className="flex flex-col leading-tight min-w-0 flex-1">
+                        <span className="text-[13px] font-bold text-zinc-800 truncate">
+                          {(app.displayLabel || app.name).replace(/\s*\(.*$/, '')}
+                          <span className="font-medium text-zinc-400"> · provider android</span>
                         </span>
+                        <span className="text-[10px] text-zinc-400">not store-tracked — skips Play entirely</span>
                       </div>
-                      <div className="mt-1.5 flex items-center gap-2 text-[12px] text-amber-800">
-                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                        <span>
-                          Auto version:{' '}
-                          <code className="font-mono">{firebaseVersionPreview()}</code> — no input
-                          needed.
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span
+                          className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md border border-amber-200 bg-amber-50 text-[13px] font-mono font-bold text-amber-800"
+                          title="Timestamp-generated at build time (UTC year.MMDD.HHMM) — the exact value is stamped when the build runs."
+                        >
+                          <Flame className="w-3.5 h-3.5 text-amber-500" />
+                          {firebaseVersionPreview()}
+                        </span>
+                        <span className="text-[8px] font-bold uppercase text-amber-500 tracking-wide leading-tight text-right">
+                          auto
+                          <br />
+                          per build
                         </span>
                       </div>
                     </div>
                   );
                 }
 
-                // Android rows render a 3-column grid (name + code + status);
-                // iOS rows collapse to a 2-column grid (just the version_number
-                // input + status) since the build number is workflow-computed.
+                // v4 compact plan row: brand mark + name/context left, mono
+                // inputs right (iOS has no code — the workflow computes it).
                 return (
-                  <div
-                    key={id}
-                    className={cn(
-                      'grid grid-cols-1 gap-3 items-end',
-                      ios
-                        ? 'sm:grid-cols-[1fr_auto]'
-                        : 'sm:grid-cols-[1fr_auto_auto]',
-                    )}
-                  >
-                    <div>
-                      <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">
-                        {app.displayLabel || app.name}
-                        <span className="text-zinc-400 ml-1.5 normal-case font-normal tracking-normal">
-                          ({app.surface} {app.platform})
+                  <div key={id} className="flex items-center gap-3">
+                    <BrandLogo
+                      brand={app.displayLabel || app.name}
+                      surface={app.surface === 'driver' ? 'driver' : undefined}
+                      size="sm"
+                      platform={ios ? 'ios' : 'android'}
+                    />
+                    <div className="flex flex-col leading-tight min-w-0 flex-1">
+                      <span className="text-[13px] font-bold text-zinc-800 truncate">
+                        {(app.displayLabel || app.name).replace(/\s*\(.*$/, '')}
+                        <span className="font-medium text-zinc-400">
+                          {' '}· {app.surface === 'driver' ? 'provider' : 'consumer'} {app.platform}
                         </span>
-                      </label>
+                      </span>
+                      <span className="text-[10px] text-zinc-400 truncate">
+                        {preview?.err ? (
+                          <span className="inline-flex items-center gap-1 text-amber-700">
+                            <AlertTriangle className="w-3 h-3 shrink-0" />
+                            {preview.err}
+                          </span>
+                        ) : (
+                          <>
+                            {preview?.source && <>auto · {preview.source}</>}
+                            {ios && (preview?.source ? ' · build number from the workflow' : 'build number from the workflow')}
+                          </>
+                        )}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
                       <input
                         type="text"
                         inputMode="decimal"
+                        aria-label={`${app.displayLabel || app.name} version`}
                         value={v.versionName}
                         // Version names are digits-and-dots only ("3.4.3") —
                         // strip anything else as it's typed/pasted.
@@ -1377,50 +1531,30 @@ export default function CreateMobileRelease() {
                           preview?.nextVersionNumber ??
                           '2.5.1'
                         }
-                        className="w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400"
+                        className="w-24 h-8 border border-zinc-300 rounded-md text-[13px] font-mono font-bold text-center bg-white focus:outline-none focus:ring-2 focus:ring-violet-300"
                       />
-                      {ios && (
-                        <p className="mt-1 text-[11px] text-zinc-500">
-                          Build number is computed by the build workflow.
-                        </p>
-                      )}
-                    </div>
-                    {!ios && (
-                      <div className="sm:w-32">
-                        <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">
-                          Code
-                        </label>
+                      {!ios && (
                         <input
                           type="number"
+                          aria-label={`${app.displayLabel || app.name} build code`}
                           value={v.versionCode}
                           onChange={(e) => setVersionField(id, 'versionCode', e.target.value)}
-                          placeholder={preview?.nextVersionCode != null ? String(preview.nextVersionCode) : '12345'}
-                          className="w-full h-10 sm:h-9 border border-zinc-300 rounded-lg px-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400"
+                          placeholder={preview?.nextVersionCode != null ? String(preview.nextVersionCode) : '123'}
+                          className="w-16 h-8 border border-zinc-300 rounded-md text-[13px] font-mono text-center text-zinc-600 bg-white focus:outline-none focus:ring-2 focus:ring-violet-300"
                         />
-                      </div>
-                    )}
-                    <div className="text-xs text-zinc-400 pb-2">
-                      {preview?.source && !preview.err && (
-                        <span>auto · {preview.source}</span>
-                      )}
-                      {preview?.err && (
-                        <span className="inline-flex items-center gap-1 text-amber-700">
-                          <AlertTriangle className="w-3.5 h-3.5" />
-                          {preview.err}
-                        </span>
                       )}
                     </div>
                   </div>
                 );
               })}
             </div>
-          </section>
+          </div>
         )}
 
         {/* ─── Provider Android destination (appears only when a driver
             Android app is selected on a release build) ── */}
         {showDestination && (
-          <section className="bg-white rounded-xl border border-zinc-200 px-4 py-3 sm:px-6">
+          <div className="px-4 sm:px-5 py-3 border-b border-zinc-100">
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="min-w-0">
                 <div className="text-sm font-medium text-zinc-900">Provider Android destination</div>
@@ -1452,114 +1586,66 @@ export default function CreateMobileRelease() {
                 </p>
               </div>
             )}
-          </section>
+          </div>
         )}
 
-        {/* ─── Workflow changelog ───────────────────── */}
-        <section className="bg-white rounded-xl border border-zinc-200 mb-4 sm:mb-6">
-          <header className="px-4 py-3 sm:px-6 sm:py-4 border-b border-zinc-100">
-            <h2 className="text-base sm:text-lg font-semibold text-zinc-900">
-              Workflow changelog
-            </h2>
-            <p className="text-xs text-zinc-500 mt-0.5">
-              Passed to the build workflow. Replace the default if you want real notes.
-            </p>
-          </header>
-          <div className="p-4 sm:p-6">
-            <Textarea
-              value={changeLog}
-              onChange={(e) => setChangeLog(e.target.value)}
-              placeholder="Describe what's in this release…"
-              rows={1}
-              required
-            />
-          </div>
-        </section>
 
-        {/* ─── Sticky summary bar: what will happen + the CTA, always visible.
-            Replaces the old Build-type card (env-locked chip lives here) and
-            the bottom Actions row. Validation reason shows BEFORE submit. ── */}
-        <div className="sticky bottom-0 z-30 pt-1 pb-3 -mb-4 sm:-mb-5">
-          {/* Duplicate-version conflict from the last submit — the message says
-              to use a new build number or discard/promote the existing build. */}
-          {conflict && (
-            <div className="mb-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 shadow-sm flex flex-col sm:flex-row sm:items-center gap-2.5">
-              <div className="flex items-start gap-2 min-w-0 flex-1">
-                <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
-                <p className="text-xs text-red-800 leading-relaxed">{conflict.message}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setConflict(null)}
-                className="text-xs font-medium text-red-600 hover:text-red-800 px-1 shrink-0"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
-          <div className="rounded-xl border border-zinc-200 bg-white/95 backdrop-blur px-4 py-3 shadow-[0_-6px_24px_-12px_rgba(0,0,0,0.25)] flex flex-col sm:flex-row sm:items-center gap-2.5 sm:gap-4">
-            <div className="flex items-center gap-2.5 min-w-0 flex-1">
-              <span
-                className={cn(
-                  'inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border shrink-0',
-                  buildType === 'debug'
-                    ? 'bg-amber-50 text-amber-700 border-amber-200'
-                    : 'bg-emerald-50 text-emerald-700 border-emerald-200',
-                )}
-              >
-                {buildType === 'debug' ? 'Debug' : 'Release'}
-              </span>
-              <div className="min-w-0">
-                <div className="text-sm font-medium text-zinc-900 truncate">
-                  {selectedIds.length === 0
-                    ? 'No apps selected'
-                    : `${selectedIds.length} app${selectedIds.length === 1 ? '' : 's'} selected`}
-                  {effSourceRef !== 'main' && (
-                    <span className="font-normal text-amber-700">
-                      {' '}· from <code className="font-mono">{effSourceRef}</code>
-                    </span>
-                  )}
+              {/* Dispatch summary */}
+              {selectedIds.length > 0 && (
+                <div className="px-4 sm:px-5 py-2.5 bg-zinc-50 border-b border-zinc-100 flex items-center gap-x-4 gap-y-1 flex-wrap text-[10px] font-mono text-zinc-500">
+                  <span className="inline-flex items-center gap-1">
+                    <GitBranch className="w-3 h-3" /> {effSourceRef}
+                  </span>
+                  {uploadTargets.length > 0 && <span>→ {uploadTargets.join(' · ')}</span>}
+                  <span>one release group</span>
                 </div>
-                {/* Destinations show as soon as apps are selected — not only once
-                    the whole form validates. Reasons may wrap; never clipped. */}
-                <div className="text-xs mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                  {uploadTargets.length > 0 && (
-                    <span className="text-zinc-500">
-                      Builds upload to {uploadTargets.join(' and ')}
-                    </span>
-                  )}
-                  {!validation.ok &&
-                    (selectedIds.length === 0 ? (
-                      <span className="text-zinc-500">{validation.reason}</span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 text-amber-700">
-                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                        {validation.reason}
-                      </span>
-                    ))}
+              )}
+
+              {/* Duplicate-version conflict from the last submit. */}
+              {conflict && (
+                <div className="mx-4 sm:mx-5 my-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+                  <p className="text-xs text-red-800 leading-relaxed flex-1">{conflict.message}</p>
+                  <button
+                    type="button"
+                    onClick={() => setConflict(null)}
+                    className="text-xs font-medium text-red-600 hover:text-red-800 shrink-0"
+                  >
+                    Dismiss
+                  </button>
                 </div>
-              </div>
-            </div>
-            <div className="flex items-center justify-end gap-2 shrink-0">
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => navigate('/mobile/releases')}
-              >
-                Cancel
-              </Button>
-              {/* Note: "Save & approve" intentionally omitted in MVP — the bulk
-                  approve action lives on the release group page. */}
-              <Button
-                type="submit"
-                loading={createMutation.isPending}
-                disabled={!validation.ok}
-              >
-                <Smartphone className="w-4 h-4" />
-                {createMutation.isPending ? 'Creating…' : 'Save as draft'}
-              </Button>
-            </div>
-          </div>
+              )}
+
+              <footer className="px-4 sm:px-5 py-3.5 flex items-center gap-2.5">
+                <Button type="button" variant="secondary" onClick={() => navigate('/mobile/releases')}>
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  loading={createMutation.isPending}
+                  disabled={!validation.ok}
+                  className="flex-1 bg-violet-600 border-violet-600 enabled:hover:bg-violet-700 enabled:hover:border-violet-700"
+                >
+                  <Smartphone className="w-4 h-4" />
+                  {createMutation.isPending
+                    ? 'Creating…'
+                    : selectedIds.length > 0
+                      ? `Save as draft — ${selectedIds.length} app${selectedIds.length === 1 ? '' : 's'}`
+                      : 'Select at least one app'}
+                </Button>
+              </footer>
+              {!validation.ok && selectedIds.length > 0 && (
+                <p className="px-4 sm:px-5 pb-3 -mt-1.5 text-[11px] text-amber-700 flex items-start gap-1">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" /> {validation.reason}
+                </p>
+              )}
+            </section>
+            <p className="stagger-item text-[10px] text-zinc-400 mt-3 px-1 leading-relaxed" style={{ '--index': 4 } as CSSProperties}>
+              {isDebug
+                ? 'Debug builds ship to Firebase App Distribution — no store review, no staged rollout; testers get them straight from the build.'
+                : 'Drafts land on the group console for review — building starts only when the wave is approved & dispatched.'}
+            </p>
+          </aside>
         </div>
       </form>
     </div>

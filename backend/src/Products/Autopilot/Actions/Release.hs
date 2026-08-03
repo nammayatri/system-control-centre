@@ -88,9 +88,9 @@ import Products.Autopilot.K8s.Deployment (buildPatchDeploymentEnvsCommand, deplo
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
-import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), displayStatusInferred, phaseFromFields, phaseSlug, variantSlug)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), displayStatusInferred, phaseFromFields, phaseSlug, supersededIfBehind, variantSlug)
 import Products.Autopilot.Mobile.Queries.StoreStatus (StoreCell, productionVersionsByApp, resolveStoreState, storeCellsByApp)
-import Products.Autopilot.Mobile.StoreSync (versionOlderThan)
+import Products.Autopilot.Mobile.StoreSync (atOrBelowProductionPure, releaseOrderBehind)
 import Products.Autopilot.Mobile.Types (mbContext, mbWfStatus)
 import Products.Autopilot.Notifications
 import Products.Autopilot.Queries.ProductService
@@ -261,7 +261,7 @@ listReleasesH _ap mFrom mTo mCategory = do
     let mWhitelist = categoryWhitelist mCategory
     prodCodes <- productionVersionsByApp
     cells <- storeCellsByApp
-    let enrich = fst . injectStoreState cells . injectPromotable prodCodes
+    let enrich = fst . injectStoreState prodCodes cells . injectPromotable prodCodes
     case (mFrom >>= parseISO, mTo >>= parseISO) of
         (Just fromTime, Just toTime) -> do
             pairs <- listReleaseTrackersByDateRangeAndCategory fromTime toTime mWhitelist
@@ -305,16 +305,13 @@ injectPromotable prods pair@(tracker, mts) =
                 bCode = NT.versionCode tracker
                 promotable = case Map.lookup key prods of
                     Just (pVer, mpCode) ->
-                        not (buildVer `versionOlderThan` pVer || (buildVer == pVer && codeAtOrBelow bCode mpCode))
+                        not (atOrBelowProductionPure (NT.env tracker) buildVer bCode pVer mpCode)
                     Nothing -> True -- no synced production → ahead by default
                 rc' = case NT.releaseContext tracker of
                     Just (Object o) -> Just (Object (KM.insert (K.fromText "promotable") (Bool promotable) o))
                     other -> other
              in (tracker{releaseContext = rc'}, mts)
         _ -> pair
-  where
-    codeAtOrBelow (Just b) (Just p) = b <= p
-    codeAtOrBelow _ _ = False
 
 {- | §16 read model for the list: REVIEW comes from the ROW (the setPhase-owned
 decision, immediate); rollout / % / track presence come from store_status (the
@@ -322,17 +319,25 @@ per-track live truth), matched by (version, code) with production-precedence.
 A build not currently on any track is left as serialized — 'fromRow' already
 derived its baseline from the row's own columns (terminal / SCC state).
 Non-mobile rows are untouched.
+
+§15 fold: a held build sitting BEHIND production in release order
+('releaseOrderBehind' against the same production map 'injectPromotable'
+uses) reads Superseded here — the one label the list, groups, and summary
+all inherit, matching what slot convergence writes to the row next pass.
 -}
-injectStoreState :: Map.Map (Text, Text, Text) [StoreCell] -> TrackerWithTarget -> TrackerWithTarget
-injectStoreState cellsByApp pair@(tracker, mts) =
+injectStoreState :: Map.Map (Text, Text, Text) (Text, Maybe Int32) -> Map.Map (Text, Text, Text) [StoreCell] -> TrackerWithTarget -> TrackerWithTarget
+injectStoreState prods cellsByApp pair@(tracker, mts) =
     case mts of
         Just (MobileBuildState s) ->
             let key = (NT.appGroup tracker, NT.service tracker, NT.env tracker)
                 cells = Map.findWithDefault [] key cellsByApp
+                behind = case Map.lookup key prods of
+                    Just (pVer, mpCode) -> releaseOrderBehind (NT.newVersion tracker) (NT.versionCode tracker) pVer mpCode
+                    Nothing -> False
              in case resolveStoreState cells (NT.newVersion tracker) (NT.versionCode tracker) of
                     Nothing -> pair
                     Just (rollout, pct, track) ->
-                        let ph = phaseFromFields (buildKind (mbContext s)) (mbWfStatus s) (NT.reviewStatus tracker) rollout pct track
+                        let ph = supersededIfBehind behind (phaseFromFields (buildKind (mbContext s)) (mbWfStatus s) (NT.reviewStatus tracker) rollout pct track)
                             disp = displayStatusInferred (reviewInferredOf (NT.metadata tracker)) ph
                             rc' =
                                 fmap

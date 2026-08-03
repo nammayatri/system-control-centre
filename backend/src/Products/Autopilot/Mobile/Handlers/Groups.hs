@@ -251,7 +251,7 @@ mkEnrich :: Flow (TrackerWithTarget -> ReleaseTracker)
 mkEnrich = do
     prodCodes <- productionVersionsByApp
     cells <- storeCellsByApp
-    pure (fst . injectStoreState cells . injectPromotable prodCodes)
+    pure (fst . injectStoreState prodCodes cells . injectPromotable prodCodes)
 
 -- | Stable-order grouping by group id (rows arrive creation-ordered).
 groupByGid :: [GroupedTracker] -> [(Text, Maybe Text, [TrackerWithTarget])]

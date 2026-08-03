@@ -1,3 +1,4 @@
+import type React from 'react';
 import { useEffect, useState, useId } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Sparkles, Loader2, ChevronDown, Copy, Check } from 'lucide-react';
@@ -115,6 +116,7 @@ export function MobileChangelogAiSummary({
   combinedApps,
   defaultCollapsed = false,
   onSummary,
+  topSlot,
 }: {
   app?: string;
   surface?: string;
@@ -135,6 +137,9 @@ export function MobileChangelogAiSummary({
   // Slack". `short` is the AI synopsis — present only once ready; the create
   // page stores it on the release for the promote form's store-notes prefill.
   onSummary?: (text: string, short?: string) => void;
+  // Rendered inside the card, under the title bar — e.g. the create page's
+  // "post to Slack" toggle, so the changelog and its destination read as one.
+  topSlot?: React.ReactNode;
 }) {
   const combined = (combinedApps?.length ?? 0) >= 2;
   const comboKey = combined
@@ -227,7 +232,7 @@ export function MobileChangelogAiSummary({
                 ? d?.available && d.usableCount != null && d.usableCount < combinedApps!.length
                   ? `Combined changelog — ${d.usableCount} of ${combinedApps!.length} apps`
                   : `Combined changelog — ${combinedApps!.length} apps, one summary`
-                : 'Changelog summary'}
+                : 'AI changelog summary'}
             </span>
             {badge && (
               <span className={cn('ml-0.5 inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold transition-colors', badge.cls)}>
@@ -263,6 +268,7 @@ export function MobileChangelogAiSummary({
             </div>
           )}
         </div>
+        {topSlot}
 
         {/* Collapsible body. grid-rows 0fr↔1fr animates height with no JS
             measurement; the inner overflow-hidden clips during the transition.

@@ -80,7 +80,7 @@ import Data.Text qualified as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
-import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), abortable, displayStatusInferred, phaseFromFields, phaseSlug, variantSlug)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), abortable, displayStatusInferred, phaseFromFields, phaseSlug, supersededIfBehind, variantSlug)
 import Products.Autopilot.Mobile.Queries.AppCatalog (storeTrackOf)
 import Products.Autopilot.Mobile.Queries.StoreStatus (
     findProductionLiveCell,
@@ -103,7 +103,7 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     setAscIds,
     setPhase,
  )
-import Products.Autopilot.Mobile.StoreSync (versionOlderThan)
+import Products.Autopilot.Mobile.StoreSync (atOrBelowProductionPure, releaseOrderBehind)
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
@@ -351,38 +351,32 @@ to @MBInReview@; the Phase-5 poll stage takes it from there (iOS auto, Android
 awaits the operator's mark-*).
 -}
 
-{- | True when this build is NOT ahead of production, so it can't be promoted.
-PLATFORM-CONDITIONAL ordering:
-
-  * Android — when both codes are known, compare by BUILD CODE alone: Play only
-    enforces version codes (globally monotonic); the marketing version name is
-    free-form, can go backwards, and never overrules a code verdict. A code at
-    or below production's can never ship. Codes unknown → fall back to the
-    version-first test below (advisory check, so a name guess is acceptable).
-  * iOS — marketing VERSION first, then build number WITHIN the same version:
-    CFBundleVersion resets per marketing version, so a newer version
-    legitimately carries the same/lower code as the live one.
-
-The single source of truth for the promote guard and the @rdPromotable@ flag.
-Reads the synced cache (no store call); fails OPEN when the production version
-is unknown, so it never blocks a promote it can't disprove.
+{- | True when this build is NOT ahead of production, so it can't be promoted:
+behind in release order (version-first, code tiebreak — 'releaseOrderBehind'),
+OR — Android — an artifact Play itself would reject (code at/below the live
+one; Play never checks version names). One shared predicate
+('atOrBelowProductionPure') with the list's promotable flag, so the promote
+gate, badge, and summary can never disagree. Reads the synced cache (no store
+call); fails OPEN when the production version is unknown.
 -}
 atOrBelowProduction :: AppCatalog -> Text -> Maybe Int32 -> Flow Bool
 atOrBelowProduction ac buildVer mCode = do
     mProd <- findProductionStoreCell (acId ac) (acPlatform ac)
     pure $ case mProd of
-        Just (Just pVer, mpCode)
-            | acPlatform ac == "android"
-            , Just b <- mCode
-            , Just p <- mpCode ->
-                b <= p
-            | otherwise ->
-                buildVer `versionOlderThan` pVer
-                    || (buildVer == pVer && codeAtOrBelow mCode mpCode)
+        Just (Just pVer, mpCode) -> atOrBelowProductionPure (acPlatform ac) buildVer mCode pVer mpCode
         _ -> False
-  where
-    codeAtOrBelow (Just b) (Just p) = b <= p
-    codeAtOrBelow _ _ = False -- same version, codes unknown → can't prove not-ahead → allow
+
+{- | The release-order half of the gate alone — drives the Superseded display
+fold ('supersededIfBehind'): a version-inverted held build reads Superseded,
+while a version-NEWER build Play merely rejects (code too low) keeps its
+truthful "Ready to promote" with the promote verb disabled.
+-}
+releaseOrderBehindProduction :: AppCatalog -> Text -> Maybe Int32 -> Flow Bool
+releaseOrderBehindProduction ac buildVer mCode = do
+    mProd <- findProductionStoreCell (acId ac) (acPlatform ac)
+    pure $ case mProd of
+        Just (Just pVer, mpCode) -> releaseOrderBehind buildVer mCode pVer mpCode
+        _ -> False
 
 {- | Is THIS build the version currently live & SERVING on the production track, per the
 synced @store_status@ production cell? Two conditions, both required:
@@ -461,18 +455,8 @@ promoteH ap rid PromoteReq{..} = do
         -- Android: codes decide when both are known (names never overrule);
         -- iOS / unknown codes: version-first with code tiebreak.
         notAheadOfIncoming :: ReleaseTrackerRow -> Bool
-        notAheadOfIncoming i
-            | rtEnv row == "android"
-            , Just b <- rtVersionCode row
-            , Just p <- rtVersionCode i =
-                b <= p
-            | otherwise =
-                version `versionOlderThan` rtNewVersion i
-                    || ( version == rtNewVersion i
-                            && case (rtVersionCode row, rtVersionCode i) of
-                                (Just b, Just p) -> b <= p
-                                _ -> False
-                       )
+        notAheadOfIncoming i =
+            atOrBelowProductionPure (rtEnv row) version (rtVersionCode row) (rtNewVersion i) (rtVersionCode i)
     forM_ (find notAheadOfIncoming mineIncoming) $ \i ->
         bad
             ( "Version "
@@ -650,9 +634,13 @@ rolloutDetailH _ap rid = do
                 rollout
                 pct
                 storeTrack
-        disp = displayStatusInferred (reviewInferredOf (parseJsonTextMaybe (rtMetadata row))) ph
         canAbort = abortable (mbWfStatus target) ph
     notAhead <- atOrBelowProduction ac (rtNewVersion row) (rtVersionCode row)
+    -- §15 fold: a held build behind production in release order reads
+    -- Superseded here too — same label the list/groups enrichment shows.
+    rob <- releaseOrderBehindProduction ac (rtNewVersion row) (rtVersionCode row)
+    let phE = supersededIfBehind rob ph
+        disp = displayStatusInferred (reviewInferredOf (parseJsonTextMaybe (rtMetadata row))) phE
     liveProd <- liveOnProduction ac (rtNewVersion row) (rtVersionCode row)
     syncedAgo <- secondsSinceLastSync (acId ac)
     cooldown <- fromIntegral <$> getStoreRefreshCooldownSeconds
@@ -671,7 +659,7 @@ rolloutDetailH _ap rid = do
             , rdMbStatus = tshow (mbWfStatus target)
             , rdStatusLabel = dLabel disp
             , rdStatusVariant = variantSlug (dVariant disp)
-            , rdPhase = phaseSlug ph
+            , rdPhase = phaseSlug phE
             , rdReviewStatus = review
             , rdReviewRejectReason = rtReviewRejectReason row
             , rdReviewSubmittedAt = rtReviewSubmittedAt row
