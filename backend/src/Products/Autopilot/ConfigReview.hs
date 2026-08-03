@@ -26,12 +26,14 @@ import Core.Environment (Flow, MonadFlow, logInfo)
 import Data.Aeson (Value (..), object, (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString qualified as BS
 import Data.List (sortBy)
 import Data.Maybe (fromMaybe, isNothing, listToMaybe)
 import Data.Ord (Down (..), comparing)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.IO qualified as TIO
+import Data.Text.Encoding qualified as TE
+import Data.Text.Encoding.Error qualified as TEE
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Products.Autopilot.ConfigDiff (configMapBeforeAfter, decodeBase64Config, deploymentBeforeAfter)
@@ -158,7 +160,10 @@ resolveRulesFile appGroup = do
     firstExisting [] = pure builtinDefaultRules
     firstExisting (p : ps) = do
         ok <- doesFileExist p
-        if ok then TIO.readFile p else firstExisting ps
+        if ok then readFileUtf8 p else firstExisting ps
+
+readFileUtf8 :: FilePath -> IO Text
+readFileUtf8 p = TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile p
 
 -- ─── Run + persist ─────────────────────────────────────────────────
 
