@@ -30,7 +30,7 @@ import Data.Text.Encoding qualified as TE
 import GHC.Int (Int32)
 import Products.Autopilot.Queries.ProductService (findProductByName, getProductSyncCluster, getSlackChannelDirect)
 import Products.Autopilot.Queries.ReleaseTracker (insertReleaseEvent)
-import Products.Autopilot.RuntimeConfig (isK8sEnabled, isSlackEnabled, isSyncClusterEnabled)
+import Products.Autopilot.RuntimeConfig (isK8sEnabled, isSlackEnabled)
 import Products.Autopilot.Types
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (
@@ -146,7 +146,7 @@ triggerSyncIfEnabled tracker mts = do
         then insertReleaseEvent (releaseId tracker) "BUSINESS" "SYNC_SKIPPED" (String "No SYNC_CLUSTER_URL configured")
         else do
             k8sEnabled <- isK8sEnabled
-            syncClusterOn <- isSyncClusterEnabled
+            let syncClusterOn = syncClusterEnabled cfg
             let syncFlag = maybe False (\t -> T.toLower t == "true") (syncEnabled tracker)
             mProduct <- findProductByName (appGroup tracker)
             let mSyncCluster = mProduct >>= getProductSyncCluster
@@ -355,7 +355,7 @@ triggerRevertSyncIfEnabled tracker mts = do
     if not isRevert || not syncFlag || not hasGlobalId || null syncUrl
         then pure ()
         else do
-            syncClusterOn <- isSyncClusterEnabled
+            let syncClusterOn = syncClusterEnabled cfg
             mProduct <- findProductByName (appGroup tracker)
             let mSyncCluster = mProduct >>= getProductSyncCluster
                 hasSyncCluster = maybe False (not . T.null) mSyncCluster
@@ -404,7 +404,7 @@ triggerImmediateRevertSync tracker mts = do
     if null syncUrl || not hasGlobalId
         then pure ()
         else do
-            syncClusterOn <- isSyncClusterEnabled
+            let syncClusterOn = syncClusterEnabled cfg
             mProduct <- findProductByName (appGroup tracker)
             let mSyncCluster = mProduct >>= getProductSyncCluster
                 hasSyncCluster = maybe False (not . T.null) mSyncCluster
