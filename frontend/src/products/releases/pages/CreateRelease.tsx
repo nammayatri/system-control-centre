@@ -71,6 +71,20 @@ const buildDiffLink = (repo: string, oldV: string, newV: string): string => {
     : `https://github.com/${r}/commits/${n}`;
 };
 
+// Stages the form falls back to when nothing else supplies them. Every read of
+// this (and of the baseline refs below) goes through cloneStages: sharing stage
+// objects between the live table and a baseline would let an edit rewrite the
+// very values a return-to-Auto is supposed to restore.
+type Stage = { rollout: number; cooloff: number; pods: number };
+const DEFAULT_STAGES: Stage[] = [
+  { rollout: 5, cooloff: 10, pods: 2 },
+  { rollout: 25, cooloff: 10, pods: 2 },
+  { rollout: 50, cooloff: 10, pods: 2 },
+  { rollout: 75, cooloff: 10, pods: 2 },
+  { rollout: 100, cooloff: 10, pods: 2 },
+];
+const cloneStages = (stages: Stage[]): Stage[] => stages.map(s => ({ ...s }));
+
 const CreateRelease: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -138,13 +152,13 @@ const CreateRelease: React.FC = () => {
   const [showAppGroupDropdown, setShowAppGroupDropdown] = useState(false);
   const [showPriorityDropdown, setShowPriorityDropdown] = useState(false);
   const [clonedService, setClonedService] = useState('');
-  const [stages, setStages] = useState([
-    { rollout: 5, cooloff: 10, pods: 2 },
-    { rollout: 25, cooloff: 10, pods: 2 },
-    { rollout: 50, cooloff: 10, pods: 2 },
-    { rollout: 75, cooloff: 10, pods: 2 },
-    { rollout: 100, cooloff: 10, pods: 2 },
-  ]);
+  const [stages, setStages] = useState<Stage[]>(cloneStages(DEFAULT_STAGES));
+  // The stages this form started from — service config on a create, the source
+  // release on a clone, the release's own stages on an edit. Flipping the Stages
+  // button back to Auto restores these, so Auto always means "the stagger this
+  // release would have had if nobody touched it" and edits made in Manual can't
+  // ride along into an Auto create.
+  const baselineStagesRef = useRef<Stage[]>(cloneStages(DEFAULT_STAGES));
   const [isReleaseSync, setIsReleaseSync] = useState(false);
   // Opt-in: post AI changelog notes to the release's Slack thread once it completes.
   // Seeded per app group from deployment config (ai_changelog_enabled) by the effect
@@ -153,19 +167,24 @@ const CreateRelease: React.FC = () => {
   const [isSecondaryEnvSwitch, setIsSecondaryEnvSwitch] = useState(false);
   const [secondaryEnvData, setSecondaryEnvData] = useState('');
   const [secondaryEnvLoading, setSecondaryEnvLoading] = useState(false);
-  const [secondaryStages, setSecondaryStages] = useState([
-    { rollout: 5, cooloff: 10, pods: 2 },
-    { rollout: 25, cooloff: 10, pods: 2 },
-    { rollout: 50, cooloff: 10, pods: 2 },
-    { rollout: 75, cooloff: 10, pods: 2 },
-    { rollout: 100, cooloff: 10, pods: 2 },
-  ]);
+  // Secondary stages are never loaded from config — they start at the defaults and
+  // only pod counts are refreshed from the sync cluster, so DEFAULT_STAGES plus
+  // those fresh counts is their baseline (kept in step by the estimate effect below).
+  const [secondaryStages, setSecondaryStages] = useState<Stage[]>(cloneStages(DEFAULT_STAGES));
+  const baselineSecondaryStagesRef = useRef<Stage[]>(cloneStages(DEFAULT_STAGES));
   const [syncCluster, setSyncCluster] = useState('');
   const [rolloutHistoryLength, setRolloutHistoryLength] = useState(0);
   const [podsAutoLocked, setPodsAutoLocked] = useState(true);
   const [secondaryPodsAutoLocked, setSecondaryPodsAutoLocked] = useState(true);
   const [secondaryOldVersion, setSecondaryOldVersion] = useState<string | null>(null);
   const [oldVersionUnresolved, setOldVersionUnresolved] = useState(false);
+  // The Stages card's Auto/Manual button governs the whole stage table, not just Min
+  // Pods: on Auto the release replays the service's saved stagger and nothing is
+  // editable, whoever you are. MANAGE_STAGGER only buys you the right to flip that
+  // button to Manual — editing starts there. The edit page has no such button (it is
+  // create-only), so mid-flight stage edits stay gated on the permission alone.
+  const canEditStages = canManageStagger && (isUpdate || !podsAutoLocked);
+  const canEditSecondaryStages = canManageStagger && !secondaryPodsAutoLocked;
   // Same signal buildPayload sends as trackerType — the app group's product_type,
   // not the per-service serviceType row (which can drift out of sync with it).
   const selectedTrackerType = useMemo(
@@ -278,7 +297,10 @@ const CreateRelease: React.FC = () => {
         try {
           const parsed = typeof existingRelease.rollout_strategy === 'string'
             ? JSON.parse(existingRelease.rollout_strategy) : existingRelease.rollout_strategy;
-          if (Array.isArray(parsed) && parsed.length > 0) setStages(parsed);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            baselineStagesRef.current = cloneStages(parsed);
+            setStages(cloneStages(parsed));
+          }
         } catch (e) { console.error('Failed to parse stages', e); }
       }
     }
@@ -300,7 +322,10 @@ const CreateRelease: React.FC = () => {
         if (data.rollout_strategy) {
           try {
             const parsed = typeof data.rollout_strategy === 'string' ? JSON.parse(data.rollout_strategy) : data.rollout_strategy;
-            if (Array.isArray(parsed) && parsed.length > 0) setStages(parsed);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              baselineStagesRef.current = cloneStages(parsed);
+              setStages(cloneStages(parsed));
+            }
           } catch (e) { console.error('Failed to parse stages', e); }
         }
       }).catch((err: any) => {
@@ -345,11 +370,13 @@ const CreateRelease: React.FC = () => {
           try {
             const rollouts = parseStrategyStages(svcConfig.rollout_strategy);
             if (rollouts.length > 0) {
-              setStages(rollouts.map(r => ({
+              const loaded: Stage[] = rollouts.map(r => ({
                 rollout: r.rolloutPercent ?? 0,
                 cooloff: r.cooloffMinutes ?? 10,
                 pods: r.podCount ?? 1,
-              })));
+              }));
+              baselineStagesRef.current = cloneStages(loaded);
+              setStages(cloneStages(loaded));
             }
           } catch (e) {
             // Surface parse errors — silent fallback to defaults hides misconfigured service configs.
@@ -372,6 +399,29 @@ const CreateRelease: React.FC = () => {
     if (isUpdate || !formData.appGroup || canManageStagger) return;
     setFormData(prev => (prev.mode === 'AUTO' ? prev : { ...prev, mode: 'AUTO' }));
   }, [isUpdate, formData.appGroup, canManageStagger]);
+
+  // Returning the Stages toggle to Auto has to undo the Manual edits: an AUTO
+  // release is meant to replay the baseline stagger, and the backend's create
+  // gate compares the submitted stages against the service config — leaving the
+  // edits in place would either 403 the create or ship a hand-made stagger under
+  // an AUTO label. Keyed off the Manual -> Auto transition specifically, so the
+  // loaders above (which run while the toggle still sits on its initial Auto)
+  // aren't clobbered by a restore.
+  const prevStagesLockRef = useRef(podsAutoLocked);
+  useEffect(() => {
+    const returnedToAuto = !prevStagesLockRef.current && podsAutoLocked;
+    prevStagesLockRef.current = podsAutoLocked;
+    if (isUpdate || !returnedToAuto) return;
+    setStages(cloneStages(baselineStagesRef.current));
+  }, [podsAutoLocked, isUpdate]);
+
+  const prevSecondaryLockRef = useRef(secondaryPodsAutoLocked);
+  useEffect(() => {
+    const returnedToAuto = !prevSecondaryLockRef.current && secondaryPodsAutoLocked;
+    prevSecondaryLockRef.current = secondaryPodsAutoLocked;
+    if (!returnedToAuto) return;
+    setSecondaryStages(cloneStages(baselineSecondaryStagesRef.current));
+  }, [secondaryPodsAutoLocked]);
 
   // Recalculate Min Pods (while locked) whenever the stage percentages change —
   // service select, the user editing a stage's %, adding/removing a stage, or
@@ -402,6 +452,13 @@ const CreateRelease: React.FC = () => {
       setSecondaryOldVersion(est.oldVersion ?? null);
       if (secondaryPodsAutoLocked) {
         setSecondaryStages(prev => prev.map((s, i) => (est.podCounts[i] != null ? { ...s, pods: est.podCounts[i] } : s)));
+        // Keep the restore target in step with the live estimate. While on Auto the
+        // percentages are always DEFAULT_STAGES', so the baseline is those plus the
+        // sync cluster's fresh pod counts — resetting to bare DEFAULT_STAGES would
+        // flash pods: 2 until this effect refetched them.
+        baselineSecondaryStagesRef.current = cloneStages(DEFAULT_STAGES).map((s, i) =>
+          est.podCounts[i] != null ? { ...s, pods: est.podCounts[i] } : s
+        );
       }
     }).catch((e: any) => {
       console.error('[CreateRelease] fetchRolloutPodEstimateSecondary failed:', e);
@@ -982,7 +1039,9 @@ const CreateRelease: React.FC = () => {
               )}
               {!isUpdate && (
                 <p className="text-xs text-zinc-500 mt-1">
-                  Min Pods is auto-calculated from the old version's live pod count. {podsAutoLocked ? 'Unlock to override.' : 'Editing manually — values will not be recalculated.'}
+                  {podsAutoLocked
+                    ? `Auto — stages follow the service's saved rollout and Min Pods is calculated from the old version's live pod count. ${canManageStagger ? 'Switch to Manual to edit them.' : 'Editing requires the MANAGE_STAGGER permission.'}`
+                    : 'Manual — edit any stage below. Switching back to Auto discards these edits and restores the service defaults.'}
                 </p>
               )}
             </div>
@@ -995,7 +1054,7 @@ const CreateRelease: React.FC = () => {
                   "shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors duration-150",
                   canManageStagger ? "text-zinc-600 border-zinc-200 hover:bg-zinc-50 cursor-pointer" : "text-zinc-400 border-zinc-100 bg-zinc-50 cursor-not-allowed opacity-70"
                 )}
-                title={!canManageStagger ? 'Requires MANAGE_STAGGER permission' : podsAutoLocked ? 'Unlock Min Pods to edit manually' : 'Lock Min Pods (auto-calculated)'}
+                title={!canManageStagger ? 'Requires MANAGE_STAGGER permission' : podsAutoLocked ? 'Switch to Manual to edit the rollout stages' : 'Switch to Auto — discards your edits and restores the service defaults'}
               >
                 {podsAutoLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
                 {podsAutoLocked ? 'Auto' : 'Manual'}
@@ -1034,25 +1093,25 @@ const CreateRelease: React.FC = () => {
                         </td>
                         <td className="py-2 px-3">
                           <input type="number" value={stage.rollout}
-                            disabled={isLocked || !canManageStagger}
+                            disabled={isLocked || !canEditStages}
                             onChange={(e) => setStages(prev => prev.map((s, i) => i === idx ? { ...s, rollout: parseInt(e.target.value) || 0 } : s))}
-                            className={cn(isLocked || !canManageStagger ? disabledInputClass : inputClass, 'w-24')} />
+                            className={cn(isLocked || !canEditStages ? disabledInputClass : inputClass, 'w-24')} />
                         </td>
                         <td className="py-2 px-3">
                           <input type="number" value={stage.cooloff}
-                            disabled={isLocked || !canManageStagger}
+                            disabled={isLocked || !canEditStages}
                             onChange={(e) => setStages(prev => prev.map((s, i) => i === idx ? { ...s, cooloff: parseInt(e.target.value) || 0 } : s))}
-                            className={cn(isLocked || !canManageStagger ? disabledInputClass : inputClass, 'w-24')} />
+                            className={cn(isLocked || !canEditStages ? disabledInputClass : inputClass, 'w-24')} />
                         </td>
                         <td className="py-2 px-3">
                           <input type="number" value={stage.pods}
-                            disabled={isLocked || !canManageStagger || (podsAutoLocked && !isUpdate)}
+                            disabled={isLocked || !canEditStages}
                             onChange={(e) => setStages(prev => prev.map((s, i) => i === idx ? { ...s, pods: parseInt(e.target.value) || 0 } : s))}
-                            className={cn((isLocked || !canManageStagger || (podsAutoLocked && !isUpdate)) ? disabledInputClass : inputClass, 'w-24')} />
+                            className={cn((isLocked || !canEditStages) ? disabledInputClass : inputClass, 'w-24')} />
                         </td>
                         <td className="py-2 px-3">
                           {!isLocked && stages.filter((_, i) => !isUpdate || i >= rolloutHistoryLength).length > 1 && (
-                            <button type="button" onClick={() => setStages(stages.filter((_, i) => i !== idx))} disabled={!canManageStagger} className={cn("p-1.5 rounded-lg transition-colors duration-150", canManageStagger ? "text-red-500 hover:bg-red-50 cursor-pointer" : "text-zinc-300 cursor-not-allowed opacity-50")}>
+                            <button type="button" onClick={() => setStages(stages.filter((_, i) => i !== idx))} disabled={!canEditStages} className={cn("p-1.5 rounded-lg transition-colors duration-150", canEditStages ? "text-red-500 hover:bg-red-50 cursor-pointer" : "text-zinc-300 cursor-not-allowed opacity-50")}>
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           )}
@@ -1063,7 +1122,7 @@ const CreateRelease: React.FC = () => {
                 </tbody>
               </table>
             </div>
-            <Button type="button" variant="secondary" size="sm" onClick={() => setStages([...stages, { rollout: 100, cooloff: 0, pods: 0 }])} disabled={!canManageStagger} className="mt-3">+ Add Stage</Button>
+            <Button type="button" variant="secondary" size="sm" onClick={() => setStages([...stages, { rollout: 100, cooloff: 0, pods: 0 }])} disabled={!canEditStages} className="mt-3">+ Add Stage</Button>
           </div>
         </div>
 
@@ -1140,14 +1199,16 @@ const CreateRelease: React.FC = () => {
                         "shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors duration-150",
                         canManageStagger ? "text-zinc-600 border-zinc-200 hover:bg-zinc-50 cursor-pointer" : "text-zinc-400 border-zinc-100 bg-zinc-50 cursor-not-allowed opacity-70"
                       )}
-                      title={!canManageStagger ? 'Requires MANAGE_STAGGER permission' : secondaryPodsAutoLocked ? 'Unlock Min Pods to edit manually' : 'Lock Min Pods (auto-calculated)'}
+                      title={!canManageStagger ? 'Requires MANAGE_STAGGER permission' : secondaryPodsAutoLocked ? 'Switch to Manual to edit the rollout stages' : 'Switch to Auto — discards your edits and restores the defaults'}
                     >
                       {secondaryPodsAutoLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
                       {secondaryPodsAutoLocked ? 'Auto' : 'Manual'}
                     </button>
                   </div>
                   <p className="text-xs text-zinc-500 mb-3">
-                    Min Pods is auto-calculated from the secondary cluster's live old-version pod count. {secondaryPodsAutoLocked ? 'Unlock to override.' : 'Editing manually — values will not be recalculated.'}
+                    {secondaryPodsAutoLocked
+                      ? `Auto — Min Pods is calculated from the secondary cluster's live old-version pod count. ${canManageStagger ? 'Switch to Manual to edit these stages.' : 'Editing requires the MANAGE_STAGGER permission.'}`
+                      : 'Manual — edit any stage below. Switching back to Auto discards these edits.'}
                   </p>
                   <p className="text-xs text-zinc-500 mb-3">
                     Currently running in {syncCluster}: <span className="font-mono">{secondaryOldVersion || (formData.appGroup && formData.service ? 'resolving…' : '—')}</span>
@@ -1177,12 +1238,12 @@ const CreateRelease: React.FC = () => {
                         {secondaryStages.map((stage, idx) => (
                           <tr key={idx} className={cn('border-b border-zinc-100', idx % 2 === 1 ? 'bg-zinc-50' : 'bg-white')}>
                             <td className="py-2 px-3 text-zinc-400 font-mono text-xs">{idx + 1}</td>
-                            <td className="py-2 px-3"><input type="number" value={stage.rollout} disabled={!canManageStagger} onChange={(e) => { const s = [...secondaryStages]; s[idx].rollout = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(!canManageStagger ? disabledInputClass : inputClass, 'w-24')} /></td>
-                            <td className="py-2 px-3"><input type="number" value={stage.cooloff} disabled={!canManageStagger} onChange={(e) => { const s = [...secondaryStages]; s[idx].cooloff = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(!canManageStagger ? disabledInputClass : inputClass, 'w-24')} /></td>
-                            <td className="py-2 px-3"><input type="number" value={stage.pods} disabled={!canManageStagger || secondaryPodsAutoLocked} onChange={(e) => { const s = [...secondaryStages]; s[idx].pods = parseInt(e.target.value) || 0; setSecondaryStages(s); }} className={cn(!canManageStagger || secondaryPodsAutoLocked ? disabledInputClass : inputClass, 'w-24')} /></td>
+                            <td className="py-2 px-3"><input type="number" value={stage.rollout} disabled={!canEditSecondaryStages} onChange={(e) => setSecondaryStages(prev => prev.map((s, i) => i === idx ? { ...s, rollout: parseInt(e.target.value) || 0 } : s))} className={cn(!canEditSecondaryStages ? disabledInputClass : inputClass, 'w-24')} /></td>
+                            <td className="py-2 px-3"><input type="number" value={stage.cooloff} disabled={!canEditSecondaryStages} onChange={(e) => setSecondaryStages(prev => prev.map((s, i) => i === idx ? { ...s, cooloff: parseInt(e.target.value) || 0 } : s))} className={cn(!canEditSecondaryStages ? disabledInputClass : inputClass, 'w-24')} /></td>
+                            <td className="py-2 px-3"><input type="number" value={stage.pods} disabled={!canEditSecondaryStages} onChange={(e) => setSecondaryStages(prev => prev.map((s, i) => i === idx ? { ...s, pods: parseInt(e.target.value) || 0 } : s))} className={cn(!canEditSecondaryStages ? disabledInputClass : inputClass, 'w-24')} /></td>
                             <td className="py-2 px-3">
                               {secondaryStages.length > 1 && (
-                                <button type="button" onClick={() => setSecondaryStages(secondaryStages.filter((_, i) => i !== idx))} disabled={!canManageStagger} className={cn("p-1.5 rounded-lg transition-colors duration-150", canManageStagger ? "text-red-500 hover:bg-red-50 cursor-pointer" : "text-zinc-300 cursor-not-allowed opacity-50")}>
+                                <button type="button" onClick={() => setSecondaryStages(secondaryStages.filter((_, i) => i !== idx))} disabled={!canEditSecondaryStages} className={cn("p-1.5 rounded-lg transition-colors duration-150", canEditSecondaryStages ? "text-red-500 hover:bg-red-50 cursor-pointer" : "text-zinc-300 cursor-not-allowed opacity-50")}>
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
                               )}
@@ -1192,7 +1253,7 @@ const CreateRelease: React.FC = () => {
                       </tbody>
                     </table>
                   </div>
-                  <Button type="button" variant="secondary" size="sm" onClick={() => setSecondaryStages([...secondaryStages, { rollout: 100, cooloff: 0, pods: 0 }])} disabled={!canManageStagger} className="mt-3">+ Add Stage</Button>
+                  <Button type="button" variant="secondary" size="sm" onClick={() => setSecondaryStages([...secondaryStages, { rollout: 100, cooloff: 0, pods: 0 }])} disabled={!canEditSecondaryStages} className="mt-3">+ Add Stage</Button>
                 </div>
               </div>
             )}
