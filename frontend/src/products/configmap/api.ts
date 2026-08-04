@@ -30,6 +30,7 @@ export async function runConfigReview(id: string, force = false): Promise<Config
   return data;
 }
 
-export async function acknowledgeConfigReview(id: string): Promise<any> {
-  return updateConfigMap(id, { ack_ai_review: true });
+export async function acknowledgeConfigReview(id: string): Promise<ConfigReviewResp> {
+  const { data } = await apiClient.post(`/tracker/configmap/${encodeURIComponent(id)}/ai/review/ack`, {});
+  return data;
 }

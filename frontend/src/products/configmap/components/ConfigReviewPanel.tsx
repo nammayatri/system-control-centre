@@ -136,7 +136,7 @@ const ConfigReviewPanel: React.FC<{ id: string; appGroup?: string; resource?: Re
           )}
 
           {d.blocksApproval && (
-            <PermissionGate product="autopilot" permission="RELEASE_UPDATE" appGroup={appGroup}>
+            <PermissionGate product="autopilot" permission="CONFIG_EDIT" appGroup={appGroup}>
               <Button size="sm" variant="success" loading={ack.isPending} onClick={() => ack.mutate()}>
                 <Check className="w-3.5 h-3.5" /> Acknowledge &amp; allow approval
               </Button>

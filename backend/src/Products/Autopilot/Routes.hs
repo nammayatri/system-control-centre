@@ -111,10 +111,12 @@ type CoreAPI =
         -- AI config review: run/re-run a ConfigMap breaking-change review, and read the latest verdict
         :<|> "tracker" :> Protected 'AP_AI_ASSESS :> "configmap" :> Capture "id" Text :> "ai" :> "review" :> ReqBody '[JSON] AiActionReq :> Post '[JSON] ConfigReviewResp
         :<|> "tracker" :> Protected 'AP_RELEASE_VIEW :> "configmap" :> Capture "id" Text :> "ai" :> "review" :> Get '[JSON] ConfigReviewResp
+        -- Acknowledging a breaking AI verdict (unblocks approval) needs CONFIG_EDIT.
+        :<|> "tracker" :> Protected 'AP_CONFIG_EDIT :> "configmap" :> Capture "id" Text :> "ai" :> "review" :> "ack" :> Post '[JSON] ConfigReviewResp
         -- AI deployment env review: same, for a BackendService release (+ acknowledge)
         :<|> "tracker" :> Protected 'AP_AI_ASSESS :> "release" :> Capture "id" Text :> "ai" :> "review" :> ReqBody '[JSON] AiActionReq :> Post '[JSON] ConfigReviewResp
         :<|> "tracker" :> Protected 'AP_RELEASE_VIEW :> "release" :> Capture "id" Text :> "ai" :> "review" :> Get '[JSON] ConfigReviewResp
-        :<|> "tracker" :> Protected 'AP_RELEASE_UPDATE :> "release" :> Capture "id" Text :> "ai" :> "review" :> "ack" :> Post '[JSON] ConfigReviewResp
+        :<|> "tracker" :> Protected 'AP_CONFIG_EDIT :> "release" :> Capture "id" Text :> "ai" :> "review" :> "ack" :> Post '[JSON] ConfigReviewResp
         -- AI (config): models available to the configured Grid key (model picker)
         :<|> "ai" :> Protected 'AP_AI_SUMMARIZE :> "models" :> Get '[JSON] AiModelsResp
         -- Mobile releases: app catalog CRUD (suffix mount per unified-product principle)
@@ -205,9 +207,10 @@ coreServer =
         :<|> Ai.askReleaseH
         :<|> ConfigReview.reviewConfigMapH
         :<|> ConfigReview.getConfigReviewH
+        :<|> ConfigReview.ackReviewH
         :<|> ConfigReview.reviewConfigMapH
         :<|> ConfigReview.getConfigReviewH
-        :<|> ConfigReview.ackReleaseReviewH
+        :<|> ConfigReview.ackReviewH
         -- AI (config): model picker
         :<|> Ai.listAiModelsH
         -- Mobile releases (suffix mount of MobileAPI)
