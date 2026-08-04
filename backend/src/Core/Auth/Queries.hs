@@ -260,8 +260,7 @@ applyOverridesIO db pid productSlug basePerms = do
   pure $ filter (`notElem` denies) combined
 
 -- | Get effective permissions for a person on a product.
--- System roles: permissions derived from Haskell ADTs via defaultPermissionsText
--- Custom roles: permissions from sc_role.permissions TEXT[] column
+-- Every role: sc_role.permissions when configured, ADT default otherwise
 -- Then apply GRANT/DENY overrides from sc_person_permission_override
 computeEffectivePermissionsIO :: DBEnv -> PersonAuth -> Text -> UUID -> IO [Text]
 computeEffectivePermissionsIO db person productSlug roleId = do
@@ -329,7 +328,24 @@ computeEffectivePermissionsForAppGroups pid productSlug appGroups =
       )
       appGroups
 
--- | Get permissions for a role (PGArray — kept as raw SQL).
+{- | Get permissions for a role (PGArray — kept as raw SQL).
+
+@sc_role.permissions@ wins wherever it has been configured, for system and
+custom roles alike. System roles previously ignored the column outright and
+re-derived their list from the 'Products.Types.defaultPermissions' ADT, so
+editing one in Access Control appeared to save — the admin UI reads the column
+— while enforcement carried on using the hardcoded list. Dropping
+MANAGE_STAGGER from autopilot's Manager changed nothing.
+
+'defaultPermissionsText' survives only as the seed for a row nobody has
+configured: the column is @DEFAULT '{}'@ and the seed inserts system roles
+without it, so an empty array means "never set", not "deliberately empty".
+Without that fallback every untouched system role would grant nothing.
+
+This is the same precedence 'Core.Admin.Queries.listRolesForProduct' already
+applies when displaying a role, so what Access Control shows and what the
+permission check enforces can no longer disagree.
+-}
 getRolePermissions :: DBEnv -> Text -> UUID -> IO [Text]
 getRolePermissions db productSlug roleId = withConn db $ \conn -> do
   rows <-
@@ -338,14 +354,10 @@ getRolePermissions db productSlug roleId = withConn db $ \conn -> do
       "SELECT name, is_system_role, permissions FROM sc_role WHERE id = ?"
       (Only roleId) ::
       IO [(Text, Bool, Maybe (PGArray Text))]
-  case rows of
-    [(roleName, True, _)] ->
-      pure $ defaultPermissionsText productSlug roleName
-    [(_, False, Just (PGArray perms))] ->
-      pure perms
-    [(_, False, Nothing)] ->
-      pure []
-    _ -> pure []
+  pure $ case rows of
+    [(_, _, Just (PGArray perms@(_ : _)))] -> perms
+    [(roleName, True, _)] -> defaultPermissionsText productSlug roleName
+    _ -> []
 
 -- ── Overrides (Beam queries) ───────────────────────────────────────
 
