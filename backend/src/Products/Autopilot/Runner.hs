@@ -17,10 +17,10 @@ import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.List (sortBy)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Ord (Down (..), comparing)
 import Data.Text qualified as T
-import Data.Time.Clock (NominalDiffTime, addUTCTime, getCurrentTime)
+import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Products.Autopilot.EventLog (logAbortTriggered, logStatusUpdated, logTrafficUpdatedWithMessage)
 import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getDeploymentReplicaStatus)
 import Products.Autopilot.K8s.Execute (isNotFoundError, runCmd)
@@ -37,7 +37,7 @@ import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getMaxCleanupRetries, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
 import Products.Autopilot.Types
 import Products.Autopilot.Types qualified as NT
-import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, ReleaseEvent, dcAppGroup, rePayload)
+import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, ReleaseEvent, dcAppGroup, reCreatedAt, rePayload)
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (..), K8sReleaseContext (..), PodsScaleDownStatus (..))
 import Products.Autopilot.Types.Target.Kubernetes qualified as K8s
@@ -751,21 +751,47 @@ abortTriggeredBy ev = case rePayload ev of
 handleAbortingRelease :: Config -> ReleaseTracker -> Maybe TargetState -> Flow ()
 handleAbortingRelease cfg rt mts = do
     logInfo $ "[handleAbortingRelease] Processing abort for " <> releaseId rt
-    -- MobileBuild: best-effort cancellation of the in-flight GitHub
-    -- Actions run before flipping the row to USER_ABORTED. Without this
-    -- the GHA workflow keeps building (and may publish to Play Store)
-    -- even after the user clicked Abort in the SCC UI. Failures are
-    -- swallowed — the row's terminal state still flips so the operator
-    -- sees the abort took effect.
-    case category rt of
-        MobileBuild -> cancelMobileGhRun rt mts
+    now <- liftIO getCurrentTime
+    mAbortTrigger <- findEventByLabel (releaseId rt) "ABORT_TRIGGERED"
+    -- MobileBuild: cancel the in-flight GitHub Actions run before flipping the
+    -- row to USER_ABORTED — otherwise the GHA workflow keeps building and may
+    -- publish to the store after the operator clicked Abort. Cancellation is
+    -- RETRIED across sweeps (the row stays ABORTING): GitHub's /runs listing
+    -- lags a fresh dispatch by seconds and API errors are transient, so a
+    -- single blind attempt silently let wrong-branch artifacts publish. A
+    -- deadline caps the retries so an unfindable run can't pin ABORTING.
+    proceed <- case category rt of
+        MobileBuild -> do
+            cancelled <- cancelMobileGhRun rt mts
+            if cancelled
+                then pure True
+                else do
+                    let abortedAt = maybe (fromMaybe now (NT.lastUpdated rt)) reCreatedAt mAbortTrigger
+                    if diffUTCTime now abortedAt < ghCancelDeadline
+                        then do
+                            logWarning $ "[handleAbortingRelease] " <> releaseId rt <> " GH run not cancelled yet — retrying on the next sweep"
+                            pure False
+                        else do
+                            logWarning $ "[handleAbortingRelease] " <> releaseId rt <> " GH cancel unresolved past deadline — terminalizing; the run may still be building"
+                            insertReleaseEvent
+                                (releaseId rt)
+                                "BUSINESS"
+                                "GH_RUN_CANCEL_UNRESOLVED"
+                                (object ["message" .= ("GitHub run could not be found or cancelled within the abort deadline — the build may still be running and could publish to the store" :: T.Text)])
+                            pure True
         _ -> do
             restoreVsTrafficOnFailure cfg rt mts
             -- Julia parity: persist cleanup marker so a crash/kubectl-fail between
             -- now and the next poll doesn't leak the new deployment. Idempotent.
             scheduleNewDeploymentCleanup rt mts
-    now <- liftIO getCurrentTime
-    mAbortTrigger <- findEventByLabel (releaseId rt) "ABORT_TRIGGERED"
+            pure True
+    when proceed $ finalizeAbort rt mts now mAbortTrigger
+  where
+    ghCancelDeadline :: NominalDiffTime
+    ghCancelDeadline = 10 * 60
+
+finalizeAbort :: ReleaseTracker -> Maybe TargetState -> UTCTime -> Maybe ReleaseEvent -> Flow ()
+finalizeAbort rt mts now mAbortTrigger = do
     let finalStatus = case mAbortTrigger >>= abortTriggeredBy of
             Just "USER" -> USER_ABORTED
             Just "DECISION_ENGINE" -> GCLT_ABORTED
@@ -803,11 +829,14 @@ handleAbortingRelease cfg rt mts = do
                         sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext s)) Nothing
                 _ -> pure ()
 
-{- | Best-effort cancel of a mobile release's in-flight GitHub run on abort. If
+{- | Cancel a mobile release's in-flight GitHub run on abort. If
 @external_run_id@ isn't resolved yet, it locates the dispatched run via the same
 window 'execResolveRunId' uses, then cancels. Never throws; idempotent.
+Returns True when SETTLED (run cancelled, or provably nothing to cancel);
+False means "couldn't cancel yet" — the caller keeps the row ABORTING and
+retries on the next sweep (run not listed yet / transient API error).
 -}
-cancelMobileGhRun :: ReleaseTracker -> Maybe TargetState -> Flow ()
+cancelMobileGhRun :: ReleaseTracker -> Maybe TargetState -> Flow Bool
 cancelMobileGhRun rt mts =
     case mts of
         Just (MobileBuildState mb) -> do
@@ -821,11 +850,12 @@ cancelMobileGhRun rt mts =
                         Just r | not (T.null r) -> pure (Just r)
                         _ -> resolveForCancel creds ac (mbcMatrixJobName (mbContext mb)) (mbBuildStartedAt mb)
                     case mRunId of
-                        Nothing ->
+                        Nothing -> do
                             logInfo $
                                 "[handleAbortingRelease] "
                                     <> releaseId rt
-                                    <> " has no resolvable GH run; nothing to cancel on GitHub"
+                                    <> " has no resolvable GH run (yet); will retry"
+                            pure False
                         Just runId -> do
                             logInfo $
                                 "[handleAbortingRelease] Cancelling GH run "
@@ -837,19 +867,23 @@ cancelMobileGhRun rt mts =
                                 Right () -> do
                                     logInfo $ "[handleAbortingRelease] GH run cancelled: " <> runId
                                     insertReleaseEvent (releaseId rt) "BUSINESS" "GH_RUN_CANCELLED" (object ["run_id" .= runId])
+                                    pure True
                                 Left ghErr -> do
                                     logWarning $ "[handleAbortingRelease] cancelRun returned error for " <> runId <> ": " <> ghErr
                                     insertReleaseEvent (releaseId rt) "BUSINESS" "GH_RUN_CANCEL_FAILED" (object ["run_id" .= runId, "error" .= ghErr])
+                                    pure False
             case attempt of
-                Right () -> pure ()
-                Left ex ->
+                Right settled -> pure settled
+                Left ex -> do
                     logWarning $
                         "[handleAbortingRelease] GH cancel path threw for " <> releaseId rt <> ": " <> T.pack (show ex)
-        _ ->
+                    pure False
+        _ -> do
             logInfo $
                 "[handleAbortingRelease] release "
                     <> releaseId rt
                     <> " is MobileBuild but has no MobileBuildState target; skipping GH cancel"
+            pure True
   where
     -- Locate the dispatched run by the ResolveRunId window (workflow_dispatch within
     -- [dispatchedAt-30s, +5m], newest). Best-effort: Nothing on no dispatch time or API

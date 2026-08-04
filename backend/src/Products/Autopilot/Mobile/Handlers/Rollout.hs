@@ -74,7 +74,7 @@ import Core.Environment (Flow)
 import Data.Aeson (FromJSON, ToJSON, object, (.=))
 import Data.Int (Int32)
 import Data.List (find)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
@@ -96,6 +96,7 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRowRaw,
     findMobileReleaseById,
     findRunSiblingsStillBuilding,
+    heldRowsForApp,
     listIncomingMobileVersions,
     logEvent,
     markReleaseInProgress,
@@ -103,7 +104,7 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     setAscIds,
     setPhase,
  )
-import Products.Autopilot.Mobile.StoreSync (atOrBelowProductionPure, releaseOrderBehind)
+import Products.Autopilot.Mobile.StoreSync (atOrBelowProductionPure, releaseOrderBehind, releaseOrderStrictlyBehind)
 import Products.Autopilot.Mobile.Types (
     MobileBuildContext (..),
     MobileBuildTargetState (..),
@@ -238,6 +239,12 @@ data RolloutDetail = RolloutDetail
     -- stage (held at MBTagPushed, or an un-promoted internal/TestFlight snapshot) AND
     -- it isn't already live on production. The FE gates the promote UI on this instead
     -- of re-deriving it, so it never offers a promote the backend would reject.
+    , rdPromoteBlock :: Maybe Text
+    -- ^ WHY rdPromotable is False, when it is (promote stage only): "behind_production"
+    -- | "behind_held" | "blocked_by_incoming" | "one_in_flight". The FE renders
+    -- cause-specific copy from this instead of guessing one message for all gates.
+    , rdPromoteBlockVersion :: Maybe Text
+    -- ^ The blocking sibling's version (held/incoming/in-flight causes), when known.
     , rdAbortable :: Bool
     -- ^ BE truth for "can this build be aborted right now" — only while the build job
     -- can still be killed (wf before MBSubmittedToStore: nothing uploaded yet). A build
@@ -494,6 +501,17 @@ promoteH ap rid PromoteReq{..} = do
                             <> version
                             <> "."
                             <> link
+    -- Held-sibling gate: promoting a build a NEWER held build has overtaken is a
+    -- dead end (it gets superseded on the next convergence pass). Same predicate
+    -- as the display fold, so the gate and the badge cannot disagree.
+    heldRows <- heldRowsForApp (rtAppGroup row) (rtService row) (rtEnv row)
+    forM_ (find (\h -> rtId h /= rid && releaseOrderStrictlyBehind version (rtVersionCode row) (rtNewVersion h) (rtVersionCode h)) heldRows) $ \h ->
+        bad
+            ( "A newer build is already held ("
+                <> rtNewVersion h
+                <> maybe "" (\c -> " +" <> tshow c) (rtVersionCode h)
+                <> ") — promote that one instead."
+            )
     if rtEnv row == "ios"
         then do
             creds <- loadAscCredsFor (acStoreAccount ac) >>= maybe (bad "App Store Connect credentials not configured.") pure
@@ -636,11 +654,44 @@ rolloutDetailH _ap rid = do
                 storeTrack
         canAbort = abortable (mbWfStatus target) ph
     notAhead <- atOrBelowProduction ac (rtNewVersion row) (rtVersionCode row)
-    -- §15 fold: a held build behind production in release order reads
-    -- Superseded here too — same label the list/groups enrichment shows.
+    -- Mirror promoteH's REMAINING gates too (incoming slot + iOS one-in-flight),
+    -- or rdPromotable offers a promote the handler is guaranteed to 400.
+    incoming <- listIncomingMobileVersions
+    let mineIncoming =
+            [ i
+            | i <- incoming
+            , rtAppGroup i == rtAppGroup row
+            , rtService i == rtService row
+            , rtEnv i == rtEnv row
+            , rtId i /= rid
+            ]
+        mBlockingIncoming =
+            find (\i -> atOrBelowProductionPure (rtEnv row) (rtNewVersion row) (rtVersionCode row) (rtNewVersion i) (rtVersionCode i)) mineIncoming
+        blockedByIncoming = isJust mBlockingIncoming
+        mInflight
+            | rtEnv row == "ios" =
+                find (\i -> rtNewVersion i /= rtNewVersion row && rtReviewStatus i /= Just "rejected") mineIncoming
+            | otherwise = Nothing
+        iosInflight = isJust mInflight
+    -- §15 fold: a held build behind production in release order — or behind a
+    -- newer HELD sibling (a landed rebuild) — reads Superseded here too, the
+    -- same label the list/groups enrichment shows.
     rob <- releaseOrderBehindProduction ac (rtNewVersion row) (rtVersionCode row)
-    let phE = supersededIfBehind rob ph
+    mRobHeld <- do
+        heldRows <- heldRowsForApp (rtAppGroup row) (rtService row) (rtEnv row)
+        pure $ find (\h -> rtId h /= rid && releaseOrderStrictlyBehind (rtNewVersion row) (rtVersionCode row) (rtNewVersion h) (rtVersionCode h)) heldRows
+    let robHeld = isJust mRobHeld
+    let phE = supersededIfBehind (rob || robHeld) ph
         disp = displayStatusInferred (reviewInferredOf (parseJsonTextMaybe (rtMetadata row))) phE
+        -- WHY the promote gate is closed, permanent causes first, so the FE
+        -- names the most fundamental blocker instead of guessing one message.
+        promoteBlock
+            | not promotableStage = Nothing
+            | notAhead = Just ("behind_production", Nothing)
+            | robHeld = Just ("behind_held", rtNewVersion <$> mRobHeld)
+            | blockedByIncoming = Just ("blocked_by_incoming", rtNewVersion <$> mBlockingIncoming)
+            | iosInflight = Just ("one_in_flight", rtNewVersion <$> mInflight)
+            | otherwise = Nothing
     liveProd <- liveOnProduction ac (rtNewVersion row) (rtVersionCode row)
     syncedAgo <- secondsSinceLastSync (acId ac)
     cooldown <- fromIntegral <$> getStoreRefreshCooldownSeconds
@@ -668,7 +719,9 @@ rolloutDetailH _ap rid = do
             , rdRolloutPercent = pct
             , rdPhasedId = phasedId
             , rdStoreTrack = storeTrack
-            , rdPromotable = promotableStage && not notAhead
+            , rdPromotable = promotableStage && not notAhead && not blockedByIncoming && not iosInflight && not robHeld
+            , rdPromoteBlock = fst <$> promoteBlock
+            , rdPromoteBlockVersion = snd =<< promoteBlock
             , rdAbortable = canAbort
             , rdRunSiblings = runSiblings
             , rdAppCatalogId = acId ac
@@ -705,7 +758,18 @@ releaseH ap rid = do
                     setAscIds rid Nothing (Just pid)
                     logEvent rid "PHASED_ID_BACKFILLED" (object ["phased_id" .= pid])
                     pure (Just pid)
-                _ -> pure Nothing
+                Right Nothing -> pure Nothing
+                -- A READ FAILURE is not "non-phased": stamping Live/100% on a
+                -- version Apple may be ramping loses every SCC pause/complete
+                -- lever for the 7-day ramp, with no reconciler path back. The
+                -- version is already released at Apple — fail here and let the
+                -- next store sync adopt the real state and backfill the id.
+                Left e ->
+                    bad
+                        ( "Released at Apple, but the phased-release state could not be read ("
+                            <> renderAscErr e
+                            <> "). Refresh the store status — the release will pick up its live rollout state from Apple."
+                        )
     now <- liftIO getCurrentTime
     case mPhasedId of
         Just _ -> do
@@ -796,6 +860,13 @@ rolloutHaltH ap rid = do
             logEvent rid "ROLLOUT_HALTED" (object ["store" .= ("asc" :: Text), "actor" .= apEmail ap])
             pure Success
         else do
+            -- Halt pauses an ACTIVE rollout. An in-review build also carries a
+            -- production fraction (the parked ~0% review submission), so the
+            -- fraction read alone is no gate: halting it would null the review
+            -- lifecycle and let /rollout/set ramp a never-approved build.
+            adopt <- isObservedRollout ac row target
+            unless (adopt || mbWfStatus target == MBRollingOut) $
+                bad "Nothing is rolling out — halt pauses an active rollout. An in-review build can only be superseded by promoting a newer one."
             storeId <- storeIdOf ac
             vc <- versionCodeText target
             creds <- loadPlayCreds >>= maybe (bad "Google Play credentials not configured.") pure
@@ -805,7 +876,6 @@ rolloutHaltH ap rid = do
                 >>= either (\e -> bad ("Play halt failed: " <> renderPlayErr e)) pure
             -- Adopt an observed (Console-started) rollout on first action, same
             -- as /rollout/set: INPROGRESS hands it to the Phase-7 reconciler.
-            adopt <- isObservedRollout ac row target
             when adopt $ markReleaseInProgress rid
             now <- liftIO getCurrentTime
             setPhase now rid (Halted frac)
@@ -833,13 +903,18 @@ rolloutResumeH ap rid = do
             logEvent rid "ROLLOUT_RESUMED" (object ["store" .= ("asc" :: Text), "actor" .= apEmail ap])
             pure Success
         else do
+            -- Same in-review protection as halt: the parked review fraction
+            -- satisfies the fraction read, and resuming would equally null the
+            -- review lifecycle (setPhase RollingOut) for a never-approved build.
+            adopt <- isObservedRollout ac row target
+            unless (adopt || mbWfStatus target == MBRollingOut) $
+                bad "Nothing is halted — resume restarts a paused rollout. An in-review build can only be superseded by promoting a newer one."
             storeId <- storeIdOf ac
             vc <- versionCodeText target
             creds <- loadPlayCreds >>= maybe (bad "Google Play credentials not configured.") pure
             frac <- liveAndroidFraction creds storeId (mbcVersionCode (mbContext target))
             resumeTrackRollout creds storeId vc frac
                 >>= either (\e -> bad ("Play resume failed: " <> renderPlayErr e)) pure
-            adopt <- isObservedRollout ac row target
             when adopt $ markReleaseInProgress rid
             now <- liftIO getCurrentTime
             setPhase now rid (RollingOut frac)
@@ -848,9 +923,12 @@ rolloutResumeH ap rid = do
             logEvent rid "ROLLOUT_RESUMED" (object ["store" .= ("play" :: Text), "actor" .= apEmail ap])
             pure Success
 
-{- | POST /releases/:id/rollout/release-all — jump to 100% on both platforms and
-finish the release. iOS completes the phased release (if any); Android completes
-the staged rollout.
+{- | POST /releases/:id/rollout/release-all — jump to 100% and finish the release.
+iOS completes the phased ramp; Android completes the staged rollout. Both paths
+must reach the store (or prove there's a rollout to finish) BEFORE the Live
+stamp: this handler previously accepted any state and, with no phased id, stamped
+Live with zero store calls — SCC read "Released · 100%" while the store kept
+serving the old version, and convergence then superseded the genuinely live row.
 -}
 rolloutReleaseAllH :: AuthedPerson -> Text -> Flow APISuccess
 rolloutReleaseAllH ap rid = do
@@ -858,22 +936,37 @@ rolloutReleaseAllH ap rid = do
     (row, target, ac) <- loadPromotable rid
     requireAppPerm (Proxy @'MB_RELEASE_ROLLOUT) ap (acName ac) (acPlatform ac)
     storeId <- storeIdOf ac
+    adopt <- isObservedRollout ac row target
     if rtEnv row == "ios"
         then do
+            -- Only an active ramp (SCC-released or adopted from the store) can be
+            -- completed. An approved-held build goes live via /release; a
+            -- non-phased release is already fully live and never needs this verb.
+            unless (adopt || mbWfStatus target == MBRollingOut) $
+                bad "Nothing is rolling out — release the approved build first, then release-all finishes a phased ramp."
             creds <- loadAscCredsFor (acStoreAccount ac) >>= maybe (bad "App Store Connect credentials not configured.") pure
-            -- A phased ramp is completed to 100%; a non-phased release is already
-            -- fully live, so there's nothing more to call.
-            case rtAscPhasedId row of
-                Just pid
-                    | not (T.null pid) ->
-                        completePhasedRelease creds pid
-                            >>= either (\e -> bad ("App Store complete failed: " <> renderAscErr e)) pure
-                _ -> pure ()
+            -- The persisted phased id, else a live ASC lookup — the promote-time
+            -- enable can succeed at Apple while the id fails to persist.
+            pid <- case rtAscPhasedId row of
+                Just p | not (T.null p) -> pure p
+                _ ->
+                    getPhasedReleaseId creds storeId (rtNewVersion row) >>= \case
+                        Left e -> bad ("Could not read the phased-release state: " <> renderAscErr e)
+                        Right (Just p) -> pure p
+                        Right Nothing -> bad "No phased release found for this version at App Store Connect — refresh the store status and retry."
+            completePhasedRelease creds pid
+                >>= either (\e -> bad ("App Store complete failed: " <> renderAscErr e)) pure
         else do
+            -- Same lifecycle gate as /rollout/set: adopt an observed external
+            -- rollout, otherwise require approved/rolling — never in-review.
+            unless adopt $ ensureAndroidRollable (mbWfStatus target)
             vc <- versionCodeText target
             creds <- loadPlayCreds >>= maybe (bad "Google Play credentials not configured.") pure
             completeTrackRollout creds storeId vc
                 >>= either (\e -> bad ("Play complete failed: " <> renderPlayErr e)) pure
+    -- Adopting an observed rollout brings the snapshot into the lifecycle so the
+    -- reconciler owns it from here (mirrors /rollout/set).
+    when adopt $ markReleaseInProgress rid
     now <- liftIO getCurrentTime
     setPhase now rid Live
     -- Closes audit defect 2: this handler previously fired no supersession.
@@ -1150,12 +1243,14 @@ retireOlderIncomingFor row = do
     forM_ ids $ \i ->
         logEvent i "INCOMING_SUPERSEDED" (object ["by_version" .= rtNewVersion row])
 
-{- | Rule C: @row@ is being promoted, so retire any OLDER held-on-internal build of
-this app to history — a lower code can no longer reach production.
+{- | Rule C: @row@ is being promoted, so retire any held-on-internal build of this
+app sitting behind it in release order — such a build can no longer reach production.
 -}
 retireOlderHeldInternalFor :: ReleaseTrackerRow -> Flow ()
 retireOlderHeldInternalFor row = do
-    ids <- retireOlderHeldInternal (rtAppGroup row) (rtService row) (rtEnv row) (rtId row) (rtVersionCode row)
+    ids <-
+        retireOlderHeldInternal (rtAppGroup row) (rtService row) (rtEnv row) (rtId row) $
+            \v c -> releaseOrderBehind v c (rtNewVersion row) (rtVersionCode row)
     forM_ ids $ \i ->
         logEvent i "HELD_SUPERSEDED" (object ["by_version" .= rtNewVersion row])
 
@@ -1169,7 +1264,7 @@ versionCodeText target = case mbcVersionCode (mbContext target) of
 requirePhasedId :: ReleaseTrackerRow -> Flow Text
 requirePhasedId row = case rtAscPhasedId row of
     Just p | not (T.null p) -> pure p
-    _ -> bad "No phased release is enabled for this version (promote with enablePhasedRelease, or use /rollout/release-all)."
+    _ -> bad "No phased release is enabled for this version — promote with enablePhasedRelease to get a pausable ramp."
 
 {- | Read the live Android production rollout fraction OF OUR VERSION (§12.10);
 error if there is no in-progress fraction to act on. The production track can carry

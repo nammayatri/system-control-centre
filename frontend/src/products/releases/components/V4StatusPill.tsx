@@ -37,15 +37,16 @@ const RAW_STATUS_VARIANT: Record<string, string> = {
   REVERTING: 'purple',
   RESTARTING: 'warning',
 };
-export function mobileDisplayOf(release: APRelease, suppressPromote = false): { label: string; variant: string } {
+export function mobileDisplayOf(release: APRelease): { label: string; variant: string } {
   const ctx = release.release_context;
   const phase = ctx?.display_phase;
   // Terminal truth FIRST — a dead row still carries its stale phase (an aborted
   // promote keeps display_phase 'internal_held'), and must never read from it.
   if (release.status === 'USER_ABORTED') return { label: 'User aborted', variant: 'danger' };
   if (release.status === 'ABORTED' && phase !== 'rejected') return { label: 'Failed', variant: 'danger' };
+  // No client-side "Superseded" rewrites: the BE display fold covers builds behind
+  // production AND behind a newer held sibling — display_label is the one truth.
   const promotable = phase === 'internal_held' && !isFirebaseInternal(release);
-  if (promotable && (suppressPromote || ctx?.promotable === false)) return { label: 'Superseded', variant: 'default' };
   const override =
     release.status === 'INPROGRESS' ||
     ['rolling_out', 'halted', 'superseded', 'live', 'rejected', 'aborted', 'build_failed'].includes(phase ?? '') ||
@@ -57,8 +58,8 @@ export function mobileDisplayOf(release: APRelease, suppressPromote = false): { 
   const raw = release.status.charAt(0) + release.status.slice(1).toLowerCase().replace(/_/g, ' ');
   return { label: raw, variant: RAW_STATUS_VARIANT[release.status] ?? 'default' };
 }
-export function V4StatusPill({ release, suppressPromote = false }: { release: APRelease; suppressPromote?: boolean }) {
-  const { label, variant } = mobileDisplayOf(release, suppressPromote);
+export function V4StatusPill({ release }: { release: APRelease }) {
+  const { label, variant } = mobileDisplayOf(release);
   const phase = release.release_context?.display_phase ?? '';
   const pulse =
     variant !== 'danger' && (['building', 'in_review', 'rolling_out'].includes(phase) || release.status === 'INPROGRESS');

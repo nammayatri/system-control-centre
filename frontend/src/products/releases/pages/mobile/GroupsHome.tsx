@@ -13,6 +13,7 @@ import {
 } from '@phosphor-icons/react';
 import { useMobileApps, useMobileGroups, useReleases } from '../../hooks';
 import type { APRelease, MobileGroupListItem, MobileGroupMemberLite, MobileGroupSummary } from '../../api';
+import { memberBucket, storeBucket } from '../../components/statusBuckets';
 import { BrandLogo } from '../../components/BrandLogo';
 import { GroupStageChip, MEMBER_PHASE_CHIP } from '../../components/GroupStageChip';
 import { MobileBuildKpis } from '../../components/MobileBuildKpis';
@@ -190,46 +191,6 @@ function deriveGroupSummaryFE(members: MobileGroupMemberLite[]): MobileGroupSumm
   eff.forEach((p) => { counts[p] = (counts[p] ?? 0) + 1; });
   const attention = members.filter((_, i) => ATTENTION_PHASES.includes(eff[i]));
   return { stage, counts, attention, primaryVerb };
-}
-
-// Which History status-bucket a group MEMBER falls in (same vocabulary as
-// MOBILE_STATUS_OPTIONS so this dropdown means the same thing everywhere).
-function memberBucket(m: MobileGroupMemberLite): string {
-  if (m.phase === 'rejected') return 'rejected';
-  if (m.status === 'REVERTED') return 'reverted';
-  if (
-    ['ABORTED', 'USER_ABORTED', 'GCLT_ABORTED', 'DISCARDED'].includes(m.status) ||
-    ['build_failed', 'aborted', 'user_aborted', 'discarded'].includes(m.phase)
-  )
-    return 'aborted';
-  // ACTIVE store-lifecycle phase wins over the raw status: a store-synced build
-  // sitting on the internal track reads status=COMPLETED but is "ready to
-  // promote" (phase internal_held) — bucket it by the phase the badge shows, or
-  // the filter would never surface it under "Ready to promote".
-  if (m.phase === 'rolling_out' || m.phase === 'halted') return 'rollout';
-  if (m.phase === 'internal_held') return 'promote';
-  if (m.phase === 'in_review') return 'review';
-  if (m.phase === 'approved') return 'approved';
-  // Terminal store phases read status=INPROGRESS on store-synced rows (their
-  // rollout is done/superseded, not the SCC status) — bucket by the phase the
-  // badge shows, or a live/superseded row wrongly falls through to "building".
-  if (['live', 'distributed', 'superseded'].includes(m.phase)) return 'completed';
-  if (m.status === 'COMPLETED') return 'completed';
-  return 'building'; // drafts + genuinely building (phase 'building' or empty)
-}
-
-// Same bucketing for a store-detected row (APRelease shape).
-function storeBucket(r: APRelease): string {
-  return memberBucket({
-    releaseId: r.id,
-    app: r.appGroup,
-    surface: r.service,
-    platform: r.env,
-    version: r.new_version,
-    phase: r.release_context?.display_phase ?? '',
-    status: r.status,
-    approved: r.is_approved === 1,
-  });
 }
 
 // Is a store-detected row still workable (promote / watch review / manage a
@@ -1214,13 +1175,13 @@ function StoreItemRow({
   onOpen: () => void;
 }) {
   const ph = release.release_context?.display_phase ?? '';
-  const promotable = ph === 'internal_held' && release.release_context?.promotable !== false;
-  // Same truthful vocabulary/colors as the member badges; a non-promotable
-  // internal build has been overtaken → Superseded.
-  const stateChip = promotable
-    ? { label: 'Ready to promote', cls: 'bg-violet-50 text-violet-800 border-violet-200' }
-    : ph === 'internal_held'
-      ? MEMBER_PHASE_CHIP.superseded
+  // Label comes from display_phase ALONE. The BE promotable flag is an action
+  // gate, not a label — it also fires for transient blocks (a sibling version
+  // in flight), where "Superseded" would lie; genuinely-behind builds arrive
+  // with display_phase already folded to superseded by the BE.
+  const stateChip =
+    ph === 'internal_held'
+      ? { label: 'Ready to promote', cls: 'bg-violet-50 text-violet-800 border-violet-200' }
       : ['rolling_out', 'halted'].includes(ph) && release.release_context?.display_label
         ? // canonical label carries the live % ("Rolling out · 50%")
           { label: release.release_context.display_label, cls: (MEMBER_PHASE_CHIP[ph] ?? MEMBER_PHASE_CHIP.building).cls }

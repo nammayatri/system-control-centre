@@ -19,6 +19,7 @@ module Products.Autopilot.Mobile.Queries.Tracker
     setPhase,
     setAscIds,
     markReleaseInProgress,
+    healBuildSubmitted,
     updateStoreSyncBuildCode,
     setReleaseVersionCode,
     findExternalReviewRow,
@@ -30,6 +31,9 @@ module Products.Autopilot.Mobile.Queries.Tracker
     findMobileVersionRow,
     retireOlderHeldInternal,
     listIncomingMobileVersions,
+    incomingMobileByApp,
+    heldRowsForApp,
+    heldMobileByApp,
     sccActiveReleaseExistsForVersion,
     applyExternalReviewPhase,
     closeExternalReviewRow,
@@ -57,7 +61,8 @@ module Products.Autopilot.Mobile.Queries.Tracker
   )
 where
 
-import Control.Monad (forM_, unless, when)
+import Control.Applicative ((<|>))
+import Control.Monad (forM_, unless)
 import Control.Monad.Catch (throwM)
 import Core.AppError (DBError (..))
 import Core.DB.Connection (runDB)
@@ -66,6 +71,7 @@ import Data.Aeson (Value)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AK
 import Data.Aeson.KeyMap qualified as KM
+import Data.Map.Strict qualified as Map
 import Data.Int (Int32)
 import Data.List (find)
 import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
@@ -282,6 +288,46 @@ setAscIds releaseId_ mVersionId mPhasedId = withDb $ \db ->
         )
         (\rt -> rtId rt ==. val_ releaseId_)
 
+-- | Heal a failed build whose artifact was VERIFIED on the store: back to the
+-- in-flight lifecycle at MBSubmittedToStore + INPROGRESS so the scheduler
+-- resumes at ConfirmTag. mbBuildCompletedAt is re-anchored to "verified now" —
+-- ConfirmTag's wall-clock timeout measures from it, and the original build
+-- completed long before the heal. Callers own the store verification; this is
+-- just the single-writer flip.
+healBuildSubmitted :: (MonadFlow m) => UTCTime -> Text -> Maybe Int32 -> m ()
+healBuildSubmitted now releaseId_ mObservedCode = withDb $ \db -> do
+  mRow <-
+    runDB db $
+      runSelectReturningOne $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtId rt ==. val_ releaseId_)
+          pure rt
+  case mRow of
+    Nothing -> throwM $ DBError "healBuildSubmitted" ("release not found: " <> releaseId_)
+    Just row -> case parseMobileTargetState (rtTargetState row) of
+      Nothing -> throwM $ DBError "healBuildSubmitted" ("not a mobile release: " <> releaseId_)
+      Just s -> do
+        let ctx = mbContext s
+            s' =
+              s
+                { mbWfStatus = MBSubmittedToStore,
+                  mbBuildCompletedAt = Just now,
+                  mbContext = ctx {mbcVersionCode = mbcVersionCode ctx <|> mObservedCode}
+                }
+        runDB db $
+          runUpdate $
+            update
+              (releaseTrackers autopilotDb)
+              ( \rt ->
+                  mconcat $
+                    [ rtTargetState rt <-. val_ (Just (encodeJsonText (MobileBuildState s'))),
+                      rtStatus rt <-. val_ "INPROGRESS"
+                    ]
+                      <> [rtVersionCode rt <-. val_ mObservedCode | isNothing (rtVersionCode row), isJust mObservedCode]
+              )
+              (\rt -> rtId rt ==. val_ releaseId_)
+
 -- | Flip a release to INPROGRESS. Used when promoting a store-sync internal /
 -- TestFlight snapshot (a COMPLETED row): going INPROGRESS lets the runner + the
 -- reconciler adopt it into the review/rollout lifecycle (poll, finalize).
@@ -492,33 +538,17 @@ isStoreIdentityRow row = case parseMobileTargetState (rtTargetState row) of
   Just st -> claimsStoreIdentity (mbContext st)
   Nothing -> True
 
--- | Rule C: when a newer build is promoted, retire OLDER held-on-internal builds of the
--- app to history (COMPLETED, keeping version_code). A lower code can't reach production
--- once a higher one is in review. Only LANDED (MBTagPushed) builds, never mid-build.
-retireOlderHeldInternal :: (MonadFlow m) => Text -> Text -> Text -> Text -> Maybe Int32 -> m [Text]
-retireOlderHeldInternal _ _ _ _ Nothing = pure []
-retireOlderHeldInternal appGroup surface platform excludeRid (Just promotedCode) = do
-  rows <- withDb $ \db ->
-    runDB db $
-      runSelectReturningList $
-        select $ do
-          rt <- all_ (releaseTrackers autopilotDb)
-          guard_ (rtAppGroup rt ==. val_ appGroup)
-          guard_ (rtService rt ==. val_ surface)
-          guard_ (rtEnv rt ==. val_ platform)
-          guard_ (rtCategory rt ==. val_ "MobileBuild")
-          guard_ (rtId rt /=. val_ excludeRid)
-          guard_ (rtStatus rt ==. val_ "INPROGRESS")
-          guard_ (isNothing_ (rtStoreTrack rt)) -- not promoted (no production track)
-          guard_ (isNothing_ (rtReviewStatus rt)) -- not in review
-          guard_ (isNothing_ (rtRolloutStatus rt)) -- not rolling out
-          guard_ (rtVersionCode rt <. just_ (val_ promotedCode))
-          pure rt
-  -- Only retire builds that actually landed (held at MBTagPushed); never orphan a
-  -- build still in flight.
-  let landed :: ReleaseTrackerRow -> Bool
-      landed r = (mbWfStatus <$> parseMobileTargetState (rtTargetState r)) == Just MBTagPushed
-      ids = map rtId (filter landed rows)
+-- | Rule C: retire HELD builds sitting behind the anchor build in RELEASE order —
+-- @behindAnchor@ is the caller-supplied SSOT predicate ('releaseOrderBehind' vs the
+-- promoted / best-internal / just-landed build). Held = store-observed on a pre-prod
+-- track (internal/TestFlight, snapshot or synced), or an SCC-landed MBTagPushed row
+-- with no track yet — never a mid-build row, never debug/Firebase (no store identity).
+retireOlderHeldInternal :: (MonadFlow m) => Text -> Text -> Text -> Text -> (Text -> Maybe Int32 -> Bool) -> m [Text]
+retireOlderHeldInternal appGroup surface platform excludeRid behindAnchor = do
+  rows <- heldRowsForApp appGroup surface platform
+  let behind :: ReleaseTrackerRow -> Bool
+      behind r = isJust (rtVersionCode r) && behindAnchor (rtNewVersion r) (rtVersionCode r)
+      ids = map rtId (filter (\r -> rtId r /= excludeRid && behind r) rows)
   forM_ ids $ \i ->
     withDb $ \db ->
       runDB db $
@@ -535,6 +565,65 @@ retireOlderHeldInternal appGroup surface platform excludeRid (Just promotedCode)
             )
             (\rt -> rtId rt ==. val_ i)
   pure ids
+
+-- | HELD candidate rows for one app: coded, store-identity, review/rollout NULL,
+-- and either store-observed on a pre-prod track or SCC-landed (MBTagPushed, no
+-- track yet). The one held-shape definition Rule C, the promote gate and the
+-- display fold all share.
+heldRowsForApp :: (MonadFlow m) => Text -> Text -> Text -> m [ReleaseTrackerRow]
+heldRowsForApp appGroup surface platform = do
+  rows <- withDb $ \db ->
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtAppGroup rt ==. val_ appGroup)
+          guard_ (rtService rt ==. val_ surface)
+          guard_ (rtEnv rt ==. val_ platform)
+          guard_ (rtCategory rt ==. val_ "MobileBuild")
+          guard_ (rtStatus rt ==. val_ "INPROGRESS" ||. rtStatus rt ==. val_ "COMPLETED")
+          guard_ (isNothing_ (rtReviewStatus rt))
+          guard_ (isNothing_ (rtRolloutStatus rt))
+          guard_
+            ( isNothing_ (rtStoreTrack rt)
+                ||. rtStoreTrack rt ==. val_ (Just "internal")
+                ||. rtStoreTrack rt ==. val_ (Just "testflight")
+            )
+          pure rt
+  pure (filter heldShapeRow rows)
+
+-- | 'heldRowsForApp' across ALL apps, keyed by (app_group, service, env) with the
+-- lite (row id, version, code) shape the list enrichment folds against.
+heldMobileByApp :: (MonadFlow m) => m (Map.Map (Text, Text, Text) [(Text, Text, Int32)])
+heldMobileByApp = do
+  rows <- withDb $ \db ->
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtCategory rt ==. val_ "MobileBuild")
+          guard_ (rtStatus rt ==. val_ "INPROGRESS" ||. rtStatus rt ==. val_ "COMPLETED")
+          guard_ (isNothing_ (rtReviewStatus rt))
+          guard_ (isNothing_ (rtRolloutStatus rt))
+          guard_
+            ( isNothing_ (rtStoreTrack rt)
+                ||. rtStoreTrack rt ==. val_ (Just "internal")
+                ||. rtStoreTrack rt ==. val_ (Just "testflight")
+            )
+          pure rt
+  pure $
+    Map.fromListWith
+      (<>)
+      [ ((rtAppGroup r, rtService r, rtEnv r), [(rtId r, rtNewVersion r, c)])
+      | r <- filter heldShapeRow rows
+      , Just c <- [rtVersionCode r]
+      ]
+
+heldShapeRow :: ReleaseTrackerRow -> Bool
+heldShapeRow r =
+  isJust (rtVersionCode r) && isStoreIdentityRow r && case rtStoreTrack r of
+    Just _ -> True -- store-observed pre-prod held row (snapshot or synced)
+    Nothing -> (mbWfStatus <$> parseMobileTargetState (rtTargetState r)) == Just MBTagPushed
 
 -- | The PROD-INCOMING rows across all apps (version-keyed model): a version on the
 -- production track that's in review / approved-held / rejected but NOT yet rolling
@@ -553,6 +642,19 @@ listIncomingMobileVersions = withDb $ \db ->
         guard_ (not_ (isNothing_ (rtReviewStatus rt))) -- in review / approved / rejected
         guard_ (isNothing_ (rtRolloutStatus rt)) -- not yet rolling out (that's PROD-LIVE)
         pure rt
+
+-- | 'listIncomingMobileVersions' keyed by app, in the lite shape the list
+-- enrichment needs to mirror promoteH's incoming gates:
+-- (row id, version, code, review_status).
+incomingMobileByApp :: (MonadFlow m) => m (Map.Map (Text, Text, Text) [(Text, Text, Maybe Int32, Maybe Text)])
+incomingMobileByApp = do
+  rows <- listIncomingMobileVersions
+  pure $
+    Map.fromListWith
+      (<>)
+      [ ((rtAppGroup r, rtService r, rtEnv r), [(rtId r, rtNewVersion r, rtVersionCode r, rtReviewStatus r)])
+      | r <- rows
+      ]
 
 -- | Has this version GRADUATED PAST review — i.e. does its row carry a
 -- @rollout_status@ (rolling out / halted / superseded / live mirror, at any

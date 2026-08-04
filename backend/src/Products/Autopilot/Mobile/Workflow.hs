@@ -47,6 +47,7 @@ module Products.Autopilot.Mobile.Workflow (
 ) where
 
 import Control.Exception (Exception, SomeException, fromException, throwIO, try)
+import Control.Applicative ((<|>))
 import Control.Monad (forM_, when)
 import qualified Control.Monad.Catch as MC
 import Control.Monad.Except (throwError)
@@ -87,8 +88,10 @@ import Products.Autopilot.Mobile.Github (
     dispatchRunCandidates,
     dispatchWorkflow,
     findRunWithJob,
+    fetchJobLog,
     listJobs,
     listTags,
+    listTagsWithShas,
     listWorkflowRuns,
  )
 import Products.Autopilot.Mobile.Github.Auth (GhAppCreds (..), getInstallationToken, loadGhCreds)
@@ -101,10 +104,22 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     logEvent,
     markReleaseRevertedBy,
     parseMobileTargetState,
+    retireOlderHeldInternal,
     setExternalRunIdForDispatch,
     setPhase,
     setReleaseVersionCode,
  )
+import Products.Autopilot.Mobile.Heal (
+    JobFailureShape (..),
+    RunIdentity (..),
+    StoreVerifyResult (..),
+    classifyFailedJob,
+    extractFailureExcerpt,
+    failedStepOf,
+    fetchRunIdentity,
+    verifyStoreArtifact,
+ )
+import Products.Autopilot.Mobile.StoreSync (releaseOrderBehind)
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (claimsStoreIdentity)
 import Products.Autopilot.Mobile.Lifecycle.Phase (ReleasePhase (..))
 import Products.Autopilot.Mobile.Types (
@@ -1130,8 +1145,14 @@ execPollMatrixJobs = mobileStage "PollMatrixJobs" $ do
                 bumped = case (status', conclusion) of
                     ("completed", Just "success") ->
                         bumpStatus (mbWfStatus target) MBSubmittedToStore
-                    ("completed", Just other) ->
-                        MBFailed ("matrix_job_" <> other)
+                    ("completed", Just "cancelled") ->
+                        MBFailed "matrix_job_cancelled"
+                    ("completed", Just _) ->
+                        -- Failure-like conclusion: HOLD the current status — the
+                        -- auto-heal gate below decides (heal / wait / fail).
+                        -- Writing MBFailed here would satisfy this stage's
+                        -- skip-guard and strand the verification loop.
+                        mbWfStatus target
                     _ ->
                         if mbWfStatus target == MBDispatched || mbWfStatus target == MBRunIdResolved
                             then MBBuilding
@@ -1167,13 +1188,132 @@ execPollMatrixJobs = mobileStage "PollMatrixJobs" $ do
                     -- The shared GH run was cancelled (a sibling's abort or a manual
                     -- cancel on GitHub) — this build died with it, it didn't fail.
                     abort "build cancelled — the GH run was cancelled (sibling abort or manual cancel)"
-                ("completed", Just other) ->
-                    abort $ "matrix job ended with conclusion=" <> other
+                ("completed", Just other) -> do
+                    -- CI claims failure, but a post-upload step death (tag push,
+                    -- notify) leaves a live store artifact behind a failed job.
+                    -- Store truth decides — never mark a shipped build failed.
+                    outcome <- attemptAutoHeal rt target j
+                    case outcome of
+                        AutoHealed mObs -> do
+                            modify $ \s ->
+                                s
+                                    { targetState =
+                                        Just $
+                                            MobileBuildState
+                                                ( applyMobileTarget s $ \mt ->
+                                                    mt
+                                                        { mbWfStatus = bumpStatus (mbWfStatus mt) MBSubmittedToStore
+                                                        , mbContext = (mbContext mt){mbcVersionCode = mbcVersionCode (mbContext mt) <|> mObs}
+                                                        }
+                                                )
+                                    }
+                            logEvent (releaseId rt) "BUILD_HEALED_FROM_STORE" $
+                                object
+                                    [ "trigger" .= ("auto" :: Text)
+                                    , "job_conclusion" .= other
+                                    , "observed_code" .= mObs
+                                    ]
+                            pure StageSuccess
+                        AutoHealWaiting n mErr -> do
+                            modify $ \s ->
+                                s
+                                    { targetState =
+                                        Just $
+                                            MobileBuildState
+                                                (applyMobileTarget s $ \mt -> mt{mbVerifyAttempts = Just n})
+                                    }
+                            logEvent (releaseId rt) "BUILD_HEAL_CHECK" $
+                                object ["attempt" .= n, "job_conclusion" .= other, "error" .= mErr]
+                            pure StageWaiting
+                        AutoHealNo detail -> do
+                            captureFailureDetail rt j
+                            modify $ \s ->
+                                s
+                                    { targetState =
+                                        Just $
+                                            MobileBuildState
+                                                ( applyMobileTarget s $ \mt ->
+                                                    mt{mbWfStatus = MBFailed ("matrix_job_" <> other)}
+                                                )
+                                    }
+                            abort $ "matrix job ended with conclusion=" <> other <> detail
                 ("completed", Nothing) ->
                     -- Spec violation from GH: completed without a conclusion.
                     -- Treat as transient; tick again.
                     pure StageWaiting
                 _ -> pure StageWaiting
+
+-- ─── Auto-heal gate (store truth vs a failed matrix job) ───────────
+
+data AutoHealOutcome
+    = AutoHealed (Maybe Int32)
+    -- ^ Store has the artifact (observed code when reported) — resume the lifecycle.
+    | AutoHealWaiting Int (Maybe Text)
+    -- ^ Not confirmed yet (attempt count, transient error) — tick again.
+    | AutoHealNo Text
+    -- ^ Genuine failure; the detail suffix explains why healing was ruled out.
+
+-- | Bounded verification budget (scheduler ticks). Store APIs list a build
+-- from upload time — not processing-complete — so a short window suffices.
+maxAutoHealAttempts :: Int
+maxAutoHealAttempts = 4
+
+{- | Best-effort: record the GH-side failure cause — the failed step name plus
+the @##[error]@ excerpt from the job log — as a BUILD_FAILURE_DETAIL event;
+the failed card renders it. Wrapped so a log-fetch hiccup can never block or
+retry the failure path itself (worst case the event carries the step only).
+-}
+captureFailureDetail :: ReleaseTracker -> Job -> StateFlow ()
+captureFailureDetail rt j = do
+    eExcerpt <- MC.try @_ @SomeException $ do
+        ac <- appCatalogForRow rt
+        creds <- loadGhCredsSafe
+        eLog <- fetchJobLog creds (gitOwner ac) (gitRepo ac) (jId j)
+        pure (either (const Nothing) extractFailureExcerpt eLog)
+    logEvent (releaseId rt) "BUILD_FAILURE_DETAIL" $
+        object
+            [ "failed_step" .= failedStepOf j
+            , "excerpt" .= either (const Nothing) id eExcerpt
+            , "html_url" .= jHtmlUrl j
+            ]
+
+{- | Decide whether a failed matrix job actually shipped its artifact.
+
+Debug/Firebase rows have no store: never healable. An upload step that
+failed or never ran is a genuine build failure — ruled out with zero store
+calls. Otherwise verify the exact artifact against store truth
+("Products.Autopilot.Mobile.Heal"), sharpened by the build code parsed from
+the job log (accepted only when the log's version matches this row).
+-}
+attemptAutoHeal :: ReleaseTracker -> MobileBuildTargetState -> Job -> StateFlow AutoHealOutcome
+attemptAutoHeal rt target j = do
+    let ctx = mbContext target
+        attempts = fromMaybe 0 (mbVerifyAttempts target)
+    if isDebugBuildType (mbcBuildType ctx) || mbcDestination ctx == Just "Firebase"
+        then pure (AutoHealNo "")
+        else case classifyFailedJob j of
+            UploadFailed -> pure (AutoHealNo " (upload step failed — no store artifact)")
+            UploadNotReached -> pure (AutoHealNo " (died before the upload step — no store artifact)")
+            _ -> do
+                ac <- appCatalogForRow rt
+                creds <- loadGhCredsSafe
+                eIdent <- fetchRunIdentity creds (gitOwner ac) (gitRepo ac) (jId j)
+                let mLogCode = case eIdent of
+                        Right ident | riVersionName ident == newVersion rt -> riVersionCode ident
+                        _ -> Nothing
+                    mCode = mbcVersionCode ctx <|> mLogCode
+                res <- lift (verifyStoreArtifact ac (newVersion rt) mCode (mbBuildStartedAt target))
+                pure $ case res of
+                    ArtifactFound mObs -> AutoHealed mObs
+                    _
+                        | attempts + 1 >= maxAutoHealAttempts ->
+                            AutoHealNo
+                                ( " (store verified: no artifact after "
+                                    <> T.pack (show (attempts + 1))
+                                    <> " checks)"
+                                )
+                    ArtifactMissing -> AutoHealWaiting (attempts + 1) Nothing
+                    VerifyErrored e -> AutoHealWaiting (attempts + 1) (Just e)
 
 {- | Stage 6: confirm the annotated tag THIS build pushed.
 
@@ -1430,6 +1570,48 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                                     <> expectedTag
                             pure StageWaiting
                 Just tagName -> do
+                    -- Provenance gate: name-matching alone can adopt a STALE tag — a
+                    -- non-store run (or manual push) that burned this name earlier
+                    -- points at a commit this build never shipped. The tag must peel
+                    -- to the commit THIS run built (release_tracker.commit_sha,
+                    -- stamped at ResolveRunId). Legacy rows without a stored sha
+                    -- adopt as before. Never force-move a published tag: mismatch
+                    -- fails the row with the retag command; after the operator
+                    -- retags, "Verify on store" resumes it through here again.
+                    forM_ (commitSha rt) $ \expectSha -> do
+                        eShas <- listTagsWithShas creds (gitOwner ac) (gitRepo ac) tagName
+                        tagSha <- case eShas of
+                            Left e -> retry ("tag provenance lookup failed: " <> e)
+                            Right pairs -> case lookup tagName pairs of
+                                Nothing -> retry ("tag provenance: could not resolve " <> tagName)
+                                Just sha -> pure sha
+                        when (T.toLower tagSha /= T.toLower expectSha) $ do
+                            logEvent (releaseId rt) "TAG_CONFLICT" $
+                                object
+                                    [ "tag" .= tagName
+                                    , "tag_commit" .= tagSha
+                                    , "build_commit" .= expectSha
+                                    , "remediation"
+                                        .= ( "git push origin :refs/tags/"
+                                                <> tagName
+                                                <> " && git tag -a "
+                                                <> tagName
+                                                <> " "
+                                                <> expectSha
+                                                <> " -m 'Release "
+                                                <> tagName
+                                                <> "' && git push origin refs/tags/"
+                                                <> tagName
+                                           )
+                                    ]
+                            abort $
+                                "tag "
+                                    <> tagName
+                                    <> " points at "
+                                    <> T.take 9 tagSha
+                                    <> " but this build is from "
+                                    <> T.take 9 expectSha
+                                    <> " — stale tag burned the name; retag it (see TAG_CONFLICT event), then press Verify on store"
                     -- The build assigns the build number (esp. iOS, where SCC has no code
                     -- at dispatch); it's embedded in the tag it pushed. Read it back so
                     -- every store-bound row carries its identity code — version+code is the
@@ -1452,11 +1634,20 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                                                 }
                                         )
                             }
-                    -- persistWorkflowState (insertReleaseTracker) doesn't write the
+                    -- persistWorkflowState (checkpointReleaseTracker) doesn't write the
                     -- version_code COLUMN, so stamp it explicitly for store-bound builds
                     -- (toRow's gate) — the JSON above alone wouldn't reach the column.
-                    when (claimsStoreIdentity (mbContext target)) $
+                    when (claimsStoreIdentity (mbContext target)) $ do
                         forM_ observedCode (setReleaseVersionCode (releaseId rt))
+                        -- Land-time supersession: this build now owns the internal
+                        -- track — retire held siblings behind it in release order NOW
+                        -- (same SSOT predicate; sync convergence stays the heal).
+                        retired <-
+                            retireOlderHeldInternal (appGroup rt) (service rt) (env rt) (releaseId rt) $
+                                \v c -> releaseOrderBehind v c version observedCode
+                        forM_ retired $ \i ->
+                            logEvent i "HELD_SUPERSEDED" $
+                                object ["by_version" .= version, "by_code" .= observedCode, "source" .= ("build_landed" :: Text)]
                     logEvent (releaseId rt) "TAG_OBSERVED" $
                         object ["tag" .= tagName, "expected" .= expectedTag, "prefix" .= prefix, "version_code" .= observedCode]
                     logInfoIO $
@@ -1777,6 +1968,7 @@ applyMobileTarget rs f =
                     , mbReviewSubmittedAt = Nothing
                     , mbReviewLastPolledAt = Nothing
                     , mbBatchDispatch = Nothing
+                    , mbVerifyAttempts = Nothing
                     }
 
 {- | Status bump that respects ordering: never regresses to an earlier

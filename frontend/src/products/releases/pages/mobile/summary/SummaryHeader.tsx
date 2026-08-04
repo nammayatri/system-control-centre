@@ -8,6 +8,7 @@ import {
   ChartBarIcon,
   FireIcon,
   GitBranchIcon,
+  HeartbeatIcon,
   NetworkIcon,
   XCircleIcon,
 } from '@phosphor-icons/react';
@@ -17,6 +18,7 @@ import { versionWithBuild } from '../../../utils';
 import type { APRelease, RolloutDetail } from '../../../api';
 import type { AppCatalogEntry } from '../../../types';
 import { SCENARIO_PILL, type Scenario } from './scenario';
+import type { HealInfo } from './heal';
 
 const KIBANA_URL = import.meta.env.VITE_KIBANA_URL || '';
 const KIALI_URL = import.meta.env.VITE_KIALI_URL || '';
@@ -37,6 +39,9 @@ export interface SummaryHeaderProps {
   syncedSecondsAgo?: number | null;
   onRefresh: () => void;
   refreshSpinning: boolean;
+  /** Present when a BUILD_HEALED_FROM_STORE event exists: this build passed
+   * because the store confirmed the artifact, not because CI went green. */
+  healed?: HealInfo | null;
 }
 
 const syncedText = (s: number) =>
@@ -59,6 +64,7 @@ export function SummaryHeader({
   syncedSecondsAgo,
   onRefresh,
   refreshSpinning,
+  healed,
 }: SummaryHeaderProps) {
   const pill = SCENARIO_PILL[scenario];
   const track = rollout?.rdStoreTrack;
@@ -132,6 +138,19 @@ export function SummaryHeader({
                 ) : null}
                 <span>{statusLabel}</span>
               </span>
+              {/* Heal marker — a healed build must look healed, not laundered:
+                  CI said failure, the store confirmed the artifact. */}
+              {healed && (
+                <span
+                  className="inline-flex items-center gap-1.5 border border-amber-300 bg-amber-50 text-amber-800 px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider"
+                  title={`CI reported failure, but the artifact was verified on the store${
+                    healed.observedCode != null ? ` (build ${healed.observedCode})` : ''
+                  } — ${healed.trigger === 'auto' ? 'healed automatically' : 'healed via Verify on store'}.`}
+                >
+                  <HeartbeatIcon size={12} weight="bold" aria-hidden="true" />
+                  <span>Healed</span>
+                </span>
+              )}
             </div>
           </div>
 

@@ -181,6 +181,10 @@ ahead of live or older than the best incoming (Rule-B shape: status only,
 review kept for history; 30-min grace for a just-promoted row); observed
 INTERNAL builds below live or older than the newest internal. Never touches
 the live build's own rows, NULL-code same-version rows, or mid-build rows.
+That invariant includes INCOMING rows: all anchor compares are STRICT, so an
+in-review row whose (version, code) equals the serving release is the build
+that just went live — adoption/reconcile flips it to Live; superseding it here
+(the old <=) buried a serving release when adoption missed one pass.
 The SQL mirrors scripts/converge-mobile-slots-inspect.sql — keep in lockstep.
 
 Ordering (2026-08-03 SSOT): LIVE and HELD slots use the RELEASE ordering on
@@ -228,7 +232,7 @@ convergeMobileSlots appGroup surface platform mAnchor = withDb $ \db -> withConn
         \UPDATE release_tracker rt SET status = 'COMPLETED', rollout_status = 'superseded' \
         \FROM incoming i LEFT JOIN best b ON TRUE \
         \WHERE rt.id = i.id \
-        \  AND ( ( ?::int IS NOT NULL AND i.version_code <= ?::int ) \
+        \  AND ( ( ?::int IS NOT NULL AND i.version_code < ?::int ) \
         \     OR i.version_code < b.bcode ) \
         \RETURNING rt.id"
     liveSql =
@@ -261,7 +265,7 @@ convergeMobileSlots appGroup surface platform mAnchor = withDb $ \db -> withConn
         \          AND ( i.vkey < mobile_version_key(?::text) \
         \                OR ( i.vkey = mobile_version_key(?::text) \
         \                     AND ?::int IS NOT NULL AND i.version_code IS NOT NULL \
-        \                     AND i.version_code <= ?::int ) ) ) \
+        \                     AND i.version_code < ?::int ) ) ) \
         \     OR i.vkey < b.bkey \
         \     OR ( i.vkey = b.bkey AND i.version_code IS NOT NULL AND b.bcode IS NOT NULL \
         \          AND i.version_code < b.bcode ) ) \
@@ -292,12 +296,12 @@ then code) — the anchor the convergence hands to Rule C so stale SCC-built
 (store_track NULL) landed rows retire on sync, not only at promote time.
 -}
 bestActiveInternalBuild ::
-    (MonadFlow m) => Text -> Text -> Text -> m (Maybe (Text, Int32))
+    (MonadFlow m) => Text -> Text -> Text -> m (Maybe (Text, Text, Int32))
 bestActiveInternalBuild appGroup surface platform = withDb $ \db -> withConn db $ \conn -> do
     rows <-
         query
             conn
-            ( "SELECT id, version_code FROM release_tracker \
+            ( "SELECT id, new_version, version_code FROM release_tracker \
               \WHERE category = 'MobileBuild' AND app_group = ? AND service = ? AND env = ? \
               \  AND store_track IN ('internal','testflight') AND review_status IS NULL \
               \  AND rollout_status IS NULL AND status IN ('INPROGRESS','COMPLETED') \
@@ -308,5 +312,5 @@ bestActiveInternalBuild appGroup surface platform = withDb $ \db -> withConn db 
             )
             (appGroup, surface, platform)
     pure $ case rows of
-        [(rid, code)] -> Just (rid, code)
+        [(rid, ver, code)] -> Just (rid, ver, code)
         _ -> Nothing

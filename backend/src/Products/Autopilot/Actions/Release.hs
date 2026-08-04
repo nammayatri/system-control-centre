@@ -88,9 +88,10 @@ import Products.Autopilot.K8s.Deployment (buildPatchDeploymentEnvsCommand, deplo
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
-import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), displayStatusInferred, phaseFromFields, phaseSlug, supersededIfBehind, variantSlug)
+import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), displayStatusInferred, phaseFromFields, phaseSlug, supersededIfBehind, variantSlug)
 import Products.Autopilot.Mobile.Queries.StoreStatus (StoreCell, productionVersionsByApp, resolveStoreState, storeCellsByApp)
-import Products.Autopilot.Mobile.StoreSync (atOrBelowProductionPure, releaseOrderBehind)
+import Products.Autopilot.Mobile.Queries.Tracker (heldMobileByApp, incomingMobileByApp)
+import Products.Autopilot.Mobile.StoreSync (atOrBelowProductionPure, releaseOrderBehind, releaseOrderStrictlyBehind)
 import Products.Autopilot.Mobile.Types (mbContext, mbWfStatus)
 import Products.Autopilot.Notifications
 import Products.Autopilot.Queries.ProductService
@@ -261,7 +262,9 @@ listReleasesH _ap mFrom mTo mCategory = do
     let mWhitelist = categoryWhitelist mCategory
     prodCodes <- productionVersionsByApp
     cells <- storeCellsByApp
-    let enrich = fst . injectStoreState prodCodes cells . injectPromotable prodCodes
+    incs <- incomingMobileByApp
+    helds <- heldMobileByApp
+    let enrich = fst . injectStoreState prodCodes helds cells . injectPromotable prodCodes incs helds
     case (mFrom >>= parseISO, mTo >>= parseISO) of
         (Just fromTime, Just toTime) -> do
             pairs <- listReleaseTrackersByDateRangeAndCategory fromTime toTime mWhitelist
@@ -290,23 +293,42 @@ listReleasesH _ap mFrom mTo mCategory = do
     categoryWhitelist _ = Nothing
 
 {- | Inject a per-row @promotable@ flag (BE truth) into a mobile release's release_context:
-True when the build is ahead of production — a NEWER marketing version, or the same version
-with a HIGHER build number. Mirrors the promote handler's gate (and is version-first so iOS,
-whose build number resets per marketing version, isn't wrongly marked superseded). Non-mobile
-rows are left untouched (no flag → the FE keeps its own stage logic); an app with no synced
+True when the build would pass EVERY promoteH gate — ahead of production (version-first,
+code tiebreak; Android adds the Play code check), ahead of any build already in the
+incoming/review slot, and (iOS) no other version in flight (Apple allows one at a time;
+same-version rebuilds and rejected rows pass, mirroring the handler). Non-mobile rows are
+left untouched (no flag → the FE keeps its own stage logic); an app with no synced
 production is promotable by default.
 -}
-injectPromotable :: Map.Map (Text, Text, Text) (Text, Maybe Int32) -> TrackerWithTarget -> TrackerWithTarget
-injectPromotable prods pair@(tracker, mts) =
+injectPromotable ::
+    Map.Map (Text, Text, Text) (Text, Maybe Int32) ->
+    Map.Map (Text, Text, Text) [(Text, Text, Maybe Int32, Maybe Text)] ->
+    Map.Map (Text, Text, Text) [(Text, Text, Int32)] ->
+    TrackerWithTarget ->
+    TrackerWithTarget
+injectPromotable prods incs helds pair@(tracker, mts) =
     case mts of
         Just (MobileBuildState _) ->
             let key = (NT.appGroup tracker, NT.service tracker, NT.env tracker)
                 buildVer = NT.newVersion tracker
                 bCode = NT.versionCode tracker
-                promotable = case Map.lookup key prods of
+                aheadOfProd = case Map.lookup key prods of
                     Just (pVer, mpCode) ->
                         not (atOrBelowProductionPure (NT.env tracker) buildVer bCode pVer mpCode)
                     Nothing -> True -- no synced production → ahead by default
+                mine = [x | x@(iid, _, _, _) <- Map.findWithDefault [] key incs, iid /= NT.releaseId tracker]
+                blockedByIncoming =
+                    any (\(_, iv, ic, _) -> atOrBelowProductionPure (NT.env tracker) buildVer bCode iv ic) mine
+                iosInflight =
+                    NT.env tracker == "ios"
+                        && any (\(_, iv, _, ir) -> iv /= buildVer && ir /= Just "rejected") mine
+                -- Overtaken by a newer held sibling — the promote gate refuses it
+                -- and the display fold reads it Superseded; keep the flag in step.
+                behindHeld =
+                    any
+                        (\(hid, hv, hc) -> hid /= NT.releaseId tracker && releaseOrderStrictlyBehind buildVer bCode hv (Just hc))
+                        (Map.findWithDefault [] key helds)
+                promotable = aheadOfProd && not blockedByIncoming && not iosInflight && not behindHeld
                 rc' = case NT.releaseContext tracker of
                     Just (Object o) -> Just (Object (KM.insert (K.fromText "promotable") (Bool promotable) o))
                     other -> other
@@ -322,20 +344,53 @@ Non-mobile rows are untouched.
 
 §15 fold: a held build sitting BEHIND production in release order
 ('releaseOrderBehind' against the same production map 'injectPromotable'
-uses) reads Superseded here — the one label the list, groups, and summary
-all inherit, matching what slot convergence writes to the row next pass.
+uses) — or behind a newer HELD sibling (a landed rebuild, the same compare
+slot convergence applies) — reads Superseded here: the one label the list,
+groups, and summary all inherit, matching what convergence writes next pass.
 -}
-injectStoreState :: Map.Map (Text, Text, Text) (Text, Maybe Int32) -> Map.Map (Text, Text, Text) [StoreCell] -> TrackerWithTarget -> TrackerWithTarget
-injectStoreState prods cellsByApp pair@(tracker, mts) =
+injectStoreState ::
+    Map.Map (Text, Text, Text) (Text, Maybe Int32) ->
+    Map.Map (Text, Text, Text) [(Text, Text, Int32)] ->
+    Map.Map (Text, Text, Text) [StoreCell] ->
+    TrackerWithTarget ->
+    TrackerWithTarget
+injectStoreState prods helds cellsByApp pair@(tracker, mts) =
     case mts of
         Just (MobileBuildState s) ->
             let key = (NT.appGroup tracker, NT.service tracker, NT.env tracker)
                 cells = Map.findWithDefault [] key cellsByApp
-                behind = case Map.lookup key prods of
+                behindProd = case Map.lookup key prods of
                     Just (pVer, mpCode) -> releaseOrderBehind (NT.newVersion tracker) (NT.versionCode tracker) pVer mpCode
                     Nothing -> False
+                -- STRICT vs siblings: an equal-identity duplicate row must not
+                -- fold this one (two rows of one build would supersede each other).
+                behindHeld =
+                    any
+                        (\(hid, hv, hc) -> hid /= NT.releaseId tracker && releaseOrderStrictlyBehind (NT.newVersion tracker) (NT.versionCode tracker) hv (Just hc))
+                        (Map.findWithDefault [] key helds)
+                behind = behindProd || behindHeld
+                -- Same fold supersededIfBehind applies, on the serialized shape:
+                -- only a held build flips, everything else keeps its baseline.
+                foldHeldCtx v@(Object o)
+                    | KM.lookup "display_phase" o == Just (toJSON (phaseSlug InternalHeld)) =
+                        let disp = displayStatusInferred (reviewInferredOf (NT.metadata tracker)) Superseded
+                         in Object
+                                ( KM.insert "display_phase" (toJSON (phaseSlug Superseded))
+                                    . KM.insert "display_label" (toJSON (dLabel disp))
+                                    . KM.insert "display_variant" (toJSON (variantSlug (dVariant disp)))
+                                    $ o
+                                )
+                    | otherwise = v
+                foldHeldCtx v = v
              in case resolveStoreState cells (NT.newVersion tracker) (NT.versionCode tracker) of
-                    Nothing -> pair
+                    -- Off-track build (no store cell matches this version+code — the
+                    -- usual state of a superseded build, since a newer build replaced
+                    -- it on its track): fromRow's baseline stands, but the §15 fold
+                    -- must still apply or the list keeps saying Ready to promote
+                    -- while the summary (row-columns fallback) says Superseded.
+                    Nothing
+                        | behind -> (tracker{releaseContext = fmap foldHeldCtx (NT.releaseContext tracker)}, mts)
+                        | otherwise -> pair
                     Just (rollout, pct, track) ->
                         let ph = supersededIfBehind behind (phaseFromFields (buildKind (mbContext s)) (mbWfStatus s) (NT.reviewStatus tracker) rollout pct track)
                             disp = displayStatusInferred (reviewInferredOf (NT.metadata tracker)) ph

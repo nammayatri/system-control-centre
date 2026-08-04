@@ -1324,12 +1324,20 @@ export interface RolloutDetail {
     rdPhasedId: string | null; // iOS phased-release id (present ⇒ phased ramp on)
     rdStoreTrack: string | null; // production | internal | testflight (store-sync rows)
     rdPromotable: boolean; // BE truth: can be promoted now (promotable stage AND not already live on prod)
+    rdPromoteBlock?: string | null; // why not promotable: behind_production | behind_held | blocked_by_incoming | one_in_flight
+    rdPromoteBlockVersion?: string | null; // the blocking sibling's version, when known
     rdAbortable: boolean; // BE truth: can be aborted now (job still killable, nothing uploaded) — else Abort is hidden
     rdRunSiblings: string[]; // other apps still building in the SAME shared GH run — abort cancels their builds too
     rdAppCatalogId: number; // app_catalog.id — force a store sync (refreshStoreApp) before re-reading
     rdLiveOnProduction: boolean; // BE truth: is THIS build the version live on production (synced cache, code-first)
     rdSyncedSecondsAgo: number | null; // seconds since store_status last synced (null = never)
     rdRefreshCooldownSeconds: number; // a Refresh only re-polls the live store once age ≥ this (else serves cache)
+}
+
+export interface VerifyStoreResp {
+    vsResult: 'healed' | 'not_found';
+    vsDetail: string;
+    vsObservedCode: number | null;
 }
 
 export interface PromoteReq {
@@ -1650,6 +1658,13 @@ export const mobileApi = {
     // Live re-poll one app → upsert the cache → return its fresh card.
     refreshStoreApp: async (appCatalogId: number): Promise<StoreMonitorApp> => {
         const { data } = await apiClient.post(`/mobile/store-monitor/${appCatalogId}/refresh`, {});
+        return data;
+    },
+
+    // Heal a failed build whose artifact actually reached the store: verifies
+    // against store truth and, on a hit, resumes the release lifecycle.
+    verifyStore: async (id: string): Promise<VerifyStoreResp> => {
+        const { data } = await apiClient.post(`/mobile/releases/${encodeURIComponent(id)}/verify-store`, {});
         return data;
     },
 
