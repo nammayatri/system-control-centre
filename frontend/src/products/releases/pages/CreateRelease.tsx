@@ -72,8 +72,9 @@ const buildDiffLink = (repo: string, oldV: string, newV: string): string => {
 };
 
 // Stages the form falls back to when nothing else supplies them. Every read of
-// this goes through cloneStages: handing the same objects to both stage tables
-// would let an edit in one rewrite the other's values.
+// this (and of the baseline refs below) goes through cloneStages: sharing stage
+// objects between the live table and a baseline would let an edit rewrite the
+// very values a return-to-Auto is supposed to restore.
 type Stage = { rollout: number; cooloff: number; pods: number };
 const DEFAULT_STAGES: Stage[] = [
   { rollout: 5, cooloff: 10, pods: 2 },
@@ -152,6 +153,12 @@ const CreateRelease: React.FC = () => {
   const [showPriorityDropdown, setShowPriorityDropdown] = useState(false);
   const [clonedService, setClonedService] = useState('');
   const [stages, setStages] = useState<Stage[]>(cloneStages(DEFAULT_STAGES));
+  // The stages this form started from — service config on a create, the source
+  // release on a clone, the release's own stages on an edit. Flipping the Stages
+  // button back to Auto restores these, so Auto always means "the stagger this
+  // release would have had if nobody touched it" and edits made in Manual can't
+  // ride along into an Auto create.
+  const baselineStagesRef = useRef<Stage[]>(cloneStages(DEFAULT_STAGES));
   const [isReleaseSync, setIsReleaseSync] = useState(false);
   // Opt-in: post AI changelog notes to the release's Slack thread once it completes.
   // Seeded per app group from deployment config (ai_changelog_enabled) by the effect
@@ -160,7 +167,11 @@ const CreateRelease: React.FC = () => {
   const [isSecondaryEnvSwitch, setIsSecondaryEnvSwitch] = useState(false);
   const [secondaryEnvData, setSecondaryEnvData] = useState('');
   const [secondaryEnvLoading, setSecondaryEnvLoading] = useState(false);
+  // Secondary stages are never loaded from config — they start at the defaults and
+  // only pod counts are refreshed from the sync cluster, so DEFAULT_STAGES plus
+  // those fresh counts is their baseline (kept in step by the estimate effect below).
   const [secondaryStages, setSecondaryStages] = useState<Stage[]>(cloneStages(DEFAULT_STAGES));
+  const baselineSecondaryStagesRef = useRef<Stage[]>(cloneStages(DEFAULT_STAGES));
   const [syncCluster, setSyncCluster] = useState('');
   const [rolloutHistoryLength, setRolloutHistoryLength] = useState(0);
   const [podsAutoLocked, setPodsAutoLocked] = useState(true);
@@ -286,7 +297,10 @@ const CreateRelease: React.FC = () => {
         try {
           const parsed = typeof existingRelease.rollout_strategy === 'string'
             ? JSON.parse(existingRelease.rollout_strategy) : existingRelease.rollout_strategy;
-          if (Array.isArray(parsed) && parsed.length > 0) setStages(parsed);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            baselineStagesRef.current = cloneStages(parsed);
+            setStages(cloneStages(parsed));
+          }
         } catch (e) { console.error('Failed to parse stages', e); }
       }
     }
@@ -308,7 +322,10 @@ const CreateRelease: React.FC = () => {
         if (data.rollout_strategy) {
           try {
             const parsed = typeof data.rollout_strategy === 'string' ? JSON.parse(data.rollout_strategy) : data.rollout_strategy;
-            if (Array.isArray(parsed) && parsed.length > 0) setStages(parsed);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              baselineStagesRef.current = cloneStages(parsed);
+              setStages(cloneStages(parsed));
+            }
           } catch (e) { console.error('Failed to parse stages', e); }
         }
       }).catch((err: any) => {
@@ -353,11 +370,13 @@ const CreateRelease: React.FC = () => {
           try {
             const rollouts = parseStrategyStages(svcConfig.rollout_strategy);
             if (rollouts.length > 0) {
-              setStages(rollouts.map(r => ({
+              const loaded: Stage[] = rollouts.map(r => ({
                 rollout: r.rolloutPercent ?? 0,
                 cooloff: r.cooloffMinutes ?? 10,
                 pods: r.podCount ?? 1,
-              })));
+              }));
+              baselineStagesRef.current = cloneStages(loaded);
+              setStages(cloneStages(loaded));
             }
           } catch (e) {
             // Surface parse errors — silent fallback to defaults hides misconfigured service configs.
@@ -380,6 +399,29 @@ const CreateRelease: React.FC = () => {
     if (isUpdate || !formData.appGroup || canManageStagger) return;
     setFormData(prev => (prev.mode === 'AUTO' ? prev : { ...prev, mode: 'AUTO' }));
   }, [isUpdate, formData.appGroup, canManageStagger]);
+
+  // Returning the Stages toggle to Auto has to undo the Manual edits: an AUTO
+  // release is meant to replay the baseline stagger, and the backend's create
+  // gate compares the submitted stages against the service config — leaving the
+  // edits in place would either 403 the create or ship a hand-made stagger under
+  // an AUTO label. Keyed off the Manual -> Auto transition specifically, so the
+  // loaders above (which run while the toggle still sits on its initial Auto)
+  // aren't clobbered by a restore.
+  const prevStagesLockRef = useRef(podsAutoLocked);
+  useEffect(() => {
+    const returnedToAuto = !prevStagesLockRef.current && podsAutoLocked;
+    prevStagesLockRef.current = podsAutoLocked;
+    if (isUpdate || !returnedToAuto) return;
+    setStages(cloneStages(baselineStagesRef.current));
+  }, [podsAutoLocked, isUpdate]);
+
+  const prevSecondaryLockRef = useRef(secondaryPodsAutoLocked);
+  useEffect(() => {
+    const returnedToAuto = !prevSecondaryLockRef.current && secondaryPodsAutoLocked;
+    prevSecondaryLockRef.current = secondaryPodsAutoLocked;
+    if (!returnedToAuto) return;
+    setSecondaryStages(cloneStages(baselineSecondaryStagesRef.current));
+  }, [secondaryPodsAutoLocked]);
 
   // Recalculate Min Pods (while locked) whenever the stage percentages change —
   // service select, the user editing a stage's %, adding/removing a stage, or
@@ -410,6 +452,13 @@ const CreateRelease: React.FC = () => {
       setSecondaryOldVersion(est.oldVersion ?? null);
       if (secondaryPodsAutoLocked) {
         setSecondaryStages(prev => prev.map((s, i) => (est.podCounts[i] != null ? { ...s, pods: est.podCounts[i] } : s)));
+        // Keep the restore target in step with the live estimate. While on Auto the
+        // percentages are always DEFAULT_STAGES', so the baseline is those plus the
+        // sync cluster's fresh pod counts — resetting to bare DEFAULT_STAGES would
+        // flash pods: 2 until this effect refetched them.
+        baselineSecondaryStagesRef.current = cloneStages(DEFAULT_STAGES).map((s, i) =>
+          est.podCounts[i] != null ? { ...s, pods: est.podCounts[i] } : s
+        );
       }
     }).catch((e: any) => {
       console.error('[CreateRelease] fetchRolloutPodEstimateSecondary failed:', e);
