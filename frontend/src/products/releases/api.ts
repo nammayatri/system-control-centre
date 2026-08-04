@@ -680,6 +680,7 @@ export interface ConfigReviewResp {
     ackBy?: string | null;
     ackAt?: string | null;
     blocksApproval: boolean;
+    state?: string | null;
 }
 
 // Deployment (BackendService) release env review.

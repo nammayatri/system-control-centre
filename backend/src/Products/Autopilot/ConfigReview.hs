@@ -16,6 +16,8 @@ module Products.Autopilot.ConfigReview (
     StoredReview (..),
     runConfigReview,
     readStoredReview,
+    reviewStatusInfo,
+    classifyAiError,
     acknowledgeReview,
     reviewBlocksApproval,
     resolveRulesFile,
@@ -47,7 +49,7 @@ import Products.Autopilot.Types (ReleaseCategory (..), ReleaseTracker (..))
 import Products.Autopilot.Types.Storage.Schema qualified as S
 import Shared.AI.Prompts (fence)
 import Shared.AI.Service (runAiTask)
-import Shared.AI.Types (AiError (..), AiResult (..), AiSubject (..), AiTask (..))
+import Shared.AI.Types (AiError (..), AiResult (..), AiSubject (..), AiTask (..), aiErrorReason)
 import Shared.Config.Runtime (getConfigBoolForProduct, getConfigTextForProduct)
 import System.Directory (doesFileExist)
 import System.FilePath ((</>))
@@ -180,6 +182,34 @@ writeAiReview rid reviewObj = do
         merged = KM.insert (K.fromText "ai_review") (Object reviewObj) base
     updateReleaseTrackerMetadata rid (Object merged)
 
+writeReviewState :: Text -> Text -> Maybe Text -> Flow ()
+writeReviewState rid state mReason = do
+    reviewedAt <- isoNow
+    writeAiReview rid $
+        KM.fromList
+            [ (K.fromText "state", String state)
+            , (K.fromText "reason", maybe Null String mReason)
+            , (K.fromText "reviewed_at", String reviewedAt)
+            ]
+
+classifyAiError :: AiError -> (Text, Text)
+classifyAiError e = (state, aiErrorReason e)
+  where
+    state = case e of
+        AiDisabled -> "unavailable"
+        AiNotConfigured _ -> "unavailable"
+        AiBadBaseUrl _ -> "unavailable"
+        _ -> "failed"
+
+reviewStatusInfo :: ReleaseTracker -> Maybe (Text, Maybe Text)
+reviewStatusInfo tr = do
+    o <- aiReviewObject tr
+    case getTextField "verdict" o of
+        Just _ -> Nothing -- 
+        Nothing -> do
+            st <- getTextField "state" o
+            pure (st, getTextField "reason" o)
+
 reviewParams ::
     ReleaseCategory ->
     Maybe (Text, Text, ReleaseTracker -> Flow (Text, Text), Text -> Text)
@@ -201,6 +231,7 @@ runConfigReview createdBy tracker force =
                 then pure (Left AiDisabled)
                 else do
                     let rid = releaseId tracker
+                    writeReviewState rid "pending" Nothing
                     (beforeRaw, afterRaw) <- extract tracker
                     let before = postProcess beforeRaw
                         after = postProcess afterRaw
@@ -218,6 +249,8 @@ runConfigReview createdBy tracker force =
                             case res of
                                 Left e -> do
                                     logInfo $ "[CONFIG-REVIEW] AI call failed for " <> rid <> ": " <> aiErrorReasonT e
+                                    let (st, rsn) = classifyAiError e
+                                    writeReviewState rid st (Just rsn)
                                     pure (Left e)
                                 Right r ->
                                     persist rid (parseVerdict (arText r)) (arText r) (Just (arModel r)) (Just (arCached r))
@@ -281,9 +314,9 @@ acknowledgement from @metadata.ai_review@, reasoning + model from the latest
 @AI_CONFIG_REVIEW@ event. 'Nothing' when no review has run yet.
 -}
 readStoredReview :: ReleaseTracker -> Flow (Maybe StoredReview)
-readStoredReview tracker = case aiReviewObject tracker of
+readStoredReview tracker = case aiReviewObject tracker >>= withVerdict of
     Nothing -> pure Nothing
-    Just o -> do
+    Just (o, verdict) -> do
         events <- listReleaseEventsByCategory (releaseId tracker) "AI"
         let matching = filter (\e -> S.reLabel e == "AI_CONFIG_REVIEW") events
             latest = listToMaybe (sortBy (comparing (Down . S.reCreatedAt)) matching)
@@ -292,7 +325,7 @@ readStoredReview tracker = case aiReviewObject tracker of
         pure $
             Just
                 StoredReview
-                    { srVerdict = fromMaybe verdictPotentially (getTextField "verdict" o)
+                    { srVerdict = verdict
                     , srSummary = summary
                     , srModel = getTextField "model" o `orElse` evModel
                     , srCached = Nothing
@@ -301,6 +334,7 @@ readStoredReview tracker = case aiReviewObject tracker of
                     , srAckAt = getTextField "ack_at" o
                     }
   where
+    withVerdict o = (,) o <$> getTextField "verdict" o
     orElse (Just x) _ = Just x
     orElse Nothing y = y
     eventField key (Object ev) = case KM.lookup (K.fromText key) ev of

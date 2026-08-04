@@ -17,7 +17,7 @@ import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { RefreshCw, Copy, Check, Pause, Play, X, Square, RotateCcw, RotateCw, FastForward, AlertTriangle } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
-import ConfigReviewPanel, { useConfigReview, VerdictBadge } from '../components/ConfigReviewPanel';
+import ConfigReviewPanel, { useConfigReview, VerdictBadge, ReviewStatusBanner } from '../components/ConfigReviewPanel';
 
 function formatConfigMapContent(raw: string): string {
   try {
@@ -223,6 +223,8 @@ const ConfigMapSummary: React.FC = () => {
           </SimpleTooltip>
         </div>
       </div>
+
+      <ReviewStatusBanner review={review} onView={() => setActiveTab('AI Review')} />
 
       {reviewBlocks && (
         <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">

@@ -21,13 +21,14 @@ import Data.Text (Text)
 import Products.Autopilot.ConfigReview (
     StoredReview (..),
     acknowledgeReview,
+    classifyAiError,
     readStoredReview,
     reviewBlocksApproval,
+    reviewStatusInfo,
     runConfigReview,
  )
 import Products.Autopilot.Handlers.Ai (AiActionReq (..))
 import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker)
-import Shared.AI.Types (aiErrorReason)
 
 -- ─── Wire type ─────────────────────────────────────────────────────
 
@@ -42,6 +43,7 @@ data ConfigReviewResp = ConfigReviewResp
     , crAckBy :: Maybe Text
     , crAckAt :: Maybe Text
     , crBlocksApproval :: Bool
+    , crState :: Maybe Text
     }
 
 instance ToJSON ConfigReviewResp where
@@ -57,6 +59,7 @@ instance ToJSON ConfigReviewResp where
             , "ackBy" .= crAckBy r
             , "ackAt" .= crAckAt r
             , "blocksApproval" .= crBlocksApproval r
+            , "state" .= crState r
             ]
 
 -- ─── Handlers ──────────────────────────────────────────────────────
@@ -70,7 +73,7 @@ reviewConfigMapH ap cmId req = do
         Just (tr, _) -> do
             res <- runConfigReview (apEmail ap) tr (fromMaybe False (aiForce req))
             case res of
-                Left e -> pure (unavailable (aiErrorReason e))
+                Left e -> let (st, rsn) = classifyAiError e in pure (unavailableWithState st rsn)
                 Right sr -> do
                     -- Re-read so blocksApproval reflects the just-persisted verdict.
                     blocks <- maybe False (reviewBlocksApproval . fst) <$> findReleaseTracker cmId
@@ -92,8 +95,10 @@ getConfigReviewH _ap cmId = do
         Just (tr, _) -> do
             msr <- readStoredReview tr
             case msr of
-                Nothing -> pure (unavailable "No AI review has run for this config yet")
                 Just sr -> pure (fromStored sr (reviewBlocksApproval tr))
+                Nothing -> case reviewStatusInfo tr of
+                    Just (st, mReason) -> pure (unavailableWithState st (fromMaybe (defaultStateReason st) mReason))
+                    Nothing -> pure (unavailableWithState "none" "No AI review has run for this config yet")
 
 -- ─── Helpers ───────────────────────────────────────────────────────
 
@@ -110,6 +115,7 @@ fromStored sr blocks =
         , crAckBy = srAckBy sr
         , crAckAt = srAckAt sr
         , crBlocksApproval = blocks
+        , crState = Just "done"
         }
 
 unavailable :: Text -> ConfigReviewResp
@@ -125,4 +131,15 @@ unavailable reason =
         , crAckBy = Nothing
         , crAckAt = Nothing
         , crBlocksApproval = False
+        , crState = Nothing
         }
+
+unavailableWithState :: Text -> Text -> ConfigReviewResp
+unavailableWithState state reason = (unavailable reason){crState = Just state}
+
+-- | Fallback human reason when a state marker carried none.
+defaultStateReason :: Text -> Text
+defaultStateReason "pending" = "AI review is in progress."
+defaultStateReason "failed" = "AI review failed to run."
+defaultStateReason "unavailable" = "AI review is unavailable."
+defaultStateReason _ = "No AI review has run for this config yet."
