@@ -44,7 +44,7 @@ import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import Data.Yaml qualified as Yaml
-import Products.Autopilot.ConfigReview (acknowledgeReview, reviewBlocksApproval, runConfigReview)
+import Products.Autopilot.ConfigReview (reviewBlocksApproval, runConfigReview)
 import Products.Autopilot.Notifications
 import Products.Autopilot.Queries.ProductService (findProductByName, getProductNamespace)
 import Products.Autopilot.Queries.ReleaseTracker
@@ -208,8 +208,6 @@ updateConfigMapH ap cmId' body = do
                         _ -> pure ()
                       when (isTruthy "is_approved" obj) $
                         notifyConfigMapApproved updated
-                      when (isTruthy "ack_ai_review" obj) $
-                        acknowledgeReview cmId' (apEmail ap)
                       case firstJust (getStrM "file" obj) (getStrM "config" obj) of
                         Just _ -> void $ forkFlow $ void $ runConfigReview (apEmail ap) updated False
                         Nothing -> pure ()

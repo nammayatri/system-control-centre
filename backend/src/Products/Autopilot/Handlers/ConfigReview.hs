@@ -10,7 +10,7 @@ module Products.Autopilot.Handlers.ConfigReview (
     ConfigReviewResp (..),
     reviewConfigMapH,
     getConfigReviewH,
-    ackReleaseReviewH,
+    ackReviewH,
 ) where
 
 import Core.Auth.Protected (AuthedPerson (..))
@@ -77,8 +77,9 @@ reviewConfigMapH ap cmId req = do
                     pure (fromStored sr blocks)
 
 
-ackReleaseReviewH :: AuthedPerson -> Text -> Flow ConfigReviewResp
-ackReleaseReviewH ap rid = do
+
+ackReviewH :: AuthedPerson -> Text -> Flow ConfigReviewResp
+ackReviewH ap rid = do
     acknowledgeReview rid (apEmail ap)
     getConfigReviewH ap rid
 
