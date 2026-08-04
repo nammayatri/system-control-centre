@@ -830,7 +830,7 @@ const ReleaseSummary: React.FC = () => {
               </SimpleTooltip>
             </PermissionGate>
           )}
-          {s === 'CREATED' && (
+          {(s === 'CREATED' || s === 'GCLT_ABORTED') && (
             <PermissionGate product="autopilot" permission="RELEASE_DISCARD" appGroup={release.appGroup}>
               <Button size="sm" variant="outline" className="border-red-300 text-red-700 hover:bg-red-50" loading={discardMut.isPending} onClick={() => doAction('discard', () => discardMut.mutateAsync({ releaseId: id! }), true)}><X className="w-3.5 h-3.5" /> Discard</Button>
             </PermissionGate>

@@ -2064,8 +2064,8 @@ restartReleaseH ap rid req = do
         Just (tracker, mTargetState) -> do
             requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_CREATE) ap (NT.appGroup tracker)
             let currentStatus = NT.status tracker
-            if currentStatus /= ABORTED && currentStatus /= USER_ABORTED && currentStatus /= REVERTED && currentStatus /= DISCARDED
-                then pure $ APIResponse "ERROR" ("Cannot restart from status: " <> T.pack (show currentStatus) <> ". Valid: ABORTED, USER_ABORTED, REVERTED, DISCARDED")
+            if currentStatus /= ABORTED && currentStatus /= USER_ABORTED && currentStatus /= REVERTED && currentStatus /= DISCARDED && currentStatus /= GCLT_ABORTED
+                then pure $ APIResponse "ERROR" ("Cannot restart from status: " <> T.pack (show currentStatus) <> ". Valid: ABORTED, USER_ABORTED, REVERTED, DISCARDED, GCLT_ABORTED")
                 else do
                     -- Validate the new-version deployment still exists in k8s.
                     -- Julia: validateRestartTracker (restart.jl:45-46).

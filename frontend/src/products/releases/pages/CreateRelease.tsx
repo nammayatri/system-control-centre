@@ -703,15 +703,19 @@ const CreateRelease: React.FC = () => {
     <div className="flex flex-col flex-1 w-full pb-12">
       <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-6">
         {error && (() => {
-          // Extract in-flight release UUID from backend error message to render a deep link.
-          const uuidMatch = error.match(/in-flight release ([0-9a-f-]{36})/i);
-          const inFlightId = uuidMatch?.[1];
+          // Extract in-flight/blocking release UUID from backend error message to render a deep link.
+          const inFlightMatch = error.match(/in-flight release ([0-9a-f-]{36})/i);
+          const gcltBlockMatch = error.match(/Previous release ([0-9a-f-]{36}) .* was GCLT_ABORTED/i);
+          const linkedId = inFlightMatch?.[1] ?? gcltBlockMatch?.[1];
           return (
             <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm flex items-start justify-between gap-3">
-              <span>{error}</span>
-              {inFlightId && (
+              <span>
+                {error}
+                {gcltBlockMatch && ' Go to that release and use Discard (or Restart) to clear the block.'}
+              </span>
+              {linkedId && (
                 <a
-                  href={`/releases/${inFlightId}`}
+                  href={`/backend/releases/${linkedId}`}
                   className="shrink-0 underline font-medium whitespace-nowrap hover:text-red-900"
                 >
                   View release →
