@@ -1039,7 +1039,9 @@ const CreateRelease: React.FC = () => {
               )}
               {!isUpdate && (
                 <p className="text-xs text-zinc-500 mt-1">
-                  Min Pods is auto-calculated from the old version's live pod count. {podsAutoLocked ? 'Unlock to override.' : 'Editing manually — values will not be recalculated.'}
+                  {podsAutoLocked
+                    ? `Auto — stages follow the service's saved rollout and Min Pods is calculated from the old version's live pod count. ${canManageStagger ? 'Switch to Manual to edit them.' : 'Editing requires the MANAGE_STAGGER permission.'}`
+                    : 'Manual — edit any stage below. Switching back to Auto discards these edits and restores the service defaults.'}
                 </p>
               )}
             </div>
@@ -1052,7 +1054,7 @@ const CreateRelease: React.FC = () => {
                   "shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors duration-150",
                   canManageStagger ? "text-zinc-600 border-zinc-200 hover:bg-zinc-50 cursor-pointer" : "text-zinc-400 border-zinc-100 bg-zinc-50 cursor-not-allowed opacity-70"
                 )}
-                title={!canManageStagger ? 'Requires MANAGE_STAGGER permission' : podsAutoLocked ? 'Unlock Min Pods to edit manually' : 'Lock Min Pods (auto-calculated)'}
+                title={!canManageStagger ? 'Requires MANAGE_STAGGER permission' : podsAutoLocked ? 'Switch to Manual to edit the rollout stages' : 'Switch to Auto — discards your edits and restores the service defaults'}
               >
                 {podsAutoLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
                 {podsAutoLocked ? 'Auto' : 'Manual'}
@@ -1197,14 +1199,16 @@ const CreateRelease: React.FC = () => {
                         "shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors duration-150",
                         canManageStagger ? "text-zinc-600 border-zinc-200 hover:bg-zinc-50 cursor-pointer" : "text-zinc-400 border-zinc-100 bg-zinc-50 cursor-not-allowed opacity-70"
                       )}
-                      title={!canManageStagger ? 'Requires MANAGE_STAGGER permission' : secondaryPodsAutoLocked ? 'Unlock Min Pods to edit manually' : 'Lock Min Pods (auto-calculated)'}
+                      title={!canManageStagger ? 'Requires MANAGE_STAGGER permission' : secondaryPodsAutoLocked ? 'Switch to Manual to edit the rollout stages' : 'Switch to Auto — discards your edits and restores the defaults'}
                     >
                       {secondaryPodsAutoLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
                       {secondaryPodsAutoLocked ? 'Auto' : 'Manual'}
                     </button>
                   </div>
                   <p className="text-xs text-zinc-500 mb-3">
-                    Min Pods is auto-calculated from the secondary cluster's live old-version pod count. {secondaryPodsAutoLocked ? 'Unlock to override.' : 'Editing manually — values will not be recalculated.'}
+                    {secondaryPodsAutoLocked
+                      ? `Auto — Min Pods is calculated from the secondary cluster's live old-version pod count. ${canManageStagger ? 'Switch to Manual to edit these stages.' : 'Editing requires the MANAGE_STAGGER permission.'}`
+                      : 'Manual — edit any stage below. Switching back to Auto discards these edits.'}
                   </p>
                   <p className="text-xs text-zinc-500 mb-3">
                     Currently running in {syncCluster}: <span className="font-mono">{secondaryOldVersion || (formData.appGroup && formData.service ? 'resolving…' : '—')}</span>
