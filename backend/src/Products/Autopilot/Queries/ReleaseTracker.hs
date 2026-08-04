@@ -4,6 +4,7 @@
 module Products.Autopilot.Queries.ReleaseTracker (
     -- * Insert / Update
     insertReleaseTracker,
+    checkpointReleaseTracker,
     conditionalUpdateTracker,
     conditionalUpdateApprove,
     conditionalUpdateTrackerRow,
@@ -144,7 +145,23 @@ cloudTypeForCategory cat = case cat of
     instanceCloud = Just . cloudProvider <$> getConfig
 
 insertReleaseTracker :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m ()
-insertReleaseTracker rt mts = do
+insertReleaseTracker = upsertReleaseTrackerWith ""
+
+{- | The workflow's per-stage checkpoint writer: same upsert, but a row an
+operator (or the abort sweep) has moved to ABORTING / an aborted or terminal
+state is left untouched. A mid-tick StageSuccess persist carries the status
+snapshot read at tick start — writing it back blindly erased a concurrent
+ABORTING (run never cancelled) or resurrected a USER_ABORTED row as
+INPROGRESS for the runner to re-drive. Every other runner writer is
+CAS-guarded; this closes the one remaining blind writer.
+-}
+checkpointReleaseTracker :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m ()
+checkpointReleaseTracker =
+    upsertReleaseTrackerWith
+        " WHERE release_tracker.status NOT IN ('ABORTING','ABORTED','USER_ABORTED','GCLT_ABORTED','DISCARDED','REVERTED')"
+
+upsertReleaseTrackerWith :: (MonadFlow m) => Query -> ReleaseTracker -> Maybe TargetState -> m ()
+upsertReleaseTrackerWith guardSql rt mts = do
     cloud <- cloudTypeForCategory (category rt)
     withDb $ \db -> do
         now <- getCurrentTime
@@ -162,7 +179,7 @@ insertReleaseTracker rt mts = do
             _ <-
                 execute
                     conn
-                    "INSERT INTO release_tracker \
+                    ( "INSERT INTO release_tracker \
                     \  ( id, old_version, new_version, app_group, service, priority, env \
                     \  , category, status, release_wf_status, mode, release_manager, approved_by \
                     \  , is_approved, is_infra_approved, release_tag, schedule_time, start_time \
@@ -210,6 +227,8 @@ insertReleaseTracker rt mts = do
                     \  , slack_thread_ts   = COALESCE(EXCLUDED.slack_thread_ts, release_tracker.slack_thread_ts) \
                     \  , date_created      = EXCLUDED.date_created \
                     \  , last_updated      = EXCLUDED.last_updated"
+                    <> guardSql
+                )
                     ( (rtId row, rtOldVersion row, rtNewVersion row, rtAppGroup row, rtService row, rtPriority row, rtEnv row)
                         :. (rtCategory row, rtStatus row, rtReleaseWFStatus row, rtMode row, rtCreatedBy row, rtApprovedBy row)
                         :. (rtIsApproved row, rtIsInfraApproved row, rtReleaseTag row, rtScheduleTime row, rtStartTime row)
@@ -651,23 +670,22 @@ findRunnableReleaseTrackers now = withCloudDb $ \cloud db -> do
                             )
                         guard_ (isNothing_ (rtScheduleTime rt) ||. rtScheduleTime rt <=. just_ (val_ now))
                         pure rt
-    -- Final filter in Haskell: drop INPROGRESS mobile rows whose
-    -- mb_wf_status is already terminal (defensive — these rows should
-    -- have had their status flipped to a terminal lifecycle value
-    -- already, but we don't trust that without the per-row check).
+    -- Final filter in Haskell: drop INPROGRESS mobile rows whose wf DIED
+    -- (aborted / failed) — re-driving those could re-run build stages.
+    -- MBCompleted rows stay RUNNABLE: every out-of-band completion (rollout
+    -- verbs, store-sync completeRollout) stamps MBCompleted and relies on the
+    -- next tick's Finalize to flip rt_status to COMPLETED and record revert
+    -- bookkeeping (markReleaseRevertedBy) — dropping them stranded shipped
+    -- releases at INPROGRESS forever. All earlier stages guard as done, so
+    -- the tick runs Finalize only.
     let parsed = map fromRow rows
-        notTerminalMobile (rt, mts) = case (NT.category rt, mts) of
-            (MobileBuild, Just (MobileBuildState s)) -> not (mbStatusIsTerminal s)
-            (MobileBuild, _) -> True
+        notDeadMobile (rt, mts) = case (NT.category rt, mts) of
+            (MobileBuild, Just (MobileBuildState s)) -> case mbWfStatus s of
+                MBAborted -> False
+                MBFailed _ -> False
+                _ -> True
             _ -> True
-    pure (filter notTerminalMobile parsed)
-  where
-    mbStatusIsTerminal :: MobileBuildTargetState -> Bool
-    mbStatusIsTerminal s = case mbWfStatus s of
-        MBCompleted -> True
-        MBAborted -> True
-        MBFailed _ -> True
-        _ -> False
+    pure (filter notDeadMobile parsed)
 
 {- | Find any non-terminal tracker for (app_group, service). Used by the
 same-service concurrency guard at create time. Excludes terminal states
@@ -986,9 +1004,13 @@ fromRow ReleaseTrackerT{..} =
             -- rolling-out) without an extra /rollout call. The bare-tag rendering
             -- matches the rollout endpoint's rdMbStatus (tshow (mbWfStatus …)).
             Just (MobileBuildState mb) ->
-                let ph = phaseFromFields (buildKind (mbContext mb)) (mbWfStatus mb) rtReviewStatus rtRolloutStatus rtRolloutPercent rtStoreTrack
+                -- Track: authoritative column first, metadata mirror as legacy fallback —
+                -- the same order rolloutDetailH uses, so list and summary can't derive
+                -- different phases for a pre-0034 row whose column is NULL.
+                let track = maybe (storeTrackText rtMetadata) Just rtStoreTrack
+                    ph = phaseFromFields (buildKind (mbContext mb)) (mbWfStatus mb) rtReviewStatus rtRolloutStatus rtRolloutPercent track
                     disp = displayStatusInferred (reviewInferredOf (parseJsonTextMaybe rtMetadata)) ph
-                 in Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent rtStoreTrack (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) rtDispatchId (toJSON (mbContext mb)))
+                 in Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent track (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) rtDispatchId (toJSON (mbContext mb)))
             _ -> Nothing
         tracker =
             ReleaseTracker

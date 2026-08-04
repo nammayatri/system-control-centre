@@ -17,16 +17,7 @@ import { isFirebaseInternal, FirebaseInternalBadge } from './FirebaseBadge';
  * The detail page derives from the richer GET /rollout payload directly; this is
  * the cheap list/group variant that needs no per-row request.
  */
-export function ReleaseStatusBadge({
-  release,
-  suppressPromote = false,
-}: {
-  release: APRelease;
-  // True when a NEWER build of the same app exists, so this (older) internal build is no
-  // longer the one to promote — it reads "Superseded" instead of "Ready to promote".
-  // Computed by the list (cross-row); defaults off everywhere else.
-  suppressPromote?: boolean;
-}) {
+export function ReleaseStatusBadge({ release }: { release: APRelease }) {
   // Firebase App Distribution builds go to an INTERNAL channel, not Google Play —
   // flag them so operators don't read them as a store release (shared component so
   // every surface shows the same badge).
@@ -38,17 +29,9 @@ export function ReleaseStatusBadge({
     // A held-on-internal build is promotable — EXCEPT a Firebase provider build (a terminal
     // internal channel with nothing to promote to Play; it keeps its plain status + badge).
     const promotable = phase === 'internal_held' && !isFirebaseInternal(release);
-    // Reads "Superseded" instead of "Ready to promote" when a newer build of the same app
-    // overtook it: the list's cross-row suppression OR the BE at-or-below-production flag.
-    const beNotPromotable = ctx?.promotable === false;
-    if (promotable && (suppressPromote || beNotPromotable)) {
-      return (
-        <>
-          {firebaseBadge}
-          <Badge variant="default" dot>Superseded</Badge>
-        </>
-      );
-    }
+    // No client-side "Superseded" rewrites: the BE display fold covers builds
+    // behind production AND behind a newer held sibling, so display_label is
+    // already the one truth every surface shows.
     // Terminal truth beats the raw status word: an abort that came from the
     // Actions pipeline is a FAILURE, a user abort names the actor. (The wf
     // phase can be stale here — aborting flips rt_status only — so key on the

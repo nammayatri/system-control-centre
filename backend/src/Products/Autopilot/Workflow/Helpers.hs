@@ -71,13 +71,15 @@ import Products.Autopilot.Workflow.Types (
 
 {- | Persist workflow state to database
 
-Saves both the ReleaseTracker and the target state.
+Saves both the ReleaseTracker and the target state. Uses the guarded
+checkpoint writer: a row an operator has moved to ABORTING or a terminal
+state is never overwritten by this mid-tick snapshot.
 -}
 persistWorkflowState :: ReleaseState -> Flow ()
 persistWorkflowState rs = do
     let rt = releaseTracker rs
         mts = targetState rs
-    DB.insertReleaseTracker rt mts
+    DB.checkpointReleaseTracker rt mts
 
 -- ============================================================================
 -- Workflow Utilities

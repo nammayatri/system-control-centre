@@ -41,6 +41,7 @@ module Products.Autopilot.Mobile.Github (
     listWorkflowRuns,
     listWorkflowRunsForSha,
     listJobs,
+    fetchJobLog,
     listTags,
     listTagsWithShas,
     compareCommits,
@@ -93,6 +94,7 @@ import Data.Ord (Down (..))
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Text.Encoding.Error (lenientDecode)
 import Data.Time.Clock (UTCTime, addUTCTime)
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Github.Auth (GhAppCreds, getInstallationToken)
@@ -405,6 +407,37 @@ listJobs creds owner repo runId = do
     pure $ case resp of
         Right r -> Right (jrJobs r)
         Left e -> Left ("listJobs: " <> renderHttpError e)
+
+{- | Fetch the complete plain-text log of one job. GitHub answers with a 302
+to short-lived blob storage; http-client follows it and (since 0.7.8) drops
+the Authorization header on the cross-host hop, which the blob store requires.
+Logs are retained ~90 days and can transiently 404 right after job completion,
+so callers must treat 'Left' as "evidence unavailable", never as fatal.
+-}
+fetchJobLog ::
+    (MonadFlow m) =>
+    GhAppCreds ->
+    Text -> -- owner
+    Text -> -- repo
+    Int64 -> -- job id
+    m (Either Text Text)
+fetchJobLog creds owner repo jobId = do
+    token <- getInstallationToken creds
+    let url = apiBase owner repo <> "/actions/jobs/" <> T.pack (show jobId) <> "/logs"
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = ghHeaders token
+                , -- a 15-minute build's log runs to tens of MB
+                  reqTimeout = Seconds 120
+                , reqLogTag = "gh-job-log"
+                }
+    resp <- liftIO (httpRaw req)
+    pure $ case resp of
+        Right HttpResponse{respStatus = s, respBody = b}
+            | s == 200 -> Right (TE.decodeUtf8With lenientDecode (LBS.toStrict b))
+            | otherwise -> Left ("fetchJobLog: HTTP " <> T.pack (show s))
+        Left e -> Left ("fetchJobLog: " <> renderHttpError e)
 
 {- | List refs/tags whose names begin with @prefix@. Returns the bare
 ref names (no @refs\/tags\/@ prefix is stripped — caller decides).

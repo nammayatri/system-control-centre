@@ -101,6 +101,8 @@ library
       Products.Autopilot.Mobile.Changelog
       Products.Autopilot.Mobile.RevertResolver
       Products.Autopilot.Mobile.StoreSync
+      Products.Autopilot.Mobile.Heal
+      Products.Autopilot.Mobile.Handlers.Heal
       Products.Autopilot.Mobile.Handlers.Revert
       Products.Autopilot.Mobile.Workflow
       Products.Autopilot.Queries.ProductService

@@ -7,6 +7,7 @@ import { useAuth } from '../../../../core/auth/AuthContext';
 import { BrandLogo } from '../../components/BrandLogo';
 import { ReleaseStatusBadge } from '../../components/ReleaseStatusBadge';
 import { MEMBER_PHASE_CHIP } from '../../components/GroupStageChip';
+import { storeBucket } from '../../components/statusBuckets';
 import { TableSkeleton } from '../../../../shared/ui/skeleton';
 import { formatBuildCode } from '../../utils';
 import { cn, formatDate } from '../../../../lib/utils';
@@ -103,6 +104,9 @@ const SLOT_STATUS_BUCKET: Record<string, string> = {
   internal_held: 'promote',
 };
 
+// Buckets with no store lane — matched against the app's release rows instead.
+const ROW_LEVEL_BUCKETS = new Set(['building', 'aborted', 'rejected', 'reverted']);
+
 export interface AppSlotViewProps {
   apps: AppCatalogEntry[];
   releases: APRelease[];
@@ -175,12 +179,18 @@ export function AppSlotView({ apps, releases, loading, filters, onOpen }: AppSlo
         out.push({ app, slots, primary: rows[0] ?? null, count: rows.length, storeLive: null, recent });
         continue;
       }
-      if (
-        filters.status &&
-        !occupied.some((r) => SLOT_STATUS_BUCKET[phaseOf(r)] === filters.status) &&
-        !(filters.status === 'completed' && storeLive)
-      )
-        continue;
+      if (filters.status) {
+        // Lane buckets match the occupied store slots; buckets that never occupy
+        // a lane (building / aborted / rejected / reverted) fall back to the
+        // app's rows via the same storeBucket the KPI tiles count with — so a
+        // tile's click can't land on an empty table.
+        const laneMatch =
+          occupied.some((r) => SLOT_STATUS_BUCKET[phaseOf(r)] === filters.status) ||
+          (filters.status === 'completed' && !!storeLive);
+        const rowMatch =
+          ROW_LEVEL_BUCKETS.has(filters.status) && rows.some((r) => storeBucket(r) === filters.status);
+        if (!laneMatch && !rowMatch) continue;
+      }
       out.push({ app, slots, primary: occupied[0] ?? null, count: occupied.length, storeLive, recent });
     }
     const rank = (x: AppSlots) => (x.primary ? 2 : x.storeLive ? 1 : 0);

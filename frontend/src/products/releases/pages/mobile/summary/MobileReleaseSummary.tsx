@@ -30,6 +30,7 @@ import { SummaryHeader } from './SummaryHeader';
 import { RevertChainBanners } from './RevertChainBanners';
 import { PhaseRail } from './PhaseRail';
 import { ChangelogCard, ProvenanceCard } from './BuildDetailsCard';
+import { failureReasonOf, ghFailureDetailOf, healInfoOf, tagConflictOf } from './heal';
 import { StoreReleaseCockpit } from './StoreReleaseCockpit';
 import { OtaFlow } from './OtaFlow';
 import { deriveScenario } from './scenario';
@@ -320,6 +321,7 @@ const MobileReleaseSummary = () => {
         syncedSecondsAgo={rollout?.rdSyncedSecondsAgo}
         onRefresh={handleRefresh}
         refreshSpinning={refreshSpinning}
+        healed={healInfoOf(events)}
       />
 
       <RevertChainBanners release={release} />
@@ -367,6 +369,8 @@ const MobileReleaseSummary = () => {
                   scenario={scenario}
                   statusLabel={statusLabel}
                   appKey={`${release.appGroup}/${release.env}`}
+                  tagConflict={scenario === 'failed' ? tagConflictOf(events) : null}
+                  failureDetail={scenario === 'failed' ? (ghFailureDetailOf(events) ?? failureReasonOf(release)) : null}
                 />
               </div>
             )}

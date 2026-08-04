@@ -26,6 +26,10 @@ Rules:
   HISTORY, badge `Superseded · X%`.
 - **Rule B (incoming auto-retire):** a newer incoming version pushes the older incoming
   (in_review / approved / rejected) to HISTORY automatically.
+- **Rule C (held auto-retire):** promoting a version retires any OLDER held-on-internal
+  build (lower code — can never reach production once a higher one is in review) to
+  HISTORY, so the INTERNAL slot doesn't accrue abandoned builds. Only LANDED
+  (`MBTagPushed`) builds are touched, never one still mid-build.
 
 ## Build stages
 1. **Migration 0034** — `store_track` column + backfill + collapse existing same-version
@@ -37,8 +41,8 @@ Rules:
 3. **`upsertMobileVersionRow`** — one convergent write keyed by `(app, surface, platform,
    version)`; all creators (store-sync snapshot, external-review, SCC create, rollout
    reflection) funnel through it (DO UPDATE merge, not parallel rows / DO NOTHING).
-4. **Rules A & B** — wired into the rollout-start and promote paths via small reusable
-   helpers (`supersedePreviousLive`, `retireOlderIncoming`).
+4. **Rules A, B & C** — wired into the rollout-start and promote paths via small reusable
+   helpers (`supersedePreviousLive`, `retireOlderIncoming`, `retireOlderHeldInternal`).
 5. **Frontend** — `superseded` stage + `Superseded · X%` badge in `mobileStage.ts`;
    slot-aware rendering.
 

@@ -43,6 +43,7 @@ import Products.Autopilot.Mobile.Provenance (ReleaseAdoptBranchReq, ReleaseProvR
 import Products.Autopilot.Types (ReleaseTracker)
 import Products.Autopilot.Types.API (ReleaseEventResponse)
 import Products.Autopilot.Mobile.Handlers.Release
+import Products.Autopilot.Mobile.Handlers.Heal (VerifyStoreResp, verifyStoreH)
 import Products.Autopilot.Mobile.Handlers.Revert (
     RevertDiffResp,
     RevertDraft,
@@ -432,6 +433,13 @@ type MobileAPI =
             :> "abort"
             :> Protected 'MB_RELEASE_ABORT
             :> Post '[JSON] APISuccess
+        -- ── Heal a failed build whose artifact actually reached the store ──
+        :<|> "mobile"
+            :> "releases"
+            :> Capture "releaseId" Text
+            :> "verify-store"
+            :> Protected 'MB_MOBILE_DISPATCH
+            :> Post '[JSON] VerifyStoreResp
         -- ── Mobile-gated reads (product split): the shared /releases feed is
         --    autopilot-gated, so mobile-only grants read through these. ──
         :<|> "mobile"
@@ -507,6 +515,7 @@ mobileServer =
         :<|> (\rid ap -> releaseProvenanceH ap rid)
         :<|> (\rid ap req -> adoptReleaseBranchH ap rid req)
         :<|> (\rid ap -> mobileAbortH ap rid)
+        :<|> (\rid ap -> verifyStoreH ap rid)
         :<|> mobileListReleasesH
         :<|> (\rid ap -> mobileGetReleaseH ap rid)
         :<|> (\rid ap -> mobileListEventsH ap rid)

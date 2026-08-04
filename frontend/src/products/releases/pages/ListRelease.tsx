@@ -346,37 +346,6 @@ const ListRelease: React.FC<{ slim?: boolean; slimFilters?: SlimFilters }> = ({ 
     return list;
   }, [releases, effSearch, effStatus, effProduct, effPlatform, slimFilters?.surface, sortField, sortDir, category]);
 
-  // Among an app's builds pending promotion (stage 'promote' — internal / TestFlight),
-  // only the LATEST by (version name, build code) is actually the one to promote; older
-  // internal builds a newer one has overtaken are stale. Collect those non-latest ids so
-  // the badge reads "Superseded" for them and "Ready to promote" only on the latest.
-  const supersededPromoteIds = useMemo(() => {
-    const cmp = (a: typeof filteredReleases[number], b: typeof filteredReleases[number]): number => {
-      const pa = (a.new_version || '').split('.').map(n => parseInt(n, 10) || 0);
-      const pb = (b.new_version || '').split('.').map(n => parseInt(n, 10) || 0);
-      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-        const d = (pa[i] ?? 0) - (pb[i] ?? 0);
-        if (d !== 0) return d;
-      }
-      return (a.release_context?.version_code ?? -1) - (b.release_context?.version_code ?? -1);
-    };
-    const byApp = new Map<string, typeof filteredReleases>();
-    for (const r of filteredReleases) {
-      if (r.tracker_type !== 'MobileBuild') continue;
-      if (stageOf(lifecycleFromRelease(r)) !== 'promote') continue;
-      const key = `${r.appGroup}|${r.service}|${r.env}`;
-      const arr = byApp.get(key);
-      if (arr) arr.push(r); else byApp.set(key, [r]);
-    }
-    const superseded = new Set<string>();
-    for (const rows of byApp.values()) {
-      if (rows.length < 2) continue;
-      const latest = rows.reduce((a, b) => (cmp(a, b) >= 0 ? a : b));
-      for (const r of rows) if (r.id !== latest.id) superseded.add(r.id);
-    }
-    return superseded;
-  }, [filteredReleases]);
-
   const totalPages = Math.ceil(filteredReleases.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
   const paginatedReleases = filteredReleases.slice(startIndex, startIndex + itemsPerPage);
@@ -747,9 +716,9 @@ const ListRelease: React.FC<{ slim?: boolean; slimFilters?: SlimFilters }> = ({ 
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-1.5 flex-wrap">
                             {release.tracker_type === 'MobileBuild' ? (
-                        <V4StatusPill release={release} suppressPromote={supersededPromoteIds.has(release.id)} />
+                        <V4StatusPill release={release} />
                       ) : (
-                        <ReleaseStatusBadge release={release} suppressPromote={supersededPromoteIds.has(release.id)} />
+                        <ReleaseStatusBadge release={release} />
                       )}
                             {track && (
                               <span
@@ -961,9 +930,9 @@ const ListRelease: React.FC<{ slim?: boolean; slimFilters?: SlimFilters }> = ({ 
                     </div>
                     <div className="flex items-center gap-1.5 flex-wrap mb-2">
                       {release.tracker_type === 'MobileBuild' ? (
-                        <V4StatusPill release={release} suppressPromote={supersededPromoteIds.has(release.id)} />
+                        <V4StatusPill release={release} />
                       ) : (
-                        <ReleaseStatusBadge release={release} suppressPromote={supersededPromoteIds.has(release.id)} />
+                        <ReleaseStatusBadge release={release} />
                       )}
                       {/* For mobile rows the platform is already shown inline above; skip the badge to avoid duplicating it. */}
                       {release.env && !isMobile && (

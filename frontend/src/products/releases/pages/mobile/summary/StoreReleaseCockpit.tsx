@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
@@ -14,6 +14,7 @@ import {
   PauseIcon,
   PlayIcon,
   ShieldWarningIcon,
+  TagIcon,
   WarningCircleIcon,
   XCircleIcon,
 } from '@phosphor-icons/react';
@@ -23,6 +24,7 @@ import { mobileApi, type APRelease, type RolloutDetail } from '../../../api';
 import { cn } from '../../../../../lib/utils';
 import { fullStamp, shortDate } from './dates';
 import { stageOf, lifecycleFromRollout } from '../../../components/mobileStage';
+import type { TagConflict } from './heal';
 import { breadcrumbsOf } from './BuildDetailsCard';
 import { SCENARIO_ACCENT, type Scenario } from './scenario';
 
@@ -68,6 +70,12 @@ export interface StoreReleaseCockpitProps {
   statusLabel: string;
   /** "<appName>/<platform>" — per-app grant key (unified permission model). */
   appKey: string;
+  /** Unresolved TAG_CONFLICT from the event stream (failed rows only): the
+   * expected tag exists but points at a commit this build didn't ship. */
+  tagConflict?: TagConflict | null;
+  /** Failure cause for the post-mortem block — the GH-side ##[error] excerpt
+   * (BUILD_FAILURE_DETAIL event) when captured, else the SCC failure reason. */
+  failureDetail?: string | null;
 }
 
 /**
@@ -76,7 +84,7 @@ export interface StoreReleaseCockpitProps {
  * mutations (ported from MobileRolloutPanel). Stage truth is stageOf() over the
  * rollout detail; visuals key off the page scenario.
  */
-export function StoreReleaseCockpit({ release, rollout: d, scenario, statusLabel, appKey }: StoreReleaseCockpitProps) {
+export function StoreReleaseCockpit({ release, rollout: d, scenario, statusLabel, appKey, tagConflict, failureDetail }: StoreReleaseCockpitProps) {
   const qc = useQueryClient();
   const { hasPermission } = usePermissions();
   const releaseId = release.id;
@@ -137,6 +145,23 @@ export function StoreReleaseCockpit({ release, rollout: d, scenario, statusLabel
     try {
       await fn();
       toast.success(label);
+      refresh();
+    } catch (e) {
+      errorToast(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Heal check for a failed BUILD: CI said failure, but the artifact may have
+  // reached the store (e.g. upload ok, tag push died). Backend verifies against
+  // store truth and resumes the lifecycle on a hit; a miss changes nothing.
+  const verifyStore = async () => {
+    setBusy('verify-store');
+    try {
+      const resp = await mobileApi.verifyStore(releaseId);
+      if (resp.vsResult === 'healed') toast.success(resp.vsDetail, { duration: 10000 });
+      else toast.warning(resp.vsDetail, { duration: 12000 });
       refresh();
     } catch (e) {
       errorToast(e);
@@ -370,13 +395,32 @@ export function StoreReleaseCockpit({ release, rollout: d, scenario, statusLabel
         </div>
       )}
 
-      {/* Promote stage, but nothing to promote (at/below production code) */}
-      {stage === 'promote' && d && !d.rdPromotable && (
-        <div className="border border-dashed border-zinc-200 rounded-lg px-4 py-6 text-center text-xs text-zinc-500">
-          Built and on the {d.rdStoreTrack ?? 'internal'} track — nothing to promote: this version code is at or
-          below what&apos;s already on production.
-        </div>
-      )}
+      {/* Promote stage, but blocked — cause-specific copy from rdPromoteBlock */}
+      {stage === 'promote' &&
+        d &&
+        !d.rdPromotable &&
+        (d.rdPromoteBlock === 'one_in_flight' ? (
+          <div className="bg-rose-50 border border-rose-200 text-rose-900 px-4 py-3 rounded-lg flex items-start gap-3">
+            <ShieldWarningIcon size={18} weight="fill" className="text-rose-500 mt-0.5 shrink-0" aria-hidden="true" />
+            <div className="text-xs">
+              <p className="text-sm font-semibold">Conflict: one in flight</p>
+              <p className="mt-0.5">
+                {d.rdPromoteBlockVersion ? `v${d.rdPromoteBlockVersion}` : 'Another version'} is awaiting developer
+                release — Apple allows one at a time. Release (or withdraw) it before promoting this build.
+              </p>
+            </div>
+          </div>
+        ) : d.rdPromoteBlock === 'behind_held' || d.rdPromoteBlock === 'blocked_by_incoming' ? (
+          <div className="border border-dashed border-zinc-200 rounded-lg px-4 py-6 text-center text-xs text-zinc-500">
+            Nothing to promote — a newer build{d.rdPromoteBlockVersion ? ` (v${d.rdPromoteBlockVersion})` : ''} is
+            ahead of this one in release order.
+          </div>
+        ) : (
+          <div className="border border-dashed border-zinc-200 rounded-lg px-4 py-6 text-center text-xs text-zinc-500">
+            Built and on the {d.rdStoreTrack ?? 'internal'} track — nothing to promote: this version code is at or
+            below what&apos;s already on production.
+          </div>
+        ))}
 
       {/* === READY TO PROMOTE (held on internal / TestFlight) === */}
       {promoteReady && (
@@ -734,12 +778,29 @@ export function StoreReleaseCockpit({ release, rollout: d, scenario, statusLabel
       )}
 
       {/* === FAILED / ABORTED / REVERTED (no rollout stage carries it) === */}
+      {scenario === 'failed' && stage !== 'rejected' && tagConflict && (
+        <TagConflictPanel conflict={tagConflict} />
+      )}
       {scenario === 'failed' && stage !== 'rejected' && (
         <PostMortem
           title={statusLabel}
-          detail={null}
+          detail={failureDetail ?? null}
           note="This release is terminal. Create a new release (or a revert) to ship a fix."
           ghRunUrl={ghRunUrl ?? null}
+          action={
+            // Build failures only (not aborts/reverts): CI failure may be a
+            // post-upload step — offer the store-truth heal check.
+            (d?.rdPhase ?? release.release_context?.display_phase) === 'build_failed' &&
+            hasPermission('mobile', 'MB_MOBILE_DISPATCH', appKey) ? (
+              <button
+                onClick={verifyStore}
+                disabled={busy !== null}
+                className="text-xs bg-white text-red-700 border border-red-300 px-3 py-1.5 rounded font-bold hover:bg-red-100 cursor-pointer disabled:opacity-50"
+              >
+                {busy === 'verify-store' ? 'Checking store…' : 'Verify on store'}
+              </button>
+            ) : null
+          }
         />
       )}
 
@@ -959,17 +1020,62 @@ function PublishGate({
   );
 }
 
+/** Amber remediation panel for an unresolved TAG_CONFLICT: the store artifact
+ * is fine — a stale git tag squats on this build's name at the wrong commit.
+ * Never auto-fixed (published-tag rewrites are a human decision); this panel
+ * hands the operator the exact command, then Verify on store resumes the row. */
+function TagConflictPanel({ conflict }: { conflict: TagConflict }) {
+  const short = (sha: string) => (sha ? sha.slice(0, 9) : '?');
+  return (
+    <div className="bg-amber-50 border border-amber-200 rounded-lg p-5 flex gap-4">
+      <TagIcon size={24} weight="fill" className="text-amber-500 shrink-0" aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <h3 className="text-sm font-bold text-amber-900">Tag conflict — a stale tag owns this build's name</h3>
+        <p className="text-xs text-amber-800 mt-1">
+          Tag <code className="font-mono bg-amber-100 px-1 rounded">{conflict.tag}</code> points at{' '}
+          <code className="font-mono bg-amber-100 px-1 rounded">{short(conflict.tagCommit)}</code>, but this build was
+          made from <code className="font-mono bg-amber-100 px-1 rounded">{short(conflict.buildCommit)}</code>. The
+          store artifact is fine — only the git tag is wrong.
+        </p>
+        {conflict.remediation && (
+          <div className="relative mt-3">
+            <pre className="bg-zinc-900 text-zinc-100 p-3 pr-16 rounded text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">
+              {conflict.remediation}
+            </pre>
+            <button
+              onClick={() => {
+                navigator.clipboard
+                  .writeText(conflict.remediation)
+                  .then(() => toast.success('Retag command copied'))
+                  .catch(() => toast.error('Could not copy'));
+              }}
+              className="absolute top-2 right-2 text-[10px] bg-zinc-700 text-white px-2 py-1 rounded font-bold hover:bg-zinc-600 cursor-pointer"
+            >
+              Copy
+            </button>
+          </div>
+        )}
+        <p className="text-[11px] text-zinc-500 mt-2">
+          Run the retag, then press <b>Verify on store</b> — the release resumes and adopts the corrected tag.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /** Red terminal post-mortem body (build failed / aborted / reverted / rejected). */
 function PostMortem({
   title,
   detail,
   note,
   ghRunUrl,
+  action,
 }: {
   title: string;
   detail: string | null;
   note: string;
   ghRunUrl: string | null;
+  action?: ReactNode;
 }) {
   return (
     <div className="bg-red-50 p-5 rounded-lg border border-red-100 flex gap-4">
@@ -982,16 +1088,19 @@ function PostMortem({
           </pre>
         )}
         <p className="text-[11px] text-zinc-500 mt-2">{note}</p>
-        {ghRunUrl && (
+        {(ghRunUrl || action) && (
           <div className="flex gap-3 mt-4">
-            <a
-              href={ghRunUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="text-xs bg-red-600 text-white px-3 py-1.5 rounded font-bold hover:bg-red-700 cursor-pointer"
-            >
-              View CI output ↗
-            </a>
+            {ghRunUrl && (
+              <a
+                href={ghRunUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs bg-red-600 text-white px-3 py-1.5 rounded font-bold hover:bg-red-700 cursor-pointer"
+              >
+                View CI output ↗
+              </a>
+            )}
+            {action}
           </div>
         )}
       </div>

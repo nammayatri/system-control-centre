@@ -35,12 +35,14 @@ module Products.Autopilot.Mobile.StoreSync (
 
     -- * App Release Monitoring (store_status cache)
     refreshStoreStatusOne,
+    refreshStoreStatusOneForced,
     refreshAllStale,
     isBulkRefreshing,
 
     -- * Version ordering (semver-ish component compare; unit-tested via callers)
     versionOlderThan,
     releaseOrderBehind,
+    releaseOrderStrictlyBehind,
     atOrBelowProductionPure,
 ) where
 
@@ -297,20 +299,30 @@ syncAppUnified mPlayCreds buildMap expected ac = do
 
 {- | End-of-sync slot convergence: keep one active row per slot, anchored on
 the production cell this pass just refreshed. Same pass, no extra store calls.
+
+Anchor only on a SERVING release — fully live ('completed'/'live') or a real
+ramp (non-NULL %, recorded only at/above the 1% floor). A version merely parked
+on the track (an in-review submission at ~1e-6, pct NULL) must not anchor:
+on a first-ever release it matched the in-review row ITSELF (code <= code, no
+self-exclusion in the SQL) and stamped it Superseded mid-review. With no
+serving anchor the SQLs fall back to best-among-themselves, which is safe.
 -}
 convergeSlotsForAc :: AppCatalog -> Flow ()
 convergeSlotsForAc ac = do
     mCell <- findProductionLiveCell (acId ac) (acPlatform ac)
     let anchor = case mCell of
-            Just (Just v, mCode, _, _) -> Just (v, mCode)
+            Just (Just v, mCode, mStatus, mPct)
+                | mStatus `elem` [Just "completed", Just "live"] || mPct /= Nothing ->
+                    Just (v, mCode)
             _ -> Nothing
     (live, incoming, held) <- convergeMobileSlots (acName ac) (acSurface ac) (acPlatform ac) anchor
     -- Rule C on sync: stale SCC-built landed rows (store_track NULL) retire
     -- against the surviving best internal build, not only at promote time.
     sccHeld <-
         bestActiveInternalBuild (acName ac) (acSurface ac) (acPlatform ac) >>= \case
-            Just (bestRid, bestCode) ->
-                retireOlderHeldInternal (acName ac) (acSurface ac) (acPlatform ac) bestRid (Just bestCode)
+            Just (bestRid, bestVer, bestCode) ->
+                retireOlderHeldInternal (acName ac) (acSurface ac) (acPlatform ac) bestRid $
+                    \v c -> releaseOrderBehind v c bestVer (Just bestCode)
             Nothing -> pure []
     let tagged =
             [("live", i) | i <- live]
@@ -408,6 +420,19 @@ releaseOrderBehind v c pv pc =
   where
     codeAtOrBelow (Just b) (Just p) = b <= p
     codeAtOrBelow _ _ = False
+
+{- | STRICT release ordering for HELD-SIBLING compares: the sibling must be
+genuinely newer (older version, or same version with a strictly LOWER code).
+Vs a sibling, @releaseOrderBehind@'s at-or-below tiebreak is wrong: a stale
+duplicate row carrying the SAME (version, code) would make two rows of one
+build fold each other Superseded (seen on legacy pre-0034 duplicates).
+-}
+releaseOrderStrictlyBehind :: Text -> Maybe Int32 -> Text -> Maybe Int32 -> Bool
+releaseOrderStrictlyBehind v c pv pc =
+    v `versionOlderThan` pv || (v == pv && codeBelow c pc)
+  where
+    codeBelow (Just b) (Just p) = b < p
+    codeBelow _ _ = False
 
 {- | The full promote-gate predicate: behind in release order, OR — Android
 only — an artifact Play itself would reject (production requires a code above
@@ -539,9 +564,21 @@ reflectIosPhasedRollout :: AscCreds -> AppCatalog -> Text -> Maybe (Text, Maybe 
 reflectIosPhasedRollout _ _ _ Nothing = pure ()
 reflectIosPhasedRollout creds ac bundleId (Just (pv, mCode)) = do
     getPhasedReleaseState creds bundleId pv >>= \case
-        Left e -> logWarning $ "[STORE_SYNC] iOS phased-state read error for " <> acName ac <> ": " <> renderAscErr e
+        Left e -> do
+            logWarning $ "[STORE_SYNC] iOS phased-state read error for " <> acName ac <> ": " <> renderAscErr e
+            -- The snapshot upsert just stamped this cell 'live' / pct NULL. If OUR
+            -- row says the version is mid-ramp, restore that last-known state — a
+            -- failed read must not flip an active ramp to "Released · 100%" on
+            -- every surface until some later refresh happens to succeed.
+            mRow <- findMobileVersionRow (acName ac) (acSurface ac) (acPlatform ac) pv mCode
+            forM_ mRow $ \row ->
+                case (rtRolloutStatus row, rtRolloutPercent row) of
+                    (Just "rolling_out", Just p) -> setProductionRolloutStatus (acId ac) "ios" pv mCode "inProgress" p
+                    (Just "halted", Just p) -> setProductionRolloutStatus (acId ac) "ios" pv mCode "halted" p
+                    _ -> pure ()
         Right ps -> do
             let pct = maybe 0 applePhasedPercent (apsCurrentDay ps)
+                inRamp :: Text -> Maybe (Text, Double)
                 inRamp st
                     | pct >= androidRolloutFloorPercent, pct < 100 = Just (st, pct)
                     | otherwise = Nothing
@@ -996,6 +1033,7 @@ insertExternalReviewRow ac mCode inferred version reviewStatus = do
                 , mbReviewSubmittedAt = Just now
                 , mbReviewLastPolledAt = Just now
                 , mbBatchDispatch = Nothing
+                , mbVerifyAttempts = Nothing
                 }
         base = mkMobileTrackerRow rid ac targetState (Just version) Nothing "store-sync" now
         row =
@@ -1156,6 +1194,7 @@ mintSyntheticRelease observed ac version mCode track = do
                 , mbReviewSubmittedAt = Nothing
                 , mbReviewLastPolledAt = Nothing
                 , mbBatchDispatch = Nothing
+                , mbVerifyAttempts = Nothing
                 }
         encodedCtx = encodeJsonText (MobileBuildState targetState)
         row =
@@ -1649,7 +1688,18 @@ drive it. A debug deployment has no production store data, so it's a no-op there
 never pull production store data into a debug deployment.
 -}
 refreshStoreStatusOne :: AppCatalog -> Flow ()
-refreshStoreStatusOne ac = do
+refreshStoreStatusOne = refreshStoreStatusOneWith False
+
+{- | Cooldown-BYPASSING variant for the heal path: verifying a failed build
+against store truth must not read a minutes-old cache. Still single-flight
+and debug-guarded; costs one out-of-window Play edit — acceptable for the
+rare heal, never wire it to a UI refresh button.
+-}
+refreshStoreStatusOneForced :: AppCatalog -> Flow ()
+refreshStoreStatusOneForced = refreshStoreStatusOneWith True
+
+refreshStoreStatusOneWith :: Bool -> AppCatalog -> Flow ()
+refreshStoreStatusOneWith force ac = do
     buildType <- getMobileBuildType
     if isDebugBuildType buildType
         then logInfo "[STORE_MONITOR] Debug build env, skipping live refresh (release-only)"
@@ -1664,7 +1714,7 @@ refreshStoreStatusOne ac = do
             mAge <- secondsSinceLastSync (acId ac)
             case mAge of
                 Just age
-                    | age < cooldown ->
+                    | not force && age < cooldown ->
                         logInfo $
                             "[STORE_MONITOR] "
                                 <> acName ac

@@ -40,6 +40,8 @@ module Products.Autopilot.Mobile.Versioning.Apple (
     fetchAscVersions,
     AscBuildInfo (..),
     fetchAscBuildInfo,
+    AscVersionBuild (..),
+    fetchBuildsForVersion,
     AscSnapshot (..),
     fetchAscSnapshots,
     BuildsResp (..),
@@ -134,6 +136,7 @@ import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Time.Clock (UTCTime)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.IO.Unsafe (unsafePerformIO)
 import Text.Read (readMaybe)
@@ -690,6 +693,73 @@ fetchLatestBuildInfo token appId = do
         Left (HttpStatusError s b) ->
             Left (AscHttpError s (TE.decodeUtf8 (LBS.toStrict b)))
         Left e -> Left (AscHttpError 0 (T.pack (show e)))
+
+-- | One build row of a version-scoped query: build number + upload time.
+data AscVersionBuild = AscVersionBuild
+    { avbBuildNumber :: Maybe Text
+    -- ^ CFBundleVersion, e.g. @"3"@
+    , avbUploadedDate :: Maybe UTCTime
+    }
+    deriving (Eq, Show)
+
+instance FromJSON AscVersionBuild where
+    parseJSON = withObject "AscVersionBuild" $ \o -> do
+        mAttrs <- o .:? "attributes"
+        case mAttrs of
+            Nothing -> pure (AscVersionBuild Nothing Nothing)
+            Just a -> AscVersionBuild <$> a .:? "version" <*> a .:? "uploadedDate"
+
+newtype VersionBuildsResp = VersionBuildsResp [AscVersionBuild]
+
+instance FromJSON VersionBuildsResp where
+    parseJSON = withObject "VersionBuildsResp" $ \o ->
+        VersionBuildsResp . fromMaybe [] <$> o .:? "data"
+
+{- | All builds of ONE marketing version, newest first: (build number,
+uploadedDate). Read-only GET — the heal path uses it to check whether a
+specific version(+build) actually reached TestFlight, with @uploadedDate@
+as the "is this OUR upload, not an older sibling" discriminator when the
+build number isn't known (job died before tagging). Token + appId are
+cache-served ('mintAscToken' / 'lookupAppByBundleId').
+-}
+fetchBuildsForVersion ::
+    (MonadFlow m) =>
+    AscCreds ->
+    Text -> -- bundle id
+    Text -> -- marketing version, e.g. "3.3.151"
+    m (Either AscError [AscVersionBuild])
+fetchBuildsForVersion creds bundleId version = liftIO $ do
+    eToken <- mintAscToken creds
+    case eToken of
+        Left err -> pure (Left err)
+        Right token -> do
+            eAppId <- lookupAppByBundleId token bundleId
+            case eAppId of
+                Left err -> pure (Left err)
+                Right appId -> do
+                    -- Same bracket-encoding rationale as 'fetchLatestBuildInfo'.
+                    let url =
+                            ascBase
+                                <> "/builds?filter%5Bapp%5D="
+                                <> appId
+                                <> "&filter%5BpreReleaseVersion.version%5D="
+                                <> version
+                                <> "&sort=-uploadedDate&limit=20"
+                        req =
+                            (defaultReq url)
+                                { reqMethod = GET
+                                , reqHeaders = [("Authorization", "Bearer " <> token)]
+                                , reqTimeout = Seconds 30
+                                , reqLogTag = "asc-version-builds"
+                                }
+                    resp <- httpJson @VersionBuildsResp req
+                    pure $ case resp of
+                        Right (VersionBuildsResp items) -> Right items
+                        Left (HttpStatusError 401 _) -> Left AscUnauthorized
+                        Left (HttpStatusError 403 _) -> Left AscUnauthorized
+                        Left (HttpStatusError s b) ->
+                            Left (AscHttpError s (TE.decodeUtf8 (LBS.toStrict b)))
+                        Left e -> Left (AscHttpError 0 (T.pack (show e)))
 
 -- ─── Response decoding ─────────────────────────────────────────────
 

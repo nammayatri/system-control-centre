@@ -151,6 +151,10 @@ data MobileBuildTargetState = MobileBuildTargetState
     -- matrix job auto-versions; ConfirmTag adopts the code from the pushed tag).
     -- Nothing / Just False = single dispatch with explicit version inputs.
     -- Backward-compatible Maybe (old rows → Nothing).
+    , mbVerifyAttempts :: Maybe Int
+    -- ^ Store-truth verification attempts consumed by PollMatrixJobs' auto-heal
+    -- gate after a failed job (bounded; the gate gives up past the budget).
+    -- 'Nothing' is treated as zero — backward-compatible with old rows.
     }
     deriving (Eq, Show, Generic)
 

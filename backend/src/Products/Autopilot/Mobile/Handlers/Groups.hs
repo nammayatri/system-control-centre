@@ -50,6 +50,7 @@ import Products.Autopilot.Actions.Release (injectPromotable, injectStoreState)
 import Products.Autopilot.Mobile.Lifecycle.GroupSummary (GroupSummary (..), MemberFact (..), deriveGroupSummary, effectivePhase)
 import Products.Autopilot.Mobile.Queries.AppCatalog (listAppCatalog)
 import Products.Autopilot.Mobile.Queries.StoreStatus (listStoreStatus, productionVersionsByApp, storeCellsByApp)
+import Products.Autopilot.Mobile.Queries.Tracker (heldMobileByApp, incomingMobileByApp)
 import Products.Autopilot.Mobile.StoreSync (refreshStoreStatusOne)
 import Products.Autopilot.Mobile.Types (isDebugBuildType)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..), StoreStatus, StoreStatusT (..))
@@ -251,7 +252,9 @@ mkEnrich :: Flow (TrackerWithTarget -> ReleaseTracker)
 mkEnrich = do
     prodCodes <- productionVersionsByApp
     cells <- storeCellsByApp
-    pure (fst . injectStoreState prodCodes cells . injectPromotable prodCodes)
+    incs <- incomingMobileByApp
+    helds <- heldMobileByApp
+    pure (fst . injectStoreState prodCodes helds cells . injectPromotable prodCodes incs helds)
 
 -- | Stable-order grouping by group id (rows arrive creation-ordered).
 groupByGid :: [GroupedTracker] -> [(Text, Maybe Text, [TrackerWithTarget])]
