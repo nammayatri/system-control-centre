@@ -71,6 +71,19 @@ const buildDiffLink = (repo: string, oldV: string, newV: string): string => {
     : `https://github.com/${r}/commits/${n}`;
 };
 
+// Stages the form falls back to when nothing else supplies them. Every read of
+// this goes through cloneStages: handing the same objects to both stage tables
+// would let an edit in one rewrite the other's values.
+type Stage = { rollout: number; cooloff: number; pods: number };
+const DEFAULT_STAGES: Stage[] = [
+  { rollout: 5, cooloff: 10, pods: 2 },
+  { rollout: 25, cooloff: 10, pods: 2 },
+  { rollout: 50, cooloff: 10, pods: 2 },
+  { rollout: 75, cooloff: 10, pods: 2 },
+  { rollout: 100, cooloff: 10, pods: 2 },
+];
+const cloneStages = (stages: Stage[]): Stage[] => stages.map(s => ({ ...s }));
+
 const CreateRelease: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -138,13 +151,7 @@ const CreateRelease: React.FC = () => {
   const [showAppGroupDropdown, setShowAppGroupDropdown] = useState(false);
   const [showPriorityDropdown, setShowPriorityDropdown] = useState(false);
   const [clonedService, setClonedService] = useState('');
-  const [stages, setStages] = useState([
-    { rollout: 5, cooloff: 10, pods: 2 },
-    { rollout: 25, cooloff: 10, pods: 2 },
-    { rollout: 50, cooloff: 10, pods: 2 },
-    { rollout: 75, cooloff: 10, pods: 2 },
-    { rollout: 100, cooloff: 10, pods: 2 },
-  ]);
+  const [stages, setStages] = useState<Stage[]>(cloneStages(DEFAULT_STAGES));
   const [isReleaseSync, setIsReleaseSync] = useState(false);
   // Opt-in: post AI changelog notes to the release's Slack thread once it completes.
   // Seeded per app group from deployment config (ai_changelog_enabled) by the effect
@@ -153,13 +160,7 @@ const CreateRelease: React.FC = () => {
   const [isSecondaryEnvSwitch, setIsSecondaryEnvSwitch] = useState(false);
   const [secondaryEnvData, setSecondaryEnvData] = useState('');
   const [secondaryEnvLoading, setSecondaryEnvLoading] = useState(false);
-  const [secondaryStages, setSecondaryStages] = useState([
-    { rollout: 5, cooloff: 10, pods: 2 },
-    { rollout: 25, cooloff: 10, pods: 2 },
-    { rollout: 50, cooloff: 10, pods: 2 },
-    { rollout: 75, cooloff: 10, pods: 2 },
-    { rollout: 100, cooloff: 10, pods: 2 },
-  ]);
+  const [secondaryStages, setSecondaryStages] = useState<Stage[]>(cloneStages(DEFAULT_STAGES));
   const [syncCluster, setSyncCluster] = useState('');
   const [rolloutHistoryLength, setRolloutHistoryLength] = useState(0);
   const [podsAutoLocked, setPodsAutoLocked] = useState(true);
