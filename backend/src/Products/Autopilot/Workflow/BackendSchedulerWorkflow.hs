@@ -47,7 +47,7 @@ import Products.Autopilot.Notifications
     notifyReleaseProgress,
   )
 import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker, insertReleaseEvent)
-import Products.Autopilot.RuntimeConfig (isScaleDownPodsOnCompletion)
+import Products.Autopilot.RuntimeConfig (getPodReadyStabilizeSeconds, isScaleDownPodsOnCompletion)
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
 import Products.Autopilot.Types.Release
   ( ReleaseStatus (..),
@@ -410,6 +410,17 @@ prepareK8sResources = do
   -- and bail loudly if the pod never reaches ready≥1.
   logInfoS "  Waiting for verification pod readiness (max 30 polls × 10s)"
   waitForSchedulerPodReady cfg ctx 30 10
+
+  stabilizeSecs <- lift getPodReadyStabilizeSeconds
+  when (stabilizeSecs > 0) $ do
+    logInfoS $ "  Verification pod Ready; stabilize wait: " <> T.pack (show stabilizeSecs) <> "s before health check"
+    insertReleaseEvent
+      (releaseId rt)
+      "BUSINESS"
+      "POD_READY_STABILIZE_WAIT"
+      (object ["stabilize_seconds" .= stabilizeSecs, "phase" .= ("scheduler-preparing" :: T.Text)])
+    threadDelaySec stabilizeSecs
+
   checkDeploymentHealth cfg ctx
 
   logInfoS "K8s resources prepared for scheduler"
