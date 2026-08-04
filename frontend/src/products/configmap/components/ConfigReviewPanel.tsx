@@ -1,9 +1,10 @@
 import React from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ShieldCheck, ShieldAlert, AlertTriangle, Sparkles, Loader2, RefreshCw, Check } from 'lucide-react';
+import { ShieldCheck, ShieldAlert, AlertTriangle, Sparkles, Loader2, RefreshCw, Check, Info } from 'lucide-react';
 import { Badge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
+import { cn } from '../../../lib/utils';
 import { fetchConfigReview, runConfigReview, acknowledgeConfigReview } from '../api';
 import { fetchReleaseReview, runReleaseReview, acknowledgeReleaseReview, type ConfigReviewResp, type ConfigReviewVerdict } from '../../releases/api';
 
@@ -46,6 +47,33 @@ const VERDICT_META: Record<ConfigReviewVerdict, { label: string; variant: 'succe
   SAFE: { label: 'Safe', variant: 'success', Icon: ShieldCheck },
   POTENTIALLY_BREAKING: { label: 'Potentially breaking', variant: 'warning', Icon: AlertTriangle },
   BREAKING: { label: 'Breaking', variant: 'danger', Icon: ShieldAlert },
+};
+
+
+const STATE_META: Record<string, { cls: string; Icon: typeof Info; spin?: boolean; label: string }> = {
+  pending:     { cls: 'border-amber-200 bg-amber-50 text-amber-800',  Icon: Loader2,       spin: true, label: 'AI review in progress' },
+  failed:      { cls: 'border-orange-300 bg-orange-50 text-orange-800', Icon: AlertTriangle,           label: 'AI review failed to run' },
+  unavailable: { cls: 'border-yellow-300 bg-yellow-50 text-yellow-800', Icon: Info,                    label: 'AI review unavailable' },
+};
+
+export const ReviewStatusBanner: React.FC<{ review?: ConfigReviewResp; onView?: () => void }> = ({ review, onView }) => {
+  if (!review || review.available) return null;
+  const meta = review.state ? STATE_META[review.state] : undefined;
+  if (!meta) return null;
+  return (
+    <div className={cn('mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border px-4 py-3', meta.cls)}>
+      <div className="flex items-start gap-2.5 text-sm">
+        <meta.Icon className={cn('w-4 h-4 mt-0.5 shrink-0', meta.spin && 'animate-spin')} />
+        <span>
+          <span className="font-medium">{meta.label}.</span>{' '}
+          {review.reason ? `${review.reason} ` : ''}This does not block approval.
+        </span>
+      </div>
+      {onView && (
+        <Button size="sm" variant="outline" className="shrink-0" onClick={onView}>Details</Button>
+      )}
+    </div>
+  );
 };
 
 /** Verdict badge — reused by the tracker warning banner too. */

@@ -29,7 +29,7 @@ import {
   ExternalLink, Network, BarChart3, Pencil, Lock, Save, Info, AlertTriangle,
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
-import ConfigReviewPanel, { useConfigReview, VerdictBadge } from '../../configmap/components/ConfigReviewPanel';
+import ConfigReviewPanel, { useConfigReview, VerdictBadge, ReviewStatusBanner } from '../../configmap/components/ConfigReviewPanel';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import { toast } from 'sonner';
 import ReactDiffViewer from 'react-diff-viewer-continued';
@@ -897,6 +897,8 @@ const ReleaseSummary: React.FC = () => {
           <SimpleTooltip content="Refresh"><Button size="icon" variant="ghost" onClick={handleRefresh} aria-label="Refresh"><RefreshCw className={`w-4 h-4 ${refreshSpinning ? 'animate-spin' : ''}`} /></Button></SimpleTooltip>
         </div>
       </div>
+
+      <ReviewStatusBanner review={review} onView={() => setActiveTab('ai-review')} />
 
       {reviewBlocks && (
         <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
