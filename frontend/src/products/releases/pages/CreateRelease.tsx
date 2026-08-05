@@ -8,6 +8,7 @@ import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs
 import type { ProductConfig } from '../api';
 import { parseStrategyStages } from '../utils';
 import { Button } from '../../../shared/ui/button';
+import EnvVarEditor from '../components/EnvVarEditor';
 import { cn } from '../../../lib/utils';
 import { normalizeProductType } from '../../../lib/constants';
 import { useAuth } from '../../../core/auth/AuthContext';
@@ -1138,8 +1139,7 @@ const CreateRelease: React.FC = () => {
               <div className="p-4 sm:p-6">
                 <FieldLabel>Environment Variables JSON</FieldLabel>
                 <div className="border border-zinc-200 rounded-lg overflow-hidden mt-1">
-                  <Editor height="320px" defaultLanguage="json" theme="light" value={envData} onChange={(val) => !isMidFlight && setEnvData(val || '')}
-                    options={{ readOnly: isMidFlight, minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
+                  <EnvVarEditor height="320px" value={envData} readOnly={isMidFlight} onChange={(val) => { if (!isMidFlight) setEnvData(val); }} />
                 </div>
               </div>
             )}
@@ -1182,8 +1182,7 @@ const CreateRelease: React.FC = () => {
                   {isSecondaryEnvSwitch && (
                     secondaryEnvLoading ? <p className="text-xs text-zinc-400 py-4">Loading secondary env vars...</p> : (
                       <div className="border border-zinc-200 rounded-lg overflow-hidden">
-                        <Editor height="280px" defaultLanguage="json" theme="light" value={secondaryEnvData} onChange={(val) => setSecondaryEnvData(val || '')}
-                          options={{ minimap: { enabled: false }, fontSize: 13, lineNumbers: 'on', scrollBeyondLastLine: false, wordWrap: 'on', tabSize: 2, automaticLayout: true }} />
+                        <EnvVarEditor height="280px" value={secondaryEnvData} onChange={(val) => setSecondaryEnvData(val)} />
                       </div>
                     )
                   )}
