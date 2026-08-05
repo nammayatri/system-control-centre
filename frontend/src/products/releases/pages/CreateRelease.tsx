@@ -556,6 +556,19 @@ const CreateRelease: React.FC = () => {
     setVersionError(validateNewVersion(e.target.value));
   };
 
+  const [dockerImageError, setDockerImageError] = useState('');
+
+  const validateDockerImage = (value: string): string => {
+    if (!value) return '';
+    if (/\s/.test(value)) return 'Docker image cannot contain spaces';
+    return '';
+  };
+
+  const handleDockerImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    handleInputChange(e);
+    setDockerImageError(validateDockerImage(e.target.value));
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -586,6 +599,11 @@ const CreateRelease: React.FC = () => {
         toast.error('New version cannot contain special characters');
         return;
       }
+    }
+
+    if (/\s/.test(formData.docker_image)) {
+      toast.error('Docker image cannot contain spaces');
+      return;
     }
 
     if (stages.length === 0) {
@@ -901,8 +919,13 @@ const CreateRelease: React.FC = () => {
               <div><FieldLabel>Description</FieldLabel><input type="text" name="description" value={formData.description} onChange={handleInputChange} placeholder="Deploying webhook Hotfix" disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} /></div>
               <div>
                 <FieldLabel required={!isUpdate}>Docker Image</FieldLabel>
-                <input type="text" name="docker_image" value={formData.docker_image} onChange={handleInputChange}
-                  required={!isUpdate} placeholder="Enter Docker Image" disabled={isMidFlight} className={isMidFlight ? disabledInputClass : inputClass} />
+                <input type="text" name="docker_image" value={formData.docker_image} onChange={handleDockerImageChange}
+                  required={!isUpdate} placeholder="Enter Docker Image" disabled={isMidFlight}
+                  className={cn(
+                    isMidFlight ? disabledInputClass : inputClass,
+                    dockerImageError && 'border-red-400 focus:ring-red-400'
+                  )} />
+                {dockerImageError && <p className="text-[10px] text-red-500 mt-0.5">{dockerImageError}</p>}
               </div>
             </div>
 

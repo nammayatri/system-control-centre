@@ -62,6 +62,7 @@ import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Char8 qualified as B
 import Data.ByteString.Lazy.Char8 qualified as LBS
+import Data.Char (isSpace)
 import Data.Foldable qualified as F
 import Data.Int (Int32)
 import Data.List (find)
@@ -671,21 +672,25 @@ createReleaseHBodyAfterStrategyCheck mXForwardedEmail mXPomeriumJwt K8sCreateRel
 
                             if not (isValidK8sVersion newVersion)
                                 then pure $ APIResponse "ERROR" ("Invalid version format for K8s label: " <> newVersion <> ". Must match [a-z0-9]([-a-z0-9]*[a-z0-9])?")
-                                else
-                                    if maybe False (/= getProductCluster pCfg) requestedCluster
-                                        then pure $ APIResponse "ERROR" "Requested cluster does not match product config"
-                                        else do
-                                            -- Safety check: duplicate deployment in K8s
-                                            let targetSvcHostForCheck = fromMaybe service (getServiceHost sCfg)
-                                                newDepNameCheck = targetSvcHostForCheck <> "-" <> newVersion
-                                            depAlreadyExists <- liftIO $ deploymentExists cfg (getProductNamespace pCfg) newDepNameCheck
-                                            if depAlreadyExists && not (fromMaybe False newService)
-                                                then pure $ APIResponse "ERROR" ("Deployment with version " <> newVersion <> " already exists: " <> newDepNameCheck)
+                                else -- Safety check: docker image must not contain whitespace
+                                do
+                                    if maybe False (not . isValidDockerImage) (extractMetadataDockerImage metadata)
+                                        then pure $ APIResponse "ERROR" "Invalid docker image: must not contain whitespace"
+                                        else
+                                            if maybe False (/= getProductCluster pCfg) requestedCluster
+                                                then pure $ APIResponse "ERROR" "Requested cluster does not match product config"
                                                 else do
-                                                    claimed <- claimServiceForModification appGroup service
-                                                    if not claimed
-                                                        then pure $ APIResponse "ERROR" ("Service " <> service <> " in app group " <> appGroup <> " is already being modified (service_state guard). Try again shortly.")
-                                                        else createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} pCfg sCfg
+                                                    -- Safety check: duplicate deployment in K8s
+                                                    let targetSvcHostForCheck = fromMaybe service (getServiceHost sCfg)
+                                                        newDepNameCheck = targetSvcHostForCheck <> "-" <> newVersion
+                                                    depAlreadyExists <- liftIO $ deploymentExists cfg (getProductNamespace pCfg) newDepNameCheck
+                                                    if depAlreadyExists && not (fromMaybe False newService)
+                                                        then pure $ APIResponse "ERROR" ("Deployment with version " <> newVersion <> " already exists: " <> newDepNameCheck)
+                                                        else do
+                                                            claimed <- claimServiceForModification appGroup service
+                                                            if not claimed
+                                                                then pure $ APIResponse "ERROR" ("Service " <> service <> " in app group " <> appGroup <> " is already being modified (service_state guard). Try again shortly.")
+                                                                else createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{..} pCfg sCfg
 
 createReleaseHBodyAfterClaim ::
     Maybe Text ->
@@ -698,16 +703,7 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{
     cfg <- getConfig
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     let targetSvcHost = fromMaybe service (getServiceHost sCfg)
-        metadataDockerImage =
-            case metadata of
-                Just (Object obj) ->
-                    case KM.lookup (K.fromText "docker-image") obj of
-                        Just (String t) | not (T.null t) -> Just t
-                        _ ->
-                            case KM.lookup (K.fromText "dockerImage") obj of
-                                Just (String t) | not (T.null t) -> Just t
-                                _ -> Nothing
-                _ -> Nothing
+        metadataDockerImage = extractMetadataDockerImage metadata
         metadataInternalVsName =
             case metadata of
                 Just (Object obj) ->
@@ -2460,6 +2456,31 @@ isValidK8sVersion ver
             startsOk = case chars of (c : _) -> isAlnumLower c; [] -> False
             endsOk = case chars of [] -> False; _ -> isAlnumLower (Prelude.last chars)
          in all isValidChar chars && startsOk && endsOk
+
+{- | Pull the docker image out of a release request's `metadata` blob, checking
+both the current `docker-image` key and the legacy `dockerImage` key.  Shared
+by the create/clone validation check and the context-building step so both
+agree on what "the docker image" means.
+-}
+extractMetadataDockerImage :: Maybe Value -> Maybe Text
+extractMetadataDockerImage metadata =
+    case metadata of
+        Just (Object obj) ->
+            case KM.lookup (K.fromText "docker-image") obj of
+                Just (String t) | not (T.null t) -> Just t
+                _ ->
+                    case KM.lookup (K.fromText "dockerImage") obj of
+                        Just (String t) | not (T.null t) -> Just t
+                        _ -> Nothing
+        _ -> Nothing
+
+{- | Reject docker image references containing whitespace. A space in an image
+tag/digest is never valid and usually means a copy-paste error (e.g. trailing
+newline or a stray "latest " with padding) that would otherwise fail late,
+deep inside the K8s apply.
+-}
+isValidDockerImage :: Text -> Bool
+isValidDockerImage = not . T.any isSpace
 
 {- | GET /release/staggerInfo/{releaseId}
 Called by the external AB engine (ab-system-v2) during a live rollout to
