@@ -244,7 +244,29 @@ button:not(:disabled):active {
   opacity: 0;
 }
 
-/* ── Reduced motion: disable everything ── */
+.env-base64-line {
+  background: rgba(217, 119, 6, 0.09);
+  box-shadow: inset 3px 0 0 0 #d97706;
+  cursor: pointer;
+}
+.env-base64-line:hover {
+  background: rgba(217, 119, 6, 0.15);
+}
+
+.env-base64-cursor {
+  cursor: pointer !important;
+}
+.env-base64-glyph {
+  cursor: pointer;
+}
+.env-base64-glyph::before {
+  content: "🔒";
+  font-size: 10px;
+  line-height: 18px;
+  display: block;
+  text-align: center;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
