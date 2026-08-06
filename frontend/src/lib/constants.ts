@@ -35,9 +35,9 @@ export const PRODUCT_TYPES: { value: ProductType; label: string }[] = [
 ];
 
 export const SERVICE_TYPES: { value: string; label: string }[] = [
-  { value: 'SERVICE', label: 'Backend Service' },
-  { value: 'SCHEDULER', label: 'Backend Scheduler' },
-  { value: 'CUSTOM', label: 'Backend Config' },
+  { value: 'BackendService', label: 'Backend Service' },
+  { value: 'BackendScheduler', label: 'Backend Scheduler' },
+  { value: 'BackendConfig', label: 'Backend Config' },
 ];
 
 // Map any legacy / shorthand product_type value to its canonical ADT name.

@@ -9,6 +9,7 @@ module Products.Autopilot.Actions.K8sResource (
     resolveRunningVersionH,
     resolveRolloutPodEstimateH,
     resolveRolloutPodEstimateSecondaryH,
+    resolveSyncRolloutStrategyH,
 )
 where
 
@@ -20,8 +21,9 @@ import Core.Http.Client (HttpReq (..), HttpResponse (..), Method (..), defaultRe
 import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value (..), encode, object, (.=))
 import Data.Aeson qualified as A
+import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as LBS
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
@@ -177,6 +179,59 @@ resolveRolloutPodEstimateSecondaryH _ap req = do
                 Left e -> do
                     logInfo $ "[SYNC-ROLLOUT-ESTIMATE] Request failed: " <> T.pack (show e)
                     pure noEstimate
+
+{- | The "sync to secondary cloud" toggle's default stagger: this product's
+own saved @rollout_strategy@ on the secondary cluster's own scc instance
+(not a generic default, and not this cluster's config -- the two clusters
+don't share deployment_config rows). Proxies to @{syncClusterUrl}/services/config@
+the same way 'fetchSecondaryEnvsH' proxies @/envs@. Returns a null
+@rolloutStrategy@ (not an error) when the sync cluster isn't configured, the
+request fails, or that service has no saved strategy there, so the UI falls
+back to its own generic default.
+-}
+resolveSyncRolloutStrategyH :: AuthedPerson -> Maybe Text -> Maybe Text -> Flow Value
+resolveSyncRolloutStrategyH _ap mProduct mService = do
+    cfg <- getConfig
+    let noStrategy = object ["rolloutStrategy" .= (Nothing :: Maybe Text)]
+        rawUrl = syncClusterUrl cfg
+    case (mProduct, mService) of
+        (Just product', Just service') | not (null rawUrl) -> do
+            let normalised =
+                    let u = if "http" `T.isPrefixOf` T.pack rawUrl then T.pack rawUrl else "http://" <> T.pack rawUrl
+                     in if T.null u || T.last u == '/' then u else u <> "/"
+                apiKey = syncClusterApiKey cfg
+                auth =
+                    if null apiKey
+                        then []
+                        else [("X-Sync-Api-Key", T.pack apiKey)]
+                getUrl = normalised <> "services/config?product=" <> product'
+                getReq = (defaultReq getUrl){reqHeaders = auth, reqTimeout = Seconds 15, reqRetries = 0, reqLogTag = "sync-rollout-strategy"}
+            logInfo $ "[SYNC-ROLLOUT-STRATEGY] Fetching secondary service config from: " <> getUrl
+            result <- liftIO (httpRaw getReq)
+            case result of
+                Right HttpResponse{respStatus = s, respBody = b}
+                    | s < 400 && not (LBS.null b) ->
+                        pure $ case A.decodeStrict' (LBS.toStrict b) :: Maybe [Value] of
+                            Just entries -> case findServiceStrategy service' entries of
+                                Just strat -> object ["rolloutStrategy" .= strat]
+                                Nothing -> noStrategy
+                            Nothing -> noStrategy
+                Right HttpResponse{respStatus = s} -> do
+                    logInfo $ "[SYNC-ROLLOUT-STRATEGY] Secondary returned status " <> T.pack (show s)
+                    pure noStrategy
+                Left e -> do
+                    logInfo $ "[SYNC-ROLLOUT-STRATEGY] Request failed: " <> T.pack (show e)
+                    pure noStrategy
+        _ -> pure noStrategy
+  where
+    findServiceStrategy svcName entries =
+        listToMaybe
+            [ strat
+            | Object o <- entries
+            , Just (String n) <- [KM.lookup "serviceName" o]
+            , n == svcName
+            , Just strat@(String _) <- [KM.lookup "rolloutStrategy" o]
+            ]
 
 fetchEnvsH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
 fetchEnvsH _ap mProduct _mEnv mService = do

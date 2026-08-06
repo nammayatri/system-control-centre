@@ -59,6 +59,7 @@ type CoreAPI =
         :<|> "running-version" :> Protected 'AP_RELEASE_VIEW :> QueryParam "product" Text :> QueryParam "service" Text :> Get '[JSON] Value
         :<|> "rollout-pod-estimate" :> ServiceProtected 'AP_RELEASE_VIEW :> ReqBody '[JSON] RolloutPodEstimateReq :> Post '[JSON] Value
         :<|> "rollout-pod-estimate" :> "secondary" :> Protected 'AP_RELEASE_VIEW :> ReqBody '[JSON] RolloutPodEstimateReq :> Post '[JSON] Value
+        :<|> "sync-rollout-strategy" :> Protected 'AP_RELEASE_VIEW :> QueryParam "product" Text :> QueryParam "service" Text :> Get '[JSON] Value
         -- New endpoints
         :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "diff" :> QueryParam "type" Text :> Get '[JSON] DiffResponse
         :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "pods" :> "health" :> Get '[JSON] PodHealthResponse
@@ -158,6 +159,7 @@ coreServer =
         :<|> K8sResource.resolveRunningVersionH
         :<|> K8sResource.resolveRolloutPodEstimateH
         :<|> K8sResource.resolveRolloutPodEstimateSecondaryH
+        :<|> K8sResource.resolveSyncRolloutStrategyH
         -- New endpoints
         :<|> Release.releaseDiffH
         :<|> Release.podHealthH

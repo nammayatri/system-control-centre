@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import { useProductConfigs, useServices } from '../useProducts';
 import { useCreateRelease, useUpdateTracker } from '../hooks';
-import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources, resolveOldVersion, fetchRolloutPodEstimate, fetchRolloutPodEstimateSecondary } from '../api';
+import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources, resolveOldVersion, fetchRolloutPodEstimate, fetchRolloutPodEstimateSecondary, fetchSyncRolloutStrategy } from '../api';
 import type { ProductConfig } from '../api';
 import { parseStrategyStages } from '../utils';
 import { Button } from '../../../shared/ui/button';
@@ -169,11 +169,13 @@ const CreateRelease: React.FC = () => {
   const [isSecondaryEnvSwitch, setIsSecondaryEnvSwitch] = useState(false);
   const [secondaryEnvData, setSecondaryEnvData] = useState('');
   const [secondaryEnvLoading, setSecondaryEnvLoading] = useState(false);
-  // Secondary stages are never loaded from config — they start at the defaults and
-  // only pod counts are refreshed from the sync cluster, so DEFAULT_STAGES plus
-  // those fresh counts is their baseline (kept in step by the estimate effect below).
+  // Secondary stages start at the generic defaults until the loader effect below
+  // replaces them with this product's own saved rollout_strategy on the secondary
+  // cluster; pod counts are then kept fresh against the sync cluster's live pod
+  // state by the estimate effect further down.
   const [secondaryStages, setSecondaryStages] = useState<Stage[]>(cloneStages(DEFAULT_STAGES));
   const baselineSecondaryStagesRef = useRef<Stage[]>(cloneStages(DEFAULT_STAGES));
+  const secondaryConfigStagesRef = useRef<Stage[]>(cloneStages(DEFAULT_STAGES));
   const [syncCluster, setSyncCluster] = useState('');
   const [rolloutHistoryLength, setRolloutHistoryLength] = useState(0);
   const [podsAutoLocked, setPodsAutoLocked] = useState(true);
@@ -383,6 +385,26 @@ const CreateRelease: React.FC = () => {
     }
   }, [formData.appGroup, formData.service, isClone, isUpdate]);
 
+  useEffect(() => {
+    if (isUpdate || !isReleaseSync || !formData.appGroup || !formData.service) return;
+    fetchSyncRolloutStrategy(formData.appGroup, formData.service).then(raw => {
+      let loaded: Stage[] = cloneStages(DEFAULT_STAGES);
+      const rollouts = raw ? parseStrategyStages(raw) : [];
+      if (rollouts.length > 0) {
+        loaded = rollouts.map(r => ({
+          rollout: r.rolloutPercent ?? 0,
+          cooloff: r.cooloffMinutes ?? 10,
+          pods: r.podCount ?? 1,
+        }));
+      }
+      secondaryConfigStagesRef.current = cloneStages(loaded);
+      baselineSecondaryStagesRef.current = cloneStages(loaded);
+      setSecondaryStages(cloneStages(loaded));
+    }).catch((e: any) => {
+      console.error('[CreateRelease] fetchSyncRolloutStrategy failed:', e);
+    });
+  }, [formData.appGroup, formData.service, isUpdate, isReleaseSync]);
+
   // Without MANAGE_STAGGER, pin mode to AUTO instead of letting the form submit
   // a MANUAL the backend rejects — clone prefills mode from the source release.
   // Waits for appGroup (hasPermission answers differently before it is set) and
@@ -445,10 +467,11 @@ const CreateRelease: React.FC = () => {
       if (secondaryPodsAutoLocked) {
         setSecondaryStages(prev => prev.map((s, i) => (est.podCounts[i] != null ? { ...s, pods: est.podCounts[i] } : s)));
         // Keep the restore target in step with the live estimate. While on Auto the
-        // percentages are always DEFAULT_STAGES', so the baseline is those plus the
-        // sync cluster's fresh pod counts — resetting to bare DEFAULT_STAGES would
-        // flash pods: 2 until this effect refetched them.
-        baselineSecondaryStagesRef.current = cloneStages(DEFAULT_STAGES).map((s, i) =>
+        // percentages/cooloffs are always secondaryConfigStagesRef's (the product's
+        // saved secondary strategy, or DEFAULT_STAGES if none), so the baseline is
+        // those plus the sync cluster's fresh pod counts — resetting to the bare
+        // config stages would flash their stale pod counts until this refetched them.
+        baselineSecondaryStagesRef.current = cloneStages(secondaryConfigStagesRef.current).map((s, i) =>
           est.podCounts[i] != null ? { ...s, pods: est.podCounts[i] } : s
         );
       }
