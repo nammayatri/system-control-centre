@@ -49,10 +49,21 @@ export const breadcrumbsOf = (release: APRelease) => {
   const meta = (release.metadata ?? {}) as Record<string, any>;
   return {
     ghRunUrl: (meta.github_run_url || meta.gh_run_url || meta.expected_run_url || ctx.github_run_url || ctx.expected_run_url) as string | undefined,
+    // GitHub run id — the BE serializes external_run_id into release_context
+    // once ResolveRunId binds the run; with the repo it yields the run URL.
+    externalRunId: ctx.external_run_id as string | undefined,
     matrixJobStatus: (meta.matrix_job_status || ctx.matrix_job_status || ctx.mb_matrix_job_status) as string | undefined,
     tagPushed: (meta.tag_pushed || ctx.tag_pushed || ctx.mbc_tag_pushed) as string | undefined,
     githubRepo: (meta.github_repo || ctx.github_repo) as string | undefined,
   };
+};
+
+/** The GitHub Actions run URL for a release row, when resolvable. */
+export const ghRunUrlOf = (release: APRelease, repo?: string): string | undefined => {
+  const b = breadcrumbsOf(release);
+  if (b.ghRunUrl) return b.ghRunUrl;
+  const r = repo || b.githubRepo;
+  return b.externalRunId && r ? `https://github.com/${r}/actions/runs/${b.externalRunId}` : undefined;
 };
 
 const FieldLabel = ({ children }: { children: React.ReactNode }) => (
@@ -135,8 +146,9 @@ export function ProvenanceCard({
   matchedApp?: AppCatalogEntry;
   index?: number;
 }) {
-  const { ghRunUrl, tagPushed, githubRepo: bcRepo } = breadcrumbsOf(release);
+  const { tagPushed, githubRepo: bcRepo } = breadcrumbsOf(release);
   const githubRepo = bcRepo || matchedApp?.githubRepo;
+  const ghRunUrl = ghRunUrlOf(release, githubRepo);
   const qc = useQueryClient();
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
   // Missing commit (store-observed row): recover it from the build tag once —
@@ -220,6 +232,14 @@ export function ProvenanceCard({
               <span className="truncate">#{ghRunUrl.split('/').filter(Boolean).pop()}</span>
               <ArrowUpRightIcon size={12} weight="bold" className="shrink-0" aria-hidden="true" />
             </a>
+          ) : release.release_context?.display_phase === 'building' &&
+            (release.release_context as Record<string, any>)?.dispatch_id ? (
+            // SCC-dispatched, but GitHub hasn't listed the run yet (ResolveRunId
+            // pending) — store-sync rows never get a run, so they keep the dash.
+            <span className="flex items-center gap-1.5 text-xs text-zinc-400 font-sans">
+              <CircleNotchIcon size={13} weight="bold" className="animate-spin" aria-hidden="true" />
+              resolving run…
+            </span>
           ) : (
             <span className="text-sm text-zinc-400 font-mono">-</span>
           )}

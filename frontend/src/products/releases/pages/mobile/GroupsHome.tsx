@@ -13,7 +13,7 @@ import {
 } from '@phosphor-icons/react';
 import { useMobileApps, useMobileGroups, useReleases } from '../../hooks';
 import type { APRelease, MobileGroupListItem, MobileGroupMemberLite, MobileGroupSummary } from '../../api';
-import { memberBucket, storeBucket } from '../../components/statusBuckets';
+import { memberBucket, storeBucket, ROW_ONLY_BUCKETS } from '../../components/statusBuckets';
 import { BrandLogo } from '../../components/BrandLogo';
 import { GroupStageChip, MEMBER_PHASE_CHIP } from '../../components/GroupStageChip';
 import { MobileBuildKpis } from '../../components/MobileBuildKpis';
@@ -252,6 +252,27 @@ export default function GroupsHome() {
   const [surfaceFilter, setSurfaceFilter] = useState('');
   const [platformFilter, setPlatformFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  // Row-only buckets (created / building / aborted…) render as member rows only
+  // the Groups view shows — switch to it so the filter's matches are visible,
+  // and restore the Apps view when the filter leaves row-only territory.
+  // Keyed on the filter alone: a manual flip back to Apps is respected. Debug
+  // deployments are exempt — their Apps view lists build rows directly.
+  const { buildType } = useAuth();
+  const debugDeploy = buildType === 'debug';
+  const autoSwitchedToGroups = useRef(false);
+  useEffect(() => {
+    if (showHistory || debugDeploy) return;
+    if (statusFilter && ROW_ONLY_BUCKETS.has(statusFilter)) {
+      if (!showGroups) {
+        autoSwitchedToGroups.current = true;
+        setShowGroups(true);
+      }
+    } else if (autoSwitchedToGroups.current) {
+      autoSwitchedToGroups.current = false;
+      if (showGroups) setShowGroups(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusFilter]);
   // 'all_time' (default) shows every group and store row; the presets narrow.
   const [timeRange, setTimeRange] = useState<TimeRange | 'all_time'>('all_time');
   const [currentPage, setCurrentPage] = useState(1);
@@ -480,7 +501,7 @@ export default function GroupsHome() {
         </div>
         <span className="flex items-center gap-3">
           <SyncedAgo />
-          <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+          <PermissionGate product="mobile" permission="MB_RELEASE_CREATE">
           <button
             onClick={() => navigate('/mobile/releases/new')}
             className="bg-violet-600 text-white px-4 py-2 text-sm font-bold rounded-lg shadow-sm shadow-violet-200 hover:bg-violet-700 transition-all flex items-center gap-1.5 cursor-pointer active:scale-[0.98]"
@@ -664,6 +685,17 @@ export default function GroupsHome() {
             </button>
           </span>
           {showGroups && <span className="text-zinc-400">matching groups auto-expanded below</span>}
+          {!showGroups && !debugDeploy && ROW_ONLY_BUCKETS.has(statusFilter) && (
+            <span className="text-zinc-400">
+              these builds aren&apos;t store slots —{' '}
+              <button
+                onClick={() => setShowGroups(true)}
+                className="underline underline-offset-2 hover:text-zinc-600 cursor-pointer"
+              >
+                show in Groups
+              </button>
+            </span>
+          )}
         </div>
       )}
 

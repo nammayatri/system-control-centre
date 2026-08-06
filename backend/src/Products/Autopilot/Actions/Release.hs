@@ -12,13 +12,16 @@ module Products.Autopilot.Actions.Release (
     getReleaseH,
     listReleasesH,
     approveReleaseH,
+    approveReleaseCore,
     triggerReleaseH,
     rollbackReleaseH,
     revertReleaseH,
     revertByGlobalIdH,
     immediateRevertByGlobalIdH,
     discardReleaseH,
+    discardReleaseCore,
     deleteReleaseH,
+    deleteReleaseCore,
     updateTrackerH,
     immediateRevertH,
     restartReleaseH,
@@ -77,7 +80,6 @@ import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
-import Data.Yaml qualified as Yaml
 import Database.PostgreSQL.Simple (Only (..), SqlError (..), execute, withTransaction)
 import Products.Autopilot.ConfigDiff (extractConfigMapDataSection)
 import Products.Autopilot.ConfigReview (reviewBlocksApproval, runConfigReview)
@@ -396,7 +398,7 @@ injectStoreState prods helds cellsByApp pair@(tracker, mts) =
                             disp = displayStatusInferred (reviewInferredOf (NT.metadata tracker)) ph
                             rc' =
                                 fmap
-                                    (addMobileLifecycle (T.pack (show (mbWfStatus s))) rollout pct track (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) Nothing)
+                                    (addMobileLifecycle (T.pack (show (mbWfStatus s))) rollout pct track (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) Nothing Nothing)
                                     (NT.releaseContext tracker)
                          in (tracker{releaseContext = rc'}, mts)
         _ -> pair
@@ -920,35 +922,41 @@ approveReleaseH ap rid req = do
         Nothing -> throwM $ NotFound ("Release not found: " <> rid)
         Just (tracker, mTargetState) -> do
             requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_APPROVE) ap (NT.appGroup tracker)
-            -- Pre-check (cheap, friendly errors)
-            if NT.status tracker /= CREATED
-                then throwM $ BadRequest ("Cannot approve release in status " <> T.pack (show (NT.status tracker)) <> ". Only CREATED releases can be approved.")
-                else
-                    if NT.isApproved tracker
-                        then throwM $ BadRequest ("Release already approved by " <> fromMaybe "unknown" (NT.approvedBy tracker) <> ". Cannot approve again.")
-                        else do
-                            when (reviewBlocksApproval tracker) $
-                                throwM $
-                                    BadRequest "AI review flagged this deployment's env change as potentially breaking — acknowledge the warning in the AI Review tab before approving."
-                            let approver = req.approvedBy
-                                infraApproval = req.isInfraApproved
-                                updated =
-                                    (tracker :: ReleaseTracker)
-                                        { NT.approvedBy = Just approver
-                                        , NT.isApproved = True
-                                        , NT.isInfraApproved = fromMaybe (NT.isInfraApproved tracker) infraApproval
-                                        }
-                            -- Atomic CAS: only update if status is still CREATED AND
-                            -- not yet approved. Two concurrent approve calls both pass
-                            -- the pre-check above; conditionalUpdateApprove uses an
-                            -- UPDATE WHERE clause that lets exactly one win.
-                            ok <- conditionalUpdateApprove updated mTargetState
-                            if not ok
-                                then throwM $ BadRequest "Release was approved or transitioned by a concurrent request."
-                                else do
-                                    insertReleaseEvent rid "BUSINESS" "TRACKER_APPROVED" (toJSON approver)
-                                    notifyReleaseApproved updated
-                                    pure (Just updated)
+            approveReleaseCore rid req tracker mTargetState
+
+-- | Permission-free core of approve — the caller has already authorized
+-- (AP route above; MB-gated mobile wrapper in Mobile.Handlers.Release).
+approveReleaseCore :: Text -> ApproveReleaseReq -> ReleaseTracker -> Maybe TargetState -> Flow (Maybe ReleaseTracker)
+approveReleaseCore rid req tracker mTargetState = do
+    -- Pre-check (cheap, friendly errors)
+    when (NT.status tracker /= CREATED) $
+        throwM $
+            BadRequest ("Cannot approve release in status " <> T.pack (show (NT.status tracker)) <> ". Only CREATED releases can be approved.")
+    when (NT.isApproved tracker) $
+        throwM $
+            BadRequest ("Release already approved by " <> fromMaybe "unknown" (NT.approvedBy tracker) <> ". Cannot approve again.")
+    when (reviewBlocksApproval tracker) $
+        throwM $
+            BadRequest "AI review flagged this deployment's env change as potentially breaking — acknowledge the warning in the AI Review tab before approving."
+    let approver = req.approvedBy
+        infraApproval = req.isInfraApproved
+        updated =
+            (tracker :: ReleaseTracker)
+                { NT.approvedBy = Just approver
+                , NT.isApproved = True
+                , NT.isInfraApproved = fromMaybe (NT.isInfraApproved tracker) infraApproval
+                }
+    -- Atomic CAS: only update if status is still CREATED AND
+    -- not yet approved. Two concurrent approve calls both pass
+    -- the pre-check above; conditionalUpdateApprove uses an
+    -- UPDATE WHERE clause that lets exactly one win.
+    ok <- conditionalUpdateApprove updated mTargetState
+    if not ok
+        then throwM $ BadRequest "Release was approved or transitioned by a concurrent request."
+        else do
+            insertReleaseEvent rid "BUSINESS" "TRACKER_APPROVED" (toJSON approver)
+            notifyReleaseApproved updated
+            pure (Just updated)
 
 triggerReleaseH :: AuthedPerson -> Text -> TriggerReleaseReq -> Flow APIResponse
 triggerReleaseH ap rid TriggerReleaseReq{..} = do
@@ -1156,45 +1164,55 @@ immediateRevertByGlobalIdH ap gid = do
         Just (tracker, _) -> revertReleaseH ap (releaseId tracker) (RevertReleaseReq Nothing Nothing (Just True) Nothing)
 
 discardReleaseH :: AuthedPerson -> Text -> DiscardReleaseReq -> Flow APIResponse
-discardReleaseH ap rid DiscardReleaseReq{..} = do
+discardReleaseH ap rid req = do
     m <- findReleaseTrackerForCloud rid
     case m of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
             requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_DISCARD) ap (NT.appGroup tracker)
-            let oldStatus = NT.status tracker
-            if not (validateStatusTransition oldStatus DISCARDED)
-                then pure $ APIResponse "ERROR" ("Cannot discard from status: " <> T.pack (show oldStatus))
-                else do
-                    let updated = (tracker :: ReleaseTracker){NT.status = DISCARDED}
-                    ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText oldStatus)
-                    if ok
-                        then do
-                            -- Production parity: NOTIFICATION / STATUS_UPDATED
-                            logStatusUpdated updated ("Tracker marked as DISCARDED" <> maybe "" (": " <>) reason)
-                            notifyReleaseDiscarded updated
-                            releaseService (NT.appGroup updated) (NT.service updated)
-                            pure $ APIResponse "SUCCESS" "Release discarded"
-                        else pure staleTrackerError
+            discardReleaseCore req tracker mTargetState
+
+-- | Permission-free core of discard — caller has already authorized.
+discardReleaseCore :: DiscardReleaseReq -> ReleaseTracker -> Maybe TargetState -> Flow APIResponse
+discardReleaseCore DiscardReleaseReq{..} tracker mTargetState = do
+    let oldStatus = NT.status tracker
+    if not (validateStatusTransition oldStatus DISCARDED)
+        then pure $ APIResponse "ERROR" ("Cannot discard from status: " <> T.pack (show oldStatus))
+        else do
+            let updated = (tracker :: ReleaseTracker){NT.status = DISCARDED}
+            ok <- conditionalUpdateTracker updated mTargetState (releaseStatusToText oldStatus)
+            if ok
+                then do
+                    -- Production parity: NOTIFICATION / STATUS_UPDATED
+                    logStatusUpdated updated ("Tracker marked as DISCARDED" <> maybe "" (": " <>) reason)
+                    notifyReleaseDiscarded updated
+                    releaseService (NT.appGroup updated) (NT.service updated)
+                    pure $ APIResponse "SUCCESS" "Release discarded"
+                else pure staleTrackerError
 
 deleteReleaseH :: AuthedPerson -> Text -> Flow APIResponse
 deleteReleaseH ap rid = do
-    db <- getDBEnv
     mTracker <- findReleaseTrackerForCloud rid
     case mTracker of
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, _) -> do
             requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_DELETE) ap (NT.appGroup tracker)
-            -- Block deletion of active releases (INPROGRESS, ABORTING, REVERTING, PAUSED, RESTARTING)
-            let activeStatuses = [INPROGRESS, ABORTING, REVERTING, PAUSED, RESTARTING]
-            if NT.status tracker `elem` activeStatuses
-                then pure $ APIResponse "ERROR" ("Cannot delete release in " <> T.pack (show (NT.status tracker)) <> " status. Abort or complete it first.")
-                else do
-                    _ <- liftIO $ withConn db $ \conn -> withTransaction conn $ do
-                        _ <- execute conn "DELETE FROM release_events WHERE re_release_id = ?" (Only rid)
-                        execute conn "DELETE FROM release_tracker WHERE id = ?" (Only rid)
-                    releaseService (NT.appGroup tracker) (NT.service tracker)
-                    pure $ APIResponse "SUCCESS" ("Release deleted: " <> rid)
+            deleteReleaseCore rid tracker
+
+-- | Permission-free core of delete — caller has already authorized.
+deleteReleaseCore :: Text -> ReleaseTracker -> Flow APIResponse
+deleteReleaseCore rid tracker = do
+    db <- getDBEnv
+    -- Block deletion of active releases (INPROGRESS, ABORTING, REVERTING, PAUSED, RESTARTING)
+    let activeStatuses = [INPROGRESS, ABORTING, REVERTING, PAUSED, RESTARTING]
+    if NT.status tracker `elem` activeStatuses
+        then pure $ APIResponse "ERROR" ("Cannot delete release in " <> T.pack (show (NT.status tracker)) <> " status. Abort or complete it first.")
+        else do
+            _ <- liftIO $ withConn db $ \conn -> withTransaction conn $ do
+                _ <- execute conn "DELETE FROM release_events WHERE re_release_id = ?" (Only rid)
+                execute conn "DELETE FROM release_tracker WHERE id = ?" (Only rid)
+            releaseService (NT.appGroup tracker) (NT.service tracker)
+            pure $ APIResponse "SUCCESS" ("Release deleted: " <> rid)
 
 updateTrackerH :: AuthedPerson -> Text -> K8sUpdateTrackerReq -> Flow APIResponse
 updateTrackerH ap rid req = do

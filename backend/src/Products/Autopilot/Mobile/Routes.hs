@@ -42,6 +42,7 @@ import Products.Autopilot.Mobile.Handlers.Ota (
 import Products.Autopilot.Mobile.Provenance (ReleaseAdoptBranchReq, ReleaseProvResp, adoptReleaseBranchH, releaseProvenanceH)
 import Products.Autopilot.Types (ReleaseTracker)
 import Products.Autopilot.Types.API (ReleaseEventResponse)
+import Products.Autopilot.Types.API qualified as API
 import Products.Autopilot.Mobile.Handlers.Release
 import Products.Autopilot.Mobile.Handlers.Heal (VerifyStoreResp, verifyStoreH)
 import Products.Autopilot.Mobile.Handlers.Revert (
@@ -103,7 +104,7 @@ import Products.Autopilot.Mobile.Types.Ota (
  )
 import Products.Mobile.Types.Permission (MobilePermission (..))
 import Servant
-import Shared.API.Response (APISuccess)
+import Shared.API.Response (APIResponse, APISuccess)
 
 type MobileAPI =
     "mobile"
@@ -433,6 +434,29 @@ type MobileAPI =
             :> "abort"
             :> Protected 'MB_RELEASE_ABORT
             :> Post '[JSON] APISuccess
+        -- ── Draft lifecycle verbs (MobileBuild rows only): the shared
+        --    approve/discard/delete routes are autopilot-gated, so mobile-only
+        --    grants act through these. ──
+        :<|> "mobile"
+            :> "releases"
+            :> Capture "releaseId" Text
+            :> "approve"
+            :> Protected 'MB_MOBILE_DISPATCH
+            :> ReqBody '[JSON] API.ApproveReleaseReq
+            :> Post '[JSON] (Maybe ReleaseTracker)
+        :<|> "mobile"
+            :> "releases"
+            :> Capture "releaseId" Text
+            :> "discard"
+            :> Protected 'MB_RELEASE_CREATE
+            :> ReqBody '[JSON] API.DiscardReleaseReq
+            :> Post '[JSON] APIResponse
+        :<|> "mobile"
+            :> "releases"
+            :> Capture "releaseId" Text
+            :> "delete"
+            :> Protected 'MB_MOBILE_APP_MANAGE
+            :> Post '[JSON] APIResponse
         -- ── Heal a failed build whose artifact actually reached the store ──
         :<|> "mobile"
             :> "releases"
@@ -515,6 +539,9 @@ mobileServer =
         :<|> (\rid ap -> releaseProvenanceH ap rid)
         :<|> (\rid ap req -> adoptReleaseBranchH ap rid req)
         :<|> (\rid ap -> mobileAbortH ap rid)
+        :<|> (\rid ap req -> mobileApproveH ap rid req)
+        :<|> (\rid ap req -> mobileDiscardH ap rid req)
+        :<|> (\rid ap -> mobileDeleteH ap rid)
         :<|> (\rid ap -> verifyStoreH ap rid)
         :<|> mobileListReleasesH
         :<|> (\rid ap -> mobileGetReleaseH ap rid)

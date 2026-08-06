@@ -4,6 +4,18 @@ import type { APRelease, MobileGroupMemberLite } from '../api';
 // one fn shared by the KPI tiles, the groups view and the app-slot view, so a
 // tile's count always equals the rows its click filters to.
 
+// Buckets that never occupy a store lane — they exist only as individual
+// release/member rows, which only the Groups view (and history) renders.
+// The Apps view must not filter on these: it would match rows it can't show.
+export const ROW_ONLY_BUCKETS = new Set([
+  'created',
+  'to_dispatch',
+  'building',
+  'aborted',
+  'rejected',
+  'reverted',
+]);
+
 // Which History status-bucket a group MEMBER falls in.
 export function memberBucket(m: MobileGroupMemberLite): string {
   if (m.phase === 'rejected') return 'rejected';
@@ -26,7 +38,10 @@ export function memberBucket(m: MobileGroupMemberLite): string {
   // badge shows, or a live/superseded row wrongly falls through to "building".
   if (['live', 'distributed', 'superseded'].includes(m.phase)) return 'completed';
   if (m.status === 'COMPLETED') return 'completed';
-  return 'building'; // drafts + genuinely building (phase 'building' or empty)
+  // Pre-dispatch rows share phase "building" but nothing is running yet —
+  // split by the approval gate so each human queue gets its own bucket.
+  if (m.status === 'CREATED') return m.approved ? 'to_dispatch' : 'created';
+  return 'building'; // dispatched + genuinely building (phase 'building' or empty)
 }
 
 // Same bucketing for a store-detected row (APRelease shape).

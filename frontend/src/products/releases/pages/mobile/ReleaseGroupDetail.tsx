@@ -28,7 +28,7 @@ import { useGroupOta } from '../../otaApi';
 import { OtaSection } from '../../components/ota/OtaSection';
 import { OtaBranchPicker } from '../../components/ota/OtaPanel';
 import { usePermissions } from '../../../../core/auth/PermissionsContext';
-import { abortMobileRelease, approveRelease, createMobileRevert, discardRelease, getMobileRevertDraft, mobileApi } from '../../api';
+import { abortMobileRelease, approveMobileRelease, createMobileRevert, discardMobileRelease, getMobileRevertDraft, mobileApi } from '../../api';
 import type { BulkActionResp, RevertDraft } from '../../api';
 import { PermissionGate } from '../../../../core/auth/PermissionGate';
 import {
@@ -689,7 +689,7 @@ export default function ReleaseGroupDetail() {
     runPerId(
       'approve',
       eligibleSelected('approve'),
-      (id) => approveRelease(id, user?.email || 'local_admin'),
+      (id) => approveMobileRelease(id, user?.email || 'local_admin'),
       'Approved',
     );
 
@@ -959,7 +959,7 @@ export default function ReleaseGroupDetail() {
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+          <PermissionGate product="mobile" permission="MB_RELEASE_CREATE">
             <button
               onClick={() => navigate('/mobile/releases/new')}
               className="bg-white border border-zinc-200 text-zinc-600 px-3 py-1.5 text-sm font-semibold rounded-lg shadow-sm hover:bg-zinc-50 transition-all inline-flex items-center gap-1.5"
@@ -1051,7 +1051,7 @@ export default function ReleaseGroupDetail() {
             />
             {/* Discard a never-dispatched draft — sits with the other draft-stage
                 verbs. Destructive → explicit selection + confirm. */}
-            <PermissionGate product="autopilot" permission="RELEASE_DISCARD">
+            <PermissionGate product="mobile" permission="MB_RELEASE_CREATE">
               <VerbButton
                 verb="discard"
                 label="Discard"
@@ -1063,7 +1063,7 @@ export default function ReleaseGroupDetail() {
                       `Discard ${targets.length} draft${targets.length === 1 ? '' : 's'}? This can't be undone — the draft${targets.length === 1 ? '' : 's'} won't build.`,
                     )
                   )
-                    void runPerId('discard', targets, (id) => discardRelease(id), 'Discarded');
+                    void runPerId('discard', targets, (id) => discardMobileRelease(id), 'Discarded');
                 }}
               />
             </PermissionGate>
@@ -1156,7 +1156,7 @@ export default function ReleaseGroupDetail() {
           )}
           <span className="inline-flex items-center gap-2">
             <span className="eyebrow">Recover</span>
-            <PermissionGate product="autopilot" permission="RELEASE_REVERT">
+            <PermissionGate product="mobile" permission="MB_RELEASE_REVERT">
               <VerbButton
                 verb="revert"
                 label="Revert"
@@ -1177,7 +1177,7 @@ export default function ReleaseGroupDetail() {
                 }
               />
             </PermissionGate>
-            <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+            <PermissionGate product="mobile" permission="MB_RELEASE_CREATE">
               <span
                 title={
                   selectedRows.length > 0

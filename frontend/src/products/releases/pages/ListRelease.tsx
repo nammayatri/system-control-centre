@@ -117,6 +117,8 @@ const STATUS_FILTER_OPTIONS: ReleaseStatus[] = [
 // raw INPROGRESS would lump in-review / approved / rolling-out together — so the
 // mobile dropdown uses these buckets instead, matched by `mobileStatusCategory`.
 export const MOBILE_STATUS_OPTIONS: { value: string; label: string }[] = [
+  { value: 'created', label: 'Created' },
+  { value: 'to_dispatch', label: 'Approved · not dispatched' },
   { value: 'building', label: 'Building' },
   { value: 'promote', label: 'Ready to promote' },
   { value: 'review', label: 'In review' },
@@ -150,6 +152,8 @@ function mobileStatusCategory(r: APRelease): string {
   if (ph === 'in_review') return 'review';
   if (ph === 'approved') return 'approved';
   if (['live', 'distributed', 'superseded'].includes(ph)) return 'completed';
+  // Pre-dispatch rows: same created / to_dispatch split as memberBucket.
+  if (r.status === 'CREATED') return r.is_approved === 1 ? 'to_dispatch' : 'created';
   // No phase (pre-lifecycle rows): the original stage/status derivation.
   const stage = stageOf(lifecycleFromRelease(r));
   if (stage === 'rollout') return 'rollout';

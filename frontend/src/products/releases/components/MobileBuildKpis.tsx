@@ -24,7 +24,7 @@ const CARDS: {
     key: 'building',
     label: 'Building',
     dot: 'bg-amber-500',
-    hint: 'Drafts and builds running on GitHub — not yet on a store track.',
+    hint: 'Dispatched and building on GitHub — not yet on a store track.',
   },
   {
     key: 'promote',
