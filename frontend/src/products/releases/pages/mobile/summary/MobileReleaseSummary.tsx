@@ -58,10 +58,10 @@ const MobileReleaseSummary = () => {
   const { user: authUser } = useAuth();
   const actor = authUser?.email || 'admin';
 
-  const approveMut = useApproveRelease();
-  const discardMut = useDiscardRelease();
-  const abortMut = useAbortRelease();
-  const deleteMut = useDeleteRelease();
+  const approveMut = useApproveRelease({ mobile: true });
+  const discardMut = useDiscardRelease({ mobile: true });
+  const abortMut = useAbortRelease({ mobile: true });
+  const deleteMut = useDeleteRelease({ mobile: true });
   const dispatchMobileMut = useDispatchMobileReleases();
 
   // Rollout + OTA queries stay above the early returns (rules of hooks);
@@ -204,7 +204,7 @@ const MobileReleaseSummary = () => {
   const actions = (
     <>
       {s === 'CREATED' && release.is_approved === 0 && (
-        <PermissionGate product="autopilot" permission="RELEASE_APPROVE" appGroup={release.appGroup}>
+        <PermissionGate product="mobile" permission="MB_MOBILE_DISPATCH" appGroup={`${release.appGroup}/${release.env}`}>
           <Button
             size="sm"
             variant="success"
@@ -216,7 +216,7 @@ const MobileReleaseSummary = () => {
         </PermissionGate>
       )}
       {s === 'CREATED' && !!release.is_approved && (
-        <PermissionGate product="autopilot" permission="MOBILE_DISPATCH" appGroup={release.appGroup}>
+        <PermissionGate product="mobile" permission="MB_MOBILE_DISPATCH" appGroup={`${release.appGroup}/${release.env}`}>
           <Button
             size="sm"
             variant="outline"
@@ -236,7 +236,7 @@ const MobileReleaseSummary = () => {
         </PermissionGate>
       )}
       {s === 'CREATED' && (
-        <PermissionGate product="autopilot" permission="RELEASE_DISCARD" appGroup={release.appGroup}>
+        <PermissionGate product="mobile" permission="MB_RELEASE_CREATE" appGroup={`${release.appGroup}/${release.env}`}>
           <Button
             size="sm"
             variant="outline"
@@ -252,7 +252,7 @@ const MobileReleaseSummary = () => {
           is still Building. A rejected / on-store / terminal build can't be
           un-shipped, so Abort is hidden. */}
       {s === 'INPROGRESS' && !!rollout?.rdAbortable && (
-        <PermissionGate product="autopilot" permission="RELEASE_PAUSE" appGroup={release.appGroup}>
+        <PermissionGate product="mobile" permission="MB_RELEASE_ABORT" appGroup={`${release.appGroup}/${release.env}`}>
           <Button
             size="sm"
             variant="secondary"
@@ -271,7 +271,7 @@ const MobileReleaseSummary = () => {
         !revertedByTarget &&
         !revertsTarget &&
         !isDebug && (
-          <PermissionGate product="autopilot" permission="RELEASE_REVERT" appGroup={release.appGroup}>
+          <PermissionGate product="mobile" permission="MB_RELEASE_REVERT" appGroup={`${release.appGroup}/${release.env}`}>
             <Button
               size="sm"
               variant="secondary"
@@ -282,7 +282,7 @@ const MobileReleaseSummary = () => {
             </Button>
           </PermissionGate>
         )}
-      <PermissionGate product="autopilot" permission="RELEASE_DELETE" appGroup={release.appGroup}>
+      <PermissionGate product="mobile" permission="MB_MOBILE_APP_MANAGE" appGroup={`${release.appGroup}/${release.env}`}>
         <SimpleTooltip content="Delete">
           <Button
             size="icon"
@@ -371,6 +371,7 @@ const MobileReleaseSummary = () => {
                   appKey={`${release.appGroup}/${release.env}`}
                   tagConflict={scenario === 'failed' ? tagConflictOf(events) : null}
                   failureDetail={scenario === 'failed' ? (ghFailureDetailOf(events) ?? failureReasonOf(release)) : null}
+                  githubRepo={matchedMobileApp?.githubRepo}
                 />
               </div>
             )}

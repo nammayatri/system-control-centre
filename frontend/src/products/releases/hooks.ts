@@ -5,6 +5,9 @@ import {
   fetchReleaseEvents,
   createRelease,
   approveRelease,
+  approveMobileRelease,
+  discardMobileRelease,
+  abortMobileRelease,
   rollbackRelease,
   revertRelease,
   discardRelease,
@@ -14,6 +17,7 @@ import {
   immediateRevert,
   updateTracker,
   deleteRelease,
+  deleteMobileRelease,
   restartRelease,
   fastForwardRelease,
   immediateRevertRelease,
@@ -113,11 +117,12 @@ export function useCreateRelease() {
   });
 }
 
-export function useApproveRelease() {
+export function useApproveRelease(opts?: { mobile?: boolean }) {
   const qc = useQueryClient();
   return useMutation({
+    // Mobile rows go through the MB-gated route so mobile-only grants work.
     mutationFn: ({ releaseId, approvedBy, isInfraApproved }: { releaseId: string; approvedBy: string; isInfraApproved?: boolean }) =>
-      approveRelease(releaseId, approvedBy, isInfraApproved),
+      opts?.mobile ? approveMobileRelease(releaseId, approvedBy) : approveRelease(releaseId, approvedBy, isInfraApproved),
     onSuccess: (_, vars) => {
       toast.success('Release approved');
       qc.invalidateQueries({ queryKey: ['release', vars.releaseId] });
@@ -159,11 +164,11 @@ export function useRevertRelease() {
   });
 }
 
-export function useDiscardRelease() {
+export function useDiscardRelease(opts?: { mobile?: boolean }) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ releaseId, reason }: { releaseId: string; reason?: string }) =>
-      discardRelease(releaseId, reason),
+      opts?.mobile ? discardMobileRelease(releaseId, reason) : discardRelease(releaseId, reason),
     onSuccess: (_, vars) => {
       toast.success('Release discarded');
       qc.invalidateQueries({ queryKey: ['release', vars.releaseId] });
@@ -203,10 +208,12 @@ export function useResumeRelease() {
   });
 }
 
-export function useAbortRelease() {
+export function useAbortRelease(opts?: { mobile?: boolean }) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (releaseId: string) => abortRelease(releaseId),
+    // Mobile: the MB-gated abort route (per-app scope), not the shared
+    // AP_RELEASE_UPDATE status flip.
+    mutationFn: (releaseId: string) => (opts?.mobile ? abortMobileRelease(releaseId) : abortRelease(releaseId)),
     onSuccess: (_, releaseId) => {
       toast.success('Release abort initiated');
       qc.invalidateQueries({ queryKey: ['release', releaseId] });
@@ -232,10 +239,12 @@ export function useImmediateRevert() {
   });
 }
 
-export function useDeleteRelease() {
+export function useDeleteRelease(opts?: { mobile?: boolean }) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (releaseId: string) => deleteRelease(releaseId),
+    // Mobile rows go through the MB-gated route so mobile-only grants work.
+    mutationFn: (releaseId: string) =>
+      opts?.mobile ? deleteMobileRelease(releaseId) : deleteRelease(releaseId),
     onSuccess: () => {
       toast.success('Release deleted');
       qc.invalidateQueries({ queryKey: ['releases'] });

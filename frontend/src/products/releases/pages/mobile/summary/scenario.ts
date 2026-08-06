@@ -83,3 +83,34 @@ export const SCENARIO_PILL: Record<Scenario, { box: string; dot: string | null }
   'failed': { box: 'bg-red-50 border-red-200 text-red-700', dot: null },
   'debug': { box: 'bg-amber-50 border-amber-200 text-amber-700', dot: null },
 };
+
+/**
+ * Human words for the build workflow's internal stage (mb_wf_status), shown
+ * while the page scenario is 'building' — the operator sees WHERE the
+ * workflow is (dispatching / building / uploading), not just "Building".
+ */
+export const BUILD_WORKFLOW_STEPS = ['Preparing', 'Dispatched', 'Building', 'Uploading'] as const;
+
+export interface BuildStageInfo {
+  step: number; // 1-based index into BUILD_WORKFLOW_STEPS
+  label: (typeof BUILD_WORKFLOW_STEPS)[number];
+  detail: string;
+}
+
+export function buildWorkflowStage(release: APRelease): BuildStageInfo | null {
+  const mb = (release.release_context?.mb_wf_status ?? '') as string;
+  switch (mb) {
+    case 'MBInit':
+    case 'MBVersionResolved':
+      return { step: 1, label: 'Preparing', detail: 'Resolving the version and claiming the build slot.' };
+    case 'MBDispatched':
+      return { step: 2, label: 'Dispatched', detail: 'Workflow dispatched — waiting for GitHub to start the run.' };
+    case 'MBRunIdResolved':
+    case 'MBBuilding':
+      return { step: 3, label: 'Building', detail: 'GitHub runners are building the app.' };
+    case 'MBSubmittedToStore':
+      return { step: 4, label: 'Uploading', detail: 'Artifact uploaded — waiting for the store to process it and the release tag to land.' };
+    default:
+      return null;
+  }
+}

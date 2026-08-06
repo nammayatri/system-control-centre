@@ -692,6 +692,7 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                                     object
                                         [ "run_id" .= runIdT
                                         , "head_sha" .= wrHeadSha r
+                                        , "html_url" .= wrHtmlUrl r
                                         , "source" .= ("orphan_adopt" :: Text)
                                         ]
                                 adoptGroupRun rt leaderId runIdT inheritedBatch

@@ -25,8 +25,8 @@ import { cn } from '../../../../../lib/utils';
 import { fullStamp, shortDate } from './dates';
 import { stageOf, lifecycleFromRollout } from '../../../components/mobileStage';
 import type { TagConflict } from './heal';
-import { breadcrumbsOf } from './BuildDetailsCard';
-import { SCENARIO_ACCENT, type Scenario } from './scenario';
+import { ghRunUrlOf } from './BuildDetailsCard';
+import { BUILD_WORKFLOW_STEPS, buildWorkflowStage, SCENARIO_ACCENT, type Scenario } from './scenario';
 
 function errMsg(e: any): string {
   return e?.response?.data?.message ?? e?.response?.data?.error ?? e?.message ?? 'Request failed';
@@ -76,6 +76,9 @@ export interface StoreReleaseCockpitProps {
   /** Failure cause for the post-mortem block — the GH-side ##[error] excerpt
    * (BUILD_FAILURE_DETAIL event) when captured, else the SCC failure reason. */
   failureDetail?: string | null;
+  /** owner/repo of the app's build repo (app catalog) — completes the GitHub
+   * run URL when the row carries only external_run_id. */
+  githubRepo?: string;
 }
 
 /**
@@ -84,7 +87,7 @@ export interface StoreReleaseCockpitProps {
  * mutations (ported from MobileRolloutPanel). Stage truth is stageOf() over the
  * rollout detail; visuals key off the page scenario.
  */
-export function StoreReleaseCockpit({ release, rollout: d, scenario, statusLabel, appKey, tagConflict, failureDetail }: StoreReleaseCockpitProps) {
+export function StoreReleaseCockpit({ release, rollout: d, scenario, statusLabel, appKey, tagConflict, failureDetail, githubRepo }: StoreReleaseCockpitProps) {
   const qc = useQueryClient();
   const { hasPermission } = usePermissions();
   const releaseId = release.id;
@@ -301,7 +304,7 @@ export function StoreReleaseCockpit({ release, rollout: d, scenario, statusLabel
     }
   };
 
-  const { ghRunUrl } = breadcrumbsOf(release);
+  const ghRunUrl = ghRunUrlOf(release, githubRepo);
 
   // Subtitle under "Store Release" — platform + stage flavored (mockup copy).
   const subtitle = (() => {
@@ -382,18 +385,62 @@ export function StoreReleaseCockpit({ release, rollout: d, scenario, statusLabel
 
       {/* ── STAGE BODIES (one at a time) ── */}
 
-      {/* Build not on a store track yet / staged rollout off */}
-      {stage === 'none' && scenario !== 'failed' && (
-        <div className="border border-dashed border-zinc-200 rounded-lg px-4 py-6 text-center text-xs text-zinc-500">
-          {scenario === 'draft'
-            ? 'Store controls unlock after the build is dispatched and lands on a store track.'
-            : scenario === 'building'
-              ? 'Building — store controls unlock once the binary reaches a store track.'
-              : scenario === 'live'
-                ? 'This build is live on the store.'
-                : 'No store actions available for this build.'}
-        </div>
-      )}
+      {/* Build not on a store track yet / staged rollout off. While BUILDING,
+          show WHERE the workflow is (stage words from mb_wf_status) + the
+          GitHub run link, not just a generic "Building". */}
+      {stage === 'none' && scenario !== 'failed' && (() => {
+        const wf = scenario === 'building' ? buildWorkflowStage(release) : null;
+        if (!wf)
+          return (
+            <div className="border border-dashed border-zinc-200 rounded-lg px-4 py-6 text-center text-xs text-zinc-500">
+              {scenario === 'draft'
+                ? 'Store controls unlock after the build is dispatched and lands on a store track.'
+                : scenario === 'building'
+                  ? 'Building — store controls unlock once the binary reaches a store track.'
+                  : scenario === 'live'
+                    ? 'This build is live on the store.'
+                    : 'No store actions available for this build.'}
+            </div>
+          );
+        return (
+          <div className="border border-dashed border-zinc-200 rounded-lg px-4 py-5 text-center">
+            <div className="flex items-center justify-center gap-1.5 text-[11px] font-semibold">
+              {BUILD_WORKFLOW_STEPS.map((label, i) => (
+                <span key={label} className="flex items-center gap-1.5">
+                  {i > 0 && <span className="w-4 border-t border-zinc-200" aria-hidden />}
+                  <span
+                    className={cn(
+                      'flex items-center gap-1',
+                      i + 1 < wf.step ? 'text-emerald-600' : i + 1 === wf.step ? 'text-violet-700' : 'text-zinc-300',
+                    )}
+                  >
+                    {i + 1 < wf.step ? (
+                      <CheckIcon size={11} weight="bold" aria-hidden="true" />
+                    ) : i + 1 === wf.step ? (
+                      <span className="w-1.5 h-1.5 rounded-full bg-violet-500 animate-pulse motion-reduce:animate-none" aria-hidden />
+                    ) : (
+                      <span className="w-1.5 h-1.5 rounded-full bg-zinc-200" aria-hidden />
+                    )}
+                    {label}
+                  </span>
+                </span>
+              ))}
+            </div>
+            <p className="text-xs text-zinc-500 mt-2.5">{wf.detail}</p>
+            <p className="text-[11px] text-zinc-400 mt-1">Store controls unlock once the binary reaches a store track.</p>
+            {ghRunUrl && (
+              <a
+                href={ghRunUrl}
+                target="_blank"
+                rel="noopener"
+                className="mt-2.5 inline-flex items-center gap-1 text-xs font-semibold text-violet-600 hover:underline"
+              >
+                View GitHub run <ArrowSquareOutIcon size={12} weight="bold" aria-hidden="true" />
+              </a>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Promote stage, but blocked — cause-specific copy from rdPromoteBlock */}
       {stage === 'promote' &&

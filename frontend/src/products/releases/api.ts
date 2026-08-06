@@ -91,6 +91,8 @@ export interface ReleaseContext {
     // Dispatch-group id: rows dispatched together share ONE GitHub run. The group
     // page renders its "shared run" chip off this. Absent until dispatched.
     dispatch_id?: string | null;
+    // GitHub Actions run id — absent until ResolveRunId binds the run.
+    external_run_id?: string | null;
 }
 
 // ── All statuses (UPPERCASE — canonical) ─────
@@ -435,6 +437,9 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         tag_pushed: (r.releaseContext as any)?.tag_pushed,
         matrix_job_name: (r.releaseContext as any)?.matrix_job_name,
         dispatch_id: (r.releaseContext as any)?.dispatch_id,
+        // GitHub Actions run id (stamped once ResolveRunId binds the run) —
+        // the summary's "Workflow Run Entity" / "View GitHub run" link.
+        external_run_id: (r.releaseContext as any)?.external_run_id,
         build_type: (r.releaseContext as any)?.build_type,
         // Provider Android store destination ("GooglePlay" | "Firebase") — drives the
         // "Firebase internal" badge. Must be passed through here or it's dropped.
@@ -795,12 +800,25 @@ export async function updateTracker(releaseId: string, updates: Record<string, a
 export const pauseRelease = (id: string) => updateTracker(id, { status: 'PAUSED' });
 export const resumeRelease = (id: string) => updateTracker(id, { status: 'INPROGRESS' });
 export const abortRelease = (id: string) => updateTracker(id, { status: 'ABORTING' });
-// Mobile builds use the mobile-gated abort (MB_RELEASE_ABORT, per-app scope) —
-// works for scoped mobile grants that hold no autopilot access at all.
+// Mobile builds use the mobile-gated verbs (MB_*, per-app scope) — they work
+// for scoped mobile grants that hold no autopilot access at all. The shared
+// /releases/:id/* routes above stay for backend rows (AP_* gated).
 export const abortMobileRelease = async (id: string) => {
     const { data } = await apiClient.post(`/mobile/releases/${encodeURIComponent(id)}/abort`);
     return data;
 };
+export async function approveMobileRelease(releaseId: string, approvedBy: string): Promise<any> {
+    const { data } = await apiClient.post(`/mobile/releases/${encodeURIComponent(releaseId)}/approve`, { approvedBy, isInfraApproved: null });
+    return data;
+}
+export async function discardMobileRelease(releaseId: string, reason?: string): Promise<any> {
+    const { data } = await apiClient.post(`/mobile/releases/${encodeURIComponent(releaseId)}/discard`, { reason: reason || null });
+    return data;
+}
+export async function deleteMobileRelease(releaseId: string): Promise<any> {
+    const { data } = await apiClient.post(`/mobile/releases/${encodeURIComponent(releaseId)}/delete`);
+    return data;
+}
 export const immediateRevert = (id: string, requestedBy?: string) =>
     revertRelease(id, requestedBy, undefined, true);
 

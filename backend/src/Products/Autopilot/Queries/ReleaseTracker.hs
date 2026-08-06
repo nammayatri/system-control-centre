@@ -1010,7 +1010,7 @@ fromRow ReleaseTrackerT{..} =
                 let track = maybe (storeTrackText rtMetadata) Just rtStoreTrack
                     ph = phaseFromFields (buildKind (mbContext mb)) (mbWfStatus mb) rtReviewStatus rtRolloutStatus rtRolloutPercent track
                     disp = displayStatusInferred (reviewInferredOf (parseJsonTextMaybe rtMetadata)) ph
-                 in Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent track (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) rtDispatchId (toJSON (mbContext mb)))
+                 in Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent track (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) rtDispatchId rtExternalRunId (toJSON (mbContext mb)))
             _ -> Nothing
         tracker =
             ReleaseTracker
@@ -1063,8 +1063,8 @@ This lets the releases list/detail read the live rollout % straight off the row
 (the same source the rollout endpoint uses), instead of a stale metadata mirror.
 No-op if the value isn't an object.
 -}
-addMobileLifecycle :: Text -> Maybe Text -> Maybe Double -> Maybe Text -> Text -> Text -> Text -> Maybe Text -> Value -> Value
-addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack dispLabel dispVariant dispPhase mDispatchId (Object o) =
+addMobileLifecycle :: Text -> Maybe Text -> Maybe Double -> Maybe Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Value -> Value
+addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack dispLabel dispVariant dispPhase mDispatchId mRunId (Object o) =
     Object
         . KM.insert "mb_wf_status" (toJSON st)
         . KM.insert "rollout_status" (toJSON mRolloutStatus)
@@ -1082,8 +1082,12 @@ addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack dispLabel dispVaria
         -- page renders its "shared run" chip off this. Insert only when known, so a
         -- re-application over already-built JSON (injectStoreState) can't clobber it.
         . maybe id (\d -> KM.insert "dispatch_id" (toJSON d)) mDispatchId
+        -- GitHub run id (ResolveRunId stamps the column): the summary's
+        -- "Workflow Run Entity" link. Insert-when-known, so re-application
+        -- (injectStoreState) can't clobber it.
+        . maybe id (\r -> KM.insert "external_run_id" (toJSON r)) mRunId
         $ o
-addMobileLifecycle _ _ _ _ _ _ _ _ v = v
+addMobileLifecycle _ _ _ _ _ _ _ _ _ v = v
 
 {- | Whether metadata flags the review verdict as track-INFERRED (Android
 out-of-band detection, Google exposes no review state) rather than

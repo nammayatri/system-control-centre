@@ -31,6 +31,9 @@ module Products.Autopilot.Mobile.Handlers.Release (
 
     -- * Abort (cancel a running build)
     mobileAbortH,
+    mobileApproveH,
+    mobileDiscardH,
+    mobileDeleteH,
 
     -- * Mobile-gated reads (product split: list/detail/events for mobile-only grants)
     mobileListReleasesH,
@@ -115,6 +118,7 @@ import Products.Autopilot.Mobile.Types.Storage (
 import Products.Autopilot.Actions.Release qualified as BE
 import Products.Autopilot.EventLog (logStatusUpdated)
 import Products.Autopilot.Types.API (ReleaseEventResponse)
+import Products.Autopilot.Types.API qualified as API
 import Products.Autopilot.Notifications (notifyReleaseAborted)
 import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, conditionalUpdateTracker, findDispatchedReleaseIds, findReleaseTracker, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch)
 import Products.Autopilot.RuntimeConfig (getMobileBuildType)
@@ -134,7 +138,7 @@ import qualified Shared.AI.Changelog as CL
 import Shared.AI.Config (loadAiConfig)
 import Shared.AI.Queries (claimReleaseSummary, computePromptHash, lookupReleaseSummary, upsertReleaseSummary)
 import Shared.AI.ReleaseSummary (generateCombinedWithFallback, generateWithFallback, renderCombinedDeterministic)
-import Shared.API.Response (APISuccess (..))
+import Shared.API.Response (APIResponse (..), APISuccess (..))
 import Shared.JSON (stripPrefixOptions)
 import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 
@@ -1169,6 +1173,46 @@ mobileAbortH ap rid = do
             logStatusUpdated aborted "Tracker marked as ABORTING"
             notifyReleaseAborted aborted
             pure Success
+
+-- ── Draft lifecycle verbs (product split) ───────────────────────────
+
+{- | Approve a mobile DRAFT for dispatch — the MobileBuild-only mirror of the
+shared approve route. Gated by 'MB_MOBILE_DISPATCH' (approval is the gate to
+dispatch; same operator) so a mobile-only grant works without autopilot access.
+-}
+mobileApproveH :: AuthedPerson -> Text -> API.ApproveReleaseReq -> Flow (Maybe RT.ReleaseTracker)
+mobileApproveH ap rid req =
+    withMobileRow rid $ \(tracker, mts) -> do
+        requireAppPerm (Proxy @'MB_MOBILE_DISPATCH) ap (RT.appGroup tracker) (RT.env tracker)
+        BE.approveReleaseCore rid req tracker mts
+
+-- | Discard a never-dispatched mobile draft — creator-level ('MB_RELEASE_CREATE').
+mobileDiscardH :: AuthedPerson -> Text -> API.DiscardReleaseReq -> Flow APIResponse
+mobileDiscardH ap rid req =
+    withMobileRow rid $ \(tracker, mts) -> do
+        requireAppPerm (Proxy @'MB_RELEASE_CREATE) ap (RT.appGroup tracker) (RT.env tracker)
+        BE.discardReleaseCore req tracker mts
+
+{- | Permanently delete a mobile release row (drops its audit trail too) —
+destructive, so it takes the admin verb 'MB_MOBILE_APP_MANAGE'.
+-}
+mobileDeleteH :: AuthedPerson -> Text -> Flow APIResponse
+mobileDeleteH ap rid =
+    withMobileRow rid $ \(tracker, _) -> do
+        requireAppPerm (Proxy @'MB_MOBILE_APP_MANAGE) ap (RT.appGroup tracker) (RT.env tracker)
+        BE.deleteReleaseCore rid tracker
+
+-- | Shared shape of the mobile verb wrappers: resolve the row, refuse
+-- non-mobile categories (BE rows keep their AP-gated routes).
+withMobileRow :: Text -> ((RT.ReleaseTracker, Maybe TargetState) -> Flow a) -> Flow a
+withMobileRow rid act = do
+    m <- findReleaseTracker rid
+    case m of
+        Nothing -> throwM (NotFound "Release not found")
+        Just pair@(tracker, _) -> do
+            unless (RT.category tracker == MobileBuild) $
+                throwM (BadRequest "Not a mobile build — use the shared release routes for backend rows")
+            act pair
 
 -- ── Mobile-gated reads (product split) ─────────────────────────────
 

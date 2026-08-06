@@ -25,6 +25,17 @@ const tryFormatJson = (data: string): string => {
   catch { return data; }
 };
 
+// Payload-carried link (e.g. GH_RUN_RESOLVED's html_url → the GitHub Actions
+// run) — surfaced as a click-through so the run is one click away, not buried
+// in the expanded JSON.
+const linkOf = (data?: string): string | undefined => {
+  try {
+    const p = JSON.parse(data || '');
+    const url = p?.html_url;
+    return typeof url === 'string' && url.startsWith('https://') ? url : undefined;
+  } catch { return undefined; }
+};
+
 export const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [eventSearch, setEventSearch] = useState('');
@@ -73,7 +84,22 @@ export const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events 
                       </Badge>
                     </td>
                     <td className="py-2 px-3 font-mono text-xs">{evt.label}</td>
-                    <td className="py-2 px-3 text-xs text-zinc-500 max-w-xs truncate" title={evt.data}>{evt.data?.slice(0, 40)}{(evt.data?.length || 0) > 40 ? '...' : ''}</td>
+                    <td className="py-2 px-3 text-xs text-zinc-500 max-w-xs" title={evt.data}>
+                      <span className="flex items-center gap-2 min-w-0">
+                        {linkOf(evt.data) && (
+                          <a
+                            href={linkOf(evt.data)}
+                            target="_blank"
+                            rel="noopener"
+                            onClick={(e) => e.stopPropagation()}
+                            className="shrink-0 font-semibold text-violet-600 hover:underline"
+                          >
+                            {evt.label === 'GH_RUN_RESOLVED' ? 'View run ↗' : 'Open ↗'}
+                          </a>
+                        )}
+                        <span className="truncate">{evt.data?.slice(0, 40)}{(evt.data?.length || 0) > 40 ? '...' : ''}</span>
+                      </span>
+                    </td>
                   </tr>
                   {expandedRows.has(idx) && (
                     <tr className="border-b border-zinc-100 bg-zinc-50">
