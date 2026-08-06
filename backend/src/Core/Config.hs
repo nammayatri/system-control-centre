@@ -63,7 +63,11 @@ data Config = Config
     -- Airborne analytics base URL — a SEPARATE, unauthenticated service from
     -- the control plane (no PAT, org/app passed as query params). Empty = the
     -- analytics proxy routes report "not configured" instead of guessing.
-    airborneAnalyticsUrl :: String
+    airborneAnalyticsUrl :: String,
+    -- Chime (appmonitor) push-campaign + adoption base URL. Empty = the chime
+    -- proxy routes report "not configured". The API key comes from
+    -- Core.Secrets (SC_CHIME_API_KEY) at call time, never Config.
+    chimeUrl :: String
   }
   deriving (Show)
 
@@ -99,6 +103,7 @@ loadConfig = do
 
   airborneUrl <- envOr "SC_AIRBORNE_URL" "https://airborne.juspay.in"
   airborneAnalyticsUrl <- envOr "SC_AIRBORNE_ANALYTICS_URL" ""
+  chimeUrl <- envOr "SC_CHIME_URL" ""
 
   pure Config {..}
 

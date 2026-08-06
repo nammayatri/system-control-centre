@@ -25,6 +25,19 @@ const tryFormatJson = (data: string): string => {
   catch { return data; }
 };
 
+// A GitHub run/job URL carried in the event payload (MATRIX_JOB_UPDATED's
+// html_url, dispatch events' run urls) — rendered as a direct CI link.
+const ghUrlOf = (data?: string): string | null => {
+  if (!data) return null;
+  try {
+    const d = JSON.parse(data) as Record<string, unknown>;
+    const u = d.html_url ?? d.github_run_url ?? d.run_url ?? d.expected_run_url ?? d.gh_run_url;
+    return typeof u === 'string' && u.startsWith('http') ? u : null;
+  } catch {
+    return null;
+  }
+};
+
 export const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events }) => {
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [eventSearch, setEventSearch] = useState('');
@@ -73,7 +86,26 @@ export const ReleaseEventsTab: React.FC<{ events: RolloutEvent[] }> = ({ events 
                       </Badge>
                     </td>
                     <td className="py-2 px-3 font-mono text-xs">{evt.label}</td>
-                    <td className="py-2 px-3 text-xs text-zinc-500 max-w-xs truncate" title={evt.data}>{evt.data?.slice(0, 40)}{(evt.data?.length || 0) > 40 ? '...' : ''}</td>
+                    <td className="py-2 px-3 text-xs text-zinc-500 max-w-xs">
+                      <span className="flex items-center gap-2">
+                        <span className="truncate" title={evt.data}>
+                          {evt.data?.slice(0, 40)}
+                          {(evt.data?.length || 0) > 40 ? '...' : ''}
+                        </span>
+                        {ghUrlOf(evt.data) && (
+                          <a
+                            href={ghUrlOf(evt.data)!}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-blue-600 font-bold hover:underline shrink-0 whitespace-nowrap"
+                            title="Open the GitHub workflow run/job"
+                          >
+                            CI ↗
+                          </a>
+                        )}
+                      </span>
+                    </td>
                   </tr>
                   {expandedRows.has(idx) && (
                     <tr className="border-b border-zinc-100 bg-zinc-50">

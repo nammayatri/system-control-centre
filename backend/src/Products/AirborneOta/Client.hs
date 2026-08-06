@@ -21,6 +21,7 @@ module Products.AirborneOta.Client (
     loadAirborneCreds,
     airborneConfigured,
     fetchUpstreamApps,
+    renderQuery,
     KeepaliveOutcome (..),
     recordKeepalive,
     readKeepalive,

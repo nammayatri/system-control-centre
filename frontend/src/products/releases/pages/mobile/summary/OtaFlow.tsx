@@ -28,14 +28,15 @@ import { useConfirm } from '../../../../../shared/ui/confirm-dialog';
 import {
   concludeOtaRelease,
   discardOtaRelease,
-  fetchOtaAdoption,
-  fetchOtaFailures,
   fetchOtaPackageDetail,
   fetchOtaPackages,
   fetchOtaReleases,
   rampOtaRelease,
 } from '../../../../airborne-ota/api';
 import { useOtaAccess } from '../../../../airborne-ota/hooks';
+import { chimeApi } from '../../../api';
+import { AdoptionCard } from '../../../components/chime/AdoptionCard';
+import { useMobileApps } from '../../../hooks';
 import type { OtaRelease } from '../../../../airborne-ota/types';
 import {
   cancelOtaPush,
@@ -171,6 +172,11 @@ export function OtaFlow(props: OtaFlowProps) {
   const qc = useQueryClient();
   const confirm = useConfirm();
   const access = useOtaAccess();
+  const { data: mobileApps = [] } = useMobileApps();
+  const catalogPkg = useMemo(
+    () => mobileApps.find((a) => a.airborneAppRef === ref)?.packageName ?? null,
+    [mobileApps, ref],
+  );
   const perms = useMemo(
     () => access.data?.apps.find((a) => a.appRef === ref)?.permissions ?? [],
     [access.data, ref],
@@ -707,7 +713,16 @@ export function OtaFlow(props: OtaFlowProps) {
                   </div>
                 </div>
 
-                <MetricsBlock appRef={ref} releaseId={r.id} enabled={live} />
+                {live && (
+                  <AdoptionCard
+                    className="px-3 pb-3"
+                    variant="compact"
+                    appRef={ref}
+                    pkg={catalogPkg}
+                    os={platform === 'ios' ? 'ios' : 'android'}
+                    version={pkgVersionOf(r) != null ? String(pkgVersionOf(r)) : (pkgTagOf(r) ?? null)}
+                  />
+                )}
 
                 {/* Ramp control — serving releases AND created ones (first ramp
                     is what starts serving; parity with the group panel). */}
@@ -826,6 +841,7 @@ export function OtaFlow(props: OtaFlowProps) {
           })
         )}
 
+
         {/* 2. Releasable packages (stacked lineage) */}
         {hasView && !releasesQ.isError && (
           <div>
@@ -852,7 +868,10 @@ export function OtaFlow(props: OtaFlowProps) {
                         <span className="font-mono font-bold text-zinc-800">
                           pkg v{pk.version} {pk.tag && <span className="font-normal text-zinc-400">· {pk.tag}</span>}
                         </span>
-                        <ProvenanceBadge prov={provOf(pk.version)} push={push} link={link} />
+                        <span className="flex items-center gap-1.5">
+                          <AdoptionInline appRef={ref} pkg={catalogPkg} os={platform === 'ios' ? 'ios' : 'android'} version={String(pk.version)} />
+                          <ProvenanceBadge prov={provOf(pk.version)} push={push} link={link} />
+                        </span>
                       </div>
                       {pkgRels.map((rel) => {
                         const st = statusOf(rel);
@@ -917,9 +936,14 @@ export function OtaFlow(props: OtaFlowProps) {
                       History · {eligiblePkgs.length - 1} older package{eligiblePkgs.length - 1 > 1 ? 's' : ''} from
                       this build
                     </summary>
-                    <div className="divide-y divide-zinc-100">
-                      {eligiblePkgs.slice(1).map((pk) => (
-                        <div key={pk.version} className="px-3 py-1.5 flex items-center gap-2">
+                    <div className="flex flex-col gap-1.5 p-2 bg-white">
+                      {eligiblePkgs.slice(1).map((pk) => {
+                        const newest = releases
+                          .filter((r) => pkgVersionOf(r) === pk.version)
+                          .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))[0];
+                        return (
+                        <div key={pk.version} className="bg-zinc-50/60 border border-zinc-100 rounded-md px-2.5 py-1.5 flex flex-col gap-1">
+                        <div className="flex items-center gap-2">
                           <span className="font-mono text-[11px] text-zinc-600 font-semibold">pkg v{pk.version}</span>
                           {pk.tag && <span className="font-mono text-[10px] text-zinc-400">{pk.tag}</span>}
                           <ProvenanceBadge
@@ -928,6 +952,7 @@ export function OtaFlow(props: OtaFlowProps) {
                             link={myLinks.find((l) => l.packageVersion === pk.version)}
                           />
                           <span className="ml-auto" />
+                          <AdoptionInline appRef={ref} pkg={catalogPkg} os={platform === 'ios' ? 'ios' : 'android'} version={String(pk.version)} />
                           {can('OTA_RELEASE_CREATE') && !releaseBlocked && (
                             <button
                               type="button"
@@ -938,7 +963,18 @@ export function OtaFlow(props: OtaFlowProps) {
                             </button>
                           )}
                         </div>
-                      ))}
+                        {newest && (
+                          <span className="flex items-center gap-1 flex-wrap text-[9px] text-zinc-600 font-medium">
+                            <span className={cn('px-1 rounded font-bold', REL_BADGE[statusOf(newest)] ?? 'bg-zinc-100 text-zinc-600')}>
+                              {statusOf(newest)}
+                            </span>
+                            <TargetChips dims={dimsOf(newest)} />
+                            {newest.created_at && <span title={fullStamp(newest.created_at)}>· {shortDate(newest.created_at)}</span>}
+                          </span>
+                        )}
+                        </div>
+                        );
+                      })}
                     </div>
                   </details>
                 )}
@@ -1409,67 +1445,36 @@ export function JobMatrix({ pushId, live, defaultOpen = true }: { pushId: string
 }
 
 /** 7-day adoption metrics — honest dashed empty when analytics is absent. */
-function MetricsBlock({ appRef, releaseId, enabled }: { appRef: string; releaseId?: string; enabled: boolean }) {
-  const [range] = useState(() => {
-    const end = Date.now();
-    return { start: end - 7 * 86_400_000, end };
-  });
-  const adoptionQ = useQuery({
-    queryKey: ['mobile-ota-adoption', appRef, releaseId],
-    queryFn: () =>
-      fetchOtaAdoption(appRef, {
-        interval: 'DAY',
-        start_date: String(range.start),
-        end_date: String(range.end),
-        date: String(range.end),
-        release_id: releaseId,
-      }),
-    enabled: enabled && !!releaseId,
+
+/** Inline active-users chip for one package version — same cache family as
+ * AdoptionCard; renders nothing when Chime has no record (rows stay clean). */
+function AdoptionInline({
+  appRef,
+  pkg,
+  os,
+  version,
+}: {
+  appRef: string;
+  pkg: string | null;
+  os: 'android' | 'ios';
+  version: string | null;
+}) {
+  const q = useQuery({
+    queryKey: ['chime-adoption', appRef, pkg, version, os],
+    queryFn: () => chimeApi.adoption(appRef, { pkg: pkg!, version: version!, os }),
+    enabled: !!pkg && !!version,
     retry: false,
     staleTime: 60_000,
   });
-  const failuresQ = useQuery({
-    queryKey: ['mobile-ota-metrics', appRef, releaseId],
-    queryFn: () => fetchOtaFailures(appRef, { days: 7, release_id: releaseId }),
-    enabled: enabled && !!releaseId,
-    retry: false,
-    staleTime: 60_000,
-  });
-  if (!enabled) return null;
-  const buckets =
-    (adoptionQ.data as { data?: { time_breakdown?: Array<Record<string, unknown>> } } | undefined)?.data
-      ?.time_breakdown ?? [];
-  const num = (v: unknown) => (typeof v === 'number' ? v : 0);
-  const sum = (k: string) => buckets.reduce((acc, b) => acc + num(b[k]), 0);
-  const downloads = sum('download_success');
-  const applied = sum('apply_success');
-  const rollbacks = sum('rollbacks_initiated');
-  const failures = (failuresQ.data as { total_failures?: number } | undefined)?.total_failures;
-  const haveAdoption = !adoptionQ.isError && buckets.length > 0;
-  const haveFailures = !failuresQ.isError && failures != null;
-  const fmt = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
-  const bad = rollbacks + (failures ?? 0);
+  const a = q.data?.data;
+  if (!a || a.recorded === false || a.active_users == null) return null;
+  const windowLabel = a.window_hours % 24 === 0 ? `${a.window_hours / 24} days` : `${a.window_hours}h`;
   return (
-    <div className="px-3 pb-3">
-      {!haveAdoption && !haveFailures ? (
-        <div className="border border-dashed border-zinc-300 bg-zinc-50/50 rounded flex items-center justify-center py-3 text-center text-zinc-400 text-[10px] gap-1">
-          <ChartBarIcon size={13} weight="duotone" aria-hidden="true" /> Analytics absent. Connect Mixpanel to view
-          adoption.
-        </div>
-      ) : (
-        <div className="border border-zinc-100 bg-zinc-50/50 rounded py-2 px-3 text-[10px] text-zinc-500">
-          7d:{' '}
-          {haveAdoption && (
-            <>
-              downloads <span className="text-zinc-700 font-bold">{fmt(downloads)}</span> · applied{' '}
-              <span className="text-zinc-700 font-bold">{fmt(applied)}</span> ·{' '}
-            </>
-          )}
-          rollbacks/failures{' '}
-          <span className={bad > 0 ? 'text-red-600 font-bold' : 'text-zinc-700 font-bold'}>{fmt(bad)}</span>
-          {bad > 0 && ' — a rising count means Revert'}
-        </div>
-      )}
-    </div>
+    <span
+      className="font-mono text-[9px] bg-violet-50 border border-violet-200 text-violet-700 px-1.5 py-px rounded whitespace-nowrap"
+      title={`~${a.active_users.toLocaleString()} active users on v${version} in the last ${windowLabel} (Chime HLL, ~1%)`}
+    >
+      ~{a.active_users.toLocaleString()} users
+    </span>
   );
 }
