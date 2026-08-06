@@ -2,7 +2,7 @@
 // (docs/design/release-group-detail-mockup-v1.html): building → package ready →
 // release created → live → failed, each with real data and real verbs. State
 // derives from the row's push + release truth; nothing is invented.
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { Link } from 'react-router-dom';
@@ -23,11 +23,11 @@ import {
 } from '@phosphor-icons/react';
 import { cn } from '../../../../lib/utils';
 import { useConfirm } from '../../../../shared/ui/confirm-dialog';
+import { AdoptionCard } from '../chime/AdoptionCard';
+import { useMobileApps } from '../../hooks';
 import {
   concludeOtaRelease,
   discardOtaRelease,
-  fetchOtaAdoption,
-  fetchOtaFailures,
   rampOtaRelease,
 } from '../../../airborne-ota/api';
 import type { OtaRelease } from '../../../airborne-ota/types';
@@ -101,6 +101,7 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
     releaseBlocked = null,
     groupId,
     airborneAppRef: ref,
+    platform,
     pushes,
     ongoing,
     foreignOngoing,
@@ -116,6 +117,11 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
     onChanged,
   } = props;
   const confirm = useConfirm();
+  const { data: mobileApps = [] } = useMobileApps();
+  const catalogPkg = useMemo(
+    () => mobileApps.find((a) => a.airborneAppRef === ref)?.packageName ?? null,
+    [mobileApps, ref],
+  );
   const can = (p: string) => perms.includes(p);
   const [busy, setBusy] = useState<string | null>(null);
   const [rampPct, setRampPct] = useState('');
@@ -710,7 +716,7 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
           </div>
 
           {/* CI workflow job matrix of the push that built this package */}
-          <div className="lg:col-span-3 bg-white rounded-lg border border-zinc-200 p-4 flex flex-col gap-2.5">
+          <div className="lg:col-span-4 bg-white rounded-lg border border-zinc-200 p-4 flex flex-col gap-2.5">
             {(() => {
               const push = pushes.find((p) => p.packageVersion === pkgVersionOf(live));
               return (
@@ -752,7 +758,14 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
             })()}
           </div>
 
-          <AdoptionAnalytics appRef={ref} releaseId={live.id} />
+          <AdoptionCard
+            className="lg:col-span-4"
+            variant="panel"
+            appRef={ref}
+            pkg={catalogPkg}
+            os={platform === 'ios' ? 'ios' : 'android'}
+            version={pkgVersionOf(live) != null ? String(pkgVersionOf(live)) : (pkgTagOf(live) ?? null)}
+          />
         </div>
       )}
 
@@ -855,120 +868,3 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
   );
 }
 
-/** Adoption analytics — KPI strip + 7-day dual bars; honest dashed empty. */
-function AdoptionAnalytics({ appRef, releaseId }: { appRef: string; releaseId?: string }) {
-  const [range] = useState(() => {
-    const end = Date.now();
-    return { start: end - 7 * 86_400_000, end };
-  });
-  const adoptionQ = useQuery({
-    queryKey: ['mobile-ota-adoption', appRef, releaseId],
-    queryFn: () =>
-      fetchOtaAdoption(appRef, {
-        interval: 'DAY',
-        start_date: String(range.start),
-        end_date: String(range.end),
-        date: String(range.end),
-        release_id: releaseId,
-      }),
-    enabled: !!releaseId,
-    retry: false,
-    staleTime: 60_000,
-  });
-  const failuresQ = useQuery({
-    queryKey: ['mobile-ota-metrics', appRef, releaseId],
-    queryFn: () => fetchOtaFailures(appRef, { days: 7, release_id: releaseId }),
-    enabled: !!releaseId,
-    retry: false,
-    staleTime: 60_000,
-  });
-  const buckets =
-    (adoptionQ.data as { data?: { time_breakdown?: Array<Record<string, unknown>> } } | undefined)?.data
-      ?.time_breakdown ?? [];
-  const num = (v: unknown) => (typeof v === 'number' ? v : 0);
-  const sum = (k: string) => buckets.reduce((acc, b) => acc + num(b[k]), 0);
-  const downloads = sum('download_success');
-  const applied = sum('apply_success');
-  const rollbacks = sum('rollbacks_initiated');
-  const failures = (failuresQ.data as { total_failures?: number } | undefined)?.total_failures;
-  const haveAdoption = !adoptionQ.isError && buckets.length > 0;
-  const haveFailures = !failuresQ.isError && failures != null;
-  const fmt = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
-  const bad = rollbacks + (failures ?? 0);
-  const maxDl = Math.max(1, ...buckets.map((b) => num(b['download_success'])));
-  const loading = !!releaseId && (adoptionQ.isLoading || failuresQ.isLoading);
-  return (
-    <div className="lg:col-span-5 bg-white rounded-lg border border-zinc-200 p-4 flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <span className={cn(eyebrowCls, 'flex items-center gap-1')}>
-          <ChartBarIcon size={12} weight="bold" className="text-violet-500" aria-hidden="true" /> Adoption · last 7 days
-        </span>
-        <span className="bg-zinc-100 border border-zinc-200 text-zinc-500 text-[9px] font-bold px-1.5 py-px rounded uppercase">Mixpanel</span>
-      </div>
-      {loading ? (
-        <div className="flex-1 flex items-center justify-center gap-2 py-8 text-[10px] text-zinc-500 font-medium">
-          <CircleNotchIcon size={14} weight="bold" className="animate-spin text-violet-500" aria-hidden="true" />
-          Loading adoption…
-        </div>
-      ) : !haveAdoption && !haveFailures ? (
-        <div className="flex-1 border border-dashed border-zinc-300 bg-zinc-50/50 rounded flex items-center justify-center py-8 text-center text-zinc-400 text-[10px] gap-1">
-          <ChartBarIcon size={13} weight="duotone" aria-hidden="true" /> Analytics absent. Connect Mixpanel to view adoption.
-        </div>
-      ) : (
-        <>
-          <div className="grid grid-cols-4 gap-2">
-            <div className="bg-zinc-50 border border-zinc-100 rounded p-2">
-              <span className="block text-[9px] text-zinc-400 font-medium uppercase">Downloads</span>
-              <span className="font-mono font-bold text-zinc-900 text-sm">{fmt(downloads)}</span>
-            </div>
-            <div className="bg-zinc-50 border border-zinc-100 rounded p-2">
-              <span className="block text-[9px] text-zinc-400 font-medium uppercase">Applied</span>
-              <span className="font-mono font-bold text-zinc-900 text-sm">{fmt(applied)}</span>
-            </div>
-            <div className="bg-zinc-50 border border-zinc-100 rounded p-2">
-              <span className="block text-[9px] text-zinc-400 font-medium uppercase">Apply rate</span>
-              <span className="font-mono font-bold text-emerald-600 text-sm">
-                {downloads > 0 ? `${Math.round((applied / downloads) * 100)}%` : '—'}
-              </span>
-            </div>
-            <div className="bg-zinc-50 border border-zinc-100 rounded p-2">
-              <span className="block text-[9px] text-zinc-400 font-medium uppercase">Rollbacks</span>
-              <span className={cn('font-mono font-bold text-sm', bad > 0 ? 'text-red-600' : 'text-zinc-900')}>{fmt(bad)}</span>
-            </div>
-          </div>
-          {haveAdoption && (
-            <>
-              <div className="flex-1 flex items-end gap-1.5 h-16 min-h-16">
-                {buckets.slice(-7).map((b, i) => (
-                  <div key={i} className="flex-1 flex items-end gap-0.5 h-full">
-                    <div
-                      className="w-1/2 bg-violet-200 rounded-t"
-                      style={{ height: `${Math.max(4, (num(b['download_success']) / maxDl) * 100)}%` }}
-                      title={`${num(b['download_success'])} downloads`}
-                    />
-                    <div
-                      className="w-1/2 bg-violet-600 rounded-t"
-                      style={{ height: `${Math.max(4, (num(b['apply_success']) / maxDl) * 100)}%` }}
-                      title={`${num(b['apply_success'])} applied`}
-                    />
-                  </div>
-                ))}
-              </div>
-              <div className="flex justify-between text-[8px] font-mono text-zinc-400 -mt-1">
-                <span>{shortDate(new Date(range.start).toISOString())}</span>
-                <span>{shortDate(new Date(range.end).toISOString())}</span>
-              </div>
-            </>
-          )}
-          <div className="flex items-center justify-between border-t border-zinc-100 pt-2 gap-2 flex-wrap">
-            <span className="flex items-center gap-3 text-[9px] text-zinc-500 font-medium">
-              <span className="flex items-center gap-1"><span className="w-2 h-2 bg-violet-200 rounded-sm" /> downloads</span>
-              <span className="flex items-center gap-1"><span className="w-2 h-2 bg-violet-600 rounded-sm" /> applied</span>
-            </span>
-            <span className="text-[9px] text-zinc-400">events stay keyed to the release — adoption keeps accruing after Conclude</span>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}

@@ -1773,3 +1773,138 @@ export interface MobileGroupDetail {
     // "Slack failed / Resend" control on the console header).
     changelogSlack?: MobileChangelogSlackState;
 }
+
+// ── Chime (appmonitor) — OTA fleet push campaigns + adoption ────────
+// BFF proxy under /airborne/chime/:app (app = the composite <org>~<app>
+// airborne ref). Chime's envelope is { status, data }; non-error outcomes
+// like status:"skipped" (one campaign per target) ride the 200 path — they
+// are NORMAL results the UI renders, never thrown errors.
+
+export interface ChimeEnvelope<T> {
+    status: string; // accepted | skipped | running | completed | cancelled | dry_run | error | success …
+    data?: T | null;
+    reason?: string; // present on error envelopes
+}
+
+export interface ChimeJobSummary {
+    job_id: string;
+    role: 'bap' | 'bpp';
+    platform: 'android' | 'ios';
+    package_name: string;
+    status: 'running' | 'completed' | 'cancelled' | 'dry_run' | 'error';
+    started_at: string;
+}
+
+export interface ChimeJobList {
+    total: number;
+    count: number;
+    limit: number;
+    offset: number;
+    has_more: boolean;
+    jobs: ChimeJobSummary[];
+}
+
+export interface ChimeJobStatus {
+    job_id: string;
+    role: string;
+    platform: string;
+    package_name: string;
+    status: string;
+    users_queried: number;
+    tokens_found: number;
+    successes: number;
+    failures: number;
+    duration_seconds: number;
+}
+
+export interface ChimeJobFunnel {
+    job_id: string;
+    role: string;
+    platform: string;
+    package_name: string;
+    status: string;
+    started_at: string;
+    updated_at: string;
+    duration_seconds: number;
+    delivery: { users_queried: number; tokens_found: number; successes: number; failures: number };
+    funnel: { fcm_received: number; worker_started: number; downloaded: number; no_update: number; failed: number };
+    // Null rate = "not measurable yet" (zero denominator) — render "—", NEVER 0.
+    rates: {
+        delivery: number | null;
+        reach: number | null;
+        worker_start: number | null;
+        download: number | null;
+        failure: number | null;
+    };
+    in_flight: number;
+    funnel_reported: boolean;
+    source: 'redis' | 'postgres';
+    as_of: string;
+}
+
+export interface ChimeVersionUsers {
+    package_name: string;
+    version: string;
+    os: 'android' | 'ios';
+    org: string;
+    active_users: number;
+    approximate: boolean; // always true — HyperLogLog estimate (~1% at scale)
+    window_hours: number; // label source: 168 → "7 days"; render from this, don't hardcode
+    updated_at?: string; // absent when answered from redis
+    source: 'redis' | 'postgres';
+    recorded?: boolean; // false = BFF folded a Chime 404: nothing recorded for this key yet
+}
+
+const chimeBase = (appRef: string) => `/airborne/chime/${encodeURIComponent(appRef)}`;
+
+export const chimeApi = {
+    // 202 accepted → data.job_id; 200 skipped → the one-in-flight conflict card.
+    launchCampaign: async (
+        appRef: string,
+        p: { role: 'bap' | 'bpp'; platform: 'android' | 'ios'; pkg: string; dryRun?: boolean },
+    ): Promise<ChimeEnvelope<{ job_id?: string } & Record<string, unknown>>> => {
+        const { data } = await apiClient.post(`${chimeBase(appRef)}/campaigns/launch`, undefined, {
+            params: { role: p.role, platform: p.platform, package: p.pkg, dry_run: p.dryRun ?? false },
+        });
+        return data;
+    },
+
+    // Pre-launch probe: listJobs(ref, { package, status: 'running', limit: 1 }).
+    listJobs: async (
+        appRef: string,
+        f: { role?: string; os?: string; pkg?: string; status?: string; limit?: number; offset?: number } = {},
+    ): Promise<ChimeEnvelope<ChimeJobList>> => {
+        const { data } = await apiClient.get(`${chimeBase(appRef)}/jobs`, {
+            params: { role: f.role, os: f.os, package: f.pkg, status: f.status, limit: f.limit, offset: f.offset },
+        });
+        return data;
+    },
+
+    // Envelope status here is the JOB's own status (running/completed/…).
+    jobStatus: async (appRef: string, jobId: string): Promise<ChimeEnvelope<ChimeJobStatus>> => {
+        const { data } = await apiClient.get(`${chimeBase(appRef)}/jobs/${encodeURIComponent(jobId)}/status`);
+        return data;
+    },
+
+    jobFunnel: async (appRef: string, jobId: string): Promise<ChimeEnvelope<ChimeJobFunnel>> => {
+        const { data } = await apiClient.get(`${chimeBase(appRef)}/jobs/${encodeURIComponent(jobId)}/funnel`);
+        return data;
+    },
+
+    cancelJob: async (appRef: string, jobId: string): Promise<ChimeEnvelope<{ job_id: string }>> => {
+        const { data } = await apiClient.post(`${chimeBase(appRef)}/jobs/${encodeURIComponent(jobId)}/cancel`);
+        return data;
+    },
+
+    // 404 upstream is folded by the BFF into { data: { recorded: false } } —
+    // the adoption card's empty state, not an error.
+    adoption: async (
+        appRef: string,
+        p: { pkg: string; version: string; os: 'android' | 'ios' },
+    ): Promise<ChimeEnvelope<ChimeVersionUsers>> => {
+        const { data } = await apiClient.get(`${chimeBase(appRef)}/adoption`, {
+            params: { package: p.pkg, version: p.version, os: p.os },
+        });
+        return data;
+    },
+};

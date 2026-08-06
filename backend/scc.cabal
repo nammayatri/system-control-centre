@@ -108,6 +108,7 @@ library
       Products.Autopilot.Queries.ProductService
       Products.Autopilot.Queries.ReleaseTracker
       Products.Autopilot.Queries.VsEditTracker
+      Products.AirborneOta.Chime
       Products.AirborneOta.Client
       Products.AirborneOta.Keepalive
       Products.AirborneOta.Queries

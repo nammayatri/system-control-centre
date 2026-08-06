@@ -45,6 +45,7 @@ import Products.AirborneOta.Client (
     fetchUpstreamApps,
     readKeepalive,
  )
+import Products.AirborneOta.Chime (chimeConfigured, chimeRequest, expectChimeOk)
 import Products.AirborneOta.Queries (AirborneEventRow (..), insertAirborneEvent, listAirborneEvents)
 import Products.AirborneOta.Types (AppRef (..), ConcludeReq (..), CreateAppReq (..), RampReq (..))
 import Products.AirborneOta.Types.Permission (OtaPermission (..))
@@ -65,6 +66,16 @@ type AirborneAPI =
         -- Org-scoped upstream (allow_app=false): gated by a PRODUCT-level
         -- OTA_APP_MANAGE check, never the per-app deployment fallback.
         :<|> "airborne" :> Protected 'OTA_APP_MANAGE :> "apps" :> "create" :> ReqBody '[JSON] CreateAppReq :> Post '[JSON] Value
+        -- ── Chime (appmonitor): fleet push campaigns + adoption. App-scoped
+        --    like everything else — :app is the composite <org>~<app> ref
+        --    (per-app RBAC; org feeds the adoption query server-side). The
+        --    "chime" literal precedes the bare Capture ":app" routes.
+        :<|> "airborne" :> Protected 'OTA_RELEASE_RAMP :> "chime" :> Capture "app" Text :> "campaigns" :> "launch" :> QueryParam "role" Text :> QueryParam "platform" Text :> QueryParam "package" Text :> QueryParam "dry_run" Bool :> Post '[JSON] Value
+        :<|> "airborne" :> Protected 'OTA_VIEW :> "chime" :> Capture "app" Text :> "jobs" :> QueryParam "role" Text :> QueryParam "os" Text :> QueryParam "package" Text :> QueryParam "status" Text :> QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] Value
+        :<|> "airborne" :> Protected 'OTA_VIEW :> "chime" :> Capture "app" Text :> "jobs" :> Capture "jobId" Text :> "status" :> Get '[JSON] Value
+        :<|> "airborne" :> Protected 'OTA_VIEW :> "chime" :> Capture "app" Text :> "jobs" :> Capture "jobId" Text :> "funnel" :> Get '[JSON] Value
+        :<|> "airborne" :> Protected 'OTA_RELEASE_RAMP :> "chime" :> Capture "app" Text :> "jobs" :> Capture "jobId" Text :> "cancel" :> Post '[JSON] Value
+        :<|> "airborne" :> Protected 'OTA_VIEW :> "chime" :> Capture "app" Text :> "adoption" :> QueryParam "package" Text :> QueryParam "version" Text :> QueryParam "os" Text :> Get '[JSON] Value
         :<|> "airborne" :> Protected 'OTA_VIEW :> Capture "app" Text :> "releases" :> QueryParam "page" Int :> QueryParam "count" Int :> QueryParam "status" Text :> Header "x-dimension" Text :> Get '[JSON] Value
         :<|> "airborne" :> Protected 'OTA_VIEW :> Capture "app" Text :> "releases" :> Capture "releaseId" Text :> Get '[JSON] Value
         :<|> "airborne" :> Protected 'OTA_RELEASE_RAMP :> Capture "app" Text :> "releases" :> Capture "releaseId" Text :> "ramp" :> ReqBody '[JSON] RampReq :> Post '[JSON] Value
@@ -120,6 +131,12 @@ airborneServer =
         :<|> accessH
         :<|> listAllAppsH
         :<|> createAppH
+        :<|> chimeLaunchH
+        :<|> chimeJobsH
+        :<|> chimeJobStatusH
+        :<|> chimeJobFunnelH
+        :<|> chimeCancelH
+        :<|> chimeAdoptionH
         :<|> listReleasesH
         :<|> getReleaseH
         :<|> rampH
@@ -189,6 +206,9 @@ healthH _ap = do
             else pure Nothing
     analytics <- probeAnalyticsHealth
     keepalive <- keepaliveStatus
+    -- Chime is presence-only here (no upstream probe): the FE uses it to gate
+    -- the fleet-campaign UI ("key missing" card vs live card).
+    chime <- (\c -> object ["configured" .= c]) <$> chimeConfigured
     let pingOk = either (const False) (const True) ePing
         deepOk = maybe False (either (const False) (const True)) eDeep
         status :: Text
@@ -206,6 +226,7 @@ healthH _ap = do
             , "deep" .= object ["checked" .= configured, "ok" .= deepOk, "error" .= deepErr eDeep]
             , "analytics" .= analytics
             , "keepalive" .= keepalive
+            , "chime" .= chime
             ]
   where
     deepErr = maybe Nothing (either Just (const Nothing))
@@ -849,6 +870,105 @@ the airborne org/app pair (no DB — the app list is live). A malformed ref
 (no '~', or an empty side) is a 400. Whether the app actually exists upstream
 is decided by airborne's own response to the proxied call.
 -}
+-- ─── Chime: fleet push campaigns + adoption ────────────────────────
+
+{- | POST /airborne/chime/:app/campaigns/launch — start (or dry-run) a push
+campaign. Chime keys campaigns by (role, platform, package); the :app ref
+carries RBAC. A 200 @skipped@ (one campaign per target) passes through as a
+normal body — the FE renders the conflict card, it is NOT an error.
+-}
+chimeLaunchH :: AuthedPerson -> Text -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Bool -> Flow Value
+chimeLaunchH ap app mRole mPlatform mPackage mDry = do
+    _ <- resolveApp app
+    requireOtaPermission (Proxy @'OTA_RELEASE_RAMP) ap app
+    role <- needSeg "role" mRole
+    platform <- needSeg "platform" mPlatform
+    pkg <- needSeg "package" mPackage
+    r <-
+        chimeRequest
+            Http.POST
+            ("/chime/" <> role <> "/" <> platform <> "/" <> pkg)
+            [("dry_run", boolParam <$> mDry)]
+            Nothing
+    expectChimeOk r
+
+chimeJobsH :: AuthedPerson -> Text -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Int -> Maybe Int -> Flow Value
+chimeJobsH ap app mRole mOs mPackage mStatus mLimit mOffset = do
+    _ <- resolveApp app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
+    r <-
+        chimeRequest
+            Http.GET
+            "/chime/jobs"
+            [ ("role", mRole)
+            , ("os", mOs)
+            , ("package", mPackage)
+            , ("status", mStatus)
+            , ("limit", tshow <$> mLimit)
+            , ("offset", tshow <$> mOffset)
+            ]
+            Nothing
+    expectChimeOk r
+
+chimeJobStatusH :: AuthedPerson -> Text -> Text -> Flow Value
+chimeJobStatusH ap app jobId = do
+    _ <- resolveApp app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
+    jid <- needSeg "jobId" (Just jobId)
+    r <- chimeRequest Http.GET ("/chime/status/" <> jid) [] Nothing
+    expectChimeOk r
+
+chimeJobFunnelH :: AuthedPerson -> Text -> Text -> Flow Value
+chimeJobFunnelH ap app jobId = do
+    _ <- resolveApp app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
+    jid <- needSeg "jobId" (Just jobId)
+    r <- chimeRequest Http.GET ("/chime/jobs/" <> jid <> "/funnel") [] Nothing
+    expectChimeOk r
+
+chimeCancelH :: AuthedPerson -> Text -> Text -> Flow Value
+chimeCancelH ap app jobId = do
+    _ <- resolveApp app
+    requireOtaPermission (Proxy @'OTA_RELEASE_RAMP) ap app
+    jid <- needSeg "jobId" (Just jobId)
+    r <- chimeRequest Http.POST ("/chime/cancel/" <> jid) [] Nothing
+    expectChimeOk r
+
+{- | GET /airborne/chime/:app/adoption — active users on one bundle version.
+@org@ comes from the :app ref server-side (never the browser). Chime 404
+means "nothing recorded for that key yet" — a normal empty state, folded to
+@{recorded: false}@ instead of an HTTP error.
+-}
+chimeAdoptionH :: AuthedPerson -> Text -> Maybe Text -> Maybe Text -> Maybe Text -> Flow Value
+chimeAdoptionH ap app mPackage mVersion mOs = do
+    AppRef org _ <- resolveApp app
+    requireOtaPermission (Proxy @'OTA_VIEW) ap app
+    pkg <- needSeg "package" mPackage
+    ver <- needSeg "version" mVersion
+    os <- needSeg "os" mOs
+    r <-
+        chimeRequest
+            Http.GET
+            "/chime/versions/users"
+            [("package", Just pkg), ("version", Just ver), ("os", Just os), ("org", Just org)]
+            Nothing
+    if urStatus r == 404
+        then pure (object ["status" .= ("success" :: Text), "data" .= object ["recorded" .= False]])
+        else expectChimeOk r
+
+-- | Require a present, path-safe parameter (path segments are interpolated
+-- into the upstream URL; query params ride 'renderQuery' but stay uniform).
+needSeg :: Text -> Maybe Text -> Flow Text
+needSeg name mv = case mv of
+    Nothing -> throwM (BadRequest (name <> " is required"))
+    Just v
+        | T.null v || T.any (`elem` ("/?#%&\n\r " :: String)) v ->
+            throwM (BadRequest ("invalid " <> name))
+        | otherwise -> pure v
+
+boolParam :: Bool -> Text
+boolParam b = if b then "true" else "false"
+
 resolveApp :: Text -> Flow AppRef
 resolveApp ref = case T.breakOn "~" ref of
     (org, rest)

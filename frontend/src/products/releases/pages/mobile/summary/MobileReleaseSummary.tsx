@@ -2,7 +2,7 @@ import { useCallback, useState, type CSSProperties } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { Check, Send, Square, Trash2, Undo2, X } from 'lucide-react';
-import { RocketLaunchIcon } from '@phosphor-icons/react';
+import { MegaphoneIcon, RocketLaunchIcon } from '@phosphor-icons/react';
 import { useAuth } from '../../../../../core/auth/AuthContext';
 import { PermissionGate } from '../../../../../core/auth/PermissionGate';
 import { usePermissions } from '../../../../../core/auth/PermissionsContext';
@@ -30,6 +30,7 @@ import { SummaryHeader } from './SummaryHeader';
 import { RevertChainBanners } from './RevertChainBanners';
 import { PhaseRail } from './PhaseRail';
 import { ChangelogCard, ProvenanceCard } from './BuildDetailsCard';
+import { CampaignCard } from '../../../components/chime/CampaignCard';
 import { failureReasonOf, ghFailureDetailOf, healInfoOf, tagConflictOf } from './heal';
 import { StoreReleaseCockpit } from './StoreReleaseCockpit';
 import { OtaFlow } from './OtaFlow';
@@ -346,6 +347,14 @@ const MobileReleaseSummary = () => {
             )}
           >
             {tab.label}
+            {/* Live-build tracker: events stream while CI runs — the pulse
+                says "look here" without needing the tab open. */}
+            {tab.key === 'events' && scenario === 'building' && (
+              <span
+                className="inline-block w-2 h-2 bg-sky-500 rounded-full animate-pulse ml-1.5 align-middle motion-reduce:animate-none"
+                title="Build in progress — events are streaming"
+              />
+            )}
             {tab.count != null && tab.count > 0 && (
               <span className="bg-zinc-100 text-zinc-600 text-[10px] px-1.5 py-0.5 rounded ml-1 group-hover:bg-zinc-200">
                 {tab.count}
@@ -354,6 +363,28 @@ const MobileReleaseSummary = () => {
           </button>
         ))}
       </div>
+
+      {/* FLEET CAMPAIGN (Chime) — full-width zone above both columns
+          (mockup: "Fleet Campaign · OTA bundle"). OTA-scoped workflow, kept
+          OUTSIDE the OTA rail: the rail stays data-only. Hidden entirely when
+          the build has no OTA target or the operator lacks the airborne grant
+          (the card self-gates on OTA_VIEW). */}
+      {activeTab === 'summary' && !isDebug && otaCapable && matchedMobileApp?.packageName && (
+        <div className="mb-6 stagger-item" style={{ '--index': 3 } as CSSProperties}>
+          <p className="eyebrow mb-1 flex items-center gap-1">
+            <MegaphoneIcon size={14} weight="bold" className="text-violet-500" aria-hidden="true" /> Fleet Campaign · OTA
+            bundle
+          </p>
+          <CampaignCard
+            titled={false}
+            appRef={otaCapable.airborneAppRef}
+            pkg={matchedMobileApp.packageName}
+            role={release.service === 'driver' ? 'bpp' : 'bap'}
+            platform={release.env === 'ios' ? 'ios' : 'android'}
+            appLabel={`${release.service || 'consumer'} · ${release.env}`}
+          />
+        </div>
+      )}
 
       {activeTab === 'summary' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
