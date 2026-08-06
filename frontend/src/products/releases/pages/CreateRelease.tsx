@@ -154,8 +154,9 @@ const CreateRelease: React.FC = () => {
   const [showPriorityDropdown, setShowPriorityDropdown] = useState(false);
   const [clonedService, setClonedService] = useState('');
   const [stages, setStages] = useState<Stage[]>(cloneStages(DEFAULT_STAGES));
-  // The stages this form started from — service config on a create, the source
-  // release on a clone, the release's own stages on an edit. Flipping the Stages
+  // The stages this form started from — the service's configured default on a
+  // create or clone (a clone deliberately does NOT inherit the source release's
+  // stagger), the release's own stages on an edit. Flipping the Stages
   // button back to Auto restores these, so Auto always means "the stagger this
   // release would have had if nobody touched it" and edits made in Manual can't
   // ride along into an Auto create.
@@ -320,15 +321,6 @@ const CreateRelease: React.FC = () => {
           mode: data.mode, new_version: data.new_version || '', change_log: data.change_log || ''
         }));
         if (data.env_override_data) { setIsEnvSwitch(true); setEnvData(data.env_override_data); }
-        if (data.rollout_strategy) {
-          try {
-            const parsed = typeof data.rollout_strategy === 'string' ? JSON.parse(data.rollout_strategy) : data.rollout_strategy;
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              baselineStagesRef.current = cloneStages(parsed);
-              setStages(cloneStages(parsed));
-            }
-          } catch (e) { console.error('Failed to parse stages', e); }
-        }
       }).catch((err: any) => {
         const msg = err?.response?.data?.message || err.message || 'Failed to load clone details';
         setError(msg);
@@ -359,10 +351,9 @@ const CreateRelease: React.FC = () => {
     setPostChangelogSlack(!!config.ai_changelog_enabled);
   }, [formData.appGroup, productConfigs, isUpdate]);
 
-  // Load rollout stages from service config on service select (skip clone/update — those use existing stages).
   // Pod counts are auto-recalculated separately, below, whenever the loaded stages' percentages settle.
   useEffect(() => {
-    if (!isClone && !isUpdate && formData.appGroup && formData.service) {
+    if (!isUpdate && formData.appGroup && formData.service) {
       const appGroup = formData.appGroup;
       const service = formData.service;
       fetchReleaseConfigs(appGroup).then(configs => {
