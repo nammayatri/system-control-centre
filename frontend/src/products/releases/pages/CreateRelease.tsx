@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import { useProductConfigs, useServices } from '../useProducts';
 import { useCreateRelease, useUpdateTracker } from '../hooks';
-import { fetchReleaseDetails, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources, resolveOldVersion, fetchRolloutPodEstimate, fetchRolloutPodEstimateSecondary, fetchSyncRolloutStrategy } from '../api';
+import { fetchReleaseDetails, fetchReleaseSourceEnv, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources, resolveOldVersion, fetchRolloutPodEstimate, fetchRolloutPodEstimateSecondary, fetchSyncRolloutStrategy } from '../api';
 import type { ProductConfig } from '../api';
 import { parseStrategyStages } from '../utils';
 import { Button } from '../../../shared/ui/button';
@@ -147,6 +147,9 @@ const CreateRelease: React.FC = () => {
   const [error, setError] = useState('');
   const [isEnvSwitch, setIsEnvSwitch] = useState(false);
   const [envData, setEnvData] = useState('');
+  const [cloneEnvChoice, setCloneEnvChoice] = useState<'source' | 'live' | null>(null);
+  const [cloneSourceEnv, setCloneSourceEnv] = useState<any>(null);
+  const [cloneEnvSourceType, setCloneEnvSourceType] = useState<'override' | 'snapshot' | 'none'>('none');
   const [isResourcesSwitch, setIsResourcesSwitch] = useState(false);
   const [resourcesData, setResourcesData] = useState('');
   const [showServiceDropdown, setShowServiceDropdown] = useState(false);
@@ -322,7 +325,17 @@ const CreateRelease: React.FC = () => {
           docker_image: data.release_context?.docker_image || data.docker_image || '',
           mode: data.mode, new_version: data.new_version || '', change_log: data.change_log || ''
         }));
-        if (data.env_override_data) { setIsEnvSwitch(true); setEnvData(data.env_override_data); }
+        fetchReleaseSourceEnv(id).then(({ source, env: srcEnv }) => {
+          if (source !== 'none' && srcEnv != null) {
+            setCloneSourceEnv(srcEnv);
+            setCloneEnvSourceType(source);
+            setCloneEnvChoice('source');
+            setIsEnvSwitch(true);
+            setEnvData(JSON.stringify(srcEnv, null, 2));
+          }
+        }).catch((e: any) => {
+          console.error('[CreateRelease] fetchReleaseSourceEnv failed:', e);
+        });
       }).catch((err: any) => {
         const msg = err?.response?.data?.message || err.message || 'Failed to load clone details';
         setError(msg);
@@ -484,6 +497,12 @@ const CreateRelease: React.FC = () => {
   useEffect(() => { if (!isResourcesSwitch) setResourcesData(''); }, [isResourcesSwitch]);
 
   useEffect(() => {
+    // On Clone with a source env available (override or snapshot), the
+    // prefill effect already seeds envData from it (cloneEnvChoice='source');
+    // don't let this generic live-fetch stomp it right after. Only auto-fetch
+    // live env when there's no source env to offer, or the user explicitly
+    // chose "fetch live env".
+    if (isClone && cloneEnvSourceType !== 'none' && cloneEnvChoice !== 'live') return;
     if (isEnvSwitch && formData.appGroup && formData.service && formData.env) {
       fetchEnvs(formData.appGroup, formData.env, formData.service)
         .then(res => setEnvData(JSON.stringify(res, null, 2)))
@@ -493,7 +512,7 @@ const CreateRelease: React.FC = () => {
           setIsEnvSwitch(false);
         });
     }
-  }, [isEnvSwitch, formData.appGroup, formData.service, formData.env]);
+  }, [isEnvSwitch, formData.appGroup, formData.service, formData.env, isClone, cloneEnvSourceType, cloneEnvChoice]);
 
   useEffect(() => {
     if (isResourcesSwitch && formData.appGroup && formData.service) {
@@ -1171,6 +1190,21 @@ const CreateRelease: React.FC = () => {
               <Toggle checked={isEnvSwitch} onChange={() => canToggleEnvSwitch && formData.service && !isMidFlight && setIsEnvSwitch(!isEnvSwitch)} disabled={!canToggleEnvSwitch || !formData.service || isMidFlight} />
               {!canToggleEnvSwitch && selectedServices.length > 1 && <span className="text-xs text-zinc-400 ml-2">Single service only</span>}
               {isMidFlight && <span className="text-xs text-zinc-400 ml-2">Locked mid-flight</span>}
+              {isClone && cloneEnvSourceType !== 'none' && (
+                <div className="flex items-center gap-2 ml-2">
+                  <span className="text-xs text-zinc-400">Env source:</span>
+                  <button type="button"
+                    onClick={() => { setCloneEnvChoice('source'); setEnvData(JSON.stringify(cloneSourceEnv, null, 2)); setIsEnvSwitch(true); }}
+                    className={cn('text-xs px-2.5 py-1 rounded-full border transition-colors', cloneEnvChoice === 'source' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-zinc-600 border-zinc-200 hover:border-zinc-300')}>
+                    Use release's env
+                  </button>
+                  <button type="button"
+                    onClick={() => { setCloneEnvChoice('live'); setIsEnvSwitch(true); }}
+                    className={cn('text-xs px-2.5 py-1 rounded-full border transition-colors', cloneEnvChoice === 'live' ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-zinc-600 border-zinc-200 hover:border-zinc-300')}>
+                    Fetch current live env
+                  </button>
+                </div>
+              )}
             </div>
             {isEnvSwitch && (
               <div className="p-4 sm:p-6">

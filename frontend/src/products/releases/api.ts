@@ -568,6 +568,11 @@ export async function fetchReleaseEvents(id: string, opts?: { mobile?: boolean }
     }));
 }
 
+export async function fetchReleaseSourceEnv(id: string): Promise<{ source: 'override' | 'snapshot' | 'none'; env: any }> {
+    const { data } = await apiClient.get(`/releases/${id}/source-env`);
+    return { source: data?.source || 'none', env: data?.env ?? null };
+}
+
 export async function fetchProductConfigs(): Promise<ProductConfig[]> {
     const { data } = await apiClient.get('/products/config');
     if (!Array.isArray(data)) return [];

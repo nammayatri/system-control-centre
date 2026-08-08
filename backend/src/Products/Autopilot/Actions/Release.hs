@@ -10,6 +10,7 @@ module Products.Autopilot.Actions.Release (
     -- * Release Handlers
     createReleaseH,
     getReleaseH,
+    getReleaseSourceEnvH,
     listReleasesH,
     approveReleaseH,
     approveReleaseCore,
@@ -82,7 +83,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import Database.PostgreSQL.Simple (Only (..), SqlError (..), execute, withTransaction)
-import Products.Autopilot.ConfigDiff (extractConfigMapDataSection)
+import Products.Autopilot.ConfigDiff (deploymentAfterRaw, extractConfigMapDataSection, extractContainerEnvJson)
 import Products.Autopilot.ConfigReview (reviewBlocksApproval, runConfigReview)
 import Products.Autopilot.DiffLink (buildDiffLink)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
@@ -686,7 +687,21 @@ createReleaseHBodyAfterStrategyCheck mXForwardedEmail mXPomeriumJwt K8sCreateRel
                                                     let targetSvcHostForCheck = fromMaybe service (getServiceHost sCfg)
                                                         newDepNameCheck = targetSvcHostForCheck <> "-" <> newVersion
                                                     depAlreadyExists <- liftIO $ deploymentExists cfg (getProductNamespace pCfg) newDepNameCheck
-                                                    if depAlreadyExists && not (fromMaybe False newService)
+                                                    -- Bug fix: sync-cloud reverts hit this same handler on the
+                                                    -- secondary cluster. A revert re-points at an OLD version
+                                                    -- whose deployment commonly still exists there (never
+                                                    -- GC'd) -- that's expected, not a collision. Primary-cloud
+                                                    -- retries tolerate the same situation via the workflow
+                                                    -- layer (BackendServiceWorkflow.hs /
+                                                    -- BackendSchedulerWorkflow.hs patch-or-skip on an existing
+                                                    -- deployment), but sync's doCreate always POSTs fresh and
+                                                    -- never reaches that tolerant code -- this guard rejects
+                                                    -- it first. Scoped narrowly to isSystemTriggered && revert
+                                                    -- so a genuine sync-forward create (or any human create)
+                                                    -- with a colliding deployment name still fails loudly.
+                                                    let isRevertSync = fromMaybe False isSystemTriggered && maybe False (> 0) revert
+                                                        bypassDupCheck = fromMaybe False newService || isRevertSync
+                                                    if depAlreadyExists && not bypassDupCheck
                                                         then pure $ APIResponse "ERROR" ("Deployment with version " <> newVersion <> " already exists: " <> newDepNameCheck)
                                                         else do
                                                             claimed <- claimServiceForModification appGroup service
@@ -771,7 +786,7 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{
                 , podsScaleDownTimestamp = Nothing
                 , podsScaleDownStatus = Nothing
                 , oldVersionPodCount = Nothing
-                , revert = Nothing
+                , revert = revert
                 , abRunId = Nothing
                 , abStatus = Nothing
                 , cleanupAt = Nothing
@@ -910,6 +925,32 @@ getReleaseH :: AuthedPerson -> Text -> Flow (Maybe ReleaseTracker)
 getReleaseH _ap rid = do
     m <- findReleaseTracker rid
     pure (fmap fst m)
+
+{- | The "effective" env a release actually carries, for the Clone flow: an
+explicit @envOverrideData@ override if the release set one, else the real
+container env pulled from its own DEPLOYMENT_AFTER/_PREVIEW SNAPSHOT (every
+release captures one regardless of whether it used an env override -- see
+'Products.Autopilot.ConfigDiff.deploymentAfterRaw'). This also covers revert
+releases, whose @envOverrideData@ is deliberately cleared: their own
+snapshot holds the verbatim env of the target deployment being reverted to.
+-}
+getReleaseSourceEnvH :: AuthedPerson -> Text -> Flow Value
+getReleaseSourceEnvH _ap rid = do
+    m <- findReleaseTracker rid
+    case m of
+        Nothing -> throwM $ NotFound "Release not found"
+        Just (tracker, _) -> case NT.envOverrideData tracker of
+            Just t | not (T.null (T.strip t)) ->
+                pure $ object ["source" .= ("override" :: Text), "env" .= decodeEnvOverrideText t]
+            _ -> do
+                afterRaw <- deploymentAfterRaw tracker
+                case extractContainerEnvJson afterRaw of
+                    Just envVal -> pure $ object ["source" .= ("snapshot" :: Text), "env" .= envVal]
+                    Nothing -> pure $ object ["source" .= ("none" :: Text), "env" .= (Nothing :: Maybe Value)]
+  where
+    decodeEnvOverrideText t = case A.eitherDecodeStrict (encodeUtf8 t) :: Either String Value of
+        Right v -> v
+        Left _ -> String t
 
 approveReleaseH :: AuthedPerson -> Text -> ApproveReleaseReq -> Flow (Maybe ReleaseTracker)
 approveReleaseH ap rid req = do

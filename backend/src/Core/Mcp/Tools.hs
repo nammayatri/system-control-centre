@@ -13,11 +13,13 @@ import Core.Admin.Queries (writeAuditLog)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..))
 import Core.Environment (Flow)
-import Data.Aeson (FromJSON, Result (..), Value (..), fromJSON, object, toJSON, (.=))
+import Data.Aeson (FromJSON, Result (..), Value (..), encode, fromJSON, object, toJSON, (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString.Lazy qualified as LBS
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Products.Autopilot.Actions.ConfigMap qualified as ConfigMap
 import Products.Autopilot.Actions.Release qualified as Release
 import Products.Autopilot.Types.API
@@ -240,6 +242,21 @@ releaseCloneTool =
         case mSrc of
           Nothing -> throwM (NotFound ("Release tracker not found: " <> srcId))
           Just ReleaseTracker {..} -> do
+            -- envOverrideData is often empty (no explicit env switch used on
+            -- the source release, or it's a revert -- which deliberately
+            -- clears it). Fall back to the source's own DEPLOYMENT_AFTER/
+            -- _PREVIEW SNAPSHOT env in that case, same as the dashboard's
+            -- clone-time "use release's env" choice.
+            effectiveEnvOverride <- case envOverrideData of
+              Just t | not (T.null (T.strip t)) -> pure (Just t)
+              _ -> do
+                srcEnv <- Release.getReleaseSourceEnvH ap srcId
+                pure $ case srcEnv of
+                  Object o -> case KM.lookup (K.fromText "env") o of
+                    Just Null -> Nothing
+                    Just envVal -> Just (TE.decodeUtf8 (LBS.toStrict (encode envVal)))
+                    Nothing -> Nothing
+                  _ -> Nothing
             let base =
                   object
                     [ "appGroup" .= appGroup,
@@ -250,7 +267,7 @@ releaseCloneTool =
                       "rolloutStrategy" .= rolloutStrategy,
                       "priority" .= priority,
                       "mode" .= mode,
-                      "envOverrideData" .= envOverrideData,
+                      "envOverrideData" .= effectiveEnvOverride,
                       "metadata" .= metadata
                     ]
                 merged = Object (KM.union (asObject args) (asObject base))

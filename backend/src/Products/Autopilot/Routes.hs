@@ -37,6 +37,7 @@ type CoreAPI =
         :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> QueryParam "from" Text :> QueryParam "to" Text :> QueryParam "category" Text :> Get '[JSON] [ReleaseTracker]
         :<|> "releases" :> ServiceProtected 'AP_RELEASE_CREATE :> "create" :> Header "X-Forwarded-Email" Text :> Header "x-pomerium-jwt-assertion" Text :> ReqBody '[JSON] K8sCreateReleaseReq :> Post '[JSON] APIResponse
         :<|> "releases" :> ServiceProtected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> Get '[JSON] (Maybe ReleaseTracker)
+        :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "source-env" :> Get '[JSON] Value
         :<|> "releases" :> Protected 'AP_RELEASE_APPROVE :> Capture "releaseId" Text :> "approve" :> ReqBody '[JSON] ApproveReleaseReq :> Post '[JSON] (Maybe ReleaseTracker)
         :<|> "releases" :> Protected 'AP_RELEASE_CREATE :> Capture "releaseId" Text :> "trigger" :> ReqBody '[JSON] TriggerReleaseReq :> Post '[JSON] APIResponse
         :<|> "releases" :> Protected 'AP_RELEASE_REVERT :> Capture "releaseId" Text :> "rollback" :> ReqBody '[JSON] TriggerReleaseReq :> Post '[JSON] APIResponse
@@ -134,6 +135,7 @@ coreServer =
         :<|> Release.listReleasesH
         :<|> Release.createReleaseH
         :<|> Release.getReleaseH
+        :<|> Release.getReleaseSourceEnvH
         :<|> Release.approveReleaseH
         :<|> Release.triggerReleaseH
         :<|> Release.rollbackReleaseH

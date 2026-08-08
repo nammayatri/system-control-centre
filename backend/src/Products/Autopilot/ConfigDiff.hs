@@ -12,7 +12,9 @@ module Products.Autopilot.ConfigDiff (
     extractConfigMapDataSection,
     configMapBeforeAfter,
     extractDeploymentEnvSection,
+    extractContainerEnvJson,
     deploymentBeforeAfter,
+    deploymentAfterRaw,
     decodeBase64Config,
     maybeDecodeBase64,
 ) where
@@ -97,6 +99,25 @@ extractDeploymentEnvSection yamlText =
                  in if null blocks then yamlText else T.intercalate "\n\n" blocks
         _ -> yamlText
 
+{- | Raw container @env@ array (unlike 'extractDeploymentEnvSection', which
+renders a human-readable text block) — parses the same
+@spec.template.spec.containers[0].env@ path and returns it as JSON, so
+callers that need the actual env data (not a rendered diff) can reuse the
+same traversal.
+-}
+extractContainerEnvJson :: Text -> Maybe Value
+extractContainerEnvJson yamlText =
+    case Yaml.decodeEither' (TE.encodeUtf8 yamlText) :: Either Yaml.ParseException Value of
+        Right root -> do
+            spec <- objLookup "spec" root
+            containersVal <- objLookup "template" spec >>= objLookup "spec" >>= objLookup "containers"
+            case containersVal of
+                Array a -> case toList a of
+                    (c : _) -> objLookup "env" c
+                    [] -> Nothing
+                _ -> Nothing
+        Left _ -> Nothing
+
 renderContainer :: Value -> Text
 renderContainer c =
     let name = maybe "container" asText (objLookup "name" c)
@@ -149,15 +170,27 @@ Both sides are reduced to their env-relevant section so they compare cleanly.
 -}
 deploymentBeforeAfter :: ReleaseTracker -> Flow (Text, Text)
 deploymentBeforeAfter tracker = do
+    (beforeRaw, afterRaw) <- rawDeploymentBeforeAfter tracker
+    pure (extractDeploymentEnvSection beforeRaw, extractDeploymentEnvSection afterRaw)
+
+{- | Raw (un-reduced) before/after deployment YAML text for a BackendService
+tracker, same @DEPLOYMENT_BEFORE@/@_AFTER@ (falling back to @_PREVIEW@)
+snapshot precedence as 'deploymentBeforeAfter' -- shared so callers that need
+the full manifest (not just the rendered env section) can reuse the lookup.
+-}
+rawDeploymentBeforeAfter :: ReleaseTracker -> Flow (Text, Text)
+rawDeploymentBeforeAfter tracker = do
     let rid = releaseId tracker
     snaps <- listReleaseEventsByCategory rid "SNAPSHOT"
     let findSnap labels = listToMaybe [e | lbl <- labels, e <- snaps, S.reLabel e == lbl]
         payloadToText (String s) = s
         payloadToText other = TE.decodeUtf8 (LBS.toStrict (A.encode other))
         raw labels = maybe "" (payloadToText . S.rePayload) (findSnap labels)
-        beforeRaw = raw ["DEPLOYMENT_BEFORE", "DEPLOYMENT_BEFORE_PREVIEW"]
-        afterRaw = raw ["DEPLOYMENT_AFTER", "DEPLOYMENT_AFTER_PREVIEW"]
-    pure (extractDeploymentEnvSection beforeRaw, extractDeploymentEnvSection afterRaw)
+    pure (raw ["DEPLOYMENT_BEFORE", "DEPLOYMENT_BEFORE_PREVIEW"], raw ["DEPLOYMENT_AFTER", "DEPLOYMENT_AFTER_PREVIEW"])
+
+-- | Just the raw "after" deployment YAML text (see 'rawDeploymentBeforeAfter').
+deploymentAfterRaw :: ReleaseTracker -> Flow Text
+deploymentAfterRaw tracker = snd <$> rawDeploymentBeforeAfter tracker
 
 -- ─── Base64 decoding (so the model reviews real config, not blobs) ──
 
