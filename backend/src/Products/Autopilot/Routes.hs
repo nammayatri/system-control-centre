@@ -78,7 +78,7 @@ type CoreAPI =
         :<|> "products" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> "config" :> Capture "id" Int32 :> ReqBody '[JSON] UpsertProductReq :> Put '[JSON] APIResponse
         :<|> "products" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> "config" :> Capture "id" Int32 :> Delete '[JSON] APIResponse
         -- Release Config CRUD
-        :<|> "services" :> Protected 'AP_PRODUCT_CONFIG_VIEW :> "config" :> QueryParam "product" Text :> Get '[JSON] [ReleaseConfigResponse]
+        :<|> "services" :> ServiceProtected 'AP_PRODUCT_CONFIG_VIEW :> "config" :> QueryParam "product" Text :> Get '[JSON] [ReleaseConfigResponse]
         :<|> "services" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> "config" :> ReqBody '[JSON] UpsertServiceReq :> Post '[JSON] APIResponse
         :<|> "services" :> Protected 'AP_PRODUCT_CONFIG_VIEW :> "config" :> Capture "id" Int32 :> Get '[JSON] Value
         :<|> "services" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> "config" :> Capture "id" Int32 :> ReqBody '[JSON] UpsertServiceReq :> Put '[JSON] APIResponse
