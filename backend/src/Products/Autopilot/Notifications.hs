@@ -79,6 +79,7 @@ import Products.Autopilot.Types.Target (TargetState (..))
 -- (oldVersion/newVersion/cluster/…) don't clash with 'ReleaseTracker (..)'.
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (context), K8sReleaseContext (changelogSlackOptIn))
 import Products.Autopilot.Types.Workflow (ReleaseCategory (..))
+import Products.Autopilot.Webhooks (dispatchTerminalWebhooks)
 import Shared.AI.Changelog (ownSideLabel)
 import System.Environment (lookupEnv)
 import Prelude
@@ -491,6 +492,7 @@ notifyReleaseCompleted tracker mts = do
   -- 'whenSlackEnabled' fork so the multi-second GitHub+AI work never blocks the
   -- COMPLETED post; it lands in the thread a few seconds after COMPLETED.
   whenSlackEnabled $ maybePostBackendChangelog tracker mts
+  dispatchTerminalWebhooks tracker
   triggerSyncIfEnabled tracker mts
 
 -- | release_event label marking the changelog was posted (exactly-once guard).
@@ -546,15 +548,17 @@ postBackendChangelog tracker notes =
       Nothing -> pure ()
 
 notifyReleaseAborted :: ReleaseTracker -> Flow ()
-notifyReleaseAborted tracker = whenSlackEnabled $
-  withChannel (appGroup tracker) (service tracker) $ \channel -> do
-    threadTs <- resolveThreadTs tracker
-    let blocks =
-          [ sectionBlock "*ABORTED*",
-            contextBlock ["Traffic restored to `" <> oldVersion tracker <> "`"]
-          ]
-    _ <- sendSlackRich channel "ABORTED" colorAborted blocks threadTs
-    pure ()
+notifyReleaseAborted tracker = do
+  whenSlackEnabled $
+    withChannel (appGroup tracker) (service tracker) $ \channel -> do
+      threadTs <- resolveThreadTs tracker
+      let blocks =
+            [ sectionBlock "*ABORTED*",
+              contextBlock ["Traffic restored to `" <> oldVersion tracker <> "`"]
+            ]
+      _ <- sendSlackRich channel "ABORTED" colorAborted blocks threadTs
+      pure ()
+  dispatchTerminalWebhooks tracker
 
 notifyReleasePaused :: ReleaseTracker -> Flow ()
 notifyReleasePaused tracker = whenSlackEnabled $

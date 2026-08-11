@@ -207,7 +207,7 @@ const CreateRelease: React.FC = () => {
     return aws.hash === gcp.hash && aws.vNum >= gcp.vNum;
   }, [isReleaseSync, secondaryOldVersion, formData.new_version]);
 
-  const { data: services = [] } = useServices(formData.appGroup, isNewService);
+  const { data: services = [], isFetching: servicesLoading } = useServices(formData.appGroup, isNewService);
   const createMutation = useCreateRelease();
   const updateMutation = useUpdateTracker();
 
@@ -971,18 +971,22 @@ const CreateRelease: React.FC = () => {
                 ) : (
                   <div className="service-dropdown relative">
                     <div
-                      onClick={() => formData.appGroup && services.length > 0 && setShowServiceDropdown(!showServiceDropdown)}
-                      className={cn(inputClass, 'cursor-pointer flex items-center justify-between', (!formData.appGroup || services.length === 0) && 'bg-zinc-50 cursor-not-allowed')}
+                      onClick={() => formData.appGroup && setShowServiceDropdown(!showServiceDropdown)}
+                      className={cn(inputClass, 'cursor-pointer flex items-center justify-between', !formData.appGroup && 'bg-zinc-50 cursor-not-allowed')}
                     >
                       <span className={selectedServices.length > 0 ? 'text-zinc-900' : 'text-zinc-400'}>
-                        {selectedServices.length > 0 ? `${selectedServices.length} selected` : 'Select services'}
+                        {selectedServices.length > 0
+                          ? `${selectedServices.length} selected`
+                          : servicesLoading ? 'Loading services…' : 'Select services'}
                       </span>
                       <ChevronDown className="w-4 h-4 text-zinc-400" />
                     </div>
                     {showServiceDropdown && (
                       <div className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto bg-white border border-zinc-200 rounded-lg shadow-lg">
-                        {services.length === 0 ? (
-                          <div className="px-3 py-2 text-sm text-zinc-400">No services found</div>
+                        {servicesLoading ? (
+                          <div className="px-3 py-2 text-sm text-zinc-400">Loading services…</div>
+                        ) : services.length === 0 ? (
+                          <div className="px-3 py-2 text-sm text-zinc-400">No services found for this group</div>
                         ) : (
                           <>
                             <button type="button" onClick={() => setSelectedServices(selectedServices.length === services.length ? [] : [...services])}

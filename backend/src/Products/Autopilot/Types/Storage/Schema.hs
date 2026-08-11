@@ -142,10 +142,40 @@ instance Table ReleaseEventT where
     data PrimaryKey ReleaseEventT f = ReleaseEventId (Columnar f Int32) deriving (Generic, Beamable)
     primaryKey = ReleaseEventId . reId
 
+data ReleaseWebhookT f = ReleaseWebhookT
+    { rwId :: Columnar f Int32
+    , rwAppGroup :: Columnar f Text
+    , rwServices :: Columnar f (Maybe Text)
+    , rwCloudType :: Columnar f Text
+    , rwName :: Columnar f Text
+    , rwEnabled :: Columnar f Bool
+    , rwOnSuccess :: Columnar f Bool
+    , rwOnFailure :: Columnar f Bool
+    , rwMethod :: Columnar f Text
+    , rwUrl :: Columnar f Text
+    , rwHeaders :: Columnar f (Maybe Text)
+    , rwQueryParams :: Columnar f (Maybe Text)
+    , rwBody :: Columnar f (Maybe Text)
+    , rwTimeoutSeconds :: Columnar f (Maybe Int32)
+    , rwRetries :: Columnar f (Maybe Int32)
+    , rwCreatedAt :: Columnar f UTCTime
+    , rwUpdatedAt :: Columnar f UTCTime
+    }
+    deriving (Generic, Beamable)
+
+type ReleaseWebhookRow = ReleaseWebhookT Identity
+
+deriving instance Show ReleaseWebhookRow
+
+instance Table ReleaseWebhookT where
+    data PrimaryKey ReleaseWebhookT f = ReleaseWebhookId (Columnar f Int32) deriving (Generic, Beamable)
+    primaryKey = ReleaseWebhookId . rwId
+
 data AutopilotDb f = AutopilotDb
     { deploymentConfig :: f (TableEntity DeploymentConfigT)
     , releaseTrackers :: f (TableEntity ReleaseTrackerT)
     , releaseEvents :: f (TableEntity ReleaseEventT)
+    , releaseWebhooks :: f (TableEntity ReleaseWebhookT)
     , appCatalogs :: f (TableEntity AppCatalogT)
     , storeStatuses :: f (TableEntity StoreStatusT)
     }
@@ -251,6 +281,28 @@ autopilotDb =
                             , reLabel = fieldNamed "re_label"
                             , rePayload = fieldNamed "re_payload"
                             , reCreatedAt = fieldNamed "re_created_at"
+                            }
+            , releaseWebhooks =
+                setEntityName "release_webhook"
+                    <> modifyTableFields
+                        tableModification
+                            { rwId = fieldNamed "id"
+                            , rwAppGroup = fieldNamed "app_group"
+                            , rwServices = fieldNamed "services"
+                            , rwCloudType = fieldNamed "cloud_type"
+                            , rwName = fieldNamed "name"
+                            , rwEnabled = fieldNamed "enabled"
+                            , rwOnSuccess = fieldNamed "on_success"
+                            , rwOnFailure = fieldNamed "on_failure"
+                            , rwMethod = fieldNamed "method"
+                            , rwUrl = fieldNamed "url"
+                            , rwHeaders = fieldNamed "headers"
+                            , rwQueryParams = fieldNamed "query_params"
+                            , rwBody = fieldNamed "body"
+                            , rwTimeoutSeconds = fieldNamed "timeout_seconds"
+                            , rwRetries = fieldNamed "retries"
+                            , rwCreatedAt = fieldNamed "created_at"
+                            , rwUpdatedAt = fieldNamed "updated_at"
                             }
             , appCatalogs = appCatalog
             , storeStatuses = storeStatus

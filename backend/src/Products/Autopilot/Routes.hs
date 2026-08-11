@@ -16,12 +16,14 @@ import Products.Autopilot.Actions.ConfigMap as ConfigMap
 import Products.Autopilot.Actions.K8sResource as K8sResource
 import Products.Autopilot.Actions.Release as Release
 import Products.Autopilot.Actions.VSEdit as VSEdit
+import Products.Autopilot.Actions.Webhook as Webhook
 import Products.Autopilot.Handlers.Ai as Ai
 import Products.Autopilot.Handlers.ConfigReview as ConfigReview
 import Products.Autopilot.Mobile.Routes (MobileAPI, mobileServer)
 import Products.Autopilot.Types (ReleaseTracker)
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Permission (AutopilotPermission (..))
+import Products.Autopilot.Types.Webhook (PlaceholderDef, ReleaseWebhook, UpsertWebhookReq, WebhookTestResult)
 import Servant
 import Shared.API.Response (APIResponse (..))
 
@@ -83,6 +85,13 @@ type CoreAPI =
         :<|> "services" :> Protected 'AP_PRODUCT_CONFIG_VIEW :> "config" :> Capture "id" Int32 :> Get '[JSON] Value
         :<|> "services" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> "config" :> Capture "id" Int32 :> ReqBody '[JSON] UpsertServiceReq :> Put '[JSON] APIResponse
         :<|> "services" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> "config" :> Capture "id" Int32 :> Delete '[JSON] APIResponse
+        -- Release webhooks
+        :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> "placeholders" :> Get '[JSON] [PlaceholderDef]
+        :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> QueryParam "appGroup" Text :> Get '[JSON] [ReleaseWebhook]
+        :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> ReqBody '[JSON] UpsertWebhookReq :> Post '[JSON] APIResponse
+        :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> Capture "id" Int32 :> "test" :> Post '[JSON] WebhookTestResult
+        :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> Capture "id" Int32 :> ReqBody '[JSON] UpsertWebhookReq :> Put '[JSON] APIResponse
+        :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> Capture "id" Int32 :> Delete '[JSON] APIResponse
         -- VS Edit Tracker (static paths BEFORE captures to avoid ambiguity)
         :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_CREATE :> ReqBody '[JSON] CreateVsEditTrackerReq :> Post '[JSON] Value
         :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_VIEW :> "list" :> QueryParam "from" Text :> QueryParam "to" Text :> Get '[JSON] [VsEditTrackerResponse]
@@ -184,6 +193,13 @@ coreServer =
         :<|> Config.getReleaseConfigH
         :<|> Config.updateReleaseConfigH
         :<|> Config.deleteReleaseConfigH
+        -- Release webhooks
+        :<|> Webhook.listPlaceholdersH
+        :<|> Webhook.listWebhooksH
+        :<|> Webhook.createWebhookH
+        :<|> Webhook.testWebhookH
+        :<|> Webhook.updateWebhookH
+        :<|> Webhook.deleteWebhookH
         -- VS Edit Tracker (order must match API type: static paths before captures)
         :<|> VSEdit.createVsEditTrackerH
         :<|> VSEdit.listVsEditTrackersH
