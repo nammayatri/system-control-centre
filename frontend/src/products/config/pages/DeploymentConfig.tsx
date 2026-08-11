@@ -12,14 +12,16 @@ import { Button } from '../../../shared/ui/button';
 import { Badge } from '../../../shared/ui/badge';
 import { TableSkeleton } from '../../../shared/ui/skeleton';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
+import { usePermissions } from '../../../core/auth/PermissionsContext';
 import { useConfirm } from '../../../shared/ui/confirm-dialog';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
   DialogDescription, DialogBody, DialogFooter,
 } from '../../../shared/ui/dialog';
-import { Search, Plus, RefreshCw, Pencil, Trash2, ChevronRight, ChevronDown } from 'lucide-react';
+import { Search, Plus, RefreshCw, Pencil, Trash2, ChevronRight, ChevronDown, Webhook } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
+import WebhooksModal from './WebhooksModal';
 
 interface GroupWithServices {
   group: ProductConfig;
@@ -66,6 +68,9 @@ function typeBadgeVariant(type: string): 'blue' | 'warning' | 'purple' | 'defaul
 const DeploymentConfig: React.FC = () => {
   const queryClient = useQueryClient();
   const confirmAction = useConfirm();
+  const { hasPermission } = usePermissions();
+  const canManageWebhooks = (appGroup: string) =>
+    hasPermission('autopilot', 'PRODUCT_CONFIG_EDIT', appGroup);
 
   const [search, setSearch] = useState('');
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -77,6 +82,8 @@ const DeploymentConfig: React.FC = () => {
   const [serviceModalOpen, setServiceModalOpen] = useState(false);
   const [editingService, setEditingService] = useState<ReleaseConfig | null>(null);
   const [serviceForm, setServiceForm] = useState<Partial<ReleaseConfig>>(EMPTY_SERVICE_FORM);
+
+  const [webhooksFor, setWebhooksFor] = useState<string | null>(null);
 
   const { data: groupConfigs = [], isLoading: groupsLoading, isFetching: groupsFetching, refetch: refetchGroups } = useQuery({
     queryKey: ['product-configs'],
@@ -350,6 +357,21 @@ const DeploymentConfig: React.FC = () => {
                         </td>
                         <td className="py-3 px-4 text-center">
                           <div className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
+                            <button
+                              onClick={() => setWebhooksFor(group.appGroup)}
+                              disabled={!canManageWebhooks(group.appGroup)}
+                              title={canManageWebhooks(group.appGroup)
+                                ? 'Release webhooks'
+                                : 'Release webhooks — requires admin access'}
+                              className={cn(
+                                'p-1.5 rounded-lg transition-colors duration-150',
+                                canManageWebhooks(group.appGroup)
+                                  ? 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 cursor-pointer'
+                                  : 'text-zinc-300 cursor-not-allowed'
+                              )}
+                            >
+                              <Webhook className="w-3.5 h-3.5" />
+                            </button>
                             <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={group.appGroup}>
                               <button
                                 onClick={() => openEditGroup(group)}
@@ -480,6 +502,21 @@ const DeploymentConfig: React.FC = () => {
                         </span>
                       </div>
                       <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
+                        <button
+                          onClick={() => setWebhooksFor(group.appGroup)}
+                          disabled={!canManageWebhooks(group.appGroup)}
+                          aria-label={canManageWebhooks(group.appGroup)
+                            ? 'Release webhooks'
+                            : 'Release webhooks — requires admin access'}
+                          className={cn(
+                            'w-9 h-9 flex items-center justify-center rounded-lg',
+                            canManageWebhooks(group.appGroup)
+                              ? 'text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer'
+                              : 'text-zinc-300 cursor-not-allowed'
+                          )}
+                        >
+                          <Webhook className="w-4 h-4" />
+                        </button>
                         <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={group.appGroup}>
                           <button
                             onClick={() => openEditGroup(group)}
@@ -936,6 +973,12 @@ const DeploymentConfig: React.FC = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <WebhooksModal
+        appGroup={webhooksFor}
+        services={webhooksFor ? serviceConfigs.filter((s: ReleaseConfig) => s.appGroup === webhooksFor) : []}
+        onClose={() => setWebhooksFor(null)}
+      />
     </div>
   );
 };

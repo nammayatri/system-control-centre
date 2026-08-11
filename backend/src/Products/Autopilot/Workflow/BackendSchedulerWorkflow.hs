@@ -848,9 +848,11 @@ notifyComplete = do
 
   updateRT $ \r -> r {status = COMPLETED}
 
-  -- Notify Slack
+  -- Re-read after the update: 'rt' above still says INPROGRESS, and the
+  -- notifiers key off status.
+  currentRT <- getRT
   currentTS <- gets targetState
-  lift $ notifyReleaseCompleted rt currentTS
+  lift $ notifyReleaseCompleted currentRT currentTS
 
 -- ============================================================================
 -- K8s State Helpers

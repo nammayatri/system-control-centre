@@ -1139,6 +1139,122 @@ export async function deleteReleaseConfig(id: number): Promise<any> {
     return data;
 }
 
+// ── Release Webhooks ──────────────────────────────────────────────
+// Deployment-scoped outbound calls fired when a release settles.
+// Same scope as the rollout/cooloff config: an app group plus a set of its
+// services. An empty `services` means every service in the group.
+
+export type WebhookMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+export interface WebhookKV {
+    key: string;
+    value: string;
+}
+
+export interface ReleaseWebhook {
+    id: number;
+    appGroup: string;
+    services: string[];
+    name: string;
+    enabled: boolean;
+    onSuccess: boolean;
+    onFailure: boolean;
+    method: WebhookMethod;
+    url: string;
+    headers: WebhookKV[];
+    queryParams: WebhookKV[];
+    body?: string | null;
+    timeoutSeconds?: number | null;
+    retries?: number | null;
+}
+
+/** One entry in the "available placeholders" reference, served by the backend
+ *  so the UI never drifts from what the dispatcher can actually resolve. */
+export interface WebhookPlaceholder {
+    name: string;
+    token: string;
+    description: string;
+    sample: string;
+}
+
+export interface WebhookTestResult {
+    ok: boolean;
+    requestMethod: string;
+    requestUrl: string;
+    responseStatus?: number | null;
+    responseBody?: string | null;
+    error?: string | null;
+}
+
+export async function fetchWebhooks(appGroup?: string): Promise<ReleaseWebhook[]> {
+    const params = appGroup ? { appGroup } : {};
+    const { data } = await apiClient.get('/webhooks', { params });
+    if (!Array.isArray(data)) return [];
+    return data.map((w: any) => ({
+        id: w.id,
+        appGroup: w.appGroup || '',
+        services: Array.isArray(w.services) ? w.services : [],
+        name: w.name || '',
+        enabled: w.enabled !== false,
+        onSuccess: w.onSuccess !== false,
+        onFailure: w.onFailure !== false,
+        method: (w.method || 'POST') as WebhookMethod,
+        url: w.url || '',
+        headers: Array.isArray(w.headers) ? w.headers : [],
+        queryParams: Array.isArray(w.queryParams) ? w.queryParams : [],
+        body: w.body ?? null,
+        timeoutSeconds: w.timeoutSeconds ?? null,
+        retries: w.retries ?? null,
+    }));
+}
+
+export async function fetchWebhookPlaceholders(): Promise<WebhookPlaceholder[]> {
+    const { data } = await apiClient.get('/webhooks/placeholders');
+    return Array.isArray(data) ? data : [];
+}
+
+function toWebhookBody(payload: Partial<ReleaseWebhook>) {
+    return {
+        appGroup: payload.appGroup,
+        services: payload.services || [],
+        name: payload.name,
+        enabled: payload.enabled !== false,
+        onSuccess: payload.onSuccess !== false,
+        onFailure: payload.onFailure !== false,
+        method: payload.method || 'POST',
+        url: payload.url,
+        // Blank rows are the operator's scratch space in the editor — drop them
+        // rather than sending headers with empty names the backend rejects.
+        headers: (payload.headers || []).filter(h => h.key.trim() !== ''),
+        queryParams: (payload.queryParams || []).filter(q => q.key.trim() !== ''),
+        body: payload.body || null,
+        timeoutSeconds: payload.timeoutSeconds ?? null,
+        retries: payload.retries ?? null,
+    };
+}
+
+export async function createWebhook(payload: Partial<ReleaseWebhook>): Promise<any> {
+    const { data } = await apiClient.post('/webhooks', toWebhookBody(payload));
+    return data;
+}
+
+export async function updateWebhook(id: number, payload: Partial<ReleaseWebhook>): Promise<any> {
+    const { data } = await apiClient.put(`/webhooks/${id}`, { id, ...toWebhookBody(payload) });
+    return data;
+}
+
+export async function deleteWebhook(id: number): Promise<any> {
+    const { data } = await apiClient.delete(`/webhooks/${id}`);
+    return data;
+}
+
+/** Fires the stored webhook once against the real endpoint, with the sample
+ *  placeholder values. Requires the webhook to be saved first. */
+export async function testWebhook(id: number): Promise<WebhookTestResult> {
+    const { data } = await apiClient.post(`/webhooks/${id}/test`);
+    return data;
+}
+
 // ── VS Edit Tracker ───────────────────────────────────────────────
 
 export interface VSEditTracker {

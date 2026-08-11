@@ -75,6 +75,8 @@ import Products.Autopilot.Mobile.Workflow (codeFromTag, electDispatchLeader, rev
 import Products.Autopilot.Queries.ReleaseTracker (keepSnapshot)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
+import Products.Autopilot.Types.Webhook (ReleaseWebhook (..), WebhookMethod (..), WebhookTrigger (..), renderTemplate, samplePlaceholderEnv, triggersOn)
+import Products.Autopilot.Webhooks (triggerForStatus)
 import Products.Autopilot.Types.Target qualified
 import Products.Autopilot.Types.Workflow (ReleaseCategory (..), getDefaultDeploymentTarget)
 import Products.ConfigCatalog (allConfigEntries, findConfigEntry)
@@ -173,6 +175,7 @@ main = do
   section "[48] dispatchRunCandidates (abort-cancel run match: window + newest-first)" testDispatchRunCandidates
   section "[49] Changelog diff link (server-side generation, mirrors frontend)" testDiffLink
   section "[51] extractContainerEnvJson (deployment YAML -> container env array)" testExtractContainerEnvJson
+  section "[52] Release Webhooks (dispatch trigger + templating)" testReleaseWebhooks
 
   putStrLn ""
   putStrLn "==========================================="
@@ -2365,3 +2368,72 @@ testExtractContainerEnvJson = do
   assertEqual "extractContainerEnvJson parses containers[0].env" (Just expectedEnv) (extractContainerEnvJson yamlText)
   assertEqual "extractContainerEnvJson Nothing for a deployment with no containers" Nothing (extractContainerEnvJson "spec:\n  template:\n    spec:\n      containers: []")
   assertEqual "extractContainerEnvJson Nothing for non-YAML garbage" Nothing (extractContainerEnvJson "{[not yaml or json")
+
+-- ============================================================================
+-- [52] Release Webhooks (dispatch trigger + placeholder templating)
+-- ============================================================================
+
+testReleaseWebhooks :: IO ()
+testReleaseWebhooks = do
+  -- Only a terminal status dispatches. ABORTING is the abort *request* — the
+  -- release is still rolling traffic back, so a receiver must not hear "failed"
+  -- yet, and the marker written here would suppress the real ABORTED dispatch.
+  assertEqual "COMPLETED dispatches success" (Just OnSuccess) (triggerForStatus COMPLETED)
+  assertEqual "ABORTED dispatches failure" (Just OnFailure) (triggerForStatus ABORTED)
+  assertEqual "USER_ABORTED dispatches failure" (Just OnFailure) (triggerForStatus USER_ABORTED)
+  assertEqual "GCLT_ABORTED dispatches failure" (Just OnFailure) (triggerForStatus GCLT_ABORTED)
+  assertEqual "ABORTING does NOT dispatch" Nothing (triggerForStatus ABORTING)
+  assertEqual "INPROGRESS does not dispatch" Nothing (triggerForStatus INPROGRESS)
+  assertEqual "PAUSED does not dispatch" Nothing (triggerForStatus PAUSED)
+  assertEqual "REVERTING does not dispatch" Nothing (triggerForStatus REVERTING)
+
+  -- Placeholder substitution
+  let env = [("NEW_VERSION", "v1.4.0"), ("OLD_VERSION", "v1.3.9")] :: [(Text, Text)]
+  assertEqual
+    "Substitutes a known token"
+    "released v1.4.0 over v1.3.9"
+    (renderTemplate env "released {{NEW_VERSION}} over {{OLD_VERSION}}")
+  assertEqual
+    "Token name is case-insensitive and tolerates inner spaces"
+    "v1.4.0"
+    (renderTemplate env "{{ new_version }}")
+  assertEqual
+    "Unknown token is left verbatim, not blanked, so a typo is visible"
+    "{{NEW_VERSIN}}"
+    (renderTemplate env "{{NEW_VERSIN}}")
+  assertEqual
+    "Unterminated braces are left alone"
+    "{{NEW_VERSION"
+    (renderTemplate env "{{NEW_VERSION")
+  assertEqual "Empty template stays empty" "" (renderTemplate env "")
+
+  assertEqual
+    "Send test substitutes obviously-fake values"
+    "TEST_NEW_VERSION over TEST_OLD_VERSION"
+    (renderTemplate samplePlaceholderEnv "{{NEW_VERSION}} over {{OLD_VERSION}}")
+  assertBool
+    "No sample value looks like a real version"
+    (all (\(_, v) -> "TEST_" `T.isPrefixOf` v) samplePlaceholderEnv)
+
+  -- A disabled hook never fires, whatever it opted into.
+  let hook =
+        ReleaseWebhook
+          { whId = 1,
+            whAppGroup = "beckn",
+            whServices = [],
+            whName = "ops",
+            whEnabled = True,
+            whOnSuccess = True,
+            whOnFailure = False,
+            whMethod = WH_POST,
+            whUrl = "https://hooks.example.com/x",
+            whHeaders = [],
+            whQueryParams = [],
+            whBody = Nothing,
+            whTimeoutSeconds = Nothing,
+            whRetries = Nothing
+          }
+  assertBool "Enabled hook fires for the trigger it opted into" (triggersOn OnSuccess hook)
+  assertBool "Enabled hook ignores a trigger it opted out of" (not (triggersOn OnFailure hook))
+  assertBool "Disabled hook never fires" (not (triggersOn OnSuccess hook {whEnabled = False}))
+

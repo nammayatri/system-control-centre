@@ -67,6 +67,7 @@ library
       Products.Autopilot.K8s.HPA
       Products.Autopilot.K8s.Kubectl
       Products.Autopilot.Notifications
+      Products.Autopilot.Webhooks
       Products.Autopilot.ReleaseChangelog
       Products.Autopilot.K8s.VirtualService
       Products.Autopilot.Mobile.Auth
@@ -107,6 +108,7 @@ library
       Products.Autopilot.Mobile.Workflow
       Products.Autopilot.Queries.ProductService
       Products.Autopilot.Queries.ReleaseTracker
+      Products.Autopilot.Queries.ReleaseWebhook
       Products.Autopilot.Queries.VsEditTracker
       Products.AirborneOta.Client
       Products.AirborneOta.Keepalive
@@ -120,6 +122,7 @@ library
       Products.Autopilot.Actions.K8sResource
       Products.Autopilot.Actions.Release
       Products.Autopilot.Actions.VSEdit
+      Products.Autopilot.Actions.Webhook
       Products.Autopilot.Handlers.Ai
       Products.Autopilot.Handlers.ConfigReview
       Products.Autopilot.Routes
@@ -136,6 +139,7 @@ library
       Products.Autopilot.Types.Target
       Products.Autopilot.Types.Target.Config
       Products.Autopilot.Types.Target.Kubernetes
+      Products.Autopilot.Types.Webhook
       Products.Autopilot.Types.Workflow
       Products.Autopilot.Workflow.BackendConfigWorkflow
       Products.Autopilot.Workflow.BackendSchedulerWorkflow
