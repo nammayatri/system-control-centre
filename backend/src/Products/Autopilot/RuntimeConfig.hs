@@ -4,6 +4,7 @@
 module Products.Autopilot.RuntimeConfig
   ( -- Feature flags (MonadFlow versions)
     isK8sEnabled,
+    isConfigMapSafetyCheckEnabled,
     isWatcherEnabled,
     isApproveAllReleases,
     isScaleDownPodsOnCompletion,
@@ -95,6 +96,16 @@ isSlackEnabled = getConfigBoolForProduct "slack_enabled" (Just "autopilot") Fals
 -- Used for unit-test runs and DB-only smoke checks. Default True.
 isK8sEnabled :: (MonadFlow m) => m Bool
 isK8sEnabled = getConfigBoolForProduct "k8s_enabled" (Just "autopilot") True
+
+-- | Gate for the pre-apply ConfigMap safety check (see
+-- 'Products.Autopilot.K8s.ConfigMapSafetyCheck'). When True (default),
+-- applying a ConfigMap change first test-deploys it against a throwaway
+-- clone of the referencing deployment(s) and aborts the change if any
+-- fails to reach Ready. Toggle off via the "configmap_safety_check_enabled"
+-- server config to skip straight to applying, e.g. if the extra pod churn
+-- is undesirable for a given cluster.
+isConfigMapSafetyCheckEnabled :: (MonadFlow m) => m Bool
+isConfigMapSafetyCheckEnabled = getConfigBoolForProduct "configmap_safety_check_enabled" (Just "autopilot") True
 
 -- | Master kill-switch for the runner poll loop. When False, the runner
 -- still spawns but skips the iteration body, so no releases get picked.

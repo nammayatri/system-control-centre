@@ -64,7 +64,8 @@ type CoreAPI =
         :<|> "rollout-pod-estimate" :> "secondary" :> Protected 'AP_RELEASE_VIEW :> ReqBody '[JSON] RolloutPodEstimateReq :> Post '[JSON] Value
         :<|> "sync-rollout-strategy" :> Protected 'AP_RELEASE_VIEW :> QueryParam "product" Text :> QueryParam "service" Text :> Get '[JSON] Value
         -- New endpoints
-        :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "diff" :> QueryParam "type" Text :> Get '[JSON] DiffResponse
+        :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "diff" :> QueryParam "type" Text :> Get '[JSON] CrossCloudDiffResponse
+        :<|> "release" :> ServiceProtected 'AP_RELEASE_VIEW :> "diff" :> "global" :> Capture "globalId" Text :> QueryParam "type" Text :> Get '[JSON] DiffResponse
         :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "pods" :> "health" :> Get '[JSON] PodHealthResponse
         :<|> "releases" :> Protected 'AP_RELEASE_REVERT :> Capture "releaseId" Text :> "revert" :> "immediate" :> ReqBody '[JSON] ImmediateRevertReq :> Post '[JSON] APIResponse
         :<|> "releases" :> Protected 'AP_RELEASE_CREATE :> Capture "releaseId" Text :> "restart" :> ReqBody '[JSON] RestartReleaseReq :> Post '[JSON] APIResponse
@@ -173,6 +174,7 @@ coreServer =
         :<|> K8sResource.resolveSyncRolloutStrategyH
         -- New endpoints
         :<|> Release.releaseDiffH
+        :<|> Release.releaseDiffByGlobalIdH
         :<|> Release.podHealthH
         :<|> Release.immediateRevertH
         :<|> Release.restartReleaseH

@@ -562,6 +562,14 @@ data ProductConfigResponse = ProductConfigResponse
     , vsLockedBy :: Maybe Text
     , slackChannel :: Maybe Text
     , repoName :: Maybe Text
+    , -- | Whether *this* running backend instance has an outbound sync
+      -- cluster URL configured (from 'Config.syncClusterUrl'/'syncClusterEnabled'),
+      -- as opposed to 'syncCluster' which is just the product's descriptive
+      -- topology label and is identical in both clusters' DBs. A cluster with
+      -- no outbound sync target (e.g. a downstream-only cluster) has this
+      -- False even when 'syncCluster' names a peer, so the frontend can hide
+      -- secondary-env / cross-cloud UI that would otherwise create nothing.
+      syncClusterConfigured :: Bool
     }
     deriving (Show, Generic)
 
@@ -662,6 +670,42 @@ instance ToJSON DiffResponse where
             [ "oldfile" .= o
             , "newfile" .= n
             , "message" .= m
+            ]
+
+instance FromJSON DiffResponse where
+    parseJSON = withObject "DiffResponse" $ \o ->
+        DiffResponse
+            <$> o .: "oldfile"
+            <*> o .: "newfile"
+            <*> o .: "message"
+
+{- | Cross-cloud diff: 'primary' is always this cluster's own diff (same
+shape/content as the legacy 'DiffResponse'). 'secondary' is populated only
+when the release's product has a configured sync cluster and a linked
+secondary tracker was found — fetched live from the secondary cluster's
+own diff endpoint. Absent 'secondary' means either there's no sync cluster
+configured for this product (e.g. the AWS krukshetra side, which has
+nothing to sync further to) or the secondary lookup/fetch failed.
+-}
+data CrossCloudDiffResponse = CrossCloudDiffResponse
+    { ccdPrimary :: DiffResponse
+    , ccdSecondary :: Maybe DiffResponse
+    , ccdSecondaryCluster :: Maybe Text
+    }
+    deriving (Show, Generic)
+
+instance ToJSON CrossCloudDiffResponse where
+    toJSON (CrossCloudDiffResponse p s cluster) =
+        object
+            [ "oldfile" .= drOldfile p
+            , "newfile" .= drNewfile p
+            , "message" .= drMessage p
+            , "primaryEnvDiff" .= p
+            , "primaryConfigMapDiff" .= p
+            , "secondaryEnvDiff" .= s
+            , "secondaryConfigMapDiff" .= s
+            , "secondaryCluster" .= cluster
+            , "hasSecondary" .= (case s of Just _ -> True; Nothing -> False)
             ]
 
 -- Resources Response Type

@@ -66,6 +66,8 @@ library
       Products.Autopilot.K8s.Execute
       Products.Autopilot.K8s.HPA
       Products.Autopilot.K8s.Kubectl
+      Products.Autopilot.K8s.PodHealth
+      Products.Autopilot.K8s.ConfigMapSafetyCheck
       Products.Autopilot.Notifications
       Products.Autopilot.Webhooks
       Products.Autopilot.ReleaseChangelog

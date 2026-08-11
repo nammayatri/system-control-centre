@@ -27,10 +27,12 @@ import Data.Text.Encoding (encodeUtf8)
 import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Encoding qualified as TLE
 import Products.Autopilot.Actions.ConfigMap (syncCompletedConfigMap)
+import Products.Autopilot.K8s.ConfigMapSafetyCheck (SafetyCheckFailure (..), runConfigMapSafetyCheck)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.Notifications (notifyConfigMapCompleted)
 import Products.Autopilot.Queries.ProductService (findProductByName, getProductNamespace)
 import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTracker, findReleaseTracker, insertReleaseEvent)
+import Products.Autopilot.RuntimeConfig (isConfigMapSafetyCheckEnabled)
 import Products.Autopilot.Sync (triggerRevertSyncIfEnabled)
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
 import Products.Autopilot.Types.Target (BackendConfigWFStatus (..), ConfigDeploymentState (..), TargetState (..), emptyConfigState)
@@ -161,7 +163,7 @@ resolveConfigContent = do
           logInfoS "  Content is raw K8s manifest, will apply directly"
         else do
           let cmName' = T.unpack (service rt)
-              getCmd = unwords [kubectlBin cfg, "get configmap", cmName', "-n", ns, "-o json"]
+              getCmd = unwords [kubectlBin cfg, "-n", ns, "get configmap", cmName', "-o json"]
           logInfoS $ "  Fetching existing ConfigMap: " <> T.pack cmName'
           getRes <- liftIO $ runCmd getCmd
           case getRes of
@@ -196,6 +198,21 @@ applyConfigMap = do
       content <- case KM.lookup "resolvedContent" wm of
         Just (String c) -> pure c
         _ -> liftIO $ throwIO $ WorkflowError "apply" "Missing resolvedContent"
+
+      safetyCheckOn <- lift isConfigMapSafetyCheckEnabled
+      when safetyCheckOn $ do
+        checkResult <- lift $ runConfigMapSafetyCheck cfg (releaseId rt) (T.pack ns) (service rt) content
+        case checkResult of
+          Right () -> pure ()
+          Left failures ->
+            liftIO $
+              throwIO $
+                WorkflowError
+                  "safety-check"
+                  ( "ConfigMap safety check failed -- aborting before apply. "
+                      <> T.intercalate "; " [f <> ": " <> r | (f, r) <- [(scfDeployment x, scfReason x) | x <- failures]]
+                  )
+
       result <- liftIO $ replaceFromStdin cfg ns content
       case result of
         Right () -> do

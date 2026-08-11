@@ -347,7 +347,14 @@ const CreateRelease: React.FC = () => {
   useEffect(() => {
     if (formData.appGroup) {
       const config = productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup);
-      setSyncCluster(config?.sync_cluster || '');
+      // sync_cluster is just a descriptive topology label and is identical
+      // in both clusters' DBs; sync_cluster_configured reflects whether
+      // *this* backend instance actually has an outbound sync URL (e.g.
+      // false on a downstream-only cluster like AWS krukshetra receiving
+      // from GCP prod). Require both so we don't show a secondary-env
+      // section — or create a sync release — on a cluster with nothing to
+      // sync to.
+      setSyncCluster(config?.sync_cluster && config?.sync_cluster_configured ? config.sync_cluster : '');
     } else setSyncCluster('');
   }, [formData.appGroup, productConfigs]);
 

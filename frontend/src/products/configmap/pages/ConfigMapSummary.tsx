@@ -48,28 +48,56 @@ const tryFormatJson = (data: string): string => { try { return JSON.stringify(JS
 
 const ConfigMapDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
   const { data: diff, isLoading, error } = useReleaseDiff(releaseId, 'configmap');
+  const secondary = diff?.hasSecondary ? diff.secondaryConfigMapDiff : null;
   return (
-    <div className="p-4 sm:p-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
-        <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">ConfigMap Diff</h3>
-        {diff?.message && <span className="text-xs text-zinc-400">{diff.message}</span>}
+    <div className="p-4 sm:p-6 space-y-6">
+      <div>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+          <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">
+            {secondary ? `Primary ConfigMap Diff` : 'ConfigMap Diff'}
+          </h3>
+          {diff?.message && <span className="text-xs text-zinc-400">{diff.message}</span>}
+        </div>
+        {isLoading ? (
+          <div className="animate-pulse space-y-3"><div className="h-4 bg-zinc-100 rounded w-1/3" /><div className="h-64 bg-zinc-100 rounded" /></div>
+        ) : error || !diff ? (
+          <p className="text-sm text-zinc-400">No diff data available.</p>
+        ) : !diff.oldfile && !diff.newfile ? (
+          <p className="text-sm text-zinc-400">No ConfigMap diff data available.</p>
+        ) : (
+          <div className="border border-zinc-200 rounded-lg overflow-hidden overflow-x-auto text-xs sm:text-sm">
+            <ReactDiffViewer
+              oldValue={formatConfigMapContent(diff.oldfile)}
+              newValue={formatConfigMapContent(diff.newfile)}
+              splitView={true}
+              leftTitle="Before"
+              rightTitle="After"
+              useDarkTheme={false}
+            />
+          </div>
+        )}
       </div>
-      {isLoading ? (
-        <div className="animate-pulse space-y-3"><div className="h-4 bg-zinc-100 rounded w-1/3" /><div className="h-64 bg-zinc-100 rounded" /></div>
-      ) : error || !diff ? (
-        <p className="text-sm text-zinc-400">No diff data available.</p>
-      ) : !diff.oldfile && !diff.newfile ? (
-        <p className="text-sm text-zinc-400">No ConfigMap diff data available.</p>
-      ) : (
-        <div className="border border-zinc-200 rounded-lg overflow-hidden overflow-x-auto text-xs sm:text-sm">
-          <ReactDiffViewer
-            oldValue={formatConfigMapContent(diff.oldfile)}
-            newValue={formatConfigMapContent(diff.newfile)}
-            splitView={true}
-            leftTitle="Before"
-            rightTitle="After"
-            useDarkTheme={false}
-          />
+      {secondary && (
+        <div>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+            <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">
+              Secondary ConfigMap Diff{diff?.secondaryCluster ? ` (${diff.secondaryCluster})` : ''}
+            </h3>
+          </div>
+          {!secondary.oldfile && !secondary.newfile ? (
+            <p className="text-sm text-zinc-400">No secondary ConfigMap diff data available.</p>
+          ) : (
+            <div className="border border-zinc-200 rounded-lg overflow-hidden overflow-x-auto text-xs sm:text-sm">
+              <ReactDiffViewer
+                oldValue={formatConfigMapContent(secondary.oldfile)}
+                newValue={formatConfigMapContent(secondary.newfile)}
+                splitView={true}
+                leftTitle="Before"
+                rightTitle="After"
+                useDarkTheme={false}
+              />
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -172,6 +200,18 @@ const ConfigMapSummary: React.FC = () => {
     : (data.events as ConfigMapEvent[] | undefined) || [];
   const sortedEvents = [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
+  // Backend forces manual approval for ConfigMap changes that arrived via
+  // cross-cluster sync (see Actions/ConfigMap.hs createConfigMapH) and
+  // records why in this event — surface it here so it's not just buried
+  // in the Event Data tab.
+  const syncApprovalEvent = events.find(e => e.label === 'SYNC_MANUAL_APPROVAL_REQUIRED');
+  const syncApprovalReason = (() => {
+    if (!syncApprovalEvent) return null;
+    try { return JSON.parse(syncApprovalEvent.data)?.reason || 'This ConfigMap change was synced from another cluster and requires manual approval.'; }
+    catch { return 'This ConfigMap change was synced from another cluster and requires manual approval.'; }
+  })();
+  const showSyncApprovalBanner = !!syncApprovalReason && data.status === 'CREATED' && data.is_approved === 0;
+
   return (
     <div className="flex flex-col w-full pb-12">
       <div className="flex flex-col gap-3 mb-4 sm:mb-5">
@@ -225,6 +265,15 @@ const ConfigMapSummary: React.FC = () => {
       </div>
 
       <ReviewStatusBanner review={review} onView={() => setActiveTab('AI Review')} />
+
+      {showSyncApprovalBanner && (
+        <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-violet-300 bg-violet-50 px-4 py-3">
+          <div className="flex items-start gap-2.5 text-sm text-violet-800">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{syncApprovalReason}</span>
+          </div>
+        </div>
+      )}
 
       {reviewBlocks && (
         <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">

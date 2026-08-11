@@ -264,6 +264,13 @@ export interface ProductConfig {
     release_branch?: string;
     product_type: string;
     sync_cluster?: string | null;
+    // Whether *this* backend instance actually has an outbound sync cluster
+    // URL configured — distinct from sync_cluster, which is just the
+    // product's descriptive topology label and is identical in both
+    // clusters' DBs. A cluster with nothing to sync further to (e.g. AWS
+    // krukshetra receiving from GCP prod) has this false even though
+    // sync_cluster still names a peer.
+    sync_cluster_configured?: boolean;
     need_infra_approval?: number;
     ai_changelog_enabled?: number;
     vs_locked_by?: string | null;
@@ -587,6 +594,7 @@ export async function fetchProductConfigs(): Promise<ProductConfig[]> {
         release_branch: p.releaseBranch || '',
         repo_name: p.repoName || '',
         sync_cluster: p.syncCluster || p.sync_cluster || null,
+        sync_cluster_configured: !!(p.syncClusterConfigured ?? p.sync_cluster_configured),
         need_infra_approval: p.needInfraApproval ? 1 : 0,
         ai_changelog_enabled: p.aiChangelogEnabled ? 1 : 0,
         slack_channel: p.slackChannel ?? p.slack_channel ?? null,
@@ -967,6 +975,15 @@ export interface ReleaseDiff {
     oldfile: string;
     newfile: string;
     message: string;
+    // Cross-cloud fields — populated only when this cluster has an outbound
+    // sync cluster configured AND the release has a linked secondary
+    // tracker (see backend CrossCloudDiffResponse). Absent on a
+    // downstream-only cluster (e.g. AWS krukshetra) or a release that was
+    // never synced.
+    hasSecondary?: boolean;
+    secondaryCluster?: string | null;
+    secondaryEnvDiff?: { oldfile: string; newfile: string; message: string } | null;
+    secondaryConfigMapDiff?: { oldfile: string; newfile: string; message: string } | null;
 }
 
 export async function fetchReleaseDiff(releaseId: string, type?: string): Promise<ReleaseDiff> {

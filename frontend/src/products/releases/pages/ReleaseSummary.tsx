@@ -101,31 +101,58 @@ const DIFF_TYPE_LABELS: Record<DiffType, string> = {
 };
 
 const EnvDiffTab: React.FC<{ releaseId: string }> = ({ releaseId }) => {
-  const [diffType, setDiffType] = useState<DiffType>('deployment');
+  const [diffType] = useState<DiffType>('deployment');
   const { data: diff, isLoading, error } = useReleaseDiff(releaseId, diffType);
+  const secondary = diff?.hasSecondary ? diff.secondaryEnvDiff : null;
+  const primaryLabel = secondary ? `Primary ${DIFF_TYPE_LABELS[diffType]} Diff` : `${DIFF_TYPE_LABELS[diffType]} Diff`;
 
   return (
-    <div className="p-4 sm:p-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
-        <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">Deployment Diff</h3>
-        {diff?.message && <span className="text-xs text-zinc-400">{diff.message}</span>}
+    <div className="p-4 sm:p-6 space-y-6">
+      <div>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+          <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">{primaryLabel}</h3>
+          {diff?.message && <span className="text-xs text-zinc-400">{diff.message}</span>}
+        </div>
+        {isLoading ? (
+          <div className="animate-pulse space-y-3"><div className="h-4 bg-zinc-100 rounded w-1/3" /><div className="h-64 bg-zinc-100 rounded" /></div>
+        ) : error || !diff ? (
+          <p className="text-sm text-zinc-400">No diff data available.</p>
+        ) : !diff.oldfile && !diff.newfile ? (
+          <div><p className="text-sm text-zinc-400">No {DIFF_TYPE_LABELS[diffType]} diff data available.</p>{diff.message && <p className="text-xs text-zinc-400 mt-1">{diff.message}</p>}</div>
+        ) : (
+          <div className="border border-zinc-200 rounded-lg overflow-hidden text-xs sm:text-sm overflow-x-auto">
+            <ReactDiffViewer
+              oldValue={formatDiff(diff.oldfile)}
+              newValue={formatDiff(diff.newfile)}
+              splitView={true}
+              leftTitle={`${DIFF_TYPE_LABELS[diffType]} — Before`}
+              rightTitle={`${DIFF_TYPE_LABELS[diffType]} — After`}
+              useDarkTheme={false}
+            />
+          </div>
+        )}
       </div>
-      {isLoading ? (
-        <div className="animate-pulse space-y-3"><div className="h-4 bg-zinc-100 rounded w-1/3" /><div className="h-64 bg-zinc-100 rounded" /></div>
-      ) : error || !diff ? (
-        <p className="text-sm text-zinc-400">No diff data available.</p>
-      ) : !diff.oldfile && !diff.newfile ? (
-        <div><p className="text-sm text-zinc-400">No {DIFF_TYPE_LABELS[diffType]} diff data available.</p>{diff.message && <p className="text-xs text-zinc-400 mt-1">{diff.message}</p>}</div>
-      ) : (
-        <div className="border border-zinc-200 rounded-lg overflow-hidden text-xs sm:text-sm overflow-x-auto">
-          <ReactDiffViewer
-            oldValue={formatDiff(diff.oldfile)}
-            newValue={formatDiff(diff.newfile)}
-            splitView={true}
-            leftTitle={`${DIFF_TYPE_LABELS[diffType]} — Before`}
-            rightTitle={`${DIFF_TYPE_LABELS[diffType]} — After`}
-            useDarkTheme={false}
-          />
+      {secondary && (
+        <div>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+            <h3 className="text-sm font-semibold text-zinc-700 uppercase tracking-wider">
+              Secondary {DIFF_TYPE_LABELS[diffType]} Diff{diff?.secondaryCluster ? ` (${diff.secondaryCluster})` : ''}
+            </h3>
+          </div>
+          {!secondary.oldfile && !secondary.newfile ? (
+            <p className="text-sm text-zinc-400">No secondary {DIFF_TYPE_LABELS[diffType]} diff data available.</p>
+          ) : (
+            <div className="border border-zinc-200 rounded-lg overflow-hidden text-xs sm:text-sm overflow-x-auto">
+              <ReactDiffViewer
+                oldValue={formatDiff(secondary.oldfile)}
+                newValue={formatDiff(secondary.newfile)}
+                splitView={true}
+                leftTitle={`${DIFF_TYPE_LABELS[diffType]} — Before`}
+                rightTitle={`${DIFF_TYPE_LABELS[diffType]} — After`}
+                useDarkTheme={false}
+              />
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -574,6 +601,15 @@ const ReleaseSummary: React.FC = () => {
   // AI env review (BackendService deployments). Drives the banner + approve-gate.
   const { data: review } = useConfigReview(id || '', 'release');
   const reviewBlocks = !!review?.available && review.blocksApproval;
+  // Backend forces manual approval for releases that arrived via cross-cluster
+  // sync and carry an env change (see Actions/Release.hs
+  // createReleaseHBodyAfterGuard) and records why in this event.
+  const syncApprovalEvent = events.find(e => e.label === 'SYNC_MANUAL_APPROVAL_REQUIRED');
+  const syncApprovalReason = (() => {
+    if (!syncApprovalEvent) return null;
+    try { return JSON.parse(syncApprovalEvent.data)?.reason || 'This release was synced from another cluster and requires manual approval.'; }
+    catch { return 'This release was synced from another cluster and requires manual approval.'; }
+  })();
   const doRefresh = useCallback(async () => {
     await Promise.all([
       refetch(),
@@ -899,6 +935,15 @@ const ReleaseSummary: React.FC = () => {
       </div>
 
       <ReviewStatusBanner review={review} onView={() => setActiveTab('ai-review')} />
+
+      {!!syncApprovalReason && s === 'CREATED' && release.is_approved === 0 && (
+        <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-violet-300 bg-violet-50 px-4 py-3">
+          <div className="flex items-start gap-2.5 text-sm text-violet-800">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{syncApprovalReason}</span>
+          </div>
+        </div>
+      )}
 
       {reviewBlocks && (
         <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">

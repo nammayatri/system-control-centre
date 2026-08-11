@@ -178,6 +178,11 @@ doCreate cfg tracker mts targetCluster = do
         syncEnvOverride = case mCtx >>= syncClusterEnvOverrideData of
             Just t | not (T.null t) -> Just t
             _ -> envOverrideData tracker
+        -- Never claim pre-approval for a release carrying an env change --
+        -- the receiving cluster enforces this independently too (see
+        -- 'Actions.Release.createReleaseHBodyAfterGuard'), but this keeps
+        -- the sync request body honest about what it's actually asking for.
+        hasEnvChange = maybe False (not . T.null . T.strip) syncEnvOverride
     rolloutStrat <- getSyncRolloutStrategy tracker mCtx targetCluster
     let body =
             object
@@ -200,7 +205,7 @@ doCreate cfg tracker mts targetCluster = do
                 , "revert" .= revertValue tracker
                 , "global_id" .= globalId tracker
                 , "is_infra_approved" .= (1 :: Int)
-                , "is_approved" .= True
+                , "is_approved" .= not hasEnvChange
                 , "udf3" .= (Nothing :: Maybe Text)
                 , "isReleaseSync" .= False
                 , "isSystemTriggered" .= True

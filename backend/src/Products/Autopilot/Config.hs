@@ -13,6 +13,12 @@ autopilotConfigs =
         "Enable Kubernetes operations"
         (Just "autopilot")
     , ConfigEntry
+        "configmap_safety_check_enabled"
+        (BoolConfig True)
+        DeploymentGroup
+        "Before applying a ConfigMap change, test-deploy it against a throwaway clone of the referencing deployment(s) and abort the change if any fails to become Ready"
+        (Just "autopilot")
+    , ConfigEntry
         "approve_all_releases"
         (BoolConfig False)
         DeploymentGroup

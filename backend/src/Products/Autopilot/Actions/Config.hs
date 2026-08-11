@@ -28,7 +28,8 @@ import Control.Applicative ((<|>))
 import Control.Monad.Catch (throwM)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson, requireDeploymentPermission)
-import Core.Environment (Flow)
+import Core.Config (Config (..))
+import Core.Environment (Flow, getConfig)
 import Data.Aeson (Value (..), toJSON)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
@@ -50,10 +51,13 @@ import Shared.Queries.ServerConfig (deleteServerConfig, listServerConfigsByProdu
 -- Product Config CRUD (/products/config)
 
 listProductConfigsH :: AuthedPerson -> Flow [ProductConfigResponse]
-listProductConfigsH _ap = map toProductConfigResponse <$> listProducts
+listProductConfigsH _ap = do
+  cfg <- getConfig
+  let syncConfigured = syncClusterEnabled cfg && not (null (syncClusterUrl cfg))
+  map (toProductConfigResponse syncConfigured) <$> listProducts
 
-toProductConfigResponse :: S.DeploymentConfig -> ProductConfigResponse
-toProductConfigResponse p =
+toProductConfigResponse :: Bool -> S.DeploymentConfig -> ProductConfigResponse
+toProductConfigResponse syncConfigured p =
   ProductConfigResponse
     { id = S.dcId p,
       appGroup = S.dcAppGroup p,
@@ -67,7 +71,8 @@ toProductConfigResponse p =
       syncCluster = S.dcSyncCluster p,
       vsLockedBy = S.dcVsLockedBy p,
       slackChannel = S.dcSlackChannel p,
-      repoName = S.dcRepoName p
+      repoName = S.dcRepoName p,
+      syncClusterConfigured = syncConfigured
     }
 
 createProductConfigH :: AuthedPerson -> UpsertProductReq -> Flow APIResponse
@@ -75,10 +80,12 @@ createProductConfigH ap req = upsertProductH ap req
 
 getProductConfigH :: AuthedPerson -> Int32 -> Flow Value
 getProductConfigH _ap pid = do
+  cfg <- getConfig
+  let syncConfigured = syncClusterEnabled cfg && not (null (syncClusterUrl cfg))
   m <- findProductConfigById pid
   case m of
     Nothing -> pure $ toJSON $ ErrorResponse "Product config not found" Nothing
-    Just p -> pure $ toJSON (toProductConfigResponse p)
+    Just p -> pure $ toJSON (toProductConfigResponse syncConfigured p)
 
 updateProductConfigH :: AuthedPerson -> Int32 -> UpsertProductReq -> Flow APIResponse
 updateProductConfigH ap pathId UpsertProductReq {appGroup = appGroup', cluster = cluster', namespace = namespace', vsName = vsName', productType = productType', productAcronym = productAcronym', syncCluster = syncCluster', needInfraApproval = needInfraApproval', aiChangelogEnabled = aiChangelogEnabled', slackChannel = slackChannel', repoName = repoName'} = do
