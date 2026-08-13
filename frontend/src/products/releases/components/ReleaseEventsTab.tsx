@@ -25,14 +25,15 @@ const tryFormatJson = (data: string): string => {
   catch { return data; }
 };
 
-// Payload-carried link (e.g. GH_RUN_RESOLVED's html_url → the GitHub Actions
-// run) — surfaced as a click-through so the run is one click away, not buried
-// in the expanded JSON.
+// Payload-carried link (GH_RUN_RESOLVED / MATRIX_JOB_UPDATED html_url,
+// dispatch events' run urls) — surfaced as a click-through so the run is one
+// click away, not buried in the expanded JSON.
 const linkOf = (data?: string): string | undefined => {
+  if (!data) return undefined;
   try {
-    const p = JSON.parse(data || '');
-    const url = p?.html_url;
-    return typeof url === 'string' && url.startsWith('https://') ? url : undefined;
+    const p = JSON.parse(data) as Record<string, unknown>;
+    const url = p.html_url ?? p.github_run_url ?? p.run_url ?? p.expected_run_url ?? p.gh_run_url;
+    return typeof url === 'string' && url.startsWith('http') ? url : undefined;
   } catch { return undefined; }
 };
 

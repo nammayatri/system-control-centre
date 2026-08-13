@@ -64,6 +64,8 @@ import {
 } from './OtaPanel';
 import { OtaFlow } from '../../pages/mobile/summary/OtaFlow';
 import { OtaLifecyclePanel } from './OtaLifecyclePanel';
+import { CampaignCard } from '../chime/CampaignCard';
+import { useMobileApps } from '../../hooks';
 
 const keyOf = (c: { appName: string; platform: string }) => `${c.appName}|${c.platform}`;
 
@@ -123,6 +125,7 @@ export function OtaSection({
 }) {
   const confirm = useConfirm();
   const access = useOtaAccess();
+  const { data: mobileApps = [] } = useMobileApps();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [bump, setBump] = useState<'patch' | 'minor' | 'major'>('patch');
@@ -548,7 +551,7 @@ export function OtaSection({
   })();
 
   return (
-    <div className="bg-white rounded-xl border border-zinc-200 border-l-[6px] border-l-violet-500 overflow-hidden shadow-[0_4px_12px_-4px_rgba(0,0,0,0.05)]">
+    <div className="bg-white rounded-xl border border-zinc-200 overflow-hidden shadow-[0_4px_12px_-4px_rgba(0,0,0,0.05)]">
       {/* Toolbar — push form + selection verbs (violet OTA identity) */}
       <div className="flex items-center gap-2 flex-wrap px-4 py-3 border-b border-violet-100 bg-violet-50/50">
         <span className="inline-flex items-center gap-1 bg-violet-100 text-violet-800 border border-violet-200 text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider shadow-sm">
@@ -880,6 +883,25 @@ export function OtaSection({
                         onRetryPush={() => void doPushFor(r)}
                         onChanged={onChanged}
                       />
+                      {/* Fleet campaign (Chime) — full-width strip below the
+                          panels (design: group-detail mockup, states a–i).
+                          Catalog matched by airborne ref; hidden when the app
+                          has no package or the operator lacks OTA_VIEW (the
+                          card self-gates). */}
+                      {(() => {
+                        const cat = mobileApps.find((a) => a.airborneAppRef === r.capable.airborneAppRef);
+                        return cat?.packageName ? (
+                          <div className="mt-4">
+                            <CampaignCard
+                              appRef={r.capable.airborneAppRef}
+                              pkg={cat.packageName}
+                              role={cat.surface === 'driver' ? 'bpp' : 'bap'}
+                              platform={cat.platform}
+                              appLabel={`${cat.surface} · ${cat.platform}`}
+                            />
+                          </div>
+                        ) : null;
+                      })()}
                     </td>
                   </tr>
                 )}

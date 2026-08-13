@@ -110,6 +110,7 @@ library
       Products.Autopilot.Queries.ReleaseTracker
       Products.Autopilot.Queries.ReleaseWebhook
       Products.Autopilot.Queries.VsEditTracker
+      Products.AirborneOta.Chime
       Products.AirborneOta.Client
       Products.AirborneOta.Keepalive
       Products.AirborneOta.Queries
