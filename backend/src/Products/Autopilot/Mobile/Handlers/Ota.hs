@@ -37,8 +37,10 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import System.IO.Unsafe (unsafePerformIO)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..), KnownPermission, requireDeploymentPermissionScopes)
-import Core.Environment (Flow, logInfo, logWarning)
+import Core.DB.Connection (withConn)
+import Core.Environment (Flow, logInfo, logWarning, withDb)
 import Core.Http.Client qualified as Http
+import Database.PostgreSQL.Simple (Only (..), query)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import Data.Aeson.Key qualified as AK
 import Data.Aeson.KeyMap qualified as KM
@@ -92,12 +94,31 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (StoreCell (..), storeCells
 import Products.Autopilot.Mobile.Types (MobileBuildTargetState (..), MobileBuildWFStatus (..), isDebugBuildType, mbcBuildType)
 import Products.Autopilot.Mobile.Types.Ota
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..))
-import Products.Autopilot.Mobile.Workflow (tryAdvisoryLockShared)
 import Products.Autopilot.Queries.ReleaseTracker (findReleaseTrackersByGroupId)
 import Products.Autopilot.Types.Release qualified as Rel
 import Products.Autopilot.Types.Target (TargetState (..))
 
 -- ─── Constants & small helpers ─────────────────────────────────────
+
+{- | @pg_try_advisory_lock(hashtext($1))@ — non-blocking, session-scoped
+advisory lock. Best-effort serialization of concurrent OTA dispatch requests
+(the lock call and the guarded work run on different pooled connections, and
+the lock releases only when its connection closes — a re-check on the same
+connection re-acquires reentrantly). The mobile BUILD workflow stopped using
+this pattern (its dispatch uniqueness comes from durable pre-POST receipts);
+kept here local to the OTA handler until that flow gets the same treatment.
+-}
+tryAdvisoryLockShared :: Text -> Flow Bool
+tryAdvisoryLockShared key = withDb $ \db ->
+    withConn db $ \conn -> do
+        rows <-
+            query
+                conn
+                "SELECT pg_try_advisory_lock(hashtext(?))"
+                (Only key)
+        pure $ case rows of
+            [Only b] -> b
+            _ -> False
 
 otaWorkflowFile :: Text
 otaWorkflowFile = ".github/workflows/consumer-airborne-ota.yaml"
@@ -437,7 +458,7 @@ convergeBatch creds now batchId batchRows ownerRepo = do
                         | r <- dispatchRunCandidates (opDispatchedAt anchor) runs
                         , maybe True (== opSourceRef anchor) (wrHeadBranch r)
                         ]
-                mRun <- findRunWithJob creds owner repo (otaJobName (opAppName anchor) (opPlatform anchor)) cands
+                mRun <- findRunWithJob creds owner repo [otaJobName (opAppName anchor) (opPlatform anchor)] cands
                 case mRun of
                     Just r -> do
                         updateOtaPushRun batchId (wrId r) (wrHeadSha r)

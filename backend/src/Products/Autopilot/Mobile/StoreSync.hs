@@ -1034,6 +1034,10 @@ insertExternalReviewRow ac mCode inferred version reviewStatus = do
                 , mbReviewLastPolledAt = Just now
                 , mbBatchDispatch = Nothing
                 , mbVerifyAttempts = Nothing
+                , mbDispatchWatermark = Nothing
+                , mbCandidateRunId = Nothing
+                , mbFirebaseReleaseUrl = Nothing
+                , mbFirebaseTesterUrl = Nothing
                 }
         base = mkMobileTrackerRow rid ac targetState (Just version) Nothing "store-sync" now
         row =
@@ -1195,6 +1199,10 @@ mintSyntheticRelease observed ac version mCode track = do
                 , mbReviewLastPolledAt = Nothing
                 , mbBatchDispatch = Nothing
                 , mbVerifyAttempts = Nothing
+                , mbDispatchWatermark = Nothing
+                , mbCandidateRunId = Nothing
+                , mbFirebaseReleaseUrl = Nothing
+                , mbFirebaseTesterUrl = Nothing
                 }
         encodedCtx = encodeJsonText (MobileBuildState targetState)
         row =

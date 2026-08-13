@@ -67,7 +67,12 @@ const MobileReleaseSummary = () => {
   // Rollout + OTA queries stay above the early returns (rules of hooks);
   // `enabled` flags are read off the possibly-undefined release. Both share
   // their cache keys with the panels below (deduped, no double fetch).
-  const rolloutQ = useMobileRollout(id, release?.tracker_type === 'MobileBuild');
+  // Debug builds have no store lifecycle — the rollout endpoint 400s for them
+  // ("Debug builds are not promoted to the stores"), so don't even ask.
+  const rolloutQ = useMobileRollout(
+    id,
+    release?.tracker_type === 'MobileBuild' && release?.release_context?.build_type !== 'debug',
+  );
   const groupId =
     release?.tracker_type === 'MobileBuild'
       ? (release?.release_context?.release_group_id ?? undefined)
@@ -166,7 +171,18 @@ const MobileReleaseSummary = () => {
   // sibling apps' still-running builds die with it (BE lists those only).
   const mobileAbortWarning = rollout?.rdRunSiblings?.length
     ? `This cancels the shared GitHub run. Still building in the same run and will ALSO be cancelled: ${rollout.rdRunSiblings.join(', ')}.`
-    : undefined;
+    : isDebug
+      ? 'Cancelling stops the shared GitHub run — any sibling apps still building in the same run are cancelled with it.'
+      : undefined;
+
+  // Debug builds get no rollout detail (endpoint 400s), so abortability is
+  // derived locally: cancellable until the build uploads its artifact
+  // (MBSubmittedToStore and beyond = too late, mirroring rdAbortable).
+  const debugAbortable =
+    isDebug &&
+    ['MBInit', 'MBVersionResolved', 'MBDispatched', 'MBRunIdResolved', 'MBBuilding'].includes(
+      (release.release_context as Record<string, any>)?.mb_wf_status ?? '',
+    );
 
   const matchedMobileApp = mobileApps.find(
     (a) => a.name === release.appGroup && a.surface === release.service && a.platform === release.env,
@@ -251,7 +267,7 @@ const MobileReleaseSummary = () => {
       {/* Abort visibility is BE-driven (rdAbortable): shown only while the build
           is still Building. A rejected / on-store / terminal build can't be
           un-shipped, so Abort is hidden. */}
-      {s === 'INPROGRESS' && !!rollout?.rdAbortable && (
+      {s === 'INPROGRESS' && (!!rollout?.rdAbortable || debugAbortable) && (
         <PermissionGate product="mobile" permission="MB_RELEASE_ABORT" appGroup={`${release.appGroup}/${release.env}`}>
           <Button
             size="sm"

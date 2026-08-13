@@ -16,6 +16,7 @@ module Products.Autopilot.Mobile.Queries.Tracker
   ( findSiblingsByDispatchId,
     findRunSiblingsStillBuilding,
     setExternalRunIdForDispatch,
+    externalRunIdsClaimedElsewhere,
     setPhase,
     setAscIds,
     markReleaseInProgress,
@@ -203,6 +204,31 @@ setExternalRunIdForDispatch dispatchId runId headSha = withDb $ \db ->
               ]
         )
         (\rt -> rtDispatchId rt ==. val_ (Just dispatchId))
+
+-- | Of the given candidate GH run ids, the ones already claimed
+-- (@external_run_id@) by a tracker row OUTSIDE this dispatch group. Run
+-- adoption drops these before binding, so one group can never steal a run
+-- another group owns — the last disambiguator on top of the actor filter
+-- and the run-id watermark.
+externalRunIdsClaimedElsewhere ::
+  (MonadFlow m) =>
+  Text ->
+  [Text] ->
+  m [Text]
+externalRunIdsClaimedElsewhere _ [] = pure []
+externalRunIdsClaimedElsewhere dispatchId runIds = do
+  rows <- withDb $ \db ->
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtExternalRunId rt `in_` map (val_ . Just) runIds)
+          guard_
+            ( rtDispatchId rt /=. val_ (Just dispatchId)
+                ||. isNothing_ (rtDispatchId rt)
+            )
+          pure (rtExternalRunId rt)
+  pure (mapMaybe id rows)
 
 -- | The single writer: one ReleasePhase projects the whole status tuple
 -- (review/rollout/percent/track/reason + mb_wf_status + review *_at) in one UPDATE.

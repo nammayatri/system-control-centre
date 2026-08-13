@@ -74,6 +74,10 @@ data HttpReq = HttpReq
     , reqBody :: Maybe LBS.ByteString
     , reqTimeout :: Seconds
     -- ^ Total request timeout. Default: 30s. Ignored when 'reqNoTimeout' is True.
+    , reqNoRedirect :: Bool
+    -- ^ Do not follow redirects — return the 3xx response itself (with its
+    -- Location header). For endpoints that redirect to pre-signed blob URLs,
+    -- which reject requests still carrying our Authorization header (401).
     , reqNoTimeout :: Bool
     -- ^ Disable the response timeout entirely (wait indefinitely). Default: False.
     -- For long, legitimately-slow calls (e.g. an LLM generating a big output)
@@ -93,6 +97,7 @@ defaultReq url =
         , reqHeaders = []
         , reqBody = Nothing
         , reqTimeout = Seconds 30
+        , reqNoRedirect = False
         , reqNoTimeout = False
         , reqRetries = 1
         , reqLogTag = "http"
@@ -170,6 +175,7 @@ doOne HttpReq{..} = do
                             if reqNoTimeout
                                 then responseTimeoutNone
                                 else responseTimeoutMicro (toMicros reqTimeout)
+                        , redirectCount = if reqNoRedirect then 0 else redirectCount baseReq
                         }
             result <- try (httpLbs req mgr) :: IO (Either HttpException (Response LBS.ByteString))
             case result of

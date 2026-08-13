@@ -400,7 +400,7 @@ injectStoreState prods helds cellsByApp pair@(tracker, mts) =
                             disp = displayStatusInferred (reviewInferredOf (NT.metadata tracker)) ph
                             rc' =
                                 fmap
-                                    (addMobileLifecycle (T.pack (show (mbWfStatus s))) rollout pct track (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) Nothing Nothing)
+                                    (addMobileLifecycle (T.pack (show (mbWfStatus s))) rollout pct track (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) Nothing Nothing Nothing Nothing Nothing)
                                     (NT.releaseContext tracker)
                          in (tracker{releaseContext = rc'}, mts)
         _ -> pair

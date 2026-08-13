@@ -93,6 +93,13 @@ export interface ReleaseContext {
     dispatch_id?: string | null;
     // GitHub Actions run id — absent until ResolveRunId binds the run.
     external_run_id?: string | null;
+    // Sighted-but-unverified run id (display only): the run SCC believes is
+    // ours while matrix-job verification pends (iOS setup takes 10-20 min).
+    candidate_run_id?: string | null;
+    // Debug builds: Firebase App Distribution links parsed from the job log
+    // at build completion (debug lanes push no tag / upload no artifacts).
+    firebase_console_url?: string | null;
+    firebase_tester_url?: string | null;
 }
 
 // ── All statuses (UPPERCASE — canonical) ─────
@@ -440,6 +447,12 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         // GitHub Actions run id (stamped once ResolveRunId binds the run) —
         // the summary's "Workflow Run Entity" / "View GitHub run" link.
         external_run_id: (r.releaseContext as any)?.external_run_id,
+        // Sighted-but-unverified run (display-only fallback for the same link).
+        candidate_run_id: (r.releaseContext as any)?.candidate_run_id,
+        // Debug builds: Firebase release links (must be passed through here
+        // or they're dropped by this pick-list).
+        firebase_console_url: (r.releaseContext as any)?.firebase_console_url,
+        firebase_tester_url: (r.releaseContext as any)?.firebase_tester_url,
         build_type: (r.releaseContext as any)?.build_type,
         // Provider Android store destination ("GooglePlay" | "Firebase") — drives the
         // "Firebase internal" badge. Must be passed through here or it's dropped.
