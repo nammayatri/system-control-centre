@@ -45,6 +45,7 @@ import Products.Autopilot.Mobile.Github
     WorkflowRun (..),
     WorkflowRunsResp (..),
     dispatchRunCandidates,
+    ownDispatchCandidates,
   )
 import Products.Autopilot.Mobile.Github.Compare
   ( CommitInfo (..),
@@ -71,7 +72,7 @@ import Products.Autopilot.Mobile.Types
 import Products.Autopilot.Mobile.Versioning (TrackInfo (..), computeNextVersion)
 import Products.Autopilot.Mobile.Versioning.Apple (AscPhasedState (..), AscReviewState (..), AscVersion (..), BuildsResp (..), appStoreStateToReview, applePhasedPercent, computeNextIosVersion, firstWhatsNew, parseAscVersion, parseVersionStatesWithBuild, selectInFlightReview)
 import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), ProdTrackRelease (..), StoreTrackSnapshot (..), parseProdReleaseNotes, parseProdTrackReleases, parseRolloutState, parseTrackSnapshot, userFractionInRange)
-import Products.Autopilot.Mobile.Workflow (codeFromTag, electDispatchLeader, reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
+import Products.Autopilot.Mobile.Workflow (FirebaseReleaseInfo (..), codeFromTag, electDispatchLeader, parseFirebaseRelease, reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
 import Products.Autopilot.Queries.ReleaseTracker (keepSnapshot)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
@@ -2224,7 +2225,10 @@ testDispatchRunCandidates = do
             wrName = "",
             wrDisplayTitle = Nothing,
             wrHeadSha = "",
-            wrHeadBranch = Nothing
+            wrHeadBranch = Nothing,
+            wrActorId = Nothing,
+            wrActorLogin = Nothing,
+            wrRunAttempt = Nothing
           }
       ids = map wrId . dispatchRunCandidates now
   assertEqual "in-window dispatch run matched" [1] (ids [mkRun 1 "workflow_dispatch" 10])
@@ -2233,6 +2237,78 @@ testDispatchRunCandidates = do
   -- boundaries inclusive (-30s lower, +300s upper); result is newest-first
   assertEqual "boundaries inclusive, newest-first" [6, 5] (ids [mkRun 5 "workflow_dispatch" (-30), mkRun 6 "workflow_dispatch" 300])
   assertEqual "multiple in-window sorted newest-first" [8, 7] (ids [mkRun 7 "workflow_dispatch" 10, mkRun 8 "workflow_dispatch" 200])
+
+  -- ownDispatchCandidates: bot-actor filter + run-id watermark, oldest-first
+  putStrLn "Own dispatch run match: actor + watermark, oldest-first"
+  let bot = mkRun 0 "workflow_dispatch" 0
+      withActor aid r = r {wrActorId = Just aid}
+      own mBot mWm = map wrId . ownDispatchCandidates mBot mWm now
+  -- watermark: strictly-above only; oldest first
+  assertEqual
+    "above watermark kept, at/below dropped, oldest-first"
+    [101, 102]
+    (own Nothing (Just 100) [withActor 7 (bot {wrId = 102}), withActor 7 (bot {wrId = 100}), withActor 7 (bot {wrId = 101})])
+  -- actor filter: PRESENT mismatching actor drops; missing actor is kept
+  -- (GitHub's actor field is nullable — must not hide our own run)
+  assertEqual
+    "actor filter drops foreign, keeps missing actor"
+    [101, 103]
+    (own (Just 7) (Just 100) [withActor 7 (bot {wrId = 101}), withActor 8 (bot {wrId = 102}), bot {wrId = 103}])
+  -- unknown bot identity: no actor filter applied
+  assertEqual
+    "unknown bot id skips actor filter"
+    [101, 102]
+    (own Nothing (Just 100) [withActor 8 (bot {wrId = 102}), bot {wrId = 101}])
+  -- no watermark (legacy rows): created-at window fallback still applies
+  assertEqual
+    "no watermark falls back to created-at window"
+    [9]
+    (own Nothing Nothing [withActor 7 (bot {wrId = 9, wrCreatedAt = at 10}), withActor 7 (bot {wrId = 10, wrCreatedAt = at 600})])
+  -- non-dispatch events always excluded
+  assertEqual
+    "non-dispatch event excluded even above watermark"
+    []
+    (own Nothing (Just 100) [(bot {wrId = 101, wrEvent = "push"})])
+  -- stale-watermark defense: a run created BEFORE the receipt is never ours,
+  -- even above the watermark (a stale GH page once produced an ancient
+  -- watermark that made months-old runs "candidates")
+  assertEqual
+    "above watermark but created before receipt -> dropped"
+    []
+    (own Nothing (Just 100) [withActor 7 (bot {wrId = 101, wrCreatedAt = at (-3600)})])
+
+  -- parseFirebaseRelease: fastlane firebase_app_distribution output, with the
+  -- real log shape (timestamps + ANSI colour codes around the URLs)
+  putStrLn "Firebase debug-release log parsing"
+  let esc = "\ESC[0m"
+      fbLog =
+        T.unlines
+          [ "2026-08-12T17:12:04.5004519Z [22:42:04]: \ESC[32m\9757\65039 Version code has been changed to 392\ESC[0m",
+            "2026-08-12T17:18:45.2835987Z [22:48:45]: \ESC[32m\9989 Uploaded AAB successfully and created release 99.0.0 (392).\ESC[0m",
+            "2026-08-12T17:18:48.2439181Z [22:48:48]: \128279 View this release in the Firebase console: https://console.firebase.google.com/project/x/appdistribution/releases/1uf?utm_source=fastlane" <> esc,
+            "2026-08-12T17:18:48.2449216Z [22:48:48]: \128279 Share this release with testers who have access: https://appdistribution.firebase.google.com/testerapps/1:8/releases/1uf?utm_source=fastlane " <> esc
+          ]
+  assertEqual
+    "parses version, code and both links"
+    ( Just
+        ( FirebaseReleaseInfo
+            { friVersionName = "99.0.0",
+              friVersionCode = 392,
+              friConsoleUrl = Just "https://console.firebase.google.com/project/x/appdistribution/releases/1uf?utm_source=fastlane",
+              friTesterUrl = Just "https://appdistribution.firebase.google.com/testerapps/1:8/releases/1uf?utm_source=fastlane"
+            }
+        )
+    )
+    (parseFirebaseRelease fbLog)
+  assertEqual "no release line -> Nothing" Nothing (parseFirebaseRelease "some\nunrelated\nlog")
+  assertEqual
+    "release line without parseable code -> Nothing"
+    Nothing
+    (parseFirebaseRelease "x and created release 99.0.0 (abc).")
+  assertEqual
+    "links optional (IPA wording, no link lines)"
+    (Just (FirebaseReleaseInfo "1.2.3" 45 Nothing Nothing))
+    (parseFirebaseRelease "ts: Uploaded IPA successfully and created release 1.2.3 (45).")
 
 -- Server-side changelog diff-link generation. MUST stay a byte-for-byte
 -- semantic match with the frontend (CreateRelease.tsx normalizeRepo/toCommitId/

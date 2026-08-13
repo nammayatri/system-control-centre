@@ -52,18 +52,24 @@ export const breadcrumbsOf = (release: APRelease) => {
     // GitHub run id — the BE serializes external_run_id into release_context
     // once ResolveRunId binds the run; with the repo it yields the run URL.
     externalRunId: ctx.external_run_id as string | undefined,
+    // Sighted-but-unverified run (display-only): linkable while verification
+    // pends — iOS runs spend 10-20 min in setup before the matrix expands.
+    candidateRunId: ctx.candidate_run_id as string | undefined,
     matrixJobStatus: (meta.matrix_job_status || ctx.matrix_job_status || ctx.mb_matrix_job_status) as string | undefined,
     tagPushed: (meta.tag_pushed || ctx.tag_pushed || ctx.mbc_tag_pushed) as string | undefined,
     githubRepo: (meta.github_repo || ctx.github_repo) as string | undefined,
   };
 };
 
-/** The GitHub Actions run URL for a release row, when resolvable. */
+/** The GitHub Actions run URL for a release row, when resolvable. Falls back
+ * to the sighted-but-unverified candidate run so the link appears during the
+ * workflow's setup phase, before the verified id is stamped. */
 export const ghRunUrlOf = (release: APRelease, repo?: string): string | undefined => {
   const b = breadcrumbsOf(release);
   if (b.ghRunUrl) return b.ghRunUrl;
   const r = repo || b.githubRepo;
-  return b.externalRunId && r ? `https://github.com/${r}/actions/runs/${b.externalRunId}` : undefined;
+  const runId = b.externalRunId || b.candidateRunId;
+  return runId && r ? `https://github.com/${r}/actions/runs/${runId}` : undefined;
 };
 
 const FieldLabel = ({ children }: { children: React.ReactNode }) => (
@@ -146,9 +152,11 @@ export function ProvenanceCard({
   matchedApp?: AppCatalogEntry;
   index?: number;
 }) {
-  const { tagPushed, githubRepo: bcRepo } = breadcrumbsOf(release);
+  const { tagPushed, githubRepo: bcRepo, externalRunId, ghRunUrl: legacyRunUrl } = breadcrumbsOf(release);
   const githubRepo = bcRepo || matchedApp?.githubRepo;
   const ghRunUrl = ghRunUrlOf(release, githubRepo);
+  // Link built from the candidate (sighted, not yet verified) — badge it.
+  const runVerifying = Boolean(ghRunUrl) && !externalRunId && !legacyRunUrl;
   const qc = useQueryClient();
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
   // Missing commit (store-observed row): recover it from the build tag once —
@@ -231,6 +239,9 @@ export function ProvenanceCard({
             >
               <span className="truncate">#{ghRunUrl.split('/').filter(Boolean).pop()}</span>
               <ArrowUpRightIcon size={12} weight="bold" className="shrink-0" aria-hidden="true" />
+              {runVerifying && (
+                <span className="text-[10px] text-zinc-400 font-sans shrink-0">verifying…</span>
+              )}
             </a>
           ) : release.release_context?.display_phase === 'building' &&
             (release.release_context as Record<string, any>)?.dispatch_id ? (
@@ -244,6 +255,36 @@ export function ProvenanceCard({
             <span className="text-sm text-zinc-400 font-mono">-</span>
           )}
         </div>
+        {(release.release_context as Record<string, any>)?.firebase_console_url && (
+          <div className="flex flex-col gap-1">
+            <FieldLabel>Firebase Release</FieldLabel>
+            <div className="flex items-center gap-3 min-w-0">
+              <a
+                href={(release.release_context as Record<string, any>).firebase_console_url}
+                target="_blank"
+                rel="noopener"
+                className="flex items-center gap-1.5 text-sm text-blue-600 font-mono hover:underline cursor-pointer min-w-0"
+              >
+                <span className="truncate">
+                  {release.release_context?.version_code != null
+                    ? `#${release.release_context.version_code}`
+                    : 'console'}
+                </span>
+                <ArrowUpRightIcon size={12} weight="bold" className="shrink-0" aria-hidden="true" />
+              </a>
+              {(release.release_context as Record<string, any>)?.firebase_tester_url && (
+                <a
+                  href={(release.release_context as Record<string, any>).firebase_tester_url}
+                  target="_blank"
+                  rel="noopener"
+                  className="text-xs text-zinc-500 font-sans hover:underline cursor-pointer shrink-0"
+                >
+                  tester link ↗
+                </a>
+              )}
+            </div>
+          </div>
+        )}
         <div className="flex flex-col gap-1">
           <FieldLabel>Release Manager Operator</FieldLabel>
           <div className="flex items-center gap-2 text-sm text-zinc-800 min-w-0">
@@ -364,13 +405,19 @@ export function ChangelogCard({ release, index = 0 }: { release: APRelease; inde
     staleTime: 5 * 60_000,
   });
   const prevTag = prevQ.data?.previousTag;
-  const aiRange = storeSync
-    ? prevTag && thisTag
-      ? { base: `ref:${prevTag}`, head: thisTag }
-      : null
-    : release.sourceRef
-      ? { base: 'production', head: release.sourceRef }
-      : null;
+  // Debug builds get NO AI summary — and no AI calls: this gate is what mounts
+  // the summary component, and mounting is what hits the AI endpoint (which
+  // claims + forks generation server-side).
+  const isDebugBuild = (release.release_context as Record<string, any> | undefined)?.build_type === 'debug';
+  const aiRange = isDebugBuild
+    ? null
+    : storeSync
+      ? prevTag && thisTag
+        ? { base: `ref:${prevTag}`, head: thisTag }
+        : null
+      : release.sourceRef
+        ? { base: 'production', head: release.sourceRef }
+        : null;
   if (lines.length === 0 && !aiRange && !(storeSync && thisTag && prevQ.isLoading)) return null;
 
   return (

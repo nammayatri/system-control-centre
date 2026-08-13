@@ -1111,7 +1111,10 @@ export default function CreateMobileRelease() {
                         </label>
                       </div>
                     ) : undefined;
-                  return changelogApps.length > 1 ? (
+                  // Debug builds: no AI summary and no AI endpoint calls —
+                  // mounting the component is what claims server-side
+                  // generation. The commit browser below stays.
+                  return isDebug ? null : changelogApps.length > 1 ? (
                   // Multi-app: ONE combined summary for the whole selection —
                   // common changes + labeled per-app extras; every app submits
                   // this same text. The per-app tabs below still browse commits.

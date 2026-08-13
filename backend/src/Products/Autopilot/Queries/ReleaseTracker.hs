@@ -5,6 +5,7 @@ module Products.Autopilot.Queries.ReleaseTracker (
     -- * Insert / Update
     insertReleaseTracker,
     checkpointReleaseTracker,
+    checkpointReleaseTrackerChecked,
     conditionalUpdateTracker,
     conditionalUpdateApprove,
     conditionalUpdateTrackerRow,
@@ -99,6 +100,7 @@ import Data.Aeson (FromJSON, ToJSON, Value (..), fromJSON, toJSON)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Text qualified as AesonText
+import Data.Int (Int64)
 import Data.Maybe (fromMaybe, isNothing, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -148,20 +150,36 @@ insertReleaseTracker :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> 
 insertReleaseTracker = upsertReleaseTrackerWith ""
 
 {- | The workflow's per-stage checkpoint writer: same upsert, but a row an
-operator (or the abort sweep) has moved to ABORTING / an aborted or terminal
-state is left untouched. A mid-tick StageSuccess persist carries the status
-snapshot read at tick start — writing it back blindly erased a concurrent
-ABORTING (run never cancelled) or resurrected a USER_ABORTED row as
-INPROGRESS for the runner to re-drive. Every other runner writer is
-CAS-guarded; this closes the one remaining blind writer.
+operator (or the abort sweep) has moved to ABORTING / PAUSED / an aborted or
+terminal state is left untouched. A mid-tick StageSuccess persist carries the
+status snapshot read at tick start — writing it back blindly erased a
+concurrent ABORTING (run never cancelled), resurrected a USER_ABORTED row as
+INPROGRESS for the runner to re-drive, or silently un-paused a row. Every
+other runner writer is CAS-guarded; this closes the one remaining blind
+writer.
 -}
 checkpointReleaseTracker :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m ()
-checkpointReleaseTracker =
-    upsertReleaseTrackerWith
-        " WHERE release_tracker.status NOT IN ('ABORTING','ABORTED','USER_ABORTED','GCLT_ABORTED','DISCARDED','REVERTED')"
+checkpointReleaseTracker rt mts = () <$ checkpointReleaseTrackerChecked rt mts
+
+{- | 'checkpointReleaseTracker' that reports whether the guarded write landed
+(True) or was filtered by the status guard (False). Callers about to take an
+irreversible external action on the strength of the checkpoint — the mobile
+dispatch receipt before its @workflow_dispatch@ POST — MUST use this variant
+and skip the action when the write did not land.
+-}
+checkpointReleaseTrackerChecked :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m Bool
+checkpointReleaseTrackerChecked rt mts =
+    (> 0)
+        <$> upsertReleaseTrackerCounted
+            " WHERE release_tracker.status NOT IN ('ABORTING','ABORTED','USER_ABORTED','GCLT_ABORTED','DISCARDED','REVERTED','PAUSED')"
+            rt
+            mts
 
 upsertReleaseTrackerWith :: (MonadFlow m) => Query -> ReleaseTracker -> Maybe TargetState -> m ()
-upsertReleaseTrackerWith guardSql rt mts = do
+upsertReleaseTrackerWith guardSql rt mts = () <$ upsertReleaseTrackerCounted guardSql rt mts
+
+upsertReleaseTrackerCounted :: (MonadFlow m) => Query -> ReleaseTracker -> Maybe TargetState -> m Int64
+upsertReleaseTrackerCounted guardSql rt mts = do
     cloud <- cloudTypeForCategory (category rt)
     withDb $ \db -> do
         now <- getCurrentTime
@@ -176,7 +194,7 @@ upsertReleaseTrackerWith guardSql rt mts = do
         -- external_run_id / version_code, and the creation-stamped
         -- release_group_id / release_group_label (migration 0042).
         withConn db $ \conn -> do
-            _ <-
+            n <-
                 execute
                     conn
                     ( "INSERT INTO release_tracker \
@@ -237,7 +255,7 @@ upsertReleaseTrackerWith guardSql rt mts = do
                         :. (rtEnvOverrideData row, rtSlackThreadTs row, rtCreatedAt row, rtUpdatedAt row)
                         :. Only (rtCloudType row)
                     )
-            pure ()
+            pure n
 
 {- | Atomically update a release tracker only if its current status matches the
 expected value (CAS: @UPDATE ... WHERE id = ? AND status = ?@). Returns True if
@@ -1010,7 +1028,7 @@ fromRow ReleaseTrackerT{..} =
                 let track = maybe (storeTrackText rtMetadata) Just rtStoreTrack
                     ph = phaseFromFields (buildKind (mbContext mb)) (mbWfStatus mb) rtReviewStatus rtRolloutStatus rtRolloutPercent track
                     disp = displayStatusInferred (reviewInferredOf (parseJsonTextMaybe rtMetadata)) ph
-                 in Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent track (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) rtDispatchId rtExternalRunId (toJSON (mbContext mb)))
+                 in Just (addMobileLifecycle (T.pack (show (mbWfStatus mb))) rtRolloutStatus rtRolloutPercent track (dLabel disp) (variantSlug (dVariant disp)) (phaseSlug ph) rtDispatchId rtExternalRunId (mbCandidateRunId mb) (mbFirebaseReleaseUrl mb) (mbFirebaseTesterUrl mb) (toJSON (mbContext mb)))
             _ -> Nothing
         tracker =
             ReleaseTracker
@@ -1063,8 +1081,8 @@ This lets the releases list/detail read the live rollout % straight off the row
 (the same source the rollout endpoint uses), instead of a stale metadata mirror.
 No-op if the value isn't an object.
 -}
-addMobileLifecycle :: Text -> Maybe Text -> Maybe Double -> Maybe Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Value -> Value
-addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack dispLabel dispVariant dispPhase mDispatchId mRunId (Object o) =
+addMobileLifecycle :: Text -> Maybe Text -> Maybe Double -> Maybe Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Value -> Value
+addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack dispLabel dispVariant dispPhase mDispatchId mRunId mCandidateRun mFbConsole mFbTester (Object o) =
     Object
         . KM.insert "mb_wf_status" (toJSON st)
         . KM.insert "rollout_status" (toJSON mRolloutStatus)
@@ -1086,8 +1104,15 @@ addMobileLifecycle st mRolloutStatus mRolloutPct mStoreTrack dispLabel dispVaria
         -- "Workflow Run Entity" link. Insert-when-known, so re-application
         -- (injectStoreState) can't clobber it.
         . maybe id (\r -> KM.insert "external_run_id" (toJSON r)) mRunId
+        -- DISPLAY-ONLY sighted-but-unverified run: the FE links it (labelled
+        -- verifying) until external_run_id lands. Insert-when-known.
+        . maybe id (\r -> KM.insert "candidate_run_id" (toJSON r)) mCandidateRun
+        -- Debug builds: Firebase App Distribution release links parsed from
+        -- the job log at completion. Insert-when-known.
+        . maybe id (\u -> KM.insert "firebase_console_url" (toJSON u)) mFbConsole
+        . maybe id (\u -> KM.insert "firebase_tester_url" (toJSON u)) mFbTester
         $ o
-addMobileLifecycle _ _ _ _ _ _ _ _ _ v = v
+addMobileLifecycle _ _ _ _ _ _ _ _ _ _ _ _ v = v
 
 {- | Whether metadata flags the review verdict as track-INFERRED (Android
 out-of-band detection, Google exposes no review state) rather than

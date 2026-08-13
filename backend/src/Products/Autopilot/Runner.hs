@@ -3,8 +3,9 @@
 module Products.Autopilot.Runner where
 
 import Control.Concurrent qualified as CC
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
 import Control.Exception qualified as E
-import Control.Monad (filterM, forM_, forever, when)
+import Control.Monad (filterM, forM_, forever, void, when)
 import Control.Monad.Catch qualified as MC
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
@@ -19,6 +20,9 @@ import Data.List (sortBy)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Ord (Down (..), comparing)
+import Data.Set (Set)
+import Data.Set qualified as Set
+import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Products.Autopilot.EventLog (logAbortTriggered, logStatusUpdated, logTrafficUpdatedWithMessage)
@@ -26,10 +30,11 @@ import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getD
 import Products.Autopilot.K8s.Execute (isNotFoundError, runCmd)
 import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
-import Products.Autopilot.Mobile.Github (cancelRun, dispatchRunCandidates, findRunWithJob, listWorkflowRuns, wrId)
-import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
-import Products.Autopilot.Mobile.Queries.Tracker (appCatalogForRow, gitOwner, gitRepo)
+import Products.Autopilot.Mobile.Github (cancelRun, findRunWithJob, listWorkflowRuns, ownDispatchCandidates, wrCreatedAt, wrId)
+import Products.Autopilot.Mobile.Github.Auth (BotIdentity (..), getBotIdentity, loadGhCreds)
+import Products.Autopilot.Mobile.Queries.Tracker (appCatalogForRow, externalRunIdsClaimedElsewhere, gitOwner, gitRepo)
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), MobileBuildWFStatus (..))
+import Products.Autopilot.Mobile.Workflow (dispatchGroupJobNames, findDispatchIdForRelease)
 import Products.Autopilot.Mobile.Types.Storage (acWorkflowPath)
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted, sendGroupChangelogSlackIfSettled)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks, releaseService)
@@ -43,6 +48,7 @@ import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (..), K8sR
 import Products.Autopilot.Types.Target.Kubernetes qualified as K8s
 import Products.Autopilot.Workflow.Factory (executeReleaseWorkflow)
 import Products.Autopilot.Workflow.Types (ReleaseState (..), WorkFlowError (..))
+import System.IO.Unsafe (unsafePerformIO)
 import Prelude
 
 {- | Runner lifecycle: synchronous startup recovery, then poll loop.
@@ -199,6 +205,23 @@ rollbackInProgressOnStartup = do
 -- Main Poll Loop
 -- ============================================================================
 
+{- | Release ids whose forked tick is still running — in-process serialization
+of engine drives per row (see the Step 2 comment in 'iteration'). Process-wide
+like the GH token cache; two separate backend instances are NOT covered (the
+durable dispatch receipt narrows that residual race to the sub-second
+pre-receipt window).
+-}
+{-# NOINLINE rowsInFlight #-}
+rowsInFlight :: MVar (Set Text)
+rowsInFlight = unsafePerformIO (newMVar Set.empty)
+
+claimRowInFlight :: Text -> IO Bool
+claimRowInFlight rid = modifyMVar rowsInFlight $ \s ->
+    pure $ if Set.member rid s then (s, False) else (Set.insert rid s, True)
+
+releaseRowInFlight :: Text -> IO ()
+releaseRowInFlight rid = modifyMVar_ rowsInFlight (pure . Set.delete rid)
+
 loop :: Flow ()
 loop = forever $ do
     result <- MC.try @_ @E.SomeException $ do
@@ -235,10 +258,20 @@ loop = forever $ do
         products <- getProductsByNamesAndClusters jobPairs
         eligible <- filterM (isEligibleToRun products multiRelease ongoing) jobs
 
-        -- Step 2: Pick jobs and fork each into a background thread for parallel execution
+        -- Step 2: Pick jobs and fork each into a background thread for parallel execution.
+        -- Per-row in-flight guard: a tick can outlive the poll interval (the
+        -- dispatch stage alone holds two 30s-timeout GitHub calls), and
+        -- INPROGRESS mobile rows are re-picked every poll with no CAS claim —
+        -- without the guard, two concurrent ticks of the SAME row can both
+        -- reach the dispatch POST (duplicate GH run). Skipping is safe: the
+        -- row is simply re-picked on the next poll after its tick finishes.
         let picked = pickJobs multiRelease eligible
         db <- getDBEnv
-        forM_ picked $ \twt -> forkFlow (trigger db twt)
+        forM_ picked $ \twt@(rtP, _) -> do
+            claimed <- liftIO $ claimRowInFlight (releaseId rtP)
+            if claimed
+                then void $ forkFlow (trigger db twt `MC.finally` liftIO (releaseRowInFlight (releaseId rtP)))
+                else logInfo $ "[RUNNER] Previous tick still in flight for " <> releaseId rtP <> " — skipping this poll"
 
         -- Step 3: Handle aborting trackers
         abortingTrackers <- findAbortingReleaseTrackers
@@ -472,6 +505,12 @@ runReleaseWorkflow _cfg rtNew mts = do
                     Just (freshRT, _) -> status freshRT
                     Nothing -> status rtNew
                 isUserAbort = currentStatus' == ABORTING || currentStatus' == USER_ABORTED
+                -- Persist the FRESH target state, not the tick-start snapshot:
+                -- mid-tick checkpoints (the mobile pre-POST dispatch receipt,
+                -- stage StageSuccess persists) already live in the row, and
+                -- writing the stale mts back would erase them — a successor
+                -- leader would then re-dispatch a run that already exists.
+                freshMts = maybe mts snd freshM
             if isUserAbort
                 then do
                     -- Defer to handleAbortingRelease (Step 3 of poll loop)
@@ -483,7 +522,7 @@ runReleaseWorkflow _cfg rtNew mts = do
                     -- Round 8 audit C1: CAS against INPROGRESS so a user
                     -- pause/abort/discard that landed mid-workflow isn't
                     -- silently overwritten by the workflow's failure path.
-                    casOk <- conditionalUpdateTracker abortedTracker mts (releaseStatusToText INPROGRESS)
+                    casOk <- conditionalUpdateTracker abortedTracker freshMts (releaseStatusToText INPROGRESS)
                     if not casOk
                         then logWarning $ "[RUNNER] Workflow failed but tracker " <> releaseId rt <> " was concurrently modified — leaving as-is, the user state wins"
                         else do
@@ -787,8 +826,12 @@ handleAbortingRelease cfg rt mts = do
             pure True
     when proceed $ finalizeAbort rt mts now mAbortTrigger
   where
+    -- 30 min, deliberately past the iOS workflows' setup ceiling (~20 min):
+    -- cancel targets need matrix-job verification, and iOS matrices only
+    -- list once setup finishes — a shorter deadline made verified cancels
+    -- unreachable exactly when the run was still cheap to kill.
     ghCancelDeadline :: NominalDiffTime
-    ghCancelDeadline = 10 * 60
+    ghCancelDeadline = 30 * 60
 
 finalizeAbort :: ReleaseTracker -> Maybe TargetState -> UTCTime -> Maybe ReleaseEvent -> Flow ()
 finalizeAbort rt mts now mAbortTrigger = do
@@ -848,7 +891,7 @@ cancelMobileGhRun rt mts =
                     -- early-window abort (dispatched, not yet resolved) still stops the build.
                     mRunId <- case mbExternalRunId mb of
                         Just r | not (T.null r) -> pure (Just r)
-                        _ -> resolveForCancel creds ac (mbcMatrixJobName (mbContext mb)) (mbBuildStartedAt mb)
+                        _ -> resolveForCancel creds ac mb
                     case mRunId of
                         Nothing -> do
                             logInfo $
@@ -885,12 +928,19 @@ cancelMobileGhRun rt mts =
                     <> " is MobileBuild but has no MobileBuildState target; skipping GH cancel"
             pure True
   where
-    -- Locate the dispatched run by the ResolveRunId window (workflow_dispatch within
-    -- [dispatchedAt-30s, +5m], newest). Best-effort: Nothing on no dispatch time or API
-    -- error. With SEVERAL same-workflow runs in the window (provider version cohorts /
-    -- concurrent operators), cancel only a run PROVEN to contain this row's matrix job —
-    -- cancelling an unverified guess could kill another cohort's builds.
-    resolveForCancel creds ac jobName mDispatchedAt = case mDispatchedAt of
+    -- Locate the dispatched run from the receipt: bot-authored runs above the
+    -- pre-dispatch watermark, HARD-CAPPED to [receipt, receipt+5min] — our run
+    -- was created at the receipt time, so anything later is a successor
+    -- release's dispatch and must never become a cancel target — and never a
+    -- run already claimed (external_run_id) by another dispatch group.
+    --
+    -- A SINGLE surviving candidate cancels directly when this row's POST
+    -- provably succeeded (status reached MBDispatched): matrix-job proof is
+    -- impossible during the iOS setup phase (10-20 min) while the cancel
+    -- deadline is 10 min, and with actor+watermark+window+claimed filters a
+    -- lone candidate is ours. Ambiguous cases (several candidates, or the
+    -- POST outcome unknown) still require matrix-job verification.
+    resolveForCancel creds ac mb = case mbBuildStartedAt mb of
         Nothing -> pure Nothing
         Just dispatchedAt -> do
             eRuns <- listWorkflowRuns creds (gitOwner ac) (gitRepo ac) (acWorkflowPath ac)
@@ -898,21 +948,32 @@ cancelMobileGhRun rt mts =
                 Left e -> do
                     logWarning $ "[handleAbortingRelease] run lookup for cancel failed for " <> releaseId rt <> ": " <> e
                     pure Nothing
-                Right runs -> case dispatchRunCandidates dispatchedAt runs of
-                    [] -> pure Nothing
-                    [r] -> pure (Just (mkRunId r))
-                    rs -> do
-                        mV <- findRunWithJob creds (gitOwner ac) (gitRepo ac) jobName rs
-                        case mV of
-                            Just r -> pure (Just (mkRunId r))
-                            Nothing -> do
-                                logWarning $
-                                    "[handleAbortingRelease] "
-                                        <> releaseId rt
-                                        <> " ambiguous cancel target ("
-                                        <> T.pack (show (length rs))
-                                        <> " runs in window, none verified) — skipping GH cancel"
-                                pure Nothing
+                Right runs -> do
+                    mBot <- getBotIdentity creds
+                    let inWindow r = wrCreatedAt r <= addUTCTime 300 dispatchedAt
+                        cands0 = filter inWindow (ownDispatchCandidates (biUserId <$> mBot) (mbDispatchWatermark mb) dispatchedAt runs)
+                    mDid <- findDispatchIdForRelease (releaseId rt)
+                    claimed <- case mDid of
+                        Just did | not (T.null did) -> externalRunIdsClaimedElsewhere did (map mkRunId cands0)
+                        _ -> pure []
+                    let cands = [r | r <- cands0, mkRunId r `notElem` claimed]
+                        postConfirmed = mbWfStatus mb `notElem` [MBInit, MBVersionResolved]
+                    case cands of
+                        [] -> pure Nothing
+                        [r] | postConfirmed -> pure (Just (mkRunId r))
+                        rs -> do
+                            groupJobs <- dispatchGroupJobNames (releaseId rt) mb
+                            mV <- findRunWithJob creds (gitOwner ac) (gitRepo ac) groupJobs rs
+                            case mV of
+                                Just r -> pure (Just (mkRunId r))
+                                Nothing -> do
+                                    logWarning $
+                                        "[handleAbortingRelease] "
+                                            <> releaseId rt
+                                            <> " cancel target not verified ("
+                                            <> T.pack (show (length rs))
+                                            <> " candidate run(s)) — skipping GH cancel this sweep"
+                                    pure Nothing
     mkRunId r = T.pack (show (wrId r))
 
 -- ============================================================================

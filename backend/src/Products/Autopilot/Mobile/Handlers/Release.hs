@@ -350,6 +350,10 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                 , mbReviewLastPolledAt = Nothing
                 , mbBatchDispatch = Nothing
                 , mbVerifyAttempts = Nothing
+                , mbDispatchWatermark = Nothing
+                , mbCandidateRunId = Nothing
+                , mbFirebaseReleaseUrl = Nothing
+                , mbFirebaseTesterUrl = Nothing
                 }
         row = mkMobileTrackerRow rid app_ target mVerFinal mSourceRef (apEmail ap) now
     pure

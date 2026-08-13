@@ -25,7 +25,7 @@ module Products.Autopilot.Mobile.Types (
 
 import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericParseJSON, genericToJSON, object, withObject, (.:), (.:?), (.=))
 import Data.Char (toLower)
-import Data.Int (Int32)
+import Data.Int (Int32, Int64)
 import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Data.Time (UTCTime)
@@ -155,6 +155,26 @@ data MobileBuildTargetState = MobileBuildTargetState
     -- ^ Store-truth verification attempts consumed by PollMatrixJobs' auto-heal
     -- gate after a failed job (bounded; the gate gives up past the budget).
     -- 'Nothing' is treated as zero — backward-compatible with old rows.
+    , mbDispatchWatermark :: Maybe Int64
+    -- ^ Highest GH run id that already existed for the workflow file,
+    -- snapshotted just BEFORE our workflow_dispatch POST (the dispatch
+    -- "receipt", persisted pre-POST together with 'mbBuildStartedAt').
+    -- Any bot-authored run with id above this was created after our
+    -- attempt — run adoption matches on it instead of wall-clock windows.
+    -- 'Nothing' on rows persisted before this field existed.
+    , mbCandidateRunId :: Maybe Text
+    -- ^ DISPLAY-ONLY: the oldest unclaimed candidate run sighted while
+    -- matrix-job verification is still pending (iOS workflows expand their
+    -- matrix only after a 10-20 min setup job). Lets the UI link the run
+    -- long before @external_run_id@ (the verified truth) is stamped. Never
+    -- used for binding decisions.
+    , mbFirebaseReleaseUrl :: Maybe Text
+    -- ^ Debug builds: Firebase App Distribution console link for the uploaded
+    -- release, parsed from the fastlane output in the job log at build
+    -- completion (debug lanes push no tag and upload no artifacts — the log
+    -- is the only place this identity exists). Display only.
+    , mbFirebaseTesterUrl :: Maybe Text
+    -- ^ Debug builds: tester-facing share link for the same Firebase release.
     }
     deriving (Eq, Show, Generic)
 

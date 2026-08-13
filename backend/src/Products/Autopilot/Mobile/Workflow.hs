@@ -22,15 +22,18 @@ Each stage:
   conditions (max attempts exceeded, missing config).
 
 Postgres-side: stages 2-4 share a @dispatch_id@ that the create endpoint
-(T17) sets up for sibling rows (same dispatch group). Stage 2 grabs a
-Postgres advisory lock keyed on that id so only one worker dispatches
-the underlying GHA workflow even if multiple tick at once.
+(T17) sets up for sibling rows (same dispatch group). Exactly one GH run
+per group is enforced by the leader gate (stage 3) plus the durable
+dispatch receipt: the leader persists @mbBuildStartedAt@ + the run-id
+watermark BEFORE the POST, so any retry path first looks for (and adopts)
+the run that receipt points at instead of dispatching a second one.
 
 Two known limitations are documented inline:
 
-* Stage 4 cannot match a freshly-dispatched GH run by nonce because
-  GitHub omits @inputs@ from the @\/runs@ list response. We use the
-  @created_at@ window heuristic instead.
+* GitHub's dispatch POST returns 204 with no run id, and omits @inputs@
+  from the @\/runs@ list response — so stage 4 identifies our run by
+  actor (the App's bot account) + the pre-dispatch run-id watermark
+  (+ matrix-job verification when several candidates remain).
 * @persistReleaseState@ reuses the K8s/Config persist helper, which
   serializes @MobileBuildState@ via the shared 'TargetState' JSON
   encoding (already wired up in T8/T15).
@@ -43,12 +46,15 @@ module Products.Autopilot.Mobile.Workflow (
     selectBuildTag,
     codeFromTag,
     electDispatchLeader,
-    tryAdvisoryLockShared,
+    dispatchGroupJobNames,
+    findDispatchIdForRelease,
+    FirebaseReleaseInfo (..),
+    parseFirebaseRelease,
 ) where
 
 import Control.Exception (Exception, SomeException, fromException, throwIO, try)
 import Control.Applicative ((<|>))
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, guard, when)
 import qualified Control.Monad.Catch as MC
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
@@ -69,34 +75,36 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (digitToInt, isAlphaNum, isDigit)
 import Data.Int (Int32)
-import Data.List (sortOn)
+import Data.List (nub, sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Text.Read (readMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
-import Database.PostgreSQL.Simple (Only (..), query)
+import Database.PostgreSQL.Simple (Only (..), execute, query)
 import Products.Autopilot.Mobile.Github (
     Job (..),
     WorkflowDispatchReq (..),
     WorkflowRun (..),
-    dispatchRunCandidates,
     dispatchWorkflow,
     findRunWithJob,
     fetchJobLog,
     listJobs,
     listTags,
     listTagsWithShas,
+    getWorkflowRun,
     listWorkflowRuns,
+    ownDispatchCandidates,
  )
-import Products.Autopilot.Mobile.Github.Auth (GhAppCreds (..), getInstallationToken, loadGhCreds)
+import Products.Autopilot.Mobile.Github.Auth (BotIdentity (..), GhAppCreds (..), getBotIdentity, getInstallationToken, loadGhCreds)
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRow,
+    externalRunIdsClaimedElsewhere,
     findSiblingsByDispatchId,
     gitOwner,
     gitRepo,
@@ -109,6 +117,7 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     setPhase,
     setReleaseVersionCode,
  )
+import Products.Autopilot.Queries.ReleaseTracker (checkpointReleaseTrackerChecked)
 import Products.Autopilot.Mobile.Heal (
     JobFailureShape (..),
     RunIdentity (..),
@@ -205,24 +214,24 @@ stageResolveVersion =
         { stageGuard = mbStatusReached MBVersionResolved
         }
 
--- | Stage 2 — acquire the advisory lock keyed on @dispatch_id@. Skipped once
+-- | Stage 2 — validate the dispatch group (dispatch_id present). Skipped once
 -- the run id is known OR this row already dispatched (re-tick while stage 4
--- polls) — re-trying the lock then can self-block on its own stale session lock
--- (the pool returns connections without pg_advisory_unlock).
+-- polls).
 stageGroupForDispatch =
     (mkStage "GroupForDispatch" execGroupForDispatch)
         { stageGuard = \rs -> hasExternalRunId rs || mbStatusReached MBDispatched rs
         }
 
--- | Stage 3 — POST @workflow_dispatch@ with selected_apps + version + payload.
+-- | Stage 3 — POST @workflow_dispatch@ (leader only), with a durable
+-- pre-POST receipt so a lost outcome is adopted, never re-dispatched.
 stageDispatchWorkflow =
     (mkStage "DispatchWorkflow" execDispatchWorkflow)
         { stageGuard = mbStatusReached MBDispatched
         }
 
-{- | Stage 4 — poll @\/runs@ until we can match a freshly-created run by
-the actor + created_at heuristic, then write @external_run_id@ on every
-sibling in the dispatch group.
+{- | Stage 4 — poll @\/runs@ until we can match our freshly-created run
+(bot actor + run-id watermark + unclaimed + matrix-job verification), then
+write @external_run_id@ on every sibling in the dispatch group.
 -}
 stageResolveRunId =
     (mkStage "ResolveRunId" execResolveRunId)
@@ -534,15 +543,19 @@ versionLt a b = comps a < comps b
   where
     comps = map (\p -> fromMaybe 0 (readMaybe (T.unpack p)) :: Int) . T.splitOn "."
 
-{- | Stage 2: Acquire the dispatch-group advisory lock.
+{- | Stage 2: Validate the dispatch group.
 
 * Looks up the row's @dispatch_id@. If NULL, abort: the create endpoint
   should always populate it before the workflow starts.
-* @pg_try_advisory_lock(hashtext(dispatch_id))@; if another worker
-  holds it, return Waiting so the engine retries on the next tick.
-* The lock auto-releases when the pooled connection returns to the
-  pool. We deliberately do NOT pin it across stages — re-acquiring per
-  tick is the right contention pattern for a sibling-dispatch group.
+
+This stage used to take a Postgres session advisory lock keyed on the
+dispatch id. That lock was removed: session locks are NOT released when a
+pooled connection is returned to the pool, so the "mutex" lingered on an
+idle connection and stalled retries for minutes (until the pool happened to
+hand the same connection back), while the actual POST ran on a different
+connection anyway. Dispatch uniqueness is owned by the leader gate in
+stage 3 plus the durable pre-POST receipt ('dispatchFreshRun') and
+adopt-before-dispatch recovery — not by a lock.
 -}
 execGroupForDispatch :: forall m. (StageM ReleaseState m) => m StageOutcome
 execGroupForDispatch = do
@@ -553,42 +566,13 @@ execGroupForDispatch = do
         else mobileStage "GroupForDispatch" $ do
             let rt = releaseTracker rs
             mDid <- findDispatchIdForRelease (releaseId rt)
-            dispatchId <- case mDid of
-                Just d | not (T.null d) -> pure d
+            case mDid of
+                Just d | not (T.null d) -> pure StageSuccess
                 _ ->
                     abort $
                         "release "
                             <> releaseId rt
                             <> " has no dispatch_id; mobile create endpoint must set it"
-            -- Group run already dispatched AND stamped (leader's ResolveRunId
-            -- writes the column on every sibling)? Then there is nothing left to
-            -- serialize — pass; stage 3 adopts. COLUMN read, not state: a
-            -- follower's own state lags the stamp, and waiting on the lock here
-            -- deadlocks against the leader's still-held session lock.
-            mStamp <- externalRunIdForRelease (releaseId rt)
-            case mStamp of
-                Just runId | not (T.null runId) -> pure StageSuccess
-                _ -> lockForDispatch rt dispatchId
-
--- | The genuine pre-dispatch race: no run exists yet, so serialize the group
--- on the advisory lock before anyone dispatches.
-lockForDispatch :: ReleaseTracker -> Text -> StateFlow StageOutcome
-lockForDispatch rt dispatchId = do
-            ok <- tryAdvisoryLockShared dispatchId
-            if ok
-                then do
-                    logInfoIO $
-                        "[GroupForDispatch] "
-                            <> releaseId rt
-                            <> " acquired advisory lock for dispatch_id="
-                            <> dispatchId
-                    pure StageSuccess
-                else do
-                    logInfoIO $
-                        "[GroupForDispatch] "
-                            <> releaseId rt
-                            <> " advisory lock busy; waiting"
-                    pure StageWaiting
 
 {- | Stage 3: POST @workflow_dispatch@ — exactly ONE GitHub run per dispatch
 group, via the leader gate ('electDispatchLeader'): the first non-terminal
@@ -672,19 +656,35 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                         <> ")"
                 pure StageWaiting
             | otherwise -> do
-                -- Leader. A dead ex-leader may have dispatched then aborted before
-                -- ResolveRunId stamped the group — mbBuildStartedAt on any sibling
-                -- context proves a dispatch happened. Look that run up via the same
-                -- window ResolveRunId uses and adopt it; only dispatch fresh when
-                -- there is provably nothing to adopt.
-                let mAnchor = listToMaybe [t | st <- siblingStates, Just t <- [mbBuildStartedAt st]]
-                case mAnchor of
+                -- Leader. A dispatch receipt (mbBuildStartedAt + run-id watermark,
+                -- persisted BEFORE the POST) on any sibling context proves a dispatch
+                -- was ATTEMPTED — by a dead ex-leader, or by ourselves on a tick whose
+                -- POST outcome was lost (timeout / crash / restart). Adopt the run that
+                -- receipt points at; dispatch fresh only when the receipt is old enough
+                -- that a created run would provably be visible by now.
+                --
+                -- Receipts are picked as a PAIR (anchor + its own watermark) from the
+                -- LATEST attempt: after leader succession a dead ex-leader's stale
+                -- receipt also sits in the group, and clocking the grace from it (or
+                -- mixing its anchor with another row's watermark) would expire the
+                -- grace instantly and re-dispatch during ordinary GH list lag.
+                let receipts =
+                        [ (t, mbDispatchWatermark st)
+                        | st <- siblingStates
+                        , Just t <- [mbBuildStartedAt st]
+                        ]
+                case listToMaybe (sortOn (Down . fst) receipts) of
                     Nothing -> dispatchFreshRun rt ac creds target living
-                    Just anchor -> do
+                    Just (anchor, mWatermark) -> do
                         res <- listWorkflowRuns creds (gitOwner ac) (gitRepo ac) (acWorkflowPath ac)
                         runs <- case res of
                             Right xs -> pure xs
                             Left e -> retry ("listWorkflowRuns failed while checking for an orphaned dispatch: " <> e)
+                        mBot <- getBotIdentity creds
+                        cands <-
+                            unclaimedCandidates
+                                dispatchId
+                                (ownDispatchCandidates (biUserId <$> mBot) mWatermark anchor runs)
                         let stampAndAdopt r = do
                                 let runIdT = T.pack (show (wrId r))
                                 setExternalRunIdForDispatch dispatchId runIdT (wrHeadSha r)
@@ -696,28 +696,78 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                                         , "source" .= ("orphan_adopt" :: Text)
                                         ]
                                 adoptGroupRun rt leaderId runIdT inheritedBatch
-                        case dispatchRunCandidates anchor runs of
+                        case cands of
                             [] -> do
-                                logInfoIO $
-                                    "[DispatchWorkflow] "
-                                        <> releaseId rt
-                                        <> " prior dispatch evidence but no run in the lookup window — dispatching fresh"
-                                dispatchFreshRun rt ac creds target living
-                            [r] -> stampAndAdopt r
-                            rs -> do
-                                -- Several same-workflow runs in the window: adopt only a run
-                                -- PROVEN to contain this row's matrix job. Unverified ⇒ wait —
-                                -- dispatching fresh here could mint the duplicate we're avoiding.
-                                mV <- findRunWithJob creds (gitOwner ac) (gitRepo ac) (mbcMatrixJobName (mbContext target)) rs
-                                case mV of
-                                    Just r -> stampAndAdopt r
-                                    Nothing -> do
+                                now <- liftIO getCurrentTime
+                                if diffUTCTime now anchor < dispatchAdoptGrace
+                                    then do
                                         logInfoIO $
                                             "[DispatchWorkflow] "
                                                 <> releaseId rt
-                                                <> " orphan-adopt ambiguous ("
-                                                <> T.pack (show (length rs))
-                                                <> " runs in window, none verified yet) — waiting"
+                                                <> " dispatch receipt but no adoptable run yet — waiting out the grace period (GH list lag)"
+                                        pure StageWaiting
+                                    else do
+                                        logInfoIO $
+                                            "[DispatchWorkflow] "
+                                                <> releaseId rt
+                                                <> " dispatch receipt but no run appeared within grace — dispatching fresh"
+                                        dispatchFreshRun rt ac creds target living
+                            candRuns -> do
+                                -- Adopt ONLY a run proven to contain one of the GROUP's
+                                -- matrix jobs (oldest first — the run created right after
+                                -- our receipt is ours). Even a SINGLE candidate needs
+                                -- proof: our POST may never have created anything, and the
+                                -- one run above the watermark can be another group's
+                                -- not-yet-stamped dispatch. Matrix jobs only list once the
+                                -- run's setup job expands them (minutes), so Nothing = not
+                                -- verifiable YET → wait; never dispatch fresh while
+                                -- unclaimed candidates exist (a foreign one gets claimed by
+                                -- its owner soon and drops out).
+                                let groupJobs = nub (mbcMatrixJobName (mbContext target) : [mbcMatrixJobName (mbContext st) | st <- siblingStates])
+                                mV <- findRunWithJob creds (gitOwner ac) (gitRepo ac) groupJobs candRuns
+                                now <- liftIO getCurrentTime
+                                let anyCandidateLive = any (\r -> wrStatus r /= "completed") candRuns
+                                case mV of
+                                    Just r -> stampAndAdopt r
+                                    -- A LONE settled dead-conclusion candidate is OUR run,
+                                    -- killed before its matrix expanded (manual cancel on
+                                    -- GitHub, setup failure): a jobless dead run can never
+                                    -- verify, and under the receipt + watermark + created-at
+                                    -- + unclaimed filters nothing else lands alone in that
+                                    -- window. Fail honestly — NEVER quietly dispatch a
+                                    -- replacement the operator didn't ask for.
+                                    Nothing
+                                        | [r] <- candRuns
+                                        , wrStatus r == "completed"
+                                        , Just concl <- wrConclusion r
+                                        , concl `elem` ["cancelled", "failure", "startup_failure", "timed_out"] -> do
+                                            logEvent (releaseId rt) "STATUS_UPDATED" $
+                                                object
+                                                    [ "run_id" .= T.pack (show (wrId r))
+                                                    , "html_url" .= wrHtmlUrl r
+                                                    , "reason" .= ("the GitHub run ended '" <> concl <> "' before its matrix expanded — nothing to bind or build" :: Text)
+                                                    ]
+                                            abort ("GitHub run ended '" <> concl <> "' before the matrix expanded")
+                                    -- Every candidate is COMPLETED and none carries a group
+                                    -- job — a settled run's job list is final, so these are
+                                    -- provably not ours (an abandoned foreign dispatch that
+                                    -- was never claimed). Nothing to adopt: fall back to the
+                                    -- grace-gated fresh dispatch instead of parking forever.
+                                    Nothing
+                                        | not anyCandidateLive && diffUTCTime now anchor >= dispatchAdoptGrace -> do
+                                            logInfoIO $
+                                                "[DispatchWorkflow] "
+                                                    <> releaseId rt
+                                                    <> " candidates all settled without a group job (foreign) — dispatching fresh"
+                                            dispatchFreshRun rt ac creds target living
+                                    Nothing -> do
+                                        forM_ (listToMaybe candRuns) (noteCandidateRun dispatchId target)
+                                        logInfoIO $
+                                            "[DispatchWorkflow] "
+                                                <> releaseId rt
+                                                <> " orphan-adopt: "
+                                                <> T.pack (show (length candRuns))
+                                                <> " candidate run(s), none verified yet — waiting"
                                         pure StageWaiting
 
 {- | The dispatch-group leader: the first NON-TERMINAL sibling by release id
@@ -729,6 +779,45 @@ a sibling, so that only happens on a mid-tick external flip.
 electDispatchLeader :: Text -> [(Text, Bool)] -> Text
 electDispatchLeader self sibs =
     fromMaybe self (listToMaybe [i | (i, isTerm) <- sibs, not isTerm])
+
+{- | How long after a dispatch receipt we keep looking for the run before
+concluding the POST never reached GitHub and dispatching fresh. GitHub
+creates the run synchronously on accept; only its LIST endpoint lags, and
+that lag is seconds — two minutes is far beyond it, while the cost of
+waiting is trivial next to a duplicate run (tag collision, zombie build).
+-}
+dispatchAdoptGrace :: NominalDiffTime
+dispatchAdoptGrace = 120
+
+-- | Drop candidates whose run id is already claimed (@external_run_id@) by a
+-- row OUTSIDE this dispatch group — one group must never bind another
+-- group's run.
+unclaimedCandidates :: Text -> [WorkflowRun] -> StateFlow [WorkflowRun]
+unclaimedCandidates dispatchId cands = do
+    claimed <- externalRunIdsClaimedElsewhere dispatchId (map (T.pack . show . wrId) cands)
+    pure [r | r <- cands, T.pack (show (wrId r)) `notElem` claimed]
+
+{- | Matrix job names of every row in this release's dispatch group (terminal
+rows included — a run dispatched before a sibling died still carries its job).
+Run verification matches on ANY of these: one hit proves the run belongs to
+the group, while the executing row's own job alone is NOT reliable evidence —
+CI's matrix step silently drops apps missing from the repo's config, so the
+leader's own job may never exist in a perfectly good group run. Always
+contains at least the row's own job name.
+-}
+dispatchGroupJobNames :: (MonadFlow m) => Text -> MobileBuildTargetState -> m [Text]
+dispatchGroupJobNames rid target = do
+    mDid <- findDispatchIdForRelease rid
+    names <- case mDid of
+        Just did | not (T.null did) -> do
+            contexts <- findDispatchGroupContexts did
+            pure
+                [ mbcMatrixJobName (mbContext st)
+                | (_, mCtx) <- contexts
+                , Just st <- [parseMobileTargetState mCtx]
+                ]
+        _ -> pure []
+    pure (nub (mbcMatrixJobName (mbContext target) : names))
 
 {- | Adopt the group's already-dispatched GH run on THIS row: record the run id
 and dispatch progress without touching GitHub. Backfills @mbBuildStartedAt@
@@ -792,8 +881,23 @@ dispatchFreshRun rt ac creds target living = do
     -- NOTE: We deliberately do NOT pass the workflow's `payload` input. The
     -- workflow's Set-Matrix step treats any non-empty payload as a full matrix
     -- envelope (`echo "$PAYLOAD" | jq -c '.matrices'`) and bypasses the
-    -- selected_apps + catalyst path. SCC matches runs by actor + created_at
-    -- window in ResolveRunId, not by an in-payload nonce.
+    -- selected_apps + catalyst path. SCC matches runs by actor + run-id
+    -- watermark in ResolveRunId, not by an in-payload nonce.
+    --
+    -- Pre-dispatch watermark: the highest run id that already exists for this
+    -- workflow file. Our run will be the first bot-authored run ABOVE it.
+    -- A failed listing degrades to Nothing (created-at window fallback) —
+    -- never blocks the dispatch.
+    wmRes <- listWorkflowRuns creds (gitOwner ac) (gitRepo ac) (acWorkflowPath ac)
+    mWatermark <- case wmRes of
+        Right runs -> pure (Just (maximum (0 : map wrId runs)))
+        Left e -> do
+            logInfoIO $
+                "[DispatchWorkflow] "
+                    <> releaseId rt
+                    <> " watermark listing failed (window fallback will apply): "
+                    <> e
+            pure Nothing
     dispatchedAt <- liftIO getCurrentTime
     -- Build the workflow_dispatch inputs map. Two different shapes — the
     -- Android workflow declares `version_name` + `version_code` (two fields),
@@ -880,6 +984,45 @@ dispatchFreshRun rt ac creds target living = do
                 , wdrInputs = inputs
                 }
         wfPath = acWorkflowPath ac
+    -- ── Durable receipt BEFORE the POST ─────────────────────────────
+    -- The POST's outcome can be lost (timeout after GitHub accepted, 5xx
+    -- after processing, crash/restart mid-call). Write the attempt down
+    -- first: any later tick — this row's or a successor leader's — goes
+    -- adopt-first off this receipt instead of blindly dispatching again.
+    -- Written straight to the DB (not just tick state) because the engine
+    -- only persists on StageSuccess — exactly what a lost tick never reaches.
+    modify $ \s ->
+        s
+            { targetState =
+                Just $
+                    MobileBuildState
+                        ( applyMobileTarget s $ \mt ->
+                            mt
+                                { mbBuildStartedAt = Just dispatchedAt
+                                , mbDispatchWatermark = mWatermark
+                                , -- Part of the receipt: decided pre-POST, and the
+                                  -- adopt path inherits it from sibling contexts —
+                                  -- ConfirmTag needs it even when the POST outcome
+                                  -- was lost and the run was adopted later.
+                                  mbBatchDispatch = Just isBatch
+                                }
+                        )
+            }
+    sReceipt <- gets id
+    receiptLanded <- checkpointReleaseTrackerChecked (releaseTracker sReceipt) (targetState sReceipt)
+    -- The checkpoint is status-guarded: a row flipped to ABORTING/PAUSED
+    -- mid-tick filters the write. No receipt ⇒ no POST — otherwise the run
+    -- would exist with no record anywhere and the abort sweep could never
+    -- find it to cancel. The owning flow (abort sweep / un-pause) takes over.
+    when (not receiptLanded) $
+        retry "dispatch receipt not persisted (row aborted/paused mid-tick) — skipping the POST"
+    logEvent (releaseId rt) "GH_DISPATCH_ATTEMPTED" $
+        object
+            [ "workflow_path" .= wfPath
+            , "ref" .= ref
+            , "watermark" .= mWatermark
+            , "dispatched_at" .= dispatchedAt
+            ]
     res <-
         dispatchWorkflow
             creds
@@ -931,7 +1074,11 @@ dispatchFreshRun rt ac creds target living = do
         -- only genuinely transient failures (5xx / network) keep retrying.
         Left e
             | isPermanentDispatchError e -> abort ("workflow_dispatch rejected by GitHub (check the workflow inputs / source ref): " <> e)
-            | otherwise -> retry ("dispatchWorkflow failed: " <> e)
+            -- Ambiguous outcome (timeout / 5xx / network): GitHub may or may
+            -- not have created a run. The receipt persisted above makes the
+            -- next tick go ADOPT-FIRST — it only re-dispatches if no run
+            -- appears within 'dispatchAdoptGrace'.
+            | otherwise -> retry ("dispatchWorkflow failed (adopt-first on next tick): " <> e)
 
 -- | A 'dispatchWorkflow' error that will never succeed on retry — GitHub rejected
 -- the request, not a transient hiccup. Matched on the rendered HTTP error string.
@@ -945,23 +1092,23 @@ isPermanentDispatchError e =
         , "Unexpected inputs"
         ]
 
-{- | Stage 4: Resolve @external_run_id@ by polling GH for a recently-
-created @workflow_dispatch@ run.
+{- | Stage 4: Resolve @external_run_id@ by polling GH for the run our
+dispatch created.
 
-GitHub's @\/actions\/workflows\/{file}\/runs@ list response does NOT
-include @inputs@ in each row, so we cannot match by nonce. Instead:
+GitHub's dispatch POST returns 204 with no run id, and the @\/runs@ list
+omits @inputs@, so the run is identified by evidence instead:
 
 1. Fetch the @\/runs@ list (event=workflow_dispatch).
-2. Filter to rows created within @[dispatchedAt - 30s, dispatchedAt + 5min]@.
-3. Sort by @created_at DESC@; pick the first match.
-4. Persist @external_run_id@ to all sibling rows in a single SQL UPDATE.
+2. Keep runs authored by OUR App's bot account ('BotIdentity') whose id is
+   strictly above the pre-dispatch watermark from the receipt (created-at
+   window fallback for pre-watermark rows) — 'ownDispatchCandidates'.
+3. Drop runs already claimed by another dispatch group
+   ('externalRunIdsClaimedElsewhere').
+4. Oldest first: one candidate binds directly; several bind only via
+   matrix-job verification ('findRunWithJob').
+5. Persist @external_run_id@ to all sibling rows in a single SQL UPDATE.
 
-This is a heuristic, not a guarantee. A concurrent dispatch from
-another operator on the same workflow file with overlapping timing
-could be mis-attributed; the operator can recover by aborting +
-recreating.
-
-Bounded retry: after 10 ticks (~5 min at 30s intervals) we abort with
+Bounded retry: after 10 ticks with no candidate we abort with
 @MBFailed "run_lookup_timeout"@ so the row doesn't poll forever.
 -}
 execResolveRunId :: forall m. (StageM ReleaseState m) => m StageOutcome
@@ -991,15 +1138,27 @@ execResolveRunId = do
             allRuns <- case res of
                 Right xs -> pure xs
                 Left e -> retry ("listWorkflowRuns failed: " <> e)
+            mBot <- getBotIdentity creds
             now <- liftIO getCurrentTime
             let dispatchedAt = fromMaybe now (mbBuildStartedAt target)
-                candidates = dispatchRunCandidates dispatchedAt allRuns
+                mWatermark = mbDispatchWatermark target
+            candidates <-
+                unclaimedCandidates dispatchId $
+                    ownDispatchCandidates (biUserId <$> mBot) mWatermark dispatchedAt allRuns
             -- Bounded retry, two tiers. No candidate at all after ~10 ticks =
             -- the dispatch never materialised (today's rule). Candidates present
-            -- but not yet disambiguated get a longer budget: matrix jobs only
-            -- list once the run's setup job finishes (minutes), and the run
-            -- itself provably exists.
-            when ((attempts > 10 && null candidates) || attempts > 40) $ do
+            -- but not yet verified NEVER time out while any of them is still
+            -- running: matrix jobs only list once the run's setup phase
+            -- finishes, and that phase is minutes on Android but 10-20+ min on
+            -- the iOS workflows (a long setup-environment job precedes the
+            -- matrix) — a wall-clock cap here failed real in-progress builds.
+            -- Once every candidate has COMPLETED and still none carries a
+            -- group job, no amount of waiting will produce one — time out
+            -- then. A foreign live run can't park us forever: its owner
+            -- stamps it, claimed-exclusion drops it, and the null-candidates
+            -- tier fires on the next tick.
+            let anyCandidateLive = any (\r -> wrStatus r /= "completed") candidates
+            when ((attempts > 10 && null candidates) || (attempts > 40 && not anyCandidateLive)) $ do
                 modify $ \s ->
                     s
                         { targetState =
@@ -1015,19 +1174,54 @@ execResolveRunId = do
                         , "reason" .= ("ResolveRunId exceeded attempts (candidates=" <> T.pack (show (length candidates)) <> ")" :: Text)
                         ]
                 abort "ResolveRunId: max attempts exceeded"
-            -- One candidate = unambiguous, bind directly (the common case).
-            -- Several candidates = same-workflow runs dispatched within one
-            -- window (provider version cohorts / concurrent operators) — bind
-            -- only to the run that contains THIS row's matrix job.
+            -- Bind ONLY to a run proven to contain one of the GROUP's matrix
+            -- jobs — even a single candidate can be another group's run (same
+            -- workflow file, provider version cohorts / concurrent operators)
+            -- created inside our window before its owner stamped it. Group
+            -- names, not just this row's: CI silently drops apps missing from
+            -- the repo's matrix config, so the executing row's own job may
+            -- never exist in the group's perfectly good run. Matrix jobs list
+            -- once the setup job expands them (~a minute), so a pending
+            -- verification just waits a few ticks; the attempts>40 tier
+            -- bounds it.
+            -- A LONE settled candidate with a dead conclusion is OUR run,
+            -- killed before its matrix expanded (manual cancel on GitHub,
+            -- setup failure): under the receipt + watermark + created-at +
+            -- unclaimed filters nothing else lands alone in that window, and
+            -- a settled jobless run can never verify. Waiting would mislabel
+            -- this as run_lookup_timeout ~13 min later — fail with the truth.
+            case candidates of
+                [r]
+                    | wrStatus r == "completed"
+                    , Just concl <- wrConclusion r
+                    , concl `elem` ["cancelled", "failure", "startup_failure", "timed_out"] -> do
+                        modify $ \s ->
+                            s
+                                { targetState =
+                                    Just $
+                                        MobileBuildState
+                                            ( applyMobileTarget s $ \mt ->
+                                                mt{mbWfStatus = MBFailed ("run_" <> concl <> "_before_verification")}
+                                            )
+                                }
+                        logEvent (releaseId rt) "STATUS_UPDATED" $
+                            object
+                                [ "mb_wf_status" .= ("MBFailed: run_" <> concl <> "_before_verification" :: Text)
+                                , "run_id" .= T.pack (show (wrId r))
+                                , "html_url" .= wrHtmlUrl r
+                                , "reason" .= ("the GitHub run ended '" <> concl <> "' before its matrix expanded — nothing to bind or build" :: Text)
+                                ]
+                        abort ("GitHub run ended '" <> concl <> "' before the matrix expanded")
+                _ -> pure ()
+            groupJobs <- dispatchGroupJobNames (releaseId rt) target
             mBound <- case candidates of
                 [] -> pure Nothing
-                [r] -> pure (Just r)
                 _ ->
                     findRunWithJob
                         creds
                         (gitOwner ac)
                         (gitRepo ac)
-                        (mbcMatrixJobName (mbContext target))
+                        groupJobs
                         candidates
             case mBound of
                 Just r -> do
@@ -1063,6 +1257,9 @@ execResolveRunId = do
                             <> headSha
                     pure StageSuccess
                 Nothing -> do
+                    -- Show the (almost certainly ours) oldest candidate in the
+                    -- UI while verification pends — display-only stamp + event.
+                    forM_ (listToMaybe candidates) (noteCandidateRun dispatchId target)
                     logInfoIO $
                         "[ResolveRunId] "
                             <> releaseId rt
@@ -1132,6 +1329,47 @@ execPollMatrixJobs = mobileStage "PollMatrixJobs" $ do
                         , "detail" .= ("matrix expansion failed before our job started" :: Text)
                         ]
                 abort "matrix job never appeared; workflow run failed before matrix expansion"
+            -- Run finished GREEN without our job: selected_apps is only a
+            -- request — the workflow's matrix step silently drops apps it
+            -- doesn't know for this flavor, and the siblings' jobs all
+            -- succeeded. Waiting longer can't conjure the job; fail with the
+            -- real cause. The >1 jobs floor skips the instant between the
+            -- setup job completing and its matrix jobs being listed.
+            --
+            -- Job-absence is only trustworthy when the RUN itself is settled
+            -- on attempt 1: the jobs listing shows only the LATEST attempt
+            -- (a "re-run failed jobs" hides our attempt-1 green job), and a
+            -- partial mid-run listing must keep waiting — so confirm against
+            -- the run record before concluding, never from the job list alone.
+            | not (null jobs) && not anyInFlight && not anyFailed && length jobs > 1 -> do
+                runE <- getWorkflowRun creds (gitOwner ac) (gitRepo ac) runId
+                let settledAttempt1 = case runE of
+                        Right r -> wrStatus r == "completed" && maybe True (<= 1) (wrRunAttempt r)
+                        Left _ -> False
+                if not settledAttempt1
+                    then do
+                        logInfoIO $
+                            "[PollMatrixJobs] "
+                                <> releaseId rt
+                                <> " job "
+                                <> jobName
+                                <> " missing but run not settled on attempt 1 — waiting"
+                        pure StageWaiting
+                    else do
+                        logInfoIO $
+                            "[PollMatrixJobs] "
+                                <> releaseId rt
+                                <> " run completed without matrix job "
+                                <> jobName
+                                <> " — app not in the repo's matrix config; aborting"
+                        logEvent (releaseId rt) "MATRIX_JOB_UPDATED" $
+                            object
+                                [ "job_name" .= jobName
+                                , "status" .= ("missing" :: Text)
+                                , "conclusion" .= ("not_in_matrix" :: Text)
+                                , "detail" .= ("run completed without this app's job — add the app to the repo's matrix config for this build flavor" :: Text)
+                                ]
+                        abort ("matrix job " <> jobName <> " never appeared — app is not in the repo's matrix config for this build flavor")
             | otherwise -> do
                 logInfoIO $
                     "[PollMatrixJobs] "
@@ -1184,7 +1422,14 @@ execPollMatrixJobs = mobileStage "PollMatrixJobs" $ do
                     , "html_url" .= jHtmlUrl j
                     ]
             case (status', conclusion) of
-                ("completed", Just "success") -> pure StageSuccess
+                ("completed", Just "success") -> do
+                    -- Debug builds: the build's real identity (Firebase App
+                    -- Distribution version code + release links) exists ONLY
+                    -- in the fastlane job log — no tag, no artifacts. Read it
+                    -- once, fail soft.
+                    when (isDebugBuildType (mbcBuildType (mbContext target))) $
+                        observeFirebaseRelease rt creds ac j
+                    pure StageSuccess
                 ("completed", Just "cancelled") ->
                     -- The shared GH run was cancelled (a sibling's abort or a manual
                     -- cancel on GitHub) — this build died with it, it didn't fail.
@@ -1970,6 +2215,10 @@ applyMobileTarget rs f =
                     , mbReviewLastPolledAt = Nothing
                     , mbBatchDispatch = Nothing
                     , mbVerifyAttempts = Nothing
+                    , mbDispatchWatermark = Nothing
+                    , mbCandidateRunId = Nothing
+                    , mbFirebaseReleaseUrl = Nothing
+                    , mbFirebaseTesterUrl = Nothing
                     }
 
 {- | Status bump that respects ordering: never regresses to an earlier
@@ -2067,6 +2316,139 @@ externalRunIdForRelease rid = withDb $ \db ->
             [Only mRunId] -> mRunId
             _ -> Nothing
 
+{- | DISPLAY-ONLY: stamp the sighted candidate run id into every group row's
+context so all siblings' summaries can link the run while matrix-job
+verification is still pending (iOS: 10-20 min of setup before the matrix
+expands). Never touches @external_run_id@ — binding stays verification-gated.
+-}
+setCandidateRunIdForDispatch :: (MonadFlow m) => Text -> Text -> m ()
+setCandidateRunIdForDispatch did runId = withDb $ \db ->
+    withConn db $ \conn -> do
+        _ <-
+            execute
+                conn
+                -- The shape guard (object-looking text only) keeps a corrupt
+                -- sibling context from throwing on the ::jsonb cast and
+                -- failing the whole group's tick over a display-only stamp.
+                "UPDATE release_tracker \
+                \SET release_context = jsonb_set(release_context::jsonb, '{contents,mbCandidateRunId}', to_jsonb(?::text))::text \
+                \WHERE dispatch_id = ? AND release_context IS NOT NULL AND release_context ~ '^\\s*\\{'"
+                (runId, did)
+        pure ()
+
+{- | Surface the oldest unclaimed candidate run to the whole dispatch group
+the moment it is sighted — long before verification can bind it. Deduped
+against the tick-start state so the stamp + events fire once per candidate.
+-}
+noteCandidateRun :: Text -> MobileBuildTargetState -> WorkflowRun -> StateFlow ()
+noteCandidateRun did target r = do
+    let runIdT = T.pack (show (wrId r))
+    when (mbCandidateRunId target /= Just runIdT) $ do
+        setCandidateRunIdForDispatch did runIdT
+        siblings <- findSiblingsByDispatchId did
+        forM_ siblings $ \(srt, _) ->
+            logEvent (releaseId srt) "GH_RUN_CANDIDATE" $
+                object
+                    [ "run_id" .= runIdT
+                    , "html_url" .= wrHtmlUrl r
+                    , "note" .= ("run sighted — matrix-job verification pending" :: Text)
+                    ]
+
+-- ─── Debug-build Firebase release observation ──────────────────────
+
+-- | What fastlane's @firebase_app_distribution@ printed for a debug build:
+-- the only record of the build's identity (debug lanes push no tag and
+-- upload no GH artifacts). The version NAME is a hardcoded placeholder
+-- ("99.0.0") in the debug workflows; the CODE is real — assigned by
+-- @increment_version_code@ against Firebase's latest release.
+data FirebaseReleaseInfo = FirebaseReleaseInfo
+    { friVersionName :: Text
+    , friVersionCode :: Int32
+    , friConsoleUrl :: Maybe Text
+    , friTesterUrl :: Maybe Text
+    }
+    deriving (Eq, Show)
+
+{- | Parse fastlane's @firebase_app_distribution@ output out of a job log:
+
+>  ✅ Uploaded AAB successfully and created release 99.0.0 (392).
+>  🔗 View this release in the Firebase console: https://console.firebase.google.com/…
+>  🔗 Share this release with testers who have access: https://appdistribution.firebase.google.com/…
+
+Log lines carry timestamps and ANSI colour codes, so match on substrings and
+trim non-URL tails. 'Nothing' when no release line exists (not a Firebase
+lane, or the plugin's wording changed) — callers fail SOFT: the version just
+stays blank, exactly as before this parser existed.
+-}
+parseFirebaseRelease :: Text -> Maybe FirebaseReleaseInfo
+parseFirebaseRelease logTxt = do
+    relLine <- firstLineWith releaseMark
+    let body = T.drop (T.length releaseMark) (snd (T.breakOn releaseMark relLine))
+        (ver, afterVer) = T.breakOn " (" body
+        codeTxt = T.takeWhile isDigit (T.drop 2 afterVer)
+    code <- readMaybe (T.unpack codeTxt)
+    guard (not (T.null (T.strip ver)))
+    pure
+        FirebaseReleaseInfo
+            { friVersionName = T.strip ver
+            , friVersionCode = code
+            , friConsoleUrl = urlAfter "View this release in the Firebase console: "
+            , friTesterUrl = urlAfter "Share this release with testers who have access: "
+            }
+  where
+    releaseMark = "and created release "
+    lns = T.lines logTxt
+    firstLineWith needle = listToMaybe [l | l <- lns, needle `T.isInfixOf` l]
+    urlAfter prefix = do
+        l <- firstLineWith prefix
+        let u = T.drop (T.length prefix) (snd (T.breakOn prefix l))
+            cleaned = T.takeWhile (\c -> c /= '\ESC' && c /= ' ' && c /= '\r') u
+        if "http" `T.isPrefixOf` cleaned then Just cleaned else Nothing
+
+{- | Debug builds only: recover the build's Firebase identity from the
+completed matrix job's log — version code onto the tracker column AND the
+context mirror (the same field auto-heal stamps, which every version cell
+reads), console/tester links into the target state for the summary page.
+Best-effort in every direction: any failure logs and leaves the version
+blank; it can never fail a build that just succeeded.
+-}
+observeFirebaseRelease :: ReleaseTracker -> GhAppCreds -> AppCatalog -> Job -> StateFlow ()
+observeFirebaseRelease rt creds ac j = do
+    eRes <- MC.try @_ @SomeException $ do
+        eLog <- fetchJobLog creds (gitOwner ac) (gitRepo ac) (jId j)
+        case eLog of
+            Left e ->
+                logInfoIO $ "[PollMatrixJobs] " <> releaseId rt <> " firebase-release log fetch failed (version stays blank): " <> e
+            Right logTxt -> case parseFirebaseRelease logTxt of
+                Nothing ->
+                    logInfoIO $ "[PollMatrixJobs] " <> releaseId rt <> " no firebase release line in job log (version stays blank)"
+                Just fri -> do
+                    setReleaseVersionCode (releaseId rt) (friVersionCode fri)
+                    modify $ \s ->
+                        s
+                            { targetState =
+                                Just $
+                                    MobileBuildState
+                                        ( applyMobileTarget s $ \mt ->
+                                            mt
+                                                { mbContext = (mbContext mt){mbcVersionCode = mbcVersionCode (mbContext mt) <|> Just (friVersionCode fri)}
+                                                , mbFirebaseReleaseUrl = friConsoleUrl fri
+                                                , mbFirebaseTesterUrl = friTesterUrl fri
+                                                }
+                                        )
+                            }
+                    logEvent (releaseId rt) "FIREBASE_RELEASE_OBSERVED" $
+                        object
+                            [ "version_name" .= friVersionName fri
+                            , "version_code" .= friVersionCode fri
+                            , "html_url" .= friConsoleUrl fri
+                            , "tester_url" .= friTesterUrl fri
+                            ]
+    case eRes of
+        Left ex ->
+            logInfoIO $ "[PollMatrixJobs] " <> releaseId rt <> " firebase-release observation threw (ignored): " <> T.pack (show ex)
+        Right () -> pure ()
+
 {- | (id, release_context) for every row in a dispatch group — terminal rows
 included. The leader gate parses these to detect a dispatch by a dead
 ex-leader (a context carrying @mbBuildStartedAt@) and adopt its run instead of
@@ -2083,28 +2465,3 @@ findDispatchGroupContexts did = withDb $ \db ->
             "SELECT id, release_context FROM release_tracker WHERE dispatch_id = ?"
             (Only did)
 
-{- | @pg_try_advisory_lock(hashtext($1))@ — non-blocking advisory lock
-keyed on the dispatch id. Returns True if acquired, False if held by
-another connection.
-
-The lock is connection-bound: when the pooled connection returns to
-the pool (or closes), the lock auto-releases. We deliberately do NOT
-keep the connection pinned beyond the call — re-acquiring per stage
-tick is the desired semantics for sibling-dispatch grouping (only one
-worker should ever progress past stage 2 at a time, and that's
-guaranteed by re-trying the lock on every tick).
--}
-tryAdvisoryLockShared ::
-    (MonadFlow m) =>
-    Text ->
-    m Bool
-tryAdvisoryLockShared key = withDb $ \db ->
-    withConn db $ \conn -> do
-        rows <-
-            query
-                conn
-                "SELECT pg_try_advisory_lock(hashtext(?))"
-                (Only key)
-        pure $ case rows of
-            [Only b] -> b
-            _ -> False

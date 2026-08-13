@@ -334,17 +334,32 @@ export default function ReleaseGroupDetail() {
   const cancelBuild = async (r: APRelease) => {
     setCancellingBuild(r.id);
     try {
-      const d = await mobileApi.getRolloutDetail(r.id);
-      if (!d.rdAbortable) {
-        toast.error('Too late to cancel — the build already produced artifacts. Use Revert instead.');
-        return;
+      // Debug builds have no rollout detail (the endpoint 400s for them) —
+      // derive abortability locally: cancellable until the artifact uploads
+      // (MBSubmittedToStore and beyond), mirroring the BE's rdAbortable.
+      const isDebugRow = r.release_context?.build_type === 'debug';
+      let siblings: string[] = [];
+      if (isDebugRow) {
+        const wf = (r.release_context as Record<string, any>)?.mb_wf_status ?? '';
+        if (!['MBInit', 'MBVersionResolved', 'MBDispatched', 'MBRunIdResolved', 'MBBuilding'].includes(wf)) {
+          toast.error('Too late to cancel — the build already produced artifacts.');
+          return;
+        }
+      } else {
+        const d = await mobileApi.getRolloutDetail(r.id);
+        if (!d.rdAbortable) {
+          toast.error('Too late to cancel — the build already produced artifacts. Use Revert instead.');
+          return;
+        }
+        siblings = d.rdRunSiblings ?? [];
       }
-      const siblings = d.rdRunSiblings ?? [];
       const ok = await confirmDialog({
         title: 'Cancel build',
         description: siblings.length
           ? `This cancels the shared GitHub run. Still building in the same run and will ALSO be cancelled: ${siblings.join(', ')}.`
-          : `Cancel the ${r.appGroup} · ${r.env} build? The GitHub job is cancelled and this release is aborted.`,
+          : isDebugRow
+            ? `Cancel the ${r.appGroup} · ${r.env} build? This stops the shared GitHub run — sibling apps still building in the same run are cancelled with it.`
+            : `Cancel the ${r.appGroup} · ${r.env} build? The GitHub job is cancelled and this release is aborted.`,
         confirmLabel: 'Cancel build',
         cancelLabel: 'Keep building',
         variant: 'danger',

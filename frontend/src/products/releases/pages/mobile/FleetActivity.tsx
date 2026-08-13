@@ -114,6 +114,14 @@ function decode(r: FleetActivityRow): Decoded {
     case 'TRACKER_TRIGGERED':
     case 'GH_DISPATCHED':
       return { category: 'build', sentence: 'dispatched the build to CI', failed: false, system: false, icon: <PaperPlaneTiltIcon size={13} weight="bold" className="text-amber-600" aria-hidden="true" /> };
+    case 'GH_DISPATCH_ATTEMPTED':
+      // Pre-POST dispatch receipt (bookkeeping twin of GH_DISPATCHED) — a
+      // feed row here would read as a duplicate "dispatched" entry.
+      return { category: 'build', sentence: 'recorded the dispatch receipt', failed: false, system: true };
+    case 'GH_RUN_CANDIDATE':
+      return { category: 'build', sentence: 'CI run appeared — verifying it is ours', failed: false, system: true };
+    case 'FIREBASE_RELEASE_OBSERVED':
+      return { category: 'build', sentence: 'debug build landed on Firebase App Distribution', failed: false, system: true };
     case 'BUILD_STARTED':
       return { category: 'build', sentence: 'CI build started', failed: false, system: true };
     case 'BUILD_COMPLETED':

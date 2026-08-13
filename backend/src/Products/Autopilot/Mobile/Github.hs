@@ -31,6 +31,8 @@ module Products.Autopilot.Mobile.Github (
     WorkflowRun (..),
     WorkflowRunsResp (..),
     dispatchRunCandidates,
+    ownDispatchCandidates,
+    getWorkflowRun,
     findRunWithJob,
     Job (..),
     JobStep (..),
@@ -135,11 +137,24 @@ data WorkflowRun = WorkflowRun
     , wrHeadBranch :: Maybe Text
     -- ^ Branch the run was dispatched on. OTA run correlation filters
     -- candidates on this to reject runs dispatched from other branches.
+    , wrActorId :: Maybe Int64
+    -- ^ Numeric user id of whoever started the run. For runs we dispatch
+    -- this is the App's @\<slug\>[bot]@ account ('BotIdentity') — run
+    -- adoption filters on it so a human's manual run never matches.
+    , wrActorLogin :: Maybe Text
+    -- ^ Login of the run's actor (for logs/events only; match on the id).
+    , wrRunAttempt :: Maybe Int
+    -- ^ Attempt number (>1 after "re-run failed jobs"). The default jobs
+    -- listing only shows the LATEST attempt's jobs, so job-absence evidence
+    -- is only trustworthy on attempt 1.
     }
     deriving (Show, Generic)
 
 instance FromJSON WorkflowRun where
-    parseJSON = withObject "WorkflowRun" $ \o ->
+    parseJSON = withObject "WorkflowRun" $ \o -> do
+        mActor <- o .:? "actor"
+        actorId <- maybe (pure Nothing) (.:? "id") mActor
+        actorLogin <- maybe (pure Nothing) (.:? "login") mActor
         WorkflowRun
             <$> o .: "id"
             <*> o .: "event"
@@ -151,6 +166,9 @@ instance FromJSON WorkflowRun where
             <*> o .:? "display_title"
             <*> o .: "head_sha"
             <*> o .:? "head_branch"
+            <*> pure actorId
+            <*> pure actorLogin
+            <*> o .:? "run_attempt"
 
 newtype WorkflowRunsResp = WorkflowRunsResp {wrrRuns :: [WorkflowRun]}
     deriving (Show)
@@ -169,11 +187,64 @@ dispatchRunCandidates dispatchedAt = sortOn (Down . wrCreatedAt) . filter inWind
     hi = addUTCTime 300 dispatchedAt
     inWindow r = wrEvent r == "workflow_dispatch" && wrCreatedAt r >= lo && wrCreatedAt r <= hi
 
-{- | The first candidate run (newest-first, per 'dispatchRunCandidates') whose
-job list contains @jobName@. Two dispatches on the SAME workflow file can land
-inside each other's created-at windows (provider version cohorts, concurrent
-operators), so the window alone can cross-bind — the matrix job name is the
-disambiguator: each run only contains its own cohort's app jobs.
+{- | Candidates for OUR dispatch, strongest evidence first. Keeps a run iff:
+
+* it is a @workflow_dispatch@ run, AND
+* its actor is our App's bot account (when the identity is known — a run a
+  human started from the GitHub UI can never match), AND
+* its id is strictly above the pre-dispatch watermark when one was recorded
+  (run ids are monotonically increasing, so above-the-mark means created
+  after our POST — no wall clocks involved); rows persisted before the
+  watermark existed fall back to the legacy created-at window.
+
+Sorted OLDEST first: the run created immediately after our watermark
+snapshot is ours; a later unclaimed run belongs to a later dispatch.
+-}
+ownDispatchCandidates ::
+    -- | Bot user id ('BotIdentity'), when discovered
+    Maybe Int64 ->
+    -- | Pre-dispatch run-id watermark (the receipt), when recorded
+    Maybe Int64 ->
+    -- | Receipt time — window fallback for pre-watermark rows
+    UTCTime ->
+    [WorkflowRun] ->
+    [WorkflowRun]
+ownDispatchCandidates mBotId mWatermark dispatchedAt = sortOn wrId . filter ok
+  where
+    lo = addUTCTime (-30) dispatchedAt
+    hi = addUTCTime 300 dispatchedAt
+    ok r =
+        wrEvent r == "workflow_dispatch"
+            -- Exclude only on a PRESENT, mismatching actor. GitHub's schema
+            -- marks actor nullable — a null-actor row must not hide our own
+            -- run (job verification still gates any bind).
+            && ( case mBotId of
+                    Nothing -> True
+                    Just bid -> maybe True (== bid) (wrActorId r)
+               )
+            -- A run created before the receipt can NEVER be ours, whatever
+            -- the watermark says — the watermark snapshot comes from one
+            -- listing call, and a stale/partial GitHub page once produced an
+            -- ancient watermark that made every old run on the page a
+            -- "candidate" (and oldest-first then surfaced a months-old run).
+            -- The created-at floor and the id watermark back each other up.
+            && wrCreatedAt r >= lo
+            && case mWatermark of
+                Just w -> wrId r > w
+                Nothing -> wrCreatedAt r <= hi
+
+{- | The first candidate run (in the given order) whose job list contains ANY
+of @jobNames@ — a dispatch group's matrix job names. Two dispatches on the
+SAME workflow file can land inside each other's windows (provider version
+cohorts, concurrent operators), so the window alone can cross-bind — the
+matrix job names are the disambiguator: each run only contains its own
+cohort's app jobs.
+
+Callers pass the WHOLE group's job names, not just the executing row's: any
+one job proves the run belongs to the group, and the executing row's own job
+alone is NOT reliable evidence — CI's matrix step silently drops apps missing
+from the repo's config, so the group leader's own job may never exist in a
+perfectly good group run.
 
 'Nothing' = no candidate verified YET. Matrix jobs only appear once the run's
 setup job finishes expanding the matrix (minutes), so callers must treat
@@ -185,16 +256,16 @@ findRunWithJob ::
     GhAppCreds ->
     Text -> -- owner
     Text -> -- repo
-    Text -> -- this row's matrix job name
+    [Text] -> -- the dispatch group's matrix job names (any one match binds)
     [WorkflowRun] ->
     m (Maybe WorkflowRun)
-findRunWithJob creds owner repo jobName = go . take 3
+findRunWithJob creds owner repo jobNames = go . take 3
   where
     go [] = pure Nothing
     go (r : rs) = do
         eJobs <- listJobs creds owner repo (T.pack (show (wrId r)))
         case eJobs of
-            Right jobs | any ((== jobName) . jName) jobs -> pure (Just r)
+            Right jobs | any ((`elem` jobNames) . jName) jobs -> pure (Just r)
             _ -> go rs
 
 -- | One row from @\/actions\/runs\/{run_id}\/jobs@.
@@ -306,7 +377,12 @@ dispatchWorkflow creds owner repo workflowFile body = do
                 , reqBody = Just (encode body)
                 , reqTimeout = Seconds 30
                 , reqLogTag = "gh-dispatch"
-                , reqRetries = 1
+                , -- NEVER blind-retry this POST: workflow_dispatch is not
+                  -- idempotent and a timeout after GitHub already accepted the
+                  -- first attempt would mint a second run the caller never
+                  -- learns about. Retry policy lives in the workflow stage,
+                  -- which adopts an existing run before re-dispatching.
+                  reqRetries = 0
                 }
     resp <- liftIO (httpRaw req)
     pure $ case resp of
@@ -350,6 +426,32 @@ listWorkflowRuns creds owner repo workflowFile = do
     pure $ case resp of
         Right r -> Right (wrrRuns r)
         Left e -> Left ("listWorkflowRuns: " <> renderHttpError e)
+
+{- | One run by id — @GET \/actions\/runs\/{run_id}@. Exact and
+pagination-proof (the runs LIST shows only the newest 20); use it where a
+decision hangs on the run's settled status\/attempt rather than discovery.
+-}
+getWorkflowRun ::
+    (MonadFlow m) =>
+    GhAppCreds ->
+    Text -> -- owner
+    Text -> -- repo
+    Text -> -- run id
+    m (Either Text WorkflowRun)
+getWorkflowRun creds owner repo runId = do
+    token <- getInstallationToken creds
+    let url = apiBase owner repo <> "/actions/runs/" <> runId
+        req =
+            (defaultReq url)
+                { reqMethod = GET
+                , reqHeaders = ghHeaders token
+                , reqTimeout = Seconds 30
+                , reqLogTag = "gh-run"
+                }
+    resp <- liftIO (httpJson @WorkflowRun req)
+    pure $ case resp of
+        Right r -> Right r
+        Left e -> Left ("getWorkflowRun: " <> renderHttpError e)
 
 {- | Runs of ONE workflow file filtered to an exact head commit — the build
 event record for that sha. @head_branch@ of the (unanimous) result is the
@@ -395,7 +497,10 @@ listJobs ::
     m (Either Text [Job])
 listJobs creds owner repo runId = do
     token <- getInstallationToken creds
-    let url = apiBase owner repo <> "/actions/runs/" <> runId <> "/jobs"
+    -- per_page=100: the default 30 truncates fleet-batch runs; a matrix job
+    -- past page 1 would look "missing" to PollMatrixJobs and could trip its
+    -- not_in_matrix abort on a healthy build.
+    let url = apiBase owner repo <> "/actions/runs/" <> runId <> "/jobs?per_page=100"
         req =
             (defaultReq url)
                 { reqMethod = GET
@@ -423,21 +528,44 @@ fetchJobLog ::
     m (Either Text Text)
 fetchJobLog creds owner repo jobId = do
     token <- getInstallationToken creds
+    -- GitHub answers with a 302 to a pre-signed blob-storage URL. Following
+    -- it automatically forwards our Authorization header, which the blob
+    -- store rejects (HTTP 401 — a signed URL and an auth header may not be
+    -- combined). So: take the redirect by hand, then fetch the blob BARE.
     let url = apiBase owner repo <> "/actions/jobs/" <> T.pack (show jobId) <> "/logs"
         req =
             (defaultReq url)
                 { reqMethod = GET
                 , reqHeaders = ghHeaders token
-                , -- a 15-minute build's log runs to tens of MB
-                  reqTimeout = Seconds 120
+                , reqTimeout = Seconds 30
                 , reqLogTag = "gh-job-log"
+                , reqNoRedirect = True
                 }
+        asLog b = Right (TE.decodeUtf8With lenientDecode (LBS.toStrict b))
     resp <- liftIO (httpRaw req)
-    pure $ case resp of
-        Right HttpResponse{respStatus = s, respBody = b}
-            | s == 200 -> Right (TE.decodeUtf8With lenientDecode (LBS.toStrict b))
-            | otherwise -> Left ("fetchJobLog: HTTP " <> T.pack (show s))
-        Left e -> Left ("fetchJobLog: " <> renderHttpError e)
+    case resp of
+        Left e -> pure (Left ("fetchJobLog: " <> renderHttpError e))
+        Right HttpResponse{respStatus = s, respBody = b, respHeaders = hs}
+            -- Tiny logs may come back inline.
+            | s == 200 -> pure (asLog b)
+            | s `elem` [301, 302, 303, 307, 308] ->
+                case lookup "location" [(T.toLower k, v) | (k, v) <- hs] of
+                    Nothing -> pure (Left ("fetchJobLog: HTTP " <> T.pack (show s) <> " without a Location header"))
+                    Just loc -> do
+                        blob <-
+                            liftIO $
+                                httpRaw
+                                    (defaultReq loc)
+                                        { reqMethod = GET
+                                        , -- a 15-minute build's log runs to tens of MB
+                                          reqTimeout = Seconds 120
+                                        , reqLogTag = "gh-job-log-blob"
+                                        }
+                        pure $ case blob of
+                            Right HttpResponse{respStatus = 200, respBody = lb} -> asLog lb
+                            Right HttpResponse{respStatus = s2} -> Left ("fetchJobLog blob: HTTP " <> T.pack (show s2))
+                            Left e -> Left ("fetchJobLog blob: " <> renderHttpError e)
+            | otherwise -> pure (Left ("fetchJobLog: HTTP " <> T.pack (show s)))
 
 {- | List refs/tags whose names begin with @prefix@. Returns the bare
 ref names (no @refs\/tags\/@ prefix is stripped — caller decides).

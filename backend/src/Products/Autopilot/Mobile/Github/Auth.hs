@@ -31,15 +31,18 @@ module Products.Autopilot.Mobile.Github.Auth (
     -- * Credentials + cache
     GhAppCreds (..),
     InstallationToken (..),
+    BotIdentity (..),
 
     -- * Public API
     getInstallationToken,
     clearTokenCache,
     loadGhCreds,
+    getBotIdentity,
 ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
-import Control.Monad.Catch (throwM)
+import Control.Exception (SomeException)
+import Control.Monad.Catch (throwM, try)
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (InternalError))
 import Core.Environment (MonadFlow, logError)
@@ -54,6 +57,7 @@ import Core.Secrets (lookupEnvSecret, lookupEnvSecretB64)
 import Core.Types.Time (Seconds (..))
 import Data.Aeson (FromJSON (..), withObject, (.:))
 import qualified Data.ByteString.Lazy as LBS
+import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -222,6 +226,100 @@ exchangeForInstallationToken GhAppCreds{..} jwt = do
         Left e -> do
             logError $ "[github-auth] installation-token exchange failed: " <> T.pack (show e)
             throwM (InternalError ("GitHub installation-token exchange failed: " <> renderHttpError e))
+
+-- ─── Bot identity (actor filter for run adoption) ──────────────────
+
+{- | The GitHub App's machine-user identity: the App slug (e.g. @ny-titan@)
+and the numeric user id of its @\<slug\>[bot]@ account. Every workflow run
+dispatched with this App's installation token is attributed to that account,
+so run adoption can filter candidates on @actor.id == biUserId@ — a run some
+human started from the GitHub UI can never be mistaken for ours.
+-}
+data BotIdentity = BotIdentity
+    { biSlug :: Text
+    , biUserId :: Int64
+    }
+    deriving (Eq, Show)
+
+-- | Process-wide cache, KEYED by the App id it was discovered for: the
+-- identity never changes for a given App (the numeric user id survives an
+-- App rename), but if the credentials are ever swapped to a different App
+-- the stale identity would silently filter out every run the new App's bot
+-- creates — so a key mismatch forces rediscovery.
+{-# NOINLINE botIdentityCache #-}
+botIdentityCache :: MVar (Maybe (Text, BotIdentity))
+botIdentityCache = unsafePerformIO (newMVar Nothing)
+
+newtype AppMeta = AppMeta {amSlug :: Text}
+
+instance FromJSON AppMeta where
+    parseJSON = withObject "AppMeta" $ \o -> AppMeta <$> o .: "slug"
+
+newtype GhUser = GhUser {guId :: Int64}
+
+instance FromJSON GhUser where
+    parseJSON = withObject "GhUser" $ \o -> GhUser <$> o .: "id"
+
+{- | Discover (and cache for the process lifetime) the App's bot identity:
+@GET \/app@ (JWT auth) for the slug, then @GET \/users\/\<slug\>[bot]@ for
+the numeric user id (@[bot]@ is GitHub's reserved, guaranteed naming for App
+machine accounts — brackets are illegal in human usernames).
+
+Returns 'Nothing' on ANY failure: callers treat the identity as unknown and
+skip the actor filter for that tick rather than blocking dispatch or run
+adoption on a metadata lookup. Failures are not cached — the next call
+retries.
+-}
+getBotIdentity :: (MonadFlow m) => GhAppCreds -> m (Maybe BotIdentity)
+getBotIdentity creds = do
+    cached <- liftIO (readMVar botIdentityCache)
+    case cached of
+        Just (appId, b) | appId == gacAppId creds -> pure (Just b)
+        _ -> do
+            eIdent <- try @_ @SomeException (discoverBotIdentity creds)
+            case eIdent of
+                Right (Right b) -> do
+                    liftIO (modifyMVar_ botIdentityCache (\_ -> pure (Just (gacAppId creds, b))))
+                    pure (Just b)
+                Right (Left e) -> do
+                    logError ("[github-auth] bot identity discovery failed (actor filter skipped): " <> e)
+                    pure Nothing
+                Left ex -> do
+                    logError ("[github-auth] bot identity discovery threw (actor filter skipped): " <> T.pack (show ex))
+                    pure Nothing
+
+discoverBotIdentity :: (MonadFlow m) => GhAppCreds -> m (Either Text BotIdentity)
+discoverBotIdentity creds = do
+    jwt <- mintAppJwt creds
+    let ghHdrs auth =
+            [ ("Authorization", "Bearer " <> auth)
+            , ("Accept", "application/vnd.github+json")
+            , ("X-GitHub-Api-Version", "2022-11-28")
+            , ("User-Agent", "system-control-centre")
+            ]
+        appReq =
+            (defaultReq "https://api.github.com/app")
+                { reqHeaders = ghHdrs jwt
+                , reqTimeout = Seconds 15
+                , reqLogTag = "gh-app-meta"
+                }
+    eApp <- liftIO (httpJson @AppMeta appReq)
+    case eApp of
+        Left e -> pure (Left ("GET /app: " <> renderHttpError e))
+        Right (AppMeta slug) -> do
+            token <- getInstallationToken creds
+            let botLogin = slug <> "[bot]"
+                -- %5B / %5D = URL-encoded brackets of the "[bot]" suffix.
+                userReq =
+                    (defaultReq ("https://api.github.com/users/" <> slug <> "%5Bbot%5D"))
+                        { reqHeaders = ghHdrs token
+                        , reqTimeout = Seconds 15
+                        , reqLogTag = "gh-bot-user"
+                        }
+            eUser <- liftIO (httpJson @GhUser userReq)
+            pure $ case eUser of
+                Left e -> Left ("GET /users/" <> botLogin <> ": " <> renderHttpError e)
+                Right (GhUser uid) -> Right (BotIdentity slug uid)
 
 renderHttpError :: HttpError -> Text
 renderHttpError (HttpExceptionError m) = m
