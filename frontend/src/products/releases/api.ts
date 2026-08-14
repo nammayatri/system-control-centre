@@ -1643,10 +1643,28 @@ export interface StoreMonitorResult {
     refreshing: boolean;
 }
 
+// One app row's effective per-app permissions (unified grant model) —
+// GET /mobile/access. mobilePerms are MB_*; otaPerms are the airborne OTA_*
+// family (legacy per-ref grants folded in).
+export interface MobileAccessEntry {
+    id: number;
+    name: string;
+    surface: string;
+    platform: string;
+    airborneAppRef?: string | null;
+    mobilePerms: string[];
+    otaPerms: string[];
+}
+
 export const mobileApi = {
     listApps: async (): Promise<AppCatalogEntry[]> => {
         const { data } = await apiClient.get('/mobile/apps');
         return Array.isArray(data) ? data : [];
+    },
+
+    access: async (): Promise<{ apps: MobileAccessEntry[] }> => {
+        const { data } = await apiClient.get('/mobile/access');
+        return data && Array.isArray(data.apps) ? data : { apps: [] };
     },
 
     createApp: async (body: Partial<AppCatalogEntry>): Promise<AppCatalogEntry> => {
@@ -1936,11 +1954,12 @@ export interface MobileGroupDetail {
     changelogSlack?: MobileChangelogSlackState;
 }
 
-// ── Chime (appmonitor) — OTA fleet push campaigns + adoption ────────
-// BFF proxy under /airborne/chime/:app (app = the composite <org>~<app>
-// airborne ref). Chime's envelope is { status, data }; non-error outcomes
-// like status:"skipped" (one campaign per target) ride the 200 path — they
-// are NORMAL results the UI renders, never thrown errors.
+// ── Chime (appmonitor) — fleet push campaigns + adoption ────────────
+// BFF proxy under /mobile/apps/:appId/chime (app-catalog id — no airborne
+// coupling; the server derives role/platform/package from the catalog row).
+// Chime's envelope is { status, data }; non-error outcomes like
+// status:"skipped" (one campaign per target) ride the 200 path — they are
+// NORMAL results the UI renders, never thrown errors.
 
 export interface ChimeEnvelope<T> {
     status: string; // accepted | skipped | running | completed | cancelled | dry_run | error | success …
@@ -2017,55 +2036,52 @@ export interface ChimeVersionUsers {
     recorded?: boolean; // false = BFF folded a Chime 404: nothing recorded for this key yet
 }
 
-const chimeBase = (appRef: string) => `/airborne/chime/${encodeURIComponent(appRef)}`;
+const chimeBase = (appId: number) => `/mobile/apps/${appId}/chime`;
 
 export const chimeApi = {
     // 202 accepted → data.job_id; 200 skipped → the one-in-flight conflict card.
     launchCampaign: async (
-        appRef: string,
-        p: { role: 'bap' | 'bpp'; platform: 'android' | 'ios'; pkg: string; dryRun?: boolean },
+        appId: number,
+        p: { dryRun?: boolean } = {},
     ): Promise<ChimeEnvelope<{ job_id?: string } & Record<string, unknown>>> => {
-        const { data } = await apiClient.post(`${chimeBase(appRef)}/campaigns/launch`, undefined, {
-            params: { role: p.role, platform: p.platform, package: p.pkg, dry_run: p.dryRun ?? false },
+        const { data } = await apiClient.post(`${chimeBase(appId)}/launch`, undefined, {
+            params: { dry_run: p.dryRun ?? false },
         });
         return data;
     },
 
-    // Pre-launch probe: listJobs(ref, { package, status: 'running', limit: 1 }).
+    // Pre-launch probe: listJobs(appId, { status: 'running', limit: 1 }).
     listJobs: async (
-        appRef: string,
-        f: { role?: string; os?: string; pkg?: string; status?: string; limit?: number; offset?: number } = {},
+        appId: number,
+        f: { status?: string; limit?: number; offset?: number } = {},
     ): Promise<ChimeEnvelope<ChimeJobList>> => {
-        const { data } = await apiClient.get(`${chimeBase(appRef)}/jobs`, {
-            params: { role: f.role, os: f.os, package: f.pkg, status: f.status, limit: f.limit, offset: f.offset },
+        const { data } = await apiClient.get(`${chimeBase(appId)}/jobs`, {
+            params: { status: f.status, limit: f.limit, offset: f.offset },
         });
         return data;
     },
 
     // Envelope status here is the JOB's own status (running/completed/…).
-    jobStatus: async (appRef: string, jobId: string): Promise<ChimeEnvelope<ChimeJobStatus>> => {
-        const { data } = await apiClient.get(`${chimeBase(appRef)}/jobs/${encodeURIComponent(jobId)}/status`);
+    jobStatus: async (appId: number, jobId: string): Promise<ChimeEnvelope<ChimeJobStatus>> => {
+        const { data } = await apiClient.get(`${chimeBase(appId)}/jobs/${encodeURIComponent(jobId)}/status`);
         return data;
     },
 
-    jobFunnel: async (appRef: string, jobId: string): Promise<ChimeEnvelope<ChimeJobFunnel>> => {
-        const { data } = await apiClient.get(`${chimeBase(appRef)}/jobs/${encodeURIComponent(jobId)}/funnel`);
+    jobFunnel: async (appId: number, jobId: string): Promise<ChimeEnvelope<ChimeJobFunnel>> => {
+        const { data } = await apiClient.get(`${chimeBase(appId)}/jobs/${encodeURIComponent(jobId)}/funnel`);
         return data;
     },
 
-    cancelJob: async (appRef: string, jobId: string): Promise<ChimeEnvelope<{ job_id: string }>> => {
-        const { data } = await apiClient.post(`${chimeBase(appRef)}/jobs/${encodeURIComponent(jobId)}/cancel`);
+    cancelJob: async (appId: number, jobId: string): Promise<ChimeEnvelope<{ job_id: string }>> => {
+        const { data } = await apiClient.post(`${chimeBase(appId)}/jobs/${encodeURIComponent(jobId)}/cancel`);
         return data;
     },
 
-    // 404 upstream is folded by the BFF into { data: { recorded: false } } —
-    // the adoption card's empty state, not an error.
-    adoption: async (
-        appRef: string,
-        p: { pkg: string; version: string; os: 'android' | 'ios' },
-    ): Promise<ChimeEnvelope<ChimeVersionUsers>> => {
-        const { data } = await apiClient.get(`${chimeBase(appRef)}/adoption`, {
-            params: { package: p.pkg, version: p.version, os: p.os },
+    // 404 upstream (and "no org mapping") is folded by the BFF into
+    // { data: { recorded: false } } — the adoption card's empty state, not an error.
+    adoption: async (appId: number, p: { version: string }): Promise<ChimeEnvelope<ChimeVersionUsers>> => {
+        const { data } = await apiClient.get(`${chimeBase(appId)}/adoption`, {
+            params: { version: p.version },
         });
         return data;
     },

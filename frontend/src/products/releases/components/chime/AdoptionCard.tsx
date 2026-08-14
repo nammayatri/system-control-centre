@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ChartBarIcon } from '@phosphor-icons/react';
 import { chimeApi, type ChimeVersionUsers } from '../../api';
-import { useOtaAccess } from '../../../airborne-ota/hooks';
+import { useMobileAccess } from '../../hooks';
 import { cn } from '../../../../lib/utils';
 
 // Adoption (Chime) — renders EXACTLY what GET /chime/versions/users returns:
@@ -13,11 +13,10 @@ import { cn } from '../../../../lib/utils';
 // empty state, not an error.
 
 export interface AdoptionCardProps {
-  /** Composite airborne ref `<org>~<app>`. */
-  appRef: string;
+  /** App-catalog id (server derives package/os/org); null disables the query. */
+  appId: number | null;
   /** Store package id; null disables the query (empty state shows). */
   pkg: string | null;
-  os: 'android' | 'ios';
   /** Bundle identity devices report — package tag preferred, else version. */
   version: string | null;
   variant: 'panel' | 'compact';
@@ -26,17 +25,17 @@ export interface AdoptionCardProps {
 
 const nf = (n: number | undefined | null) => (n == null ? '—' : n.toLocaleString('en-US'));
 
-export function AdoptionCard({ appRef, pkg, os, version, variant, className }: AdoptionCardProps) {
-  const access = useOtaAccess();
+export function AdoptionCard({ appId, pkg, version, variant, className }: AdoptionCardProps) {
+  const access = useMobileAccess();
   const hasView = useMemo(
-    () => (access.data?.apps.find((a) => a.appRef === appRef)?.permissions ?? []).includes('OTA_VIEW'),
-    [access.data, appRef],
+    () => (access.data?.apps.find((a) => a.id === appId)?.mobilePerms ?? []).includes('MB_RELEASE_VIEW'),
+    [access.data, appId],
   );
 
   const adoptionQ = useQuery({
-    queryKey: ['chime-adoption', appRef, pkg, version, os],
-    queryFn: () => chimeApi.adoption(appRef, { pkg: pkg!, version: version!, os }),
-    enabled: hasView && !!pkg && !!version,
+    queryKey: ['chime-adoption', appId, pkg, version],
+    queryFn: () => chimeApi.adoption(appId!, { version: version! }),
+    enabled: hasView && appId != null && !!pkg && !!version,
     retry: false,
     staleTime: 60_000,
   });

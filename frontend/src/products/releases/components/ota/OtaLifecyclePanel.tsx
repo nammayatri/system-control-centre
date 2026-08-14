@@ -55,7 +55,6 @@ export interface OtaLifecyclePanelProps {
   releaseBlocked?: string | null;
   groupId: string;
   appName: string;
-  platform: string;
   airborneAppRef: string;
   /** All group pushes for this (app, platform), newest first. */
   pushes: OtaPushRow[];
@@ -101,7 +100,6 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
     releaseBlocked = null,
     groupId,
     airborneAppRef: ref,
-    platform,
     pushes,
     ongoing,
     foreignOngoing,
@@ -118,10 +116,8 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
   } = props;
   const confirm = useConfirm();
   const { data: mobileApps = [] } = useMobileApps();
-  const catalogPkg = useMemo(
-    () => mobileApps.find((a) => a.airborneAppRef === ref)?.packageName ?? null,
-    [mobileApps, ref],
-  );
+  const catalogRow = useMemo(() => mobileApps.find((a) => a.airborneAppRef === ref) ?? null, [mobileApps, ref]);
+  const catalogPkg = catalogRow?.packageName ?? null;
   const can = (p: string) => perms.includes(p);
   const [busy, setBusy] = useState<string | null>(null);
   const [rampPct, setRampPct] = useState('');
@@ -761,9 +757,8 @@ export function OtaLifecyclePanel(props: OtaLifecyclePanelProps) {
           <AdoptionCard
             className="lg:col-span-4"
             variant="panel"
-            appRef={ref}
+            appId={catalogRow?.id ?? null}
             pkg={catalogPkg}
-            os={platform === 'ios' ? 'ios' : 'android'}
             version={pkgVersionOf(live) != null ? String(pkgVersionOf(live)) : (pkgTagOf(live) ?? null)}
           />
         </div>

@@ -9,7 +9,7 @@ import {
   XCircleIcon,
 } from '@phosphor-icons/react';
 import { chimeApi, type ChimeJobFunnel, type ChimeJobStatus, type ChimeJobSummary } from '../../api';
-import { useOtaAccess } from '../../../airborne-ota/hooks';
+import { useMobileAccess } from '../../hooks';
 
 // Fleet campaign (Chime) — one shared card for the summary page and the group
 // detail row. Layout model (user-decided during integ testing):
@@ -23,12 +23,10 @@ import { useOtaAccess } from '../../../airborne-ota/hooks';
 // down or unconfigured never blocks the release UI around this card.
 
 export interface CampaignCardProps {
-  /** Composite airborne ref `<org>~<app>` — RBAC scope + adoption org. */
-  appRef: string;
-  /** Store package id, e.g. in.juspay.nammayatri. */
+  /** App-catalog id — the server derives role/platform/package from the row. */
+  appId: number;
+  /** Store package id, e.g. in.juspay.nammayatri (display only). */
   pkg: string;
-  role: 'bap' | 'bpp';
-  platform: 'android' | 'ios';
   /** Human caption for the idle card, e.g. "consumer · ios". */
   appLabel: string;
   /** False when a section title already sits above the card (summary page) —
@@ -53,15 +51,15 @@ function errText(e: unknown): string {
   return anyE?.response?.data?.message ?? anyE?.response?.data?.error ?? anyE?.message ?? 'Request failed';
 }
 
-export function CampaignCard({ appRef, pkg, role, platform, appLabel, titled = true }: CampaignCardProps) {
+export function CampaignCard({ appId, pkg, appLabel, titled = true }: CampaignCardProps) {
   const qc = useQueryClient();
-  const access = useOtaAccess();
+  const access = useMobileAccess();
   const perms = useMemo(
-    () => access.data?.apps.find((a) => a.appRef === appRef)?.permissions ?? [],
-    [access.data, appRef],
+    () => access.data?.apps.find((a) => a.id === appId)?.mobilePerms ?? [],
+    [access.data, appId],
   );
-  const hasView = perms.includes('OTA_VIEW');
-  const canRamp = perms.includes('OTA_RELEASE_RAMP');
+  const hasView = perms.includes('MB_RELEASE_VIEW');
+  const canRamp = perms.includes('MB_RELEASE_ROLLOUT');
 
   const [busy, setBusy] = useState(false);
   const [skipped, setSkipped] = useState(false);
@@ -69,13 +67,13 @@ export function CampaignCard({ appRef, pkg, role, platform, appLabel, titled = t
   const [dryRunJobId, setDryRunJobId] = useState<string | null>(null);
 
   // Latest REAL campaign for this package. Every dry run mints its own
-  // dry_run job at the top of the list, so limit:1 would let it shadow the
-  // actual campaign — fetch a small window and pick the newest non-dry_run.
-  // Poll only while one is in flight; a settled campaign costs nothing.
+  // dry_run job at the top of the list, so a small window would let heavy
+  // dry-run testing shadow the actual campaign — fetch a generous window
+  // and pick the newest non-dry_run. Poll only while one is in flight.
   const realJob = (jobs?: ChimeJobSummary[]) => jobs?.find((j) => j.status !== 'dry_run');
   const jobsQ = useQuery({
-    queryKey: ['chime-jobs', appRef, pkg],
-    queryFn: () => chimeApi.listJobs(appRef, { pkg, limit: 10 }),
+    queryKey: ['chime-jobs', appId],
+    queryFn: () => chimeApi.listJobs(appId, { limit: 50 }),
     enabled: hasView,
     retry: false,
     refetchInterval: (q) => {
@@ -95,8 +93,8 @@ export function CampaignCard({ appRef, pkg, role, platform, appLabel, titled = t
 
   // Delivery counters — polled while running (GET /chime/status/{jobID}).
   const statusQ = useQuery({
-    queryKey: ['chime-job-status', appRef, latest?.job_id],
-    queryFn: () => chimeApi.jobStatus(appRef, latest!.job_id),
+    queryKey: ['chime-job-status', appId, latest?.job_id],
+    queryFn: () => chimeApi.jobStatus(appId, latest!.job_id),
     enabled: hasView && !!latest && latest.status !== 'dry_run',
     retry: false,
     refetchInterval: running ? 10_000 : false,
@@ -105,8 +103,8 @@ export function CampaignCard({ appRef, pkg, role, platform, appLabel, titled = t
 
   // Device funnel — fills in live while running, final when terminal.
   const funnelQ = useQuery({
-    queryKey: ['chime-job-funnel', appRef, latest?.job_id],
-    queryFn: () => chimeApi.jobFunnel(appRef, latest!.job_id),
+    queryKey: ['chime-job-funnel', appId, latest?.job_id],
+    queryFn: () => chimeApi.jobFunnel(appId, latest!.job_id),
     enabled: hasView && !!latest && latest.status !== 'dry_run',
     retry: false,
     refetchInterval: running ? 15_000 : false,
@@ -115,23 +113,23 @@ export function CampaignCard({ appRef, pkg, role, platform, appLabel, titled = t
 
   // Dry-run result: the recorded dry_run job's audience counters.
   const dryQ = useQuery({
-    queryKey: ['chime-dryrun', appRef, activeDryRunId],
-    queryFn: () => chimeApi.jobStatus(appRef, activeDryRunId!),
+    queryKey: ['chime-dryrun', appId, activeDryRunId],
+    queryFn: () => chimeApi.jobStatus(appId, activeDryRunId!),
     enabled: hasView && !!activeDryRunId,
     retry: false,
   });
   const dry: ChimeJobStatus | null | undefined = dryQ.data?.data;
 
   const refresh = () => {
-    void qc.invalidateQueries({ queryKey: ['chime-jobs', appRef, pkg] });
-    void qc.invalidateQueries({ queryKey: ['chime-job-status', appRef] });
-    void qc.invalidateQueries({ queryKey: ['chime-job-funnel', appRef] });
+    void qc.invalidateQueries({ queryKey: ['chime-jobs', appId] });
+    void qc.invalidateQueries({ queryKey: ['chime-job-status', appId] });
+    void qc.invalidateQueries({ queryKey: ['chime-job-funnel', appId] });
   };
 
   const launch = async (dryRun: boolean) => {
     setBusy(true);
     try {
-      const resp = await chimeApi.launchCampaign(appRef, { role, platform, pkg, dryRun });
+      const resp = await chimeApi.launchCampaign(appId, { dryRun });
       if (resp.status === 'skipped') {
         setSkipped(true);
       } else if (dryRun) {
@@ -155,7 +153,7 @@ export function CampaignCard({ appRef, pkg, role, platform, appLabel, titled = t
     if (!latest) return;
     setBusy(true);
     try {
-      await chimeApi.cancelJob(appRef, latest.job_id);
+      await chimeApi.cancelJob(appId, latest.job_id);
       setCancelRequested(true);
       toast.success('Cancellation signalled — campaign winds down cooperatively');
       refresh();
