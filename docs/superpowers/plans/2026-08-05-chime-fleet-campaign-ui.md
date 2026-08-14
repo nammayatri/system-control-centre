@@ -35,6 +35,22 @@ integration is its own workstream in the app repo.
 
 ## 1. Backend — Chime BFF proxy
 
+> **AMENDED 2026-08-14 — chime decoupled from airborne.** §1.2/§1.3 below record
+> the original decision and are superseded: the routes now live in the MOBILE
+> product as `/mobile/apps/:appId/chime/{launch,jobs,jobs/:jobId/status,
+> jobs/:jobId/funnel,jobs/:jobId/cancel,adoption}` (handlers in
+> `Products.Autopilot.Mobile.Handlers.Chime`; `Products/AirborneOta/Chime.hs`
+> remains the HTTP client). RBAC is `MB_RELEASE_VIEW` (reads) /
+> `MB_RELEASE_ROLLOUT` (launch+cancel), route-level + per-app `requireAppPerm`,
+> plus a job-ownership check on jobId routes (the job's (role, platform,
+> package) must match the addressed app). role/platform/package derive from
+> the app_catalog row server-side; `airborne_app_ref` is needed ONLY as the
+> adoption org label (`<org>~` half). Consequence reversed: mobile operators
+> need no OTA_* grant; legacy airborne-only grant holders no longer see the
+> card. The card now also mounts on DEBUG build summaries (any app with a
+> package_name). Config moved to env: `SC_CHIME_URL` / `SC_CHIME_API_KEY`
+> (not server_config).
+
 Follow the `Products/AirborneOta` pattern (server-side key, SCC RBAC in front, browser never
 sees the credential).
 

@@ -360,6 +360,16 @@ export function useMobileApps() {
   });
 }
 
+// Per-app effective MB_*/OTA_* permissions — drives per-row button states
+// (e.g. the chime campaign card's self-gating).
+export function useMobileAccess() {
+  return useQuery({
+    queryKey: ['mobile', 'access'],
+    queryFn: () => mobileApi.access(),
+    staleTime: 5 * 60_000,
+  });
+}
+
 export function useMobileBranches(search?: string) {
   return useQuery({
     queryKey: ['mobile', 'branches', search ?? ''],

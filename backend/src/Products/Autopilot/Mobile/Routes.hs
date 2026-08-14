@@ -14,6 +14,7 @@ module Products.Autopilot.Mobile.Routes (
 
 import Core.Auth.Protected (Protected)
 import Core.Environment (Flow)
+import Data.Aeson (Value)
 import Data.Int (Int32)
 import Data.Text (Text)
 import Data.Time (UTCTime)
@@ -27,6 +28,14 @@ import Products.Autopilot.Mobile.Handlers.Groups (
     resendGroupChangelogH,
  )
 import Products.Autopilot.Mobile.Handlers.Activity (ActivityResp, fleetActivityH)
+import Products.Autopilot.Mobile.Handlers.Chime (
+    chimeAdoptionH,
+    chimeCancelH,
+    chimeJobFunnelH,
+    chimeJobStatusH,
+    chimeJobsH,
+    chimeLaunchH,
+ )
 import Products.Autopilot.Mobile.Handlers.Live
 import Products.Autopilot.Mobile.Handlers.Ota (
     cancelOtaPushH,
@@ -483,6 +492,62 @@ type MobileAPI =
             :> "events"
             :> Protected 'MB_RELEASE_VIEW
             :> Get '[JSON] [ReleaseEventResponse]
+        -- ── Chime fleet campaigns (appmonitor) — catalog-addressed, no
+        --    airborne coupling. Role/platform/package derive from the row;
+        --    launch/cancel change fleet exposure, hence ROLLOUT trust. ──
+        :<|> "mobile"
+            :> "apps"
+            :> Capture "appId" Int32
+            :> "chime"
+            :> "launch"
+            :> Protected 'MB_RELEASE_ROLLOUT
+            :> QueryParam "dry_run" Bool
+            :> Post '[JSON] Value
+        :<|> "mobile"
+            :> "apps"
+            :> Capture "appId" Int32
+            :> "chime"
+            :> "jobs"
+            :> Protected 'MB_RELEASE_VIEW
+            :> QueryParam "status" Text
+            :> QueryParam "limit" Int
+            :> QueryParam "offset" Int
+            :> Get '[JSON] Value
+        :<|> "mobile"
+            :> "apps"
+            :> Capture "appId" Int32
+            :> "chime"
+            :> "jobs"
+            :> Capture "jobId" Text
+            :> "status"
+            :> Protected 'MB_RELEASE_VIEW
+            :> Get '[JSON] Value
+        :<|> "mobile"
+            :> "apps"
+            :> Capture "appId" Int32
+            :> "chime"
+            :> "jobs"
+            :> Capture "jobId" Text
+            :> "funnel"
+            :> Protected 'MB_RELEASE_VIEW
+            :> Get '[JSON] Value
+        :<|> "mobile"
+            :> "apps"
+            :> Capture "appId" Int32
+            :> "chime"
+            :> "jobs"
+            :> Capture "jobId" Text
+            :> "cancel"
+            :> Protected 'MB_RELEASE_ROLLOUT
+            :> Post '[JSON] Value
+        :<|> "mobile"
+            :> "apps"
+            :> Capture "appId" Int32
+            :> "chime"
+            :> "adoption"
+            :> Protected 'MB_RELEASE_VIEW
+            :> QueryParam "version" Text
+            :> Get '[JSON] Value
 
 mobileServer :: ServerT MobileAPI Flow
 mobileServer =
@@ -546,3 +611,10 @@ mobileServer =
         :<|> mobileListReleasesH
         :<|> (\rid ap -> mobileGetReleaseH ap rid)
         :<|> (\rid ap -> mobileListEventsH ap rid)
+        -- ── Chime fleet campaigns ──
+        :<|> (\aid ap mDry -> chimeLaunchH ap aid mDry)
+        :<|> (\aid ap mStatus mLimit mOffset -> chimeJobsH ap aid mStatus mLimit mOffset)
+        :<|> (\aid jid ap -> chimeJobStatusH ap aid jid)
+        :<|> (\aid jid ap -> chimeJobFunnelH ap aid jid)
+        :<|> (\aid jid ap -> chimeCancelH ap aid jid)
+        :<|> (\aid ap mVer -> chimeAdoptionH ap aid mVer)

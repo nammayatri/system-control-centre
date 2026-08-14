@@ -36,7 +36,7 @@ import {
 import { useOtaAccess } from '../../../../airborne-ota/hooks';
 import { chimeApi } from '../../../api';
 import { AdoptionCard } from '../../../components/chime/AdoptionCard';
-import { useMobileApps } from '../../../hooks';
+import { useMobileAccess, useMobileApps } from '../../../hooks';
 import type { OtaRelease } from '../../../../airborne-ota/types';
 import {
   cancelOtaPush,
@@ -173,10 +173,8 @@ export function OtaFlow(props: OtaFlowProps) {
   const confirm = useConfirm();
   const access = useOtaAccess();
   const { data: mobileApps = [] } = useMobileApps();
-  const catalogPkg = useMemo(
-    () => mobileApps.find((a) => a.airborneAppRef === ref)?.packageName ?? null,
-    [mobileApps, ref],
-  );
+  const catalogRow = useMemo(() => mobileApps.find((a) => a.airborneAppRef === ref) ?? null, [mobileApps, ref]);
+  const catalogPkg = catalogRow?.packageName ?? null;
   const perms = useMemo(
     () => access.data?.apps.find((a) => a.appRef === ref)?.permissions ?? [],
     [access.data, ref],
@@ -717,9 +715,8 @@ export function OtaFlow(props: OtaFlowProps) {
                   <AdoptionCard
                     className="px-3 pb-3"
                     variant="compact"
-                    appRef={ref}
+                    appId={catalogRow?.id ?? null}
                     pkg={catalogPkg}
-                    os={platform === 'ios' ? 'ios' : 'android'}
                     version={pkgVersionOf(r) != null ? String(pkgVersionOf(r)) : (pkgTagOf(r) ?? null)}
                   />
                 )}
@@ -869,7 +866,7 @@ export function OtaFlow(props: OtaFlowProps) {
                           pkg v{pk.version} {pk.tag && <span className="font-normal text-zinc-400">· {pk.tag}</span>}
                         </span>
                         <span className="flex items-center gap-1.5">
-                          <AdoptionInline appRef={ref} pkg={catalogPkg} os={platform === 'ios' ? 'ios' : 'android'} version={String(pk.version)} />
+                          <AdoptionInline appId={catalogRow?.id ?? null} pkg={catalogPkg} version={String(pk.version)} />
                           <ProvenanceBadge prov={provOf(pk.version)} push={push} link={link} />
                         </span>
                       </div>
@@ -952,7 +949,7 @@ export function OtaFlow(props: OtaFlowProps) {
                             link={myLinks.find((l) => l.packageVersion === pk.version)}
                           />
                           <span className="ml-auto" />
-                          <AdoptionInline appRef={ref} pkg={catalogPkg} os={platform === 'ios' ? 'ios' : 'android'} version={String(pk.version)} />
+                          <AdoptionInline appId={catalogRow?.id ?? null} pkg={catalogPkg} version={String(pk.version)} />
                           {can('OTA_RELEASE_CREATE') && !releaseBlocked && (
                             <button
                               type="button"
@@ -1449,20 +1446,20 @@ export function JobMatrix({ pushId, live, defaultOpen = true }: { pushId: string
 /** Inline active-users chip for one package version — same cache family as
  * AdoptionCard; renders nothing when Chime has no record (rows stay clean). */
 function AdoptionInline({
-  appRef,
+  appId,
   pkg,
-  os,
   version,
 }: {
-  appRef: string;
+  appId: number | null;
   pkg: string | null;
-  os: 'android' | 'ios';
   version: string | null;
 }) {
+  const access = useMobileAccess();
+  const hasView = (access.data?.apps.find((a) => a.id === appId)?.mobilePerms ?? []).includes('MB_RELEASE_VIEW');
   const q = useQuery({
-    queryKey: ['chime-adoption', appRef, pkg, version, os],
-    queryFn: () => chimeApi.adoption(appRef, { pkg: pkg!, version: version!, os }),
-    enabled: !!pkg && !!version,
+    queryKey: ['chime-adoption', appId, pkg, version],
+    queryFn: () => chimeApi.adoption(appId!, { version: version! }),
+    enabled: hasView && appId != null && !!pkg && !!version,
     retry: false,
     staleTime: 60_000,
   });

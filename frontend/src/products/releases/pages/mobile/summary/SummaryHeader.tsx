@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import {
+  AndroidLogoIcon,
+  AppleLogoIcon,
   ArrowsClockwiseIcon,
   ArrowSquareOutIcon,
   ArrowUUpLeftIcon,
@@ -156,6 +158,18 @@ export function SummaryHeader({
 
           {/* Secondary track / metadata chips */}
           <div className="hidden lg:flex items-center gap-2 ml-4 border-l border-zinc-200 pl-4 h-8">
+            {/* Platform — otherwise only visible in the breadcrumb. */}
+            <span
+              className="bg-zinc-100 text-zinc-700 text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wide flex items-center gap-1"
+              title={`Platform: ${release.env}`}
+            >
+              {release.env === 'ios' ? (
+                <AppleLogoIcon size={12} weight="fill" className="text-zinc-700" aria-hidden="true" />
+              ) : (
+                <AndroidLogoIcon size={12} weight="fill" className="text-emerald-600" aria-hidden="true" />
+              )}
+              {release.env === 'ios' ? 'iOS' : 'Android'}
+            </span>
             {track === 'production' && (
               <span className="bg-green-100 text-green-800 text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wide">
                 Production

@@ -864,7 +864,6 @@ export function OtaSection({
                         }
                         groupId={groupId}
                         appName={r.capable.appName}
-                        platform={r.capable.platform}
                         airborneAppRef={r.capable.airborneAppRef}
                         pushes={ota.rows.filter(
                           (p) => p.appName === r.capable.appName && p.platform === r.capable.platform,
@@ -886,17 +885,15 @@ export function OtaSection({
                       {/* Fleet campaign (Chime) — full-width strip below the
                           panels (design: group-detail mockup, states a–i).
                           Catalog matched by airborne ref; hidden when the app
-                          has no package or the operator lacks OTA_VIEW (the
-                          card self-gates). */}
+                          has no package or the operator lacks MB_RELEASE_VIEW
+                          (the card self-gates). */}
                       {(() => {
                         const cat = mobileApps.find((a) => a.airborneAppRef === r.capable.airborneAppRef);
                         return cat?.packageName ? (
                           <div className="mt-4">
                             <CampaignCard
-                              appRef={r.capable.airborneAppRef}
+                              appId={cat.id}
                               pkg={cat.packageName}
-                              role={cat.surface === 'driver' ? 'bpp' : 'bap'}
-                              platform={cat.platform}
                               appLabel={`${cat.surface} · ${cat.platform}`}
                             />
                           </div>

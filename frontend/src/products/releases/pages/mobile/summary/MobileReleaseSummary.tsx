@@ -21,6 +21,7 @@ import {
   useDeleteRelease,
   useDispatchMobileReleases,
   useMobileRollout,
+  useMobileAccess,
   useMobileApps,
 } from '../../../hooks';
 import { useGroupOta } from '../../../otaApi';
@@ -81,6 +82,7 @@ const MobileReleaseSummary = () => {
   const otaQ = useGroupOta(groupId, release?.release_context?.build_type !== 'debug');
   const { hasPermission: hasPerm } = usePermissions();
   const { data: mobileApps = [] } = useMobileApps();
+  const { data: mobileAccess } = useMobileAccess();
   const confirmAction = useConfirm();
 
   // Refresh scope: release + events, plus the two mobile panels' caches (the
@@ -188,6 +190,9 @@ const MobileReleaseSummary = () => {
   const matchedMobileApp = mobileApps.find(
     (a) => a.name === release.appGroup && a.surface === release.service && a.platform === release.env,
   );
+  const hasChimeView = !!mobileAccess?.apps
+    .find((a) => a.id === matchedMobileApp?.id)
+    ?.mobilePerms.includes('MB_RELEASE_VIEW');
 
   const crashlyticsUrl = (() => {
     const fbProject = matchedMobileApp?.firebaseProjectId || '_';
@@ -381,11 +386,12 @@ const MobileReleaseSummary = () => {
       </div>
 
       {/* FLEET CAMPAIGN (Chime) — full-width zone above both columns
-          (mockup: "Fleet Campaign · OTA bundle"). OTA-scoped workflow, kept
-          OUTSIDE the OTA rail: the rail stays data-only. Hidden entirely when
-          the build has no OTA target or the operator lacks the airborne grant
-          (the card self-gates on OTA_VIEW). */}
-      {activeTab === 'summary' && !isDebug && otaCapable && matchedMobileApp?.packageName && (
+          (mockup: "Fleet Campaign · OTA bundle"). Catalog-addressed, no
+          airborne coupling: shown for ANY build (debug included) whose app
+          has a store package — chime pushes by (role, platform, package).
+          The per-app view gate lives HERE (not just in the card) so the
+          eyebrow never renders orphaned above a self-gated null card. */}
+      {activeTab === 'summary' && matchedMobileApp?.packageName && hasChimeView && (
         <div className="mb-6 stagger-item" style={{ '--index': 3 } as CSSProperties}>
           <p className="eyebrow mb-1 flex items-center gap-1">
             <MegaphoneIcon size={14} weight="bold" className="text-violet-500" aria-hidden="true" /> Fleet Campaign · OTA
@@ -393,10 +399,8 @@ const MobileReleaseSummary = () => {
           </p>
           <CampaignCard
             titled={false}
-            appRef={otaCapable.airborneAppRef}
+            appId={matchedMobileApp.id}
             pkg={matchedMobileApp.packageName}
-            role={release.service === 'driver' ? 'bpp' : 'bap'}
-            platform={release.env === 'ios' ? 'ios' : 'android'}
             appLabel={`${release.service || 'consumer'} · ${release.env}`}
           />
         </div>

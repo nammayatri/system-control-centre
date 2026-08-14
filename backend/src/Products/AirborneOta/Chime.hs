@@ -2,7 +2,11 @@
 {-# LANGUAGE RecordWildCards #-}
 
 {- | HTTP client for Chime (appmonitor) — OTA push campaigns + adoption
-analytics. Sibling of "Products.AirborneOta.Client": Chime is simpler (one
+analytics. Housed beside "Products.AirborneOta.Client" for the shared
+plumbing ('UpstreamResult', 'renderQuery'), but its consumers live in the
+MOBILE product ("Products.Autopilot.Mobile.Handlers.Chime" — campaigns are
+catalog-addressed, not airborne-addressed); only 'chimeConfigured' is still
+read here for @\/airborne\/health@. Chime is simpler than airborne (one
 static @X-API-Key@, no token exchange), so this is a thin authenticated
 passthrough. The device-side event key (@X-Event-Key@) is NEVER handled by
 SCC — those endpoints are called by the mobile SDK, not by operators.

@@ -83,6 +83,7 @@ library
       Products.Autopilot.Mobile.Queries.Supersession
       Products.Autopilot.Mobile.Handlers.AppCatalog
       Products.Autopilot.Mobile.Handlers.Activity
+      Products.Autopilot.Mobile.Handlers.Chime
       Products.Autopilot.Mobile.Handlers.Ota
       Products.Autopilot.Mobile.Provenance
       Products.Autopilot.Mobile.Handlers.Live

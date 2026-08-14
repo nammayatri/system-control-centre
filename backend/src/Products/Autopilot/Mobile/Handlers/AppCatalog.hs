@@ -119,7 +119,8 @@ instance FromJSON PatchAppReq
 
 -- | One app row's effective per-app permissions (unified grant model).
 data MobileAccessEntry = MobileAccessEntry
-    { name :: Text
+    { id :: Int32
+    , name :: Text
     , surface :: Text
     , platform :: Text
     , airborneAppRef :: Maybe Text
@@ -161,7 +162,8 @@ mobileAccessH ap = do
     pure $
         MobileAccessResp
             [ MobileAccessEntry
-                { name = acName a
+                { id = acId a
+                , name = acName a
                 , surface = acSurface a
                 , platform = acPlatform a
                 , airborneAppRef = acAirborneAppRef a
