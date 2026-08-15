@@ -10,6 +10,7 @@ module Products.Autopilot.Actions.ConfigMap
     getConfigMapH,
     createConfigMapH,
     updateConfigMapH,
+    handleConfigMapRevert,
     syncCompletedConfigMap,
 
     -- * K8s ConfigMap Lookup
@@ -87,6 +88,13 @@ createConfigMapH ap body = do
       let isSync = case body of
             Object o -> isTruthy "isSync" o
             _ -> False
+          -- ConfigMap changes that arrive via cross-cluster sync never
+          -- auto-approve here, regardless of what the sender's is_approved
+          -- said -- deciding it on the receiving side means it holds even
+          -- if the sender's own logic changes or has a bug.
+          isFromSync = case body of
+            Object o -> isTruthy "isSystemTriggered" o
+            _ -> False
           secondaryFile' = case body of
             Object o -> getStrM "secondary_file" o
             _ -> Nothing
@@ -111,7 +119,7 @@ createConfigMapH ap body = do
                 mode = AUTO,
                 createdBy = apEmail ap,
                 approvedBy = Nothing,
-                isApproved = case body of Object o -> isTruthy "is_approved" o; _ -> False,
+                isApproved = not isFromSync && (case body of Object o -> isTruthy "is_approved" o; _ -> False),
                 isInfraApproved = False,
                 releaseTag = Nothing,
                 dateCreated = Nothing,
@@ -148,6 +156,12 @@ createConfigMapH ap body = do
           targetState = ConfigState emptyConfigState
       insertReleaseTracker tracker (Just targetState)
       insertReleaseEvent rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
+      when isFromSync $
+        insertReleaseEvent
+          rid
+          "BUSINESS"
+          "SYNC_MANUAL_APPROVAL_REQUIRED"
+          (object ["reason" .= ("This ConfigMap change was synced from another cluster -- approve manually here before it takes effect." :: Text)])
       -- Snapshot at creation so diff is immediately available.
       cfg <- getConfig
       let cmName = fromMaybe service' name'
@@ -375,7 +389,12 @@ syncCompletedConfigMap cfg rt = do
             "release_manager" .= NT.createdBy rt,
             "file" .= fileVal,
             "isSync" .= False,
-            "is_approved" .= True
+            -- ConfigMap changes never auto-approve on the receiving side --
+            -- always require an operator to review and approve there
+            -- explicitly. isSystemTriggered lets the receiver identify
+            -- (and the UI explain) that this one arrived via sync.
+            "is_approved" .= False,
+            "isSystemTriggered" .= True
           ]
             <> maybe [] (\d -> ["description" .= d]) (NT.description rt)
             <> maybe [] (\c -> ["change_log" .= c]) (NT.changeLog rt)

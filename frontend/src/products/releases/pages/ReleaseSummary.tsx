@@ -574,6 +574,15 @@ const ReleaseSummary: React.FC = () => {
   // AI env review (BackendService deployments). Drives the banner + approve-gate.
   const { data: review } = useConfigReview(id || '', 'release');
   const reviewBlocks = !!review?.available && review.blocksApproval;
+  // Backend forces manual approval for releases that arrived via cross-cluster
+  // sync and carry an env change (see Actions/Release.hs
+  // createReleaseHBodyAfterClaim) and records why in this event.
+  const syncApprovalEvent = events.find(e => e.label === 'SYNC_MANUAL_APPROVAL_REQUIRED');
+  const syncApprovalReason = (() => {
+    if (!syncApprovalEvent) return null;
+    try { return JSON.parse(syncApprovalEvent.data)?.reason || 'This release was synced from another cluster and requires manual approval.'; }
+    catch { return 'This release was synced from another cluster and requires manual approval.'; }
+  })();
   const doRefresh = useCallback(async () => {
     await Promise.all([
       refetch(),
@@ -899,6 +908,15 @@ const ReleaseSummary: React.FC = () => {
       </div>
 
       <ReviewStatusBanner review={review} onView={() => setActiveTab('ai-review')} />
+
+      {!!syncApprovalReason && s === 'CREATED' && release.is_approved === 0 && (
+        <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-violet-300 bg-violet-50 px-4 py-3">
+          <div className="flex items-start gap-2.5 text-sm text-violet-800">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{syncApprovalReason}</span>
+          </div>
+        </div>
+      )}
 
       {reviewBlocks && (
         <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">

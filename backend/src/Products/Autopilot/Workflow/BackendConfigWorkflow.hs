@@ -161,7 +161,7 @@ resolveConfigContent = do
           logInfoS "  Content is raw K8s manifest, will apply directly"
         else do
           let cmName' = T.unpack (service rt)
-              getCmd = unwords [kubectlBin cfg, "get configmap", cmName', "-n", ns, "-o json"]
+              getCmd = unwords [kubectlBin cfg, "-n", ns, "get configmap", cmName', "-o json"]
           logInfoS $ "  Fetching existing ConfigMap: " <> T.pack cmName'
           getRes <- liftIO $ runCmd getCmd
           case getRes of

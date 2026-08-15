@@ -83,6 +83,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import Database.PostgreSQL.Simple (Only (..), SqlError (..), execute, withTransaction)
+import Products.Autopilot.Actions.ConfigMap (handleConfigMapRevert)
 import Products.Autopilot.ConfigDiff (deploymentAfterRaw, extractConfigMapDataSection, extractContainerEnvJson)
 import Products.Autopilot.ConfigReview (reviewBlocksApproval, runConfigReview)
 import Products.Autopilot.DiffLink (buildDiffLink)
@@ -809,9 +810,20 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{
     approveAll <- isApproveAllReleases
     now <- liftIO getCurrentTime
     let isFromSync = fromMaybe False isSystemTriggered
-        initialApproval = case isApproved of
-            Just True -> True
-            _ -> approveAll && isFromSync
+        -- A release that arrives via cross-cluster sync AND carries an env
+        -- override never auto-approves here, no matter what the sender's
+        -- is_approved said -- an env change landing pre-approved on the
+        -- secondary cluster skips the one human checkpoint that would have
+        -- caught a bad value before it rolled out there too. Deciding this
+        -- on the receiving side (not trusting the sender's flag) means it
+        -- holds even if the sender's own logic has a bug.
+        hasEnvOverride = maybe False (not . T.null . T.strip) envOverrideData
+        forceManualApproval = isFromSync && hasEnvOverride
+        initialApproval
+            | forceManualApproval = False
+            | otherwise = case isApproved of
+                Just True -> True
+                _ -> approveAll && isFromSync
         -- Auto-generate release tag if not provided
         autoTag = case releaseTag of
             Just t | not (T.null t) -> Just t
@@ -894,6 +906,12 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq{
             pure $ APIResponse "SUCCESS" ("Tracker already exists: " <> existingRid)
         Nothing -> do
             insertReleaseEvent rid "BUSINESS" "TRACKER_CREATED" (toJSON tracker)
+            when forceManualApproval $
+                insertReleaseEvent
+                    rid
+                    "BUSINESS"
+                    "SYNC_MANUAL_APPROVAL_REQUIRED"
+                    (object ["reason" .= ("This release was synced from another cluster and includes an env change -- approve manually here before it takes effect." :: Text)])
             -- Capture PREVIEW snapshots at creation time so the diff
             -- is available immediately (before the workflow runs).
             -- Labels use the @_PREVIEW@ suffix to distinguish them
@@ -1043,148 +1061,158 @@ revertReleaseH ap rid req = do
         Nothing -> pure $ APIResponse "ERROR" "Release not found"
         Just (tracker, mTargetState) -> do
             requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_REVERT) ap (NT.appGroup tracker)
-            let oldCtx = case mTargetState of
-                    Just (K8sState k8s) -> context k8s
-                    _ -> defaultK8sReleaseContext
-                ctxOldVersion = oldCtx.oldVersion
-                ctxNewVersion = oldCtx.newVersion
-                ctxServiceName = oldCtx.serviceName
-            -- Safety check: verify old deployment exists before creating revert
-            let oldDepName = ctxServiceName <> "-" <> ctxOldVersion
-            oldDepExists <- liftIO $ deploymentExists cfg (oldCtx.namespace) oldDepName
-            if not oldDepExists && not (T.null ctxOldVersion) && ctxOldVersion /= "new" && ctxOldVersion /= "unknown"
-                then pure $ APIResponse "ERROR" ("Old deployment not found in K8s: " <> oldDepName <> ". Cannot revert.")
+            -- BackendConfig (ConfigMap) trackers carry a 'ConfigState', not a
+            -- 'K8sState' -- the deployment-shaped logic below always falls
+            -- through to 'defaultK8sReleaseContext' (empty namespace/name)
+            -- for them, which produced malformed kubectl commands (e.g. an
+            -- empty "-n" arg misread as a plugin invocation) instead of a
+            -- real revert. Delegate to the ConfigMap-specific revert path,
+            -- same as the diff endpoint already branches by category.
+            if NT.category tracker == BackendConfig
+                then handleConfigMapRevert tracker mTargetState rid
                 else do
-                    now <- liftIO getCurrentTime
-                    newRid <- liftIO (UUID.toText <$> UUID.nextRandom)
-                    let trackerCreatedBy = NT.createdBy tracker
-                        isImmediate = fromMaybe False (immediate req)
-                        origSyncEnabled = maybe False (\t -> T.toLower t == "true") (NT.syncEnabled tracker)
-                        shouldSyncRevert = fromMaybe False ((req :: RevertReleaseReq).isRevertSync) && origSyncEnabled
-                        revertedContext =
-                            oldCtx
-                                { deploymentName = ctxServiceName <> "-" <> ctxOldVersion
-                                , oldVersion = ctxNewVersion
-                                , newVersion = ctxOldVersion
-                                , abRunId = Nothing
-                                , abStatus = Nothing
-                                , cleanupAt = Nothing
-                                , cleanupTargetDeployment = Nothing
-                                , cleanupStatus = Nothing
-                                , podsScaleDownDelay = Nothing
-                                , podsScaleDownTimestamp = Nothing
-                                , podsScaleDownStatus = Nothing
-                                , revert = Just 1
-                                , prevAbHsDecision = Nothing
-                                , postMonitoringDecisionMap = Nothing
-                                , -- A revert restores the deployment to whatever it
-                                  -- already looks like in k8s. Carrying forward the
-                                  -- original release's dockerImage would re-apply
-                                  -- that image to the old deployment and produce a
-                                  -- misleading diff (showing a fake image change).
-                                  -- Clear it so the workflow leaves the existing
-                                  -- deployment's image alone.
-                                  K8s.dockerImage = Nothing
-                                }
-                        revertedTargetState = K8sState $ emptyK8sState{context = revertedContext}
-                        revertedTracker =
-                            (tracker :: ReleaseTracker)
-                                { NT.releaseId = newRid
-                                , NT.status = CREATED
-                                , NT.releaseWFStatus = INIT
-                                , NT.createdBy = fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)
-                                , NT.approvedBy = if isImmediate then Just (fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)) else Nothing
-                                , NT.isApproved = isImmediate
-                                , -- Bug fix: refresh dateCreated/lastUpdated. The revert
-                                  -- tracker is a record copy of the original, so without
-                                  -- this override every revert inherits the ORIGINAL
-                                  -- release's dateCreated, making the audit log lie
-                                  -- about when the revert was actually issued.
-                                  NT.dateCreated = Just now
-                                , NT.lastUpdated = Just now
-                                , -- Bug fix: clear envOverrideData on revert. A revert
-                                  -- semantically means "undo the change", and the env
-                                  -- switch is part of the change. If we kept the
-                                  -- original's envOverrideData here, the revert workflow
-                                  -- would re-apply those overridden envs to the clone,
-                                  -- defeating the point of reverting. Clearing it lets
-                                  -- the clone preserve the source deployment's envs.
-                                  NT.envOverrideData = Nothing
-                                , NT.scheduleTime = Just now
-                                , NT.startTime = Nothing
-                                , NT.endTime = Nothing
-                                , NT.rolloutHistory = []
-                                , NT.releaseTag = fmap (<> "_REVERT") (NT.releaseTag tracker)
-                                , NT.info = (req :: RevertReleaseReq).info
-                                , NT.syncEnabled = if shouldSyncRevert then Just "true" else Nothing
-                                , -- Bug fix: swap oldVersion/newVersion on the domain record so that
-                                  -- Runner.validateRunningVersion (which compares NT.oldVersion against
-                                  -- the live VS subset) will match. Without this swap the runner
-                                  -- always sees the current VS at the original newVersion and
-                                  -- discards the revert tracker with VERSION_MISMATCH.
-                                  NT.oldVersion = NT.newVersion tracker
-                                , NT.newVersion = NT.oldVersion tracker
-                                , -- Bug fix (round 5): clear globalId on the revert tracker. The
-                                  -- partial unique index uq_release_tracker_global_id forbids two
-                                  -- rows with the same global_id; without this reset, every revert
-                                  -- of a release that ever had a global_id (i.e. every cross-cloud
-                                  -- replicated release) hit a raw SQL 23505 violation.
-                                  NT.globalId = Nothing
-                                , NT.slackThreadTs = Nothing
-                                }
-                    -- Round 8 audit C5: use insertReleaseTrackerSafe so the
-                    -- partial unique index uq_release_tracker_service_inflight
-                    -- catches a parallel revert call (or any other in-flight
-                    -- writer) and translates the SQL 23505 to a friendly
-                    -- Conflict, instead of leaving two revert trackers for the
-                    -- same (app_group, service) pair.
-                    _idem <- insertReleaseTrackerSafe revertedTracker revertedTargetState
-                    insertReleaseEvent
-                        newRid
-                        "BUSINESS"
-                        "REVERT_TRACKER_CREATED"
-                        ( object
-                            [ "originalId" .= rid
-                            , "shouldSyncRevert" .= shouldSyncRevert
-                            , "isImmediate" .= isImmediate
-                            , "origSyncEnabled" .= (origSyncEnabled :: Bool)
-                            ]
-                        )
-                    -- Capture BEFORE/AFTER snapshots for the revert release.
-                    -- BEFORE = the CURRENT live state (the new deployment from
-                    -- the original release, which we're reverting away from).
-                    -- AFTER  = the TARGET deployment the revert will restore
-                    -- (the original's oldVersion, which typically still exists
-                    -- on the cluster at 0 replicas). Sourcing the preview from
-                    -- the target gives the user a correct diff showing what
-                    -- will happen — including any env removal, because the
-                    -- target deployment's env spec is what the user is
-                    -- reverting TO.
-                    let revertNs = (\(K8sReleaseContext{namespace = n}) -> n) oldCtx
-                        revertNewDep = ctxServiceName <> "-" <> NT.newVersion tracker
-                        revertTargetDep = ctxServiceName <> "-" <> NT.oldVersion tracker
-                    -- Create-time preview snapshots (see createReleaseH for
-                    -- the rationale behind the @_PREVIEW@ suffix).
-                    captureDeploymentSnapshot cfg newRid revertNs revertNewDep "DEPLOYMENT_BEFORE_PREVIEW"
-                    captureDeploymentPreview
-                        cfg
-                        newRid
-                        revertNs
-                        revertTargetDep
-                        (NT.oldVersion tracker)
-                        -- Revert never patches the image; the workflow just clones
-                        -- the target deployment as-is. Passing the original
-                        -- release's image here would synthesise a fake image
-                        -- change in the preview diff (matches the runtime fix to
-                        -- 'revertedContext.dockerImage = Nothing').
-                        ""
-                        Nothing -- revert tracker clears envOverrideData (see buildRevertedTracker)
-                        "DEPLOYMENT_AFTER_PREVIEW"
-                    notifyReleaseCreated revertedTracker
-                    notifyReleaseReverted revertedTracker
-                    when (isImmediate && shouldSyncRevert) $
-                        triggerImmediateRevertSync tracker mTargetState
-                    pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
+                    let oldCtx = case mTargetState of
+                            Just (K8sState k8s) -> context k8s
+                            _ -> defaultK8sReleaseContext
+                        ctxOldVersion = oldCtx.oldVersion
+                        ctxNewVersion = oldCtx.newVersion
+                        ctxServiceName = oldCtx.serviceName
+                    -- Safety check: verify old deployment exists before creating revert
+                    let oldDepName = ctxServiceName <> "-" <> ctxOldVersion
+                    oldDepExists <- liftIO $ deploymentExists cfg (oldCtx.namespace) oldDepName
+                    if not oldDepExists && not (T.null ctxOldVersion) && ctxOldVersion /= "new" && ctxOldVersion /= "unknown"
+                        then pure $ APIResponse "ERROR" ("Old deployment not found in K8s: " <> oldDepName <> ". Cannot revert.")
+                        else do
+                        now <- liftIO getCurrentTime
+                        newRid <- liftIO (UUID.toText <$> UUID.nextRandom)
+                        let trackerCreatedBy = NT.createdBy tracker
+                            isImmediate = fromMaybe False (immediate req)
+                            origSyncEnabled = maybe False (\t -> T.toLower t == "true") (NT.syncEnabled tracker)
+                            shouldSyncRevert = fromMaybe False ((req :: RevertReleaseReq).isRevertSync) && origSyncEnabled
+                            revertedContext =
+                                oldCtx
+                                    { deploymentName = ctxServiceName <> "-" <> ctxOldVersion
+                                    , oldVersion = ctxNewVersion
+                                    , newVersion = ctxOldVersion
+                                    , abRunId = Nothing
+                                    , abStatus = Nothing
+                                    , cleanupAt = Nothing
+                                    , cleanupTargetDeployment = Nothing
+                                    , cleanupStatus = Nothing
+                                    , podsScaleDownDelay = Nothing
+                                    , podsScaleDownTimestamp = Nothing
+                                    , podsScaleDownStatus = Nothing
+                                    , revert = Just 1
+                                    , prevAbHsDecision = Nothing
+                                    , postMonitoringDecisionMap = Nothing
+                                    , -- A revert restores the deployment to whatever it
+                                      -- already looks like in k8s. Carrying forward the
+                                      -- original release's dockerImage would re-apply
+                                      -- that image to the old deployment and produce a
+                                      -- misleading diff (showing a fake image change).
+                                      -- Clear it so the workflow leaves the existing
+                                      -- deployment's image alone.
+                                      K8s.dockerImage = Nothing
+                                    }
+                            revertedTargetState = K8sState $ emptyK8sState{context = revertedContext}
+                            revertedTracker =
+                                (tracker :: ReleaseTracker)
+                                    { NT.releaseId = newRid
+                                    , NT.status = CREATED
+                                    , NT.releaseWFStatus = INIT
+                                    , NT.createdBy = fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)
+                                    , NT.approvedBy = if isImmediate then Just (fromMaybe trackerCreatedBy ((req :: RevertReleaseReq).requestedBy)) else Nothing
+                                    , NT.isApproved = isImmediate
+                                    , -- Bug fix: refresh dateCreated/lastUpdated. The revert
+                                      -- tracker is a record copy of the original, so without
+                                      -- this override every revert inherits the ORIGINAL
+                                      -- release's dateCreated, making the audit log lie
+                                      -- about when the revert was actually issued.
+                                      NT.dateCreated = Just now
+                                    , NT.lastUpdated = Just now
+                                    , -- Bug fix: clear envOverrideData on revert. A revert
+                                      -- semantically means "undo the change", and the env
+                                      -- switch is part of the change. If we kept the
+                                      -- original's envOverrideData here, the revert workflow
+                                      -- would re-apply those overridden envs to the clone,
+                                      -- defeating the point of reverting. Clearing it lets
+                                      -- the clone preserve the source deployment's envs.
+                                      NT.envOverrideData = Nothing
+                                    , NT.scheduleTime = Just now
+                                    , NT.startTime = Nothing
+                                    , NT.endTime = Nothing
+                                    , NT.rolloutHistory = []
+                                    , NT.releaseTag = fmap (<> "_REVERT") (NT.releaseTag tracker)
+                                    , NT.info = (req :: RevertReleaseReq).info
+                                    , NT.syncEnabled = if shouldSyncRevert then Just "true" else Nothing
+                                    , -- Bug fix: swap oldVersion/newVersion on the domain record so that
+                                      -- Runner.validateRunningVersion (which compares NT.oldVersion against
+                                      -- the live VS subset) will match. Without this swap the runner
+                                      -- always sees the current VS at the original newVersion and
+                                      -- discards the revert tracker with VERSION_MISMATCH.
+                                      NT.oldVersion = NT.newVersion tracker
+                                    , NT.newVersion = NT.oldVersion tracker
+                                    , -- Bug fix (round 5): clear globalId on the revert tracker. The
+                                      -- partial unique index uq_release_tracker_global_id forbids two
+                                      -- rows with the same global_id; without this reset, every revert
+                                      -- of a release that ever had a global_id (i.e. every cross-cloud
+                                      -- replicated release) hit a raw SQL 23505 violation.
+                                      NT.globalId = Nothing
+                                    , NT.slackThreadTs = Nothing
+                                    }
+                        -- Round 8 audit C5: use insertReleaseTrackerSafe so the
+                        -- partial unique index uq_release_tracker_service_inflight
+                        -- catches a parallel revert call (or any other in-flight
+                        -- writer) and translates the SQL 23505 to a friendly
+                        -- Conflict, instead of leaving two revert trackers for the
+                        -- same (app_group, service) pair.
+                        _idem <- insertReleaseTrackerSafe revertedTracker revertedTargetState
+                        insertReleaseEvent
+                            newRid
+                            "BUSINESS"
+                            "REVERT_TRACKER_CREATED"
+                            ( object
+                                [ "originalId" .= rid
+                                , "shouldSyncRevert" .= shouldSyncRevert
+                                , "isImmediate" .= isImmediate
+                                , "origSyncEnabled" .= (origSyncEnabled :: Bool)
+                                ]
+                            )
+                        -- Capture BEFORE/AFTER snapshots for the revert release.
+                        -- BEFORE = the CURRENT live state (the new deployment from
+                        -- the original release, which we're reverting away from).
+                        -- AFTER  = the TARGET deployment the revert will restore
+                        -- (the original's oldVersion, which typically still exists
+                        -- on the cluster at 0 replicas). Sourcing the preview from
+                        -- the target gives the user a correct diff showing what
+                        -- will happen — including any env removal, because the
+                        -- target deployment's env spec is what the user is
+                        -- reverting TO.
+                        let revertNs = (\(K8sReleaseContext{namespace = n}) -> n) oldCtx
+                            revertNewDep = ctxServiceName <> "-" <> NT.newVersion tracker
+                            revertTargetDep = ctxServiceName <> "-" <> NT.oldVersion tracker
+                        -- Create-time preview snapshots (see createReleaseH for
+                        -- the rationale behind the @_PREVIEW@ suffix).
+                        captureDeploymentSnapshot cfg newRid revertNs revertNewDep "DEPLOYMENT_BEFORE_PREVIEW"
+                        captureDeploymentPreview
+                            cfg
+                            newRid
+                            revertNs
+                            revertTargetDep
+                            (NT.oldVersion tracker)
+                            -- Revert never patches the image; the workflow just clones
+                            -- the target deployment as-is. Passing the original
+                            -- release's image here would synthesise a fake image
+                            -- change in the preview diff (matches the runtime fix to
+                            -- 'revertedContext.dockerImage = Nothing').
+                            ""
+                            Nothing -- revert tracker clears envOverrideData (see buildRevertedTracker)
+                            "DEPLOYMENT_AFTER_PREVIEW"
+                        notifyReleaseCreated revertedTracker
+                        notifyReleaseReverted revertedTracker
+                        when (isImmediate && shouldSyncRevert) $
+                            triggerImmediateRevertSync tracker mTargetState
+                        pure $ APIResponse "SUCCESS" ("Revert tracker created: " <> newRid)
 
 revertByGlobalIdH :: AuthedPerson -> Text -> Flow APIResponse
 revertByGlobalIdH ap gid = do

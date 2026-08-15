@@ -172,6 +172,18 @@ const ConfigMapSummary: React.FC = () => {
     : (data.events as ConfigMapEvent[] | undefined) || [];
   const sortedEvents = [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
+  // Backend forces manual approval for ConfigMap changes that arrived via
+  // cross-cluster sync (see Actions/ConfigMap.hs createConfigMapH) and
+  // records why in this event — surface it here so it's not just buried
+  // in the Event Data tab.
+  const syncApprovalEvent = events.find(e => e.label === 'SYNC_MANUAL_APPROVAL_REQUIRED');
+  const syncApprovalReason = (() => {
+    if (!syncApprovalEvent) return null;
+    try { return JSON.parse(syncApprovalEvent.data)?.reason || 'This ConfigMap change was synced from another cluster and requires manual approval.'; }
+    catch { return 'This ConfigMap change was synced from another cluster and requires manual approval.'; }
+  })();
+  const showSyncApprovalBanner = !!syncApprovalReason && data.status === 'CREATED' && data.is_approved === 0;
+
   return (
     <div className="flex flex-col w-full pb-12">
       <div className="flex flex-col gap-3 mb-4 sm:mb-5">
@@ -225,6 +237,15 @@ const ConfigMapSummary: React.FC = () => {
       </div>
 
       <ReviewStatusBanner review={review} onView={() => setActiveTab('AI Review')} />
+
+      {showSyncApprovalBanner && (
+        <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-violet-300 bg-violet-50 px-4 py-3">
+          <div className="flex items-start gap-2.5 text-sm text-violet-800">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{syncApprovalReason}</span>
+          </div>
+        </div>
+      )}
 
       {reviewBlocks && (
         <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
