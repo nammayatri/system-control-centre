@@ -858,6 +858,11 @@ reconcileExternalReviewMapped ac mCode inferred existing mMapped = do
         Nothing -> pure Nothing
     let target = mVersionRow <|> existing
         mTargetId = rtId <$> target
+        -- Retire/complete may ONLY ever touch the synthetic EXTERNAL row. With
+        -- target preferring the version row, aiming them at mTargetId completed
+        -- an SCC release MID-REVIEW (review_status cleared, badge fell back to
+        -- "Ready to promote" — BharatTaxi 2026-08-16).
+        mExternalId = rtId <$> existing
         -- Carry the target row's operator-set review_status so an inferred pass
         -- can't downgrade an approve/reject (defaults to in_review if unset).
         mExisting = (\r -> (rtNewVersion r, fromMaybe "in_review" (rtReviewStatus r))) <$> target
@@ -868,7 +873,7 @@ reconcileExternalReviewMapped ac mCode inferred existing mMapped = do
     -- Vanish rule (§16h-1): a retired watched submission is classified — not
     -- assumed published. The serving cell says Published; a new pending says
     -- Replaced; otherwise it left the store without publishing.
-    let retire hasNewPending = forM_ target $ \r -> do
+    let retire hasNewPending = forM_ existing $ \r -> do
             serving <- findProductionLiveCell (acId ac) (acPlatform ac)
             case retireOutcome serving hasNewPending (rtNewVersion r) (rtVersionCode r) of
                 PendingPublished -> completeExternalReviewRow (rtId r)
@@ -886,10 +891,21 @@ reconcileExternalReviewMapped ac mCode inferred existing mMapped = do
                 PendingParked -> pure ()
     case externalReviewAction inferred mExisting mMapped sccOwns of
         ExtNoop -> pure ()
-        -- SCC owns the version (it graduated to a rollout) → the external
-        -- duplicate simply completes; otherwise a true vanish → classify.
+        -- SCC owns the version → the external duplicate (if any) completes, and
+        -- the SCC row self-heals to store truth: the store still shows this
+        -- version pending, so a row whose review state drifted (e.g. a past
+        -- clobber) gets it re-applied through the idempotent single writer.
+        -- The inferred guard mirrors externalReviewAction's: an inferred
+        -- "in_review" never downgrades an operator approve/reject.
         ExtComplete
-            | sccOwns -> mapM_ completeExternalReviewRow mTargetId
+            | sccOwns -> do
+                mapM_ completeExternalReviewRow mExternalId
+                forM_ ((,) <$> mVersionRow <*> mMapped) $ \(r, (_v, reviewStatus)) ->
+                    unless (inferred && isOperatorVerdict (rtReviewStatus r) && reviewStatus == "in_review") $ do
+                        when (rtReviewStatus r /= Just reviewStatus) $
+                            logInfo $
+                                "[STORE_SYNC] Healing " <> rtId r <> " review state to " <> reviewStatus <> " (store shows the version pending; row had " <> fromMaybe "none" (rtReviewStatus r) <> ")"
+                        applyExternalReviewPhase (rtId r) reviewStatus mCode
             | otherwise -> retire False
         -- State change through the single writer (§16e-2): fills a missing code,
         -- advances a converged snapshot to INPROGRESS, setPhases the verdict.
@@ -898,6 +914,11 @@ reconcileExternalReviewMapped ac mCode inferred existing mMapped = do
         ExtRetireAndInsert version reviewStatus -> do
             retire True
             insertExternalReviewRow ac mCode inferred version reviewStatus
+
+-- | An operator-recorded verdict — the states an inferred pass must never
+-- downgrade (same rule as externalReviewAction's isOperatorDecided).
+isOperatorVerdict :: Maybe Text -> Bool
+isOperatorVerdict s = s == Just "approved" || s == Just "rejected"
 
 {- | What to do with the external-review row this pass. The verdict string is the
 single source — the wf mirror is derived from it at the write site.
