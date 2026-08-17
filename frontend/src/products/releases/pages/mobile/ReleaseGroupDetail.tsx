@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import {
   AndroidLogoIcon,
@@ -7,6 +7,8 @@ import {
   ArrowUpRightIcon,
   ArrowUUpLeftIcon,
   CaretRightIcon,
+  GithubLogoIcon,
+  SparkleIcon,
   CheckCircleIcon,
   CheckIcon,
   CheckSquareIcon,
@@ -23,12 +25,15 @@ import {
   XCircleIcon,
   XIcon,
 } from '@phosphor-icons/react';
-import { useMobileGroup, useDispatchMobileReleases } from '../../hooks';
+import { breadcrumbsOf } from './summary/BuildDetailsCard';
+import { useMobileApps, useMobileGroup, useDispatchMobileReleases } from '../../hooks';
 import { useGroupOta } from '../../otaApi';
 import { OtaSection } from '../../components/ota/OtaSection';
 import { OtaBranchPicker } from '../../components/ota/OtaPanel';
 import { usePermissions } from '../../../../core/auth/PermissionsContext';
 import { abortMobileRelease, approveMobileRelease, createMobileRevert, discardMobileRelease, getMobileRevertDraft, mobileApi } from '../../api';
+import { fetchReleaseProvenance } from '../../otaApi';
+import { MobileChangelogAiSummary } from '../../components/MobileChangelogAiSummary';
 import type { BulkActionResp, RevertDraft } from '../../api';
 import { PermissionGate } from '../../../../core/auth/PermissionGate';
 import {
@@ -99,6 +104,14 @@ const RAIL_LABELS: { label: string; tone: RailTone; word: string }[] = [
   { label: 'Rollout', tone: 'emerald', word: 'rolling' },
   { label: 'Live', tone: 'emerald', word: 'live' },
 ];
+// Debug waves have no store lifecycle — same 4 stages the summary page shows
+// (PhaseRail's DISTRIBUTION_STEPS): built artifacts go straight to testers.
+const RAIL_LABELS_DEBUG: { label: string; tone: RailTone; word: string }[] = [
+  { label: 'Draft', tone: 'emerald', word: '' },
+  { label: 'Approve', tone: 'violet', word: 'await' },
+  { label: 'Build', tone: 'amber', word: 'here' },
+  { label: 'Distributed', tone: 'emerald', word: 'shipped' },
+];
 
 export type RailMarks = Record<number, { ok: number; failed: number; sup: number }>;
 
@@ -112,10 +125,12 @@ function FleetRail({
   marks,
   total,
   selectionCount = 0,
+  labels = RAIL_LABELS,
 }: {
   marks: RailMarks | null;
   total: number;
   selectionCount?: number;
+  labels?: { label: string; tone: RailTone; word: string }[];
 }) {
   const stepKeys = Object.keys(marks ?? {}).map(Number);
   const maxMark = stepKeys.length > 0 ? Math.max(...stepKeys) : 0;
@@ -124,8 +139,8 @@ function FleetRail({
   // Whole fleet superseded → the rail is history: complete but overtaken,
   // muted to zinc end to end (summary-page parity).
   const allSup =
-    stepKeys.length === 1 && (marks?.[6]?.sup ?? 0) === total && total > 0;
-  const progressPct = allSup ? 100 : Math.max(6, Math.min(100, (maxMark / (RAIL_LABELS.length - 1)) * 100));
+    stepKeys.length === 1 && (marks?.[labels.length - 1]?.sup ?? 0) === total && total > 0;
+  const progressPct = allSup ? 100 : Math.max(6, Math.min(100, (maxMark / (labels.length - 1)) * 100));
   const lineRed = !allSup && failedOnly(marks?.[maxMark]);
   return (
     <section className="stagger-item card-surface px-6 py-8" style={{ ['--index' as string]: 1 }}>
@@ -147,11 +162,11 @@ function FleetRail({
           style={{ width: `${progressPct}%` }}
         />
         <div className="relative z-20 flex justify-between items-start w-full">
-          {RAIL_LABELS.map((step, i) => {
+          {labels.map((step, i) => {
             const m = marks?.[i];
             const tone = RAIL_TONE[step.tone];
             const isRose = failedOnly(m);
-            const isLast = i === RAIL_LABELS.length - 1;
+            const isLast = i === labels.length - 1;
             // Live step truth: ticked when members genuinely serve; a
             // superseded-only step reads "superseded", never 100%.
             const liveDone = !allSup && isLast && !!m && m.ok > 0;
@@ -165,7 +180,7 @@ function FleetRail({
                 ? `${m.failed} failed`
                 : isLast
                   ? [
-                      m.ok > 0 ? (m.ok === total && m.sup === 0 ? '100%' : `${m.ok} live`) : null,
+                      m.ok > 0 ? (m.ok === total && m.sup === 0 ? '100%' : `${m.ok} ${step.word || 'live'}`) : null,
                       m.sup > 0 ? `${m.sup} superseded` : null,
                       m.failed > 0 ? `${m.failed} failed` : null,
                     ]
@@ -396,6 +411,89 @@ export default function ReleaseGroupDetail() {
     () => groupReleases.find((r) => r.sourceRef)?.sourceRef ?? null,
     [groupReleases],
   );
+  // Combined AI changelog stored at create time — every member carries the
+  // same body, so render from the first that has one.
+  const groupChangelogBody = useMemo(
+    () => groupReleases.map((r) => r.release_context?.changelog_summary).find((s) => !!s) ?? null,
+    [groupReleases],
+  );
+  const [changelogOpen, setChangelogOpen] = useState(false);
+  // Late combined generation for groups with no stored body (pre-refactor
+  // rows): pinned tag→tag per member when the tags resolve — frozen to what
+  // shipped — else a live branch-range fallback.
+  const changelogGenMembers = useMemo(
+    () => groupReleases.filter((r) => r.release_context?.build_type !== 'debug'),
+    [groupReleases],
+  );
+  const [genCombined, setGenCombined] = useState<null | {
+    apps: { app: string; surface: string; platform: string; version?: string; baseRef?: string; headRef?: string }[];
+    branch: string;
+    pinned: boolean;
+  }>(null);
+  const [genPreparing, setGenPreparing] = useState(false);
+  // The BACKEND persists a ready result onto the rows (combinedGroupId on the
+  // generation request) — here we only refetch so the card swaps to the
+  // stored view as soon as the body lands on the members.
+  const genRefetchedRef = useRef(false);
+  const onGeneratedSummary = (_text: string, _short?: string, status?: string) => {
+    if (status !== 'ready' || genRefetchedRef.current) return;
+    genRefetchedRef.current = true;
+    void refetch();
+  };
+  const startCombinedGeneration = async () => {
+    setGenPreparing(true);
+    try {
+      const apps = await Promise.all(
+        changelogGenMembers.map(async (r) => {
+          const head = breadcrumbsOf(r).tagPushed || null;
+          let baseRef: string | null = null;
+          if (head) {
+            try {
+              baseRef = (await fetchReleaseProvenance(r.id))?.previousTag ?? null;
+            } catch {
+              baseRef = null;
+            }
+          }
+          return {
+            app: r.appGroup,
+            surface: r.service,
+            platform: r.env,
+            version: r.new_version
+              ? `v${r.new_version}${r.release_context?.version_code != null ? `+${r.release_context.version_code}` : ''}`
+              : undefined,
+            ...(head && baseRef ? { baseRef, headRef: head } : {}),
+          };
+        }),
+      );
+      const pinned = apps.every((a) => !!a.baseRef && !!a.headRef);
+      // Live fallback needs a real branch — never guess 'main' for a group
+      // that has none (the diff would be against an arbitrary ref).
+      if (!pinned && !groupBranch) {
+        toast.error(
+          "Can't generate: some builds have no resolvable tags and this group has no source branch to fall back to.",
+        );
+        return;
+      }
+      setGenCombined({ apps, branch: groupBranch || 'main', pinned });
+      setChangelogOpen(true);
+    } finally {
+      setGenPreparing(false);
+    }
+  };
+  // Repo for the baseline-commit link — member breadcrumbs first (row
+  // vintage-dependent), else the app catalog (always knows the repo).
+  const { data: mobileAppsForRepo = [] } = useMobileApps();
+  const commitRepo = useMemo(() => {
+    const fromCrumbs = groupReleases.map((r) => breadcrumbsOf(r).githubRepo).find(Boolean);
+    if (fromCrumbs) return fromCrumbs;
+    for (const r of groupReleases) {
+      const cat = mobileAppsForRepo.find(
+        (a) => a.name === r.appGroup && a.surface === r.service && a.platform === r.env,
+      );
+      if (cat?.githubRepo) return cat.githubRepo;
+    }
+    return null;
+  }, [groupReleases, mobileAppsForRepo]);
   // Picker target: the first OTA-capable app still missing a branch (its
   // recovered anchor commit is what candidates are verified against).
   const branchPickTarget = useMemo(
@@ -545,12 +643,17 @@ export default function ReleaseGroupDetail() {
   // Rail marks: the selection when there is one, otherwise EVERY member — the
   // rail always shows where apps actually are, never a blended stage that
   // hides a straggler.
+  // Debug wave → the 4-step distribution rail (summary-page parity): store
+  // stages don't exist, so member marks clamp onto Distributed (index 3).
+  const isDebugGroup =
+    groupReleases.length > 0 && groupReleases.every((r) => r.release_context?.build_type === 'debug');
   const railMarks = useMemo<RailMarks | null>(() => {
     const rows = selectedRows.length > 0 ? selectedRows : groupReleases;
     if (rows.length === 0) return null;
     const marks: RailMarks = {};
     for (const r of rows) {
-      const { step, failed, superseded } = rowMark(r);
+      const { step: rawStep, failed, superseded } = rowMark(r);
+      const step = isDebugGroup ? Math.min(rawStep, 3) : rawStep;
       if (!marks[step]) marks[step] = { ok: 0, failed: 0, sup: 0 };
       if (failed) marks[step].failed++;
       else if (superseded) marks[step].sup++;
@@ -558,7 +661,7 @@ export default function ReleaseGroupDetail() {
     }
     return marks;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRows, groupReleases]);
+  }, [selectedRows, groupReleases, isDebugGroup]);
   // Toolbar segments render only when at least one of their verbs is currently
   // performable on ANY member — dead segments are noise. RECOVER always shows
   // (Copy is performable on every group).
@@ -948,6 +1051,42 @@ export default function ReleaseGroupDetail() {
                   <GitBranchIcon size={12} className="text-zinc-500" aria-hidden="true" /> {groupBranch}
                 </span>
               )}
+              {/* Group baseline commit — BE folds the members' commit_sha:
+                  one link when unanimous (same blue-link language as the
+                  summary card); "mixed" with per-app shas in the tooltip
+                  when they differ; nothing while unresolved. */}
+              {group?.commitSha &&
+                (commitRepo ? (
+                  <a
+                    href={`https://github.com/${commitRepo}/commit/${group.commitSha}`}
+                    target="_blank"
+                    rel="noopener"
+                    onClick={(e) => e.stopPropagation()}
+                    className="font-mono font-bold text-blue-600 cursor-pointer hover:underline inline-flex items-center gap-1"
+                    title={`Source baseline commit: ${group.commitSha}`}
+                  >
+                    <GithubLogoIcon size={13} weight="bold" className="text-zinc-700" aria-hidden="true" />{' '}
+                    {group.commitSha.slice(0, 7)}
+                  </a>
+                ) : (
+                  <span
+                    className="font-mono font-bold text-zinc-800 inline-flex items-center gap-1"
+                    title={`Source baseline commit: ${group.commitSha}`}
+                  >
+                    <GithubLogoIcon size={13} weight="bold" className="text-zinc-700" aria-hidden="true" />{' '}
+                    {group.commitSha.slice(0, 7)}
+                  </span>
+                ))}
+              {group?.commitMixed && (
+                <span
+                  className="bg-amber-50 text-amber-800 font-mono px-2 py-0.5 rounded inline-flex items-center gap-1 border border-amber-200"
+                  title={groupReleases
+                    .map((r) => `${r.appGroup}/${r.env}: ${r.commitSha ? r.commitSha.slice(0, 7) : '—'}`)
+                    .join('\n')}
+                >
+                  <GithubLogoIcon size={12} aria-hidden="true" /> mixed commits
+                </span>
+              )}
               {slack?.state === 'failed' && (
                 <span className="inline-flex items-center gap-1.5">
                   <span
@@ -991,7 +1130,68 @@ export default function ReleaseGroupDetail() {
           marks={railMarks}
           total={selectedRows.length > 0 ? selectedRows.length : groupReleases.length}
           selectionCount={selectedRows.length}
+          labels={isDebugGroup ? RAIL_LABELS_DEBUG : RAIL_LABELS}
         />
+      )}
+
+      {/* Combined changelog (AI) — stored at create time on every member;
+          collapsed by default (reference material, not a control). Groups
+          with no stored body (pre-refactor) can generate one late: pinned
+          tag→tag when every member's tags resolve, else a live fallback. */}
+      {(groupChangelogBody || changelogGenMembers.length >= 2) && (
+        <div className="bg-white rounded-xl border border-zinc-200 shadow-sm">
+          <div className="w-full flex items-center justify-between px-4 py-3">
+            <button
+              onClick={() => setChangelogOpen((v) => !v)}
+              aria-expanded={changelogOpen}
+              className="flex items-center gap-1.5 cursor-pointer text-[11px] font-bold uppercase tracking-wider text-violet-600"
+            >
+              <SparkleIcon size={13} weight="fill" aria-hidden="true" /> Combined changelog · AI
+              <CaretRightIcon
+                size={14}
+                className={cn('text-zinc-400 transition-transform', changelogOpen && 'rotate-90')}
+                aria-hidden="true"
+              />
+            </button>
+            {!groupChangelogBody && !genCombined && (
+              <PermissionGate product="mobile" permission="MB_AI_SUMMARIZE">
+                <button
+                  onClick={() => void startCombinedGeneration()}
+                  disabled={genPreparing}
+                  className="text-[11px] font-bold text-violet-700 border border-violet-300 rounded px-2.5 py-1 hover:bg-violet-50 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {genPreparing ? 'Resolving build tags…' : 'Generate combined summary'}
+                </button>
+              </PermissionGate>
+            )}
+          </div>
+          {changelogOpen &&
+            (groupChangelogBody ? (
+              <pre className="px-4 pb-4 text-xs text-zinc-700 whitespace-pre-wrap break-words font-sans leading-relaxed max-h-96 overflow-y-auto">
+                {groupChangelogBody}
+              </pre>
+            ) : genCombined ? (
+              <div className="px-4 pb-4">
+                {!genCombined.pinned && (
+                  <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-2">
+                    Some builds' tags could not be resolved — this compares against the branch/production as of
+                    today, which may include changes shipped after this group.
+                  </p>
+                )}
+                <MobileChangelogAiSummary
+                  combinedApps={genCombined.apps}
+                  branch={genCombined.branch}
+                  base="production"
+                  combinedGroupId={groupId}
+                  onSummary={onGeneratedSummary}
+                />
+              </div>
+            ) : (
+              <p className="px-4 pb-4 text-xs text-zinc-400">
+                No combined changelog was stored for this group — generate one above.
+              </p>
+            ))}
+        </div>
       )}
 
       {/* Missing source branch — standalone banner, surfaced at the top so

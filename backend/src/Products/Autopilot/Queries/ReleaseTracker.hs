@@ -5,6 +5,8 @@ module Products.Autopilot.Queries.ReleaseTracker (
     -- * Insert / Update
     insertReleaseTracker,
     checkpointReleaseTracker,
+    stampChangelogShort,
+    stampGroupChangelogSummary,
     checkpointReleaseTrackerChecked,
     conditionalUpdateTracker,
     conditionalUpdateApprove,
@@ -257,6 +259,40 @@ upsertReleaseTrackerCounted guardSql rt mts = do
                     )
             pure n
 
+{- | Stamp a late-arriving AI short synopsis into the build context — narrow
+jsonb write (never a wholesale target_state write: the runner / store-sync may
+own the row concurrently). Shape-guarded like the other jsonb stamps.
+-}
+stampChangelogShort :: (MonadFlow m) => Text -> Text -> m ()
+stampChangelogShort rid short = withDb $ \db ->
+    withConn db $ \conn ->
+        void $
+            execute
+                conn
+                "UPDATE release_tracker \
+                \SET release_context = jsonb_set(release_context::jsonb, '{contents,mbContext,changelog_summary_short}', to_jsonb(?::text))::text \
+                \WHERE id = ? AND release_context ~ '^\\s*\\{'"
+                (short, rid)
+
+{- | Stamp a (late-generated) combined changelog body onto EVERY member of a
+group — narrow jsonb writes only. The Slack flag is defaulted to FALSE where
+unset (absent key or JSON null): a freshly stamped body must never flip a
+legacy row's presence-fallback ('changelogSlackOptedIn') to opted-in.
+Explicit true/false flags are preserved. Returns the member count updated.
+-}
+stampGroupChangelogSummary :: (MonadFlow m) => Text -> Text -> m Int64
+stampGroupChangelogSummary gid body = withDb $ \db ->
+    withConn db $ \conn ->
+        execute
+            conn
+            "UPDATE release_tracker \
+            \SET release_context = jsonb_set(jsonb_set(release_context::jsonb, \
+            \      '{contents,mbContext,changelog_summary}', to_jsonb(?::text)), \
+            \      '{contents,mbContext,changelog_slack_opt_in}', \
+            \      COALESCE(NULLIF(release_context::jsonb #> '{contents,mbContext,changelog_slack_opt_in}', 'null'::jsonb), 'false'::jsonb))::text \
+            \WHERE release_group_id = ? AND category = 'MobileBuild' AND release_context ~ '^\\s*\\{'"
+            (body, gid)
+
 {- | Atomically update a release tracker only if its current status matches the
 expected value (CAS: @UPDATE ... WHERE id = ? AND status = ?@). Returns True if
 the update succeeded, False if the status was changed by another thread.
@@ -506,11 +542,12 @@ markChangelogSlackFailed gid err
                     (err, gid)
 
 {- | Read the group's changelog-Slack state for the UI: @(sentAt, error, optedIn)@.
-Columns are group-uniform, so MAX picks the (single) non-null value; @optedIn@ is
-true iff any member opted into the Slack post (its stored MobileBuildContext
-carries a @changelog_summary@ body). The jsonb dig is guarded so a non-JSON /
-empty release_context never aborts the read. Returns 'Nothing' for an unknown
-group.
+Columns are group-uniform, so MAX picks the (single) non-null value; @optedIn@
+mirrors 'Products.Autopilot.Mobile.Types.changelogSlackOptedIn': the explicit
+@changelog_slack_opt_in@ flag wins, and ONLY legacy rows (no flag) fall back to
+the body's presence — the body is always stored now, so presence alone must
+never be read as opt-in. The jsonb dig is guarded so a non-JSON / empty
+release_context never aborts the read. Returns 'Nothing' for an unknown group.
 -}
 getChangelogSlackState :: (MonadFlow m) => Text -> m (Maybe (Maybe UTCTime, Maybe Text, Bool))
 getChangelogSlackState gid
@@ -520,10 +557,14 @@ getChangelogSlackState gid
             rows <-
                 query
                     conn
+                    -- Opt-in mirrors changelogSlackOptedIn: explicit flag first,
+                    -- legacy rows (no flag) fall back to body presence.
                     "SELECT MAX(changelog_slack_sent_at), MAX(changelog_slack_error), \
                     \COALESCE(bool_or( \
                     \  CASE WHEN release_context ~ '^\\s*\\{' \
-                    \  THEN (release_context::jsonb #>> '{contents,mbContext,changelog_summary}') IS NOT NULL \
+                    \  THEN COALESCE( \
+                    \    (release_context::jsonb #>> '{contents,mbContext,changelog_slack_opt_in}')::boolean, \
+                    \    (release_context::jsonb #>> '{contents,mbContext,changelog_summary}') IS NOT NULL) \
                     \  ELSE false END), false) \
                     \FROM release_tracker WHERE release_group_id = ?"
                     (Only gid)

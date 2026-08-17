@@ -66,6 +66,9 @@ export interface ReleaseContext {
     destination?: string | null;
     ota_namespace?: string | null;
     change_log?: string;
+    // AI changelog bodies stored at create time (full body + short synopsis).
+    changelog_summary?: string | null;
+    changelog_summary_short?: string | null;
     // BE truth (injected by listReleasesH): the build's code is strictly higher than the
     // production track's, so it's actually promotable. The list badge ANDs this with its
     // own stage logic so it never offers a promote the backend would reject. Absent/true
@@ -459,6 +462,10 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         destination: (r.releaseContext as any)?.destination,
         ota_namespace: (r.releaseContext as any)?.ota_namespace,
         change_log: (r.releaseContext as any)?.change_log,
+        // AI changelog bodies stored at create time (group console renders the
+        // combined body). Must be passed through here or the pick-list drops them.
+        changelog_summary: (r.releaseContext as any)?.changelog_summary,
+        changelog_summary_short: (r.releaseContext as any)?.changelog_summary_short,
         mb_wf_status: (r.releaseContext as any)?.mb_wf_status,
         rollout_status: (r.releaseContext as any)?.rollout_status,
         rollout_percent: (r.releaseContext as any)?.rollout_percent,
@@ -1735,15 +1742,21 @@ export const mobileApi = {
 
     // One combined changelog for a multi-app selection: common changes across
     // every app + labeled per-app extras. Same response shape as the per-app call.
+    // baseRef/headRef pin an app's range tag→tag (late generation for shipped
+    // groups — frozen to what actually shipped); omitted = live track/branch range.
+    // groupId: group-console late generation — the BACKEND persists a ready
+    // result onto that group's rows (omit on the create page: no rows yet).
     changelogAiSummaryCombined: async (
-        apps: { app: string; surface: string; platform: string; version?: string }[],
+        apps: { app: string; surface: string; platform: string; version?: string; baseRef?: string; headRef?: string }[],
         branch: string,
         base = '',
+        groupId?: string,
     ): Promise<ChangelogSummaryResp> => {
         const { data } = await apiClient.post('/mobile/changelog-ai-summary-combined', {
             apps,
             branch,
             ...(base ? { base } : {}),
+            ...(groupId ? { groupId } : {}),
         });
         return data;
     },
@@ -1934,6 +1947,10 @@ export interface MobileGroupDetail {
     // whether the fleet's combined changelog reached Slack (drives the
     // "Slack failed / Resend" control on the console header).
     changelogSlack?: MobileChangelogSlackState;
+    // Group source baseline: the one commit every member agrees on, or
+    // commitMixed=true when they differ (render per-member shas instead).
+    commitSha?: string | null;
+    commitMixed?: boolean;
 }
 
 // ── Chime (appmonitor) — OTA fleet push campaigns + adoption ────────

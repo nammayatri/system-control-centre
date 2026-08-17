@@ -114,6 +114,7 @@ export function MobileChangelogAiSummary({
   versionName = '',
   versionCode = '',
   combinedApps,
+  combinedGroupId,
   defaultCollapsed = false,
   onSummary,
   topSlot,
@@ -131,12 +132,15 @@ export function MobileChangelogAiSummary({
   // ≥2 entries switch the panel to the COMBINED endpoint: one changelog for the
   // whole selection — common changes + per-app extras (app/surface/platform
   // props are ignored in that mode). `version` shows next to the app in the header.
-  combinedApps?: { app: string; surface: string; platform: string; version?: string }[];
+  combinedApps?: { app: string; surface: string; platform: string; version?: string; baseRef?: string; headRef?: string }[];
+  /** Group-console late generation: the backend persists a READY result onto
+   * this group's rows. Omit on the create page (rows don't exist yet). */
+  combinedGroupId?: string;
   // Reports the current summary text (AI prose once ready, else the deterministic
   // changelog) up to the parent, so the create page can stash it for "send to
   // Slack". `short` is the AI synopsis — present only once ready; the create
   // page stores it on the release for the promote form's store-notes prefill.
-  onSummary?: (text: string, short?: string) => void;
+  onSummary?: (text: string, short?: string, status?: string) => void;
   // Rendered inside the card, under the title bar — e.g. the create page's
   // "post to Slack" toggle, so the changelog and its destination read as one.
   topSlot?: React.ReactNode;
@@ -144,18 +148,20 @@ export function MobileChangelogAiSummary({
   const combined = (combinedApps?.length ?? 0) >= 2;
   const comboKey = combined
     ? combinedApps!
-        .map((a) => `${a.app}|${a.surface}|${a.platform}|${a.version ?? ''}`)
+        .map((a) => `${a.app}|${a.surface}|${a.platform}|${a.version ?? ''}|${a.baseRef ?? ''}|${a.headRef ?? ''}`)
         .sort()
         .join(',')
     : '';
   const enabled = combined ? !!branch : !!(app && surface && platform && branch);
   const q = useQuery({
+    // combinedGroupId is in the key so a create-page cached response can't be
+    // reused for the group page (whose request must reach the server to persist).
     queryKey: combined
-      ? ['mobile-changelog-ai-combined', comboKey, branch, base]
+      ? ['mobile-changelog-ai-combined', comboKey, branch, base, combinedGroupId ?? '']
       : ['mobile-changelog-ai', app, surface, platform, branch, base, versionName, versionCode],
     queryFn: () =>
       combined
-        ? mobileApi.changelogAiSummaryCombined(combinedApps!, branch, base)
+        ? mobileApi.changelogAiSummaryCombined(combinedApps!, branch, base, combinedGroupId)
         : mobileApi.changelogAiSummary(app, surface, platform, branch, base, versionName, versionCode),
     enabled,
     // Poll only while the detached generation is in flight; stop once ready/failed.
@@ -173,10 +179,12 @@ export function MobileChangelogAiSummary({
   // The full generated summary: short synopsis + the changelog prose.
   const copyText = [d?.summaryShort, d?.summaryLong].filter(Boolean).join('\n\n');
 
-  // Surface the current summary text to the parent (for "send changelog to Slack").
+  // Surface the current summary text to the parent (for "send changelog to
+  // Slack" / persistence). status lets callers act only on the READY text —
+  // this also fires with the deterministic body while still pending.
   useEffect(() => {
-    if (onSummary && d?.summaryLong) onSummary(d.summaryLong, d.summaryShort?.trim() || undefined);
-  }, [onSummary, d?.summaryLong, d?.summaryShort]);
+    if (onSummary && d?.summaryLong) onSummary(d.summaryLong, d.summaryShort?.trim() || undefined, d.status);
+  }, [onSummary, d?.summaryLong, d?.summaryShort, d?.status]);
 
   const onCopy = async () => {
     if (!copyText) return;
@@ -288,6 +296,19 @@ export function MobileChangelogAiSummary({
                 <div className="flex items-center gap-2 text-xs text-zinc-500">
                   <Loader2 size={12} className="animate-spin" /> Loading…
                 </div>
+              )}
+
+              {/* Honest failure state — a request error must never render as a
+                  silent empty panel (403 / network / 500 all land here). */}
+              {q.isError && !d && (
+                <p className="text-xs text-zinc-500">
+                  Summary unavailable —{' '}
+                  {(q.error as { response?: { data?: { message?: string } }; message?: string })?.response?.data
+                    ?.message ??
+                    (q.error as { message?: string })?.message ??
+                    'request failed'}
+                  .
+                </p>
               )}
 
               {d && !d.available && <p className="text-xs text-zinc-500">{d.reason}</p>}

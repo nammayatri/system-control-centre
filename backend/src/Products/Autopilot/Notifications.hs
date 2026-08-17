@@ -69,7 +69,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import Products.Autopilot.Queries.ProductService (findProductByName, getRepoNameDirect, getSlackChannelDirect)
 import Products.Autopilot.Queries.ReleaseTracker qualified as RTQ
 import Products.Autopilot.ReleaseChangelog (generateBackendChangelog)
-import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), isFailedMBTerminal)
+import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), changelogSlackOptedIn, isFailedMBTerminal)
 import Products.Autopilot.RuntimeConfig (getDecisionNotificationDedupMinutes, getMobileSlackChannel, isSlackEnabled)
 import Products.Autopilot.Sync (triggerSyncIfEnabled)
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
@@ -339,7 +339,14 @@ sendGroupChangelogSlackIfSettled gid mKnownShipped
   | otherwise = do
       rows <- RTQ.findReleaseTrackersByGroupId gid
       let members = [(rt, s) | (_, _, (rt, Just (MobileBuildState s))) <- rows]
-          optedInBodies = [body | (_, s) <- members, Just body <- [mbcChangelogSummary (mbContext s)]]
+          -- Opt-in is the explicit flag (legacy rows: body presence); the send
+          -- body falls back to the typed changelog when no AI summary exists.
+          optedInBodies =
+            [ fromMaybe (mbcChangeLog c) (mbcChangelogSummary c)
+            | (_, s) <- members
+            , let c = mbContext s
+            , changelogSlackOptedIn c
+            ]
           shippedRow rt s = isJust (mbcTagPushed (mbContext s)) || Just (releaseId rt) == mKnownShipped
           settledRow rt s =
             shippedRow rt s

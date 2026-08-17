@@ -77,7 +77,7 @@ import Data.List (find)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import GHC.Generics (Generic)
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
 import Products.Autopilot.Mobile.Lifecycle.Phase (Display (..), ReleasePhase (..), abortable, displayStatusInferred, phaseFromFields, phaseSlug, supersededIfBehind, variantSlug)
@@ -141,7 +141,8 @@ import Products.Autopilot.Mobile.Versioning.Play (
     setTrackRollout,
     userFractionInRange,
  )
-import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe, reviewInferredOf)
+import Products.Autopilot.Mobile.Handlers.Release (lookupCachedAiShort)
+import Products.Autopilot.Queries.ReleaseTracker (parseJsonTextMaybe, reviewInferredOf, stampChangelogShort)
 import Products.Autopilot.RuntimeConfig (getAndroidReviewRolloutFraction, getStoreRefreshCooldownSeconds, isStagedRolloutEnabled)
 import Products.Autopilot.Types.Storage.Schema (ReleaseTrackerRow, ReleaseTrackerT (..))
 import Shared.API.Response (APISuccess (..))
@@ -306,6 +307,38 @@ promoteFormH _ap rid = do
     let platform = rtEnv row
         isStoreSync = rtMode row == Just "STORE_SYNC"
     notes <- promoteDefaultNotes row target ac
+    -- Self-containment backfill (cache-only, fail-soft): a row created while
+    -- the AI short was still generating stored nothing — fill it from the
+    -- content-keyed cache when the range still matches, and stamp the row so
+    -- every later read is column-only. Never generates, never fails the form.
+    -- Scope: single-app production-base keys only (combined-created and
+    -- internal-base rows can't match by construction — they just miss).
+    -- Age-bounded so LEGACY rows don't pay the GH compare on every form
+    -- open forever: past the window a miss is permanent, skip the probe.
+    now <- liftIO getCurrentTime
+    let recentEnough = diffUTCTime now (rtCreatedAt row) < 14 * 86400
+    aiShort <- case mbcChangelogSummaryShort (mbContext target) of
+        Just s -> pure (Just s)
+        Nothing
+            | recentEnough
+            , not isStoreSync
+            , not (isDebugBuildType (mbcBuildType (mbContext target)))
+            , Just branch <- rtSourceRef row -> do
+                mCached <-
+                    MC.try @_ @SomeException
+                        ( lookupCachedAiShort
+                            ac
+                            (rtAppGroup row)
+                            (rtService row)
+                            (rtEnv row)
+                            branch
+                            (rtNewVersion row)
+                            (if platform == "ios" then "" else maybe "" tshow (rtVersionCode row))
+                        )
+                        >>= either (\(_ :: SomeException) -> pure Nothing) pure
+                forM_ mCached (stampChangelogShort rid)
+                pure mCached
+        _ -> pure Nothing
     pure
         PromoteForm
             { pfReleaseId = rid
@@ -317,7 +350,7 @@ promoteFormH _ap rid = do
             , pfLocked = isPostPromote (mbWfStatus target)
             , pfPhasedSupported = platform == "ios"
             , pfIsStoreSync = isStoreSync
-            , pfAiShort = mbcChangelogSummaryShort (mbContext target)
+            , pfAiShort = aiShort
             }
 
 {- | Best-effort fetch of the current production "What's New" from the store
