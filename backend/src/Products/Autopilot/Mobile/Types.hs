@@ -17,6 +17,7 @@ module Products.Autopilot.Mobile.Types (
     rolloutStatusToText,
     rolloutStatusFromText,
     isDebugBuildType,
+    changelogSlackOptedIn,
     validMBTransition,
     isMBTerminal,
     isFailedMBTerminal,
@@ -41,6 +42,15 @@ creation time.
 isDebugBuildType :: Text -> Bool
 isDebugBuildType = (== "debug")
 
+-- | The ONE Slack opt-in rule (BE + SQL mirror in getChangelogSlackState):
+-- new rows carry the explicit flag; legacy rows (pre-flag) meant opt-in by
+-- the body's presence — the body is now always stored, so presence alone
+-- must never be read as opt-in for new rows.
+changelogSlackOptedIn :: MobileBuildContext -> Bool
+changelogSlackOptedIn c = case mbcChangelogSlackOptIn c of
+    Just b -> b
+    Nothing -> mbcChangelogSummary c /= Nothing
+
 data MobileBuildContext = MobileBuildContext
     { mbcVersionCode :: Maybe Int32
     , mbcChangeLog :: Text
@@ -51,7 +61,13 @@ data MobileBuildContext = MobileBuildContext
     , mbcTagPushed :: Maybe Text
     , mbcDestination :: Maybe Text
     , mbcChangelogSummary :: Maybe Text
+    -- ^ The AI/combined changelog body — pure STORAGE (always kept when one
+    -- was generated). Slack opt-in lives in 'mbcChangelogSlackOptIn'; legacy
+    -- rows (pre-flag) encoded opt-in as this field's presence.
     , mbcChangelogSummaryShort :: Maybe Text
+    , mbcChangelogSlackOptIn :: Maybe Bool
+    -- ^ Post the changelog to Slack when the group settles. Nothing = legacy
+    -- row: fall back to the old presence rule ('changelogSlackOptedIn').
     , mbcStoreObserved :: Maybe Bool
     -- ^ Just True on rows minted for a build SCC only OBSERVED live on the store
     -- (pre-SCC / out-of-band). Excluded from latest-build selection so sync keeps
@@ -73,6 +89,7 @@ instance ToJSON MobileBuildContext where
             , "destination" .= mbcDestination c
             , "changelog_summary" .= mbcChangelogSummary c
             , "changelog_summary_short" .= mbcChangelogSummaryShort c
+            , "changelog_slack_opt_in" .= mbcChangelogSlackOptIn c
             , "store_observed" .= mbcStoreObserved c
             ]
 
@@ -103,6 +120,7 @@ instance FromJSON MobileBuildContext where
             -- absent in rows persisted before this field → Nothing (not opted in)
             <*> o .:? "changelog_summary"
             <*> o .:? "changelog_summary_short"
+            <*> o .:? "changelog_slack_opt_in"
             <*> o .:? "store_observed"
 
 data MobileBuildWFStatus

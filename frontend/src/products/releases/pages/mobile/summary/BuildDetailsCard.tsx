@@ -392,33 +392,36 @@ export function ChangelogCard({ release, index = 0 }: { release: APRelease; inde
     .split('\n')
     .map((l) => l.replace(/^[-*•\s]+/, '').trim())
     .filter(Boolean);
-  // Store-observed rows have no meaningful branch range — their changelog is
-  // previous-build-tag → this-build-tag from the ledger (both real commits).
-  // No previous tag resolvable → no AI summary at all (never a wrong range).
+  // Once a build is TAGGED, its true range is previous-build-tag → its own
+  // tag (both frozen) — for every row type. Branch-based ranges are only for
+  // builds that don't have a tag yet: both their ends are live, so the
+  // summary drifts as production moves or the branch gains commits.
   const storeSync = release.mode === 'STORE_SYNC' || release.release_manager === 'store-sync';
-  const thisTag = breadcrumbsOf(release).tagPushed;
-  const prevQ = useQuery({
-    queryKey: ['mobile-release-prov', release.id],
-    queryFn: () => fetchReleaseProvenance(release.id),
-    enabled: storeSync && !!thisTag,
-    retry: false,
-    staleTime: 5 * 60_000,
-  });
-  const prevTag = prevQ.data?.previousTag;
   // Debug builds get NO AI summary — and no AI calls: this gate is what mounts
   // the summary component, and mounting is what hits the AI endpoint (which
   // claims + forks generation server-side).
   const isDebugBuild = (release.release_context as Record<string, any> | undefined)?.build_type === 'debug';
+  const thisTag = breadcrumbsOf(release).tagPushed;
+  const prevQ = useQuery({
+    queryKey: ['mobile-release-prov', release.id],
+    queryFn: () => fetchReleaseProvenance(release.id),
+    enabled: !!thisTag && !isDebugBuild,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+  const prevTag = prevQ.data?.previousTag;
   const aiRange = isDebugBuild
     ? null
-    : storeSync
-      ? prevTag && thisTag
-        ? { base: `ref:${prevTag}`, head: thisTag }
-        : null
-      : release.sourceRef
-        ? { base: 'production', head: release.sourceRef }
-        : null;
-  if (lines.length === 0 && !aiRange && !(storeSync && thisTag && prevQ.isLoading)) return null;
+    : thisTag && prevTag
+      ? { base: `ref:${prevTag}`, head: thisTag }
+      : thisTag && prevQ.isLoading
+        ? null // wait for the pinned range — never show a drifting one first
+        : storeSync
+          ? null // store rows have no branch to fall back to
+          : release.sourceRef
+            ? { base: 'production', head: release.sourceRef } // untagged yet
+            : null;
+  if (lines.length === 0 && !aiRange && !(thisTag && prevQ.isLoading && !isDebugBuild)) return null;
 
   return (
     <div className="card-surface p-6 stagger-item" style={{ '--index': index } as React.CSSProperties}>
@@ -450,7 +453,7 @@ export function ChangelogCard({ release, index = 0 }: { release: APRelease; inde
         <p className="text-xs text-zinc-400">No changelog recorded for this build.</p>
       )}
 
-      {storeSync && thisTag && prevQ.isLoading && (
+      {thisTag && !isDebugBuild && prevQ.isLoading && (
         <div className="mt-4 flex items-center gap-2 text-xs text-zinc-400">
           <CircleNotchIcon size={13} weight="bold" className="animate-spin" aria-hidden="true" />
           resolving previous build for changelog…
@@ -465,8 +468,11 @@ export function ChangelogCard({ release, index = 0 }: { release: APRelease; inde
             <AiRangeChips release={release} base={aiRange.base} head={aiRange.head} />
           </div>
           <div className="mt-1">
-            {/* versionCode mirrors the create-time AI-summary cache key: iOS is
-                keyed with '' (workflow assigns the code); Android uses the code. */}
+            {/* versionCode keeps the create-time key convention (iOS '', Android
+                code). NOTE: once a build is tagged the range is pinned tag→tag,
+                whose key can't match the create page's branch-based one — that
+                single extra generation per tagged build is the accepted price
+                for a summary frozen to what actually shipped. */}
             <MobileChangelogAiSummary
               app={release.appGroup}
               surface={release.service}

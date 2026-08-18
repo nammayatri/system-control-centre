@@ -1697,10 +1697,11 @@ reviewPollDue now mLastPolled intervalSec =
 release changelog to the mobile Slack channel — but ONLY for releases that opted
 in at create time (the "Send changelog summary to Slack" tickbox).
 
-The opt-in + body live in @mbcChangelogSummary@ on the build context
-('release_context'), read straight off @target@: @Just body@ = opted in (send
-@body@; if blank, fall back to the typed changelog @mbcChangeLog@); 'Nothing' =
-not opted in (skip). Storing it in @release_context@ — not the shared @metadata@
+The opt-in is @mbcChangelogSlackOptIn@ ('changelogSlackOptedIn' — legacy rows
+fall back to the body's presence); the body is @mbcChangelogSummary@, always
+stored now, with the typed changelog @mbcChangeLog@ as the send-time fallback.
+Both live on the build context ('release_context'), read straight off
+@target@. Storing them in @release_context@ — not the shared @metadata@
 column — is what makes it reliable: store-sync / rollout passes overwrite
 @metadata@ between create and ConfirmTag, but never touch @release_context@.
 
@@ -2204,6 +2205,7 @@ applyMobileTarget rs f =
                             , mbcDestination = Nothing
                             , mbcChangelogSummary = Nothing
                 , mbcChangelogSummaryShort = Nothing
+                , mbcChangelogSlackOptIn = Nothing
                 , mbcStoreObserved = Nothing
                             }
                     , mbExternalRunId = Nothing

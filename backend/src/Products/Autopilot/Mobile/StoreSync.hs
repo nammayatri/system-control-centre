@@ -1040,6 +1040,7 @@ insertExternalReviewRow ac mCode inferred version reviewStatus = do
                 , mbcDestination = Nothing
                 , mbcChangelogSummary = Nothing
                 , mbcChangelogSummaryShort = Nothing
+                , mbcChangelogSlackOptIn = Nothing
                 , mbcStoreObserved = Nothing
                 }
         targetState =
@@ -1205,6 +1206,7 @@ mintSyntheticRelease observed ac version mCode track = do
                 , mbcDestination = Nothing
                 , mbcChangelogSummary = Nothing
                 , mbcChangelogSummaryShort = Nothing
+                , mbcChangelogSlackOptIn = Nothing
                 , mbcStoreObserved = if observed then Just True else Nothing
                 }
         targetState =

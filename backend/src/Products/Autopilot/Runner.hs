@@ -555,10 +555,12 @@ runReleaseWorkflow _cfg rtNew mts = do
                             -- Fleet changelog: a build failing may be the LAST
                             -- group member to settle — re-check the group barrier
                             -- so the one Slack post still fires for whatever shipped.
+                            -- Unconditional like ConfirmTag: opt-in is a GROUP question
+                            -- (the barrier gates internally) — an opted-OUT member
+                            -- settling last must still release its siblings' post.
                             case mts of
-                                Just (MobileBuildState s)
-                                    | isJust (mbcChangelogSummary (mbContext s)) ->
-                                        sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext s)) Nothing
+                                Just (MobileBuildState s) ->
+                                    sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext s)) Nothing
                                 _ -> pure ()
         Right _ -> do
             -- The workflow persists state via persistWorkflowState in each cprV2
@@ -866,10 +868,11 @@ finalizeAbort rt mts now mAbortTrigger = do
             releaseService (NT.appGroup aborted) (NT.service aborted)
             -- Fleet changelog: a user abort may settle the last group member —
             -- re-check the group barrier so the one Slack post still fires.
+            -- Unconditional (see the abort-path comment above): the settling
+            -- member's own opt-in must not gate the group's post.
             case mts of
-                Just (MobileBuildState s)
-                    | isJust (mbcChangelogSummary (mbContext s)) ->
-                        sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext s)) Nothing
+                Just (MobileBuildState s) ->
+                    sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext s)) Nothing
                 _ -> pure ()
 
 {- | Cancel a mobile release's in-flight GitHub run on abort. If

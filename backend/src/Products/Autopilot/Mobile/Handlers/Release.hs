@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeApplications #-}
@@ -67,6 +68,7 @@ module Products.Autopilot.Mobile.Handlers.Release (
     CombinedAiSummaryReq (..),
     CombinedAppKey (..),
     changelogAiSummaryCombinedH,
+    lookupCachedAiShort,
 ) where
 
 import Control.Monad (forM, forM_, unless, void, when)
@@ -77,7 +79,7 @@ import Data.Proxy (Proxy (..))
 import Products.Autopilot.Mobile.Auth (requireAppPerm, requireAppPermAll)
 import Products.Mobile.Types.Permission (MobilePermission (..))
 import Core.DB.Connection (runDB)
-import Core.Environment (Flow, forkFlow, withDb)
+import Core.Environment (Flow, forkFlow, logInfo, withDb)
 import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericParseJSON, genericToJSON, object, (.=))
 import Data.Int (Int32)
 import Data.List (nub, partition, sortOn)
@@ -119,8 +121,8 @@ import Products.Autopilot.Actions.Release qualified as BE
 import Products.Autopilot.EventLog (logStatusUpdated)
 import Products.Autopilot.Types.API (ReleaseEventResponse)
 import Products.Autopilot.Types.API qualified as API
-import Products.Autopilot.Notifications (notifyReleaseAborted)
-import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, conditionalUpdateTracker, findDispatchedReleaseIds, findReleaseTracker, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch)
+import Products.Autopilot.Notifications (notifyReleaseAborted, sendGroupChangelogSlackIfSettled)
+import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, conditionalUpdateTracker, findDispatchedReleaseIds, findReleaseTracker, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch, stampGroupChangelogSummary)
 import Products.Autopilot.RuntimeConfig (getMobileBuildType)
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
@@ -321,20 +323,23 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                 , mbcOtaNamespace = Nothing
                 , mbcTagPushed = Nothing
                 , mbcDestination = if isProviderProdAndroid then mDestination else Nothing
-                , -- Per-release opt-in for the post-build changelog Slack post. Store
-                  -- it in the build context (release_context) — NOT release_tracker.metadata,
-                  -- which store-sync/rollout overwrite before ConfirmTag runs. @Just body@
-                  -- means "send"; the body is the captured rich summary, falling back to
-                  -- the typed changelog. ConfirmTag reads this straight off the target.
-                  mbcChangelogSummary =
-                    if mSendSlack == Just True
-                        then Just (maybe changeLog_ (\s -> if T.null (T.strip s) then changeLog_ else s) mSummary)
-                        else Nothing
+                , -- The AI/combined changelog body — ALWAYS stored when one was
+                  -- generated (it's viewable later on the group console), in the
+                  -- build context (release_context) — NOT release_tracker.metadata,
+                  -- which store-sync/rollout overwrite before ConfirmTag runs.
+                  -- Slack opt-in is the separate flag below; the send-time body
+                  -- falls back to the typed changelog when no summary exists.
+                  mbcChangelogSummary = case fmap T.strip mSummary of
+                    Just s | not (T.null s) -> Just s
+                    _ -> Nothing
                 , -- Stored regardless of the Slack opt-in — it feeds the promote
                   -- form's store-notes prefill, not the Slack post.
                   mbcChangelogSummaryShort = case fmap T.strip mShort of
                     Just s | not (T.null s) -> Just s
                     _ -> Nothing
+                , -- Per-release opt-in for the post-build changelog Slack post
+                  -- (explicit — presence of the body above no longer implies it).
+                  mbcChangelogSlackOptIn = Just (mSendSlack == Just True)
                 , mbcStoreObserved = Nothing
                 }
         target =
@@ -882,6 +887,43 @@ stateResp st longTxt shortTxt mModel =
         , compareUrl = Nothing
         }
 
+{- | Cache-ONLY lookup of the AI short synopsis for a row that stored none
+(created while generation was still pending). Rebuilds the create-time
+content key for the row's range and returns the ready cache row's short —
+'Nothing' when the range has moved on or nothing is cached. Never generates,
+never throws (one GH compare read, caller-visible as a slightly slower form).
+-}
+lookupCachedAiShort :: AppCatalog -> Text -> Text -> Text -> Text -> Text -> Text -> Flow (Maybe Text)
+lookupCachedAiShort ac appName surface platform branch vName vCode
+    | T.null (T.strip branch) = pure Nothing
+    | otherwise = do
+        creds <- loadGhCreds
+        builds <- fetchLatestBuildsForApp appName surface platform
+        case findLastReleaseBuild builds appName surface platform of
+            Nothing -> pure Nothing
+            Just lb -> do
+                (chBaseRef, _, _) <- resolveChangelogBase Nothing ac lb
+                if T.null chBaseRef
+                    then pure Nothing
+                    else
+                        compareRefs creds (gitOwner ac) (gitRepo ac) chBaseRef branch >>= \case
+                            Left _ -> pure Nothing
+                            Right cr -> do
+                                let commits = filter (not . isBotCommit) (crCommits cr)
+                                    versionStr
+                                        | T.null (T.strip vName) = ""
+                                        | T.null (T.strip vCode) = "v" <> T.strip vName
+                                        | otherwise = "v" <> T.strip vName <> "+" <> T.strip vCode
+                                    -- MUST mirror changelogAiSummaryH's key exactly.
+                                    contentKey =
+                                        computePromptHash $
+                                            T.intercalate "\US" ["rn7", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
+                                mRow <- lookupReleaseSummary contentKey
+                                pure $ case mRow of
+                                    Just ("ready", _, Just short, _, _)
+                                        | not (T.null (T.strip short)) -> Just short
+                                    _ -> Nothing
+
 changelogAiSummaryH :: AuthedPerson -> Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Maybe Text -> Flow AiSummaryResp
 changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersionCode = do
     ac <- appCatalogByKey appName surface platform
@@ -981,6 +1023,12 @@ data CombinedAppKey = CombinedAppKey
     , cakPlatform :: Text
     , cakVersion :: Maybe Text
     -- ^ Display string ("v3.4.2+375") shown next to the app in the header.
+    , cakBaseRef :: Maybe Text
+    -- ^ Pinned base git ref (previous build's tag). With 'cakHeadRef', the
+    -- app's range is frozen tag→tag — late generation for a SHIPPED group
+    -- describes exactly what it shipped, and the cache key never drifts.
+    , cakHeadRef :: Maybe Text
+    -- ^ Pinned head git ref (this build's tag); overrides the request branch.
     }
     deriving (Generic, Show)
 
@@ -991,6 +1039,11 @@ data CombinedAiSummaryReq = CombinedAiSummaryReq
     { casApps :: [CombinedAppKey]
     , casBranch :: Text
     , casBase :: Maybe Text
+    , casGroupId :: Maybe Text
+    -- ^ When set (group console's late generation), a READY result is
+    -- persisted onto the group's member rows server-side — the card then
+    -- takes the stored-view path on every later visit. Absent on the create
+    -- page, where the rows don't exist yet.
     }
     deriving (Generic, Show)
 
@@ -1013,27 +1066,36 @@ changelogAiSummaryCombinedH ap req = do
     -- (like the preview) — intersecting truncated ranges would misclassify.
     perApp <- forM appKeys $ \k -> do
         ac <- appCatalogByKey (cakApp k) (cakSurface k) (cakPlatform k)
-        builds <- fetchLatestBuildsForApp (cakApp k) (cakSurface k) (cakPlatform k)
         let label = cakApp k <> " " <> cakPlatform k
             surf = cakSurface k
             mVer = T.strip <$> cakVersion k
             ver = if maybe True T.null mVer then Nothing else mVer
-        case findLastReleaseBuild builds (cakApp k) (cakSurface k) (cakPlatform k) of
-            Nothing -> pure (label, surf, ver, Nothing)
-            Just lb -> do
-                (baseRef, _, _) <- resolveChangelogBase (casBase req) ac lb
-                if T.null baseRef
-                    then pure (label, surf, ver, Nothing)
-                    else do
-                        eRaw <- fetchFullRange creds (gitOwner ac) (gitRepo ac) baseRef branch
-                        case eRaw of
-                            Left _ -> pure (label, surf, ver, Nothing)
-                            Right cs -> do
-                                let raw = filter (not . isBotCommit) cs
-                                    items =
-                                        CL.filterCommitsForSurface (cakSurface k) $
-                                            CL.dropAutomationCommits (map toCommitItemFullSha raw)
-                                pure (label, surf, ver, Just (raw, items))
+            fetchRange baseRef headRef = do
+                eRaw <- fetchFullRange creds (gitOwner ac) (gitRepo ac) baseRef headRef
+                case eRaw of
+                    Left _ -> pure (label, surf, ver, Nothing)
+                    Right cs -> do
+                        let raw = filter (not . isBotCommit) cs
+                            items =
+                                CL.filterCommitsForSurface (cakSurface k) $
+                                    CL.dropAutomationCommits (map toCommitItemFullSha raw)
+                        pure (label, surf, ver, Just (raw, items))
+            -- Pinned tag→tag range (late generation for shipped groups):
+            -- both refs frozen, so neither the text nor its cache key drift.
+            pinned = case (T.strip <$> cakBaseRef k, T.strip <$> cakHeadRef k) of
+                (Just b, Just h) | not (T.null b), not (T.null h) -> Just (b, h)
+                _ -> Nothing
+        case pinned of
+            Just (b, h) -> fetchRange b h
+            Nothing -> do
+                builds <- fetchLatestBuildsForApp (cakApp k) (cakSurface k) (cakPlatform k)
+                case findLastReleaseBuild builds (cakApp k) (cakSurface k) (cakPlatform k) of
+                    Nothing -> pure (label, surf, ver, Nothing)
+                    Just lb -> do
+                        (baseRef, _, _) <- resolveChangelogBase (casBase req) ac lb
+                        if T.null baseRef
+                            then pure (label, surf, ver, Nothing)
+                            else fetchRange baseRef branch
     let usable = sortOn (\(lbl, _, _, _, _) -> lbl) [(lbl, surf, ver, raw, items) | (lbl, surf, ver, Just (raw, items)) <- perApp]
     -- Only ONE app needs a comparable base — the summary covers whoever has one,
     -- and names the rest in-line (finalize). Blocking on <2 was the old behaviour.
@@ -1096,9 +1158,12 @@ changelogAiSummaryCombinedH ap req = do
                     if null excludedLabels
                         then ""
                         else
-                            "\n\n_No comparable previous release for "
+                            -- Covers BOTH exclusion causes (no comparable base,
+                            -- range fetch failed) — the per-app tuple doesn't
+                            -- distinguish them, so the note must not overclaim.
+                            "\n\n_Could not diff "
                                 <> T.intercalate ", " excludedLabels
-                                <> " — not included above._"
+                                <> " (no comparable previous release, or the commit range could not be fetched) — not included above._"
                 -- Every combined-success response carries the no-base note and
                 -- the real usable count (the FE labels/annotates off these).
                 finalize r =
@@ -1115,16 +1180,26 @@ changelogAiSummaryCombinedH ap req = do
                                     [ [lbl, fromMaybe "" ver, T.unwords (map CL.cgSha items)]
                                     | (lbl, _, ver, _, items) <- usable
                                     ]
+            -- Persist a READY result onto the requesting group's rows —
+            -- server-side, no separate persist API, idempotent per poll.
+            let deliver r@AiSummaryResp{status = st, summaryLong = mL} = do
+                    forM_ (casGroupId req) $ \gid ->
+                        when (st == "ready") $
+                            forM_ mL $ \bodyTxt -> do
+                                n <- stampGroupChangelogSummary gid bodyTxt
+                                when (n > 0) $
+                                    logInfo $ "[AI] combined changelog persisted onto group " <> gid <> " (" <> T.pack (show n) <> " members)"
+                    pure r
             mRow <- lookupReleaseSummary contentKey
             case mRow of
                 Just ("ready", mLong, mShort, mModel, _) ->
-                    pure (finalize (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel))
+                    deliver (finalize (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel))
                 _ -> do
                     ecfg <- loadAiConfig
                     case ecfg of
                         Left _ -> do
                             upsertReleaseSummary contentKey detLong detShort "" (length unionItems)
-                            pure (finalize (stateResp "ready" detLong detShort Nothing))
+                            deliver (finalize (stateResp "ready" detLong detShort Nothing))
                         Right cfg -> do
                             claimed <- claimReleaseSummary contentKey detLong (length unionItems)
                             when claimed $
@@ -1135,7 +1210,7 @@ changelogAiSummaryCombinedH ap req = do
                                             Just (lng, sht, usedModel) -> upsertReleaseSummary contentKey lng sht usedModel (length unionItems)
                                             Nothing -> upsertReleaseSummary contentKey detLong detShort "" (length unionItems)
                             st <- lookupReleaseSummary contentKey
-                            pure $ finalize $ case st of
+                            deliver $ finalize $ case st of
                                 Just ("ready", mLong, mShort, mModel, _) ->
                                     stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel
                                 _ -> stateResp "pending" detLong "" Nothing
@@ -1195,7 +1270,15 @@ mobileDiscardH :: AuthedPerson -> Text -> API.DiscardReleaseReq -> Flow APIRespo
 mobileDiscardH ap rid req =
     withMobileRow rid $ \(tracker, mts) -> do
         requireAppPerm (Proxy @'MB_RELEASE_CREATE) ap (RT.appGroup tracker) (RT.env tracker)
-        BE.discardReleaseCore req tracker mts
+        resp <- BE.discardReleaseCore req tracker mts
+        -- A discard may settle the LAST group member (DISCARDED counts as
+        -- settled in the barrier) — re-check so the siblings' one Slack post
+        -- still fires. Unconditional; the barrier gates internally.
+        case mts of
+            Just (MobileBuildState s) ->
+                sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext s)) Nothing
+            _ -> pure ()
+        pure resp
 
 {- | Permanently delete a mobile release row (drops its audit trail too) —
 destructive, so it takes the admin verb 'MB_MOBILE_APP_MANAGE'.

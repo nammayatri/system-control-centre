@@ -1077,7 +1077,8 @@ testClaimsStoreIdentity = do
             mbcTagPushed = Nothing,
             mbcDestination = dest,
             mbcChangelogSummary = Nothing,
-            mbcChangelogSummaryShort = Nothing
+            mbcChangelogSummaryShort = Nothing,
+            mbcChangelogSlackOptIn = Nothing
           }
   -- Store-bound builds DO claim an identity.
   assertBool "consumer Android (release, no destination)" $ claimsStoreIdentity (ctx "release" Nothing)
@@ -1233,11 +1234,27 @@ testMobileBuildContextJsonRoundTrip = do
             mbcTagPushed = Nothing,
             mbcDestination = Nothing,
             mbcChangelogSummary = Nothing,
-            mbcChangelogSummaryShort = Nothing
+            mbcChangelogSummaryShort = Nothing,
+            mbcChangelogSlackOptIn = Nothing
           }
   let encoded = Aeson.encode ctx
   let decoded = Aeson.decode encoded :: Maybe MobileBuildContext
   assertEqual "round-trip equals original" (Just ctx) decoded
+  -- Slack opt-in rule: the explicit flag always wins; ONLY legacy rows
+  -- (no flag) fall back to body presence. A regression here posts
+  -- non-opted releases to Slack — keep these three exact.
+  assertBool
+    "opt-in: flag=False beats a stored body"
+    (not (changelogSlackOptedIn ctx{mbcChangelogSummary = Just "body", mbcChangelogSlackOptIn = Just False}))
+  assertBool
+    "opt-in: flag=True without a body"
+    (changelogSlackOptedIn ctx{mbcChangelogSummary = Nothing, mbcChangelogSlackOptIn = Just True})
+  assertBool
+    "opt-in: legacy fallback = body presence"
+    (changelogSlackOptedIn ctx{mbcChangelogSummary = Just "body", mbcChangelogSlackOptIn = Nothing})
+  assertBool
+    "opt-in: legacy, no body -> not opted in"
+    (not (changelogSlackOptedIn ctx{mbcChangelogSummary = Nothing, mbcChangelogSlackOptIn = Nothing}))
 
 -- | Legacy rows persisted before the @build_type@ field used a
 -- @destination@ string. 'MobileBuildContext' 'FromJSON' must map those to a

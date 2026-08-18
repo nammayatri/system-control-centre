@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 {- | Release-group read model (fleet design §5, Phase 2).
 
@@ -28,17 +29,17 @@ module Products.Autopilot.Mobile.Handlers.Groups (
     resendGroupChangelogH,
 ) where
 
-import Control.Monad (unless, void)
-import Control.Monad.Catch (throwM)
+import Control.Monad (forM, unless, void)
+import Control.Monad.Catch (SomeException, catch, throwM)
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson)
-import Core.Environment (Flow, forkFlow)
+import Core.Environment (Flow, forkFlow, logWarning)
 import Data.Aeson (Value (..))
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.Int (Int32)
-import Data.List (sortOn)
+import Data.List (find, nub, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Ord (Down (..))
@@ -50,7 +51,11 @@ import Products.Autopilot.Actions.Release (injectPromotable, injectStoreState)
 import Products.Autopilot.Mobile.Lifecycle.GroupSummary (GroupSummary (..), MemberFact (..), deriveGroupSummary, effectivePhase)
 import Products.Autopilot.Mobile.Queries.AppCatalog (listAppCatalog)
 import Products.Autopilot.Mobile.Queries.StoreStatus (listStoreStatus, productionVersionsByApp, storeCellsByApp)
+import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
+import Products.Autopilot.Mobile.Provenance (resolveAnchor)
 import Products.Autopilot.Mobile.Queries.Tracker (heldMobileByApp, incomingMobileByApp)
+-- Constructor only: the record accessors clash with ReleaseTracker's.
+import Products.Autopilot.Mobile.Types.Ota (OtaProvAnchor (OtaProvAnchor))
 import Products.Autopilot.Mobile.StoreSync (refreshStoreStatusOne)
 import Products.Autopilot.Mobile.Types (isDebugBuildType)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..), StoreStatus, StoreStatusT (..))
@@ -142,6 +147,12 @@ data GroupDetailResp = GroupDetailResp
     , gdChangelogSlack :: ChangelogSlackState
     -- ^ whether the fleet's combined changelog reached Slack (drives the
     -- "Slack failed / Resend" control on the console header).
+    , gdCommitSha :: Maybe Text
+    -- ^ the group's shared source baseline commit — set only when every member
+    -- that knows its commit agrees (the dispatched-together invariant).
+    , gdCommitMixed :: Bool
+    -- ^ members carry DIFFERING commits (later rebuild etc.) — the FE renders
+    -- per-member shas from gdMembers instead of one group chip.
     }
     deriving (Generic, Show)
 
@@ -196,8 +207,36 @@ groupDetailH _ap gid = do
     (label, members0) <- case rows of
         [] -> throwM $ NotFound ("release group not found: " <> gid)
         _ -> pure (listToMaybe (mapMaybe (\(_, l, _) -> l) rows), [p | (_, _, p) <- rows])
+    -- Lazy baseline backfill (the OTA page's anchor recovery, §11b): members
+    -- missing commit_sha resolve it from the tag ledger once — the column is
+    -- the cache — so the console's group commit isn't blank on fresh groups.
+    catalog <- listAppCatalog
+    let matchAc rt = find (\a -> acName a == appGroup rt && acSurface a == service rt && acPlatform a == env rt) catalog
+        anchorless = [(rt, ac) | (rt, _) <- members0, commitSha rt == Nothing, Just ac <- [matchAc rt]]
+    wroteAnchor <-
+        ( if null anchorless
+            then pure False
+            else do
+                mCreds <- (Just <$> loadGhCreds) `catch` \(_ :: SomeException) -> pure Nothing
+                results <- forM anchorless $ \(rt, ac) -> resolveAnchor mCreds rt ac
+                pure (or [True | OtaProvAnchor (Just _) _ _ <- results])
+        )
+            `catch` \(e :: SomeException) ->
+                False <$ logWarning ("[GROUPS] baseline backfill error (ignored): " <> T.pack (show e))
+    members1 <-
+        if wroteAnchor
+            then do
+                rows' <- findReleaseTrackersByGroupId gid
+                pure [p | (_, _, p) <- rows']
+            else pure members0
     enrich <- mkEnrich
-    let members = map enrich members0
+    let members = map enrich members1
+        -- One branch snapshot dispatched together ⇒ one baseline; anything
+        -- else is honestly "mixed" (never one sha pretending to cover all).
+        (groupSha, groupMixed) = case nub (mapMaybe (commitSha . fst) members1) of
+            [s] -> (Just s, False)
+            [] -> (Nothing, False)
+            _ -> (Nothing, True)
         facts = map toFact members
         summary = deriveGroupSummary facts
         eligible =
@@ -226,6 +265,8 @@ groupDetailH _ap gid = do
             , gdCooldownSeconds = cooldown
             , gdAndroidReviewFraction = reviewFraction
             , gdChangelogSlack = slackState
+            , gdCommitSha = groupSha
+            , gdCommitMixed = groupMixed
             }
 
 -- | Manually (re)send the group's combined changelog to Slack — recovery for a
