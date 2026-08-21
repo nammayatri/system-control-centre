@@ -17,6 +17,8 @@ module Products.Autopilot.Mobile.Queries.Tracker
     findRunSiblingsStillBuilding,
     setExternalRunIdForDispatch,
     externalRunIdsClaimedElsewhere,
+    dispatchCeilingFor,
+    markTagLogScanned,
     setPhase,
     setAscIds,
     markReleaseInProgress,
@@ -63,10 +65,11 @@ module Products.Autopilot.Mobile.Queries.Tracker
 where
 
 import Control.Applicative ((<|>))
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, void)
 import Control.Monad.Catch (throwM)
 import Core.AppError (DBError (..))
-import Core.DB.Connection (runDB)
+import Core.DB.Connection (runDB, withConn)
+import Database.PostgreSQL.Simple (Only (..), execute, query)
 import Core.Environment (MonadFlow, logWarning, withDb)
 import Data.Aeson (Value)
 import Data.Aeson qualified as Aeson
@@ -75,11 +78,11 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.Map.Strict qualified as Map
 import Data.Int (Int32)
 import Data.List (find)
-import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Database.Beam
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind, claimsStoreIdentity)
 import Products.Autopilot.Mobile.Lifecycle.Phase
@@ -178,9 +181,23 @@ findRunSiblingsStillBuilding dispatchId excludeRid = do
     stillBuilding wf =
       wf `elem` [MBInit, MBVersionResolved, MBDispatched, MBRunIdResolved, MBBuilding]
 
--- | Set @external_run_id@ and @commit_sha@ on every tracker row in the
--- dispatch group. A single SQL UPDATE so siblings can never disagree on
--- which GHA run they're tied to or which commit they built from.
+-- | Bind @external_run_id@ (+ @commit_sha@) on every tracker row in the
+-- dispatch group, FIRST WRITER WINS, and return the run id the group is
+-- bound to afterwards — the caller's own when it won, the incumbent's when
+-- another writer bound a different run first.
+--
+-- The bind is a CAS (@external_run_id IS NULL / '' / already ours@) because
+-- three paths bind concurrently across two pods — the inline bind from the
+-- dispatch response, orphan-adopt, and ResolveRunId — and none of them holds
+-- the dispatch advisory lock. A blind overwrite let two pods that had seen
+-- different GitHub listings each stamp their own run: last writer won and the
+-- other run was recorded nowhere, so nothing ever cancelled it and it built
+-- and pushed tags unattended. Callers MUST treat a returned id different from
+-- theirs as "I lost" and adopt the incumbent.
+--
+-- Postgres orders this correctly without an explicit transaction: a loser's
+-- UPDATE blocks on the winner's row lock, then re-evaluates its WHERE against
+-- the committed row, matches nothing, and the follow-up read sees the winner.
 --
 -- @commit_sha@ is the @head_sha@ returned by the GH run API — i.e. the
 -- SHA of HEAD at dispatch time on whichever ref the dispatch carried
@@ -191,19 +208,90 @@ setExternalRunIdForDispatch ::
   Text ->
   Text ->
   Text ->
-  m ()
-setExternalRunIdForDispatch dispatchId runId headSha = withDb $ \db ->
-  runDB db $
-    runUpdate $
-      update
-        (releaseTrackers autopilotDb)
-        ( \rt ->
-            mconcat
-              [ rtExternalRunId rt <-. val_ (Just runId),
-                rtCommitSha rt <-. val_ (Just headSha)
-              ]
+  m Text
+setExternalRunIdForDispatch dispatchId runId headSha = do
+  withDb $ \db ->
+    runDB db $
+      runUpdate $
+        update
+          (releaseTrackers autopilotDb)
+          ( \rt ->
+              mconcat
+                [ rtExternalRunId rt <-. val_ (Just runId),
+                  rtCommitSha rt <-. val_ (Just headSha)
+                ]
+          )
+          ( \rt ->
+              rtDispatchId rt
+                ==. val_ (Just dispatchId)
+                &&. ( isNothing_ (rtExternalRunId rt)
+                        ||. rtExternalRunId rt ==. val_ (Just "")
+                        ||. rtExternalRunId rt ==. val_ (Just runId)
+                    )
+          )
+  bound <- withDb $ \db ->
+    runDB db $
+      runSelectReturningList $
+        select $ do
+          rt <- all_ (releaseTrackers autopilotDb)
+          guard_ (rtDispatchId rt ==. val_ (Just dispatchId))
+          guard_ (isJust_ (rtExternalRunId rt) &&. rtExternalRunId rt /=. val_ (Just ""))
+          pure (rtExternalRunId rt)
+  pure (fromMaybe runId (listToMaybe (catMaybes bound)))
+
+{- | How far after our own receipt a LATER dispatch must sit before its receipt
+is trusted as a ceiling on our candidate runs. GitHub creates a run
+synchronously with the POST, so a successor dispatching this long after us
+provably started every run created from here on. The gap keeps near-simultaneous
+dispatches (whose creation order can blur under GitHub latency) on the plain
++5min window, where matrix-job names still disambiguate them — a same-app
+recreate cannot get through create -> approve -> dispatch this fast anyway.
+-}
+successorCeilingGuard :: NominalDiffTime
+successorCeilingGuard = 90
+
+{- | Upper bound on when OUR dispatched run can have been created: the earliest
+receipt of a LATER dispatch on the SAME workflow file, or Nothing when no
+successor is far enough behind us ('successorCeilingGuard').
+
+This is the disambiguator the +5min window alone cannot provide. A group whose
+run was cancelled before its matrix expanded has an unverifiable corpse as its
+own candidate; a same-app successor dispatched minutes later lands inside the
+window carrying IDENTICAL matrix job names, so job verification matches it and
+the dead group adopts (or the abort sweep CANCELS) the successor's live run —
+the 19 Aug incidents, at 4-minute and 10-minute gaps. Runs created at or after
+a later dispatch's POST provably belong to that dispatch.
+
+Scoped to one workflow file because that is the population the candidate
+listing draws from; a receipt from another workflow says nothing about our
+run's creation time.
+-}
+dispatchCeilingFor :: (MonadFlow m) => AppCatalog -> UTCTime -> m (Maybe UTCTime)
+dispatchCeilingFor ac dispatchedAt = withDb $ \db ->
+  withConn db $ \conn -> do
+    rows <-
+      query
+        conn
+        "SELECT MIN((rt.release_context::jsonb #>> '{contents,mbBuildStartedAt}')::timestamptz) \
+        \FROM release_tracker rt \
+        \JOIN app_catalog ac \
+        \  ON ac.name = rt.app_group AND ac.surface = rt.service AND ac.platform = rt.env \
+        \WHERE rt.category = 'MobileBuild' \
+        \  AND ac.github_repo = ? AND ac.workflow_path = ? \
+        \  AND rt.release_context ~ '^\\s*\\{' \
+        \  AND (rt.release_context::jsonb #>> '{contents,mbBuildStartedAt}')::timestamptz >= ? \
+        \  AND (rt.release_context::jsonb #>> '{contents,mbBuildStartedAt}')::timestamptz <= ?"
+        -- Upper bound is the fixed +5min cap the caller already applies: a
+        -- successor beyond it could never tighten the window, so returning
+        -- Nothing there is the same answer for less work.
+        ( acGithubRepo ac
+        , acWorkflowPath ac
+        , addUTCTime successorCeilingGuard dispatchedAt
+        , addUTCTime 300 dispatchedAt
         )
-        (\rt -> rtDispatchId rt ==. val_ (Just dispatchId))
+    pure $ case rows of
+      [Only mT] -> mT
+      _ -> Nothing
 
 -- | Of the given candidate GH run ids, the ones already claimed
 -- (@external_run_id@) by a tracker row OUTSIDE this dispatch group. Run
@@ -1012,6 +1100,25 @@ incrementResolveAttempts releaseId' = withDb $ \db -> do
         "incrementResolveAttempts: tracker "
           <> T.unpack rid
           <> " has no MobileBuildState release_context"
+
+{- | Record that ConfirmTag has read this build's matrix-job log in full and it
+named no usable tag ('mbTagLogScanned'), so later ticks skip the fetch.
+
+A narrow jsonb write, shape-guarded, for the same reason as
+'incrementResolveAttempts': the stage parks with 'StageWaiting', which the
+engine never persists, so stage scratch has to go straight to the row. Never a
+wholesale context write — the runner and store-sync own the row concurrently.
+-}
+markTagLogScanned :: (MonadFlow m) => Text -> m ()
+markTagLogScanned rid = withDb $ \db ->
+  withConn db $ \conn ->
+    void $
+      execute
+        conn
+        "UPDATE release_tracker \
+        \SET release_context = jsonb_set(release_context::jsonb, '{contents,mbTagLogScanned}', 'true'::jsonb)::text \
+        \WHERE id = ? AND release_context ~ '^\\s*\\{'"
+        (Only rid)
 
 -- | Look up the AppCatalog row for a tracker. Throws 'DBError' on miss
 -- because a well-formed mobile tracker row always has a matching catalog

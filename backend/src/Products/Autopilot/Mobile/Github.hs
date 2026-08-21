@@ -26,6 +26,7 @@ than crash the worker.
 module Products.Autopilot.Mobile.Github (
     -- * Request types
     WorkflowDispatchReq (..),
+    DispatchRunDetails (..),
 
     -- * Response shapes
     WorkflowRun (..),
@@ -118,7 +119,29 @@ instance ToJSON WorkflowDispatchReq where
         object
             [ "ref" .= wdrRef
             , "inputs" .= wdrInputs
+            , -- Opt into GitHub's 200-with-run-details response (changelog
+              -- 2026-02-19; default from API version 2026-03-10). Top-level,
+              -- NOT an input — inputs are capped at 25 and validated against
+              -- the workflow file.
+              "return_run_details" .= True
             ]
+
+{- | The 200 response body of a @workflow_dispatch@ POST when
+@return_run_details@ is honoured: the id of OUR run, atomically — no
+listing, no candidate matching. @head_sha@ is NOT included; fetch it via
+'getWorkflowRun'.
+-}
+data DispatchRunDetails = DispatchRunDetails
+    { drdRunId :: Int64
+    , drdHtmlUrl :: Maybe Text
+    }
+    deriving (Show)
+
+instance FromJSON DispatchRunDetails where
+    parseJSON = withObject "DispatchRunDetails" $ \o ->
+        DispatchRunDetails
+            <$> o .: "workflow_run_id"
+            <*> o .:? "html_url"
 
 -- | One row from @\/actions\/workflows\/{file}\/runs@.
 data WorkflowRun = WorkflowRun
@@ -192,10 +215,20 @@ dispatchRunCandidates dispatchedAt = sortOn (Down . wrCreatedAt) . filter inWind
 * it is a @workflow_dispatch@ run, AND
 * its actor is our App's bot account (when the identity is known — a run a
   human started from the GitHub UI can never match), AND
+* it was created inside [receipt - 30s, ceiling] — BOTH bounds, always.
+  GitHub creates the run synchronously with the POST (only its LIST endpoint
+  lags, and lag doesn't move @created_at@), so a run created past the ceiling
+  is provably a LATER dispatch's. Without the ceiling a dead group whose run
+  was cancelled pre-expansion adopted a same-app successor group's run —
+  identical matrix job names defeat job verification (19 Aug incidents).
+  The ceiling is @receipt + 5m@, tightened to just before a known successor
+  dispatch's receipt when one exists (@mCeiling@, from 'dispatchCeilingFor') —
+  the fixed window alone is anchored on OUR receipt while the redispatch gap
+  that caused those incidents is measured from the CANCEL, so a successor 1-4
+  minutes later still lands inside it, AND
 * its id is strictly above the pre-dispatch watermark when one was recorded
   (run ids are monotonically increasing, so above-the-mark means created
-  after our POST — no wall clocks involved); rows persisted before the
-  watermark existed fall back to the legacy created-at window.
+  after our POST — no wall clocks involved).
 
 Sorted OLDEST first: the run created immediately after our watermark
 snapshot is ours; a later unclaimed run belongs to a later dispatch.
@@ -207,12 +240,17 @@ ownDispatchCandidates ::
     Maybe Int64 ->
     -- | Receipt time — window fallback for pre-watermark rows
     UTCTime ->
+    -- | Receipt of the next dispatch on this workflow file, when one is known
+    -- ('dispatchCeilingFor'): nothing created from then on can be ours
+    Maybe UTCTime ->
     [WorkflowRun] ->
     [WorkflowRun]
-ownDispatchCandidates mBotId mWatermark dispatchedAt = sortOn wrId . filter ok
+ownDispatchCandidates mBotId mWatermark dispatchedAt mCeiling = sortOn wrId . filter ok
   where
     lo = addUTCTime (-30) dispatchedAt
-    hi = addUTCTime 300 dispatchedAt
+    -- Same 30s skew allowance as the floor: GitHub's created_at and our
+    -- receipt clock need not agree to the second.
+    hi = minimum (addUTCTime 300 dispatchedAt : [addUTCTime (-30) c | Just c <- [mCeiling]])
     ok r =
         wrEvent r == "workflow_dispatch"
             -- Exclude only on a PRESENT, mismatching actor. GitHub's schema
@@ -229,9 +267,10 @@ ownDispatchCandidates mBotId mWatermark dispatchedAt = sortOn wrId . filter ok
             -- "candidate" (and oldest-first then surfaced a months-old run).
             -- The created-at floor and the id watermark back each other up.
             && wrCreatedAt r >= lo
+            && wrCreatedAt r <= hi
             && case mWatermark of
                 Just w -> wrId r > w
-                Nothing -> wrCreatedAt r <= hi
+                Nothing -> True
 
 {- | The first candidate run (in the given order) whose job list contains ANY
 of @jobNames@ — a dispatch group's matrix job names. Two dispatches on the
@@ -352,8 +391,12 @@ renderHttpError (HttpDecodeError m) = "decode error: " <> T.pack m
 
 -- ─── Operations ────────────────────────────────────────────────────
 
-{- | Trigger a @workflow_dispatch@. GitHub returns HTTP 204 with an
-empty body on success; anything else is a failure.
+{- | Trigger a @workflow_dispatch@. With @return_run_details@ in the body
+GitHub answers 200 + the created run's id ('DispatchRunDetails'); a legacy
+204 (flag not honoured) degrades to @Right Nothing@ — dispatched, no
+details, ResolveRunId hunts as before. ANY 2xx means the POST succeeded:
+a body-parse hiccup maps to @Right Nothing@, never @Left@ — a @Left@ here
+risks a duplicate dispatch on retry.
 -}
 dispatchWorkflow ::
     (MonadFlow m) =>
@@ -362,7 +405,7 @@ dispatchWorkflow ::
     Text -> -- repo
     Text -> -- workflowFile (full path OK, e.g. ".github/workflows/fastlane-android.yaml")
     WorkflowDispatchReq ->
-    m (Either Text ())
+    m (Either Text (Maybe DispatchRunDetails))
 dispatchWorkflow creds owner repo workflowFile body = do
     token <- getInstallationToken creds
     let url =
@@ -387,7 +430,7 @@ dispatchWorkflow creds owner repo workflowFile body = do
     resp <- liftIO (httpRaw req)
     pure $ case resp of
         Right HttpResponse{respStatus = s, respBody = b}
-            | s == 204 -> Right ()
+            | s >= 200 && s < 300 -> Right (Aeson.decode b)
             | otherwise ->
                 Left
                     ( "dispatchWorkflow failed: HTTP "

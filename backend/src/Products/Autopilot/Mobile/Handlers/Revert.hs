@@ -579,7 +579,9 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
                 , -- A revert is system-initiated; it never opts into a changelog post.
                   mbcChangelogSummary = Nothing
                 , mbcChangelogSummaryShort = Nothing
+                , mbcChangelogSummaryModel = Nothing
                 , mbcChangelogSlackOptIn = Nothing
+                , mbcChangelogContentKey = Nothing
                 , mbcStoreObserved = Nothing
                 }
         targetState =
@@ -590,10 +592,12 @@ mobileRevertCreateH ap releaseId' RevertReq{..} = do
                 , mbMatrixJobStatus = Nothing
                 , mbBuildStartedAt = Nothing
                 , mbBuildCompletedAt = Nothing
+                , mbTagLogScanned = Nothing
                 , mbResolveAttempts = Nothing
                 , mbReviewSubmittedAt = Nothing
                 , mbReviewLastPolledAt = Nothing
                 , mbBatchDispatch = Nothing
+                , mbVersionsPassed = Nothing
                 , mbVerifyAttempts = Nothing
                 , mbDispatchWatermark = Nothing
                 , mbCandidateRunId = Nothing

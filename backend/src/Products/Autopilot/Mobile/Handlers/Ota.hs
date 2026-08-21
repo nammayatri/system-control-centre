@@ -652,7 +652,7 @@ dispatchOtaH ap gid OtaDispatchReq{versionBump = bump, apps = mApps, platforms =
         Left err -> do
             markBatchFailed batchId ("dispatch failed: " <> err)
             throwM (InternalError ("OTA workflow dispatch failed: " <> err))
-        Right () -> do
+        Right _ -> do
             logInfo ("[OTA] dispatched " <> appVariants <> " (" <> platform <> ") on " <> srcRef <> " batch " <> batchId)
             pure
                 OtaDispatchResp

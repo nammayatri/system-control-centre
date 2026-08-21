@@ -417,7 +417,29 @@ export default function ReleaseGroupDetail() {
     () => groupReleases.map((r) => r.release_context?.changelog_summary).find((s) => !!s) ?? null,
     [groupReleases],
   );
+  // Provenance of that body: the model that wrote it, or null when the
+  // deterministic commit listing did (AI off, or every model failed). Rows
+  // stored before provenance was recorded also read null — "Auto-generated"
+  // is the honest label for both, since the body alone cannot prove a model
+  // wrote it.
+  const groupChangelogModel = useMemo(
+    () => groupReleases.map((r) => r.release_context?.changelog_summary_model).find((s) => !!s) ?? null,
+    [groupReleases],
+  );
+  // A stored body with no model is PROVISIONAL: the create page captures the
+  // panel's text even while the model is still writing, and what it gets in
+  // that window is the deterministic commit listing (the API returns it as the
+  // body of a "pending" response). So the release froze a placeholder while the
+  // real summary finished into the cache moments later, unseen.
+  //
+  // Follow that generation instead of settling for the placeholder: the cache
+  // is keyed on content, so the request below is a HIT on the work the create
+  // page already started — it returns the finished summary at once, or reports
+  // "Generating…" until it lands, and the ready result is stamped back onto
+  // these rows. Nothing new is generated; we are only catching up.
+  const changelogProvisional = !!groupChangelogBody && !groupChangelogModel;
   const [changelogOpen, setChangelogOpen] = useState(false);
+  const followedRef = useRef(false);
   // Late combined generation for groups with no stored body (pre-refactor
   // rows): pinned tag→tag per member when the tags resolve — frozen to what
   // shipped — else a live branch-range fallback.
@@ -429,18 +451,27 @@ export default function ReleaseGroupDetail() {
     apps: { app: string; surface: string; platform: string; version?: string; baseRef?: string; headRef?: string }[];
     branch: string;
     pinned: boolean;
+    /** at least one member has a confirmed build tag — i.e. this group has
+     *  shipped something, so an unpinned range really could have drifted */
+    anyBuilt: boolean;
   }>(null);
   const [genPreparing, setGenPreparing] = useState(false);
   // The BACKEND persists a ready result onto the rows (combinedGroupId on the
   // generation request) — here we only refetch so the card swaps to the
   // stored view as soon as the body lands on the members.
   const genRefetchedRef = useRef(false);
+  // Settled = the follow produced a final answer (AI or, when every model
+  // failed, the deterministic listing). Without this the header would sit on
+  // "Generating…" forever whenever the result came back model-less.
+  const [followDone, setFollowDone] = useState(false);
   const onGeneratedSummary = (_text: string, _short?: string, status?: string) => {
-    if (status !== 'ready' || genRefetchedRef.current) return;
+    if (status !== 'ready') return;
+    setFollowDone(true);
+    if (genRefetchedRef.current) return;
     genRefetchedRef.current = true;
     void refetch();
   };
-  const startCombinedGeneration = async () => {
+  const startCombinedGeneration = async (openOnStart = true) => {
     setGenPreparing(true);
     try {
       const apps = await Promise.all(
@@ -466,6 +497,10 @@ export default function ReleaseGroupDetail() {
         }),
       );
       const pinned = apps.every((a) => !!a.baseRef && !!a.headRef);
+      // Tags only exist once ConfirmTag verifies a build, so a group that has
+      // not built yet can NEVER be pinned. That is not a degraded range — a
+      // branch comparison is simply what its changelog is.
+      const anyBuilt = changelogGenMembers.some((r) => !!breadcrumbsOf(r).tagPushed);
       // Live fallback needs a real branch — never guess 'main' for a group
       // that has none (the diff would be against an arbitrary ref).
       if (!pinned && !groupBranch) {
@@ -474,12 +509,26 @@ export default function ReleaseGroupDetail() {
         );
         return;
       }
-      setGenCombined({ apps, branch: groupBranch || 'main', pinned });
-      setChangelogOpen(true);
+      setGenCombined({ apps, branch: groupBranch || 'main', pinned, anyBuilt });
+      if (openOnStart) setChangelogOpen(true);
     } finally {
       setGenPreparing(false);
     }
   };
+  // A provisional body means the create page froze the placeholder while the
+  // model was still writing. Pick that generation back up automatically — it is
+  // a content-keyed cache read of work already in flight, so it either returns
+  // the finished summary immediately or reports it as still generating. Once
+  // per mount, and never for a body a model already signed.
+  useEffect(() => {
+    if (followedRef.current) return;
+    if (!changelogProvisional || genCombined || genPreparing) return;
+    if (changelogGenMembers.length < 2) return;
+    followedRef.current = true;
+    void startCombinedGeneration(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [changelogProvisional, changelogGenMembers.length]);
+
   // Repo for the baseline-commit link — member breadcrumbs first (row
   // vintage-dependent), else the app catalog (always knows the repo).
   const { data: mobileAppsForRepo = [] } = useMobileApps();
@@ -1146,7 +1195,25 @@ export default function ReleaseGroupDetail() {
               aria-expanded={changelogOpen}
               className="flex items-center gap-1.5 cursor-pointer text-[11px] font-bold uppercase tracking-wider text-violet-600"
             >
-              <SparkleIcon size={13} weight="fill" aria-hidden="true" /> Combined changelog · AI
+              <SparkleIcon size={13} weight="fill" aria-hidden="true" /> Combined changelog
+              {groupChangelogBody ? (
+                <span
+                  className={cn(
+                    'ml-1 rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-normal normal-case',
+                    groupChangelogModel
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : changelogProvisional && genCombined && !followDone
+                        ? 'bg-violet-100 text-violet-700'
+                        : 'bg-zinc-100 text-zinc-600',
+                  )}
+                >
+                  {groupChangelogModel
+                    ? `AI · ${groupChangelogModel}`
+                    : changelogProvisional && genCombined && !followDone
+                      ? 'Generating…'
+                      : 'Auto-generated'}
+                </span>
+              ) : null}
               <CaretRightIcon
                 size={14}
                 className={cn('text-zinc-400 transition-transform', changelogOpen && 'rotate-90')}
@@ -1166,13 +1233,17 @@ export default function ReleaseGroupDetail() {
             )}
           </div>
           {changelogOpen &&
-            (groupChangelogBody ? (
+            (groupChangelogBody && !(changelogProvisional && genCombined && !followDone) ? (
               <pre className="px-4 pb-4 text-xs text-zinc-700 whitespace-pre-wrap break-words font-sans leading-relaxed max-h-96 overflow-y-auto">
                 {groupChangelogBody}
               </pre>
             ) : genCombined ? (
               <div className="px-4 pb-4">
-                {!genCombined.pinned && (
+                {/* Only meaningful once something HAS shipped: then an unpinned
+                    range can include commits merged after this group was built.
+                    For a group that hasn't built, there are no tags by
+                    definition and the branch range is the intended one. */}
+                {!genCombined.pinned && genCombined.anyBuilt && (
                   <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-2">
                     Some builds' tags could not be resolved — this compares against the branch/production as of
                     today, which may include changes shipped after this group.
@@ -1184,6 +1255,7 @@ export default function ReleaseGroupDetail() {
                   base="production"
                   combinedGroupId={groupId}
                   onSummary={onGeneratedSummary}
+                  headless
                 />
               </div>
             ) : (

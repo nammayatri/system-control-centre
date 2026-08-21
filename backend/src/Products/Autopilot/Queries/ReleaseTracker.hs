@@ -8,6 +8,7 @@ module Products.Autopilot.Queries.ReleaseTracker (
     stampChangelogShort,
     stampGroupChangelogSummary,
     checkpointReleaseTrackerChecked,
+    claimDispatchReceipt,
     conditionalUpdateTracker,
     conditionalUpdateApprove,
     conditionalUpdateTrackerRow,
@@ -112,7 +113,8 @@ import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Database.Beam
 import Database.Beam.Postgres (Postgres)
 import Database.Beam.Postgres.Full (anyConflict, insertReturning, onConflict, onConflictDoNothing, runPgInsertReturningList)
-import Database.PostgreSQL.Simple (Only (..), Query, ToRow, execute, query, withTransaction)
+import Control.Exception qualified as CE
+import Database.PostgreSQL.Simple (Connection, Only (..), Query, SqlError (..), ToRow, execute, execute_, query, withTransaction)
 import Database.PostgreSQL.Simple.Types ((:.) (..))
 import Debug.Trace qualified as DT
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind, claimsStoreIdentity)
@@ -163,19 +165,161 @@ writer.
 checkpointReleaseTracker :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m ()
 checkpointReleaseTracker rt mts = () <$ checkpointReleaseTrackerChecked rt mts
 
-{- | 'checkpointReleaseTracker' that reports whether the guarded write landed
+{- | 'checkpointReleaseTracker' reporting whether the guarded write landed
 (True) or was filtered by the status guard (False). Callers about to take an
-irreversible external action on the strength of the checkpoint — the mobile
-dispatch receipt before its @workflow_dispatch@ POST — MUST use this variant
-and skip the action when the write did not land.
+irreversible external action on the strength of it MUST use this variant and
+skip the action on False. The dispatch receipt needs cross-replica atomicity
+too, so it uses 'claimDispatchReceipt' instead.
 -}
 checkpointReleaseTrackerChecked :: (MonadFlow m) => ReleaseTracker -> Maybe TargetState -> m Bool
 checkpointReleaseTrackerChecked rt mts =
-    (> 0)
-        <$> upsertReleaseTrackerCounted
-            " WHERE release_tracker.status NOT IN ('ABORTING','ABORTED','USER_ABORTED','GCLT_ABORTED','DISCARDED','REVERTED','PAUSED')"
-            rt
-            mts
+    (> 0) <$> upsertReleaseTrackerCounted checkpointStatusGuard rt mts
+
+-- | Rows an operator (or the abort sweep) moved to an aborted/paused/terminal
+-- state are off-limits to the workflow's checkpoint writers.
+checkpointStatusGuard :: Query
+checkpointStatusGuard = " WHERE release_tracker.status NOT IN ('ABORTING','ABORTED','USER_ABORTED','GCLT_ABORTED','DISCARDED','REVERTED','PAUSED')"
+
+{- | Receipt-preserving @release_context@ write. @incoming@ is the writer's own
+new-context expression (@EXCLUDED.release_context@ / @v.incoming@).
+
+A stored dispatch receipt (@mbBuildStartedAt@) fresher than the incoming one
+proves the writer's snapshot predates it, so the fields that tick advanced are
+overlaid back: the receipt set, the ConfirmTag flags (read as a PAIR), and the
+stage latches. Equal receipts do NOT graft — that is the dispatcher's own
+follow-up persist. EVERY context writer must go through this: two pods drive
+one row with no cross-pod claim.
+-}
+receiptPreservingContext :: Query -> Query
+receiptPreservingContext incoming =
+    "CASE \
+    \  WHEN release_tracker.release_context ~ '^\\s*\\{' \
+    \   AND (release_tracker.release_context::jsonb #>> '{contents,mbBuildStartedAt}')::timestamptz \
+    \       > COALESCE(CASE WHEN "
+        <> incoming
+        <> " ~ '^\\s*\\{' THEN ("
+        <> incoming
+        <> "::jsonb #>> '{contents,mbBuildStartedAt}')::timestamptz END, '-infinity'::timestamptz) \
+           \  THEN CASE WHEN "
+        <> incoming
+        <> " ~ '^\\s*\\{' \
+           \            THEN jsonb_set("
+        <> incoming
+        <> "::jsonb, '{contents}', COALESCE("
+        <> incoming
+        <> "::jsonb -> 'contents', '{}'::jsonb) || jsonb_build_object("
+        <> preserved "mbBuildStartedAt"
+        <> ", "
+        <> preserved "mbDispatchWatermark"
+        <> ", "
+        <> preserved "mbBatchDispatch"
+        <> ", "
+        <> preserved "mbVersionsPassed"
+        <> ", "
+        <> preserved "mbWfStatus"
+        <> ", "
+        <> preservedIfSet "mbExternalRunId"
+        <> "))::text \
+           \            ELSE release_tracker.release_context END \
+           \  ELSE "
+        <> incoming
+        <> " END"
+  where
+    -- Written as ONE set by the dispatching tick: take stored verbatim, JSON
+    -- null included. Mixing one writer's anchor with another's watermark
+    -- expires the adopt grace instantly. Fallback = stored lacks the KEY.
+    preserved :: Query -> Query
+    preserved = preservedWith False
+
+    -- Advances AFTER the receipt, so keep stored only when it holds a value:
+    -- @#>@ yields jsonb 'null' (not SQL NULL) for a present-but-null key and
+    -- aeson writes every Nothing as null, so COALESCE alone would let a stored
+    -- null overwrite a run id the writer had just bound.
+    preservedIfSet :: Query -> Query
+    preservedIfSet = preservedWith True
+
+    preservedWith :: Bool -> Query -> Query
+    preservedWith skipNulls field =
+        let stored =
+                "release_tracker.release_context::jsonb #> '{contents,"
+                    <> field
+                    <> "}'"
+         in "'"
+                <> field
+                <> "', COALESCE("
+                <> (if skipNulls then "NULLIF(" <> stored <> ", 'null'::jsonb)" else stored)
+                <> ", "
+                <> incoming
+                <> "::jsonb #> '{contents,"
+                <> field
+                <> "}')"
+
+{- | Atomically claim the right to POST a @workflow_dispatch@ for a dispatch
+group: False means DO NOT POST. Closes the cross-replica TOCTOU behind the
+duplicate GitHub runs — both pods read "no receipt" within ~350ms and both
+wrote one, the checkpoint upsert being status-guarded but not compare-and-set.
+
+One short transaction, no HTTP inside: an advisory lock keyed on the dispatch
+id (TRANSACTION-scoped — the session lock removed from workflow stage 2 leaked
+into the connection pool), then one aggregate re-check of the group, then the
+status-guarded checkpoint upsert.
+
+The re-check refuses on: @bound@, the group already has an @external_run_id@
+(adopt\/resolve stamp it without writing a receipt); @fresher@, a sibling
+receipt newer than the caller's @mObservedAnchor@ (Nothing = decided off "no
+receipt at all"), the 1ms epsilon absorbing jsonb-cast rounding of the SAME
+timestamp; or @aborting AND has_receipt@, a teardown with a run to tear down.
+That @has_receipt@ qualifier mirrors the stage gate's @groupHasRunInFlight@ and
+is load-bearing — an ABORTING row that never dispatched has no cancel target
+and sits until the 30-min deadline, so vetoing on it alone would stall its
+healthy siblings for half an hour.
+
+Not a plain @WHERE receipt IS NULL@ CAS: re-dispatch-after-grace legitimately
+overwrites a stale receipt, and "nothing newer than what I observed" covers
+fresh claims, lost races and grace re-dispatches alike.
+
+The lock wait is bounded (@SET LOCAL lock_timeout@): a silently-dead holder
+(node loss, partition — server keeps its transaction open until TCP keepalive
+expiry) must not wedge the peer's claim for hours. Timeout (SqlError 55P03)
+maps to False — identical to losing the race; SET LOCAL dies with the
+transaction, so nothing leaks into the pooled connection.
+-}
+claimDispatchReceipt :: (MonadFlow m) => Text -> Maybe UTCTime -> ReleaseTracker -> Maybe TargetState -> m Bool
+claimDispatchReceipt did mObservedAnchor rt mts = do
+    cloud <- cloudTypeForCategory (category rt)
+    withDb $ \db ->
+        withConn db $ \conn ->
+            claimTxn conn cloud `CE.catch` \e ->
+                if sqlState e == "55P03" then pure False else CE.throwIO e
+  where
+    claimTxn conn cloud =
+        withTransaction conn $ do
+            _ <- execute_ conn "SET LOCAL lock_timeout = '5s'"
+            _ <-
+                query
+                    conn
+                    "SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(?))) l"
+                    (Only did) ::
+                    IO [Only Int]
+            taken <-
+                query
+                    conn
+                    "SELECT 1 FROM ( \
+                    \  SELECT \
+                    \    COALESCE(bool_or(external_run_id IS NOT NULL AND external_run_id <> ''), false) AS bound \
+                    \  , COALESCE(bool_or(release_context ~ '^\\s*\\{' \
+                    \        AND (release_context::jsonb #>> '{contents,mbBuildStartedAt}') IS NOT NULL), false) AS has_receipt \
+                    \  , COALESCE(bool_or(status = 'ABORTING'), false) AS aborting \
+                    \  , COALESCE(bool_or(release_context ~ '^\\s*\\{' \
+                    \        AND (release_context::jsonb #>> '{contents,mbBuildStartedAt}')::timestamptz \
+                    \            > COALESCE(?::timestamptz, '-infinity'::timestamptz) + interval '1 millisecond'), false) AS fresher \
+                    \  FROM release_tracker WHERE dispatch_id = ? \
+                    \) g \
+                    \WHERE g.bound OR g.fresher OR (g.aborting AND g.has_receipt)"
+                    (mObservedAnchor, did)
+            case (taken :: [Only Int]) of
+                (_ : _) -> pure False
+                [] -> (> 0) <$> upsertReleaseTrackerOnConn conn checkpointStatusGuard cloud rt mts
 
 upsertReleaseTrackerWith :: (MonadFlow m) => Query -> ReleaseTracker -> Maybe TargetState -> m ()
 upsertReleaseTrackerWith guardSql rt mts = () <$ upsertReleaseTrackerCounted guardSql rt mts
@@ -183,19 +327,27 @@ upsertReleaseTrackerWith guardSql rt mts = () <$ upsertReleaseTrackerCounted gua
 upsertReleaseTrackerCounted :: (MonadFlow m) => Query -> ReleaseTracker -> Maybe TargetState -> m Int64
 upsertReleaseTrackerCounted guardSql rt mts = do
     cloud <- cloudTypeForCategory (category rt)
-    withDb $ \db -> do
-        now <- getCurrentTime
-        let created = fromMaybe now (dateCreated rt)
-            row = toRow cloud created now rt mts
-        -- Every non-PK column must appear in BOTH the INSERT list AND the DO
-        -- UPDATE SET clause, otherwise it silently retains its old value on
-        -- conflict and corrupts rollout state. EXCEPTIONS (deliberately absent
-        -- from both lists so this writer can never clobber them): the
-        -- setPhase-owned lifecycle columns (review_*, rollout_*, store_track,
-        -- asc ids, terminal_status), the externally-stamped dispatch_id /
-        -- external_run_id / version_code, and the creation-stamped
-        -- release_group_id / release_group_label (migration 0042).
-        withConn db $ \conn -> do
+    withDb $ \db ->
+        withConn db $ \conn ->
+            upsertReleaseTrackerOnConn conn guardSql cloud rt mts
+
+upsertReleaseTrackerOnConn :: Connection -> Query -> Maybe Text -> ReleaseTracker -> Maybe TargetState -> IO Int64
+upsertReleaseTrackerOnConn conn guardSql cloud rt mts = do
+    now <- getCurrentTime
+    let created = fromMaybe now (dateCreated rt)
+        row = toRow cloud created now rt mts
+    -- Every non-PK column must appear in BOTH the INSERT list AND the DO
+    -- UPDATE SET clause, otherwise it silently retains its old value on
+    -- conflict and corrupts rollout state. EXCEPTIONS (deliberately absent
+    -- from both lists so this writer can never clobber them): the
+    -- setPhase-owned lifecycle columns (review_*, rollout_*, store_track,
+    -- asc ids, terminal_status), the externally-stamped dispatch_id /
+    -- external_run_id / version_code, and the creation-stamped
+    -- release_group_id / release_group_label (migration 0042).
+    -- release_context is MERGED, not overwritten ('receiptPreservingContext'):
+    -- a peer pod's stale checkpoint must never erase a committed dispatch
+    -- receipt, or the receipt CAS goes blind and both pods POST.
+    do
             n <-
                 execute
                     conn
@@ -236,8 +388,9 @@ upsertReleaseTrackerCounted guardSql rt mts = do
                     \  , end_time          = EXCLUDED.end_time \
                     \  , rollout_strategy  = EXCLUDED.rollout_strategy \
                     \  , rollout_history   = EXCLUDED.rollout_history \
-                    \  , release_context   = EXCLUDED.release_context \
-                    \  , info              = EXCLUDED.info \
+                    \  , release_context   = "
+                        <> receiptPreservingContext "EXCLUDED.release_context"
+                        <> "  , info              = EXCLUDED.info \
                     \  , description       = EXCLUDED.description \
                     \  , change_log        = EXCLUDED.change_log \
                     \  , metadata          = EXCLUDED.metadata \
@@ -278,20 +431,27 @@ stampChangelogShort rid short = withDb $ \db ->
 group — narrow jsonb writes only. The Slack flag is defaulted to FALSE where
 unset (absent key or JSON null): a freshly stamped body must never flip a
 legacy row's presence-fallback ('changelogSlackOptedIn') to opted-in.
-Explicit true/false flags are preserved. Returns the member count updated.
+Explicit true/false flags are preserved.
+
+@mModel@ is the body's provenance — the model that wrote it, or Nothing for
+the deterministic listing. It is stamped ALONGSIDE the body (never left over
+from a previous stamp) so the console can label the two apart. Returns the
+member count updated.
 -}
-stampGroupChangelogSummary :: (MonadFlow m) => Text -> Text -> m Int64
-stampGroupChangelogSummary gid body = withDb $ \db ->
+stampGroupChangelogSummary :: (MonadFlow m) => Text -> Maybe Text -> Text -> m Int64
+stampGroupChangelogSummary gid mModel body = withDb $ \db ->
     withConn db $ \conn ->
         execute
             conn
             "UPDATE release_tracker \
-            \SET release_context = jsonb_set(jsonb_set(release_context::jsonb, \
+            \SET release_context = jsonb_set(jsonb_set(jsonb_set(release_context::jsonb, \
             \      '{contents,mbContext,changelog_summary}', to_jsonb(?::text)), \
+            \      '{contents,mbContext,changelog_summary_model}', \
+            \      CASE WHEN ?::text IS NULL OR ?::text = '' THEN 'null'::jsonb ELSE to_jsonb(?::text) END), \
             \      '{contents,mbContext,changelog_slack_opt_in}', \
             \      COALESCE(NULLIF(release_context::jsonb #> '{contents,mbContext,changelog_slack_opt_in}', 'null'::jsonb), 'false'::jsonb))::text \
             \WHERE release_group_id = ? AND category = 'MobileBuild' AND release_context ~ '^\\s*\\{'"
-            (body, gid)
+            (body, mModel, mModel, mModel, gid)
 
 {- | Atomically update a release tracker only if its current status matches the
 expected value (CAS: @UPDATE ... WHERE id = ? AND status = ?@). Returns True if
@@ -334,6 +494,11 @@ live values always survive a workflow persist:
 the failed-terminal identity-slot release (a build aborted before uploading
 frees its (version, code) for a rebuild). @slack_thread_ts@ keeps COALESCE
 semantics: a Nothing in the row never erases a thread id another path stamped.
+@release_context@ goes through 'receiptPreservingContext' — the abort/status
+routes CAS on status alone with a handler-entry snapshot, which without the
+merge erased a just-committed dispatch receipt. It is bound through a one-row
+@FROM (VALUES …)@ so the merge can reference it repeatedly from one
+placeholder, bound AFTER the SET params and BEFORE @whereParams@.
 -}
 casUpdateWorkflowCols :: (ToRow w, MonadFlow m) => ReleaseTrackerRow -> Query -> w -> m Bool
 casUpdateWorkflowCols row whereSql whereParams = withDb $ \db ->
@@ -345,19 +510,23 @@ casUpdateWorkflowCols row whereSql whereParams = withDb $ \db ->
                   \  old_version = ?, new_version = ?, app_group = ?, service = ?, priority = ?, env = ? \
                   \ , category = ?, status = ?, release_wf_status = ?, mode = ?, release_manager = ?, approved_by = ? \
                   \ , is_approved = ?, is_infra_approved = ?, release_tag = ?, schedule_time = ?, start_time = ?, end_time = ? \
-                  \ , rollout_strategy = ?, rollout_history = ?, release_context = ?, info = ?, description = ?, change_log = ? \
+                  \ , rollout_strategy = ?, rollout_history = ?, info = ?, description = ?, change_log = ? \
                   \ , metadata = ?, global_id = ?, sync_enabled = ?, env_override_data = ?, slack_thread_ts = COALESCE(?, slack_thread_ts), commit_sha = ? \
                   \ , source_ref = ?, reverts_release_id = ?, ab_validation_status = ?, ab_validation = ?, version_code = ?, date_created = ? \
-                  \ , last_updated = ? "
+                  \ , last_updated = ? \
+                  \ , release_context = "
+                    <> receiptPreservingContext "v.incoming"
+                    <> " FROM (VALUES (?::text)) AS v(incoming) "
                     <> whereSql
                 )
                 ( (rtOldVersion row, rtNewVersion row, rtAppGroup row, rtService row, rtPriority row, rtEnv row)
                     :. (rtCategory row, rtStatus row, rtReleaseWFStatus row, rtMode row, rtCreatedBy row, rtApprovedBy row)
                     :. (rtIsApproved row, rtIsInfraApproved row, rtReleaseTag row, rtScheduleTime row, rtStartTime row, rtEndTime row)
-                    :. (rtRolloutStrategy row, rtRolloutHistory row, rtTargetState row, rtInfo row, rtDescription row, rtChangeLog row)
+                    :. (rtRolloutStrategy row, rtRolloutHistory row, rtInfo row, rtDescription row, rtChangeLog row)
                     :. (rtMetadata row, rtGlobalId row, rtSyncEnabled row, rtEnvOverrideData row, rtSlackThreadTs row, rtCommitSha row)
                     :. (rtSourceRef row, rtRevertsReleaseId row, rtAbValidationStatus row, rtAbValidation row, rtVersionCode row, rtCreatedAt row)
                     :. Only (rtUpdatedAt row)
+                    :. Only (rtTargetState row)
                     :. whereParams
                 )
         pure (n > 0)

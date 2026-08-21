@@ -32,9 +32,9 @@ import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasC
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Mobile.Github (cancelRun, findRunWithJob, listWorkflowRuns, ownDispatchCandidates, wrCreatedAt, wrId)
 import Products.Autopilot.Mobile.Github.Auth (BotIdentity (..), getBotIdentity, loadGhCreds)
-import Products.Autopilot.Mobile.Queries.Tracker (appCatalogForRow, externalRunIdsClaimedElsewhere, gitOwner, gitRepo)
+import Products.Autopilot.Mobile.Queries.Tracker (appCatalogForRow, dispatchCeilingFor, externalRunIdsClaimedElsewhere, gitOwner, gitRepo, parseMobileTargetState)
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), MobileBuildWFStatus (..))
-import Products.Autopilot.Mobile.Workflow (dispatchGroupJobNames, findDispatchIdForRelease)
+import Products.Autopilot.Mobile.Workflow (dispatchGroupJobNames, externalRunIdForRelease, findDispatchGroupContexts, findDispatchIdForRelease)
 import Products.Autopilot.Mobile.Types.Storage (acWorkflowPath)
 import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted, sendGroupChangelogSlackIfSettled)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks, releaseService)
@@ -894,7 +894,20 @@ cancelMobileGhRun rt mts =
                     -- early-window abort (dispatched, not yet resolved) still stops the build.
                     mRunId <- case mbExternalRunId mb of
                         Just r | not (T.null r) -> pure (Just r)
-                        _ -> resolveForCancel creds ac mb
+                        _ -> do
+                            -- The group's binding lives in the external_run_id COLUMN,
+                            -- stamped on every sibling row at once; a row copies it into
+                            -- its OWN context only on a tick that adopts. An ABORTING row
+                            -- is never driven again (the runner picks up CREATED/INPROGRESS
+                            -- only) and checkpoint writes are status-guarded, so a row
+                            -- aborted before it adopted could never learn the id — and its
+                            -- sweep hunted blind until the 30-min deadline while the answer
+                            -- sat on the row. Read the column: exact, no listing, no
+                            -- matching.
+                            mCol <- externalRunIdForRelease (releaseId rt)
+                            case mCol of
+                                Just r | not (T.null r) -> pure (Just r)
+                                _ -> resolveForCancelGroup creds ac mb
                     case mRunId of
                         Nothing -> do
                             logInfo $
@@ -943,6 +956,29 @@ cancelMobileGhRun rt mts =
     -- deadline is 10 min, and with actor+watermark+window+claimed filters a
     -- lone candidate is ours. Ambiguous cases (several candidates, or the
     -- POST outcome unknown) still require matrix-job verification.
+    -- Hunt with the GROUP's newest receipt when this row has none of its own.
+    -- Only the leader writes a dispatch receipt, so a follower aborted before
+    -- the group was bound has nothing to seed the hunt with — yet the run is
+    -- shared per dispatch group, so the leader's receipt + watermark identify
+    -- exactly the run this row is building in. Rows that DO carry a receipt
+    -- keep today's behaviour untouched (their own is the right anchor).
+    resolveForCancelGroup creds ac mb
+        | isJust (mbBuildStartedAt mb) = resolveForCancel creds ac mb
+        | otherwise = do
+            mDid <- findDispatchIdForRelease (releaseId rt)
+            groupReceipts <- case mDid of
+                Just did | not (T.null did) -> do
+                    ctxs <- findDispatchGroupContexts did
+                    pure
+                        [ st
+                        | (_, mCtx) <- ctxs
+                        , Just st <- [parseMobileTargetState mCtx]
+                        , isJust (mbBuildStartedAt st)
+                        ]
+                _ -> pure []
+            case sortBy (comparing (Down . mbBuildStartedAt)) groupReceipts of
+                (lead : _) -> resolveForCancel creds ac lead
+                [] -> pure Nothing
     resolveForCancel creds ac mb = case mbBuildStartedAt mb of
         Nothing -> pure Nothing
         Just dispatchedAt -> do
@@ -953,8 +989,10 @@ cancelMobileGhRun rt mts =
                     pure Nothing
                 Right runs -> do
                     mBot <- getBotIdentity creds
-                    let inWindow r = wrCreatedAt r <= addUTCTime 300 dispatchedAt
-                        cands0 = filter inWindow (ownDispatchCandidates (biUserId <$> mBot) (mbDispatchWatermark mb) dispatchedAt runs)
+                    -- Ceiling matters most here: cancelling a successor's live
+                    -- build is worse than failing to cancel our own.
+                    mCeiling <- dispatchCeilingFor ac dispatchedAt
+                    let cands0 = ownDispatchCandidates (biUserId <$> mBot) (mbDispatchWatermark mb) dispatchedAt mCeiling runs
                     mDid <- findDispatchIdForRelease (releaseId rt)
                     claimed <- case mDid of
                         Just did | not (T.null did) -> externalRunIdsClaimedElsewhere did (map mkRunId cands0)

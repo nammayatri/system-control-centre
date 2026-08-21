@@ -81,6 +81,7 @@ import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (context),
 import Products.Autopilot.Types.Workflow (ReleaseCategory (..))
 import Products.Autopilot.Webhooks (dispatchTerminalWebhooks)
 import Shared.AI.Changelog (ownSideLabel)
+import Shared.AI.Queries (lookupReleaseSummary)
 import System.Environment (lookupEnv)
 import Prelude
 
@@ -341,12 +342,8 @@ sendGroupChangelogSlackIfSettled gid mKnownShipped
       let members = [(rt, s) | (_, _, (rt, Just (MobileBuildState s))) <- rows]
           -- Opt-in is the explicit flag (legacy rows: body presence); the send
           -- body falls back to the typed changelog when no AI summary exists.
-          optedInBodies =
-            [ fromMaybe (mbcChangeLog c) (mbcChangelogSummary c)
-            | (_, s) <- members
-            , let c = mbContext s
-            , changelogSlackOptedIn c
-            ]
+          optedInContexts = [c | (_, s) <- members, let c = mbContext s, changelogSlackOptedIn c]
+          optedInBodies = [fromMaybe (mbcChangeLog c) (mbcChangelogSummary c) | c <- optedInContexts]
           shippedRow rt s = isJust (mbcTagPushed (mbContext s)) || Just (releaseId rt) == mKnownShipped
           settledRow rt s =
             shippedRow rt s
@@ -368,7 +365,29 @@ sendGroupChangelogSlackIfSettled gid mKnownShipped
               if not won
                 then pure ()
                 else do
-                  let body0 = fromMaybe "" (listToMaybe optedInBodies)
+                  -- The stored body may be the DETERMINISTIC placeholder: create
+                  -- can happen while the detached AI generation is still running.
+                  -- That generation outlives the browser and files its result under
+                  -- the content key captured at create, so check the cache for a
+                  -- ready AI body and prefer it. Read-only, and the build is over
+                  -- by now — no race with the engine's release_context writes.
+                  let body0Stored = fromMaybe "" (listToMaybe optedInBodies)
+                  mCached <- case listToMaybe [k | c <- optedInContexts, Just k <- [mbcChangelogContentKey c]] of
+                    Nothing -> pure Nothing
+                    Just key -> do
+                      row <- lookupReleaseSummary key
+                      pure $ case row of
+                        -- model="" means the cache holds the same deterministic
+                        -- listing we already have — nothing gained by swapping.
+                        Just ("ready", Just long, _, mModel, _)
+                          | not (T.null (T.strip long))
+                          , maybe False (not . T.null . T.strip) mModel ->
+                              Just long
+                        _ -> Nothing
+                  forM_ mCached $ \_ ->
+                    logInfoG $
+                      "[changelog-slack] group " <> gid <> " using the AI summary that finished after create"
+                  let body0 = fromMaybe body0Stored mCached
                       failedLabels = [appGroup rt <> " " <> env rt | (rt, s) <- members, not (shippedRow rt s)]
                       shippedSurfaces = [ownSideLabel (service rt) | (rt, s) <- members, shippedRow rt s]
                       body = dropFailedAppSections failedLabels shippedSurfaces body0
