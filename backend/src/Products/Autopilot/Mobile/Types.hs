@@ -152,6 +152,13 @@ data MobileBuildTargetState = MobileBuildTargetState
     , mbMatrixJobStatus :: Maybe Text
     , mbBuildStartedAt :: Maybe UTCTime
     , mbBuildCompletedAt :: Maybe UTCTime
+    , mbTagLogScanned :: Maybe Bool
+    -- ^ ConfirmTag has already read this build's matrix-job log in full and it
+    -- named no usable tag. ConfirmTag only runs after the job COMPLETED, so
+    -- that log is final — re-reading it (tens of MB, every poll, for up to the
+    -- 180-minute tag timeout) can never produce a different answer. Set via a
+    -- direct DB write because the stage parks with 'StageWaiting', which the
+    -- engine does not persist.
     , mbResolveAttempts :: Maybe Int
     -- ^ Counter incremented by the ResolveRunId workflow stage each time
     -- it polls GitHub for the dispatched run. Bounded retry budget; the
@@ -169,6 +176,12 @@ data MobileBuildTargetState = MobileBuildTargetState
     -- matrix job auto-versions; ConfirmTag adopts the code from the pushed tag).
     -- Nothing / Just False = single dispatch with explicit version inputs.
     -- Backward-compatible Maybe (old rows → Nothing).
+    , mbVersionsPassed :: Maybe Bool
+    -- ^ Just True = the dispatch carried the per-app @versions@ input, so every
+    -- matrix job (batched or not) built THIS row's resolved version — ConfirmTag
+    -- matches the tag exactly instead of adopting the highest code. Part of the
+    -- pre-POST dispatch receipt (adopters inherit it, like 'mbBatchDispatch').
+    -- Nothing on rows dispatched before the input existed → fuzzy match applies.
     , mbVerifyAttempts :: Maybe Int
     -- ^ Store-truth verification attempts consumed by PollMatrixJobs' auto-heal
     -- gate after a failed job (bounded; the gate gives up past the budget).

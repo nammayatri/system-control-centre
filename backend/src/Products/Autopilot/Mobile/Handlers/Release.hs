@@ -350,10 +350,12 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                 , mbMatrixJobStatus = Nothing
                 , mbBuildStartedAt = Nothing
                 , mbBuildCompletedAt = Nothing
+                , mbTagLogScanned = Nothing
                 , mbResolveAttempts = Nothing
                 , mbReviewSubmittedAt = Nothing
                 , mbReviewLastPolledAt = Nothing
                 , mbBatchDispatch = Nothing
+                , mbVersionsPassed = Nothing
                 , mbVerifyAttempts = Nothing
                 , mbDispatchWatermark = Nothing
                 , mbCandidateRunId = Nothing

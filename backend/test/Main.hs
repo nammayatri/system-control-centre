@@ -72,7 +72,7 @@ import Products.Autopilot.Mobile.Types
 import Products.Autopilot.Mobile.Versioning (TrackInfo (..), computeNextVersion)
 import Products.Autopilot.Mobile.Versioning.Apple (AscPhasedState (..), AscReviewState (..), AscVersion (..), BuildsResp (..), appStoreStateToReview, applePhasedPercent, computeNextIosVersion, firstWhatsNew, parseAscVersion, parseVersionStatesWithBuild, selectInFlightReview)
 import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), ProdTrackRelease (..), StoreTrackSnapshot (..), parseProdReleaseNotes, parseProdTrackReleases, parseRolloutState, parseTrackSnapshot, userFractionInRange)
-import Products.Autopilot.Mobile.Workflow (FirebaseReleaseInfo (..), codeFromTag, electDispatchLeader, parseFirebaseRelease, reviewPollDue, reviewPollTimedOut, selectBuildTag, tagConfirmTimedOut)
+import Products.Autopilot.Mobile.Workflow (FirebaseReleaseInfo (..), codeFromTag, electDispatchLeader, parseFirebaseRelease, reviewPollDue, reviewPollTimedOut, selectBuildTag, selectProviderBuildTag, tagConfirmTimedOut, tagPushedFromLog)
 import Products.Autopilot.Queries.ReleaseTracker (keepSnapshot)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
@@ -163,6 +163,7 @@ main = do
   section "[37] iOS next-version rule (bump in sync / reuse when TF ahead)" testIosVersionBumpRule
   section "[38] Changelog base resolution (prod default / internal / fallback)" testChangelogBaseResolution
   section "[39] Store release-notes parsing (Play track + iOS whatsNew)" testStoreReleaseNotesParse
+  section "[41] ConfirmTag log-first tag extraction (tagPushedFromLog)" testTagPushedFromLog
   section "[40] Out-of-band review detection (in-flight select / map / reconcile)" testExternalReviewDetection
   section "[41] Android pending-publish detection (track parse / pick rule)" testAndroidPendingPublish
   section "[49] Dispatch-group leader election (first living sibling)" testElectDispatchLeader
@@ -1387,6 +1388,80 @@ testResolveRollback = do
 -- under the broad app prefix. The fastlane workflow tags deterministically as
 -- @{prefix}{version}+{code}@ and SCC supplies that version/code on dispatch, so we
 -- match it exactly. GitHub returns matching-refs in ascending order, so "first"
+-- | tagPushedFromLog reads the tag a build's own job log says it pushed.
+-- Fixtures mirror real GitHub job logs: ISO-timestamp line prefixes, the
+-- script-SOURCE dump (un-expanded $TAG_NAME / <tag> placeholder), and the
+-- three confirmation-line shapes (consumer push, provider push, provider
+-- already-exists rebuild).
+testTagPushedFromLog :: IO ()
+testTagPushedFromLog = do
+  putStrLn "ConfirmTag: log-first tag extraction"
+  let ts = "2026-08-20T14:32:01.1234567Z "
+      consumerLog =
+        T.unlines
+          [ ts <> "##[group]Run set -euo pipefail",
+            -- script dump: un-expanded variable must NOT be picked up
+            ts <> "echo \"\10004 Annotated tag pushed: $TAG\"",
+            ts <> "##[endgroup]",
+            ts <> "To https://github.com/nammayatri/ny-react-native",
+            ts <> " * [new tag]  v9292rides/prod/ios/v1.0.0+2 -> v9292rides/prod/ios/v1.0.0+2",
+            ts <> "\10004 Annotated tag pushed: v9292rides/prod/ios/v1.0.0+2"
+          ]
+      providerLog =
+        T.unlines
+          [ ts <> "echo \"Successfully created and pushed tag: $TAG_NAME\"",
+            ts <> "Creating tag: NammaYatriPartner-v3.1.0-245",
+            ts <> "Successfully created and pushed tag: NammaYatriPartner-v3.1.0-245"
+          ]
+      providerRebuildLog =
+        T.unlines
+          [ ts <> "echo \"Tag $TAG_NAME already exists, skipping\"",
+            ts <> "Tag NammaYatriPartner-v3.1.0-245 already exists, skipping"
+          ]
+  assertEqual
+    "consumer: expanded push line wins; $TAG script-dump artifact rejected"
+    (Just "v9292rides/prod/ios/v1.0.0+2")
+    (tagPushedFromLog consumerLog)
+  assertEqual
+    "provider: post-push line parsed; $TAG_NAME dump rejected"
+    (Just "NammaYatriPartner-v3.1.0-245")
+    (tagPushedFromLog providerLog)
+  assertEqual
+    "provider rebuild: already-exists line names the tag; TAG_NAME dump rejected"
+    (Just "NammaYatriPartner-v3.1.0-245")
+    (tagPushedFromLog providerRebuildLog)
+  assertEqual
+    "no confirmation line -> Nothing (caller falls back to repo tags)"
+    Nothing
+    (tagPushedFromLog (ts <> "Creating tag: NammaYatriPartner-v3.1.0-245"))
+  assertEqual
+    "<tag> placeholder from a CONTRACT comment dump is rejected"
+    Nothing
+    (tagPushedFromLog (ts <> "# (\"Annotated tag pushed: <tag>\") to bind the tag"))
+  assertEqual
+    "empty log -> Nothing"
+    Nothing
+    (tagPushedFromLog "")
+  -- Two confirmation lines (retried step): the LAST wins.
+  assertEqual
+    "multiple confirmation lines -> last occurrence wins"
+    (Just "nammayatri/prod/android/v3.5.1+413")
+    ( tagPushedFromLog $
+        T.unlines
+          [ ts <> "\10004 Annotated tag pushed: nammayatri/prod/android/v3.5.1+412",
+            ts <> "\10004 Annotated tag pushed: nammayatri/prod/android/v3.5.1+413"
+          ]
+    )
+  -- Provider selection rule sanity: exact code preferred, else highest.
+  assertEqual
+    "selectProviderBuildTag: exact SCC code preferred"
+    (Just "NammaYatriPartner-v3.1.0-245")
+    ( selectProviderBuildTag
+        "NammaYatriPartner-v3.1.0-"
+        (Just 245)
+        ["refs/tags/NammaYatriPartner-v3.1.0-244", "refs/tags/NammaYatriPartner-v3.1.0-245"]
+    )
+
 -- would be the oldest version — the bug this guards against.
 testSelectBuildTag :: IO ()
 testSelectBuildTag = do
@@ -2259,7 +2334,8 @@ testDispatchRunCandidates = do
   putStrLn "Own dispatch run match: actor + watermark, oldest-first"
   let bot = mkRun 0 "workflow_dispatch" 0
       withActor aid r = r {wrActorId = Just aid}
-      own mBot mWm = map wrId . ownDispatchCandidates mBot mWm now
+      own mBot mWm = map wrId . ownDispatchCandidates mBot mWm now Nothing
+      ownCeil mBot mWm ceil = map wrId . ownDispatchCandidates mBot mWm now (Just (at ceil))
   -- watermark: strictly-above only; oldest first
   assertEqual
     "above watermark kept, at/below dropped, oldest-first"
@@ -2293,6 +2369,40 @@ testDispatchRunCandidates = do
     "above watermark but created before receipt -> dropped"
     []
     (own Nothing (Just 100) [withActor 7 (bot {wrId = 101, wrCreatedAt = at (-3600)})])
+  -- successor ceiling (19 Aug cross-group hijack): a same-app group dispatched
+  -- minutes later lands INSIDE the plain +5min window and carries identical
+  -- matrix job names, so job verification cannot tell it apart. A run created
+  -- at/after the successor's receipt (minus the 30s skew allowance) is theirs.
+  -- 4-minute redispatch: our own run stays, the successor's is excluded.
+  assertEqual
+    "successor ceiling drops a later group's run, keeps ours"
+    [101]
+    ( ownCeil
+        Nothing
+        (Just 100)
+        240
+        [ withActor 7 (bot {wrId = 101, wrCreatedAt = at 5}) -- ours, at our receipt
+        , withActor 7 (bot {wrId = 102, wrCreatedAt = at 240}) -- successor's run
+        ]
+    )
+  -- the ceiling only ever tightens: a successor far beyond +5min cannot widen
+  -- the window past the fixed cap
+  assertEqual
+    "ceiling never widens the fixed +5min cap"
+    [101]
+    ( ownCeil
+        Nothing
+        (Just 100)
+        3600
+        [ withActor 7 (bot {wrId = 101, wrCreatedAt = at 5})
+        , withActor 7 (bot {wrId = 102, wrCreatedAt = at 400})
+        ]
+    )
+  -- no successor known -> unchanged +5min behaviour
+  assertEqual
+    "no ceiling keeps the plain window"
+    [101, 102]
+    (own Nothing (Just 100) [withActor 7 (bot {wrId = 101, wrCreatedAt = at 5}), withActor 7 (bot {wrId = 102, wrCreatedAt = at 240})])
 
   -- parseFirebaseRelease: fastlane firebase_app_distribution output, with the
   -- real log shape (timestamps + ANSI colour codes around the URLs)

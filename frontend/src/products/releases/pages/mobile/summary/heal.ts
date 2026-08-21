@@ -80,7 +80,8 @@ export interface TagConflict {
 }
 
 /** Latest UNRESOLVED tag conflict. A TAG_OBSERVED event after the conflict
- * means the retag landed and ConfirmTag adopted it — conflict cleared. */
+ * means the retag landed and ConfirmTag adopted it — conflict cleared.
+ */
 export function tagConflictOf(events: RolloutEvent[]): TagConflict | null {
   const sorted = [...events].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   let conflict: TagConflict | null = null;
@@ -88,12 +89,18 @@ export function tagConflictOf(events: RolloutEvent[]): TagConflict | null {
     if (ev.label === 'TAG_CONFLICT') {
       try {
         const d = JSON.parse(ev.data || '{}');
-        conflict = {
+        const parsed = {
           tag: String(d.tag ?? ''),
           tagCommit: String(d.tag_commit ?? ''),
           buildCommit: String(d.build_commit ?? ''),
           remediation: String(d.remediation ?? ''),
         };
+        // Every field drives the panel's text or its copy-paste command; a
+        // payload missing any of them is a different conflict shape. Leave
+        // prior state alone rather than rendering blanks.
+        if (parsed.tag && parsed.tagCommit && parsed.buildCommit && parsed.remediation) {
+          conflict = parsed;
+        }
       } catch {
         // unparseable payload — keep any prior conflict state
       }

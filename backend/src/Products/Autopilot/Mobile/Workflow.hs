@@ -44,10 +44,14 @@ module Products.Autopilot.Mobile.Workflow (
     reviewPollTimedOut,
     reviewPollDue,
     selectBuildTag,
+    selectProviderBuildTag,
     codeFromTag,
+    tagPushedFromLog,
     electDispatchLeader,
     dispatchGroupJobNames,
     findDispatchIdForRelease,
+    findDispatchGroupContexts,
+    externalRunIdForRelease,
     FirebaseReleaseInfo (..),
     parseFirebaseRelease,
 ) where
@@ -71,12 +75,13 @@ import Core.Workflow.Stage (Stage (..), StageM, StageOutcome (..), mkStage)
 import Core.Workflow.Types (WorkFlowError (..))
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as AK
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (digitToInt, isAlphaNum, isDigit)
 import Data.Int (Int32)
 import Data.List (nub, sortOn)
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe)
 import Text.Read (readMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
@@ -88,6 +93,8 @@ import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Database.PostgreSQL.Simple (Only (..), execute, query)
 import Products.Autopilot.Mobile.Github (
+    DispatchRunDetails (..),
+    cancelRun,
     Job (..),
     WorkflowDispatchReq (..),
     WorkflowRun (..),
@@ -104,6 +111,8 @@ import Products.Autopilot.Mobile.Github (
 import Products.Autopilot.Mobile.Github.Auth (BotIdentity (..), GhAppCreds (..), getBotIdentity, getInstallationToken, loadGhCreds)
 import Products.Autopilot.Mobile.Queries.Tracker (
     appCatalogForRow,
+    markTagLogScanned,
+    dispatchCeilingFor,
     externalRunIdsClaimedElsewhere,
     findSiblingsByDispatchId,
     gitOwner,
@@ -117,7 +126,7 @@ import Products.Autopilot.Mobile.Queries.Tracker (
     setPhase,
     setReleaseVersionCode,
  )
-import Products.Autopilot.Queries.ReleaseTracker (checkpointReleaseTrackerChecked)
+import Products.Autopilot.Queries.ReleaseTracker (claimDispatchReceipt)
 import Products.Autopilot.Mobile.Heal (
     JobFailureShape (..),
     RunIdentity (..),
@@ -548,14 +557,15 @@ versionLt a b = comps a < comps b
 * Looks up the row's @dispatch_id@. If NULL, abort: the create endpoint
   should always populate it before the workflow starts.
 
-This stage used to take a Postgres session advisory lock keyed on the
+This stage used to take a Postgres SESSION advisory lock keyed on the
 dispatch id. That lock was removed: session locks are NOT released when a
 pooled connection is returned to the pool, so the "mutex" lingered on an
 idle connection and stalled retries for minutes (until the pool happened to
 hand the same connection back), while the actual POST ran on a different
 connection anyway. Dispatch uniqueness is owned by the leader gate in
-stage 3 plus the durable pre-POST receipt ('dispatchFreshRun') and
-adopt-before-dispatch recovery — not by a lock.
+stage 3 plus the atomic pre-POST receipt claim ('claimDispatchReceipt' — a
+TRANSACTION-scoped advisory lock that cannot leak into the pool) and
+adopt-before-dispatch recovery.
 -}
 execGroupForDispatch :: forall m. (StageM ReleaseState m) => m StageOutcome
 execGroupForDispatch = do
@@ -639,11 +649,31 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
     contexts <- findDispatchGroupContexts dispatchId
     let siblingStates = [st | (_, mCtx) <- contexts, Just st <- [parseMobileTargetState mCtx]]
         inheritedBatch = listToMaybe [b | st <- siblingStates, Just b <- [mbBatchDispatch st]]
+        inheritedVersions = listToMaybe [v | st <- siblingStates, Just v <- [mbVersionsPassed st]]
+    -- Abort-propagation gate: while a sibling is ABORTING **and the group has a
+    -- run in flight** (a bound run id, or a receipt proving a POST was made),
+    -- the group is being torn down — a not-yet-flipped row must neither adopt
+    -- nor dispatch. That teardown window is where a dead group hijacked a
+    -- same-app successor's run (19 Aug); 'claimDispatchReceipt' re-checks
+    -- ABORTING in-lock, this parks before the GitHub calls.
+    --
+    -- The in-flight condition matters: an ABORTING row that never dispatched
+    -- has no cancel target, so 'resolveForCancel' returns Nothing on every
+    -- sweep and it only settles at the 30-min deadline. Parking on that would
+    -- freeze the group's healthy siblings for half an hour over a row that
+    -- provably never built anything. Settled aborts never park either —
+    -- partial aborts leave the living siblings to continue.
+    let groupAborting = any (\(r, _) -> status r == ABORTING) siblings
+        groupHasRunInFlight =
+            maybe False (not . T.null) mStamp
+                || any (isJust . mbBuildStartedAt) siblingStates
+    when (groupAborting && groupHasRunInFlight) $
+        retry "dispatch group abort in progress (run teardown) — parking (no adopt, no dispatch)"
     case mStamp of
         Just runId
             | not (T.null runId) ->
                 -- The group's run already exists — adopt, never dispatch a second.
-                adoptGroupRun rt leaderId runId inheritedBatch
+                adoptGroupRun rt leaderId runId inheritedBatch inheritedVersions
         _
             | releaseId rt /= leaderId -> do
                 logInfoIO $
@@ -661,7 +691,11 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                 -- was ATTEMPTED — by a dead ex-leader, or by ourselves on a tick whose
                 -- POST outcome was lost (timeout / crash / restart). Adopt the run that
                 -- receipt points at; dispatch fresh only when the receipt is old enough
-                -- that a created run would provably be visible by now.
+                -- that a created run would provably be visible by now. This read is a
+                -- RACY first look (two replicas can both see the same picture within
+                -- the same tick) — the authoritative re-check happens inside
+                -- 'claimDispatchReceipt', which re-reads the group's receipts under a
+                -- pg advisory xact lock before any POST is allowed.
                 --
                 -- Receipts are picked as a PAIR (anchor + its own watermark) from the
                 -- LATEST attempt: after leader succession a dead ex-leader's stale
@@ -674,28 +708,44 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                         , Just t <- [mbBuildStartedAt st]
                         ]
                 case listToMaybe (sortOn (Down . fst) receipts) of
-                    Nothing -> dispatchFreshRun rt ac creds target living
+                    Nothing -> dispatchFreshRun rt ac creds target living dispatchId Nothing
                     Just (anchor, mWatermark) -> do
                         res <- listWorkflowRuns creds (gitOwner ac) (gitRepo ac) (acWorkflowPath ac)
                         runs <- case res of
                             Right xs -> pure xs
                             Left e -> retry ("listWorkflowRuns failed while checking for an orphaned dispatch: " <> e)
                         mBot <- getBotIdentity creds
+                        mCeiling <- dispatchCeilingFor ac anchor
                         cands <-
                             unclaimedCandidates
                                 dispatchId
-                                (ownDispatchCandidates (biUserId <$> mBot) mWatermark anchor runs)
+                                (ownDispatchCandidates (biUserId <$> mBot) mWatermark anchor mCeiling runs)
                         let stampAndAdopt r = do
                                 let runIdT = T.pack (show (wrId r))
-                                setExternalRunIdForDispatch dispatchId runIdT (wrHeadSha r)
-                                logEvent (releaseId rt) "GH_RUN_RESOLVED" $
-                                    object
-                                        [ "run_id" .= runIdT
-                                        , "head_sha" .= wrHeadSha r
-                                        , "html_url" .= wrHtmlUrl r
-                                        , "source" .= ("orphan_adopt" :: Text)
-                                        ]
-                                adoptGroupRun rt leaderId runIdT inheritedBatch
+                                -- First-writer-wins bind: another pod may have
+                                -- bound a different run while we verified this
+                                -- one. Adopt whatever the group ended up on —
+                                -- never fight over the binding.
+                                boundId <- setExternalRunIdForDispatch dispatchId runIdT (wrHeadSha r)
+                                if boundId /= runIdT
+                                    then do
+                                        logInfoIO $
+                                            "[DispatchWorkflow] "
+                                                <> releaseId rt
+                                                <> " orphan-adopt lost the bind to run "
+                                                <> boundId
+                                                <> " — adopting it instead of "
+                                                <> runIdT
+                                        adoptGroupRun rt leaderId boundId inheritedBatch inheritedVersions
+                                    else do
+                                        logEvent (releaseId rt) "GH_RUN_RESOLVED" $
+                                            object
+                                                [ "run_id" .= runIdT
+                                                , "head_sha" .= wrHeadSha r
+                                                , "html_url" .= wrHtmlUrl r
+                                                , "source" .= ("orphan_adopt" :: Text)
+                                                ]
+                                        adoptGroupRun rt leaderId runIdT inheritedBatch inheritedVersions
                         case cands of
                             [] -> do
                                 now <- liftIO getCurrentTime
@@ -711,7 +761,7 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                                             "[DispatchWorkflow] "
                                                 <> releaseId rt
                                                 <> " dispatch receipt but no run appeared within grace — dispatching fresh"
-                                        dispatchFreshRun rt ac creds target living
+                                        dispatchFreshRun rt ac creds target living dispatchId (Just anchor)
                             candRuns -> do
                                 -- Adopt ONLY a run proven to contain one of the GROUP's
                                 -- matrix jobs (oldest first — the run created right after
@@ -759,7 +809,7 @@ execDispatchWorkflow = mobileStage "DispatchWorkflow" $ do
                                                 "[DispatchWorkflow] "
                                                     <> releaseId rt
                                                     <> " candidates all settled without a group job (foreign) — dispatching fresh"
-                                            dispatchFreshRun rt ac creds target living
+                                            dispatchFreshRun rt ac creds target living dispatchId (Just anchor)
                                     Nothing -> do
                                         forM_ (listToMaybe candRuns) (noteCandidateRun dispatchId target)
                                         logInfoIO $
@@ -824,8 +874,8 @@ and dispatch progress without touching GitHub. Backfills @mbBuildStartedAt@
 (the ConfirmTag wall-clock anchor) for adopters that never dispatched, and
 inherits the dispatcher's batch flag so ConfirmTag matches the tag the same way.
 -}
-adoptGroupRun :: ReleaseTracker -> Text -> Text -> Maybe Bool -> StateFlow StageOutcome
-adoptGroupRun rt leaderId runId mBatch = do
+adoptGroupRun :: ReleaseTracker -> Text -> Text -> Maybe Bool -> Maybe Bool -> StateFlow StageOutcome
+adoptGroupRun rt leaderId runId mBatch mVersions = do
     now <- liftIO getCurrentTime
     modify $ \s ->
         s
@@ -840,6 +890,9 @@ adoptGroupRun rt leaderId runId mBatch = do
                                 , mbBatchDispatch = case mBatch of
                                     Just b -> Just b
                                     Nothing -> mbBatchDispatch mt
+                                , mbVersionsPassed = case mVersions of
+                                    Just v -> Just v
+                                    Nothing -> mbVersionsPassed mt
                                 }
                         )
             }
@@ -860,8 +913,13 @@ dispatchFreshRun ::
     GhAppCreds ->
     MobileBuildTargetState ->
     [(ReleaseTracker, AppCatalog)] ->
+    -- | dispatch_id — key of the cross-replica receipt claim
+    Text ->
+    -- | latest sibling receipt the caller's decision was based on
+    -- (Nothing = decided off "no receipt at all")
+    Maybe UTCTime ->
     StateFlow StageOutcome
-dispatchFreshRun rt ac creds target living = do
+dispatchFreshRun rt ac creds target living dispatchId mObservedAnchor = do
     let
         -- selected_apps is the comma-separated list of catalyst app NAMES
         -- (e.g. "NammaYatri,KeralaSavaari"), not surfaces. The workflow
@@ -899,6 +957,37 @@ dispatchFreshRun rt ac creds target living = do
                     <> e
             pure Nothing
     dispatchedAt <- liftIO getCurrentTime
+    -- ── Per-app `versions` input (consumer prod only) ───────────────
+    -- {appName: {version_name, version_code}} ({version_number} on iOS); the
+    -- workflow's Set-Matrix merges it into each app's matrix entry, so every
+    -- app in a batched run builds ITS OWN resolved identity instead of
+    -- auto-detecting from the store. Names from each sibling's tracker row,
+    -- codes from its persisted build context. Provider/debug workflows don't
+    -- declare the input, and GitHub 422s a POST carrying an undeclared input
+    -- (validated against the workflow AT THE DISPATCHED REF — a branch cut
+    -- before the input existed fails dispatch until rebased).
+    versionsMap <-
+        if acSurface ac == "driver" || isDebugBuildType (mbcBuildType (mbContext target))
+            then pure KM.empty
+            else do
+                ctxs <- findDispatchGroupContexts dispatchId
+                let codePairs =
+                        [ (cid, mbcVersionCode (mbContext st))
+                        | (cid, mCtx) <- ctxs
+                        , Just st <- [parseMobileTargetState mCtx]
+                        ]
+                    entry :: (ReleaseTracker, AppCatalog) -> Maybe (KM.Key, Aeson.Value)
+                    entry (r, a)
+                        | T.null (newVersion r) = Nothing -- unresolved (API edge): auto-detect
+                        | acPlatform a == "ios" =
+                            Just (AK.fromText (acName a), object ["version_number" .= newVersion r])
+                        | otherwise =
+                            let codeField =
+                                    [ "version_code" .= T.pack (show c)
+                                    | Just (Just c) <- [lookup (releaseId r) codePairs]
+                                    ]
+                             in Just (AK.fromText (acName a), object (("version_name" .= newVersion r) : codeField))
+                pure (KM.fromList (mapMaybe entry living))
     -- Build the workflow_dispatch inputs map. Two different shapes — the
     -- Android workflow declares `version_name` + `version_code` (two fields),
     -- the iOS workflow declares `version_number` (one field, semver string;
@@ -909,13 +998,18 @@ dispatchFreshRun rt ac creds target living = do
     let isDebug = isDebugBuildType (mbcBuildType (mbContext target))
         changeLogVal = mbcChangeLog (mbContext target)
         isProvider = acSurface ac == "driver"
+        versionsSent = not (KM.null versionsMap)
+        versionsInput =
+            [ ("versions", Aeson.String (TE.decodeUtf8 (LBS.toStrict (Aeson.encode (Aeson.Object versionsMap)))))
+            | versionsSent
+            ]
         -- Batched (multi-app) consumer run: a run-level version input would
-        -- force the LEADER's version onto every app, so send NONE — each matrix
-        -- job auto-detects its own next version from the store, and ConfirmTag
-        -- adopts the code from the tag the build pushed. Provider cohorts batch
-        -- only when versions agree (grouped at dispatch), so the provider branch
-        -- below still sends the cohort's shared version_name; for them isBatch
-        -- only switches ConfirmTag to tag-truth code adoption.
+        -- force the LEADER's version onto every app, so send NONE at run level
+        -- — each app's identity travels in the `versions` map instead (its
+        -- matrix entry wins over run-level inputs in the workflow). Provider
+        -- cohorts batch only when versions agree (grouped at dispatch), so the
+        -- provider branch below still sends the cohort's shared version_name;
+        -- for them isBatch only switches ConfirmTag to tag-truth code adoption.
         isBatch = length living > 1
         -- Debug builds skip store version resolution, so newVersion is blank — but
         -- the provider workflow REQUIRES a non-empty version_name. Use a date-based
@@ -965,6 +1059,7 @@ dispatchFreshRun rt ac creds target living = do
                         , ("change_log", Aeson.String changeLogVal)
                         ]
                             <> [("version_number", Aeson.String versionName) | not isBatch]
+                            <> versionsInput
                 _ ->
                     KM.fromList $
                         [ ("selected_apps", Aeson.String selectedApps)
@@ -977,6 +1072,7 @@ dispatchFreshRun rt ac creds target living = do
                                         , ("version_code", Aeson.String (T.pack (show versionCode)))
                                         ]
                                )
+                            <> versionsInput
         ref = fromMaybe "main" (sourceRef rt)
         body =
             WorkflowDispatchReq
@@ -1005,17 +1101,23 @@ dispatchFreshRun rt ac creds target living = do
                                   -- ConfirmTag needs it even when the POST outcome
                                   -- was lost and the run was adopted later.
                                   mbBatchDispatch = Just isBatch
+                                , mbVersionsPassed = Just versionsSent
                                 }
                         )
             }
     sReceipt <- gets id
-    receiptLanded <- checkpointReleaseTrackerChecked (releaseTracker sReceipt) (targetState sReceipt)
-    -- The checkpoint is status-guarded: a row flipped to ABORTING/PAUSED
-    -- mid-tick filters the write. No receipt ⇒ no POST — otherwise the run
-    -- would exist with no record anywhere and the abort sweep could never
-    -- find it to cancel. The owning flow (abort sweep / un-pause) takes over.
+    receiptLanded <- claimDispatchReceipt dispatchId mObservedAnchor (releaseTracker sReceipt) (targetState sReceipt)
+    -- The claim is atomic across replicas (advisory-locked receipt CAS): it
+    -- fails when a concurrent dispatcher on another pod just wrote a fresher
+    -- receipt, when the group was already bound to a run (external_run_id),
+    -- when ANY sibling is ABORTING (re-checked in-lock — the stage-entry gate
+    -- is stale by several GitHub calls at this point), or when this row
+    -- flipped to ABORTING/PAUSED mid-tick. Either way: no claim ⇒ no POST —
+    -- otherwise a second GH run would exist with no record anywhere. The
+    -- retry's next tick sees the winner's receipt / bound run and adopts it
+    -- (or the abort/un-pause flow takes over).
     when (not receiptLanded) $
-        retry "dispatch receipt not persisted (row aborted/paused mid-tick) — skipping the POST"
+        retry "dispatch receipt claim lost (concurrent dispatcher, run already bound, or group aborting) — skipping the POST"
     logEvent (releaseId rt) "GH_DISPATCH_ATTEMPTED" $
         object
             [ "workflow_path" .= wfPath
@@ -1031,7 +1133,7 @@ dispatchFreshRun rt ac creds target living = do
             wfPath
             body
     case res of
-        Right () -> do
+        Right mDetails -> do
             logInfoIO $
                 "[DispatchWorkflow] "
                     <> releaseId rt
@@ -1052,6 +1154,7 @@ dispatchFreshRun rt ac creds target living = do
                                         { mbWfStatus = bumpStatus (mbWfStatus mt) MBDispatched
                                         , mbBuildStartedAt = Just dispatchedAt
                                         , mbBatchDispatch = Just isBatch
+                                        , mbVersionsPassed = Just versionsSent
                                         }
                                 )
                     }
@@ -1063,7 +1166,65 @@ dispatchFreshRun rt ac creds target living = do
                     , "version_name" .= versionName
                     , "version_code" .= versionCode
                     , "batch" .= isBatch
+                    , "versions_passed" .= versionsSent
                     ]
+            -- ── Inline bind (return_run_details) ────────────────────────
+            -- GitHub told us OUR run's id in the dispatch response — bind it
+            -- now: no listing, no candidate matching, nothing to mis-adopt.
+            -- head_sha isn't in the response, so one exact GET-by-id fetches
+            -- it; if that GET fails (or the 204 legacy path returned no
+            -- details) we bind nothing and ResolveRunId hunts as before —
+            -- one binding path for the column + sha, never a partial stamp.
+            forM_ mDetails $ \d -> do
+                let runIdT = T.pack (show (drdRunId d))
+                eRun <- getWorkflowRun creds (gitOwner ac) (gitRepo ac) runIdT
+                case eRun of
+                    Right run -> do
+                        boundId <- setExternalRunIdForDispatch dispatchId runIdT (wrHeadSha run)
+                        modify $ \s ->
+                            s
+                                { targetState =
+                                    Just $
+                                        MobileBuildState
+                                            (applyMobileTarget s $ \mt -> mt{mbExternalRunId = Just boundId})
+                                }
+                        -- Losing the bind means a peer bound a different run
+                        -- between our claim and this stamp, so the run we just
+                        -- POSTed is a duplicate the group will never reference:
+                        -- no cancel tier could ever find it, and left alone it
+                        -- builds for hours, pushes our tag and uploads a second
+                        -- artifact of the same identity. CANCEL it — ownership
+                        -- is not inferred here, GitHub named this run id in our
+                        -- own dispatch response. A failed cancel still leaves
+                        -- the group on ONE binding; the event carries the run
+                        -- so an operator can finish the job by hand.
+                        if boundId /= runIdT
+                            then do
+                                eCancel <- cancelRun creds (gitOwner ac) (gitRepo ac) runIdT
+                                logEvent (releaseId rt) "STATUS_UPDATED" $
+                                    object
+                                        [ "reason" .= ("dispatched run is a duplicate — the group was bound to another run first" :: Text)
+                                        , "orphan_run_id" .= runIdT
+                                        , "orphan_html_url" .= fromMaybe (wrHtmlUrl run) (drdHtmlUrl d)
+                                        , "bound_run_id" .= boundId
+                                        , "orphan_cancelled" .= either (const False) (const True) eCancel
+                                        , "cancel_error" .= either Just (const Nothing) eCancel
+                                        ]
+                            else logEvent (releaseId rt) "GH_RUN_RESOLVED" $
+                                object
+                                    [ "run_id" .= runIdT
+                                    , "head_sha" .= wrHeadSha run
+                                    , "html_url" .= fromMaybe (wrHtmlUrl run) (drdHtmlUrl d)
+                                    , "source" .= ("dispatch_response" :: Text)
+                                    ]
+                    Left e ->
+                        logInfoIO $
+                            "[DispatchWorkflow] "
+                                <> releaseId rt
+                                <> " run-by-id fetch failed after dispatch (ResolveRunId will bind run "
+                                <> runIdT
+                                <> "): "
+                                <> e
             pure StageSuccess
         -- A 4xx from GitHub means the request itself is rejected — unknown/extra
         -- inputs (422, e.g. the dispatched ref's workflow declares a different input
@@ -1095,8 +1256,12 @@ isPermanentDispatchError e =
 {- | Stage 4: Resolve @external_run_id@ by polling GH for the run our
 dispatch created.
 
-GitHub's dispatch POST returns 204 with no run id, and the @\/runs@ list
-omits @inputs@, so the run is identified by evidence instead:
+FALLBACK path: since @return_run_details@ (GitHub changelog 2026-02-19)
+the dispatch response carries our run id and 'dispatchFreshRun' binds it
+inline — this stage then skips on its @hasExternalRunId@ guard. It still
+runs when the dispatch response was lost (timeout\/crash), parsed as a
+legacy 204, or the post-dispatch GET-by-id failed. In those cases the
+@\/runs@ list omits @inputs@, so the run is identified by evidence:
 
 1. Fetch the @\/runs@ list (event=workflow_dispatch).
 2. Keep runs authored by OUR App's bot account ('BotIdentity') whose id is
@@ -1127,6 +1292,15 @@ execResolveRunId = do
             dispatchId <- case mDid of
                 Just d -> pure d
                 Nothing -> abort "dispatch_id missing at ResolveRunId"
+            -- Same abort-propagation gate as DispatchWorkflow: never bind a run
+            -- while the group's run is being torn down (that teardown window is
+            -- where a dying row adopted a successor's run). Reaching this stage
+            -- means a POST was made, so the in-flight test is the row's own
+            -- receipt — no extra query. Parked before incrementResolveAttempts
+            -- so a park never burns the bounded retry budget.
+            siblingsNow <- findSiblingsByDispatchId dispatchId
+            when (any (\(r, _) -> status r == ABORTING) siblingsNow && isJust (mbBuildStartedAt target)) $
+                retry "dispatch group abort in progress (run teardown) — parking (no bind)"
             attempts <- incrementResolveAttempts (releaseId rt)
             let wfPath = acWorkflowPath ac
             res <-
@@ -1142,9 +1316,10 @@ execResolveRunId = do
             now <- liftIO getCurrentTime
             let dispatchedAt = fromMaybe now (mbBuildStartedAt target)
                 mWatermark = mbDispatchWatermark target
+            mCeiling <- dispatchCeilingFor ac dispatchedAt
             candidates <-
                 unclaimedCandidates dispatchId $
-                    ownDispatchCandidates (biUserId <$> mBot) mWatermark dispatchedAt allRuns
+                    ownDispatchCandidates (biUserId <$> mBot) mWatermark dispatchedAt mCeiling allRuns
             -- Bounded retry, two tiers. No candidate at all after ~10 ticks =
             -- the dispatch never materialised (today's rule). Candidates present
             -- but not yet verified NEVER time out while any of them is still
@@ -1225,9 +1400,12 @@ execResolveRunId = do
                         candidates
             case mBound of
                 Just r -> do
-                    let runIdT = T.pack (show (wrId r))
+                    let verifiedId = T.pack (show (wrId r))
                         headSha = wrHeadSha r
-                    setExternalRunIdForDispatch dispatchId runIdT headSha
+                    -- First-writer-wins bind: a peer pod (inline bind or its own
+                    -- resolve) may have bound a different run while we verified
+                    -- this one. Take the group's binding, never overwrite it.
+                    runIdT <- setExternalRunIdForDispatch dispatchId verifiedId headSha
                     modify $ \s ->
                         s
                             { targetState =
@@ -1247,6 +1425,7 @@ execResolveRunId = do
                             , "html_url" .= wrHtmlUrl r
                             , "created_at" .= wrCreatedAt r
                             , "candidates" .= length candidates
+                            , "verified_run_id" .= verifiedId
                             ]
                     logInfoIO $
                         "[ResolveRunId] "
@@ -1329,25 +1508,35 @@ execPollMatrixJobs = mobileStage "PollMatrixJobs" $ do
                         , "detail" .= ("matrix expansion failed before our job started" :: Text)
                         ]
                 abort "matrix job never appeared; workflow run failed before matrix expansion"
-            -- Run finished GREEN without our job: selected_apps is only a
-            -- request — the workflow's matrix step silently drops apps it
-            -- doesn't know for this flavor, and the siblings' jobs all
-            -- succeeded. Waiting longer can't conjure the job; fail with the
-            -- real cause. The >1 jobs floor skips the instant between the
-            -- setup job completing and its matrix jobs being listed.
+            -- Our job is absent and nothing is in flight. Job-absence is only
+            -- trustworthy when the RUN itself is settled on attempt 1: the jobs
+            -- listing shows only the LATEST attempt (a "re-run failed jobs"
+            -- hides our attempt-1 green job), and a partial mid-run listing
+            -- (setup job done, matrix not yet listed) must keep waiting — so
+            -- confirm against the run record, never from the job list alone.
             --
-            -- Job-absence is only trustworthy when the RUN itself is settled
-            -- on attempt 1: the jobs listing shows only the LATEST attempt
-            -- (a "re-run failed jobs" hides our attempt-1 green job), and a
-            -- partial mid-run listing must keep waiting — so confirm against
-            -- the run record before concluding, never from the job list alone.
-            | not (null jobs) && not anyInFlight && not anyFailed && length jobs > 1 -> do
+            -- Three settled shapes end here, and the run's own conclusion tells
+            -- them apart:
+            --   * run GREEN without our job — selected_apps is only a request;
+            --     the matrix step silently drops apps it doesn't know for this
+            --     flavor. Fail with the real cause.
+            --   * run DEAD with zero jobs (startup_failure / cancelled while
+            --     queued) or with only its setup job — nothing ever built.
+            -- The dead shapes reach this stage ONLY since the dispatch-response
+            -- inline bind: it skips ResolveRunId, whose lone-dead-candidate rule
+            -- used to catch them. Without this branch such a row polls forever.
+            | not anyInFlight && not anyFailed -> do
                 runE <- getWorkflowRun creds (gitOwner ac) (gitRepo ac) runId
-                let settledAttempt1 = case runE of
-                        Right r -> wrStatus r == "completed" && maybe True (<= 1) (wrRunAttempt r)
-                        Left _ -> False
-                if not settledAttempt1
-                    then do
+                let mRun = either (const Nothing) Just runE
+                    settledAttempt1 = case mRun of
+                        Just r -> wrStatus r == "completed" && maybe True (<= 1) (wrRunAttempt r)
+                        Nothing -> False
+                    mConcl = mRun >>= wrConclusion
+                    deadConcl = case mConcl of
+                        Just c | c `elem` ["cancelled", "failure", "startup_failure", "timed_out"] -> Just c
+                        _ -> Nothing
+                case (settledAttempt1, deadConcl) of
+                    (False, _) -> do
                         logInfoIO $
                             "[PollMatrixJobs] "
                                 <> releaseId rt
@@ -1355,7 +1544,25 @@ execPollMatrixJobs = mobileStage "PollMatrixJobs" $ do
                                 <> jobName
                                 <> " missing but run not settled on attempt 1 — waiting"
                         pure StageWaiting
-                    else do
+                    (True, Just concl) -> do
+                        logInfoIO $
+                            "[PollMatrixJobs] "
+                                <> releaseId rt
+                                <> " run ended '"
+                                <> concl
+                                <> "' before job "
+                                <> jobName
+                                <> " started; aborting"
+                        logEvent (releaseId rt) "MATRIX_JOB_UPDATED" $
+                            object
+                                [ "job_name" .= jobName
+                                , "status" .= ("missing" :: Text)
+                                , "conclusion" .= ("run_" <> concl :: Text)
+                                , "html_url" .= (wrHtmlUrl <$> mRun)
+                                , "detail" .= ("the GitHub run ended '" <> concl <> "' before this app's job started — nothing was built" :: Text)
+                                ]
+                        abort ("GitHub run ended '" <> concl <> "' before matrix job " <> jobName <> " started")
+                    (True, Nothing) -> do
                         logInfoIO $
                             "[PollMatrixJobs] "
                                 <> releaseId rt
@@ -1660,6 +1867,81 @@ codeFromTag isProvider verPrefix prefix version tag =
                 then Just (T.foldl' (\acc c -> acc * 10 + fromIntegral (digitToInt c)) (0 :: Int32) d)
                 else Nothing
 
+{- | Pure: the tag a build's job log says it pushed. Recognises the tag
+steps' EXISTING confirmation lines — no workflow changes needed:
+
+* @Annotated tag pushed: \<tag\>@ — consumer workflows, post-push.
+* @Successfully created and pushed tag: \<tag\>@ — provider workflows, post-push.
+* @Tag \<tag\> already exists, skipping@ — provider same-identity rebuild:
+  the push is skipped but the tag is still this build's identity (the
+  provenance gate judges whether its commit is right).
+
+Job logs also contain the script SOURCE dump, where these lines carry the
+un-expanded @$TAG_NAME@ — candidates are restricted to a plausible tag
+charset and must contain a scheme separator (@/@ or @-v@), which rejects
+those artifacts. The LAST candidate wins (execution output follows the dump).
+-}
+tagPushedFromLog :: Text -> Maybe Text
+tagPushedFromLog logTxt =
+    listToMaybe (reverse (concatMap candidates (T.lines logTxt)))
+  where
+    prefixMarkers = ["Annotated tag pushed: ", "Successfully created and pushed tag: "]
+    existsMarker = " already exists, skipping"
+    candidates ln =
+        [ tag
+        | m <- prefixMarkers
+        , let (_, rest) = T.breakOn m ln
+        , m `T.isPrefixOf` rest
+        , let tag = T.takeWhile plausibleTagChar (T.stripStart (T.drop (T.length m) rest))
+        , plausibleTag tag
+        ]
+            <> [ tag
+               | existsMarker `T.isInfixOf` ln
+               , let (pre, _) = T.breakOn existsMarker ln
+               , let tag = T.takeWhileEnd plausibleTagChar pre
+               , plausibleTag tag
+               ]
+    plausibleTagChar c = isAlphaNum c || c `elem` ("./+-_" :: String)
+    -- Both tag schemes carry a separator ('/' consumer, "-v" provider);
+    -- bare variable names from the script dump (e.g. "TAG_NAME") have neither.
+    plausibleTag t = not (T.null t) && ("/" `T.isInfixOf` t || "-v" `T.isInfixOf` t)
+
+{- | Outcome of reading the build's own matrix-job log for the tag it pushed.
+'LogTagAbsent' is a SETTLED answer — ConfirmTag only runs once the job has
+completed, so its log is final and re-reading it can never yield a tag —
+while 'LogUnavailable' is a transient miss worth retrying next tick.
+-}
+data JobLogTag
+    = LogTagFound Text
+    | LogTagAbsent
+    | LogUnavailable
+
+{- | Best-effort: the tag THIS build pushed, read from its own matrix job's
+log. Strongest attribution available — bound run id → own matrix job → its
+log — so two same-app runs pushing same-version tags can never cross-adopt.
+A run unbound, job absent, or fetch/parse failure yields 'LogUnavailable' and
+the caller falls back to the repo-tags listing for this tick. The caller
+validates any returned tag against the row's pinned identity — the log line is
+a pointer, never a trust root.
+-}
+tagFromJobLog :: (MonadFlow m) => GhAppCreds -> AppCatalog -> MobileBuildTargetState -> m JobLogTag
+tagFromJobLog creds ac target =
+    fmap (either (const LogUnavailable) id) . MC.try @_ @SomeException $
+        case mbExternalRunId target of
+            Nothing -> pure LogUnavailable
+            Just runId -> do
+                eJobs <- listJobs creds (gitOwner ac) (gitRepo ac) runId
+                case eJobs of
+                    Left _ -> pure LogUnavailable
+                    Right jobs ->
+                        case filter (\j -> jName j == mbcMatrixJobName (mbContext target)) jobs of
+                            (j : _) -> do
+                                eLog <- fetchJobLog creds (gitOwner ac) (gitRepo ac) (jId j)
+                                pure $ case eLog of
+                                    Left _ -> LogUnavailable
+                                    Right body -> maybe LogTagAbsent LogTagFound (tagPushedFromLog body)
+                            [] -> pure LogUnavailable
+
 {- | Pure predicate for the ConfirmTag wall-clock guard. Has the stage waited
 past @timeoutMin@ for the build's tag? Anchors on build-completion, falling back
 to build-start. If neither timestamp is set we can't measure elapsed time, so we
@@ -1757,12 +2039,16 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                 platform = acPlatform ac
                 version = newVersion rt
                 mCode = mbcVersionCode (mbContext target)
-                -- Batched dispatch sent NO version inputs (each app auto-versions),
-                -- so the code SCC pre-resolved was never given to the workflow —
-                -- match like iOS (any +<digits> tag of this version, highest wins)
-                -- and read the real code back off the pushed tag.
-                isBatch = mbBatchDispatch target == Just True
-                effCode = if isBatch then Nothing else mCode
+                -- Batched dispatch withOUT the per-app `versions` input (older
+                -- rows): the code SCC pre-resolved was never given to the
+                -- workflow — match like iOS (any +<digits> tag of this version,
+                -- highest wins) and read the real code back off the pushed tag.
+                -- With mbVersionsPassed the workflow built exactly OUR identity,
+                -- so exact-match even in a batch.
+                autoVersioned =
+                    mbBatchDispatch target == Just True
+                        && mbVersionsPassed target /= Just True
+                effCode = if autoVersioned then Nothing else mCode
                 prefix
                     | isProvider = acName ac <> "-v"
                     | otherwise = normalizeAppSegment (acName ac) <> "/prod/" <> platform <> "/v"
@@ -1770,13 +2056,105 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                 expectedTag
                     | isProvider = providerVerPrefix <> maybe "<code>" (T.pack . show) effCode
                     | otherwise = prefix <> version <> maybe "" (\c -> "+" <> T.pack (show c)) effCode
-            res <- listTags creds (gitOwner ac) (gitRepo ac) prefix
-            refs <- case res of
-                Right xs -> pure xs
-                Left e -> retry ("listTags failed: " <> e)
-            let mSelected
-                    | isProvider = selectProviderBuildTag providerVerPrefix effCode refs
-                    | otherwise = selectBuildTag prefix version effCode refs
+            -- ── Log-first tag discovery ─────────────────────────────
+            -- The build's own job log names the tag it pushed ("Annotated tag
+            -- pushed: <tag>") and the run id is bound to THIS row, so the tag
+            -- is attributed to this exact build — no cross-run inference (two
+            -- same-app runs pushing same-version tags are indistinguishable
+            -- in the repo listing). The log is a pointer, not a trust root:
+            -- the tag must match the row's pinned identity below and still
+            -- passes the provenance gate. Any miss falls back to the
+            -- repo-tags listing.
+            -- Read the log at most ONCE per row. ConfirmTag runs only after the
+            -- matrix job completed, so its log is FINAL: whatever it names (or
+            -- doesn't) can never change on a later read, while the stage
+            -- re-enters every poll until the tag appears or the 180-minute
+            -- timeout expires — each tick pulling tens of MB, on both pods.
+            -- Only 'LogUnavailable' (run unbound / job missing / fetch or parse
+            -- failure) is worth retrying; the caller marks every SETTLED
+            -- outcome below, once it knows whether the tag was usable.
+            alreadyScanned <- pure (mbTagLogScanned target == Just True)
+            logOutcome <-
+                if alreadyScanned
+                    then pure LogUnavailable
+                    else tagFromJobLog creds ac target
+            let mLogTag = case logOutcome of
+                    LogTagFound t -> Just t
+                    _ -> Nothing
+                -- Settled = the log was read in full. A tag that does not match
+                -- this row is as final as no tag at all: the row's identity
+                -- (prefix / version / effCode) is fixed, so it can never start
+                -- matching. That is exactly the row headed for tag_timeout —
+                -- the one that would otherwise re-download for three hours.
+                logSettled = case logOutcome of
+                    LogTagFound _ -> True
+                    LogTagAbsent -> True
+                    LogUnavailable -> False
+            let base = prefix <> version
+                -- selectBuildTag / selectProviderBuildTag's acceptance rule,
+                -- applied to the log's tag. Provider accepts any code of this
+                -- version: the workflow assigns the code itself, so the run's
+                -- own log outranks the code SCC pre-resolved.
+                logTagMatches t
+                    | isProvider =
+                        let sfx = T.drop (T.length providerVerPrefix) t
+                         in providerVerPrefix `T.isPrefixOf` t && not (T.null sfx) && T.all isDigit sfx
+                    | otherwise = case effCode of
+                        Just c -> t == base <> "+" <> T.pack (show c)
+                        Nothing ->
+                            t == base
+                                || ((base <> "+") `T.isPrefixOf` t && T.all isDigit (T.drop (T.length base + 1) t))
+            mSelected <- case mLogTag of
+                Just t
+                    | logTagMatches t -> do
+                        logInfoIO $
+                            "[ConfirmTag] " <> releaseId rt <> " tag read from own job log: " <> t
+                        pure (Just t)
+                    -- This row PINNED its identity via the `versions` input, yet
+                    -- the build's own log says it tagged something else — a real
+                    -- conflict (CI ignored the pin / workflow drift). Fail with
+                    -- the evidence instead of waiting out a tag_timeout.
+                    | mbVersionsPassed target == Just True -> do
+                        logEvent (releaseId rt) "TAG_CONFLICT" $
+                            object
+                                [ "log_tag" .= t
+                                , "expected" .= expectedTag
+                                , "source" .= ("job_log" :: Text)
+                                ]
+                        abort $
+                            "build's job log says it pushed "
+                                <> t
+                                <> " but this row pinned "
+                                <> expectedTag
+                                <> " via the versions input — check the workflow's version handling"
+                _ -> do
+                    -- Legacy auto-versioned row whose log tag names a different
+                    -- version: surface it — it explains the tag_timeout this row
+                    -- is otherwise headed for.
+                    forM_ mLogTag $ \t ->
+                        logInfoIO $
+                            "[ConfirmTag] "
+                                <> releaseId rt
+                                <> " job-log tag "
+                                <> t
+                                <> " does not match this row's identity ("
+                                <> expectedTag
+                                <> ") — falling back to repo tags"
+                    -- Reaching the fallback with a SETTLED log means that log
+                    -- holds nothing this row can ever use. Record it so the
+                    -- remaining ticks of the tag window skip the fetch — this
+                    -- branch, not the no-tag one, is where a row can idle for
+                    -- the full 180 minutes.
+                    when (logSettled && not alreadyScanned) $
+                        markTagLogScanned (releaseId rt)
+                    res <- listTags creds (gitOwner ac) (gitRepo ac) prefix
+                    refs <- case res of
+                        Right xs -> pure xs
+                        Left e -> retry ("listTags failed: " <> e)
+                    pure $
+                        if isProvider
+                            then selectProviderBuildTag providerVerPrefix effCode refs
+                            else selectBuildTag prefix version effCode refs
             case mSelected of
                 Nothing -> do
                     -- Tag not pushed yet. Wall-clock guard (mirrors
@@ -2212,10 +2590,12 @@ applyMobileTarget rs f =
                     , mbMatrixJobStatus = Nothing
                     , mbBuildStartedAt = Nothing
                     , mbBuildCompletedAt = Nothing
-                    , mbResolveAttempts = Nothing
+                    , mbTagLogScanned = Nothing
+                , mbResolveAttempts = Nothing
                     , mbReviewSubmittedAt = Nothing
                     , mbReviewLastPolledAt = Nothing
                     , mbBatchDispatch = Nothing
+                    , mbVersionsPassed = Nothing
                     , mbVerifyAttempts = Nothing
                     , mbDispatchWatermark = Nothing
                     , mbCandidateRunId = Nothing

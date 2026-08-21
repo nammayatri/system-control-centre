@@ -29,7 +29,7 @@ module Products.Autopilot.Mobile.Handlers.Groups (
     resendGroupChangelogH,
 ) where
 
-import Control.Monad (forM, unless, void)
+import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Catch (SomeException, catch, throwM)
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..))
@@ -54,15 +54,17 @@ import Products.Autopilot.Mobile.Queries.StoreStatus (listStoreStatus, productio
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
 import Products.Autopilot.Mobile.Provenance (resolveAnchor)
 import Products.Autopilot.Mobile.Queries.Tracker (heldMobileByApp, incomingMobileByApp)
--- Constructor only: the record accessors clash with ReleaseTracker's.
-import Products.Autopilot.Mobile.Types.Ota (OtaProvAnchor (OtaProvAnchor))
 import Products.Autopilot.Mobile.StoreSync (refreshStoreStatusOne)
-import Products.Autopilot.Mobile.Types (isDebugBuildType)
 import Products.Autopilot.Mobile.Types.Storage (AppCatalog, AppCatalogT (..), StoreStatus, StoreStatusT (..))
 import Products.Autopilot.Notifications (sendGroupChangelogSlackIfSettled)
 import Products.Autopilot.Queries.ReleaseTracker (GroupedTracker, TrackerWithTarget, findMobileGroupTrackersSince, findReleaseTrackersByGroupId, getChangelogSlackState)
 import Products.Autopilot.RuntimeConfig (getAndroidReviewRolloutFraction, getMobileBuildType, getStoreRefreshCooldownSeconds)
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.Set qualified as Set
+import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), isDebugBuildType)
 import Products.Autopilot.Types (ReleaseTracker (..))
+import Products.Autopilot.Types.Target (TargetState (..))
+import System.IO.Unsafe (unsafePerformIO)
 import Products.Autopilot.Types.Release (ReleaseStatus (..))
 import Data.Aeson (ToJSON (..), genericToJSON)
 import Shared.JSON (stripPrefixOptions)
@@ -201,39 +203,61 @@ listGroupsH _ap mSince = do
 -- Kicks the same detached, cooldown-gated store refresh the monitor uses for
 -- member apps whose cache is stale — the rollout numbers on the console come
 -- from store_status and nothing else reconciles them.
+-- | Groups whose baseline backfill is already running — one concurrent
+-- ledger scan per group, ever (rapid page reloads must not stack them).
+{-# NOINLINE anchorBackfillInFlight #-}
+anchorBackfillInFlight :: IORef (Set.Set Text)
+anchorBackfillInFlight = unsafePerformIO (newIORef Set.empty)
+
 groupDetailH :: AuthedPerson -> Text -> Flow GroupDetailResp
 groupDetailH _ap gid = do
     rows <- findReleaseTrackersByGroupId gid
     (label, members0) <- case rows of
         [] -> throwM $ NotFound ("release group not found: " <> gid)
         _ -> pure (listToMaybe (mapMaybe (\(_, l, _) -> l) rows), [p | (_, _, p) <- rows])
-    -- Lazy baseline backfill (the OTA page's anchor recovery, §11b): members
-    -- missing commit_sha resolve it from the tag ledger once — the column is
-    -- the cache — so the console's group commit isn't blank on fresh groups.
+    -- Lazy baseline backfill (the OTA page's anchor recovery, §11b) — ASYNC:
+    -- the ledger walk costs one GitHub call per annotated tag, so it must
+    -- never gate this response (the chip lands on the console's next poll,
+    -- the column is the cache). Debug members are skipped outright — their
+    -- tags never reach the ledger, so a lookup only burns the whole scan.
+    -- Single-flight per group so rapid reloads can't stack scans.
     catalog <- listAppCatalog
     let matchAc rt = find (\a -> acName a == appGroup rt && acSurface a == service rt && acPlatform a == env rt) catalog
-        anchorless = [(rt, ac) | (rt, _) <- members0, commitSha rt == Nothing, Just ac <- [matchAc rt]]
-    wroteAnchor <-
-        ( if null anchorless
-            then pure False
-            else do
-                mCreds <- (Just <$> loadGhCreds) `catch` \(_ :: SomeException) -> pure Nothing
-                results <- forM anchorless $ \(rt, ac) -> resolveAnchor mCreds rt ac
-                pure (or [True | OtaProvAnchor (Just _) _ _ <- results])
-        )
-            `catch` \(e :: SomeException) ->
-                False <$ logWarning ("[GROUPS] baseline backfill error (ignored): " <> T.pack (show e))
-    members1 <-
-        if wroteAnchor
-            then do
-                rows' <- findReleaseTrackersByGroupId gid
-                pure [p | (_, _, p) <- rows']
-            else pure members0
+        buildTypeOf mts = case mts of
+            Just (MobileBuildState s) -> mbcBuildType (mbContext s)
+            _ -> "release"
+        tagOf mts = case mts of
+            Just (MobileBuildState s) -> mbcTagPushed (mbContext s)
+            _ -> Nothing
+        anchorless =
+            [ (rt, ac)
+            | (rt, mts) <- members0
+            , commitSha rt == Nothing
+            , not (isDebugBuildType (buildTypeOf mts))
+            , -- The baseline is only provable AFTER the build ships: CI pushes
+              -- the tag at build end, and that tag IS the commit's address.
+              -- Pre-build members have nothing to find — skip until it lands.
+              maybe False (not . T.null) (tagOf mts)
+            , Just ac <- [matchAc rt]
+            ]
+    unless (null anchorless) $ do
+        claimed <- liftIO $ atomicModifyIORef' anchorBackfillInFlight $ \s ->
+            if gid `Set.member` s then (s, False) else (Set.insert gid s, True)
+        when claimed $
+            void $
+                forkFlow $ do
+                    ( do
+                        mCreds <- (Just <$> loadGhCreds) `catch` \(_ :: SomeException) -> pure Nothing
+                        forM_ anchorless $ \(rt, ac) -> void (resolveAnchor mCreds rt ac)
+                        )
+                        `catch` \(e :: SomeException) ->
+                            logWarning ("[GROUPS] baseline backfill error (ignored): " <> T.pack (show e))
+                    liftIO $ atomicModifyIORef' anchorBackfillInFlight (\s -> (Set.delete gid s, ()))
     enrich <- mkEnrich
-    let members = map enrich members1
+    let members = map enrich members0
         -- One branch snapshot dispatched together ⇒ one baseline; anything
         -- else is honestly "mixed" (never one sha pretending to cover all).
-        (groupSha, groupMixed) = case nub (mapMaybe (commitSha . fst) members1) of
+        (groupSha, groupMixed) = case nub (mapMaybe (commitSha . fst) members0) of
             [s] -> (Just s, False)
             [] -> (Nothing, False)
             _ -> (Nothing, True)
