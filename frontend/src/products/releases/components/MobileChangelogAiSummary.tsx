@@ -117,6 +117,7 @@ export function MobileChangelogAiSummary({
   combinedGroupId,
   defaultCollapsed = false,
   onSummary,
+  headless = false,
   topSlot,
 }: {
   app?: string;
@@ -140,7 +141,11 @@ export function MobileChangelogAiSummary({
   // changelog) up to the parent, so the create page can stash it for "send to
   // Slack". `short` is the AI synopsis — present only once ready; the create
   // page stores it on the release for the promote form's store-notes prefill.
-  onSummary?: (text: string, short?: string, status?: string) => void;
+  onSummary?: (text: string, short?: string, status?: string, model?: string, contentKey?: string) => void;
+  /** Render only the summary body — no title bar, badge or collapse control.
+   *  For hosts that already provide those (the group console's changelog card),
+   *  where the panel's own chrome would duplicate the section header. */
+  headless?: boolean;
   // Rendered inside the card, under the title bar — e.g. the create page's
   // "post to Slack" toggle, so the changelog and its destination read as one.
   topSlot?: React.ReactNode;
@@ -183,8 +188,9 @@ export function MobileChangelogAiSummary({
   // Slack" / persistence). status lets callers act only on the READY text —
   // this also fires with the deterministic body while still pending.
   useEffect(() => {
-    if (onSummary && d?.summaryLong) onSummary(d.summaryLong, d.summaryShort?.trim() || undefined, d.status);
-  }, [onSummary, d?.summaryLong, d?.summaryShort, d?.status]);
+    if (onSummary && d?.summaryLong)
+      onSummary(d.summaryLong, d.summaryShort?.trim() || undefined, d.status, d.model || undefined, d.contentKey || undefined);
+  }, [onSummary, d?.summaryLong, d?.summaryShort, d?.status, d?.model, d?.contentKey]);
 
   const onCopy = async () => {
     if (!copyText) return;
@@ -214,8 +220,13 @@ export function MobileChangelogAiSummary({
       permission="MB_AI_SUMMARIZE"
       appGroup={app && platform ? `${app}/${platform}` : undefined}
     >
-      <div className="mb-3 overflow-hidden rounded-md border border-violet-100 bg-violet-50/40">
-        <div className="flex items-center justify-between gap-2 px-3 py-2">
+      <div
+        className={cn(
+          'overflow-hidden',
+          headless ? '' : 'mb-3 rounded-md border border-violet-100 bg-violet-50/40',
+        )}
+      >
+        <div className={cn('flex items-center justify-between gap-2 px-3 py-2', headless && 'hidden')}>
           {/* The whole title bar is the collapse toggle (click anywhere to
               hide/show). It's a real <button> so Enter/Space + focus work, with
               aria-expanded/-controls. Refresh is a SEPARATE sibling below — we
@@ -284,14 +295,14 @@ export function MobileChangelogAiSummary({
             and the result is ready when re-opened. aria-hidden hides it from AT. */}
         <div
           id={panelId}
-          aria-hidden={collapsed}
+          aria-hidden={!headless && collapsed}
           className={cn(
             'grid transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none',
-            collapsed ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]',
+            !headless && collapsed ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]',
           )}
         >
           <div className="overflow-hidden">
-            <div className="space-y-2 px-3 pb-3">
+            <div className={cn('space-y-2', headless ? 'px-0 pb-0' : 'px-3 pb-3')}>
               {q.isLoading && !d && (
                 <div className="flex items-center gap-2 text-xs text-zinc-500">
                   <Loader2 size={12} className="animate-spin" /> Loading…

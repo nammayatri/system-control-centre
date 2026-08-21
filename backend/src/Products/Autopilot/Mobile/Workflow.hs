@@ -47,6 +47,7 @@ module Products.Autopilot.Mobile.Workflow (
     selectProviderBuildTag,
     codeFromTag,
     tagPushedFromLog,
+    droppableUnexpectedInputs,
     electDispatchLeader,
     dispatchGroupJobNames,
     findDispatchIdForRelease,
@@ -1125,13 +1126,47 @@ dispatchFreshRun rt ac creds target living dispatchId mObservedAnchor = do
             , "watermark" .= mWatermark
             , "dispatched_at" .= dispatchedAt
             ]
-    res <-
+    res0 <-
         dispatchWorkflow
             creds
             (gitOwner ac)
             (gitRepo ac)
             wfPath
             body
+    -- Optional-input fallback. The workflow file AT THE DISPATCHED REF owns the
+    -- input schema, so a ref cut before `versions` existed 422s the whole POST
+    -- ("Unexpected inputs provided"). GitHub rejects the REQUEST — no run is
+    -- created — so we can safely drop the optional keys and retry once: the
+    -- build runs with the workflow's own auto-detect instead of failing the
+    -- release. Only inputs whose absence changes nothing else are droppable;
+    -- any other unexpected input still aborts (a real schema mismatch).
+    (res, versionsLanded) <- case res0 of
+        Left e
+            | Just dropped <- droppableUnexpectedInputs e -> do
+                logEvent (releaseId rt) "DISPATCH_INPUT_FALLBACK" $
+                    object
+                        [ "dropped" .= dropped
+                        , "workflow_path" .= wfPath
+                        , "ref" .= ref
+                        , "detail" .= ("workflow at this ref predates the input — retried without it" :: Text)
+                        ]
+                logInfoIO $
+                    "[DispatchWorkflow] "
+                        <> releaseId rt
+                        <> " ref "
+                        <> ref
+                        <> " does not declare ["
+                        <> T.intercalate ", " dropped
+                        <> "] — retrying without it (apps auto-detect their versions)"
+                r <-
+                    dispatchWorkflow
+                        creds
+                        (gitOwner ac)
+                        (gitRepo ac)
+                        wfPath
+                        body{wdrInputs = foldr (KM.delete . AK.fromText) inputs dropped}
+                pure (r, False)
+        _ -> pure (res0, versionsSent)
     case res of
         Right mDetails -> do
             logInfoIO $
@@ -1154,7 +1189,7 @@ dispatchFreshRun rt ac creds target living dispatchId mObservedAnchor = do
                                         { mbWfStatus = bumpStatus (mbWfStatus mt) MBDispatched
                                         , mbBuildStartedAt = Just dispatchedAt
                                         , mbBatchDispatch = Just isBatch
-                                        , mbVersionsPassed = Just versionsSent
+                                        , mbVersionsPassed = Just versionsLanded
                                         }
                                 )
                     }
@@ -1166,7 +1201,7 @@ dispatchFreshRun rt ac creds target living dispatchId mObservedAnchor = do
                     , "version_name" .= versionName
                     , "version_code" .= versionCode
                     , "batch" .= isBatch
-                    , "versions_passed" .= versionsSent
+                    , "versions_passed" .= versionsLanded
                     ]
             -- ── Inline bind (return_run_details) ────────────────────────
             -- GitHub told us OUR run's id in the dispatch response — bind it
@@ -1252,6 +1287,30 @@ isPermanentDispatchError e =
         , "HTTP 400"
         , "Unexpected inputs"
         ]
+
+{- | Inputs named by GitHub's @Unexpected inputs provided: [...]@ 422, when EVERY
+name it listed is optional enrichment we can drop and retry without. 'Nothing'
+otherwise — including when it names an input the build's behaviour depends on,
+which is a genuine schema mismatch and must stay a hard failure.
+
+@versions@ is droppable by construction: absent, each matrix job auto-detects
+its own version exactly as it did before the input existed.
+-}
+droppableUnexpectedInputs :: Text -> Maybe [Text]
+droppableUnexpectedInputs e
+    | T.null rest = Nothing
+    | null names = Nothing
+    | all (`elem` droppable) names = Just names
+    | otherwise = Nothing
+  where
+    droppable = ["versions"] :: [Text]
+    (_, rest) = T.breakOn "Unexpected inputs provided" e
+    -- The names sit in a bracketed list whose quotes arrive JSON-escaped
+    -- (\"versions\"); keep only identifier characters per element.
+    inside = T.takeWhile (/= ']') (T.drop 1 (T.dropWhile (/= '[') rest))
+    names =
+        filter (not . T.null) $
+            map (T.filter (\c -> isAlphaNum c || c == '_' || c == '-')) (T.splitOn "," inside)
 
 {- | Stage 4: Resolve @external_run_id@ by polling GH for the run our
 dispatch created.
@@ -2583,7 +2642,9 @@ applyMobileTarget rs f =
                             , mbcDestination = Nothing
                             , mbcChangelogSummary = Nothing
                 , mbcChangelogSummaryShort = Nothing
+                , mbcChangelogSummaryModel = Nothing
                 , mbcChangelogSlackOptIn = Nothing
+                , mbcChangelogContentKey = Nothing
                 , mbcStoreObserved = Nothing
                             }
                     , mbExternalRunId = Nothing

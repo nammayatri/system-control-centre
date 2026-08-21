@@ -317,21 +317,29 @@ promoteFormH _ap rid = do
     -- open forever: past the window a miss is permanent, skip the probe.
     now <- liftIO getCurrentTime
     let recentEnough = diffUTCTime now (rtCreatedAt row) < 14 * 86400
+        mKey = mbcChangelogContentKey (mbContext target)
+        -- A stored key resolves from the cache alone — one indexed read, no GH
+        -- compare — so none of the legacy probe's limits apply: any age, any
+        -- generation shape, and no source_ref needed (main-branch rows store
+        -- none, which is why the rebuild path never fired for them).
+        legacyProbe =
+            recentEnough
+                && not isStoreSync
+                && not (isDebugBuildType (mbcBuildType (mbContext target)))
+                && isJust (rtSourceRef row)
     aiShort <- case mbcChangelogSummaryShort (mbContext target) of
         Just s -> pure (Just s)
         Nothing
-            | recentEnough
-            , not isStoreSync
-            , not (isDebugBuildType (mbcBuildType (mbContext target)))
-            , Just branch <- rtSourceRef row -> do
+            | isJust mKey || legacyProbe -> do
                 mCached <-
                     MC.try @_ @SomeException
                         ( lookupCachedAiShort
+                            mKey
                             ac
                             (rtAppGroup row)
                             (rtService row)
                             (rtEnv row)
-                            branch
+                            (fromMaybe "" (rtSourceRef row))
                             (rtNewVersion row)
                             (if platform == "ios" then "" else maybe "" tshow (rtVersionCode row))
                         )

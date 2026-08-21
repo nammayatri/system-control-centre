@@ -431,20 +431,27 @@ stampChangelogShort rid short = withDb $ \db ->
 group — narrow jsonb writes only. The Slack flag is defaulted to FALSE where
 unset (absent key or JSON null): a freshly stamped body must never flip a
 legacy row's presence-fallback ('changelogSlackOptedIn') to opted-in.
-Explicit true/false flags are preserved. Returns the member count updated.
+Explicit true/false flags are preserved.
+
+@mModel@ is the body's provenance — the model that wrote it, or Nothing for
+the deterministic listing. It is stamped ALONGSIDE the body (never left over
+from a previous stamp) so the console can label the two apart. Returns the
+member count updated.
 -}
-stampGroupChangelogSummary :: (MonadFlow m) => Text -> Text -> m Int64
-stampGroupChangelogSummary gid body = withDb $ \db ->
+stampGroupChangelogSummary :: (MonadFlow m) => Text -> Maybe Text -> Text -> m Int64
+stampGroupChangelogSummary gid mModel body = withDb $ \db ->
     withConn db $ \conn ->
         execute
             conn
             "UPDATE release_tracker \
-            \SET release_context = jsonb_set(jsonb_set(release_context::jsonb, \
+            \SET release_context = jsonb_set(jsonb_set(jsonb_set(release_context::jsonb, \
             \      '{contents,mbContext,changelog_summary}', to_jsonb(?::text)), \
+            \      '{contents,mbContext,changelog_summary_model}', \
+            \      CASE WHEN ?::text IS NULL OR ?::text = '' THEN 'null'::jsonb ELSE to_jsonb(?::text) END), \
             \      '{contents,mbContext,changelog_slack_opt_in}', \
             \      COALESCE(NULLIF(release_context::jsonb #> '{contents,mbContext,changelog_slack_opt_in}', 'null'::jsonb), 'false'::jsonb))::text \
             \WHERE release_group_id = ? AND category = 'MobileBuild' AND release_context ~ '^\\s*\\{'"
-            (body, gid)
+            (body, mModel, mModel, mModel, gid)
 
 {- | Atomically update a release tracker only if its current status matches the
 expected value (CAS: @UPDATE ... WHERE id = ? AND status = ?@). Returns True if

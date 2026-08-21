@@ -65,9 +65,21 @@ data MobileBuildContext = MobileBuildContext
     -- was generated). Slack opt-in lives in 'mbcChangelogSlackOptIn'; legacy
     -- rows (pre-flag) encoded opt-in as this field's presence.
     , mbcChangelogSummaryShort :: Maybe Text
+    , mbcChangelogSummaryModel :: Maybe Text
+    -- ^ Which model wrote 'mbcChangelogSummary'. Empty\/Nothing means the
+    -- deterministic commit listing produced it (AI off, or every model
+    -- failed). Provenance has to be STORED: the summary is only text, so
+    -- without this the group page cannot tell a model's summary from the
+    -- fallback and labelled every stored body "AI".
     , mbcChangelogSlackOptIn :: Maybe Bool
     -- ^ Post the changelog to Slack when the group settles. Nothing = legacy
     -- row: fall back to the old presence rule ('changelogSlackOptedIn').
+    , mbcChangelogContentKey :: Maybe Text
+    -- ^ Cache key of the AI changelog generation this release was created from.
+    -- Generation is detached server-side, so it can turn ready AFTER create —
+    -- the Slack send then prefers the cached AI body over the deterministic
+    -- listing stored here at create. Keyed on the create-time commit range:
+    -- recomputing it at send would diff against this build's own tag.
     , mbcStoreObserved :: Maybe Bool
     -- ^ Just True on rows minted for a build SCC only OBSERVED live on the store
     -- (pre-SCC / out-of-band). Excluded from latest-build selection so sync keeps
@@ -89,7 +101,9 @@ instance ToJSON MobileBuildContext where
             , "destination" .= mbcDestination c
             , "changelog_summary" .= mbcChangelogSummary c
             , "changelog_summary_short" .= mbcChangelogSummaryShort c
+            , "changelog_summary_model" .= mbcChangelogSummaryModel c
             , "changelog_slack_opt_in" .= mbcChangelogSlackOptIn c
+            , "changelog_content_key" .= mbcChangelogContentKey c
             , "store_observed" .= mbcStoreObserved c
             ]
 
@@ -120,7 +134,11 @@ instance FromJSON MobileBuildContext where
             -- absent in rows persisted before this field → Nothing (not opted in)
             <*> o .:? "changelog_summary"
             <*> o .:? "changelog_summary_short"
+            -- absent on rows stored before provenance was recorded → Nothing,
+            -- which the UI shows as "Auto-generated" rather than claiming AI
+            <*> o .:? "changelog_summary_model"
             <*> o .:? "changelog_slack_opt_in"
+            <*> o .:? "changelog_content_key"
             <*> o .:? "store_observed"
 
 data MobileBuildWFStatus

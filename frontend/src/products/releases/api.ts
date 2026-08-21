@@ -69,6 +69,7 @@ export interface ReleaseContext {
     // AI changelog bodies stored at create time (full body + short synopsis).
     changelog_summary?: string | null;
     changelog_summary_short?: string | null;
+    changelog_summary_model?: string | null;
     // BE truth (injected by listReleasesH): the build's code is strictly higher than the
     // production track's, so it's actually promotable. The list badge ANDs this with its
     // own stage logic so it never offers a promote the backend would reject. Absent/true
@@ -466,6 +467,7 @@ const normalizeRelease = (r: NammaRelease): APRelease => ({
         // combined body). Must be passed through here or the pick-list drops them.
         changelog_summary: (r.releaseContext as any)?.changelog_summary,
         changelog_summary_short: (r.releaseContext as any)?.changelog_summary_short,
+        changelog_summary_model: (r.releaseContext as any)?.changelog_summary_model,
         mb_wf_status: (r.releaseContext as any)?.mb_wf_status,
         rollout_status: (r.releaseContext as any)?.rollout_status,
         rollout_percent: (r.releaseContext as any)?.rollout_percent,
@@ -1440,6 +1442,9 @@ export interface ChangelogSummaryResp {
     baseRef?: string | null;
     headRef?: string | null;
     compareUrl?: string | null;
+    // Cache key of this generation. Sent back on create so a summary that
+    // turns ready afterwards can still be found at Slack-send time.
+    contentKey?: string | null;
 }
 
 export async function releaseAiSummary(id: string, force = false): Promise<AiResp> {

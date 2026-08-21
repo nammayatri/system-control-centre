@@ -72,7 +72,7 @@ import Products.Autopilot.Mobile.Types
 import Products.Autopilot.Mobile.Versioning (TrackInfo (..), computeNextVersion)
 import Products.Autopilot.Mobile.Versioning.Apple (AscPhasedState (..), AscReviewState (..), AscVersion (..), BuildsResp (..), appStoreStateToReview, applePhasedPercent, computeNextIosVersion, firstWhatsNew, parseAscVersion, parseVersionStatesWithBuild, selectInFlightReview)
 import Products.Autopilot.Mobile.Versioning.Play (PlayRolloutState (..), ProdTrackRelease (..), StoreTrackSnapshot (..), parseProdReleaseNotes, parseProdTrackReleases, parseRolloutState, parseTrackSnapshot, userFractionInRange)
-import Products.Autopilot.Mobile.Workflow (FirebaseReleaseInfo (..), codeFromTag, electDispatchLeader, parseFirebaseRelease, reviewPollDue, reviewPollTimedOut, selectBuildTag, selectProviderBuildTag, tagConfirmTimedOut, tagPushedFromLog)
+import Products.Autopilot.Mobile.Workflow (FirebaseReleaseInfo (..), codeFromTag, droppableUnexpectedInputs, electDispatchLeader, parseFirebaseRelease, reviewPollDue, reviewPollTimedOut, selectBuildTag, selectProviderBuildTag, tagConfirmTimedOut, tagPushedFromLog)
 import Products.Autopilot.Queries.ReleaseTracker (keepSnapshot)
 import Products.Autopilot.Types.Permission
 import Products.Autopilot.Types.Release
@@ -163,7 +163,8 @@ main = do
   section "[37] iOS next-version rule (bump in sync / reuse when TF ahead)" testIosVersionBumpRule
   section "[38] Changelog base resolution (prod default / internal / fallback)" testChangelogBaseResolution
   section "[39] Store release-notes parsing (Play track + iOS whatsNew)" testStoreReleaseNotesParse
-  section "[41] ConfirmTag log-first tag extraction (tagPushedFromLog)" testTagPushedFromLog
+  section "[53] ConfirmTag log-first tag extraction (tagPushedFromLog)" testTagPushedFromLog
+  section "[54] Dispatch optional-input fallback (droppableUnexpectedInputs)" testDroppableUnexpectedInputs
   section "[40] Out-of-band review detection (in-flight select / map / reconcile)" testExternalReviewDetection
   section "[41] Android pending-publish detection (track parse / pick rule)" testAndroidPendingPublish
   section "[49] Dispatch-group leader election (first living sibling)" testElectDispatchLeader
@@ -1079,6 +1080,8 @@ testClaimsStoreIdentity = do
             mbcDestination = dest,
             mbcChangelogSummary = Nothing,
             mbcChangelogSummaryShort = Nothing,
+            mbcChangelogSummaryModel = Nothing,
+            mbcChangelogContentKey = Nothing,
             mbcChangelogSlackOptIn = Nothing
           }
   -- Store-bound builds DO claim an identity.
@@ -1236,6 +1239,8 @@ testMobileBuildContextJsonRoundTrip = do
             mbcDestination = Nothing,
             mbcChangelogSummary = Nothing,
             mbcChangelogSummaryShort = Nothing,
+            mbcChangelogSummaryModel = Nothing,
+            mbcChangelogContentKey = Nothing,
             mbcChangelogSlackOptIn = Nothing
           }
   let encoded = Aeson.encode ctx
@@ -1388,6 +1393,40 @@ testResolveRollback = do
 -- under the broad app prefix. The fastlane workflow tags deterministically as
 -- @{prefix}{version}+{code}@ and SCC supplies that version/code on dispatch, so we
 -- match it exactly. GitHub returns matching-refs in ascending order, so "first"
+-- | A ref whose workflow predates an optional input 422s the whole dispatch.
+-- GitHub creates no run for a rejected request, so dropping the optional input
+-- and retrying is safe — but only when EVERY name it listed is droppable.
+testDroppableUnexpectedInputs :: IO ()
+testDroppableUnexpectedInputs = do
+  putStrLn "dispatch: optional-input 422 fallback"
+  -- Verbatim shape of the failure seen in production (JSON-escaped quotes).
+  let real =
+        "dispatchWorkflow failed: HTTP 422: {\"message\":\"Unexpected inputs provided: [\\\"versions\\\"]\",\"documentation_url\":\"https://docs.github.com/rest\",\"status\":\"422\"}"
+  assertEqual
+    "the real 422 names only `versions` -> droppable, retry without it"
+    (Just ["versions"])
+    (droppableUnexpectedInputs real)
+  assertEqual
+    "unescaped quotes parse the same"
+    (Just ["versions"])
+    (droppableUnexpectedInputs "HTTP 422: Unexpected inputs provided: [\"versions\"]")
+  assertEqual
+    "a non-droppable input -> Nothing (real schema mismatch, must abort)"
+    Nothing
+    (droppableUnexpectedInputs "HTTP 422: Unexpected inputs provided: [\"selected_apps\"]")
+  assertEqual
+    "mixed droppable + not -> Nothing (never retry a payload still wrong)"
+    Nothing
+    (droppableUnexpectedInputs "HTTP 422: Unexpected inputs provided: [\"versions\",\"change_log\"]")
+  assertEqual
+    "an unrelated 422 (bad ref) -> Nothing"
+    Nothing
+    (droppableUnexpectedInputs "dispatchWorkflow failed: HTTP 422: {\"message\":\"No ref found\"}")
+  assertEqual
+    "a 5xx -> Nothing (transient; the caller retries the same payload)"
+    Nothing
+    (droppableUnexpectedInputs "dispatchWorkflow failed: HTTP 503")
+
 -- | tagPushedFromLog reads the tag a build's own job log says it pushed.
 -- Fixtures mirror real GitHub job logs: ISO-timestamp line prefixes, the
 -- script-SOURCE dump (un-expanded $TAG_NAME / <tag> placeholder), and the

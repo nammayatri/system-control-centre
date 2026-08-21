@@ -427,10 +427,20 @@ export default function CreateMobileRelease() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIds.join(','), JSON.stringify(versionEdits)]);
   const [combinedShort, setCombinedShort] = useState('');
+  // Which model wrote the summary above (empty = the deterministic commit
+  // listing). Stored with the body so the console can label the two apart.
+  const [combinedModel, setCombinedModel] = useState('');
+  const [modelByApp, setModelByApp] = useState<Record<number, string>>({});
+  // Cache key of the generation behind the summary above. Submitted with the
+  // release so the Slack send can pick up an AI body that turns ready AFTER
+  // create — generation is detached server-side and outlives this page.
+  const [combinedKey, setCombinedKey] = useState('');
+  const [keyByApp, setKeyByApp] = useState<Record<number, string>>({});
   useEffect(() => { setChangelogTab(0); }, [selectedIds.join(',')]);
   useEffect(() => {
     setCombinedSummary('');
     setCombinedShort('');
+    setCombinedKey('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIds.join(','), effSourceRef, changelogBase]);
   // Free-text filter over the active tab's commit list. Reset whenever the
@@ -524,6 +534,24 @@ export default function CreateMobileRelease() {
             : {}
           : shortByApp[id]
             ? { changelogSummaryShort: shortByApp[id] }
+            : {}),
+        // Provenance of the body above — omitted when the deterministic
+        // listing produced it, which the console renders as "Auto-generated".
+        ...(selectedIds.length > 1
+          ? combinedModel
+            ? { changelogSummaryModel: combinedModel }
+            : {}
+          : modelByApp[id]
+            ? { changelogSummaryModel: modelByApp[id] }
+            : {}),
+        // Sent even while the summary is still the deterministic placeholder —
+        // that is exactly the case the send-time cache lookup rescues.
+        ...(selectedIds.length > 1
+          ? combinedKey
+            ? { changelogContentKey: combinedKey }
+            : {}
+          : keyByApp[id]
+            ? { changelogContentKey: keyByApp[id] }
             : {}),
       };
     });
@@ -1057,10 +1085,10 @@ export default function CreateMobileRelease() {
               </header>
 
               <div className="p-4 sm:p-6">
-                {/* Slack is a DESTINATION of the AI changelog — it rides inside
-                    the summary card (topSlot), not as a detached checkbox.
-                    Hidden for debug builds and when Slack is disabled in config;
-                    enabled ONLY when a summary exists. */}
+                {/* The Slack opt-in sits ABOVE the summary card so it stays
+                    visible even when the card is collapsed. Hidden for debug
+                    builds and when Slack is disabled in config; enabled ONLY
+                    when a summary exists. */}
                 {(() => {
                   const slackOn = sendChangelogSlack && hasChangelogSummary;
                   // Bare channel names get the '#'; already-prefixed names and raw
@@ -1072,7 +1100,7 @@ export default function CreateMobileRelease() {
                     : null;
                   const slackSlot =
                     !isDebug && slackEnabled ? (
-                      <div className="mx-3 mb-2.5 rounded-md border border-violet-100 bg-white/60 px-3 py-2">
+                      <div className="mb-3 rounded-md border border-violet-100 bg-violet-50/40 px-3 py-2">
                         <label
                           className={cn(
                             'flex items-center gap-2.5 select-none',
@@ -1118,43 +1146,51 @@ export default function CreateMobileRelease() {
                   // Multi-app: ONE combined summary for the whole selection —
                   // common changes + labeled per-app extras; every app submits
                   // this same text. The per-app tabs below still browse commits.
-                  <MobileChangelogAiSummary
-                    combinedApps={changelogApps.map((a) => {
-                      const v = versionEdits[a.id];
-                      const version = v?.versionName.trim()
-                        ? `v${v.versionName.trim()}${v.versionCode.trim() ? `+${v.versionCode.trim()}` : ''}`
-                        : undefined;
-                      return {
-                        app: a.name,
-                        surface: a.surface,
-                        platform: a.platform,
-                        version,
-                      };
-                    })}
-                    branch={effSourceRef}
-                    base={changelogBase}
-                    topSlot={slackSlot}
-                    onSummary={(long, short) => {
-                      setCombinedSummary(long);
-                      if (short) setCombinedShort(short);
-                    }}
-                  />
+                  <>
+                    {slackSlot}
+                    <MobileChangelogAiSummary
+                      combinedApps={changelogApps.map((a) => {
+                        const v = versionEdits[a.id];
+                        const version = v?.versionName.trim()
+                          ? `v${v.versionName.trim()}${v.versionCode.trim() ? `+${v.versionCode.trim()}` : ''}`
+                          : undefined;
+                        return {
+                          app: a.name,
+                          surface: a.surface,
+                          platform: a.platform,
+                          version,
+                        };
+                      })}
+                      branch={effSourceRef}
+                      base={changelogBase}
+                      onSummary={(long, short, _status, model, key) => {
+                        setCombinedSummary(long);
+                        if (short) setCombinedShort(short);
+                        setCombinedModel(model || '');
+                        if (key) setCombinedKey(key);
+                      }}
+                    />
+                  </>
                 ) : q.data && q.data.cpCommits.length > 0 ? (
-                  <MobileChangelogAiSummary
-                    app={app.name}
-                    surface={app.surface}
-                    platform={app.platform}
-                    branch={effSourceRef}
-                    base={changelogBase}
-                    versionName={versionEdits[app.id]?.versionName || ''}
-                    versionCode={versionEdits[app.id]?.versionCode || ''}
-                    topSlot={slackSlot}
-                    onSummary={(text, short) => {
-                      setSummaryByApp((m) => (m[app.id] === text ? m : { ...m, [app.id]: text }));
-                      if (short)
-                        setShortByApp((m) => (m[app.id] === short ? m : { ...m, [app.id]: short }));
-                    }}
-                  />
+                  <>
+                    {slackSlot}
+                    <MobileChangelogAiSummary
+                      app={app.name}
+                      surface={app.surface}
+                      platform={app.platform}
+                      branch={effSourceRef}
+                      base={changelogBase}
+                      versionName={versionEdits[app.id]?.versionName || ''}
+                      versionCode={versionEdits[app.id]?.versionCode || ''}
+                      onSummary={(text, short, _status, model, key) => {
+                        setSummaryByApp((m) => (m[app.id] === text ? m : { ...m, [app.id]: text }));
+                        if (short)
+                          setShortByApp((m) => (m[app.id] === short ? m : { ...m, [app.id]: short }));
+                        setModelByApp((m) => (m[app.id] === (model || '') ? m : { ...m, [app.id]: model || '' }));
+                        if (key) setKeyByApp((m) => (m[app.id] === key ? m : { ...m, [app.id]: key }));
+                      }}
+                    />
+                  </>
                 ) : null;
                 })()}
 

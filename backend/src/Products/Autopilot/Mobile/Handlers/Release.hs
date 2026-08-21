@@ -159,6 +159,13 @@ data CreateMobileReleasesItem = CreateMobileReleasesItem
     , -- | the AI SHORT synopsis captured on the create page — stored so the
       -- promote form can prefill store notes without re-querying the AI
       changelogSummaryShort :: Maybe Text
+    , -- | which model wrote the summary above; absent\/empty means the
+      -- deterministic commit listing did, and the UI must say so
+      changelogSummaryModel :: Maybe Text
+    , -- | cache key of the generation the summary came from. Present even when
+      -- the summary is still the deterministic placeholder — the Slack send
+      -- uses it to pick up an AI body that turned ready after create.
+      changelogContentKey :: Maybe Text
     }
     deriving (Generic, Show)
 
@@ -294,7 +301,7 @@ buildRow ::
     UTCTime ->
     CreateMobileReleasesItem ->
     Flow (ReleaseTrackerRow, CreatedReleaseSummary)
-buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode, sendChangelogSlack = mSendSlack, changelogSummary = mSummary, changelogSummaryShort = mShort} = do
+buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode, sendChangelogSlack = mSendSlack, changelogSummary = mSummary, changelogSummaryShort = mShort, changelogSummaryModel = mModelName, changelogContentKey = mContentKey} = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     -- safe: createMobileReleasesH validated that every id is present in appById
     let app_ = appById Map.! aid
@@ -337,9 +344,19 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                   mbcChangelogSummaryShort = case fmap T.strip mShort of
                     Just s | not (T.null s) -> Just s
                     _ -> Nothing
+                , -- Provenance for the body above: the model that wrote it, or
+                  -- Nothing when the deterministic listing did.
+                  mbcChangelogSummaryModel = case fmap T.strip mModelName of
+                    Just m | not (T.null m) -> Just m
+                    _ -> Nothing
                 , -- Per-release opt-in for the post-build changelog Slack post
                   -- (explicit — presence of the body above no longer implies it).
                   mbcChangelogSlackOptIn = Just (mSendSlack == Just True)
+                , -- Lets the Slack send pick up an AI body that finished
+                  -- generating after this row was created.
+                  mbcChangelogContentKey = case fmap T.strip mContentKey of
+                    Just k | not (T.null k) -> Just k
+                    _ -> Nothing
                 , mbcStoreObserved = Nothing
                 }
         target =
@@ -840,6 +857,11 @@ data AiSummaryResp = AiSummaryResp
     -- ^ The compare head (the branch being released).
     , compareUrl :: Maybe Text
     -- ^ GitHub compare link for the exact range.
+    , contentKey :: Maybe Text
+    -- ^ Cache key of THIS generation (hash of the exact commit range). The
+    -- create page stores it on the release so a summary that turns ready
+    -- AFTER create can still be found — the range it was keyed on is frozen
+    -- here, and recomputing it later would diff against this build's own tag.
     }
     deriving (Generic, Show)
 
@@ -859,6 +881,7 @@ aiUnavailable r =
         , baseRef = Nothing
         , headRef = Nothing
         , compareUrl = Nothing
+        , contentKey = Nothing
         }
 
 renderCommitsForAi :: [CommitInfo] -> Text
@@ -887,16 +910,22 @@ stateResp st longTxt shortTxt mModel =
         , baseRef = Nothing
         , headRef = Nothing
         , compareUrl = Nothing
+        , contentKey = Nothing
         }
 
 {- | Cache-ONLY lookup of the AI short synopsis for a row that stored none
-(created while generation was still pending). Rebuilds the create-time
-content key for the row's range and returns the ready cache row's short —
-'Nothing' when the range has moved on or nothing is cached. Never generates,
-never throws (one GH compare read, caller-visible as a slightly slower form).
+(created while generation was still pending). Never generates, never throws.
+
+Two paths. With the create-time content key ('mbcChangelogContentKey') it is a
+single indexed read: exact, free of GitHub, works for combined-created rows,
+and immune to the range moving on. Without one (rows created before the key was
+stored) it falls back to REBUILDING the key from the live range — one GH compare,
+single-app production-base shape only, and a miss once this build's own tag
+becomes the base.
 -}
-lookupCachedAiShort :: AppCatalog -> Text -> Text -> Text -> Text -> Text -> Text -> Flow (Maybe Text)
-lookupCachedAiShort ac appName surface platform branch vName vCode
+lookupCachedAiShort :: Maybe Text -> AppCatalog -> Text -> Text -> Text -> Text -> Text -> Text -> Flow (Maybe Text)
+lookupCachedAiShort mStoredKey ac appName surface platform branch vName vCode
+    | Just k <- fmap T.strip mStoredKey, not (T.null k) = shortFor k
     | T.null (T.strip branch) = pure Nothing
     | otherwise = do
         creds <- loadGhCreds
@@ -917,14 +946,17 @@ lookupCachedAiShort ac appName surface platform branch vName vCode
                                         | T.null (T.strip vCode) = "v" <> T.strip vName
                                         | otherwise = "v" <> T.strip vName <> "+" <> T.strip vCode
                                     -- MUST mirror changelogAiSummaryH's key exactly.
-                                    contentKey =
+                                    rebuiltKey =
                                         computePromptHash $
                                             T.intercalate "\US" ["rn7", appName, surface, platform, branch, versionStr, renderCommitsForAi commits]
-                                mRow <- lookupReleaseSummary contentKey
-                                pure $ case mRow of
-                                    Just ("ready", _, Just short, _, _)
-                                        | not (T.null (T.strip short)) -> Just short
-                                    _ -> Nothing
+                                shortFor rebuiltKey
+  where
+    shortFor k = do
+        mRow <- lookupReleaseSummary k
+        pure $ case mRow of
+            Just ("ready", _, Just short, _, _)
+                | not (T.null (T.strip short)) -> Just short
+            _ -> Nothing
 
 changelogAiSummaryH :: AuthedPerson -> Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Maybe Text -> Flow AiSummaryResp
 changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersionCode = do
@@ -952,6 +984,7 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
                 result <- compareRefs creds owner repo chBaseRef branch
                 let cmpUrl = "https://github.com/" <> owner <> "/" <> repo <> "/compare/" <> chBaseRef <> "..." <> branch
                     withRange r = r{baseRef = Just (fromMaybe chBaseRef chBaseTag), headRef = Just branch, compareUrl = Just cmpUrl}
+                    withKey k r = (withRange r){contentKey = Just k}
                 case result of
                     Left e -> pure (aiUnavailable ("changelog fetch failed: " <> e))
                     Right cr -> do
@@ -981,16 +1014,22 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
                         case mRow of
                             -- Done → return the AI (or cached deterministic) result.
                             Just ("ready", mLong, mShort, mModel, _) ->
-                                pure (withRange (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel))
+                                pure (withKey contentKey (stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel))
                             -- Not ready → ensure a DETACHED generation is running and return
                             -- immediately. The work outlives this request and the browser tab.
                             _ -> do
                                 ecfg <- loadAiConfig
                                 case ecfg of
                                     Left _ -> do
-                                        -- AI off/unconfigured: the deterministic changelog IS the result.
-                                        upsertReleaseSummary contentKey detLong detShort "" n
-                                        pure (withRange (stateResp "ready" detLong detShort Nothing))
+                                        -- AI off/unconfigured: the deterministic changelog IS the
+                                        -- result — but NOT a cached one. The cache is consulted
+                                        -- before this branch, so persisting it here would pin the
+                                        -- fallback under this content key forever and the first
+                                        -- request after AI is switched on would never reach a
+                                        -- model. A genuine model failure still caches (below):
+                                        -- that IS a real attempt, and re-running it every tick
+                                        -- would hammer a broken provider.
+                                        pure (withKey contentKey (stateResp "ready" detLong detShort Nothing))
                                     Right cfg -> do
                                         -- One generator per content key; reclaims a failed row or a
                                         -- pending row orphaned by a restart (see 'claimReleaseSummary').
@@ -1007,7 +1046,7 @@ changelogAiSummaryH ap appName surface platform branch mBase mVersionName mVersi
                                         -- A concurrent generation may have just finished; otherwise
                                         -- report pending with the deterministic placeholder.
                                         st <- lookupReleaseSummary contentKey
-                                        pure $ withRange $ case st of
+                                        pure $ withKey contentKey $ case st of
                                             Just ("ready", mLong, mShort, mModel, _) ->
                                                 stateResp "ready" (fromMaybe detLong mLong) (fromMaybe "" mShort) mModel
                                             _ -> stateResp "pending" detLong "" Nothing
@@ -1172,6 +1211,7 @@ changelogAiSummaryCombinedH ap req = do
                     r
                         { summaryLong = fmap (<> noBaseNote) (summaryLong r)
                         , usableCount = Just (length usable)
+                        , contentKey = Just contentKey
                         }
                 -- "cg5" = combined-generation version; bump to invalidate cache.
                 contentKey =
@@ -1184,13 +1224,22 @@ changelogAiSummaryCombinedH ap req = do
                                     ]
             -- Persist a READY result onto the requesting group's rows —
             -- server-side, no separate persist API, idempotent per poll.
-            let deliver r@AiSummaryResp{status = st, summaryLong = mL} = do
+            let deliver r@AiSummaryResp{status = st, summaryLong = mL, model = mMdl} = do
                     forM_ (casGroupId req) $ \gid ->
                         when (st == "ready") $
                             forM_ mL $ \bodyTxt -> do
-                                n <- stampGroupChangelogSummary gid bodyTxt
+                                -- Provenance travels WITH the body: an empty model
+                                -- means the deterministic listing wrote it.
+                                n <- stampGroupChangelogSummary gid mMdl bodyTxt
                                 when (n > 0) $
-                                    logInfo $ "[AI] combined changelog persisted onto group " <> gid <> " (" <> T.pack (show n) <> " members)"
+                                    logInfo $
+                                        "[AI] combined changelog persisted onto group "
+                                            <> gid
+                                            <> " ("
+                                            <> T.pack (show n)
+                                            <> " members, model="
+                                            <> fromMaybe "auto" mMdl
+                                            <> ")"
                     pure r
             mRow <- lookupReleaseSummary contentKey
             case mRow of
@@ -1199,8 +1248,9 @@ changelogAiSummaryCombinedH ap req = do
                 _ -> do
                     ecfg <- loadAiConfig
                     case ecfg of
-                        Left _ -> do
-                            upsertReleaseSummary contentKey detLong detShort "" (length unionItems)
+                        -- Not cached: see the single-app path — a fallback returned only
+                        -- because AI is off must not pin this content key.
+                        Left _ ->
                             deliver (finalize (stateResp "ready" detLong detShort Nothing))
                         Right cfg -> do
                             claimed <- claimReleaseSummary contentKey detLong (length unionItems)

@@ -57,6 +57,11 @@ export type CreateMobileReleasesItem = {
   // AI short synopsis captured on the create page — stored so the promote
   // form can prefill store notes without re-querying the AI
   changelogSummaryShort?: string;
+  /** model that wrote the summary; absent = deterministic commit listing */
+  changelogSummaryModel?: string;
+  /** cache key of the generation the summary came from — lets the Slack send
+   * pick up an AI body that finished generating after create */
+  changelogContentKey?: string;
 };
 
 // Store destination for provider (driver) PROD Android builds — mirrors the
