@@ -106,7 +106,8 @@ import Products.Autopilot.Mobile.Types.Storage
     AppCatalogT (..),
   )
 import Products.Autopilot.Queries.ReleaseTracker
-  ( encodeJsonText,
+  ( currentCloud,
+    encodeJsonText,
     insertReleaseEvent,
     insertReleaseTrackerRow,
     parseJsonTextMaybe,
@@ -1206,8 +1207,9 @@ insertMobileTracker ::
   Text ->
   UTCTime ->
   m ()
-insertMobileTracker rid ac targetState mVersionName mSourceRef createdBy_ createdAt =
-  insertReleaseTrackerRow (mkMobileTrackerRow rid ac targetState mVersionName mSourceRef createdBy_ createdAt)
+insertMobileTracker rid ac targetState mVersionName mSourceRef createdBy_ createdAt = do
+  mCloud <- Just <$> currentCloud
+  insertReleaseTrackerRow (mkMobileTrackerRow rid ac targetState mVersionName mSourceRef createdBy_ createdAt mCloud)
 
 -- | Pure builder for a fresh MobileBuild @release_tracker@ row (status CREATED,
 -- mode MANUAL, unapproved). Extracted from 'insertMobileTracker' so the create
@@ -1221,8 +1223,12 @@ mkMobileTrackerRow ::
   Maybe Text ->
   Text ->
   UTCTime ->
+  -- | owning cloud ('currentCloud'). Scopes the row to the creating cluster so
+  -- a sibling cluster's runner never drives the same build (one DB, many
+  -- clusters); NULL would mean "visible to every cloud".
+  Maybe Text ->
   ReleaseTrackerRow
-mkMobileTrackerRow rid ac targetState mVersionName mSourceRef createdBy_ createdAt = row
+mkMobileTrackerRow rid ac targetState mVersionName mSourceRef createdBy_ createdAt mCloud = row
   where
     versionName = fromMaybe "" mVersionName
     encodedCtx = encodeJsonText (MobileBuildState targetState)
@@ -1293,7 +1299,7 @@ mkMobileTrackerRow rid ac targetState mVersionName mSourceRef createdBy_ created
           -- guard drops the empty-string placeholder some persists carry.
           rtReleaseGroupId = groupIdColumn targetState,
           rtReleaseGroupLabel = Nothing,
-          rtCloudType = Nothing,
+          rtCloudType = mCloud,
           rtCreatedAt = createdAt,
           rtUpdatedAt = createdAt
         }
@@ -1510,11 +1516,15 @@ insertMobileRevertTracker ::
   Text ->
   UTCTime ->
   m ()
-insertMobileRevertTracker rid ac targetState versionName changeLog_ sourceRef_ revertsId createdBy_ createdAt =
-  insertReleaseTrackerRow row
+insertMobileRevertTracker rid ac targetState versionName changeLog_ sourceRef_ revertsId createdBy_ createdAt = do
+  revertCloud <- Just <$> currentCloud
+  insertReleaseTrackerRow (row revertCloud)
   where
     encodedCtx = encodeJsonText (MobileBuildState targetState)
-    row =
+    -- Explicit signature: beam's Columnar family can't infer a parameterised
+    -- row builder in a where-clause.
+    row :: Maybe Text -> ReleaseTrackerRow
+    row revertCloud =
       ReleaseTrackerT
         { rtId = rid,
           rtOldVersion = "",
@@ -1578,9 +1588,9 @@ insertMobileRevertTracker rid ac targetState versionName changeLog_ sourceRef_ r
           -- so the revert shows up beside its siblings on the group page.
           rtReleaseGroupId = groupIdColumn targetState,
           rtReleaseGroupLabel = Nothing,
-          -- Not cluster-bound (migration 0045): a build's identity is global,
-          -- so it stays visible to every instance rather than one cloud's.
-          rtCloudType = Nothing,
+          -- Owned by the creating cluster: with one DB behind several clusters,
+          -- a NULL here lets every cluster's runner drive the same build.
+          rtCloudType = revertCloud,
           rtCreatedAt = createdAt,
           rtUpdatedAt = createdAt
         }

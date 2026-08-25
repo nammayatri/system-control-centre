@@ -1689,12 +1689,17 @@ execPollMatrixJobs = mobileStage "PollMatrixJobs" $ do
                     ]
             case (status', conclusion) of
                 ("completed", Just "success") -> do
-                    -- Debug builds: the build's real identity (Firebase App
-                    -- Distribution version code + release links) exists ONLY
-                    -- in the fastlane job log — no tag, no artifacts. Read it
-                    -- once, fail soft.
-                    when (isDebugBuildType (mbcBuildType (mbContext target))) $
-                        observeFirebaseRelease rt creds ac j
+                    -- Firebase-distributed builds: the real identity (version
+                    -- code + console/tester links) exists ONLY in the fastlane
+                    -- job log — no tag, no store artifact. That covers debug
+                    -- AND provider prod dispatched with destination=Firebase,
+                    -- whose log carries the same "and created release" line.
+                    -- Read it once, fail soft.
+                    when
+                        ( isDebugBuildType (mbcBuildType (mbContext target))
+                            || mbcDestination (mbContext target) == Just "Firebase"
+                        )
+                        $ observeFirebaseRelease rt creds ac j
                     pure StageSuccess
                 ("completed", Just "cancelled") ->
                     -- The shared GH run was cancelled (a sibling's abort or a manual
@@ -2058,12 +2063,27 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
         Just t -> pure t
         Nothing -> abort "MobileBuildState missing at ConfirmTag"
     let isDebug = isDebugBuildType (mbcBuildType (mbContext target))
-    if isDebug
+        -- The provider prod workflow cuts a tag ONLY for the store destination:
+        -- @Create Release Tag@ is gated on @destination == 'GooglePlay'@, and
+        -- @Upload signed AAB artifact@ on @'DownloadAAB'@. Firebase and
+        -- DownloadAAB therefore provably never produce one, and waiting for it
+        -- parks the row at BUILDING until the tag timeout. mbcDestination is
+        -- only ever set for provider prod (see 'buildRow'), so a set-but-not-
+        -- GooglePlay value is exactly that case.
+        mDest = mbcDestination (mbContext target)
+        noTagDestination = maybe False (/= "GooglePlay") mDest
+        skipTag = isDebug || noTagDestination
+        skipMarker
+            | isDebug = "debug-no-tag"
+            | otherwise = T.toLower (fromMaybe "" mDest) <> "-no-tag"
+        skipSource = if isDebug then "debug_skip" else "destination_skip" :: Text
+    if skipTag
         then do
             logInfoIO $
                 "[ConfirmTag] "
                     <> releaseId rt
-                    <> " debug destination, skipping tag confirmation"
+                    <> (if isDebug then " debug destination" else " destination=" <> fromMaybe "" mDest <> " pushes no tag")
+                    <> ", skipping tag confirmation"
             modify $ \s ->
                 s
                     { targetState =
@@ -2071,13 +2091,13 @@ execConfirmTag = mobileStage "ConfirmTag" $ do
                             MobileBuildState
                                 ( applyMobileTarget s $ \mt ->
                                     mt
-                                        { mbContext = (mbContext target){mbcTagPushed = Just "debug-no-tag"}
+                                        { mbContext = (mbContext target){mbcTagPushed = Just skipMarker}
                                         , mbWfStatus = bumpStatus (mbWfStatus mt) MBTagPushed
                                         }
                                 )
                     }
             logEvent (releaseId rt) "TAG_OBSERVED" $
-                object ["tag" .= ("debug-no-tag" :: Text), "source" .= ("debug_skip" :: Text)]
+                object ["tag" .= skipMarker, "source" .= skipSource, "destination" .= mDest]
             -- This row just settled (debug tag). Re-check the group barrier: the
             -- changelog posts ONCE per group when every member has settled.
             lift (sendGroupChangelogSlackIfSettled (mbcReleaseGroupId (mbContext target)) (Just (releaseId rt)))

@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
+import { toast } from 'sonner';
 import {
   AndroidLogoIcon,
   AppleLogoIcon,
@@ -84,9 +85,21 @@ export function SummaryHeader({
           <CaretRightIcon size={10} aria-hidden="true" />
           <span>{release.env || ''}</span>
           <CaretRightIcon size={10} aria-hidden="true" />
-          <span className="font-mono text-zinc-700 bg-zinc-100 px-1.5 py-0.5 rounded truncate max-w-[160px] sm:max-w-[240px]">
-            {release.release_tag || release.id}
-          </span>
+          {/* Copyable, like the group console's breadcrumb: this id/tag is what
+              you paste into a query or a ticket, and it is truncated on screen. */}
+          <button
+            type="button"
+            onClick={() => {
+              const v = release.release_tag || release.id;
+              void navigator.clipboard.writeText(v);
+              toast.success(release.release_tag ? 'Tag copied' : 'Release ID copied');
+            }}
+            title={`${release.release_tag || release.id} — click to copy`}
+            className="flex items-center gap-1 font-mono text-zinc-700 bg-zinc-100 hover:bg-zinc-200 px-1.5 py-0.5 rounded transition-colors cursor-copy max-w-[160px] sm:max-w-[240px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-300"
+          >
+            <span className="truncate">{release.release_tag || release.id}</span>
+            <span aria-hidden="true" className="shrink-0 text-zinc-400">⧉</span>
+          </button>
         </div>
         <div className="flex items-center gap-2">
           {syncedSecondsAgo != null && <span className="text-zinc-400">{syncedText(syncedSecondsAgo)}</span>}

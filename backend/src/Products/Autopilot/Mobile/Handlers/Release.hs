@@ -122,7 +122,7 @@ import Products.Autopilot.EventLog (logStatusUpdated)
 import Products.Autopilot.Types.API (ReleaseEventResponse)
 import Products.Autopilot.Types.API qualified as API
 import Products.Autopilot.Notifications (notifyReleaseAborted, sendGroupChangelogSlackIfSettled)
-import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, conditionalUpdateTracker, findDispatchedReleaseIds, findReleaseTracker, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch, stampGroupChangelogSummary)
+import Products.Autopilot.Queries.ReleaseTracker (TrackerWithTarget, conditionalUpdateTracker, currentCloud, findDispatchedReleaseIds, findReleaseTracker, findReleaseTrackersByIds, insertReleaseTrackerRowsBatch, stampGroupChangelogSummary)
 import Products.Autopilot.RuntimeConfig (getMobileBuildType)
 import Products.Autopilot.Types.Release (
     ReleaseStatus (..),
@@ -303,6 +303,9 @@ buildRow ::
     Flow (ReleaseTrackerRow, CreatedReleaseSummary)
 buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now CreateMobileReleasesItem{appCatalogId = aid, versionName = mVer, versionCode = mCode, sendChangelogSlack = mSendSlack, changelogSummary = mSummary, changelogSummaryShort = mShort, changelogSummaryModel = mModelName, changelogContentKey = mContentKey} = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
+    -- Owning cluster: one DB serves several clusters, and a NULL cloud_type is
+    -- visible to EVERY runner — which had both clusters dispatching the same build.
+    mCloud <- Just <$> currentCloud
     -- safe: createMobileReleasesH validated that every id is present in appById
     let app_ = appById Map.! aid
         -- The destination input only exists on provider-prod-apk-gen.yaml, so
@@ -379,7 +382,7 @@ buildRow ap appById groupId changeLog_ buildType mDestination mSourceRef now Cre
                 , mbFirebaseReleaseUrl = Nothing
                 , mbFirebaseTesterUrl = Nothing
                 }
-        row = mkMobileTrackerRow rid app_ target mVerFinal mSourceRef (apEmail ap) now
+        row = mkMobileTrackerRow rid app_ target mVerFinal mSourceRef (apEmail ap) now mCloud
     pure
         ( row
         , CreatedReleaseSummary

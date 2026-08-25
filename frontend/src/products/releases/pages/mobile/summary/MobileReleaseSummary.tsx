@@ -1,7 +1,7 @@
 import { useCallback, useState, type CSSProperties } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { Check, Send, Square, Trash2, Undo2, X } from 'lucide-react';
+import { Check, Copy, Send, Square, Trash2, Undo2, X } from 'lucide-react';
 import { MegaphoneIcon, RocketLaunchIcon } from '@phosphor-icons/react';
 import { useAuth } from '../../../../../core/auth/AuthContext';
 import { PermissionGate } from '../../../../../core/auth/PermissionGate';
@@ -304,6 +304,25 @@ const MobileReleaseSummary = () => {
             </Button>
           </PermissionGate>
         )}
+      {release.release_context?.release_group_id && (
+        <PermissionGate product="mobile" permission="MB_RELEASE_CREATE" appGroup={`${release.appGroup}/${release.env}`}>
+          <SimpleTooltip content="Start a new release with this app">
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() =>
+              navigate(
+                `/mobile/releases/new?copyFrom=${encodeURIComponent(
+                  release.release_context!.release_group_id!,
+                )}&only=${encodeURIComponent(id!)}`,
+              )
+            }
+          >
+            <Copy className="w-3.5 h-3.5" /> Copy
+          </Button>
+          </SimpleTooltip>
+        </PermissionGate>
+      )}
       <PermissionGate product="mobile" permission="MB_MOBILE_APP_MANAGE" appGroup={`${release.appGroup}/${release.env}`}>
         <SimpleTooltip content="Delete">
           <Button
