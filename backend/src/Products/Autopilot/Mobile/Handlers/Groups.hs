@@ -229,6 +229,12 @@ groupDetailH _ap gid = do
         tagOf mts = case mts of
             Just (MobileBuildState s) -> mbcTagPushed (mbContext s)
             _ -> Nothing
+        -- ConfirmTag stamps a synthetic marker ("<destination>-no-tag") for
+        -- builds whose workflow provably never tags — provider prod dispatched
+        -- to Firebase or DownloadAAB. It looks like a tag but addresses no
+        -- commit, so the ledger walk below would burn a GitHub call per member
+        -- and find nothing.
+        realTag t = not (T.null t) && not ("-no-tag" `T.isSuffixOf` t)
         anchorless =
             [ (rt, ac)
             | (rt, mts) <- members0
@@ -237,7 +243,7 @@ groupDetailH _ap gid = do
             , -- The baseline is only provable AFTER the build ships: CI pushes
               -- the tag at build end, and that tag IS the commit's address.
               -- Pre-build members have nothing to find — skip until it lands.
-              maybe False (not . T.null) (tagOf mts)
+              maybe False realTag (tagOf mts)
             , Just ac <- [matchAc rt]
             ]
     unless (null anchorless) $ do

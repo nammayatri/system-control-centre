@@ -142,7 +142,14 @@ withCloudDb action = do
 
 cloudTypeForCategory :: (MonadFlow m) => ReleaseCategory -> m (Maybe Text)
 cloudTypeForCategory cat = case cat of
-    MobileBuild -> pure Nothing
+    -- Mobile rows USED to be NULL ("visible to every cloud"). With one DB behind
+    -- multiple clusters that made every cluster's runner drive the same build —
+    -- two GitHub runs per dispatch, since only same-version peers coordinate via
+    -- 'claimDispatchReceipt'. A mobile build has no cloud affinity, so ownership
+    -- is simply "the cluster that created it"; every checkpoint re-stamps the
+    -- driving instance, so this must NOT go back to Nothing (that would release
+    -- the row to all clouds again on the very next stage write).
+    MobileBuild -> instanceCloud
     BackendService -> instanceCloud
     BackendScheduler -> instanceCloud
     BackendConfig -> instanceCloud

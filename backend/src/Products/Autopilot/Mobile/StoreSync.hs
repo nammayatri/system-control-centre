@@ -148,6 +148,7 @@ import Products.Autopilot.Mobile.Versioning.Play (
     renderPlayErr,
  )
 import Products.Autopilot.Queries.ReleaseTracker (
+    currentCloud,
     encodeJsonText,
     insertReleaseEvent,
     insertReleaseTrackerRowIfAbsent,
@@ -1027,6 +1028,9 @@ insertExternalReviewRow ac Nothing _ version reviewStatus =
 insertExternalReviewRow ac mCode inferred version reviewStatus = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
+    -- Terminal observational row, but stamp the owner anyway: NULL means
+    -- "visible to every cloud", which is never what we want with a shared DB.
+    mCloud <- Just <$> currentCloud
     let desc = externalRowDescription inferred reviewStatus
         ctx =
             MobileBuildContext
@@ -1065,7 +1069,7 @@ insertExternalReviewRow ac mCode inferred version reviewStatus = do
                 , mbFirebaseReleaseUrl = Nothing
                 , mbFirebaseTesterUrl = Nothing
                 }
-        base = mkMobileTrackerRow rid ac targetState (Just version) Nothing "store-sync" now
+        base = mkMobileTrackerRow rid ac targetState (Just version) Nothing "store-sync" now mCloud
         row =
             base
                 { rtStatus = "INPROGRESS"
@@ -1197,6 +1201,8 @@ mintSyntheticRelease observed ac version mCode track = do
     rid <- liftIO (UUID.toText <$> UUID.nextRandom)
     groupId <- liftIO (UUID.toText <$> UUID.nextRandom)
     now <- liftIO getCurrentTime
+    -- Owning cluster; NULL would make the row visible to every cloud's runner.
+    mCloud <- Just <$> currentCloud
     let derivedTag = derivedStoreTag ac version mCode
         ctx =
             MobileBuildContext
@@ -1291,7 +1297,7 @@ mintSyntheticRelease observed ac version mCode track = do
                   -- the groups list (mode=STORE_SYNC).
                   rtReleaseGroupId = Just groupId
                 , rtReleaseGroupLabel = Nothing
-                , rtCloudType = Nothing
+                , rtCloudType = mCloud
                 , rtCreatedAt = now
                 , rtUpdatedAt = now
                 }
