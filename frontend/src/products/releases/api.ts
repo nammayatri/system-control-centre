@@ -874,6 +874,51 @@ export async function immediateRevertRelease(releaseId: string, isRevertSync: bo
     return data;
 }
 
+// ── QA automation (ny-qa-automation, run against a test dashboard) ──────────
+// Backend: Products.Autopilot.Actions.QaAutomation. Triggering fires the
+// app group's configured flows (Products.Autopilot.QaAutomation.triggerQaRun)
+// on the target test dashboard's webhook; refresh polls that dashboard's own
+// /api/qa-collections/runs/<runId> for the latest status + failure detail.
+// Field names here are the JSON wire shape: Aeson strips each Haskell
+// record's prefix (qr*, tqr*) and lowercases the first letter — see
+// strippedOpts in Types/QaAutomation.hs — so these do NOT match the Haskell
+// field names directly.
+export interface QaAutomationRun {
+    id: number;
+    runId: string;
+    releaseId: string;
+    appGroup: string;
+    releaseVersion?: string | null;
+    status: string;
+    triggerSource: string;
+    testDashboardUrl?: string | null;
+    passed?: number | null;
+    failed?: number | null;
+    detail?: any;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface TriggerQaRunResponse {
+    runId: string;
+    testDashboardUrl: string;
+}
+
+export async function triggerQaRun(releaseId: string): Promise<TriggerQaRunResponse> {
+    const { data } = await apiClient.post(`/releases/${encodeURIComponent(releaseId)}/qa-run`, {});
+    return data;
+}
+
+export async function getQaRuns(releaseId: string): Promise<QaAutomationRun[]> {
+    const { data } = await apiClient.get(`/releases/${encodeURIComponent(releaseId)}/qa-runs`);
+    return data;
+}
+
+export async function refreshQaRun(runId: string): Promise<QaAutomationRun | null> {
+    const { data } = await apiClient.post(`/qa-runs/${encodeURIComponent(runId)}/refresh`, {});
+    return data;
+}
+
 // ── Mobile revert ─────────────────────────────────────────────────
 // GET /releases/:id/mobile-revert/draft  — read-only preview
 // POST /releases/:id/mobile-revert       — confirm + create

@@ -16,6 +16,7 @@ import type { RolloutHistoryEvent, RolloutEvent, RolloutStrategyEvent, PodInfo, 
 import { AB_STATUS_LABELS, AB_STATUS_COLORS } from '../api';
 import { ABValidationModal } from '../components/ABValidationModal';
 import { ReleaseEventsTab } from '../components/ReleaseEventsTab';
+import { QaAutomationTab } from '../components/QaAutomationTab';
 import MobileReleaseSummary from './mobile/summary/MobileReleaseSummary';
 import { Badge } from '../../../shared/ui/badge';
 import { StatusBadge } from '../components/StatusBadge';
@@ -562,7 +563,7 @@ const RolloutStrategyTab: React.FC<{
 const ReleaseSummary: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'env-diff' | 'json' | 'ai-review'>('summary');
+  const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'env-diff' | 'json' | 'ai-review' | 'qa-automation'>('summary');
   const [showABModal, setShowABModal] = useState(false);
 
   const { data: release, isLoading, isFetching, error, refetch } = useRelease(id);
@@ -696,6 +697,7 @@ const ReleaseSummary: React.FC = () => {
     { key: 'env-diff' as const, label: 'ENV Diff' },
     { key: 'json' as const, label: 'JSON Data' },
     { key: 'ai-review' as const, label: 'AI Review' },
+    { key: 'qa-automation' as const, label: 'QA Automation' },
   ];
 
   const dockerImage = release.docker_image || release.release_context?.docker_image || '';
@@ -982,6 +984,8 @@ const ReleaseSummary: React.FC = () => {
         {activeTab === 'ai-review' && <ConfigReviewPanel id={id!} appGroup={release.appGroup} resource="release" />}
 
         {activeTab === 'env-diff' && <EnvDiffTab releaseId={id!} />}
+
+        {activeTab === 'qa-automation' && <QaAutomationTab releaseId={id!} appGroup={release.appGroup} />}
 
         {activeTab === 'json' && (
           <div className="p-4 sm:p-6">

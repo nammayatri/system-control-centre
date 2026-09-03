@@ -171,11 +171,63 @@ instance Table ReleaseWebhookT where
     data PrimaryKey ReleaseWebhookT f = ReleaseWebhookId (Columnar f Int32) deriving (Generic, Beamable)
     primaryKey = ReleaseWebhookId . rwId
 
+data QaAutomationConfigT f = QaAutomationConfigT
+    { qacId :: Columnar f Int32
+    , qacAppGroup :: Columnar f Text
+    , qacCloudType :: Columnar f Text
+    , qacEnabled :: Columnar f Bool
+    , qacOnSuccess :: Columnar f Bool
+    , qacTestDashboardUrl :: Columnar f Text
+    , qacWebhookToken :: Columnar f Text
+    , qacFlows :: Columnar f Text
+    , qacEnvFile :: Columnar f Text
+    , qacConcurrency :: Columnar f Int32
+    , qacCreatedAt :: Columnar f UTCTime
+    , qacUpdatedAt :: Columnar f UTCTime
+    }
+    deriving (Generic, Beamable)
+
+type QaAutomationConfigRow = QaAutomationConfigT Identity
+
+deriving instance Show QaAutomationConfigRow
+
+instance Table QaAutomationConfigT where
+    data PrimaryKey QaAutomationConfigT f = QaAutomationConfigId (Columnar f Int32) deriving (Generic, Beamable)
+    primaryKey = QaAutomationConfigId . qacId
+
+data QaAutomationRunT f = QaAutomationRunT
+    { qarId :: Columnar f Int32
+    , qarRunId :: Columnar f Text
+    , qarReleaseId :: Columnar f Text
+    , qarAppGroup :: Columnar f Text
+    , qarCloudType :: Columnar f Text
+    , qarReleaseVersion :: Columnar f (Maybe Text)
+    , qarStatus :: Columnar f Text
+    , qarTriggerSource :: Columnar f Text
+    , qarTestDashboardUrl :: Columnar f (Maybe Text)
+    , qarPassed :: Columnar f (Maybe Int32)
+    , qarFailed :: Columnar f (Maybe Int32)
+    , qarDetail :: Columnar f (Maybe Text)
+    , qarCreatedAt :: Columnar f UTCTime
+    , qarUpdatedAt :: Columnar f UTCTime
+    }
+    deriving (Generic, Beamable)
+
+type QaAutomationRunRow = QaAutomationRunT Identity
+
+deriving instance Show QaAutomationRunRow
+
+instance Table QaAutomationRunT where
+    data PrimaryKey QaAutomationRunT f = QaAutomationRunId (Columnar f Int32) deriving (Generic, Beamable)
+    primaryKey = QaAutomationRunId . qarId
+
 data AutopilotDb f = AutopilotDb
     { deploymentConfig :: f (TableEntity DeploymentConfigT)
     , releaseTrackers :: f (TableEntity ReleaseTrackerT)
     , releaseEvents :: f (TableEntity ReleaseEventT)
     , releaseWebhooks :: f (TableEntity ReleaseWebhookT)
+    , qaAutomationConfigs :: f (TableEntity QaAutomationConfigT)
+    , qaAutomationRuns :: f (TableEntity QaAutomationRunT)
     , appCatalogs :: f (TableEntity AppCatalogT)
     , storeStatuses :: f (TableEntity StoreStatusT)
     }
@@ -303,6 +355,42 @@ autopilotDb =
                             , rwRetries = fieldNamed "retries"
                             , rwCreatedAt = fieldNamed "created_at"
                             , rwUpdatedAt = fieldNamed "updated_at"
+                            }
+            , qaAutomationConfigs =
+                setEntityName "qa_automation_config"
+                    <> modifyTableFields
+                        tableModification
+                            { qacId = fieldNamed "id"
+                            , qacAppGroup = fieldNamed "app_group"
+                            , qacCloudType = fieldNamed "cloud_type"
+                            , qacEnabled = fieldNamed "enabled"
+                            , qacOnSuccess = fieldNamed "on_success"
+                            , qacTestDashboardUrl = fieldNamed "test_dashboard_url"
+                            , qacWebhookToken = fieldNamed "webhook_token"
+                            , qacFlows = fieldNamed "flows"
+                            , qacEnvFile = fieldNamed "env_file"
+                            , qacConcurrency = fieldNamed "concurrency"
+                            , qacCreatedAt = fieldNamed "created_at"
+                            , qacUpdatedAt = fieldNamed "updated_at"
+                            }
+            , qaAutomationRuns =
+                setEntityName "qa_automation_run"
+                    <> modifyTableFields
+                        tableModification
+                            { qarId = fieldNamed "id"
+                            , qarRunId = fieldNamed "run_id"
+                            , qarReleaseId = fieldNamed "release_id"
+                            , qarAppGroup = fieldNamed "app_group"
+                            , qarCloudType = fieldNamed "cloud_type"
+                            , qarReleaseVersion = fieldNamed "release_version"
+                            , qarStatus = fieldNamed "status"
+                            , qarTriggerSource = fieldNamed "trigger_source"
+                            , qarTestDashboardUrl = fieldNamed "test_dashboard_url"
+                            , qarPassed = fieldNamed "passed"
+                            , qarFailed = fieldNamed "failed"
+                            , qarDetail = fieldNamed "detail"
+                            , qarCreatedAt = fieldNamed "created_at"
+                            , qarUpdatedAt = fieldNamed "updated_at"
                             }
             , appCatalogs = appCatalog
             , storeStatuses = storeStatus

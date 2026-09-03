@@ -79,6 +79,7 @@ import Products.Autopilot.Types.Target (TargetState (..))
 -- (oldVersion/newVersion/cluster/…) don't clash with 'ReleaseTracker (..)'.
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (context), K8sReleaseContext (changelogSlackOptIn))
 import Products.Autopilot.Types.Workflow (ReleaseCategory (..))
+import Products.Autopilot.QaAutomation (dispatchAutoQaRun)
 import Products.Autopilot.Webhooks (dispatchTerminalWebhooks)
 import Shared.AI.Changelog (ownSideLabel)
 import Shared.AI.Queries (lookupReleaseSummary)
@@ -519,6 +520,7 @@ notifyReleaseCompleted tracker mts = do
   -- COMPLETED post; it lands in the thread a few seconds after COMPLETED.
   whenSlackEnabled $ maybePostBackendChangelog tracker mts
   dispatchTerminalWebhooks tracker
+  dispatchAutoQaRun tracker
   triggerSyncIfEnabled tracker mts
 
 -- | release_event label marking the changelog was posted (exactly-once guard).
