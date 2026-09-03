@@ -30,6 +30,9 @@ import {
   releaseAiSummary,
   releaseAiRisk,
   releaseAiAsk,
+  triggerQaRun,
+  getQaRuns,
+  refreshQaRun,
 } from './api';
 import { toast } from 'sonner';
 
@@ -293,6 +296,51 @@ export function useRolloutRestartDeployment() {
     },
     onError: (err: any) => {
       toast.error(err?.response?.data?.message || err.message || 'Rollout restart failed');
+    },
+  });
+}
+
+// ── QA automation ────────────────────────────────────────────────────
+// Poll while any run is still RUNNING — same "peek at cached data, stop once
+// terminal" shape as useReleaseEvents. A run's own live progress is watched
+// on the test dashboard itself (the stored deep link); this poll is only for
+// keeping the results tab's status/counts fresh.
+export function useQaRuns(releaseId: string | undefined) {
+  return useQuery({
+    queryKey: ['qa-runs', releaseId],
+    queryFn: () => getQaRuns(releaseId!),
+    refetchInterval: (query) => {
+      const runs = query.state.data;
+      const anyRunning = runs?.some((r) => r.status === 'RUNNING');
+      return anyRunning ? 8000 : false;
+    },
+    enabled: !!releaseId,
+  });
+}
+
+export function useTriggerQaRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (releaseId: string) => triggerQaRun(releaseId),
+    onSuccess: (_, releaseId) => {
+      toast.success('QA automation triggered');
+      qc.invalidateQueries({ queryKey: ['qa-runs', releaseId] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err.message || 'Failed to trigger QA automation');
+    },
+  });
+}
+
+export function useRefreshQaRun(releaseId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (runId: string) => refreshQaRun(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['qa-runs', releaseId] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err.message || 'Failed to refresh run');
     },
   });
 }

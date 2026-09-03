@@ -14,6 +14,7 @@ import Products.Autopilot.Actions.ABValidation as ABValidation
 import Products.Autopilot.Actions.Config as Config
 import Products.Autopilot.Actions.ConfigMap as ConfigMap
 import Products.Autopilot.Actions.K8sResource as K8sResource
+import Products.Autopilot.Actions.QaAutomation as QaAutomation
 import Products.Autopilot.Actions.Release as Release
 import Products.Autopilot.Actions.VSEdit as VSEdit
 import Products.Autopilot.Actions.Webhook as Webhook
@@ -23,6 +24,7 @@ import Products.Autopilot.Mobile.Routes (MobileAPI, mobileServer)
 import Products.Autopilot.Types (ReleaseTracker)
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Permission (AutopilotPermission (..))
+import Products.Autopilot.Types.QaAutomation (QaAutomationRun, TriggerQaRunResponse)
 import Products.Autopilot.Types.Webhook (PlaceholderDef, ReleaseWebhook, UpsertWebhookReq, WebhookTestResult)
 import Servant
 import Shared.API.Response (APIResponse (..))
@@ -92,6 +94,10 @@ type CoreAPI =
         :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> Capture "id" Int32 :> "test" :> Post '[JSON] WebhookTestResult
         :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> Capture "id" Int32 :> ReqBody '[JSON] UpsertWebhookReq :> Put '[JSON] APIResponse
         :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> Capture "id" Int32 :> Delete '[JSON] APIResponse
+        -- QA automation (ny-qa-automation, triggered on a running test dashboard)
+        :<|> "releases" :> Protected 'AP_QA_TRIGGER :> Capture "releaseId" Text :> "qa-run" :> Post '[JSON] TriggerQaRunResponse
+        :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "qa-runs" :> Get '[JSON] [QaAutomationRun]
+        :<|> "qa-runs" :> Protected 'AP_QA_TRIGGER :> Capture "runId" Text :> "refresh" :> Post '[JSON] (Maybe QaAutomationRun)
         -- VS Edit Tracker (static paths BEFORE captures to avoid ambiguity)
         :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_CREATE :> ReqBody '[JSON] CreateVsEditTrackerReq :> Post '[JSON] Value
         :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_VIEW :> "list" :> QueryParam "from" Text :> QueryParam "to" Text :> Get '[JSON] [VsEditTrackerResponse]
@@ -200,6 +206,10 @@ coreServer =
         :<|> Webhook.testWebhookH
         :<|> Webhook.updateWebhookH
         :<|> Webhook.deleteWebhookH
+        -- QA automation
+        :<|> QaAutomation.triggerQaRunH
+        :<|> QaAutomation.listQaRunsH
+        :<|> QaAutomation.refreshQaRunH
         -- VS Edit Tracker (order must match API type: static paths before captures)
         :<|> VSEdit.createVsEditTrackerH
         :<|> VSEdit.listVsEditTrackersH
