@@ -35,6 +35,7 @@ import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value, decode, object, withObject, (.:), (.:?), (.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Types (parseMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Database.PostgreSQL.Simple (SqlError (..))
@@ -54,6 +55,14 @@ qaAutomationDispatchLabel = "QA_AUTOMATION_DISPATCHED"
 
 requestTimeoutSeconds :: Int32
 requestTimeoutSeconds = 15
+
+-- | The base URL to actually fire server-to-server calls against — the
+-- in-cluster Service DNS when configured, since 'qcTestDashboardUrl' is
+-- fronted externally by Pomerium (an identity-aware proxy expecting a
+-- browser/SSO session), which would intercept a plain token-header POST
+-- before it ever reached the dashboard's own webhook auth check.
+webhookBaseUrl :: QaAutomationConfig -> Text
+webhookBaseUrl cfg = fromMaybe (qcTestDashboardUrl cfg) (qcInternalBaseUrl cfg)
 
 -- | Look up config for the tracker's app group and fire the trigger webhook,
 -- persisting a run row on success. Never throws — every failure mode (not
@@ -75,7 +84,7 @@ triggerQaRun tracker triggerSource = do
                             , "concurrency" .= qcConcurrency cfg
                             ]
                     req =
-                        (defaultReq (qcTestDashboardUrl cfg <> "/api/qa-collections/webhook"))
+                        (defaultReq (webhookBaseUrl cfg <> "/api/qa-collections/webhook"))
                             { reqMethod = POST
                             , reqHeaders =
                                 [ ("X-QA-Webhook-Token", qcWebhookToken cfg)
@@ -146,7 +155,7 @@ refreshRunStatus runId = do
                 Nothing -> pure (Just run)
                 Just cfg -> do
                     let req =
-                            (defaultReq (qcTestDashboardUrl cfg <> "/api/qa-collections/runs/" <> runId))
+                            (defaultReq (webhookBaseUrl cfg <> "/api/qa-collections/runs/" <> runId))
                                 { reqTimeout = Seconds (fromIntegral requestTimeoutSeconds)
                                 , reqRetries = 0
                                 , reqLogTag = "qa-automation"
