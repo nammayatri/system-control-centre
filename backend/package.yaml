@@ -174,11 +174,15 @@ library:
     - Products.Autopilot.Queries.ProductService
     - Products.Autopilot.Queries.ReleaseTracker
     - Products.Autopilot.Queries.VsEditTracker
+    - Products.Autopilot.Queries.QaAutomation
+    - Products.Autopilot.QaAutomation
     - Products.Autopilot.Actions.Config
     - Products.Autopilot.Actions.ConfigMap
     - Products.Autopilot.Actions.K8sResource
     - Products.Autopilot.Actions.Release
     - Products.Autopilot.Actions.VSEdit
+    - Products.Autopilot.Actions.QaAutomation
+    - Products.Autopilot.Types.QaAutomation
     - Products.Autopilot.Handlers.Ai
     - Products.Autopilot.Handlers.ConfigReview
     - Products.Autopilot.Routes
