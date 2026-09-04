@@ -67,6 +67,7 @@ library
       Products.Autopilot.K8s.HPA
       Products.Autopilot.K8s.Kubectl
       Products.Autopilot.Notifications
+      Products.Autopilot.QaAutomation
       Products.Autopilot.Webhooks
       Products.Autopilot.ReleaseChangelog
       Products.Autopilot.K8s.VirtualService
@@ -109,6 +110,7 @@ library
       Products.Autopilot.Mobile.Workflow
       Products.Autopilot.Queries.ProductService
       Products.Autopilot.Queries.ReleaseTracker
+      Products.Autopilot.Queries.QaAutomation
       Products.Autopilot.Queries.ReleaseWebhook
       Products.Autopilot.Queries.VsEditTracker
       Products.AirborneOta.Chime
@@ -123,6 +125,7 @@ library
       Products.Autopilot.Actions.ConfigMap
       Products.Autopilot.Actions.K8sResource
       Products.Autopilot.Actions.Release
+      Products.Autopilot.Actions.QaAutomation
       Products.Autopilot.Actions.VSEdit
       Products.Autopilot.Actions.Webhook
       Products.Autopilot.Handlers.Ai
@@ -136,6 +139,7 @@ library
       Products.Autopilot.Types.API
       Products.Autopilot.Types.ABValidation
       Products.Autopilot.Types.Permission
+      Products.Autopilot.Types.QaAutomation
       Products.Autopilot.Types.Release
       Products.Autopilot.Types.Storage.Schema
       Products.Autopilot.Types.Target
