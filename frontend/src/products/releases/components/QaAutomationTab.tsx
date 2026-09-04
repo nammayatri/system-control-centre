@@ -47,46 +47,176 @@ const statusVariant = (status: string): 'info' | 'success' | 'danger' | 'warning
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type QaEvent = { type: string; [key: string]: any };
 
-const isFailureEvent = (ev: QaEvent): boolean =>
-  (ev.type === 'request' && (ev.error || (typeof ev.status === 'number' && ev.status >= 400))) ||
-  (ev.type === 'assertion' && ev.passed === false);
+interface ApiRow {
+  key: string;
+  name: string;
+  method?: string;
+  status?: number;
+  error?: string;
+  passed: boolean;
+  requestBody?: unknown;
+  responseBody?: unknown;
+  assertions: Array<{ name: string; passed: boolean; error?: string }>;
+}
+
+interface SuiteGroup {
+  key: string;
+  name: string;
+  passed: number;
+  failed: number;
+  apis: ApiRow[];
+}
+
+interface DirectoryGroup {
+  key: string;
+  name: string;
+  suites: SuiteGroup[];
+}
+
+// Every event carries `directory` (NY/MSIL/YS) and `collection` (the suite
+// file's name) — build the same Collection → Suite → API hierarchy the test
+// dashboard itself shows, instead of one flat list of every failed line.
+function groupEvents(events: QaEvent[]): DirectoryGroup[] {
+  const dirs = new Map<string, DirectoryGroup>();
+  const apiIndex = new Map<string, ApiRow>(); // `${directory}::${collection}::${name}` -> row
+
+  const getSuite = (directory: string, collection: string): SuiteGroup => {
+    let dir = dirs.get(directory);
+    if (!dir) {
+      dir = { key: directory, name: directory, suites: [] };
+      dirs.set(directory, dir);
+    }
+    let suite = dir.suites.find((s) => s.key === collection);
+    if (!suite) {
+      suite = { key: collection, name: collection, passed: 0, failed: 0, apis: [] };
+      dir.suites.push(suite);
+    }
+    return suite;
+  };
+
+  for (const ev of events) {
+    const directory = ev.directory ?? '';
+    const collection = ev.collection ?? '';
+    if (ev.type === 'request') {
+      const suite = getSuite(directory, collection);
+      const key = `${directory}::${collection}::${ev.name}`;
+      const httpFailed = !!ev.error || (typeof ev.status === 'number' && ev.status >= 400);
+      const row: ApiRow = {
+        key, name: ev.name, method: ev.method, status: ev.status, error: ev.error,
+        passed: !httpFailed, requestBody: ev.requestBody, responseBody: ev.responseBody, assertions: [],
+      };
+      apiIndex.set(key, row);
+      suite.apis.push(row);
+    } else if (ev.type === 'assertion') {
+      const key = `${directory}::${collection}::${ev.item}`;
+      const row = apiIndex.get(key);
+      if (row) {
+        row.assertions.push({ name: ev.name, passed: ev.passed, error: ev.error ?? undefined });
+        if (!ev.passed) row.passed = false;
+      }
+    } else if (ev.type === 'collection_result') {
+      const suite = getSuite(directory, collection);
+      suite.passed = ev.passed ?? 0;
+      suite.failed = ev.failed ?? 0;
+    }
+  }
+
+  return Array.from(dirs.values());
+}
+
+const ApiRowView: React.FC<{ api: ApiRow }> = ({ api }) => {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className={cn('border rounded-lg text-xs overflow-hidden', api.passed ? 'border-zinc-200' : 'border-red-200 bg-red-50')}>
+      <div
+        className="flex items-center gap-2 px-2.5 py-1.5 cursor-pointer hover:bg-black/[0.02]"
+        onClick={() => setExpanded((s) => !s)}
+      >
+        <span className={api.passed ? 'text-emerald-600' : 'text-red-600'}>{api.passed ? '✓' : '✗'}</span>
+        {api.method && <span className="font-mono font-medium text-zinc-600">{api.method}</span>}
+        <span className="font-mono">{api.name}</span>
+        {api.status != null && (
+          <span className={cn('ml-auto font-mono', api.status >= 400 ? 'text-red-600' : 'text-zinc-500')}>{api.status}</span>
+        )}
+      </div>
+      {expanded && (
+        <div className="px-2.5 pb-2.5 space-y-2 border-t border-zinc-100 pt-2">
+          {api.error && <div className="text-red-600">{api.error}</div>}
+          {api.assertions.length > 0 && (
+            <div className="space-y-0.5">
+              {api.assertions.map((a, i) => (
+                <div key={i} className={a.passed ? 'text-emerald-600' : 'text-red-600'}>
+                  {a.passed ? '✓' : '✗'} {a.name}{a.error && ` — ${a.error}`}
+                </div>
+              ))}
+            </div>
+          )}
+          {api.requestBody != null && api.requestBody !== '' && (
+            <div>
+              <div className="text-zinc-500 font-medium mb-1">Request body</div>
+              <pre className="bg-white border border-zinc-200 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+                {typeof api.requestBody === 'string' ? api.requestBody : JSON.stringify(api.requestBody, null, 2)}
+              </pre>
+            </div>
+          )}
+          {api.responseBody != null && api.responseBody !== '' && (
+            <div>
+              <div className="text-zinc-500 font-medium mb-1">Response body</div>
+              <pre className="bg-white border border-zinc-200 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+                {typeof api.responseBody === 'string' ? api.responseBody : JSON.stringify(api.responseBody, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const SuiteGroupView: React.FC<{ suite: SuiteGroup }> = ({ suite }) => {
+  const [expanded, setExpanded] = useState(false);
+  const failed = suite.apis.some((a) => !a.passed);
+  return (
+    <div className="border border-zinc-200 rounded-lg overflow-hidden">
+      <div
+        className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-zinc-50 bg-zinc-50/50"
+        onClick={() => setExpanded((s) => !s)}
+      >
+        <span className={cn('inline-block transition-transform duration-200 text-[10px] text-zinc-400', expanded ? 'rotate-90' : '')}>&#9654;</span>
+        <span className="font-mono text-xs font-semibold text-zinc-700">{suite.name}</span>
+        <Badge variant={failed ? 'danger' : 'success'} size="sm" className="ml-auto">
+          {suite.passed}✓ {suite.failed}✗
+        </Badge>
+      </div>
+      {expanded && (
+        <div className="p-2 space-y-1.5 border-t border-zinc-100">
+          {suite.apis.map((api) => <ApiRowView key={api.key} api={api} />)}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const FailureDetail: React.FC<{ detail: any }> = ({ detail }) => {
   const [showRaw, setShowRaw] = useState(false);
   const events: QaEvent[] = Array.isArray(detail?.events) ? detail.events : [];
-  const failures = events.filter(isFailureEvent);
 
   if (events.length === 0) {
     return <p className="text-xs text-zinc-400">No detail cached yet — click Refresh to pull it from the test dashboard.</p>;
   }
 
+  const directories = groupEvents(events);
+
   return (
-    <div className="space-y-2">
-      {failures.length === 0 ? (
-        <p className="text-xs text-emerald-600">No failures.</p>
-      ) : (
-        failures.map((ev, i) => (
-          <div key={i} className="border border-red-200 bg-red-50 rounded-lg p-3 text-xs">
-            <div className="font-mono font-semibold text-red-700">
-              {ev.type === 'assertion' ? `✗ ${ev.name}` : `✗ ${ev.method ?? ''} ${ev.name}${ev.status ? ` — HTTP ${ev.status}` : ''}`}
-            </div>
-            {ev.error && <div className="mt-1 text-red-600">{ev.error}</div>}
-            {ev.url && <div className="mt-1 text-zinc-500 break-all">{ev.url}</div>}
-            {ev.requestBody && (
-              <>
-                <div className="mt-2 text-zinc-500 font-medium">Request body</div>
-                <pre className="mt-1 bg-white border border-zinc-200 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">{ev.requestBody}</pre>
-              </>
-            )}
-            {ev.responseBody && (
-              <>
-                <div className="mt-2 text-zinc-500 font-medium">Response body</div>
-                <pre className="mt-1 bg-white border border-zinc-200 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">{ev.responseBody}</pre>
-              </>
-            )}
+    <div className="space-y-3">
+      {directories.map((dir) => (
+        <div key={dir.key}>
+          <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">{dir.name}</h4>
+          <div className="space-y-1.5">
+            {dir.suites.map((suite) => <SuiteGroupView key={suite.key} suite={suite} />)}
           </div>
-        ))
-      )}
+        </div>
+      ))}
       <button className="text-[11px] text-violet-600 hover:underline" onClick={() => setShowRaw((s) => !s)}>
         {showRaw ? 'Hide raw event log' : `Show raw event log (${events.length} events)`}
       </button>
