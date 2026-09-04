@@ -178,6 +178,7 @@ data QaAutomationConfigT f = QaAutomationConfigT
     , qacEnabled :: Columnar f Bool
     , qacOnSuccess :: Columnar f Bool
     , qacTestDashboardUrl :: Columnar f Text
+    , qacInternalBaseUrl :: Columnar f (Maybe Text)
     , qacWebhookToken :: Columnar f Text
     , qacFlows :: Columnar f Text
     , qacEnvFile :: Columnar f Text
@@ -366,6 +367,7 @@ autopilotDb =
                             , qacEnabled = fieldNamed "enabled"
                             , qacOnSuccess = fieldNamed "on_success"
                             , qacTestDashboardUrl = fieldNamed "test_dashboard_url"
+                            , qacInternalBaseUrl = fieldNamed "internal_base_url"
                             , qacWebhookToken = fieldNamed "webhook_token"
                             , qacFlows = fieldNamed "flows"
                             , qacEnvFile = fieldNamed "env_file"

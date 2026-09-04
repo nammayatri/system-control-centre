@@ -55,6 +55,7 @@ configFromRow r =
         , qcEnabled = qacEnabled r
         , qcOnSuccess = qacOnSuccess r
         , qcTestDashboardUrl = qacTestDashboardUrl r
+        , qcInternalBaseUrl = qacInternalBaseUrl r
         , qcWebhookToken = qacWebhookToken r
         , qcFlows = decodeJsonList (Just (qacFlows r))
         , qcEnvFile = qacEnvFile r
@@ -153,6 +154,7 @@ upsertConfig cfg = withCloudDb $ \cloud db -> do
                                 , qacEnabled = val_ (qcEnabled cfg)
                                 , qacOnSuccess = val_ (qcOnSuccess cfg)
                                 , qacTestDashboardUrl = val_ (qcTestDashboardUrl cfg)
+                                , qacInternalBaseUrl = val_ (qcInternalBaseUrl cfg)
                                 , qacWebhookToken = val_ (qcWebhookToken cfg)
                                 , qacFlows = val_ (encodeJsonList (qcFlows cfg))
                                 , qacEnvFile = val_ (qcEnvFile cfg)
@@ -171,6 +173,7 @@ upsertConfig cfg = withCloudDb $ \cloud db -> do
                                 [ qacEnabled c <-. val_ (qcEnabled cfg)
                                 , qacOnSuccess c <-. val_ (qcOnSuccess cfg)
                                 , qacTestDashboardUrl c <-. val_ (qcTestDashboardUrl cfg)
+                                , qacInternalBaseUrl c <-. val_ (qcInternalBaseUrl cfg)
                                 , qacWebhookToken c <-. val_ (qcWebhookToken cfg)
                                 , qacFlows c <-. val_ (encodeJsonList (qcFlows cfg))
                                 , qacEnvFile c <-. val_ (qcEnvFile cfg)

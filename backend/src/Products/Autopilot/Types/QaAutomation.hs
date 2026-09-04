@@ -75,6 +75,11 @@ data QaAutomationConfig = QaAutomationConfig
     , qcEnabled :: Bool
     , qcOnSuccess :: Bool
     , qcTestDashboardUrl :: Text
+    , -- | In-cluster Service DNS to actually fire the webhook/refresh calls
+      -- against, bypassing the external Pomerium-fronted route (meant for
+      -- browser/SSO sessions, not server-to-server calls). 'Nothing' falls
+      -- back to 'qcTestDashboardUrl'.
+      qcInternalBaseUrl :: Maybe Text
     , qcWebhookToken :: Text
     , qcFlows :: [QaFlow]
     , qcEnvFile :: Text
