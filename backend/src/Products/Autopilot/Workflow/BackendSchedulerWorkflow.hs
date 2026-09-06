@@ -40,18 +40,19 @@ import Products.Autopilot.K8s.Deployment
     getRunningSchedulerVersion,
   )
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
-import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildDeleteHpaCommand, getHpaMinMax, hpaExists)
+import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildCreateHpaFromTemplateCommand, buildDeleteHpaCommand, getHpaMinMax, hpaExists)
 import Products.Autopilot.Notifications
   ( notifyPodsScaledDown,
     notifyReleaseCompleted,
     notifyReleaseProgress,
   )
+import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, getHpaMaxReplicas, getHpaMinReplicas)
 import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker, insertReleaseEvent)
-import Products.Autopilot.RuntimeConfig (getPodReadyStabilizeSeconds, isScaleDownPodsOnCompletion)
+import Products.Autopilot.RuntimeConfig (getHpaTemplate, getPodReadyStabilizeSeconds, isHpaEnabledForProduct, isScaleDownPodsOnCompletion)
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
 import Products.Autopilot.Types.Release
   ( ReleaseStatus (..),
-    ReleaseTracker (appGroup, envOverrideData, releaseId, rolloutHistory, rolloutStrategy, status),
+    ReleaseTracker (appGroup, envOverrideData, releaseId, rolloutHistory, rolloutStrategy, service, status),
     RolloutHistory (..),
     RolloutStep (..),
   )
@@ -373,17 +374,19 @@ prepareK8sResources = do
         pure srcCtx
   updateK8sField (\k8s -> k8s {deploymentCreated = True})
 
-  -- 3. HPA: preserve existing / clone from old (no template branch).
+  -- 3. HPA: preserve existing / clone from old / create from template.
   --
   -- Schedulers (queue workers, cron-driven workers) don't typically have an
   -- HPA — autoscaling on CPU is meaningless for a queue consumer. But
   -- some schedulers DO have one (e.g. KEDA-managed custom-metrics HPA on
-  -- queue depth). When that's the case we mirror BackendService's flow:
-  -- preserve the operator-configured min/max/metrics/behavior verbatim and
-  -- only mutate the HPA at this prepare stage. Progressive pod-count
-  -- rollout caps at the live HPA's maxReplicas but never patches it.
-  -- No Branch 3 (template create) — schedulers without an old HPA simply
-  -- run without one.
+  -- queue depth), and an app_group can opt a scheduler in explicitly via
+  -- scaling_with_hpa_enabled (same flag BackendService checks). We mirror
+  -- BackendService's flow: preserve the operator-configured min/max/metrics/
+  -- behavior verbatim and only mutate the HPA at this prepare stage.
+  -- Progressive pod-count rollout caps at the live HPA's maxReplicas but
+  -- never patches it. Branch 3 (template create) only fires when the app
+  -- group is in scaling_with_hpa_enabled -- most schedulers stay HPA-less
+  -- by default.
   let newHpaName = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
       oldHpaName = serviceName ctx <> "-" <> oldVersion resolvedSrcCtx <> "-hpa"
   newHpaFound <- liftIO $ hpaExists cfg (namespace ctx) newHpaName
@@ -393,14 +396,36 @@ prepareK8sResources = do
       insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_PRESERVED" (toJSON newHpaName)
     else do
       oldHpaFound <- liftIO $ hpaExists cfg (namespace ctx) oldHpaName
-      when oldHpaFound $ do
-        logInfoS $ "  Cloning HPA from " <> oldHpaName <> " (preserving min/max/metrics/behavior)"
-        cloneResult <- liftIO $ runCmd (buildCloneHpaCommand cfg (namespace ctx) (serviceName ctx) (oldVersion ctx) (newVersion ctx) oldHpaName)
-        case cloneResult of
-          Right _ -> do
-            logInfoS "  HPA cloned successfully"
-            insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_CLONED" (toJSON newHpaName)
-          Left (K8sError err) -> logErrorS $ "  [HPA] Clone failed (non-fatal): " <> err
+      if oldHpaFound
+        then do
+          logInfoS $ "  Cloning HPA from " <> oldHpaName <> " (preserving min/max/metrics/behavior)"
+          cloneResult <- liftIO $ runCmd (buildCloneHpaCommand cfg (namespace ctx) (serviceName ctx) (oldVersion ctx) (newVersion ctx) oldHpaName)
+          case cloneResult of
+            Right _ -> do
+              logInfoS "  HPA cloned successfully"
+              insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_CLONED" (toJSON newHpaName)
+            Left (K8sError err) -> logErrorS $ "  [HPA] Clone failed (non-fatal): " <> err
+        else do
+          hpaEnabled <- lift $ isHpaEnabledForProduct (appGroup rt)
+          when hpaEnabled $ do
+            -- First release for this scheduler under an HPA-enabled app group:
+            -- create from template verbatim (no prior HPA to inherit from).
+            -- min/max come from this service's own deployment_config
+            -- (hpa_min_replicas/hpa_max_replicas), defaulting to 2/100 when unset.
+            mTemplate <- lift getHpaTemplate
+            case mTemplate of
+              Just tmpl | not (T.null tmpl) -> do
+                mSvcConfig <- lift $ findServiceByProductAndName (appGroup rt) (service rt)
+                let hpaMin = maybe 2 getHpaMinReplicas mSvcConfig
+                    hpaMax = maybe 100 getHpaMaxReplicas mSvcConfig
+                logInfoS $ "  Creating HPA from template: " <> newHpaName <> " (min=" <> T.pack (show hpaMin) <> " max=" <> T.pack (show hpaMax) <> ")"
+                createResult <- liftIO $ runCmd (buildCreateHpaFromTemplateCommand cfg (namespace ctx) (serviceName ctx) (newVersion ctx) tmpl (fromIntegral hpaMin) (fromIntegral hpaMax))
+                case createResult of
+                  Right _ -> do
+                    logInfoS "  HPA created from template"
+                    insertReleaseEvent (releaseId rt) "BUSINESS" "HPA_CREATED_FROM_TEMPLATE" (toJSON newHpaName)
+                  Left (K8sError err) -> logErrorS $ "  [HPA] Create from template failed (non-fatal): " <> err
+              _ -> logInfoS "  No hpa_template configured; skipping HPA create"
 
   -- Bug fix B10: replace the previous fixed `threadDelaySec 10` (which
   -- waited a fixed 10 seconds and then logged a warning if pods were not
