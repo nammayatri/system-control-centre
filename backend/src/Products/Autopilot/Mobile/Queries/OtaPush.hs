@@ -9,13 +9,14 @@ carry them as 'Text' ('Products.Autopilot.Mobile.Types.Ota'). The FromRow
 instances live here (not in Types.Ota) so the types module stays SQL-free.
 -}
 module Products.Autopilot.Mobile.Queries.OtaPush (
-    insertOtaPushes,
+    claimOtaDispatch,
     listOtaPushesForGroup,
     findOtaPushById,
-    findActivePush,
+    findActivePushForRefs,
     listActivePushRows,
     listUnresolvedPushes,
     updateOtaPushRun,
+    setOtaPushBatchRunId,
     markOtaPushStatus,
     markBatchFailed,
     setResolvedPackage,
@@ -28,14 +29,16 @@ module Products.Autopilot.Mobile.Queries.OtaPush (
     setTrackerSourceRef,
 ) where
 
-import Control.Monad (void)
+import Control.Exception qualified as CE
+import Control.Monad (forM_, void)
 import Core.DB.Connection (withConn)
 import Core.Environment (MonadFlow, withDb)
 import Data.Aeson (Value)
 import Data.Int (Int64)
+import Data.List (nub, sort)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
-import Database.PostgreSQL.Simple (In (..), Only (..), Query, execute, query, query_, (:.) (..))
+import Database.PostgreSQL.Simple (Connection, In (..), Only (..), Query, SqlError (..), execute, execute_, query, query_, withTransaction, (:.) (..))
 import Database.PostgreSQL.Simple.FromRow (FromRow (..))
 import Products.Autopilot.Mobile.Types.Ota (OtaLink (..), OtaPush (..))
 
@@ -57,10 +60,22 @@ pushCols =
 selectPush :: Query
 selectPush = "SELECT " <> pushCols <> " FROM ota_push "
 
-{- | Insert one expectation row per (app, platform); returns the inserted rows.
+{- | Claim the dispatch slot for this batch's airborne namespaces and insert
+one expectation row per (app, platform) — one transaction, all or nothing.
 Caller supplies the shared @dispatch_batch_id@ (a fresh UUID as Text).
+
+Scope is per-namespace, not global: everything that forces serialization
+(airborne's per-namespace version counter, tag- and baseline-based package
+resolution) is namespace-local, so unrelated apps push concurrently. Locks
+are taken in sorted order, so a multi-namespace claim cannot deadlock
+against an overlapping one, and are transaction-scoped — they release at
+commit instead of leaking for the life of a pooled connection.
+
+@Left (Just p)@ — a namespace here is already busy; @p@ names the owner.
+@Left Nothing@ — the lock wait timed out (SqlError 55P03); a concurrent
+claim holds it, which the caller reports the same way.
 -}
-insertOtaPushes ::
+claimOtaDispatch ::
     (MonadFlow m) =>
     Text -> -- group id
     Text -> -- source_ref
@@ -69,25 +84,51 @@ insertOtaPushes ::
     Text -> -- requested bump
     Text -> -- dispatched_by (actor email)
     [(Text, Text, Text, Maybe Int)] -> -- (app_name, platform, airborne_app_ref, baseline)
-    m [OtaPush]
-insertOtaPushes gid srcRef batchId env bump actor targets =
+    m (Either (Maybe OtaPush) [OtaPush])
+claimOtaDispatch gid srcRef batchId env bump actor targets =
     withDb $ \db -> withConn db $ \conn ->
-        concat
-            <$> mapM
-                ( \(app, plat, ref, baseline) ->
-                    query
-                        conn
-                        ( "INSERT INTO ota_push \
-                          \  (mobile_release_group_id, app_name, platform, airborne_app_ref, env, \
-                          \   requested_bump, status, source_ref, dispatch_batch_id, \
-                          \   baseline_package_version, dispatched_by) \
-                          \VALUES (?, ?, ?, ?, ?, ?, 'DISPATCHED', ?, ?::uuid, ?, ?) \
-                          \RETURNING "
-                            <> pushCols
-                        )
-                        (gid, app, plat, ref, env, bump, srcRef, batchId, baseline, actor)
+        claimTxn conn `CE.catch` \e ->
+            if sqlState e == "55P03" then pure (Left Nothing) else CE.throwIO e
+  where
+    refs = sort (nub [r | (_, _, r, _) <- targets])
+    claimTxn conn = withTransaction conn $ do
+        _ <- execute_ conn "SET LOCAL lock_timeout = '5s'"
+        forM_ refs $ \r ->
+            void
+                ( query
+                    conn
+                    "SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(?))) l"
+                    (Only ("ota-ns:" <> r)) ::
+                    IO [Only Int]
                 )
-                targets
+        busy <- activePushOn conn refs
+        case busy of
+            Just p -> pure (Left (Just p))
+            Nothing -> Right . concat <$> mapM (insertOne conn) targets
+    insertOne conn (app, plat, ref, baseline) =
+        query
+            conn
+            ( "INSERT INTO ota_push \
+              \  (mobile_release_group_id, app_name, platform, airborne_app_ref, env, \
+              \   requested_bump, status, source_ref, dispatch_batch_id, \
+              \   baseline_package_version, dispatched_by) \
+              \VALUES (?, ?, ?, ?, ?, ?, 'DISPATCHED', ?, ?::uuid, ?, ?) \
+              \RETURNING "
+                <> pushCols
+            )
+            (gid, app, plat, ref, env, bump, srcRef, batchId, baseline, actor)
+
+-- | Newest non-terminal push on any of these namespaces, on a caller's conn.
+activePushOn :: Connection -> [Text] -> IO (Maybe OtaPush)
+activePushOn conn refs =
+    listToMaybe
+        <$> query
+            conn
+            ( selectPush
+                <> "WHERE airborne_app_ref IN ? AND status IN ('DISPATCHED','RUNNING') \
+                   \ORDER BY dispatched_at DESC LIMIT 1"
+            )
+            (Only (In refs))
 
 listOtaPushesForGroup :: (MonadFlow m) => Text -> m [OtaPush]
 listOtaPushesForGroup gid =
@@ -103,16 +144,14 @@ findOtaPushById pid =
         listToMaybe
             <$> query conn (selectPush <> "WHERE id = ?::uuid") (Only pid)
 
-{- | The globally-active (non-terminal) push batch, if any (Decision D).
-Returns the newest active row — enough to identify the owner.
+{- | The active (non-terminal) push blocking a dispatch on these namespaces.
+Namespace-scoped to match 'claimOtaDispatch' — an unrelated app's push must
+not gate this group. Returns the newest such row, enough to name the owner.
 -}
-findActivePush :: (MonadFlow m) => m (Maybe OtaPush)
-findActivePush =
-    withDb $ \db -> withConn db $ \conn ->
-        listToMaybe
-            <$> query_
-                conn
-                (selectPush <> "WHERE status IN ('DISPATCHED','RUNNING') ORDER BY dispatched_at DESC LIMIT 1")
+findActivePushForRefs :: (MonadFlow m) => [Text] -> m (Maybe OtaPush)
+findActivePushForRefs [] = pure Nothing
+findActivePushForRefs refs =
+    withDb $ \db -> withConn db $ \conn -> activePushOn conn refs
 
 -- | All non-terminal rows (the convergence work-list), oldest batch first.
 listActivePushRows :: (MonadFlow m) => m [OtaPush]
@@ -131,6 +170,20 @@ listUnresolvedPushes =
         query_
             conn
             (selectPush <> "WHERE status = 'BUNDLE_PUSHED' AND package_version IS NULL ORDER BY dispatched_at ASC")
+
+{- | Stamp the run id GitHub returned from the dispatch POST itself. Rows stay
+DISPATCHED: convergence still reads the run to fill commit_sha and flip to
+RUNNING, but no longer has to GUESS which run is ours by matrix job name.
+-}
+setOtaPushBatchRunId :: (MonadFlow m) => Text -> Int64 -> m ()
+setOtaPushBatchRunId batchId runId =
+    withDb $ \db -> withConn db $ \conn ->
+        void $
+            execute
+                conn
+                "UPDATE ota_push SET external_run_id = ?, updated_at = now() \
+                \WHERE dispatch_batch_id = ?::uuid AND status = 'DISPATCHED'"
+                (runId, batchId)
 
 -- | Stamp run id + commit sha on every row of a batch → RUNNING.
 updateOtaPushRun :: (MonadFlow m) => Text -> Int64 -> Text -> m ()

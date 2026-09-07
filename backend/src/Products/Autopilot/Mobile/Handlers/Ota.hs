@@ -37,10 +37,8 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import System.IO.Unsafe (unsafePerformIO)
 import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..), KnownPermission, requireDeploymentPermissionScopes)
-import Core.DB.Connection (withConn)
-import Core.Environment (Flow, logInfo, logWarning, withDb)
+import Core.Environment (Flow, logInfo, logWarning)
 import Core.Http.Client qualified as Http
-import Database.PostgreSQL.Simple (Only (..), query)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import Data.Aeson.Key qualified as AK
 import Data.Aeson.KeyMap qualified as KM
@@ -60,12 +58,14 @@ import Products.AirborneOta.Queries (insertAirborneEvent)
 import Products.AirborneOta.Types.Permission (OtaPermission (..))
 import Products.Autopilot.Mobile.Github (
     CommitComparison (..),
+    DispatchRunDetails (..),
     WorkflowDispatchReq (..),
     WorkflowRun (..),
     compareCommits,
     dispatchRunCandidates,
     dispatchWorkflow,
     findRunWithJob,
+    getWorkflowRun,
     jCompletedAt,
     jConclusion,
     jHtmlUrl,
@@ -99,26 +99,6 @@ import Products.Autopilot.Types.Release qualified as Rel
 import Products.Autopilot.Types.Target (TargetState (..))
 
 -- ─── Constants & small helpers ─────────────────────────────────────
-
-{- | @pg_try_advisory_lock(hashtext($1))@ — non-blocking, session-scoped
-advisory lock. Best-effort serialization of concurrent OTA dispatch requests
-(the lock call and the guarded work run on different pooled connections, and
-the lock releases only when its connection closes — a re-check on the same
-connection re-acquires reentrantly). The mobile BUILD workflow stopped using
-this pattern (its dispatch uniqueness comes from durable pre-POST receipts);
-kept here local to the OTA handler until that flow gets the same treatment.
--}
-tryAdvisoryLockShared :: Text -> Flow Bool
-tryAdvisoryLockShared key = withDb $ \db ->
-    withConn db $ \conn -> do
-        rows <-
-            query
-                conn
-                "SELECT pg_try_advisory_lock(hashtext(?))"
-                (Only key)
-        pure $ case rows of
-            [Only b] -> b
-            _ -> False
 
 otaWorkflowFile :: Text
 otaWorkflowFile = ".github/workflows/consumer-airborne-ota.yaml"
@@ -392,7 +372,7 @@ getGroupOtaH _ap gid = do
             let refs = nub (mapMaybe (acAirborneAppRef . snd) (gcCapable ctx'))
                 runsBase = runsBaseFor <$> listToMaybe (map (acGithubRepo . snd) (gcCapable ctx'))
             linkRows <- listLinksForRefs refs
-            active <- findActivePush
+            active <- findActivePushForRefs refs
             capable <- capableAppsResp ctx'
             pure
                 OtaGroupResp
@@ -447,25 +427,39 @@ convergeBatch creds now batchId batchRows ownerRepo = do
         running = [p | p <- batchRows, opStatus p == "RUNNING"]
         anchor = head batchRows
         age = diffUTCTime now (opDispatchedAt anchor)
-    -- Phase 1: bind the batch to its CI run.
-    when (not (null dispatched) && age > dispatchSettle) $ do
-        eRuns <- listWorkflowRuns creds owner repo otaWorkflowFile
-        case eRuns of
-            Left err -> logWarning ("[OTA] listWorkflowRuns: " <> err)
-            Right runs -> do
-                let cands =
-                        [ r
-                        | r <- dispatchRunCandidates (opDispatchedAt anchor) runs
-                        , maybe True (== opSourceRef anchor) (wrHeadBranch r)
-                        ]
-                mRun <- findRunWithJob creds owner repo [otaJobName (opAppName anchor) (opPlatform anchor)] cands
-                case mRun of
-                    Just r -> do
-                        updateOtaPushRun batchId (wrId r) (wrHeadSha r)
-                        logInfo ("[OTA] batch " <> batchId <> " bound to run " <> T.pack (show (wrId r)))
-                    Nothing ->
-                        when (age > runLookupTimeout) $
-                            markBatchFailed batchId "run_lookup_timeout"
+    -- Phase 1: bind the batch to its CI run. A run id stamped at dispatch time
+    -- is identity, not inference: GET it and take its sha, no settle wait. Only
+    -- batches dispatched before that (or on a ref whose GH still answers 204)
+    -- fall back to the name-based hunt, which cannot tell two concurrent runs
+    -- of the same app apart.
+    when (not (null dispatched)) $ case mapMaybe opExternalRunId dispatched of
+        (runId : _) -> do
+            eRun <- getWorkflowRun creds owner repo (T.pack (show runId))
+            case eRun of
+                Right r -> do
+                    updateOtaPushRun batchId (wrId r) (wrHeadSha r)
+                    logInfo ("[OTA] batch " <> batchId <> " bound to dispatched run " <> T.pack (show (wrId r)))
+                Left err -> do
+                    logWarning ("[OTA] getWorkflowRun " <> T.pack (show runId) <> ": " <> err)
+                    when (age > runLookupTimeout) $ markBatchFailed batchId "run_lookup_timeout"
+        [] -> when (age > dispatchSettle) $ do
+            eRuns <- listWorkflowRuns creds owner repo otaWorkflowFile
+            case eRuns of
+                Left err -> logWarning ("[OTA] listWorkflowRuns: " <> err)
+                Right runs -> do
+                    let cands =
+                            [ r
+                            | r <- dispatchRunCandidates (opDispatchedAt anchor) runs
+                            , maybe True (== opSourceRef anchor) (wrHeadBranch r)
+                            ]
+                    mRun <- findRunWithJob creds owner repo [otaJobName (opAppName anchor) (opPlatform anchor)] cands
+                    case mRun of
+                        Just r -> do
+                            updateOtaPushRun batchId (wrId r) (wrHeadSha r)
+                            logInfo ("[OTA] batch " <> batchId <> " bound to run " <> T.pack (show (wrId r)))
+                        Nothing ->
+                            when (age > runLookupTimeout) $
+                                markBatchFailed batchId "run_lookup_timeout"
     -- Phase 2: track jobs of the bound run.
     when (age > runningStaleTimeout && not (null running)) $
         markBatchFailed batchId "stale (no completion after 90m)"
@@ -589,17 +583,20 @@ dispatchOtaH ap gid OtaDispatchReq{versionBump = bump, apps = mApps, platforms =
                     | (rt, r) <- ineligible
                     ]
     requireAppPermAll (Proxy @'MB_MOBILE_DISPATCH) ap [(Rel.appGroup rt, Rel.env rt) | (rt, _, True, _) <- gated]
-    -- Global serialization (Decision D): advisory lock around check+insert+dispatch.
-    gotLock <- tryAdvisoryLockShared "ota-dispatch"
-    unless gotLock $ throwM (Conflict "another OTA dispatch is being processed — retry in a moment")
-    active <- findActivePush
-    forM_ active $ \p ->
-        throwM . Conflict $
-            "an OTA push is already active (group "
-                <> opGroupId p
-                <> ", by "
-                <> opDispatchedBy p
-                <> ") — wait for it to finish or abandon it"
+    -- Serialization is per airborne namespace, not global (see 'claimOtaDispatch'):
+    -- unrelated apps share no resource, so their pushes run concurrently.
+    let wantedRefs = nub [fromMaybe "" (acAirborneAppRef ac) | (_, ac, True, _) <- gated]
+        conflictWith p =
+            Conflict $
+                "an OTA push is already active for this app (group "
+                    <> opGroupId p
+                    <> ", by "
+                    <> opDispatchedBy p
+                    <> ") — wait for it to finish or abandon it"
+    -- Fail fast so a doomed request skips the baseline round-trips below; the
+    -- authoritative check is the one inside the claim transaction.
+    preActive <- findActivePushForRefs wantedRefs
+    forM_ preActive (throwM . conflictWith)
     -- Best-effort per-namespace baseline watermark (NULL only disables the fallback resolver).
     targets <- forM [(rt, ac) | (rt, ac, True, _) <- gated] $ \(rt, ac) -> do
         let ref = fromMaybe "" (acAirborneAppRef ac)
@@ -617,7 +614,12 @@ dispatchOtaH ap gid OtaDispatchReq{versionBump = bump, apps = mApps, platforms =
             Just r -> r
             Nothing -> "ios-debug"
     batchId <- liftIO (UUID.toText <$> UUID.nextRandom)
-    inserted <- insertOtaPushes gid srcRef batchId "Production" bump (apEmail ap) targets
+    claimed <- claimOtaDispatch gid srcRef batchId "Production" bump (apEmail ap) targets
+    inserted <- case claimed of
+        Right rows -> pure rows
+        Left (Just p) -> throwM (conflictWith p)
+        Left Nothing ->
+            throwM (Conflict "another OTA dispatch for this app is being processed — retry in a moment")
     -- CI inputs mirror consumer-airborne-ota.yaml verbatim (values are strings on the wire).
     let appVariants = T.intercalate "," (nub [catalystKey a | (a, _, _, _) <- targets])
         plats = nub [p | (_, p, _, _) <- targets]
@@ -652,8 +654,21 @@ dispatchOtaH ap gid OtaDispatchReq{versionBump = bump, apps = mApps, platforms =
         Left err -> do
             markBatchFailed batchId ("dispatch failed: " <> err)
             throwM (InternalError ("OTA workflow dispatch failed: " <> err))
-        Right _ -> do
-            logInfo ("[OTA] dispatched " <> appVariants <> " (" <> platform <> ") on " <> srcRef <> " batch " <> batchId)
+        Right mDetails -> do
+            -- GH returns the created run id (return_run_details); stamping it here
+            -- is what lets convergence bind the batch by identity, not by guesswork.
+            forM_ mDetails $ \d -> setOtaPushBatchRunId batchId (drdRunId d)
+            logInfo
+                ( "[OTA] dispatched "
+                    <> appVariants
+                    <> " ("
+                    <> platform
+                    <> ") on "
+                    <> srcRef
+                    <> " batch "
+                    <> batchId
+                    <> maybe "" (\d -> " run " <> T.pack (show (drdRunId d))) mDetails
+                )
             pure
                 OtaDispatchResp
                     { dispatched = length inserted
