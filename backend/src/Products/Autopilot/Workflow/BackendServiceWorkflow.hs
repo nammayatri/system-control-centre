@@ -1083,10 +1083,12 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
                                             pure True
                                         AUTO -> do
                                             logInfoS "  [rolloutLoop] AUTO mode: checking health before advancing"
-                                            let fastForwarded = any historyManualOverride (rolloutHistory freshRT)
+                                            let fastForwarded = case unsnocList (rolloutHistory freshRT) of
+                                                    Just (_, lastH) -> historyManualOverride lastH
+                                                    Nothing -> False
                                             if fastForwarded
                                                 then do
-                                                    logInfoS "  [rolloutLoop] Fast-forward active: bypassing AB/HS decision, advancing"
+                                                    logInfoS "  [rolloutLoop] Fast-forward active for this stage: bypassing AB/HS decision, advancing"
                                                     pure True
                                                 else do
                                                     checkDeploymentHealth cfg ctx
