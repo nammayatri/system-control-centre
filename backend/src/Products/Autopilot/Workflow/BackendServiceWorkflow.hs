@@ -71,7 +71,7 @@ import Products.Autopilot.Notifications (
     notifyReleaseProgress,
  )
 import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, getHpaMaxReplicas, getHpaMinReplicas, isVsLockedByEditor, withVsLock)
-import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTracker, findReleaseTracker, insertReleaseEvent, insertReleaseTracker, touchReleaseHeartbeat)
+import Products.Autopilot.Queries.ReleaseTracker (checkpointReleaseTracker, checkpointReleaseTrackerChecked, conditionalUpdateTracker, findReleaseTracker, insertReleaseEvent, touchReleaseHeartbeat)
 import Products.Autopilot.RuntimeConfig (
     getCollectMetricsDelay,
     getHpaTemplate,
@@ -545,7 +545,7 @@ updateLastHistoryEntry f = do
         Just (initH, lastH) ->
             updateRT $ \r -> r{rolloutHistory = initH <> [f lastH]}
 
--- | Mark ABORTED and persist unconditionally. For unrecoverable input errors.
+-- | Mark ABORTED and persist. For unrecoverable input errors.
 abortWithReason :: T.Text -> StateFlow a
 abortWithReason reason = do
     logErrorS $ "[workflow] Aborting: " <> reason
@@ -554,7 +554,7 @@ abortWithReason reason = do
     insertReleaseEvent (releaseId rt) "BUSINESS" "WORKFLOW_ABORTED" (toJSON reason)
     currentRT <- getRT
     currentTS <- gets targetState
-    insertReleaseTracker currentRT currentTS
+    checkpointReleaseTracker currentRT currentTS
     liftIO $ throwIO $ WorkflowError "workflow" reason
 
 -- | Validate preconditions: cluster reachable, namespace exists.
@@ -647,7 +647,7 @@ validatePreconditions = do
 
     currentRT <- getRT
     currentTS <- gets targetState
-    insertReleaseTracker currentRT currentTS
+    checkpointReleaseTracker currentRT currentTS
 
     logInfoS "Preconditions validated"
 
@@ -1732,12 +1732,17 @@ notifyComplete = do
 
     currentRT <- getRT
     currentTS <- gets targetState
-    insertReleaseTracker currentRT currentTS
+    landed <- checkpointReleaseTrackerChecked currentRT currentTS
+    unless landed $
+        logWarningS $
+            "  [notifyComplete] "
+                <> releaseId currentRT
+                <> " was moved off INPROGRESS (abort/pause) before completion could persist — leaving DB status as-is, not marking COMPLETED"
 
     let completionMsg = "Tracker marked as COMPLETED with " <> T.pack (show (getTrafficPct currentTS)) <> "% traffic"
-    logStatusUpdated currentRT completionMsg
-
-    lift $ notifyReleaseCompleted currentRT currentTS
+    when landed $ do
+        logStatusUpdated currentRT completionMsg
+        lift $ notifyReleaseCompleted currentRT currentTS
   where
     getTrafficPct Nothing = 100 :: Int
     getTrafficPct (Just (K8sState k8s)) = trafficPercentage k8s

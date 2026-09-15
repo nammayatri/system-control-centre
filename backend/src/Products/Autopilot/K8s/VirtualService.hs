@@ -7,6 +7,7 @@ module Products.Autopilot.K8s.VirtualService (
     applyVirtualServiceRollout,
     applyVirtualServiceRolloutWithRetries,
     isSubsetReceivingTraffic,
+    isNewVersionReceivingTraffic,
     getPrimarySubsetFromVirtualService,
     isVsSyncedWithExpectedState,
     VsSyncResult (..),
@@ -50,11 +51,16 @@ applyVirtualServiceRolloutWithRetries :: Int -> Config -> K8sReleaseContext -> I
 applyVirtualServiceRolloutWithRetries maxRetries cfg ctx oldW newW = do
     externalRes <- applyVirtualServiceRolloutSingle cfg ctx maxRetries (virtualServiceName ctx) oldW newW
     case externalRes of
-        Left err -> pure (Left err)
+        Left (K8sError msg) -> pure (Left (K8sError ("external VS: " <> msg)))
         Right _ ->
             case internalVirtualServiceName ctx of
                 Nothing -> pure (Right (K8sResult "external-vs-updated"))
-                Just internalVs -> applyVirtualServiceRolloutSingle cfg ctx maxRetries internalVs oldW newW
+                Just internalVs -> do
+                    internalRes <- applyVirtualServiceRolloutSingle cfg ctx maxRetries internalVs oldW newW
+                    case internalRes of
+                        Left (K8sError msg) ->
+                            pure (Left (K8sError ("external VS updated OK, but internal VS (" <> internalVs <> ") failed — VS state now split: " <> msg)))
+                        Right r -> pure (Right r)
 
 {- | Apply VS rollout with optimistic concurrency: read full VS, patch the
 target service's routes, kubectl replace; re-reads and retries on 409.
@@ -143,6 +149,21 @@ isSubsetReceivingTraffic cfg ns vsName svcHost subsetName = do
             _ -> False
         Nothing -> False
     routeMatches _ = False
+
+-- | Checks both the external and (if configured) internal VS. Any lookup
+-- failure is treated as "still receiving" — callers use this to gate
+-- deleting pods, and an unverifiable state must not be read as safe.
+isNewVersionReceivingTraffic :: Config -> K8sReleaseContext -> IO Bool
+isNewVersionReceivingTraffic cfg ctx = do
+    extLive <- checkVs (virtualServiceName ctx)
+    intLive <- maybe (pure False) checkVs (internalVirtualServiceName ctx)
+    pure (extLive || intLive)
+  where
+    checkVs vsName
+        | T.null vsName = pure False
+        | otherwise = do
+            res <- isSubsetReceivingTraffic cfg (namespace ctx) vsName (serviceName ctx) (newVersion ctx)
+            pure $ either (const True) id res
 
 getPrimarySubsetFromVirtualService :: Config -> Text -> Text -> Text -> IO (Either Text (Maybe Text))
 getPrimarySubsetFromVirtualService cfg ns vsName svcHost = do

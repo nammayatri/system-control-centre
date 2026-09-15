@@ -29,14 +29,14 @@ import Products.Autopilot.EventLog (logAbortTriggered, logStatusUpdated, logTraf
 import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getDeploymentReplicaStatus)
 import Products.Autopilot.K8s.Execute (isNotFoundError, runCmd)
 import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax)
-import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService)
+import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService, isNewVersionReceivingTraffic)
 import Products.Autopilot.Mobile.Github (cancelRun, findRunWithJob, listWorkflowRuns, ownDispatchCandidates, wrCreatedAt, wrId)
 import Products.Autopilot.Mobile.Github.Auth (BotIdentity (..), getBotIdentity, loadGhCreds)
 import Products.Autopilot.Mobile.Queries.Tracker (appCatalogForRow, dispatchCeilingFor, externalRunIdsClaimedElsewhere, gitOwner, gitRepo, parseMobileTargetState)
 import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), MobileBuildWFStatus (..))
 import Products.Autopilot.Mobile.Workflow (dispatchGroupJobNames, externalRunIdForRelease, findDispatchGroupContexts, findDispatchIdForRelease)
 import Products.Autopilot.Mobile.Types.Storage (acWorkflowPath)
-import Products.Autopilot.Notifications (notifyPodsScaledDown, notifyReleaseAborted, sendGroupChangelogSlackIfSettled)
+import Products.Autopilot.Notifications (notifyGenericThreadMessage, notifyPodsScaledDown, notifyReleaseAborted, sendGroupChangelogSlackIfSettled)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks, releaseService)
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getMaxCleanupRetries, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
@@ -720,43 +720,65 @@ restoreVsTrafficOnFailure cfg rt mts = do
                     -- restores worker capacity, which is all schedulers care
                     -- about.
                     let vsName' = virtualServiceName ctx
-                    if T.null vsName'
-                        then logInfo $ "[restoreVsTrafficOnFailure] No VS configured for " <> releaseId rt <> " (scheduler / non-VS product); skipping VS flip"
-                        else do
-                            logInfo $ "[restoreVsTrafficOnFailure] Restoring VS traffic to old version for " <> releaseId rt
-                            vsResult <- liftIO $ applyVirtualServiceRollout cfg ctx 100 0
-                            case vsResult of
-                                Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to restore VS: " <> T.pack (show err)
-                                Right _ -> logInfo "[restoreVsTrafficOnFailure] VS traffic restored to old version"
+                    vsFlipOk <-
+                        if T.null vsName'
+                            then do
+                                logInfo $ "[restoreVsTrafficOnFailure] No VS configured for " <> releaseId rt <> " (scheduler / non-VS product); skipping VS flip"
+                                pure True
+                            else do
+                                logInfo $ "[restoreVsTrafficOnFailure] Restoring VS traffic to old version for " <> releaseId rt
+                                vsResult <- liftIO $ applyVirtualServiceRollout cfg ctx 100 0
+                                case vsResult of
+                                    Left err -> do
+                                        logError $ "[restoreVsTrafficOnFailure] Failed to restore VS for " <> releaseId rt <> ": " <> T.pack (show err)
+                                        notifyGenericThreadMessage
+                                            rt
+                                            ( "🚨 Rollback VS flip FAILED for "
+                                                <> releaseId rt
+                                                <> ": "
+                                                <> T.pack (show err)
+                                                <> " — new deployment left scaled up to avoid a 503; VS may still be pointing partly/fully at the new version. Manual intervention required."
+                                            )
+                                        pure False
+                                    Right _ -> do
+                                        logInfo "[restoreVsTrafficOnFailure] VS traffic restored to old version"
+                                        pure True
 
-                    -- Step 4: scale the new deployment to 0 (the failed one)
-                    -- Round 8 audit H3: SKIP if newDep == oldDep (immediate-revert
+                    -- Step 4: scale the new deployment to 0 (the failed one) — only
+                    -- if the VS flip actually landed. Scaling it down after a failed
+                    -- flip would zero the pods a still-live VS subset routes to,
+                    -- turning a rollback into a 503 outage instead of one.
+                    -- Round 8 audit H3: also SKIP if newDep == oldDep (immediate-revert
                     -- path replaces the new deployment's image with the old image
                     -- in-place, so the names are the same row in k8s — scaling it
                     -- to 0 would zero the only deployment with the correct image).
-                    if newDepName == oldDepName
-                        then logInfo $ "[restoreVsTrafficOnFailure] Skipping scale-down: newDep == oldDep (" <> newDepName <> ") — immediate-revert path, only one deployment exists"
-                        else do
-                            -- Julia parity (kubernetes.jl:1718-1720 scaleDownPodsWithoutPolling):
-                            -- delete the HPA BEFORE scaling to 0, otherwise the HPA reconciler
-                            -- will scale the deployment back up within 15-90s.
-                            let newHpaName = serviceName ctx <> "-" <> K8s.newVersion ctx <> "-hpa"
-                            _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns newHpaName)
-                            scaleResult <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns newDepName 0)
-                            case scaleResult of
-                                Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to scale down new deployment: " <> T.pack (show err)
-                                Right _ -> logInfo "[restoreVsTrafficOnFailure] New deployment scaled down to 0"
+                    if not vsFlipOk
+                        then logWarning $ "[restoreVsTrafficOnFailure] Skipping scale-down of " <> newDepName <> " for " <> releaseId rt <> " — VS flip did not succeed"
+                        else
+                            if newDepName == oldDepName
+                                then logInfo $ "[restoreVsTrafficOnFailure] Skipping scale-down: newDep == oldDep (" <> newDepName <> ") — immediate-revert path, only one deployment exists"
+                                else do
+                                    -- Julia parity (kubernetes.jl:1718-1720 scaleDownPodsWithoutPolling):
+                                    -- delete the HPA BEFORE scaling to 0, otherwise the HPA reconciler
+                                    -- will scale the deployment back up within 15-90s.
+                                    let newHpaName = serviceName ctx <> "-" <> K8s.newVersion ctx <> "-hpa"
+                                    _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns newHpaName)
+                                    scaleResult <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns newDepName 0)
+                                    case scaleResult of
+                                        Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to scale down new deployment: " <> T.pack (show err)
+                                        Right _ -> logInfo "[restoreVsTrafficOnFailure] New deployment scaled down to 0"
 
                     insertReleaseEvent
                         (releaseId rt)
                         "BUSINESS"
-                        "VS_TRAFFIC_RESTORED"
+                        (if vsFlipOk then "VS_TRAFFIC_RESTORED" else "VS_TRAFFIC_RESTORE_FAILED")
                         ( object
                             [ "action" .= ("restore_on_failure" :: T.Text)
                             , "oldVersion" .= (oldVer :: T.Text)
                             , "newDeployment" .= (newDepName :: T.Text)
                             , "oldDesiredAtRestore" .= oldDesired
                             , "scaledOldUp" .= (oldDesired <= 0)
+                            , "vsFlipSucceeded" .= vsFlipOk
                             ]
                         )
         _ -> pure ()
@@ -1234,109 +1256,124 @@ scaleDownLeakedNewDeployment cfg (rt, mts) = case mts of
             Nothing -> pure ()
             Just depName | T.null depName -> pure ()
             Just depName -> do
-                -- Mark in-progress so the in-flight recovery sweep can
-                -- distinguish "stuck mid-scale-down" from "scheduled".
-                let inProgressCtx = ctx{cleanupStatus = Just "SCALE_DOWN_INPROGRESS"}
-                    inProgressMts = Just (K8sState k8s{context = inProgressCtx})
-                _ <- conditionalUpdateTracker rt inProgressMts (releaseStatusToText (NT.status rt))
-
-                logInfo $
-                    "[scaleDownLeakedNewDeployment] Scaling leaked deployment "
-                        <> depName
-                        <> " to 0 (release "
-                        <> releaseId rt
-                        <> ")"
-                -- Julia parity (kubernetes.jl:1718-1720 scaleDownPodsWithoutPolling):
-                -- delete the HPA BEFORE scaling to 0. The leaked deployment likely
-                -- still has its HPA from the failed rollout — without this delete
-                -- the HPA reconciler scales it back up within 15-90 seconds.
-                let leakedHpaName = depName <> "-hpa"
-                _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns leakedHpaName)
-                result <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns depName 0)
-                case result of
-                    Left err | isNotFoundError err -> do
-                        -- Deployment already gone — treat as success, no retry needed.
-                        logInfo $
-                            "[scaleDownLeakedNewDeployment] Deployment "
-                                <> depName
-                                <> " not found in k8s — already cleaned up, marking SCALE_DOWN_COMPLETED"
-                        freshM <- findReleaseTracker (releaseId rt)
-                        case freshM of
-                            Just (freshRT, Just (K8sState freshK8s)) -> do
-                                let doneCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_COMPLETED"}
-                                    doneMts = Just (K8sState freshK8s{context = doneCtx})
-                                _ <- conditionalUpdateTracker freshRT doneMts (releaseStatusToText (NT.status freshRT))
-                                insertReleaseEvent
-                                    (releaseId rt)
-                                    "BUSINESS"
-                                    "LEAKED_DEPLOYMENT_SCALED_DOWN"
-                                    (object ["deployment" .= depName, "namespace" .= (ns :: T.Text), "note" .= ("already absent" :: T.Text)])
-                            _ -> pure ()
-                    Left err -> do
-                        maxRetries <- getMaxCleanupRetries
+                stillLive <- liftIO $ isNewVersionReceivingTraffic cfg ctx
+                if stillLive
+                    then do
                         logWarning $
-                            "[scaleDownLeakedNewDeployment] FAILED for "
+                            "[scaleDownLeakedNewDeployment] "
                                 <> depName
-                                <> ": "
-                                <> T.pack (show err)
-                                <> " — attempt "
-                                <> T.pack (show (cleanupAttempts ctx + 1))
-                                <> "/"
-                                <> T.pack (show maxRetries)
-                        freshM <- findReleaseTracker (releaseId rt)
-                        case freshM of
-                            Just (freshRT, Just (K8sState freshK8s)) -> do
-                                let currentAttempts = cleanupAttempts (context freshK8s) + 1
-                                if currentAttempts >= maxRetries
-                                    then do
-                                        -- Max retries exceeded, mark as FAILED and stop retrying
-                                        logWarning $
-                                            "[scaleDownLeakedNewDeployment] Max retries ("
-                                                <> T.pack (show maxRetries)
-                                                <> ") exceeded for "
-                                                <> depName
-                                                <> " in release "
-                                                <> releaseId rt
-                                                <> " — marking SCALE_DOWN_FAILED"
-                                        let failedCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_FAILED", cleanupAttempts = currentAttempts}
-                                            failedMts = Just (K8sState freshK8s{context = failedCtx})
-                                        _ <- conditionalUpdateTracker freshRT failedMts (releaseStatusToText (NT.status freshRT))
-                                        insertReleaseEvent
-                                            (releaseId rt)
-                                            "BUSINESS"
-                                            "LEAKED_DEPLOYMENT_SCALE_DOWN_ABANDONED"
-                                            (object ["deployment" .= depName, "error" .= T.pack (show err), "attempts" .= currentAttempts])
-                                    else do
-                                        -- Retry: reset to SCHEDULED and increment counter
-                                        let retryCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_SCHEDULED", cleanupAttempts = currentAttempts}
-                                            retryMts = Just (K8sState freshK8s{context = retryCtx})
-                                        _ <- conditionalUpdateTracker freshRT retryMts (releaseStatusToText (NT.status freshRT))
-                                        insertReleaseEvent
-                                            (releaseId rt)
-                                            "BUSINESS"
-                                            "LEAKED_DEPLOYMENT_SCALE_DOWN_FAILED"
-                                            (object ["deployment" .= depName, "error" .= T.pack (show err), "attempts" .= currentAttempts])
-                            _ -> pure ()
-                    Right _ -> do
-                        logInfo $ "[scaleDownLeakedNewDeployment] Scaled " <> depName <> " to 0 successfully"
-                        freshM <- findReleaseTracker (releaseId rt)
-                        case freshM of
-                            Just (freshRT, Just (K8sState freshK8s)) -> do
-                                let doneCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_COMPLETED"}
-                                    doneMts = Just (K8sState freshK8s{context = doneCtx})
-                                ok <- conditionalUpdateTracker freshRT doneMts (releaseStatusToText (NT.status freshRT))
-                                if ok
-                                    then
+                                <> " subset ("
+                                <> K8s.newVersion ctx
+                                <> ") is still receiving VS traffic — refusing to scale down this round, will re-check next sweep"
+                        insertReleaseEvent
+                            (releaseId rt)
+                            "BUSINESS"
+                            "LEAKED_DEPLOYMENT_SCALE_DOWN_DEFERRED"
+                            (object ["deployment" .= depName, "reason" .= ("subset still receiving VS traffic" :: T.Text)])
+                    else do
+                        -- Mark in-progress so the in-flight recovery sweep can
+                        -- distinguish "stuck mid-scale-down" from "scheduled".
+                        let inProgressCtx = ctx{cleanupStatus = Just "SCALE_DOWN_INPROGRESS"}
+                            inProgressMts = Just (K8sState k8s{context = inProgressCtx})
+                        _ <- conditionalUpdateTracker rt inProgressMts (releaseStatusToText (NT.status rt))
+
+                        logInfo $
+                            "[scaleDownLeakedNewDeployment] Scaling leaked deployment "
+                                <> depName
+                                <> " to 0 (release "
+                                <> releaseId rt
+                                <> ")"
+                        -- Julia parity (kubernetes.jl:1718-1720 scaleDownPodsWithoutPolling):
+                        -- delete the HPA BEFORE scaling to 0. The leaked deployment likely
+                        -- still has its HPA from the failed rollout — without this delete
+                        -- the HPA reconciler scales it back up within 15-90 seconds.
+                        let leakedHpaName = depName <> "-hpa"
+                        _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns leakedHpaName)
+                        result <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns depName 0)
+                        case result of
+                            Left err | isNotFoundError err -> do
+                                -- Deployment already gone — treat as success, no retry needed.
+                                logInfo $
+                                    "[scaleDownLeakedNewDeployment] Deployment "
+                                        <> depName
+                                        <> " not found in k8s — already cleaned up, marking SCALE_DOWN_COMPLETED"
+                                freshM <- findReleaseTracker (releaseId rt)
+                                case freshM of
+                                    Just (freshRT, Just (K8sState freshK8s)) -> do
+                                        let doneCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_COMPLETED"}
+                                            doneMts = Just (K8sState freshK8s{context = doneCtx})
+                                        _ <- conditionalUpdateTracker freshRT doneMts (releaseStatusToText (NT.status freshRT))
                                         insertReleaseEvent
                                             (releaseId rt)
                                             "BUSINESS"
                                             "LEAKED_DEPLOYMENT_SCALED_DOWN"
-                                            (object ["deployment" .= depName, "namespace" .= (ns :: T.Text)])
-                                    else
-                                        logWarning $
-                                            "[scaleDownLeakedNewDeployment] CAS miss persisting COMPLETED for "
-                                                <> releaseId rt
-                            _ -> pure ()
+                                            (object ["deployment" .= depName, "namespace" .= (ns :: T.Text), "note" .= ("already absent" :: T.Text)])
+                                    _ -> pure ()
+                            Left err -> do
+                                maxRetries <- getMaxCleanupRetries
+                                logWarning $
+                                    "[scaleDownLeakedNewDeployment] FAILED for "
+                                        <> depName
+                                        <> ": "
+                                        <> T.pack (show err)
+                                        <> " — attempt "
+                                        <> T.pack (show (cleanupAttempts ctx + 1))
+                                        <> "/"
+                                        <> T.pack (show maxRetries)
+                                freshM <- findReleaseTracker (releaseId rt)
+                                case freshM of
+                                    Just (freshRT, Just (K8sState freshK8s)) -> do
+                                        let currentAttempts = cleanupAttempts (context freshK8s) + 1
+                                        if currentAttempts >= maxRetries
+                                            then do
+                                                -- Max retries exceeded, mark as FAILED and stop retrying
+                                                logWarning $
+                                                    "[scaleDownLeakedNewDeployment] Max retries ("
+                                                        <> T.pack (show maxRetries)
+                                                        <> ") exceeded for "
+                                                        <> depName
+                                                        <> " in release "
+                                                        <> releaseId rt
+                                                        <> " — marking SCALE_DOWN_FAILED"
+                                                let failedCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_FAILED", cleanupAttempts = currentAttempts}
+                                                    failedMts = Just (K8sState freshK8s{context = failedCtx})
+                                                _ <- conditionalUpdateTracker freshRT failedMts (releaseStatusToText (NT.status freshRT))
+                                                insertReleaseEvent
+                                                    (releaseId rt)
+                                                    "BUSINESS"
+                                                    "LEAKED_DEPLOYMENT_SCALE_DOWN_ABANDONED"
+                                                    (object ["deployment" .= depName, "error" .= T.pack (show err), "attempts" .= currentAttempts])
+                                            else do
+                                                -- Retry: reset to SCHEDULED and increment counter
+                                                let retryCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_SCHEDULED", cleanupAttempts = currentAttempts}
+                                                    retryMts = Just (K8sState freshK8s{context = retryCtx})
+                                                _ <- conditionalUpdateTracker freshRT retryMts (releaseStatusToText (NT.status freshRT))
+                                                insertReleaseEvent
+                                                    (releaseId rt)
+                                                    "BUSINESS"
+                                                    "LEAKED_DEPLOYMENT_SCALE_DOWN_FAILED"
+                                                    (object ["deployment" .= depName, "error" .= T.pack (show err), "attempts" .= currentAttempts])
+                                    _ -> pure ()
+                            Right _ -> do
+                                logInfo $ "[scaleDownLeakedNewDeployment] Scaled " <> depName <> " to 0 successfully"
+                                freshM <- findReleaseTracker (releaseId rt)
+                                case freshM of
+                                    Just (freshRT, Just (K8sState freshK8s)) -> do
+                                        let doneCtx = (context freshK8s){cleanupStatus = Just "SCALE_DOWN_COMPLETED"}
+                                            doneMts = Just (K8sState freshK8s{context = doneCtx})
+                                        ok <- conditionalUpdateTracker freshRT doneMts (releaseStatusToText (NT.status freshRT))
+                                        if ok
+                                            then
+                                                insertReleaseEvent
+                                                    (releaseId rt)
+                                                    "BUSINESS"
+                                                    "LEAKED_DEPLOYMENT_SCALED_DOWN"
+                                                    (object ["deployment" .= depName, "namespace" .= (ns :: T.Text)])
+                                            else
+                                                logWarning $
+                                                    "[scaleDownLeakedNewDeployment] CAS miss persisting COMPLETED for "
+                                                        <> releaseId rt
+                                    _ -> pure ()
     _ -> pure ()
 
 -- force rebuild 1775474191
