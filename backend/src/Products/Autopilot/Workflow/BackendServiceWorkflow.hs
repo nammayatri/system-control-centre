@@ -36,6 +36,7 @@ import Data.Text.Encoding qualified as TE
 import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Encoding qualified as TLE
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Products.Autopilot.ApiLatencyReport (postApiLatencyReport)
 import Products.Autopilot.DecisionEngine (
     DecisionResult (..),
     PromCheckResult (..),
@@ -1308,6 +1309,8 @@ monitorHealth = do
             liftIO $ throwIO $ WorkflowError "monitoring" ("Pod readiness: " <> errMsg)
         Right () ->
             logInfoS "  All pods ready"
+
+    lift $ postApiLatencyReport cfg rt ctx
 
     -- Post-monitoring HS check once at 100%: master kill switch AND per-service gate.
     masterPostEnabled <- getConfigBoolForProduct "ab_hs_post_monitoring_enabled" (Just (appGroup rt)) False

@@ -187,6 +187,30 @@ autopilotConfigs =
         ABTestingGroup
         "Per-(app_group, service) gating for post-monitoring HS decision (JSON map)"
         (Just "autopilot")
+    , ConfigEntry
+        "api_latency_report_enabled_app_groups"
+        (JsonConfig "{}")
+        MonitoringGroup
+        "Per-(app_group, service) gating for the post-100% API latency delta Slack report (JSON map, e.g. {\"EULER\": [\"ALL\"]})"
+        (Just "autopilot")
+    , ConfigEntry
+        "api_latency_report_window_mins"
+        (IntConfig 30)
+        MonitoringGroup
+        "API latency report: lookback window in minutes for both old-version baseline and new-version sample"
+        (Just "autopilot")
+    , ConfigEntry
+        "api_latency_report_top_volume_count"
+        (IntConfig 100)
+        MonitoringGroup
+        "API latency report: number of top-by-call-volume endpoints to include"
+        (Just "autopilot")
+    , ConfigEntry
+        "api_latency_report_top_delta_count"
+        (IntConfig 3)
+        MonitoringGroup
+        "API latency report: number of top-by-%-change endpoints to include (across all endpoints, regardless of volume)"
+        (Just "autopilot")
     , -- Pod readiness (grouped under DeploymentGroup)
       ConfigEntry
         "pod_readiness_max_attempts"

@@ -11,6 +11,10 @@ module Products.Autopilot.RuntimeConfig
     isPromQueryCheckEnabled,
     isABHSDecisionEnabledForAppGroupService,
     isABHSPostMonitoringDecisionEnabledForAppGroupService,
+    isApiLatencyReportEnabledForAppGroupService,
+    getApiLatencyReportWindowMinutes,
+    getApiLatencyReportTopVolumeCount,
+    getApiLatencyReportTopDeltaCount,
     getDecisionEngineFailClosed,
     getABHSApiKey,
     getABHSAllowedTimeDiffMins,
@@ -154,6 +158,22 @@ isABHSDecisionEnabledForAppGroupService =
 isABHSPostMonitoringDecisionEnabledForAppGroupService :: (MonadFlow m) => Text -> Text -> m Bool
 isABHSPostMonitoringDecisionEnabledForAppGroupService =
   isAppGroupServiceEnabledFromKey "ab_hs_post_monitoring_decision_enabled_app_groups"
+
+isApiLatencyReportEnabledForAppGroupService :: (MonadFlow m) => Text -> Text -> m Bool
+isApiLatencyReportEnabledForAppGroupService =
+  isAppGroupServiceEnabledFromKey "api_latency_report_enabled_app_groups"
+
+getApiLatencyReportWindowMinutes :: (MonadFlow m) => m Int
+getApiLatencyReportWindowMinutes =
+  getConfigIntForProduct "api_latency_report_window_mins" (Just "autopilot") 30
+
+getApiLatencyReportTopVolumeCount :: (MonadFlow m) => m Int
+getApiLatencyReportTopVolumeCount =
+  getConfigIntForProduct "api_latency_report_top_volume_count" (Just "autopilot") 100
+
+getApiLatencyReportTopDeltaCount :: (MonadFlow m) => m Int
+getApiLatencyReportTopDeltaCount =
+  getConfigIntForProduct "api_latency_report_top_delta_count" (Just "autopilot") 3
 
 isAppGroupServiceEnabledFromKey :: (MonadFlow m) => Text -> Text -> Text -> m Bool
 isAppGroupServiceEnabledFromKey key appGroupName serviceName = withDb $ \db -> do
@@ -382,15 +402,14 @@ isHpaEnabledForProduct productName = withDb $ \db -> do
 getHpaTemplate :: (MonadFlow m) => m (Maybe Text)
 getHpaTemplate = withDb $ \db -> getEnabledServerConfigValueForProduct_io db "hpa_template" (Just "autopilot")
 
-{- | Slack channel for mobile release changelogs. Empty string in config is
-treated as unset ('Nothing'), which turns the changelog-to-Slack feature off.
--}
+-- | Slack channel for mobile release changelogs. Empty string in config is
+-- treated as unset ('Nothing'), which turns the changelog-to-Slack feature off.
 getMobileSlackChannel :: (MonadFlow m) => m (Maybe Text)
 getMobileSlackChannel = do
-    mVal <- withDb $ \db -> getEnabledServerConfigValueForProduct_io db "mobile_slack_channel" (Just "autopilot")
-    pure $ case fmap T.strip mVal of
-        Just v | not (T.null v) -> Just v
-        _ -> Nothing
+  mVal <- withDb $ \db -> getEnabledServerConfigValueForProduct_io db "mobile_slack_channel" (Just "autopilot")
+  pure $ case fmap T.strip mVal of
+    Just v | not (T.null v) -> Just v
+    _ -> Nothing
 
 -- ── Snapshot ───────────────────────────────────────────────────────
 
