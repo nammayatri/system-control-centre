@@ -211,6 +211,24 @@ autopilotConfigs =
         MonitoringGroup
         "API latency report: number of top-by-%-change endpoints to include (across all endpoints, regardless of volume)"
         (Just "autopilot")
+    , ConfigEntry
+        "api_latency_report_sre_channel"
+        (TextConfig "")
+        MonitoringGroup
+        "API latency report: Slack channel to cross-post breaking latency shifts to (e.g. SRE channel). Empty = no cross-post"
+        (Just "autopilot")
+    , ConfigEntry
+        "api_latency_report_sre_threshold_pct"
+        (IntConfig 50)
+        MonitoringGroup
+        "API latency report: minimum absolute %-change for an endpoint to be cross-posted to the SRE channel"
+        (Just "autopilot")
+    , ConfigEntry
+        "api_latency_report_sre_min_calls"
+        (IntConfig 20)
+        MonitoringGroup
+        "API latency report: minimum new-version call volume before a %-change is trusted enough to alert on"
+        (Just "autopilot")
     , -- Pod readiness (grouped under DeploymentGroup)
       ConfigEntry
         "pod_readiness_max_attempts"

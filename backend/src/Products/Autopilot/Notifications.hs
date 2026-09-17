@@ -43,6 +43,7 @@ module Products.Autopilot.Notifications
     notifyConfigMapFastForwarded,
     notifyGenericThreadMessage,
     notifyDecisionThreadMessage,
+    notifyFixedChannelAlert,
     sendMobileChangelogSlack,
     sendGroupChangelogSlackIfSettled,
     chunkForSlack,
@@ -66,20 +67,18 @@ import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Encoding qualified as TLE
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
+import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), changelogSlackOptedIn, isFailedMBTerminal)
+import Products.Autopilot.QaAutomation (dispatchAutoQaRun)
 import Products.Autopilot.Queries.ProductService (findProductByName, getRepoNameDirect, getSlackChannelDirect)
 import Products.Autopilot.Queries.ReleaseTracker qualified as RTQ
 import Products.Autopilot.ReleaseChangelog (generateBackendChangelog)
-import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTargetState (..), changelogSlackOptedIn, isFailedMBTerminal)
 import Products.Autopilot.RuntimeConfig (getDecisionNotificationDedupMinutes, getMobileSlackChannel, isSlackEnabled)
 import Products.Autopilot.Sync (triggerSyncIfEnabled)
 import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
 import Products.Autopilot.Types.Storage.Schema (rePayload)
 import Products.Autopilot.Types.Target (TargetState (..))
--- Narrow field imports so 'K8sReleaseContext'/'K8sDeploymentState' selectors
--- (oldVersion/newVersion/cluster/…) don't clash with 'ReleaseTracker (..)'.
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (context), K8sReleaseContext (changelogSlackOptIn))
 import Products.Autopilot.Types.Workflow (ReleaseCategory (..))
-import Products.Autopilot.QaAutomation (dispatchAutoQaRun)
 import Products.Autopilot.Webhooks (dispatchTerminalWebhooks)
 import Shared.AI.Changelog (ownSideLabel)
 import Shared.AI.Queries (lookupReleaseSummary)
@@ -283,23 +282,22 @@ sendMobileChangelogSlack channel members summaryLong = do
   eTs <- sendSlackRichE channel fallback colorCreated blocks Nothing
   pure (void eTs)
 
-{- | Strip the parts of the combined changelog that belong to apps whose build
-FAILED, so the group post advertises only what actually shipped. The body is
-deterministic scaffolding (see 'renderCombined'): sections open with 🧩 (global
-common / per-surface common), 📌 (per-app "Only in"), and close with a ✅
-reconciliation line. We drop:
-
-  * a 📌 "Only in <app> <platform>" block whose label is in @failedLabels@; and
-  * a 🧩 "Common in <surface> apps" block whose surface has NO shipped app
-    (its commits are shared only within that surface, so if every app of the
-    surface failed they shipped nowhere).
-
-The 🧩 GLOBAL "Common changes — in …" block always stays: it is the intersection
-across ALL apps, hence a subset of every surviving app. The ✅ line is dropped once
-anything is filtered (its counts no longer add up). Matching the FAILED app label
-(not the shipped one) fails safe — an unmatched label keeps the section rather
-than hiding a shipped app's changes.
--}
+-- | Strip the parts of the combined changelog that belong to apps whose build
+-- FAILED, so the group post advertises only what actually shipped. The body is
+-- deterministic scaffolding (see 'renderCombined'): sections open with 🧩 (global
+-- common / per-surface common), 📌 (per-app "Only in"), and close with a ✅
+-- reconciliation line. We drop:
+--
+--  * a 📌 "Only in <app> <platform>" block whose label is in @failedLabels@; and
+--  * a 🧩 "Common in <surface> apps" block whose surface has NO shipped app
+--    (its commits are shared only within that surface, so if every app of the
+--    surface failed they shipped nowhere).
+--
+-- The 🧩 GLOBAL "Common changes — in …" block always stays: it is the intersection
+-- across ALL apps, hence a subset of every surviving app. The ✅ line is dropped once
+-- anything is filtered (its counts no longer add up). Matching the FAILED app label
+-- (not the shipped one) fails safe — an unmatched label keeps the section rather
+-- than hiding a shipped app's changes.
 dropFailedAppSections :: [Text] -> [Text] -> Text -> Text
 dropFailedAppSections failedLabels shippedSurfaces body
   | not anyDropped = body
@@ -325,16 +323,15 @@ dropFailedAppSections failedLabels shippedSurfaces body
     (revAcc, _, anyDropped) = foldl step ([], False, False) (T.lines body)
     keptLines = reverse (filter (not . ("✅" `T.isPrefixOf`) . T.stripStart) revAcc)
 
-{- | Post the release-group changelog to Slack ONCE, when the group's builds have
-all SETTLED — every member either shipped (tag observed) or failed (status
-ABORTED/USER_ABORTED/GCLT_ABORTED/DISCARDED) — and at least one shipped. Called at
-each build-settle transition (ConfirmTag success + the runner's failure/abort
-paths); the LAST member to settle wins the atomic claim and posts. A no-op when
-the group didn't opt in, isn't fully settled yet, nothing shipped, or a sibling
-already claimed. @mKnownShipped@ counts a release as shipped even if its
-MBTagPushed hasn't been persisted yet — the ConfirmTag caller passes its own id,
-since it fires before the engine persists. Best-effort: at most once, never twice.
--}
+-- | Post the release-group changelog to Slack ONCE, when the group's builds have
+-- all SETTLED — every member either shipped (tag observed) or failed (status
+-- ABORTED/USER_ABORTED/GCLT_ABORTED/DISCARDED) — and at least one shipped. Called at
+-- each build-settle transition (ConfirmTag success + the runner's failure/abort
+-- paths); the LAST member to settle wins the atomic claim and posts. A no-op when
+-- the group didn't opt in, isn't fully settled yet, nothing shipped, or a sibling
+-- already claimed. @mKnownShipped@ counts a release as shipped even if its
+-- MBTagPushed hasn't been persisted yet — the ConfirmTag caller passes its own id,
+-- since it fires before the engine persists. Best-effort: at most once, never twice.
 sendGroupChangelogSlackIfSettled :: Text -> Maybe Text -> Flow ()
 sendGroupChangelogSlackIfSettled gid mKnownShipped
   | T.null (T.strip gid) = pure ()
@@ -381,8 +378,8 @@ sendGroupChangelogSlackIfSettled gid mKnownShipped
                         -- model="" means the cache holds the same deterministic
                         -- listing we already have — nothing gained by swapping.
                         Just ("ready", Just long, _, mModel, _)
-                          | not (T.null (T.strip long))
-                          , maybe False (not . T.null . T.strip) mModel ->
+                          | not (T.null (T.strip long)),
+                            maybe False (not . T.null . T.strip) mModel ->
                               Just long
                         _ -> Nothing
                   forM_ mCached $ \_ ->
@@ -527,11 +524,10 @@ notifyReleaseCompleted tracker mts = do
 changelogSentLabel :: Text
 changelogSentLabel = "CHANGELOG_SLACK_SENT"
 
-{- | Post opt-in AI changelog notes to a completed BackendService release's Slack
-thread. A no-op (posts nothing) unless: the release is 'BackendService', the
-create-time opt-in was set, no changelog was already posted, the app group has a
-@repo_name@, and the AI generator returns notes (AI enabled + commits in range).
--}
+-- | Post opt-in AI changelog notes to a completed BackendService release's Slack
+-- thread. A no-op (posts nothing) unless: the release is 'BackendService', the
+-- create-time opt-in was set, no changelog was already posted, the app group has a
+-- @repo_name@, and the AI generator returns notes (AI enabled + commits in range).
 maybePostBackendChangelog :: ReleaseTracker -> Maybe TargetState -> Flow ()
 maybePostBackendChangelog tracker mts
   | category tracker /= BackendService = pure ()
@@ -865,6 +861,13 @@ notifyGenericThreadMessage tracker msg = whenSlackEnabled $
     let blocks = [sectionBlock msg]
     _ <- sendSlackRich channel msg colorDefault blocks threadTs
     pure ()
+
+notifyFixedChannelAlert :: Text -> Text -> Flow ()
+notifyFixedChannelAlert channel msg
+  | T.null channel = pure ()
+  | otherwise = whenSlackEnabled $ do
+      _ <- sendSlackRich channel msg colorAborted [sectionBlock msg] Nothing
+      pure ()
 
 -- | Decision-engine notification with two-layer dedup:
 --  (a) exact-tuple (decisionType, decisionValue, reason) match against the

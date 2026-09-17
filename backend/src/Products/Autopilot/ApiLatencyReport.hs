@@ -26,14 +26,17 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time (UTCTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Products.Autopilot.Notifications (notifyGenericThreadMessage)
+import Products.Autopilot.Notifications (notifyFixedChannelAlert, notifyGenericThreadMessage)
 import Products.Autopilot.RuntimeConfig
-  ( getApiLatencyReportTopDeltaCount,
+  ( getApiLatencyReportSreChannel,
+    getApiLatencyReportSreMinCalls,
+    getApiLatencyReportSreThresholdPct,
+    getApiLatencyReportTopDeltaCount,
     getApiLatencyReportTopVolumeCount,
     getApiLatencyReportWindowMinutes,
     isApiLatencyReportEnabledForAppGroupService,
   )
-import Products.Autopilot.Types.Release (ReleaseTracker (appGroup, service, startTime))
+import Products.Autopilot.Types.Release (ReleaseTracker (appGroup, releaseId, service, startTime))
 import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..))
 
 data HandlerStat = HandlerStat
@@ -64,7 +67,47 @@ postApiLatencyReport cfg rt ctx = do
       case result of
         Left e -> liftIO $ logErrorG $ "[API_LATENCY_REPORT] failed: " <> T.pack (show e)
         Right Nothing -> liftIO $ logInfoG "[API_LATENCY_REPORT] no data, skipping"
-        Right (Just stats) -> mapM_ (notifyGenericThreadMessage rt) (formatReport stats topVolumeN topDeltaN)
+        Right (Just stats) -> do
+          let header = reportHeader rt ctx
+          mapM_ (notifyGenericThreadMessage rt) (formatReport header stats topVolumeN topDeltaN)
+          postSreAlertIfBreaking rt ctx stats
+
+reportHeader :: ReleaseTracker -> K8sReleaseContext -> Text
+reportHeader rt ctx =
+  appGroup rt
+    <> " | "
+    <> service rt
+    <> " ("
+    <> releaseId rt
+    <> ") — "
+    <> oldVersion ctx
+    <> " \8594 "
+    <> newVersion ctx
+
+postSreAlertIfBreaking :: ReleaseTracker -> K8sReleaseContext -> [HandlerStat] -> Flow ()
+postSreAlertIfBreaking rt ctx stats = do
+  sreChannel <- getApiLatencyReportSreChannel
+  thresholdPct <- getApiLatencyReportSreThresholdPct
+  minCalls <- getApiLatencyReportSreMinCalls
+  let breaking =
+        sortBy
+          (comparing (Down . absDelta))
+          [ s
+            | s <- stats,
+              hsNewCount s >= fromIntegral minCalls,
+              maybe False (\d -> abs d >= fromIntegral thresholdPct) (hsDeltaPct s)
+          ]
+  case breaking of
+    [] -> pure ()
+    _ ->
+      notifyFixedChannelAlert
+        sreChannel
+        ( "\128680 Breaking API latency shift — "
+            <> reportHeader rt ctx
+            <> ":\n```"
+            <> T.intercalate "\n" (map formatRow breaking)
+            <> "```"
+        )
 
 buildReport :: Config -> K8sReleaseContext -> Maybe UTCTime -> Int -> IO (Maybe [HandlerStat])
 buildReport cfg ctx mStartTime windowMins = do
@@ -167,45 +210,54 @@ parsePromVector raw =
         _ -> []
     parseResult _ = []
 
-formatReport :: [HandlerStat] -> Int -> Int -> [Text]
-formatReport stats topVolumeN topDeltaN =
-  let byDelta = take topDeltaN (sortBy (comparing (Down . absDelta)) stats)
-      byVolume = take topVolumeN (sortBy (comparing (Down . hsNewCount)) stats)
-      deltaMsg =
-        "*API latency — top "
-          <> T.pack (show (length byDelta))
-          <> " %-change (all endpoints, new vs old version):*\n```"
-          <> T.intercalate "\n" (map row byDelta)
-          <> "```"
-      volumeMsgs =
-        [ "*API latency — top by call volume ("
-            <> T.pack (show (i + 1))
-            <> "-"
-            <> T.pack (show (min (length byVolume) (i + rowsPerMessage)))
-            <> " of "
-            <> T.pack (show (length byVolume))
-            <> "):*\n```"
-            <> T.intercalate "\n" (map row chunk)
-            <> "```"
-          | (i, chunk) <- zip [0, rowsPerMessage ..] (chunksOf rowsPerMessage byVolume)
-        ]
-   in deltaMsg : volumeMsgs
+absDelta :: HandlerStat -> Double
+absDelta s = maybe 0 abs (hsDeltaPct s)
+
+formatRow :: HandlerStat -> Text
+formatRow s =
+  hsHandler s
+    <> " — old="
+    <> fmtMs (hsOldMs s)
+    <> "ms new="
+    <> fmtMs (Just (hsNewMs s))
+    <> "ms Δ="
+    <> fmtDelta (hsDeltaPct s)
+    <> " calls="
+    <> T.pack (show (round (hsNewCount s) :: Integer))
   where
-    absDelta s = maybe 0 abs (hsDeltaPct s)
-    row s =
-      hsHandler s
-        <> " — old="
-        <> fmtMs (hsOldMs s)
-        <> "ms new="
-        <> fmtMs (Just (hsNewMs s))
-        <> "ms Δ="
-        <> fmtDelta (hsDeltaPct s)
-        <> " calls="
-        <> T.pack (show (round (hsNewCount s) :: Integer))
     fmtMs Nothing = "n/a"
     fmtMs (Just v) = T.pack (show (round v :: Integer))
     fmtDelta Nothing = "n/a (no old-version baseline)"
     fmtDelta (Just d) = (if d >= 0 then "+" else "") <> T.pack (show (roundTo1 d)) <> "%"
     roundTo1 x = fromIntegral (round (x * 10) :: Integer) / 10 :: Double
+
+formatReport :: Text -> [HandlerStat] -> Int -> Int -> [Text]
+formatReport header stats topVolumeN topDeltaN =
+  let byDelta = take topDeltaN (sortBy (comparing (Down . absDelta)) stats)
+      byVolume = take topVolumeN (sortBy (comparing (Down . hsNewCount)) stats)
+      deltaMsg =
+        "*API latency — "
+          <> header
+          <> "*\nTop "
+          <> T.pack (show (length byDelta))
+          <> " %-change (all endpoints):\n```"
+          <> T.intercalate "\n" (map formatRow byDelta)
+          <> "```"
+      volumeMsgs =
+        [ "*API latency — "
+            <> header
+            <> "*\nTop by call volume ("
+            <> T.pack (show (i + 1))
+            <> "-"
+            <> T.pack (show (min (length byVolume) (i + rowsPerMessage)))
+            <> " of "
+            <> T.pack (show (length byVolume))
+            <> "):\n```"
+            <> T.intercalate "\n" (map formatRow chunk)
+            <> "```"
+          | (i, chunk) <- zip [0, rowsPerMessage ..] (chunksOf rowsPerMessage byVolume)
+        ]
+   in deltaMsg : volumeMsgs
+  where
     chunksOf _ [] = []
     chunksOf n xs = take n xs : chunksOf n (drop n xs)

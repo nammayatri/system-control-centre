@@ -15,6 +15,9 @@ module Products.Autopilot.RuntimeConfig
     getApiLatencyReportWindowMinutes,
     getApiLatencyReportTopVolumeCount,
     getApiLatencyReportTopDeltaCount,
+    getApiLatencyReportSreChannel,
+    getApiLatencyReportSreThresholdPct,
+    getApiLatencyReportSreMinCalls,
     getDecisionEngineFailClosed,
     getABHSApiKey,
     getABHSAllowedTimeDiffMins,
@@ -174,6 +177,18 @@ getApiLatencyReportTopVolumeCount =
 getApiLatencyReportTopDeltaCount :: (MonadFlow m) => m Int
 getApiLatencyReportTopDeltaCount =
   getConfigIntForProduct "api_latency_report_top_delta_count" (Just "autopilot") 3
+
+getApiLatencyReportSreChannel :: (MonadFlow m) => m Text
+getApiLatencyReportSreChannel =
+  getConfigTextForProduct "api_latency_report_sre_channel" (Just "autopilot") ""
+
+getApiLatencyReportSreThresholdPct :: (MonadFlow m) => m Int
+getApiLatencyReportSreThresholdPct =
+  getConfigIntForProduct "api_latency_report_sre_threshold_pct" (Just "autopilot") 50
+
+getApiLatencyReportSreMinCalls :: (MonadFlow m) => m Int
+getApiLatencyReportSreMinCalls =
+  getConfigIntForProduct "api_latency_report_sre_min_calls" (Just "autopilot") 20
 
 isAppGroupServiceEnabledFromKey :: (MonadFlow m) => Text -> Text -> Text -> m Bool
 isAppGroupServiceEnabledFromKey key appGroupName serviceName = withDb $ \db -> do
