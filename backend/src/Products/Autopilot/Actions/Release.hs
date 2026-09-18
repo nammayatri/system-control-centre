@@ -1833,13 +1833,16 @@ podHealthH _ap rid = do
       case mCtx of
         Nothing -> pure emptyPodHealth
         Just ctx -> do
+          mProduct <- findProductByName (NT.appGroup tracker)
           let ns = ctx.namespace
               svcHost = ctx.serviceName
-              -- Scope to this release's own old/new versions — the bare
-              -- `app=` selector also matches unrelated, permanently-running
-              -- pods on other versions of the same service (e.g. long-lived
-              -- test deployments), inflating the Total count on the dashboard.
-              selector = "app=" <> svcHost <> ",version in (" <> NT.oldVersion tracker <> "," <> NT.newVersion tracker <> ")"
+              isScheduler = case mProduct of
+                Just pCfg -> either (const False) (== "BackendScheduler") (normalizeProductType (fromMaybe "" (S.dcAppGroupType pCfg)))
+                Nothing -> False
+              selector =
+                if isScheduler
+                  then "app in (" <> svcHost <> "-" <> NT.oldVersion tracker <> "," <> svcHost <> "-" <> NT.newVersion tracker <> ")"
+                  else "app=" <> svcHost <> ",version in (" <> NT.oldVersion tracker <> "," <> NT.newVersion tracker <> ")"
           podResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get pods -l", shellQuote selector, "-o json"])
           case podResult of
             Left (K8sError _) -> pure emptyPodHealth
