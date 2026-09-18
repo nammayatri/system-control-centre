@@ -176,6 +176,12 @@ autopilotConfigs =
         "Per-(app_group, service) gating for HS decision (JSON map)"
         (Just "autopilot")
     , ConfigEntry
+        "full_traffic_stability_check_enabled"
+        (BoolConfig False)
+        ABTestingGroup
+        "Enable the post-100%-cooloff AB/HS stability re-check before finalizing a release. Also requires ab_decision_enabled + ab_hs_decision_enabled_app_groups, since it reuses that same run"
+        (Just "autopilot")
+    , ConfigEntry
         "api_latency_report_enabled_app_groups"
         (JsonConfig "{}")
         MonitoringGroup

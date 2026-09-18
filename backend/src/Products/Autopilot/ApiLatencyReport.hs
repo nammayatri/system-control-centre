@@ -26,6 +26,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time (UTCTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
+import Network.HTTP.Types.URI (urlEncode)
 import Products.Autopilot.Notifications (notifyFixedChannelAlert, notifyGenericThreadMessage)
 import Products.Autopilot.RuntimeConfig
   ( getApiLatencyReportSreChannel,
@@ -173,7 +174,7 @@ queryVectorAt promUrl query mTime = do
   let timeParam = case mTime of
         Nothing -> ""
         Just t -> "&time=" <> T.pack (show (round (utcTimeToPOSIXSeconds t) :: Integer))
-      url = T.pack promUrl <> "/api/v1/query?query=" <> query <> timeParam
+      url = T.pack promUrl <> "/api/v1/query?query=" <> urlEncodeText query <> timeParam
       req = (defaultReq url) {reqTimeout = Seconds 15, reqRetries = 0, reqLogTag = "prometheus-latency-report"}
   result <- httpRaw req
   case result of
@@ -185,6 +186,9 @@ queryVectorAt promUrl query mTime = do
     Left e -> do
       logErrorG $ "[API_LATENCY_REPORT] Prometheus query failed: " <> T.pack (show e)
       pure []
+
+urlEncodeText :: Text -> Text
+urlEncodeText = TE.decodeUtf8 . urlEncode True . TE.encodeUtf8
 
 parsePromVector :: Text -> [(Text, Double)]
 parsePromVector raw =

@@ -5,7 +5,7 @@ module Products.Autopilot.Runner where
 import Control.Concurrent qualified as CC
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
 import Control.Exception qualified as E
-import Control.Monad (filterM, forM_, forever, void, when)
+import Control.Monad (filterM, forM_, forever, unless, void, when)
 import Control.Monad.Catch qualified as MC
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask)
@@ -39,7 +39,7 @@ import Products.Autopilot.Mobile.Types.Storage (acWorkflowPath)
 import Products.Autopilot.Notifications (notifyGenericThreadMessage, notifyPodsScaledDown, notifyReleaseAborted, sendGroupChangelogSlackIfSettled)
 import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks, releaseService)
 import Products.Autopilot.Queries.ReleaseTracker
-import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getMaxCleanupRetries, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
+import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getMaxCleanupRetries, getPodReadinessMaxAttempts, getPodReadinessPollSeconds, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
 import Products.Autopilot.Types
 import Products.Autopilot.Types qualified as NT
 import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, ReleaseEvent, dcAppGroup, reCreatedAt, rePayload)
@@ -137,7 +137,15 @@ rollbackInProgressOnStartup = do
                     -- Restore VS traffic to old version (best-effort). For REVERTING releases
                     -- this is also the correct recovery action: the revert was mid-flight, so
                     -- pointing traffic back to old version completes the revert's intent.
-                    restoreVsTrafficOnFailure cfg rt mts
+                    -- Startup is one-shot (no sweep to retry on) — proceed to finalize either
+                    -- way, but log loudly if old never reached full readiness.
+                    vsRestored <- restoreVsTrafficOnFailure cfg rt mts
+                    unless vsRestored $
+                        liftIO $
+                            logWarningIO logEnv $
+                                "[STARTUP] "
+                                    <> releaseId rt
+                                    <> " — old deployment did not reach full readiness during startup recovery; traffic may not be fully restored, check manually"
                     now <- liftIO getCurrentTime
                     -- Julia parity (api/rollback/rollback.jl:32-38): a REVERTING release
                     -- whose thread was lost on restart should be treated as a *completed*
@@ -273,9 +281,18 @@ loop = forever $ do
                 then void $ forkFlow (trigger db twt `MC.finally` liftIO (releaseRowInFlight (releaseId rtP)))
                 else logInfo $ "[RUNNER] Previous tick still in flight for " <> releaseId rtP <> " — skipping this poll"
 
-        -- Step 3: Handle aborting trackers
+        -- Step 3: Handle aborting trackers — forked per row, same claim
+        -- pattern as Step 2. restoreVsTrafficOnFailure can now genuinely
+        -- block for a while (waiting for old's pods to become fully ready),
+        -- so this can no longer be a plain sequential forM_: without
+        -- forking, one release's wait would hold up every other aborting
+        -- release behind it in the same tick.
         abortingTrackers <- findAbortingReleaseTrackers
-        forM_ abortingTrackers $ \(rt, mts) -> handleAbortingRelease cfg rt mts
+        forM_ abortingTrackers $ \(rt, mts) -> do
+            claimed <- liftIO $ claimRowInFlight (releaseId rt)
+            if claimed
+                then void $ forkFlow (handleAbortingRelease cfg rt mts `MC.finally` liftIO (releaseRowInFlight (releaseId rt)))
+                else logInfo $ "[RUNNER] Previous tick still in flight for " <> releaseId rt <> " — skipping abort handling this poll"
 
         -- Step 4: Handle scale-down of old deployments after delay
         scaleDownDelay <- getPodsScaleDownDelayFromConfig
@@ -539,13 +556,19 @@ runReleaseWorkflow _cfg rtNew mts = do
                             -- failure handlers. The leaked-deployment cleanup
                             -- (scheduleNewDeploymentCleanup) and Slack abort
                             -- notification still run for every category.
-                            case category rt of
+                            vsRestored <- case category rt of
                                 BackendService -> restoreVsTrafficOnFailure cfg' rt mts
-                                _ ->
+                                _ -> do
                                     logInfo $
                                         "[RUNNER] Skipping VS restore for non-BackendService category "
                                             <> T.pack (show (category rt))
                                             <> " (no VS to restore)"
+                                    pure True
+                            unless vsRestored $
+                                logWarning $
+                                    "[RUNNER] "
+                                        <> releaseId rt
+                                        <> " — old deployment did not reach full readiness during workflow-failure recovery; traffic may not be fully restored, check manually"
                             -- Julia parity: mark for later poll-driven
                             -- cleanup in case restoreVsTrafficOnFailure's
                             -- kubectl scale-down itself failed.
@@ -647,18 +670,26 @@ validateRunningVersion cfg rt mts = do
 {- | Restore traffic to the old version after a failed/orphaned release.
 
 Order matters (round-7 audit + outage prevention):
- 1. Check old deployment's current replica count.
- 2. If 0 (someone manually scaled it down OR a previous COMPLETED release
-    scaled it down legitimately), SCALE IT BACK UP first to a sensible
-    count derived from the new deployment's current replicas (or default 1)
-    and wait briefly for at least one pod to be ready.
- 3. THEN flip the VS to point at oldVersion.
- 4. Then scale the new deployment to 0.
+ 1. Check old deployment's current replica count vs. what new is running
+    right now (old is typically still sitting at its pre-rollout baseline
+    count here, not 0 — scale-down only happens much later, in
+    cleanupOldVersion — so "old has some pods" does NOT mean "old has
+    enough pods to take 100% traffic").
+ 2. If old is under-provisioned relative to new, SCALE IT UP to match.
+ 3. Wait for old to actually reach that full ready-replica count — not just
+    one pod. Only once it's FULLY ready do we flip the VS; if it isn't
+    ready yet, we do NOT switch traffic — the row stays ABORTING and this
+    whole function is retried on the next runner sweep (the scale-up
+    command already issued persists regardless), same retry-across-sweeps
+    pattern already used for MobileBuild's GH-run-cancel.
+ 4. THEN flip the VS to point at oldVersion.
+ 5. Then scale the new deployment to 0 — only if the flip actually landed.
 
-Without step 2, restoring traffic to a 0-pod deployment would cause an
-immediate 5xx outage on the very route the rollback is supposed to protect.
+Returns True once traffic has actually been switched (or there was nothing
+to switch — no VS, or nothing to do); False means the caller must NOT
+finalize the abort yet.
 -}
-restoreVsTrafficOnFailure :: Config -> ReleaseTracker -> Maybe TargetState -> Flow ()
+restoreVsTrafficOnFailure :: Config -> ReleaseTracker -> Maybe TargetState -> Flow Bool
 restoreVsTrafficOnFailure cfg rt mts = do
     case mts of
         Just (K8sState k8s) -> do
@@ -666,40 +697,40 @@ restoreVsTrafficOnFailure cfg rt mts = do
                 oldVer = K8s.oldVersion ctx
                 isNewSvc = newService k8s
             if isNewSvc || T.null oldVer || oldVer == "new" || oldVer == "unknown"
-                then logInfo $ "[restoreVsTrafficOnFailure] Skipping VS restore for " <> releaseId rt <> " (new service or no old version)"
+                then do
+                    logInfo $ "[restoreVsTrafficOnFailure] Skipping VS restore for " <> releaseId rt <> " (new service or no old version)"
+                    pure True
                 else do
                     let newDepName = deploymentName ctx
                         ns = namespace ctx
                         oldDepName = serviceName ctx <> "-" <> oldVer
 
-                    -- Step 1: probe old deployment's replica count
+                    -- Step 1: probe old vs. new's current replica counts.
                     oldStatus <- liftIO $ getDeploymentReplicaStatus cfg ns oldDepName
                     let oldDesired = case oldStatus of
                             Right (_, _, d) -> d
                             Left _ -> 0
-                    -- Probe new deployment so we can target a sensible replica count.
                     newStatus <- liftIO $ getDeploymentReplicaStatus cfg ns newDepName
                     let newDesired = case newStatus of
                             Right (_, _, d) -> d
                             Left _ -> 0
                         targetOldReplicas = max 1 (max oldDesired newDesired)
 
-                    -- Step 2: scale OLD UP first if it's at 0 — never restore
-                    -- traffic to a deployment with no pods.
-                    when (oldDesired <= 0) $ do
+                    -- Step 2: scale old up whenever it's under-provisioned —
+                    -- not just when it's at 0.
+                    when (oldDesired < targetOldReplicas) $ do
                         logInfo $
                             "[restoreVsTrafficOnFailure] Old deployment "
                                 <> oldDepName
-                                <> " has 0 replicas — scaling UP to "
+                                <> " has "
+                                <> T.pack (show oldDesired)
+                                <> " replicas, need "
                                 <> T.pack (show targetOldReplicas)
-                                <> " before VS restore"
+                                <> " to safely absorb 100% traffic — scaling up before VS restore"
                         scaleUpRes <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns oldDepName targetOldReplicas)
                         case scaleUpRes of
                             Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: scale-up of old failed: " <> T.pack (show err)
-                            Right _ -> do
-                                logInfo "[restoreVsTrafficOnFailure] Old deployment scale-up issued; waiting for first pod ready"
-                                _ <- liftIO $ waitForFirstPodReady cfg ns oldDepName
-                                pure ()
+                            Right _ -> pure ()
                         insertReleaseEvent
                             (releaseId rt)
                             "BUSINESS"
@@ -707,98 +738,145 @@ restoreVsTrafficOnFailure cfg rt mts = do
                             ( object
                                 [ "oldDeployment" .= (oldDepName :: T.Text)
                                 , "targetReplicas" .= targetOldReplicas
-                                , "reason" .= ("Restoring traffic to a deployment that had 0 pods — scaling up first to avoid 5xx outage" :: T.Text)
+                                , "previousReplicas" .= oldDesired
                                 ]
                             )
 
-                    -- Step 3: now flip the VS — but only if there IS one.
-                    -- Schedulers (and any future non-VS product) have an empty
-                    -- vsName; calling kubectl with that produces a noisy
-                    -- "resource name may not be empty" error. The deployment-
-                    -- side recovery (steps 1-2 + step 4 below) is still the
-                    -- correct rollback action for a scheduler — the scaling
-                    -- restores worker capacity, which is all schedulers care
-                    -- about.
-                    let vsName' = virtualServiceName ctx
-                    vsFlipOk <-
-                        if T.null vsName'
-                            then do
-                                logInfo $ "[restoreVsTrafficOnFailure] No VS configured for " <> releaseId rt <> " (scheduler / non-VS product); skipping VS flip"
-                                pure True
+                    -- Step 3: only proceed once old is FULLY ready — never
+                    -- flip traffic onto a deployment that can't yet serve it.
+                    -- Reuses the same pod-readiness config the forward
+                    -- rollout waits on for the new deployment — no reason a
+                    -- rollback should be held to a different, invented
+                    -- timing than a forward rollout already is.
+                    oldReadyNow <-
+                        if oldDesired >= targetOldReplicas
+                            then pure True
                             else do
-                                logInfo $ "[restoreVsTrafficOnFailure] Restoring VS traffic to old version for " <> releaseId rt
-                                vsResult <- liftIO $ applyVirtualServiceRollout cfg ctx 100 0
-                                case vsResult of
-                                    Left err -> do
-                                        logError $ "[restoreVsTrafficOnFailure] Failed to restore VS for " <> releaseId rt <> ": " <> T.pack (show err)
-                                        notifyGenericThreadMessage
-                                            rt
-                                            ( "🚨 Rollback VS flip FAILED for "
-                                                <> releaseId rt
-                                                <> ": "
-                                                <> T.pack (show err)
-                                                <> " — new deployment left scaled up to avoid a 503; VS may still be pointing partly/fully at the new version. Manual intervention required."
-                                            )
-                                        pure False
-                                    Right _ -> do
-                                        logInfo "[restoreVsTrafficOnFailure] VS traffic restored to old version"
+                                maxAttempts <- getPodReadinessMaxAttempts
+                                pollSeconds <- getPodReadinessPollSeconds
+                                liftIO $ waitForFullReadiness cfg ns oldDepName targetOldReplicas maxAttempts pollSeconds
+
+                    if not oldReadyNow
+                        then do
+                            logWarning $
+                                "[restoreVsTrafficOnFailure] Old deployment "
+                                    <> oldDepName
+                                    <> " not yet at "
+                                    <> T.pack (show targetOldReplicas)
+                                    <> " ready replicas for "
+                                    <> releaseId rt
+                                    <> " — NOT switching traffic yet, will retry on next sweep"
+                            insertReleaseEvent
+                                (releaseId rt)
+                                "BUSINESS"
+                                "VS_TRAFFIC_RESTORE_WAITING"
+                                (object ["oldDeployment" .= oldDepName, "targetReplicas" .= targetOldReplicas])
+                            pure False
+                        else do
+                            -- Step 4: now flip the VS — but only if there IS one.
+                            -- Schedulers (and any future non-VS product) have an
+                            -- empty vsName; calling kubectl with that produces a
+                            -- noisy "resource name may not be empty" error. The
+                            -- deployment-side recovery above is still the correct
+                            -- rollback action for a scheduler — the scaling
+                            -- restores worker capacity, which is all schedulers
+                            -- care about.
+                            let vsName' = virtualServiceName ctx
+                            vsFlipOk <-
+                                if T.null vsName'
+                                    then do
+                                        logInfo $ "[restoreVsTrafficOnFailure] No VS configured for " <> releaseId rt <> " (scheduler / non-VS product); skipping VS flip"
                                         pure True
+                                    else do
+                                        logInfo $ "[restoreVsTrafficOnFailure] Restoring VS traffic to old version for " <> releaseId rt
+                                        vsResult <- liftIO $ applyVirtualServiceRollout cfg ctx 100 0
+                                        case vsResult of
+                                            Left err -> do
+                                                logError $ "[restoreVsTrafficOnFailure] Failed to restore VS for " <> releaseId rt <> ": " <> T.pack (show err)
+                                                notifyGenericThreadMessage
+                                                    rt
+                                                    ( "🚨 Rollback VS flip FAILED for "
+                                                        <> releaseId rt
+                                                        <> ": "
+                                                        <> T.pack (show err)
+                                                        <> " — new deployment left scaled up to avoid a 503; VS may still be pointing partly/fully at the new version. Manual intervention required."
+                                                    )
+                                                pure False
+                                            Right _ -> do
+                                                logInfo "[restoreVsTrafficOnFailure] VS traffic restored to old version"
+                                                pure True
 
-                    -- Step 4: scale the new deployment to 0 (the failed one) — only
-                    -- if the VS flip actually landed. Scaling it down after a failed
-                    -- flip would zero the pods a still-live VS subset routes to,
-                    -- turning a rollback into a 503 outage instead of one.
-                    -- Round 8 audit H3: also SKIP if newDep == oldDep (immediate-revert
-                    -- path replaces the new deployment's image with the old image
-                    -- in-place, so the names are the same row in k8s — scaling it
-                    -- to 0 would zero the only deployment with the correct image).
-                    if not vsFlipOk
-                        then logWarning $ "[restoreVsTrafficOnFailure] Skipping scale-down of " <> newDepName <> " for " <> releaseId rt <> " — VS flip did not succeed"
-                        else
-                            if newDepName == oldDepName
-                                then logInfo $ "[restoreVsTrafficOnFailure] Skipping scale-down: newDep == oldDep (" <> newDepName <> ") — immediate-revert path, only one deployment exists"
-                                else do
-                                    -- Julia parity (kubernetes.jl:1718-1720 scaleDownPodsWithoutPolling):
-                                    -- delete the HPA BEFORE scaling to 0, otherwise the HPA reconciler
-                                    -- will scale the deployment back up within 15-90s.
-                                    let newHpaName = serviceName ctx <> "-" <> K8s.newVersion ctx <> "-hpa"
-                                    _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns newHpaName)
-                                    scaleResult <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns newDepName 0)
-                                    case scaleResult of
-                                        Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to scale down new deployment: " <> T.pack (show err)
-                                        Right _ -> logInfo "[restoreVsTrafficOnFailure] New deployment scaled down to 0"
+                            -- Step 5: scale the new deployment to 0 (the failed
+                            -- one) — only if the VS flip actually landed.
+                            -- Scaling it down after a failed flip would zero the
+                            -- pods a still-live VS subset routes to, turning a
+                            -- rollback into a 503 outage instead of one.
+                            -- Round 8 audit H3: also SKIP if newDep == oldDep
+                            -- (immediate-revert path replaces the new
+                            -- deployment's image with the old image in-place, so
+                            -- the names are the same row in k8s — scaling it to
+                            -- 0 would zero the only deployment with the correct
+                            -- image).
+                            if not vsFlipOk
+                                then logWarning $ "[restoreVsTrafficOnFailure] Skipping scale-down of " <> newDepName <> " for " <> releaseId rt <> " — VS flip did not succeed"
+                                else
+                                    if newDepName == oldDepName
+                                        then logInfo $ "[restoreVsTrafficOnFailure] Skipping scale-down: newDep == oldDep (" <> newDepName <> ") — immediate-revert path, only one deployment exists"
+                                        else do
+                                            -- Julia parity (kubernetes.jl:1718-1720 scaleDownPodsWithoutPolling):
+                                            -- delete the HPA BEFORE scaling to 0, otherwise the HPA reconciler
+                                            -- will scale the deployment back up within 15-90s.
+                                            let newHpaName = serviceName ctx <> "-" <> K8s.newVersion ctx <> "-hpa"
+                                            _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg ns newHpaName)
+                                            scaleResult <- liftIO $ runCmd (buildScaleNamedDeploymentCommand cfg ns newDepName 0)
+                                            case scaleResult of
+                                                Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to scale down new deployment: " <> T.pack (show err)
+                                                Right _ -> logInfo "[restoreVsTrafficOnFailure] New deployment scaled down to 0"
 
-                    insertReleaseEvent
-                        (releaseId rt)
-                        "BUSINESS"
-                        (if vsFlipOk then "VS_TRAFFIC_RESTORED" else "VS_TRAFFIC_RESTORE_FAILED")
-                        ( object
-                            [ "action" .= ("restore_on_failure" :: T.Text)
-                            , "oldVersion" .= (oldVer :: T.Text)
-                            , "newDeployment" .= (newDepName :: T.Text)
-                            , "oldDesiredAtRestore" .= oldDesired
-                            , "scaledOldUp" .= (oldDesired <= 0)
-                            , "vsFlipSucceeded" .= vsFlipOk
-                            ]
-                        )
-        _ -> pure ()
+                            insertReleaseEvent
+                                (releaseId rt)
+                                "BUSINESS"
+                                (if vsFlipOk then "VS_TRAFFIC_RESTORED" else "VS_TRAFFIC_RESTORE_FAILED")
+                                ( object
+                                    [ "action" .= ("restore_on_failure" :: T.Text)
+                                    , "oldVersion" .= (oldVer :: T.Text)
+                                    , "newDeployment" .= (newDepName :: T.Text)
+                                    , "oldDesiredAtRestore" .= oldDesired
+                                    , "scaledOldUp" .= (oldDesired < targetOldReplicas)
+                                    , "vsFlipSucceeded" .= vsFlipOk
+                                    ]
+                                )
+                            pure vsFlipOk
+        _ -> pure True
 
-{- | Best-effort wait for at least one ready pod on a deployment, capped at
-~30s. Used by restoreVsTrafficOnFailure to bridge the gap after scaling
-the old deployment back up before flipping the VS. Returns even on
-timeout — the caller proceeds either way.
+{- | Poll until a deployment reaches its target ready-replica count, bounded
+by the same @pod_readiness_max_attempts@ / @pod_readiness_poll_seconds@
+config the forward rollout already waits on for the new deployment
+('waitForPodsReady' in BackendServiceWorkflow) — a rollback shouldn't be
+held to a different, invented timing than a forward rollout already is.
+Returns True if it became fully ready in that window. On False, the caller
+must NOT switch traffic to it — 'handleAbortingRelease' leaves the row
+ABORTING so the next sweep retries; the scale-up command already issued
+persists regardless of this call returning.
 -}
-waitForFirstPodReady :: Config -> T.Text -> T.Text -> IO ()
-waitForFirstPodReady cfg ns depName = go (15 :: Int)
+waitForFullReadiness :: Config -> T.Text -> T.Text -> Int -> Int -> Int -> IO Bool
+waitForFullReadiness cfg ns depName targetReplicas maxAttempts pollSeconds = go maxAttempts
   where
-    go 0 = pure ()
     go n = do
+        ready <- isFullyReady
+        if ready
+            then pure True
+            else
+                if n <= 0
+                    then pure False
+                    else do
+                        CC.threadDelay (pollSeconds * 1000000)
+                        go (n - 1)
+    isFullyReady = do
         r <- getDeploymentReplicaStatus cfg ns depName
-        case r of
-            Right (ready, _, _) | ready >= 1 -> pure ()
-            _ -> do
-                CC.threadDelay 2000000 -- 2s
-                go (n - 1)
+        pure $ case r of
+            Right (readyCount, _, _) -> readyCount >= targetReplicas
+            Left _ -> False
 
 -- ============================================================================
 -- Abort Handling
@@ -842,12 +920,47 @@ handleAbortingRelease cfg rt mts = do
                                 "GH_RUN_CANCEL_UNRESOLVED"
                                 (object ["message" .= ("GitHub run could not be found or cancelled within the abort deadline — the build may still be running and could publish to the store" :: T.Text)])
                             pure True
+        -- Retried across sweeps (the row stays ABORTING), same pattern as the
+        -- MobileBuild GH-cancel case above: 'restoreVsTrafficOnFailure' scales
+        -- old up and only switches traffic once it's fully ready, returning
+        -- False while it's still waiting. Finalizing on that False would
+        -- terminalize the release with traffic never actually restored.
         _ -> do
-            restoreVsTrafficOnFailure cfg rt mts
-            -- Julia parity: persist cleanup marker so a crash/kubectl-fail between
-            -- now and the next poll doesn't leak the new deployment. Idempotent.
-            scheduleNewDeploymentCleanup rt mts
-            pure True
+            vsRestored <- restoreVsTrafficOnFailure cfg rt mts
+            if vsRestored
+                then do
+                    -- Julia parity: persist cleanup marker so a crash/kubectl-fail
+                    -- between now and the next poll doesn't leak the new
+                    -- deployment. Idempotent.
+                    scheduleNewDeploymentCleanup rt mts
+                    pure True
+                else do
+                    -- Same pod_readiness_max_attempts / pod_readiness_poll_seconds
+                    -- config the wait inside restoreVsTrafficOnFailure itself is
+                    -- bounded by — one timing source for "how long do we wait for
+                    -- pods," not a second, separately-invented deadline on top.
+                    maxAttempts <- getPodReadinessMaxAttempts
+                    pollSeconds <- getPodReadinessPollSeconds
+                    let oldPodsReadyDeadline = fromIntegral (maxAttempts * pollSeconds) :: NominalDiffTime
+                        abortedAt = maybe (fromMaybe now (NT.lastUpdated rt)) reCreatedAt mAbortTrigger
+                    if diffUTCTime now abortedAt < oldPodsReadyDeadline
+                        then do
+                            logWarning $ "[handleAbortingRelease] " <> releaseId rt <> " old deployment not fully ready yet — retrying on the next sweep"
+                            pure False
+                        else do
+                            logWarning $ "[handleAbortingRelease] " <> releaseId rt <> " old deployment still not ready past deadline — terminalizing anyway; verify traffic manually"
+                            insertReleaseEvent
+                                (releaseId rt)
+                                "BUSINESS"
+                                "OLD_DEPLOYMENT_READY_DEADLINE_EXCEEDED"
+                                (object ["message" .= ("Old deployment never reached its target replica count within the abort deadline — traffic may not be fully switched; check manually" :: T.Text)])
+                            notifyGenericThreadMessage
+                                rt
+                                ( "🚨 Rollback for "
+                                    <> releaseId rt
+                                    <> " timed out waiting for old pods to become ready — finalizing as aborted anyway, but please verify traffic/replica state manually."
+                                )
+                            pure True
     when proceed $ finalizeAbort rt mts now mAbortTrigger
   where
     -- 30 min, deliberately past the iOS workflows' setup ceiling (~20 min):

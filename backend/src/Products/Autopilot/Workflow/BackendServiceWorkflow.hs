@@ -84,6 +84,7 @@ import Products.Autopilot.RuntimeConfig
     getReleaseStartDelay,
     getVsLockWaitDelaySeconds,
     isABHSDecisionEnabledForAppGroupService,
+    isFullTrafficStabilityCheckEnabled,
     isHpaEnabledForProduct,
     isScaleDownPodsOnCompletion,
   )
@@ -1312,9 +1313,10 @@ monitorHealth = do
   -- Status stays INPROGRESS for the whole wait, so an Abort here actually
   -- reverts traffic via the runner (see 'runAutoHealthGate') instead of
   -- just alerting with traffic stuck at 100%.
+  postMonitoringEnabled <- isFullTrafficStabilityCheckEnabled
   masterEnabled <- getConfigBoolForProduct "ab_decision_enabled" (Just (appGroup rt)) False
   perServiceEnabled <- isABHSDecisionEnabledForAppGroupService (appGroup rt) (service rt)
-  when (masterEnabled && perServiceEnabled) $ do
+  when (postMonitoringEnabled && masterEnabled && perServiceEnabled) $ do
     let cooloffMins = case rolloutStrategy rt of
           [] -> 0
           steps -> cooloffMinutes (last steps)

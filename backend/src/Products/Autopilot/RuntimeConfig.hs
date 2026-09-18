@@ -10,6 +10,7 @@ module Products.Autopilot.RuntimeConfig
     isGcltEnabled,
     isPromQueryCheckEnabled,
     isABHSDecisionEnabledForAppGroupService,
+    isFullTrafficStabilityCheckEnabled,
     isApiLatencyReportEnabledForAppGroupService,
     getApiLatencyReportWindowMinutes,
     getApiLatencyReportTopVolumeCount,
@@ -152,6 +153,10 @@ isPromQueryCheckEnabled = do
 isABHSDecisionEnabledForAppGroupService :: (MonadFlow m) => Text -> Text -> m Bool
 isABHSDecisionEnabledForAppGroupService =
   isAppGroupServiceEnabledFromKey "ab_hs_decision_enabled_app_groups"
+
+isFullTrafficStabilityCheckEnabled :: (MonadFlow m) => m Bool
+isFullTrafficStabilityCheckEnabled =
+  getConfigBoolForProduct "full_traffic_stability_check_enabled" (Just "autopilot") False
 
 isApiLatencyReportEnabledForAppGroupService :: (MonadFlow m) => Text -> Text -> m Bool
 isApiLatencyReportEnabledForAppGroupService =
