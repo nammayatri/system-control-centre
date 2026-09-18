@@ -14,7 +14,6 @@ module Products.Autopilot.DecisionEngine (
     -- * Decision Functions
     checkPromQueries,
     initiateABDecisionForRelease,
-    initiatePostMonitoringABDecisionForRelease,
     stopDecisionEngineHS,
     getABDecision,
     getHSDecision,
@@ -52,7 +51,6 @@ import Products.Autopilot.RuntimeConfig (
     getABHSVolumeMinA,
     getABHSVolumeMinB,
     getCkhClusterName,
-    getDEPostMonitoringTimeout,
     getDecisionEngineFailClosed,
     isABHSDecisionEnabledForAppGroupService,
     isPromQueryCheckEnabled,
@@ -338,26 +336,6 @@ initiateABDecisionForRelease cfg tracker = do
 fromMaybeT :: Maybe Text -> Text
 fromMaybeT = maybe "" id
 
-{- | Spawn the post-monitoring AB run (run_id suffix @-post@) once the new
-version hits 100% and pods are ready, before the post-monitor HS loop.
--}
-initiatePostMonitoringABDecisionForRelease :: (MonadFlow m) => Config -> ReleaseTracker -> m DecisionResult
-initiatePostMonitoringABDecisionForRelease cfg tracker = do
-    let abUrl = abEngineUrl cfg
-    if null abUrl
-        then pure (DecisionResult Continue Nothing "AB_ENGINE")
-        else do
-            apiKey <- getABHSApiKey
-            failClosed <- getDecisionEngineFailClosed
-            cluster <- getCkhClusterName
-            svcHost <- do
-                mSvc <- findServiceByProductAndName (appGroup tracker) (service tracker)
-                pure $ maybe "" (fromMaybeT . getServiceHost) mSvc
-            selfClosingSec <- getDEPostMonitoringTimeout
-            now <- liftIO getCurrentTime
-            let body = mkInitiateAbBodyPostMonitoring tracker cluster svcHost selfClosingSec now
-            liftIO $ initiateABDecision abUrl apiKey (appGroup tracker) body failClosed
-
 {- | Best-effort POST @{abUrl}stop/ab/{run_id}@ to terminate the decision
 pod on abort/complete. Logs failures; never throws.
 -}
@@ -451,31 +429,6 @@ mkInitiateAbBody tracker cluster svcHost now =
                     , "service" .= svcHost
                     ]
             , "run_id" .= releaseId tracker
-            ]
-
-{- | Post-monitoring variant of 'mkInitiateAbBody'. Differences: service
-suffixed @_POST@, interval 5, start_time=now, global_time=now-24h,
-run_id suffixed @-post@, plus top-level @self_closing_time@.
--}
-mkInitiateAbBodyPostMonitoring :: ReleaseTracker -> Text -> Text -> Int -> UTCTime -> Value
-mkInitiateAbBodyPostMonitoring tracker cluster svcHost selfClosingSec now =
-    let globalT = addUTCTime (negate (24 * 3600)) now
-     in object
-            [ "product" .= appGroup tracker
-            , "service" .= (service tracker <> "_POST")
-            , "environment" .= extractCluster tracker
-            , "interval" .= (5 :: Int)
-            , "placeholders"
-                .= object
-                    [ "version_a" .= oldVersion tracker
-                    , "version_b" .= newVersion tracker
-                    , "start_time" .= formatStdTime now
-                    , "cluster" .= cluster
-                    , "service" .= svcHost
-                    , "global_time" .= formatStdTime globalT
-                    ]
-            , "run_id" .= (releaseId tracker <> "-post")
-            , "self_closing_time" .= selfClosingSec
             ]
 
 -- | "YYYY-mm-ddTHH:MM:SS" for the AB engine.

@@ -146,12 +146,6 @@ autopilotConfigs =
         "Enable Health Score (HS) decision engine"
         (Just "autopilot")
     , ConfigEntry
-        "ab_hs_post_monitoring_enabled"
-        (BoolConfig False)
-        ABTestingGroup
-        "Enable post-monitoring HS decision after 100% rollout"
-        (Just "autopilot")
-    , ConfigEntry
         "prom_checks_enabled"
         (BoolConfig False)
         ABTestingGroup
@@ -180,12 +174,6 @@ autopilotConfigs =
         (JsonConfig "{}")
         ABTestingGroup
         "Per-(app_group, service) gating for HS decision (JSON map)"
-        (Just "autopilot")
-    , ConfigEntry
-        "ab_hs_post_monitoring_decision_enabled_app_groups"
-        (JsonConfig "{}")
-        ABTestingGroup
-        "Per-(app_group, service) gating for post-monitoring HS decision (JSON map)"
         (Just "autopilot")
     , ConfigEntry
         "api_latency_report_enabled_app_groups"

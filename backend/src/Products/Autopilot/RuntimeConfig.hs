@@ -10,7 +10,6 @@ module Products.Autopilot.RuntimeConfig
     isGcltEnabled,
     isPromQueryCheckEnabled,
     isABHSDecisionEnabledForAppGroupService,
-    isABHSPostMonitoringDecisionEnabledForAppGroupService,
     isApiLatencyReportEnabledForAppGroupService,
     getApiLatencyReportWindowMinutes,
     getApiLatencyReportTopVolumeCount,
@@ -53,7 +52,6 @@ module Products.Autopilot.RuntimeConfig
     getMaxVsLockWaitRetries,
     getVsLockWaitDelaySeconds,
     getCkhClusterName,
-    getDEPostMonitoringTimeout,
     getPodReadinessMaxAttempts,
     getPodReadinessPollSeconds,
     getPodRestartCountThreshold,
@@ -154,13 +152,6 @@ isPromQueryCheckEnabled = do
 isABHSDecisionEnabledForAppGroupService :: (MonadFlow m) => Text -> Text -> m Bool
 isABHSDecisionEnabledForAppGroupService =
   isAppGroupServiceEnabledFromKey "ab_hs_decision_enabled_app_groups"
-
--- | Per-(app-group, service) gating for post-monitoring AB/HS consumption.
--- Same shape as 'isABHSDecisionEnabledForAppGroupService', different key:
--- @ab_hs_post_monitoring_decision_enabled_app_groups@.
-isABHSPostMonitoringDecisionEnabledForAppGroupService :: (MonadFlow m) => Text -> Text -> m Bool
-isABHSPostMonitoringDecisionEnabledForAppGroupService =
-  isAppGroupServiceEnabledFromKey "ab_hs_post_monitoring_decision_enabled_app_groups"
 
 isApiLatencyReportEnabledForAppGroupService :: (MonadFlow m) => Text -> Text -> m Bool
 isApiLatencyReportEnabledForAppGroupService =
@@ -342,11 +333,6 @@ getRevertCooloff = getConfigIntForProduct "revert_cooloff" (Just "autopilot") 1
 -- | Opaque ClickHouse cluster name forwarded to the AB engine initiate body.
 getCkhClusterName :: (MonadFlow m) => m T.Text
 getCkhClusterName = getConfigTextForProduct "ckh_cluster_name" (Just "autopilot") ""
-
--- | Sent as @self_closing_time@ in the post-monitoring AB initiate body
--- so the engine self-stops if SC crashes mid-monitoring. Default 1800s.
-getDEPostMonitoringTimeout :: (MonadFlow m) => m Int
-getDEPostMonitoringTimeout = getConfigIntForProduct "de_post_monitoring_timeout" (Just "autopilot") 1800
 
 getLockExpiryDelayMinutes :: (MonadFlow m) => m Int
 getLockExpiryDelayMinutes = getConfigIntForProduct "lock_expiry_delay_minutes" (Just "autopilot") 15
