@@ -54,6 +54,7 @@ library
       Core.Workflow.StageInterface
       Core.Workflow.Types
       Core.Server
+      Products.Autopilot.AbortedVsAlert
       Products.Autopilot.ApiLatencyReport
       Products.Autopilot.Config
       Products.Autopilot.ConfigDiff

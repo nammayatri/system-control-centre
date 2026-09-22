@@ -39,6 +39,8 @@ module Products.Autopilot.Queries.ReleaseTracker (
     findAbortingReleaseTrackers,
     findOngoingReleaseTrackers,
     findTrackersWithStatusAndTime,
+    findAbortedTrackersSince,
+    existsNewerTrackerForService,
     findApprovedReleasesWithStatus,
     findReleaseTrackersByCategory,
     findReleaseTrackerByGlobalId,
@@ -1096,6 +1098,37 @@ findTrackersWithStatusAndTime statusList ts = withCloudDb $ \cloud db -> do
                         guard_ (rtUpdatedAt rt <=. val_ ts)
                         pure rt
     pure (map fromRow rows)
+
+findAbortedTrackersSince :: (MonadFlow m) => UTCTime -> m [TrackerWithTarget]
+findAbortedTrackersSince since = withCloudDb $ \cloud db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $
+                    orderBy_ (asc_ . rtUpdatedAt) $ do
+                        rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
+                        guard_ (rtStatus rt `in_` [val_ "ABORTED", val_ "USER_ABORTED", val_ "GCLT_ABORTED"])
+                        guard_ (rtUpdatedAt rt >=. val_ since)
+                        pure rt
+    pure (map fromRow rows)
+
+existsNewerTrackerForService :: (MonadFlow m) => Text -> Text -> Text -> Text -> UTCTime -> m Bool
+existsNewerTrackerForService ag svc environment exceptId since = withCloudDb $ \cloud db -> do
+    rows <-
+        runDB db $
+            runSelectReturningList $
+                select $
+                    limit_ 1 $ do
+                        rt <- all_ (releaseTrackers autopilotDb)
+                        guard_ (visibleToCloud cloud rt)
+                        guard_ (rtAppGroup rt ==. val_ ag)
+                        guard_ (rtService rt ==. val_ svc)
+                        guard_ (rtEnv rt ==. val_ environment)
+                        guard_ (rtId rt /=. val_ exceptId)
+                        guard_ (rtCreatedAt rt >=. val_ since)
+                        pure (rtId rt)
+    pure (not (null (rows :: [Text])))
 
 findApprovedReleasesWithStatus :: (MonadFlow m) => [Text] -> m [TrackerWithTarget]
 findApprovedReleasesWithStatus statusList = withCloudDb $ \cloud db -> do

@@ -1070,6 +1070,10 @@ These configs are read from the `server_config` database table at runtime and ca
 | release_watch_delay | int | 20 | Runner poll interval in seconds |
 | collect_metrics_delay | int | 60 | Metrics collection interval in seconds |
 | global_changelog_tracker_enabled | bool | false | Enable global changelog tracking |
+| aborted_vs_not_restored_alert_enabled | bool | true | Alert when an ABORTED release still routes traffic to the new version |
+| aborted_vs_not_restored_alert_mins | int | 15 | Minutes after the abort (end_time) before that alert fires |
+| aborted_vs_not_restored_alert_channel | text | (none) | Extra Slack/Xyne channel to mirror the alert to; empty = release thread only |
+| aborted_vs_not_restored_alert_lookback_hours | int | 24 | How far back the sweep looks for aborted releases |
 
 **Autopilot -- Scaling:**
 
