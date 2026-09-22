@@ -44,6 +44,7 @@ module Products.Autopilot.Notifications
     notifyGenericThreadMessage,
     notifyDecisionThreadMessage,
     notifyFixedChannelAlert,
+    releaseLink,
     sendMobileChangelogSlack,
     sendGroupChangelogSlackIfSettled,
     chunkForSlack,

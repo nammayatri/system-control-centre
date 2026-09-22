@@ -18,6 +18,10 @@ module Products.Autopilot.RuntimeConfig
     getApiLatencyReportSreChannel,
     getApiLatencyReportSreThresholdPct,
     getApiLatencyReportSreMinCalls,
+    isAbortedVsNotRestoredAlertEnabled,
+    getAbortedVsNotRestoredAlertMinutes,
+    getAbortedVsNotRestoredAlertChannel,
+    getAbortedVsNotRestoredAlertLookbackHours,
     getDecisionEngineFailClosed,
     getABHSApiKey,
     getABHSAllowedTimeDiffMins,
@@ -185,6 +189,25 @@ getApiLatencyReportSreThresholdPct =
 getApiLatencyReportSreMinCalls :: (MonadFlow m) => m Int
 getApiLatencyReportSreMinCalls =
   getConfigIntForProduct "api_latency_report_sre_min_calls" (Just "autopilot") 20
+
+-- | Kill-switch for the "ABORTED but VS traffic never restored" sweep.
+isAbortedVsNotRestoredAlertEnabled :: (MonadFlow m) => m Bool
+isAbortedVsNotRestoredAlertEnabled =
+  getConfigBoolForProduct "aborted_vs_not_restored_alert_enabled" (Just "autopilot") True
+
+getAbortedVsNotRestoredAlertMinutes :: (MonadFlow m) => m Int
+getAbortedVsNotRestoredAlertMinutes =
+  getConfigIntForProduct "aborted_vs_not_restored_alert_mins" (Just "autopilot") 15
+
+-- | Extra channel (SRE/oncall) the alert is mirrored to. Empty is fine: the
+-- alert still lands in the release's Slack thread.
+getAbortedVsNotRestoredAlertChannel :: (MonadFlow m) => m Text
+getAbortedVsNotRestoredAlertChannel =
+  getConfigTextForProduct "aborted_vs_not_restored_alert_channel" (Just "autopilot") ""
+
+getAbortedVsNotRestoredAlertLookbackHours :: (MonadFlow m) => m Int
+getAbortedVsNotRestoredAlertLookbackHours =
+  getConfigIntForProduct "aborted_vs_not_restored_alert_lookback_hours" (Just "autopilot") 24
 
 isAppGroupServiceEnabledFromKey :: (MonadFlow m) => Text -> Text -> Text -> m Bool
 isAppGroupServiceEnabledFromKey key appGroupName serviceName = withDb $ \db -> do

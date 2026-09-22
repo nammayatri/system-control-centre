@@ -25,6 +25,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Products.Autopilot.AbortedVsAlert (sweepAbortedVsNotRestored)
 import Products.Autopilot.EventLog (logAbortTriggered, logStatusUpdated, logTrafficUpdatedWithMessage)
 import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getDeploymentReplicaStatus)
 import Products.Autopilot.K8s.Execute (isNotFoundError, runCmd)
@@ -332,6 +333,12 @@ loop = forever $ do
         when (vsAutoCount > 0) $
             logInfo $
                 "[RUNNER] Auto-completed " <> T.pack (show vsAutoCount) <> " stale VS tracker(s) → COMPLETED"
+
+        -- Step 8: page when an abort left the VS pointing at the new version.
+        -- Forked: the check is a kubectl read per unsettled row, and the poll
+        -- loop also drives live releases. The sweep drops its own overlapping
+        -- ticks, so forking can't double-alert.
+        void $ forkFlow (sweepAbortedVsNotRestored cfg now)
 
 -- | Get the full AppState from the Flow monad (for passing to forkIO threads)
 getAppState :: Flow AppState
