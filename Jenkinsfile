@@ -37,6 +37,10 @@ pipeline {
     AWS_REGION_EUROPE = 'eu-central-1'
     AWS_ACCOUNT_EUROPE = '619048610435'
     API_URL_AWS_EUROPE = '/api'   // relative → same-origin as serving host
+    GCP_REGION_EU_PROD = 'europe-west3'
+    GCP_PROJECT_EU_PROD = 'mti-eu-prod'
+    GCP_AR_EU_PROD = "${GCP_REGION_EU_PROD}-docker.pkg.dev/${GCP_PROJECT_EU_PROD}/eu-prod"
+    API_URL_GCP_EUROPE = '/api'
 
     GCP_PROJECT_MASTER = 'ny-sandbox'
     GCP_AR_MASTER       = "asia-south1-docker.pkg.dev/${GCP_PROJECT_MASTER}"
@@ -121,6 +125,21 @@ pipeline {
             buildAndPushFrontend("${env.AWS_ACCOUNT_EUROPE}.dkr.ecr.${env.AWS_REGION_EUROPE}.amazonaws.com/autopilot-frontend:${env.TAG}", env.API_URL_AWS_EUROPE)
           } else {
             buildAndPushBackend("${env.AWS_ACCOUNT_EUROPE}.dkr.ecr.${env.AWS_REGION_EUROPE}.amazonaws.com/autopilot-haskell:${env.TAG}")
+          }
+        }
+      }
+    }
+
+    stage('Deploy to GCP Europe (mti-eu-prod)') {
+      steps {
+        withCredentials([file(credentialsId: 'gcp-sa-key-eu-prod', variable: 'GCP_KEY_FILE_EU_PROD')]) {
+          script {
+            sh 'cat $GCP_KEY_FILE_EU_PROD | docker login -u _json_key --password-stdin https://$GCP_REGION_EU_PROD-docker.pkg.dev'
+            if (params.app == 'autopilot-frontend') {
+              buildAndPushFrontend("${env.GCP_AR_EU_PROD}/autopilot-frontend:${env.TAG}", env.API_URL_GCP_EUROPE)
+            } else {
+              buildAndPushBackend("${env.GCP_AR_EU_PROD}/autopilot-haskell:${env.TAG}")
+            }
           }
         }
       }
