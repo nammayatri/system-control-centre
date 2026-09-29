@@ -743,10 +743,25 @@ restoreVsTrafficOnFailure cfg rt mts = do
                             Right (_, _, d) -> d
                             Left _ -> 0
                     newStatus <- liftIO $ getDeploymentReplicaStatus cfg ns newDepName
-                    let newDesired = case newStatus of
-                            Right (_, _, d) -> d
-                            Left _ -> 0
-                        targetOldReplicas = max 1 (max oldDesired newDesired)
+                    let (oldReadyN, _) = case oldStatus of
+                            Right (r, _, d) -> (r, d)
+                            Left _ -> (0, 0)
+                        (newReadyN, newDesired) = case newStatus of
+                            Right (r, _, d) -> (r, d)
+                            Left _ -> (0, 0)
+                        -- Old must be able to take 100% of traffic. Estimate that fleet
+                        -- size from each side's READY pods and its current traffic share
+                        -- (the last rollout stage's percent): old carries (100-p)%, new p%.
+                        -- max(oldDesired, newDesired) under-sized it — at 50/50 with 10 pods
+                        -- each that is 10 pods for 100% traffic. Over-provisioning is safe
+                        -- (cleaned up later); under-provisioning is the 503.
+                        lastPct = case rolloutHistory rt of
+                            [] -> 0
+                            xs -> historyRolloutPercent (last xs)
+                        ceilDiv100 n share = (n * 100 + share - 1) `div` share
+                        estFromOld = if lastPct < 100 && oldReadyN > 0 then ceilDiv100 oldReadyN (100 - lastPct) else 0
+                        estFromNew = if lastPct > 0 && newReadyN > 0 then ceilDiv100 newReadyN lastPct else 0
+                        targetOldReplicas = maximum [1, oldDesired, estFromOld, estFromNew]
 
                     -- Step 2: scale old up whenever it's under-provisioned —
                     -- not just when it's at 0.
@@ -839,9 +854,11 @@ restoreVsTrafficOnFailure cfg rt mts = do
                                                 -- Re-read the live VS: "replace succeeded" is not proof
                                                 -- that no route still points at the new subset.
                                                 stillLive <- liftIO $ isNewVersionReceivingTraffic cfg ctx
-                                                if stillLive
+                                                primaryNow <- liftIO $ getPrimarySubsetFromVirtualService cfg ns vsName' (serviceName ctx)
+                                                let oldIsPrimary = primaryNow == Right (Just oldVer)
+                                                if stillLive || not oldIsPrimary
                                                     then do
-                                                        logError $ "[restoreVsTrafficOnFailure] VS replace succeeded but new subset still has weight for " <> releaseId rt <> " — keeping new deployment up"
+                                                        logError $ "[restoreVsTrafficOnFailure] VS replace succeeded but live VS not restored for " <> releaseId rt <> " (newStillLive=" <> T.pack (show stillLive) <> ", primary=" <> T.pack (show primaryNow) <> ") — keeping new deployment up"
                                                         pure False
                                                     else do
                                                         logInfo "[restoreVsTrafficOnFailure] VS traffic restored to old version"
