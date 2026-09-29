@@ -8,6 +8,7 @@ module Products.Autopilot.K8s.VirtualService (
     applyVirtualServiceRolloutWithRetries,
     isSubsetReceivingTraffic,
     isNewVersionReceivingTraffic,
+    isVersionReceivingTraffic,
     getPrimarySubsetFromVirtualService,
     isVsSyncedWithExpectedState,
     VsSyncResult (..),
@@ -154,7 +155,11 @@ isSubsetReceivingTraffic cfg ns vsName svcHost subsetName = do
 -- failure is treated as "still receiving" — callers use this to gate
 -- deleting pods, and an unverifiable state must not be read as safe.
 isNewVersionReceivingTraffic :: Config -> K8sReleaseContext -> IO Bool
-isNewVersionReceivingTraffic cfg ctx = do
+isNewVersionReceivingTraffic cfg ctx = isVersionReceivingTraffic cfg ctx (newVersion ctx)
+
+-- | Same check for an arbitrary subset (e.g. the OLD version before draining it).
+isVersionReceivingTraffic :: Config -> K8sReleaseContext -> Text -> IO Bool
+isVersionReceivingTraffic cfg ctx ver = do
     extLive <- checkVs (virtualServiceName ctx)
     intLive <- maybe (pure False) checkVs (internalVirtualServiceName ctx)
     pure (extLive || intLive)
@@ -162,7 +167,7 @@ isNewVersionReceivingTraffic cfg ctx = do
     checkVs vsName
         | T.null vsName = pure False
         | otherwise = do
-            res <- isSubsetReceivingTraffic cfg (namespace ctx) vsName (serviceName ctx) (newVersion ctx)
+            res <- isSubsetReceivingTraffic cfg (namespace ctx) vsName (serviceName ctx) ver
             pure $ either (const True) id res
 
 getPrimarySubsetFromVirtualService :: Config -> Text -> Text -> Text -> IO (Either Text (Maybe Text))

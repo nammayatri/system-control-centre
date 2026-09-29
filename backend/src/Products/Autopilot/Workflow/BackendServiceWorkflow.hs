@@ -56,7 +56,9 @@ import Products.Autopilot.K8s.Deployment
     buildScaleDeploymentCommand,
     buildScaleNamedDeploymentCommand,
     deploymentExists,
+    getDeploymentPodSelector,
     getDeploymentReplicaStatus,
+    getPodsForVersions,
     serviceExists,
   )
 import Products.Autopilot.K8s.DestinationRule (ensureDestinationRule)
@@ -647,11 +649,16 @@ abortWithReason :: T.Text -> StateFlow a
 abortWithReason reason = do
   logErrorS $ "[workflow] Aborting: " <> reason
   rt <- getRT
-  updateRT $ \r -> r {status = ABORTED}
+  -- Go through ABORTING, never straight to ABORTED: a terminal row makes the
+  -- runner skip restoreVsTrafficOnFailure/cleanup, stranding the VS on the new
+  -- version. ABORTING is picked up by handleAbortingRelease, which restores
+  -- traffic (retrying until old is ready) and only then finalizes ABORTED.
   insertReleaseEvent (releaseId rt) "BUSINESS" "WORKFLOW_ABORTED" (toJSON reason)
+  logAbortTriggered (releaseId rt) "SYSTEM" "Workflow Abort" reason
+  updateRT $ \r -> r {status = ABORTING}
   currentRT <- getRT
   currentTS <- gets targetState
-  checkpointReleaseTracker currentRT currentTS
+  casUpdateOrBail "abortWithReason" currentRT currentTS (status rt)
   liftIO $ throwIO $ WorkflowError "workflow" reason
 
 -- | Validate preconditions: cluster reachable, namespace exists.
@@ -1063,7 +1070,9 @@ rolloutLoop wfCfg cfg ctx currentIndex totalSteps stepStartTime iterCount loopSt
         <> T.pack (show elapsedTotal)
         <> "s, aborting stuck rollout"
     rtStuck <- getRT
-    updateRT $ \r -> r {status = ABORTED}
+    -- ABORTING (not ABORTED) so the runner restores traffic; see abortWithReason.
+    logAbortTriggered (releaseId rtStuck) "SYSTEM" "Stuck Rollout" "max loop bail-out"
+    updateRT $ \r -> r {status = ABORTING}
     currentRT <- getRT
     currentTS <- gets targetState
     _ <- conditionalUpdateTracker currentRT currentTS (releaseStatusText (status rtStuck))
@@ -1364,8 +1373,8 @@ fetchAndLogPodLogs cfg ctx rid = do
   let ns = namespace ctx
       svc = serviceName ctx
       ver = newVersion ctx
-      selector = "app=" <> T.unpack svc <> ",version=" <> T.unpack ver
-      podNameCmd =
+      legacySelector = "app=" <> T.unpack svc <> ",version=" <> T.unpack ver
+      podNameCmd selector =
         unwords
           [ kubectlBin cfg,
             "-n",
@@ -1395,7 +1404,11 @@ fetchAndLogPodLogs cfg ctx rid = do
             "--tail=100"
           ]
   logInfoS $ "  [PODS] Fetching logs for failed deployment " <> deploymentName ctx
-  podResult <- liftIO $ runCmd podNameCmd
+  -- Pods don't share one label convention (app may differ from the
+  -- deployment prefix) — use the deployment's own selector, legacy as fallback.
+  selRes <- liftIO $ getDeploymentPodSelector cfg ns (deploymentName ctx)
+  let selector = either (const legacySelector) T.unpack selRes
+  podResult <- liftIO $ runCmd (podNameCmd selector)
   case podResult of
     Left (K8sError err) ->
       insertReleaseEvent
@@ -1463,27 +1476,11 @@ waitForPodsReady logEnv cfg ctx maxAttempts pollSeconds restartThreshold = go 0
 -- | Detailed pod health check. Left = unhealthy reason; Right = status msg.
 checkPodHealthDetailed :: Config -> K8sReleaseContext -> Int -> IO (Either T.Text T.Text)
 checkPodHealthDetailed cfg ctx restartThreshold = do
-  let svcHost = serviceName ctx
-      version = newVersion ctx
-      ns = namespace ctx
-      cmd =
-        unwords
-          [ kubectlBin cfg,
-            "-n",
-            T.unpack ns,
-            "get pods",
-            "-l",
-            "app=" <> T.unpack svcHost <> ",version=" <> T.unpack version,
-            "-o",
-            "json"
-          ]
-  result <- runCmd cmd
+  -- Selector comes from the deployment itself; `app` need not equal serviceName.
+  result <- getPodsForVersions cfg (namespace ctx) (serviceName ctx) [newVersion ctx]
   case result of
     Left _ -> pure (Right "Could not fetch pod status (non-fatal)")
-    Right (K8sResult jsonStr) ->
-      case A.decodeStrict' (TE.encodeUtf8 jsonStr) :: Maybe Value of
-        Nothing -> pure (Right "Could not parse pod JSON (non-fatal)")
-        Just podJson -> pure (analyzePodHealth restartThreshold podJson)
+    Right podJson -> pure (analyzePodHealth restartThreshold podJson)
 
 analyzePodHealth :: Int -> Value -> Either T.Text T.Text
 analyzePodHealth restartThreshold (Object root) =

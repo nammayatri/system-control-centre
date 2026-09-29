@@ -21,6 +21,8 @@ module Products.Autopilot.K8s.Deployment (
     buildPatchDeploymentEnvsCommand,
     serviceExists,
     getDeploymentReplicaStatus,
+    getDeploymentPodSelector,
+    getPodsForVersions,
 )
 where
 
@@ -29,6 +31,7 @@ import Data.Aeson (Value (..))
 import Data.Aeson qualified as A
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
+import Data.List (nub)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
@@ -144,14 +147,18 @@ serviceExists cfg ns svcName = do
     res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get service", shellQuote svcName, "-o name"])
     pure $ case res of Right _ -> True; Left _ -> False
 
+-- | (readyReplicas, availableReplicas, spec.replicas). Fields are '/'-separated
+-- because kubectl prints an absent status field as an empty string — with
+-- whitespace separation "  3" (nothing ready, 3 desired) collapsed to a single
+-- word and was misread as ready=3.
 getDeploymentReplicaStatus :: Config -> Text -> Text -> IO (Either K8sError (Int, Int, Int))
 getDeploymentReplicaStatus cfg ns depName = do
-    res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get deployment", shellQuote depName, "-o jsonpath='{.status.readyReplicas} {.status.availableReplicas} {.spec.replicas}'"])
+    res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get deployment", shellQuote depName, "-o jsonpath='{.status.readyReplicas}/{.status.availableReplicas}/{.spec.replicas}'"])
     pure $ case res of
         Left err -> Left err
         Right (K8sResult out) ->
-            let ws = words (T.unpack out)
-                pick i = if length ws > i then parseInt (ws !! i) else 0
+            let ws = T.splitOn "/" (T.strip out)
+                pick i = if length ws > i then parseInt (T.unpack (T.strip (ws !! i))) else 0
              in Right (pick 0, pick 1, pick 2)
   where
     parseInt s = case reads s of ((n, _) : _) -> n; _ -> 0
@@ -270,3 +277,49 @@ getRunningVersionFromVS cfg ns vsName svcHost = do
     getIntVal :: Text -> KM.KeyMap Value -> Int
     getIntVal key obj = case KM.lookup (K.fromText key) obj of Just (Number n) -> round n; _ -> 0
     mapMaybeList f = foldr (\x acc -> maybe acc (: acc) (f x)) []
+
+{- | Label selector (@k=v,k2=v2@) that picks exactly the pods of @depName@,
+read from the deployment's own @spec.selector.matchLabels@. Products don't
+agree on pod labels (e.g. @app=beckn-nandi@ on a deployment named
+@beckn-nandi-prod-<ver>@), so callers must not assume @app == serviceName@.
+-}
+getDeploymentPodSelector :: Config -> Text -> Text -> IO (Either K8sError Text)
+getDeploymentPodSelector cfg ns depName = do
+    res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get deployment", shellQuote depName, "-o jsonpath='{.spec.selector.matchLabels}'"])
+    pure $ case res of
+        Left err -> Left err
+        Right (K8sResult out) ->
+            let cleaned = T.strip (T.dropWhile (== '\'') (T.dropWhileEnd (== '\'') (T.strip out)))
+             in case A.decodeStrict' (encodeUtf8 cleaned) :: Maybe Value of
+                    Just (Object o) ->
+                        let pairs = [K.toText k <> "=" <> v | (k, String v) <- KM.toList o]
+                         in if null pairs
+                                then Left (K8sError ("Deployment " <> depName <> " has no selector.matchLabels"))
+                                else Right (T.intercalate "," pairs)
+                    _ -> Left (K8sError ("Could not parse selector of deployment " <> depName))
+
+{- | Pods (as a @{"items": [...]}@ List, same shape as @kubectl get pods -o json@)
+belonging to the deployments @<svcHost>-<version>@ for each given version.
+Versions whose deployment is missing (e.g. old = "new"/"unknown") are skipped;
+'Left' only when no version could be resolved at all.
+-}
+getPodsForVersions :: Config -> Text -> Text -> [Text] -> IO (Either K8sError Value)
+getPodsForVersions cfg ns svcHost versions = do
+    results <- mapM fetchOne (nub (filter (not . T.null) versions))
+    let oks = [items | Right items <- results]
+        errs = [e | Left e <- results]
+    pure $ case (oks, errs) of
+        ([], e : _) -> Left e
+        _ -> Right (Object (KM.fromList [(K.fromText "items", A.toJSON (concat oks))]))
+  where
+    fetchOne ver = do
+        selRes <- getDeploymentPodSelector cfg ns (svcHost <> "-" <> ver)
+        case selRes of
+            Left err -> pure (Left err)
+            Right sel -> do
+                podRes <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get pods -l", shellQuote sel, "-o json"])
+                pure $ case podRes of
+                    Left err -> Left err
+                    Right (K8sResult out) -> case A.decodeStrict' (encodeUtf8 out) :: Maybe Value of
+                        Just (Object o) | Just (Array items) <- KM.lookup (K.fromText "items") o -> Right (foldr (:) [] items)
+                        _ -> Left (K8sError "Could not parse pod list JSON")
