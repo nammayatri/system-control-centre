@@ -9,6 +9,7 @@
 -- consults the decision engine; MANUAL only advances on cooloff.
 module Products.Autopilot.Workflow.BackendServiceWorkflow
   ( backendServiceSpec,
+    checkPodHealthDetailed,
   )
 where
 
