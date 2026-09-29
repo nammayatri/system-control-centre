@@ -36,6 +36,7 @@ import Products.Autopilot.K8s.Deployment
     buildScaleDeploymentCommand,
     buildScaleNamedDeploymentCommand,
     deploymentExists,
+    getDeploymentPodSelector,
     getDeploymentReplicaStatus,
     getRunningSchedulerVersion,
   )
@@ -728,8 +729,8 @@ fetchAndLogPodLogs cfg ctx rid = do
       dep = deploymentName ctx
       svc = serviceName ctx
       ver = newVersion ctx
-      selector = "app=" <> T.unpack svc <> ",version=" <> T.unpack ver
-      podNameCmd =
+      legacySelector = "app=" <> T.unpack svc <> ",version=" <> T.unpack ver
+      podNameCmd selector =
         unwords
           [ kubectlBin cfg,
             "-n",
@@ -759,7 +760,11 @@ fetchAndLogPodLogs cfg ctx rid = do
             "--tail=100"
           ]
   logInfoS $ "  Fetching pod logs for " <> dep <> " (last 100 lines)"
-  podResult <- liftIO $ runCmd podNameCmd
+  -- Pods don't share one label convention (app may differ from the
+  -- deployment prefix) — use the deployment's own selector, legacy as fallback.
+  selRes <- liftIO $ getDeploymentPodSelector cfg ns (deploymentName ctx)
+  let selector = either (const legacySelector) T.unpack selRes
+  podResult <- liftIO $ runCmd (podNameCmd selector)
   case podResult of
     Left (K8sError err) ->
       insertReleaseEvent

@@ -58,7 +58,7 @@ import Core.AppError (APIError (..))
 import Core.Auth.Protected (AuthedPerson (..), requireDeploymentPermission)
 import Core.Config (Config (..))
 import Core.DB.Connection (withConn)
-import Core.Environment (Flow, forkFlow, getConfig, getDBEnv, logInfo)
+import Core.Environment (Flow, forkFlow, getConfig, getDBEnv, logInfo, logWarning)
 import Core.Logging (logErrorG)
 import Data.Aeson (Value (..), object, toJSON, (.=))
 import Data.Aeson qualified as A
@@ -89,7 +89,7 @@ import Products.Autopilot.ConfigReview (reviewBlocksApproval, runConfigReview)
 import Products.Autopilot.DiffLink (buildDiffLink)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
 import Products.Autopilot.EventLog (logAbortTriggered, logStatusUpdated)
-import Products.Autopilot.K8s.Deployment (buildPatchDeploymentEnvsCommand, deploymentExists, getRunningSchedulerVersion)
+import Products.Autopilot.K8s.Deployment (buildPatchDeploymentEnvsCommand, deploymentExists, getPodsForVersions, getRunningSchedulerVersion)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
@@ -1833,23 +1833,16 @@ podHealthH _ap rid = do
       case mCtx of
         Nothing -> pure emptyPodHealth
         Just ctx -> do
-          mProduct <- findProductByName (NT.appGroup tracker)
           let ns = ctx.namespace
-              svcHost = ctx.serviceName
-              isScheduler = case mProduct of
-                Just pCfg -> either (const False) (== "BackendScheduler") (normalizeProductType (fromMaybe "" (S.dcAppGroupType pCfg)))
-                Nothing -> False
-              selector =
-                if isScheduler
-                  then "app in (" <> svcHost <> "-" <> NT.oldVersion tracker <> "," <> svcHost <> "-" <> NT.newVersion tracker <> ")"
-                  else "app=" <> svcHost <> ",version in (" <> NT.oldVersion tracker <> "," <> NT.newVersion tracker <> ")"
-          podResult <- liftIO $ runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get pods -l", shellQuote selector, "-o json"])
+          -- Per-deployment selector (spec.selector.matchLabels): pod labels
+          -- vary by product (e.g. app=beckn-nandi on beckn-nandi-prod-<ver>),
+          -- so never derive them from serviceName.
+          podResult <- liftIO $ getPodsForVersions cfg ns ctx.serviceName [NT.oldVersion tracker, NT.newVersion tracker]
           case podResult of
-            Left (K8sError _) -> pure emptyPodHealth
-            Right (K8sResult out) ->
-              case A.decodeStrict' (encodeUtf8 out) :: Maybe Value of
-                Nothing -> pure emptyPodHealth
-                Just podJson -> pure $ parsePodHealth podJson
+            Left (K8sError e) -> do
+              logWarning $ "[podHealthH] " <> rid <> ": could not list pods: " <> e
+              pure emptyPodHealth
+            Right podJson -> pure $ parsePodHealth podJson
 
 emptyPodHealth :: PodHealthResponse
 emptyPodHealth = PodHealthResponse [] (PodSummary 0 0 0 0 0)

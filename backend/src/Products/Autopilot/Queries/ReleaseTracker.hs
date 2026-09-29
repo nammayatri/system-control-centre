@@ -1026,7 +1026,7 @@ findLeakedNewDeploymentTrackers now = withCloudDb $ \cloud db -> do
                     orderBy_ (asc_ . rtUpdatedAt) $ do
                         rt <- all_ (releaseTrackers autopilotDb)
                         guard_ (visibleToCloud cloud rt)
-                        guard_ (rtStatus rt `in_` [val_ "ABORTED", val_ "USER_ABORTED", val_ "DISCARDED"])
+                        guard_ (rtStatus rt `in_` [val_ "ABORTED", val_ "USER_ABORTED", val_ "GCLT_ABORTED", val_ "DISCARDED"])
                         pure rt
     let parsed = map fromRow rows
         isDue (_, mts) = case mts of
