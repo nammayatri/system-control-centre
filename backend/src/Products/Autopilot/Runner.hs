@@ -28,8 +28,8 @@ import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCu
 import Products.Autopilot.AbortedVsAlert (sweepAbortedVsNotRestored)
 import Products.Autopilot.EventLog (logAbortTriggered, logStatusUpdated, logTrafficUpdatedWithMessage)
 import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getDeploymentReplicaStatus)
-import Products.Autopilot.K8s.Execute (isNotFoundError, runCmd)
-import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax)
+import Products.Autopilot.K8s.Execute (K8sError (..), isNotFoundError, runCmd)
+import Products.Autopilot.K8s.HPA (buildDeleteHpaCommand, buildPatchHpaReplicasCommand, getHpaMinMax, hpaExists)
 import Products.Autopilot.K8s.VirtualService (applyVirtualServiceRollout, getPrimarySubsetFromVirtualService, isNewVersionReceivingTraffic, isVersionReceivingTraffic)
 import Products.Autopilot.Mobile.Github (cancelRun, findRunWithJob, listWorkflowRuns, ownDispatchCandidates, wrCreatedAt, wrId)
 import Products.Autopilot.Mobile.Github.Auth (BotIdentity (..), getBotIdentity, loadGhCreds)
@@ -38,7 +38,7 @@ import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTarg
 import Products.Autopilot.Mobile.Workflow (dispatchGroupJobNames, externalRunIdForRelease, findDispatchGroupContexts, findDispatchIdForRelease)
 import Products.Autopilot.Mobile.Types.Storage (acWorkflowPath)
 import Products.Autopilot.Notifications (notifyGenericThreadMessage, notifyPodsScaledDown, notifyReleaseAborted, sendGroupChangelogSlackIfSettled)
-import Products.Autopilot.Queries.ProductService (getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks, releaseService)
+import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, getHpaMinReplicas, getProductCluster, getProductVsLockedBy, getProductsByNamesAndClusters, releaseExpiredVsLocks, releaseService)
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.RuntimeConfig (getAutoCompleteVsTrackerMinutes, getDiscardingSweepMinutes, getHpaDefaultMinPods, getMaxCleanupRetries, getPodReadinessMaxAttempts, getPodReadinessPollSeconds, getPodsScaleDownDelayFromConfig, getReleaseWatchDelay, isMultiReleasePerProduct)
 import Products.Autopilot.Types
@@ -763,6 +763,29 @@ restoreVsTrafficOnFailure cfg rt mts = do
                         estFromNew = if lastPct > 0 && newReadyN > 0 then ceilDiv100 newReadyN lastPct else 0
                         targetOldReplicas = maximum [1, oldDesired, estFromOld, estFromNew]
 
+                    -- Step 1b: pin the OLD HPA's minReplicas to the target BEFORE scaling.
+                    -- Otherwise the HPA (old is now idle on CPU, or was already shrunk)
+                    -- scales old straight back down while we wait for it to become Ready,
+                    -- so the readiness wait never completes and the abort sticks forever.
+                    -- Restored to the service's configured min once traffic is back on old.
+                    let oldHpaName = oldDepName <> "-hpa"
+                    oldHpaFound <- if oldKnown then liftIO $ hpaExists cfg ns oldHpaName else pure False
+                    when oldHpaFound $ do
+                        (hpaMin, hpaMax) <- liftIO $ getHpaMinMax cfg ns oldHpaName
+                        -- (0,0) means the HPA read failed — never patch blind.
+                        when (hpaMax > 0 && (hpaMin < targetOldReplicas || hpaMax < targetOldReplicas)) $ do
+                            let pinnedMax = max hpaMax targetOldReplicas
+                            pinRes <- liftIO $ runCmd (buildPatchHpaReplicasCommand cfg ns oldHpaName targetOldReplicas pinnedMax)
+                            case pinRes of
+                                Left err -> logWarning $ "[restoreVsTrafficOnFailure] Could not pin old HPA min on " <> oldHpaName <> ": " <> T.pack (show err)
+                                Right _ -> do
+                                    logInfo $ "[restoreVsTrafficOnFailure] Pinned old HPA " <> oldHpaName <> " min " <> T.pack (show hpaMin) <> " -> " <> T.pack (show targetOldReplicas)
+                                    insertReleaseEvent
+                                        (releaseId rt)
+                                        "BUSINESS"
+                                        "OLD_HPA_MIN_PINNED"
+                                        (object ["hpa" .= oldHpaName, "previousMin" .= hpaMin, "pinnedMin" .= targetOldReplicas, "max" .= pinnedMax])
+
                     -- Step 2: scale old up whenever it's under-provisioned —
                     -- not just when it's at 0.
                     when (oldKnown && oldDesired < targetOldReplicas) $ do
@@ -894,6 +917,27 @@ restoreVsTrafficOnFailure cfg rt mts = do
                                             case scaleResult of
                                                 Left err -> logWarning $ "[restoreVsTrafficOnFailure] WARNING: Failed to scale down new deployment: " <> T.pack (show err)
                                                 Right _ -> logInfo "[restoreVsTrafficOnFailure] New deployment scaled down to 0"
+
+                            -- Traffic is verified back on old: release the HPA pin so old can
+                            -- autoscale normally again, back to the service's CONFIGURED min.
+                            when (vsFlipOk && oldHpaFound) $ do
+                                mSvc <- findServiceByProductAndName (NT.appGroup rt) (NT.service rt)
+                                (_, curMax) <- liftIO $ getHpaMinMax cfg ns oldHpaName
+                                let cfgMin = maybe 1 (fromIntegral . getHpaMinReplicas) mSvc
+                                    restoreMin = max 1 (if curMax > 0 then min cfgMin curMax else cfgMin)
+                                unpinRes <-
+                                    if curMax > 0
+                                        then liftIO $ runCmd (buildPatchHpaReplicasCommand cfg ns oldHpaName restoreMin (max curMax restoreMin))
+                                        else pure (Left (K8sError "could not read old HPA max"))
+                                case unpinRes of
+                                    Left err -> logWarning $ "[restoreVsTrafficOnFailure] Could not restore old HPA min on " <> oldHpaName <> ": " <> T.pack (show err) <> " — min stays pinned, reset manually"
+                                    Right _ -> do
+                                        logInfo $ "[restoreVsTrafficOnFailure] Restored old HPA " <> oldHpaName <> " min to " <> T.pack (show restoreMin)
+                                        insertReleaseEvent
+                                            (releaseId rt)
+                                            "BUSINESS"
+                                            "OLD_HPA_MIN_RESTORED"
+                                            (object ["hpa" .= oldHpaName, "restoredMin" .= restoreMin])
 
                             insertReleaseEvent
                                 (releaseId rt)
