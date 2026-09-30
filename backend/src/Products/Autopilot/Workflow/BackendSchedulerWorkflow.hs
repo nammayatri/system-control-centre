@@ -49,7 +49,7 @@ import Products.Autopilot.Notifications
   )
 import Products.Autopilot.Queries.ProductService (findServiceByProductAndName, getHpaMaxReplicas, getHpaMinReplicas)
 import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker, insertReleaseEvent)
-import Products.Autopilot.RuntimeConfig (getHpaTemplate, getPodReadyStabilizeSeconds, getPodRestartCountThreshold, getPodReadinessMaxAttempts, getPodReadinessPollSeconds, isHpaEnabledForProduct, isScaleDownPodsOnCompletion)
+import Products.Autopilot.RuntimeConfig (getHpaTemplate, getPodReadyStabilizeSeconds, getPodReadinessMaxAttempts, getPodReadinessPollSeconds, isHpaEnabledForProduct, isScaleDownPodsOnCompletion)
 import Products.Autopilot.Workflow.BackendServiceWorkflow (checkPodHealthDetailed)
 -- Selective import: exclude oldVersion/newVersion to avoid clash with K8sReleaseContext
 import Products.Autopilot.Types.Release
@@ -244,7 +244,7 @@ prepareK8sResources = do
   --
   -- Bug fix: previously, when the target deployment already existed
   -- (resume, revert, restart paths), this branch skipped BOTH the clone
-  -- AND the scale-to-1 call. The next step 'waitForSchedulerPodReady'
+  -- AND the scale-to-1 call. The next step 'waitSchedulerPodsHealthy'
   -- then looped while @desired > 0@ was false and timed out after 5 min
   -- on a deployment that was left at replicas=0 by a prior release's
   -- scale-down. Now we always ensure @replicas >= 1@ before the
@@ -436,9 +436,7 @@ prepareK8sResources = do
   -- `pod_readiness_max_attempts` / `pod_readiness_poll_seconds` defaults)
   -- and bail loudly if the pod never reaches ready≥1.
   logInfoS "  Waiting for verification pod readiness (pod_readiness_max_attempts x pod_readiness_poll_seconds)"
-  schedMaxAttempts <- lift getPodReadinessMaxAttempts
-  schedPollSecs <- lift getPodReadinessPollSeconds
-  waitForSchedulerPodReady cfg ctx schedMaxAttempts schedPollSecs
+  waitSchedulerPodsHealthy cfg ctx "verification-pod" False
 
   stabilizeSecs <- lift getPodReadyStabilizeSeconds
   when (stabilizeSecs > 0) $ do
@@ -681,13 +679,37 @@ first "ready >= desired" completed the release and scaled old to 0 in that gap.
 Throws 'WorkflowError' on failure, which the abort path turns into a restore of
 the old version.
 -}
+minSchedulerStabilizeSecs :: Int
+minSchedulerStabilizeSecs = 60
+
+{- | A brand-new scheduler pod must never restart. Crash loops are invisible to a
+point-in-time "state" sample (the container is Running/Ready for ~40s, then
+Completed/Error, and only sits in CrashLoopBackOff during the backoff gap), but
+every crash bumps restartCount permanently — so zero tolerance is the reliable signal.
+-}
+schedulerRestartThreshold :: Int
+schedulerRestartThreshold = 0
+
+-- | Ready + stability-window gate used between rollout stages.
 waitSchedulerRolloutHealthy :: Config -> K8sReleaseContext -> T.Text -> StateFlow ()
-waitSchedulerRolloutHealthy cfg ctx stageLabel = do
+waitSchedulerRolloutHealthy cfg ctx stageLabel = waitSchedulerPodsHealthy cfg ctx stageLabel True
+
+{- | Wait for the new deployment to be Ready while checking pod health on every poll
+(crash states, restarts). With @withStabilize@, additionally hold for the stability
+window so a pod that only crashes after app init (no readiness probe) is caught.
+-}
+waitSchedulerPodsHealthy :: Config -> K8sReleaseContext -> T.Text -> Bool -> StateFlow ()
+waitSchedulerPodsHealthy cfg ctx stageLabel withStabilize = do
   rt <- getRT
   maxAttempts <- lift getPodReadinessMaxAttempts
   pollSecs <- lift getPodReadinessPollSeconds
-  stabilizeSecs <- lift getPodReadyStabilizeSeconds
-  restartThreshold <- lift getPodRestartCountThreshold
+  configuredStabilize <- lift getPodReadyStabilizeSeconds
+  -- Floor: with the default of 0 the gate passed on the first ready>=desired sample,
+  -- which a crash-looping pod hits every time it is briefly Running.
+  let stabilizeSecs = max minSchedulerStabilizeSecs configuredStabilize
+      -- A fresh new-version pod must not restart at all: a crash loop is sampled
+      -- only occasionally in a waiting/terminated state, so a >3 threshold lets it slip by.
+      restartThreshold = schedulerRestartThreshold
   let rid = releaseId rt
       failWith :: T.Text -> StateFlow a
       failWith msg = do
@@ -724,7 +746,7 @@ waitSchedulerRolloutHealthy cfg ctx stageLabel = do
                   failWith ("Pods dropped out of Ready (" <> T.pack (show ready) <> "/" <> T.pack (show desired) <> ") during the stability window")
                 stabilize (elapsed + pollSecs) streak
   awaitReady 0
-  when (stabilizeSecs > 0) $ do
+  when (withStabilize && stabilizeSecs > 0) $ do
     logInfoS $ "    [" <> stageLabel <> "] Ready — verifying stability for " <> T.pack (show stabilizeSecs) <> "s"
     stabilize 0 0
     logInfoS $ "    [" <> stageLabel <> "] pods stable"
@@ -744,50 +766,6 @@ checkDeploymentHealth cfg ctx = do
       <> T.pack (show desired)
   when (ready < desired) $
     logWarningS "    WARNING: Not all replicas ready yet"
-
--- | Poll deployment replica status until ready≥desired or timeout.
---
--- This is a minimal scheduler-local readiness check that replaces the previous
--- fixed `threadDelaySec 10` (bug B10). It polls 'getDeploymentReplicaStatus' at
--- fixed intervals and throws 'WorkflowError' if the deployment never reaches
--- the ready state. The full pod-health checking (CrashLoopBackOff, ImagePull
--- failure, restart count) lives in 'BackendServiceWorkflow.waitForPodsReady'
--- and will be extracted to a shared module in the foundation phase.
---
--- @maxAttempts@ × @pollSeconds@ = total wait budget. Defaults to 30 × 10 = 5min.
-waitForSchedulerPodReady :: Config -> K8sReleaseContext -> Int -> Int -> StateFlow ()
-waitForSchedulerPodReady cfg ctx maxAttempts pollSeconds = do
-  rt <- getRT
-  go (releaseId rt) 0
-  where
-    go rid attempt
-      | attempt >= maxAttempts = do
-          let msg =
-                "Scheduler pod readiness timeout after "
-                  <> T.pack (show maxAttempts)
-                  <> " polls × "
-                  <> T.pack (show pollSeconds)
-                  <> "s"
-          logErrorS $ "    " <> msg
-          fetchAndLogPodLogs cfg ctx rid
-          liftIO $ throwIO $ WorkflowError "scheduler-readiness" msg
-      | otherwise = do
-          liftIO $ threadDelaySec pollSeconds
-          (ready, _avail, desired) <-
-            runK8sIO $
-              getDeploymentReplicaStatus cfg (namespace ctx) (deploymentName ctx)
-          logInfoS $
-            "    Poll "
-              <> T.pack (show (attempt + 1))
-              <> "/"
-              <> T.pack (show maxAttempts)
-              <> ": ready="
-              <> T.pack (show ready)
-              <> "/"
-              <> T.pack (show desired)
-          if ready >= desired && desired > 0
-            then logInfoS "    Verification pod is Ready"
-            else go rid (attempt + 1)
 
 fetchAndLogPodLogs :: Config -> K8sReleaseContext -> T.Text -> StateFlow ()
 fetchAndLogPodLogs cfg ctx rid = do
@@ -876,7 +854,7 @@ monitorHealth = do
   updateK8sStatus BSStabilize
   logInfoS "  Stabilization period (30s)"
   let checks = 6 :: Int -- 6 * 5s = 30s
-  restartThreshold <- lift getPodRestartCountThreshold
+  let restartThreshold = schedulerRestartThreshold
   forM_ [1 .. checks] $ \i -> do
     liftIO $ threadDelaySec 5
     -- Enforce, don't just log: a crashing scheduler must fail the release
