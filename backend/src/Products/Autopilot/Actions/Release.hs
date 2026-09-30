@@ -1855,11 +1855,26 @@ parsePodHealth (Object root) =
           total = length pods
           running = length (filter (\p -> piStatus p == "Running") pods)
           pending = length (filter (\p -> piStatus p == "Pending") pods)
-          failed = length (filter (\p -> piStatus p == "Failed") pods)
+          failed = length (filter (\p -> piStatus p == "Failed" || isCrashStatus (piStatus p)) pods)
           unknown' = total - running - pending - failed
        in PodHealthResponse pods (PodSummary total running pending failed unknown')
     _ -> emptyPodHealth
 parsePodHealth _ = emptyPodHealth
+
+-- | Container-level failure states that 'effectivePodStatus' surfaces in place of the pod phase.
+isCrashStatus :: Text -> Bool
+isCrashStatus st = st `elem` ["CrashLoopBackOff", "Error", "OOMKilled", "ImagePullBackOff", "ErrImagePull", "CreateContainerConfigError", "RunContainerError", "Completed"]
+
+{- | Pod phase stays "Running" for a crash-looping pod (the pod is alive, its container
+is not), so kubectl shows the container reason instead. Mirror that: a waiting reason
+wins, then the terminated reason of a container that is not ready after restarting.
+-}
+effectivePodStatus :: Text -> [Value] -> Text
+effectivePodStatus phase statuses =
+  case [r | Object cs <- statuses, Just (Object st) <- [KM.lookup (K.fromText "state") cs], Just (Object w) <- [KM.lookup (K.fromText "waiting") st], Just (String r) <- [KM.lookup (K.fromText "reason") w], r /= "ContainerCreating", r /= "PodInitializing"]
+    ++ [r | phase == "Running", Object cs <- statuses, getRestartCount (Object cs) > 0, not (isContainerReady (Object cs)), Just (Object st) <- [KM.lookup (K.fromText "state") cs], Just (Object t) <- [KM.lookup (K.fromText "terminated") st], Just (String r) <- [KM.lookup (K.fromText "reason") t]] of
+    (r : _) -> r
+    [] -> phase
 
 parseSinglePod :: Value -> PodInfo
 parseSinglePod (Object podObj) =
@@ -1887,7 +1902,8 @@ parseSinglePod (Object podObj) =
         Nothing -> case getObj' "spec" podObj >>= getArr' "containers" of
           Just (c : _) -> extractImageTag c
           _ -> ""
-   in PodInfo nameVal phaseVal readyVal restartsVal ageVal versionVal
+      statusVal = effectivePodStatus phaseVal (fromMaybe [] (getObj' "status" podObj >>= getArr' "containerStatuses"))
+   in PodInfo nameVal statusVal readyVal restartsVal ageVal versionVal
 parseSinglePod _ = PodInfo "" "Unknown" False 0 "" ""
 
 isContainerReady :: Value -> Bool
