@@ -43,11 +43,13 @@ data CmRow = CmRow
     { crName :: Text
     , crFiles :: M.Map Text Text
     -- ^ configmap data key -> repo path
+    , crMerge :: Bool
+    -- ^ @"mode": "merge"@ (see 'cmMerge')
     }
     deriving (Show, Eq)
 
 instance FromJSON CmRow where
-    parseJSON = withObject "configMap" $ \o -> CmRow <$> o .: "name" <*> o .: "files"
+    parseJSON = withObject "configMap" $ \o -> CmRow <$> o .: "name" <*> o .: "files" <*> (maybe False (== ("merge" :: Text)) <$> o .:? "mode")
 
 data ProductBot = ProductBot
     { pbEnv :: Text
@@ -173,7 +175,7 @@ buildFromRows rows = do
                 , rcJenkins = jenkins
                 , rcServices = services
                 , rcSecretFiles = nub (concat [pbSecretFiles pb | (_, _, pb) <- grp])
-                , rcConfigMaps = [ConfigMapTarget (crName c) (dcAppGroup r) (crFiles c) (Just (pbEnv pb)) | (_, r, pb) <- grp, c <- pbConfigMaps pb]
+                , rcConfigMaps = [ConfigMapTarget (crName c) (dcAppGroup r) (crFiles c) (Just (pbEnv pb)) (crMerge c) | (_, r, pb) <- grp, c <- pbConfigMaps pb]
                 , rcIgnoreConfigMaps = nub (concat [pbIgnore pb | (_, _, pb) <- grp])
                 , rcJenkinsByEnv = M.fromList byEnv
                 }

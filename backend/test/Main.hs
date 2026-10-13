@@ -2732,6 +2732,15 @@ testReleaseBotDiff = do
       (rebuiltNew, rebuiltOld) = replay (RBD.diffLines old new)
   assertEqual "replay(new side) == new" new rebuiltNew
   assertEqual "replay(old side) == old" old rebuiltOld
+  -- 3-way merge: apply only the repo change onto an env-specific live copy
+  let mBase = "a\nb\nc\nd\ne\n"
+  assertEqual "merge: repo unchanged -> live untouched" (Right "a\nLIVE\nc\nd\ne\n") (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" mBase)
+  assertEqual "merge: repo change in a region live never touched" (Right "a\nLIVE\nc\nd\nE2\n") (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nb\nc\nd\nE2\n")
+  assertEqual "merge: identical edit on both sides" (Right "a\nX\nc\nd\ne\n") (RBD.merge3 mBase "a\nX\nc\nd\ne\n" "a\nX\nc\nd\ne\n")
+  assertBool "merge: overlapping differing edits conflict (fail closed)" (either (const True) (const False) (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nREPO\nc\nd\ne\n"))
+  assertBool "merge: adjacent edits conflict (fail closed)" (either (const True) (const False) (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nb\nREPO\nd\ne\n"))
+  assertEqual "merge: repo adds a line far from live edits" (Right "a\nLIVE\nc\nd\ne\nf\n") (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nb\nc\nd\ne\nf\n")
+  assertEqual "merge: repo deletes a line far from live edits" (Right "a\nLIVE\nc\nd\n") (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nb\nc\nd\n")
   -- hunks carry context and correct start lines
   let hs = RBD.hunks 1 (RBD.diffLines (map (T.pack . show) [1 :: Int .. 20]) (map (T.pack . show) ([1 .. 9] ++ [99] ++ [11 .. 20 :: Int])))
   assertEqual "one hunk for one change" 1 (length hs)
@@ -2918,6 +2927,16 @@ testReleaseBotTriggers = do
 
 testReleaseBotRows :: IO ()
 testReleaseBotRows = do
+  -- merge mode parses on both rule kinds (env var + configmap); absent = replace
+  case RBW.validateServiceBot "{\"envVar\":{\"envVar\":\"DHALL_CONFIG\",\"repoPath\":\"a/rider-app.dhall\",\"mode\":\"merge\"}}" of
+    Right sb -> assertEqual "env var mode=merge parsed" (Just (Just "merge")) (fmap PRC.evMode (RBW.sbEnvVar sb))
+    Left e -> assertBool ("service rule should parse: " <> T.unpack e) False
+  case RBW.validateServiceBot "{\"envVar\":{\"envVar\":\"DHALL_CONFIG\",\"repoPath\":\"a/rider-app.dhall\"}}" of
+    Right sb -> assertEqual "env var mode absent -> replace" (Just Nothing) (fmap PRC.evMode (RBW.sbEnvVar sb))
+    Left e -> assertBool ("service rule should parse: " <> T.unpack e) False
+  case RBW.validateProductBot "{\"env\":\"MASTER\",\"configMaps\":[{\"name\":\"cm\",\"mode\":\"merge\",\"files\":{\"k\":\"p\"}}]}" of
+    Right pb -> assertEqual "configmap mode=merge parsed" [True] (map RBW.crMerge (RBW.pbConfigMaps pb))
+    Left e -> assertBool ("product rule should parse: " <> T.unpack e) False
   let row ag svc repo cfg =
         SCH.DeploymentConfigT
           { SCH.dcId = 1, SCH.dcAppGroup = ag, SCH.dcService = svc, SCH.dcCluster = Nothing, SCH.dcNamespace = Nothing

@@ -181,8 +181,8 @@ never silently resolved.
 | `channels[]` | Xyne channel id → repo + env (`PROD`/`MASTER`). A channel only sees that env's services. |
 | `repos[].branches` | Allowed release branches (the commit must be on one). |
 | `services[].dhallFiles` | Files whose change makes the service "dhall-affected". |
-| `services[].envVar {envVar, repoPath, watch?}` | If a **watched** file changed (default: `repoPath`) → decode the live `envVar` on the running deployment and diff it against `repoPath` at the commit. |
-| `configMaps[] {name, appGroup, files{key→repoPath}, env?}` | If a file in `files` changed → diff that key of the live configmap against the repo file at the commit. |
+| `services[].envVar {envVar, repoPath, watch?, mode?}` | If a **watched** file changed (default: `repoPath`) → decode the live `envVar` on the running deployment and diff it against `repoPath` at the commit. `"mode": "merge"` (see configMaps) applies only the repo change onto the live value instead of replacing it — use whenever the live value is an env-specific variant of the repo file (true for prod `DHALL_CONFIG`: ~23% line-similar to the repo's dev file). |
+| `configMaps[] {name, files{key→repoPath}, mode?}` | If a file in `files` changed → diff that key of the live configmap against the repo file at the commit (`mode` omitted / `"replace"`: the live key is replaced by the repo file — use where the repo file IS the deployed config). `"mode": "merge"`: the live content is an env-specific variant of the repo file (e.g. the MASTER configmap), so only the repo change (deployed commit → target commit) is applied onto it as a 3-way line merge; an overlap with live edits is a conflict → build-only + flagged, never guessed. Needs all selected services on the same deployed commit. |
 | `secretFiles` | Changed secret files are flagged in the thread (never read/applied). |
 | `ignoreConfigMaps` | Extra configmaps to exclude from coverage (`kube-root-ca.crt`, `istio-ca-root-cert` always are). |
 

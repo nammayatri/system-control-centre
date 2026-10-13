@@ -16,6 +16,7 @@ module Products.Autopilot.ReleaseBot.Diff (
     decodeB64Text,
     encodeB64Text,
     changedCount,
+    merge3,
 ) where
 
 import Control.Monad (forM_)
@@ -180,3 +181,55 @@ decodeB64Text t =
 encodeB64Text :: Text -> Text
 encodeB64Text = TE.decodeUtf8 . B64.encode . TE.encodeUtf8
 
+
+{- | Line-based 3-way merge: apply the change @base -> theirs@ onto @ours@.
+
+Used for configmaps whose live content is an environment-specific variant of the repo
+file (so replacing it wholesale would wipe the environment's own settings). Each side's
+edits are blocks over base line ranges. Blocks that touch or overlap (ranges expanded by
+one line) are a conflict unless both sides made the identical edit; any conflict is
+'Left' — the caller then refuses to apply (fail closed), never guesses.
+-}
+merge3 :: Text -> Text -> Text -> Either Text Text
+merge3 base ours theirs
+    | theirs == base = Right ours
+    | ours == base = Right theirs
+    | ours == theirs = Right ours
+    | otherwise =
+        let b = T.lines base
+            ob = blocks (diffLines b (T.lines ours))
+            tb = blocks (diffLines b (T.lines theirs))
+            clash = [(o, t) | o <- ob, t <- tb, touches o t, o /= t]
+         in case clash of
+                ((o, _) : _) -> Left ("the repo change overlaps live edits near base line " <> T.pack (show (bStart o + 1)))
+                [] ->
+                    let merged = dedupe (sortOn' bStart (ob ++ tb))
+                     in Right (T.unlines (assemble b 0 merged) `keepTrailing` ours)
+  where
+    keepTrailing t o = if T.isSuffixOf "\n" o || T.null o then t else T.dropWhileEnd (== '\n') t
+    touches x y = bStart x <= bEnd y + 1 && bStart y <= bEnd x + 1
+    dedupe (x : y : r) | x == y = dedupe (y : r)
+    dedupe (x : r) = x : dedupe r
+    dedupe [] = []
+    sortOn' f = foldr ins []
+      where
+        ins x [] = [x]
+        ins x (y : ys) | f x <= f y = x : y : ys | otherwise = y : ins x ys
+    assemble bl i [] = drop i bl
+    assemble bl i (blk : rest) = take (bStart blk - i) (drop i bl) ++ bRepl blk ++ assemble bl (bEnd blk) rest
+
+-- | An edit: base lines @[bStart, bEnd)@ replaced by @bRepl@ (insertion when start == end).
+data Block = Block {bStart :: Int, bEnd :: Int, bRepl :: [Text]}
+    deriving (Eq)
+
+blocks :: [DiffLine] -> [Block]
+blocks = go 0 Nothing
+  where
+    go _ cur [] = flush cur
+    go i cur (Ctx _ : r) = flush cur ++ go (i + 1) Nothing r
+    go i cur (Del _ : r) = go (i + 1) (Just (extend cur i (i + 1) [])) r
+    go i cur (Add t : r) = go i (Just (extend cur i i [t])) r
+    extend Nothing s e rs = Block s e rs
+    extend (Just (Block s _ rs0)) _ e rs = Block s e (rs0 ++ rs)
+    flush Nothing = []
+    flush (Just b) = [b]

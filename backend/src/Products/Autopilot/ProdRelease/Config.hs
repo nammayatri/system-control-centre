@@ -50,6 +50,9 @@ data EnvVarTarget = EnvVarTarget
     -- ^ Repo path of the dhall whose raw content is base64'd into that env var
     , evWatch :: Maybe [Text]
     -- ^ Changed-file patterns that TRIGGER the check of this env var (default: just 'evRepoPath')
+    , evMode :: Maybe Text
+    -- ^ @"merge"@: the live value is an env-specific variant of the repo file, so apply only the repo
+    -- change (deployed commit -> target commit) onto it (3-way) instead of replacing it
     }
     deriving (Show, Generic)
 
@@ -119,14 +122,17 @@ data ConfigMapTarget = ConfigMapTarget
     -- ^ configmap data key -> repo path (e.g. @common.dhall@ -> @dhall-configs/prod/common.dhall@)
     , cmEnv :: Maybe Text
     -- ^ Only for requests from channels of this env (@PROD@ / @MASTER@); absent = all
+    , cmMerge :: Bool
+    -- ^ @mode: "merge"@ — the live content is an env-specific variant of the repo file, so apply only
+    -- the repo change (deployed commit -> target commit) onto it (3-way) instead of replacing it
     }
     deriving (Show, Generic)
 
 instance FromJSON ConfigMapTarget where
     parseJSON = withObject "ConfigMapTarget" $ \o ->
-        ConfigMapTarget <$> o .: "name" <*> o .: "appGroup" <*> o .: "files" <*> o .:? "env"
+        ConfigMapTarget <$> o .: "name" <*> o .: "appGroup" <*> o .: "files" <*> o .:? "env" <*> (maybe False (== ("merge" :: Text)) <$> o .:? "mode")
 instance ToJSON ConfigMapTarget where
-    toJSON c = object ["name" .= cmName c, "appGroup" .= cmAppGroup c, "files" .= cmFiles c, "env" .= cmEnv c]
+    toJSON c = object ["name" .= cmName c, "appGroup" .= cmAppGroup c, "files" .= cmFiles c, "env" .= cmEnv c, "mode" .= (if cmMerge c then "merge" else "replace" :: Text)]
 
 -- | An Xyne channel the bot accepts release requests from.
 data ChannelCfg = ChannelCfg

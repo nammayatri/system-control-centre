@@ -234,8 +234,8 @@ analyze ap token repo env mBranch fullSha svcNames = do
         unverified = any (not . srVerified) svcResults
         resultFor s = take 1 [r | r <- svcResults, srService r == scService s]
     -- A changed file TRIGGERS its rule; an unverifiable diff triggers everything (fail safe).
-    envChanges <- mapM (\s -> analyzeEnv token slug fullSha (triggeredFor s resultFor) s) selected
-    cmChanges <- analyzeConfigMaps token repo env fullSha allFiles unverified
+    envChanges <- mapM (\s -> analyzeEnv token slug fullSha (listToMaybe (resultFor s) >>= srBaseCommit) (triggeredFor s resultFor) s) selected
+    cmChanges <- analyzeConfigMaps token repo env fullSha (nub [b | r <- svcResults, Just b <- [srBaseCommit r]]) allFiles unverified
     refs <- mapM (\s -> (,) s <$> readServiceRefs (scAppGroup s) (scService s)) selected
     let envs = [e | (e, _) <- envChanges, not (T.null (ecEnvVar e))]
         cms = [c | (Just c, _) <- cmChanges]
@@ -354,8 +354,8 @@ analyzeService ap token repo fullSha svc = do
                     | otherwise -> mk (crFiles c) True Nothing diffUrl
 
 -- | (change, blockers). Services with no envVar target contribute nothing.
-analyzeEnv :: Text -> Text -> Text -> Bool -> ServiceCfg -> Flow (EnvChange, [Text])
-analyzeEnv token slug fullSha triggered svc = case scEnvVar svc of
+analyzeEnv :: Text -> Text -> Text -> Maybe Text -> Bool -> ServiceCfg -> Flow (EnvChange, [Text])
+analyzeEnv token slug fullSha baseSha triggered svc = case scEnvVar svc of
     Nothing -> pure (EnvChange (scService svc) (scAppGroup svc) "" "unchanged" Nothing Nothing Nothing Nothing, [])
     Just tgt | not triggered -> pure (EnvChange (scService svc) (scAppGroup svc) (evEnvVar tgt) "not_triggered" Nothing Nothing Nothing Nothing, [])
     Just tgt -> do
@@ -363,14 +363,20 @@ analyzeEnv token slug fullSha triggered svc = case scEnvVar svc of
             mkErr st e = (EnvChange (scService svc) (scAppGroup svc) var st Nothing Nothing Nothing (Just e), [scService svc <> ": " <> e])
         live <- readServiceEnv (scAppGroup svc) (scService svc)
         newContent <- getFileAt token slug (evRepoPath tgt) fullSha
+        baseContent <- case (evMode tgt, baseSha) of
+            (Just "merge", Just b) -> Just <$> getFileAt token slug (evRepoPath tgt) b
+            (Just "merge", Nothing) -> pure (Just (Left "the deployed commit is unknown, so there is no merge base"))
+            _ -> pure Nothing
         pure $ case (live, newContent) of
             (Left e, _) -> mkErr "error" e
             (_, Left e) -> mkErr "error" e
-            (Right le, Right new) -> case envVarValue var (leEnv le) of
+            (Right le, Right repoNew) -> case envVarValue var (leEnv le) of
                 Nothing -> mkErr "live_absent" ("env var " <> var <> " is not present on the running deployment")
                 Just liveB64 -> case decodeB64Text liveB64 of
                     Left why -> (EnvChange (scService svc) (scAppGroup svc) var "undecodable" Nothing Nothing (Just liveB64) (Just why), [scService svc <> ": live " <> var <> " " <> why])
-                    Right liveTxt
+                    Right liveTxt -> case mergedNew liveTxt repoNew baseContent of
+                      Left why -> mkErr "error" ("cannot merge the repo change onto the live " <> var <> ": " <> why)
+                      Right new
                         | T.stripEnd liveTxt == T.stripEnd new -> (EnvChange (scService svc) (scAppGroup svc) var "unchanged" Nothing Nothing (Just liveB64) Nothing, [])
                         | otherwise ->
                             ( EnvChange (scService svc) (scAppGroup svc) var "changed"
@@ -380,9 +386,13 @@ analyzeEnv token slug fullSha triggered svc = case scEnvVar svc of
                                 Nothing
                             , []
                             )
+  where
+    mergedNew _ repoNew Nothing = Right repoNew
+    mergedNew liveTxt repoNew (Just (Right b)) = merge3 b liveTxt repoNew
+    mergedNew _ _ (Just (Left e)) = Left ("cannot read the base file: " <> e)
 
-analyzeConfigMaps :: Text -> RepoCfg -> Text -> Text -> [Text] -> Bool -> Flow [(Maybe CmChange, [Text])]
-analyzeConfigMaps token repo env fullSha changedFiles unverified = mapM one applicable
+analyzeConfigMaps :: Text -> RepoCfg -> Text -> Text -> [Text] -> [Text] -> Bool -> Flow [(Maybe CmChange, [Text])]
+analyzeConfigMaps token repo env fullSha bases changedFiles unverified = mapM one applicable
   where
     slug = repoSlug repo
     applicable = [t | t <- rcConfigMaps repo, maybe True (\e -> T.toLower e == T.toLower env) (cmEnv t)]
@@ -395,8 +405,25 @@ analyzeConfigMaps token repo env fullSha changedFiles unverified = mapM one appl
             Left e -> pure (Nothing, [e])
             Right (ns, liveData) -> do
                 fetched <- mapM (\(k, p) -> (,) k <$> getFileAt token slug p fullSha) (triggeredFiles t)
-                let errs = [cmName t <> "/" <> k <> ": " <> e | (k, Left e) <- fetched]
-                    news = M.fromList [(k, v) | (k, Right v) <- fetched]
+                -- merge mode: the live content is an env-specific variant of the repo file, so only the
+                -- repo change (deployed commit -> target commit) is applied onto it.
+                bases' <-
+                    if cmMerge t
+                        then case bases of
+                            [b] -> mapM (\(k, p) -> (,) k <$> getFileAt token slug p b) (triggeredFiles t)
+                            _ -> pure [(k, Left "services were deployed from different commits (or the deployed commit is unknown), so there is no single merge base") | (k, _) <- triggeredFiles t]
+                        else pure []
+                let baseOf k = lookup k bases'
+                    resolve k v
+                        | not (cmMerge t) = Right v
+                        | otherwise = case (baseOf k, M.lookup k liveData) of
+                            (Just (Right b), Just l) -> merge3 b l v
+                            (Just (Left e), _) -> Left ("cannot read the base file: " <> e)
+                            (_, Nothing) -> Left "key is absent from the live configmap"
+                            _ -> Left "no merge base"
+                    resolved = [(k, r) | (k, Right v) <- fetched, r <- [resolve k v]]
+                    errs = [cmName t <> "/" <> k <> ": " <> e | (k, Left e) <- fetched] ++ [cmName t <> "/" <> k <> ": " <> e | (k, Left e) <- resolved]
+                    news = M.fromList [(k, v) | (k, Right v) <- resolved]
                     changed = M.filterWithKey (\k v -> fmap T.stripEnd (M.lookup k liveData) /= Just (T.stripEnd v)) news
                     diffs = [diffText (cmName t <> " · " <> k) (M.findWithDefault "" k liveData) v | (k, v) <- M.toList changed]
                 if M.null changed

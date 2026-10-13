@@ -44,7 +44,7 @@ import Data.ByteArray (constEq)
 import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, maybeToList)
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -200,16 +200,21 @@ handleMention m = do
     enabled <- botEnabled
     forUs <- mentionIsForUs m
     when (enabled && forUs) $ do
+        -- Webhook ids cannot be used as a thread_ts, so we open our own root message and
+        -- keep everything else (errors, progress, summary) in its thread. Only the
+        -- Approve/Reject card goes top-level: buttons are not supported inside threads.
+        root <- say (X.mChannel m) Nothing ("🛠 Release request from " <> X.mSenderName m <> " received — checking…")
+        let reply = void . say (X.mChannel m) root
         ecfg <- loadBotConfig
         case ecfg of
-            Left e -> void (say (X.mChannel m) Nothing ("⚠️ Release bot is misconfigured: " <> e))
+            Left e -> reply ("⚠️ Release bot is not configured yet: " <> e <> "\nAdd release rules on the Deployment Config page (or release_bot_config_json); see RELEASE_BOT.md.")
             Right pc -> case findChannel pc (X.mChannel m) of
-                Nothing -> void (say (X.mChannel m) Nothing "This channel is not enabled for release requests.")
+                Nothing -> reply "This channel is not enabled for release requests."
                 Just ch -> case findRepo pc (chRepo ch) of
-                    Nothing -> void (say (X.mChannel m) Nothing ("⚠️ Channel is mapped to unknown repo " <> chRepo ch))
+                    Nothing -> reply ("⚠️ Channel is mapped to unknown repo " <> chRepo ch)
                     Just repo0 -> do
                         let repo = forEnv (chEnv ch) repo0
-                        newRequest pc{prcRepos = [repo]} ch repo m
+                        newRequest pc{prcRepos = [repo]} ch repo root m
 
 {- | The webhook URL may be shared with other Xyne apps, so react only when THIS app was
 tagged. If the message carries no mention ids, or our own id cannot be determined, we do
@@ -220,8 +225,8 @@ mentionIsForUs m
     | null (X.mMentioned m) = pure True
     | otherwise = maybe True (`elem` X.mMentioned m) <$> X.botUserId
 
-newRequest :: ProdReleaseConfig -> ChannelCfg -> RepoCfg -> X.Mention -> Flow ()
-newRequest pc ch repo m = do
+newRequest :: ProdReleaseConfig -> ChannelCfg -> RepoCfg -> Maybe Text -> X.Mention -> Flow ()
+newRequest pc ch repo root m = do
     rid <- UUID.toText <$> liftIO UUID.nextRandom
     now <- liftIO getCurrentTime
     ttl <- ttlMinutes
@@ -242,12 +247,12 @@ newRequest pc ch repo m = do
             Left why -> do
                 void (transition rid "RECEIVED" "DENIED" (object ["error" .= why]))
                 audit Nothing "RELEASE_BOT_DENIED" rid (object ["email" .= email, "why" .= why])
-                void (say (X.mChannel m) Nothing ("⛔ " <> email <> " is not allowed to request releases: " <> why))
+                void (say (X.mChannel m) root ("⛔ " <> email <> " is not allowed to request releases: " <> why))
             Right ap -> do
                 audit (Just ap) "RELEASE_BOT_REQUEST" rid (object ["text" .= T.take 300 (X.mText m), "channel" .= X.mChannel m])
-                ts <- say (X.mChannel m) Nothing ("🛠 Release request `" <> shortId rid <> "` received from " <> X.mSenderName m <> " — analyzing…")
-                patchRequest rid (object ["threadTs" .= ts])
-                planRequest pc ch repo ap rid ts m
+                void (say (X.mChannel m) root ("Request `" <> shortId rid <> "` — analyzing…"))
+                patchRequest rid (object ["threadTs" .= root])
+                planRequest pc ch repo ap rid root m
   where
     nonEmpty t = if T.null t then Nothing else Just t
 
@@ -691,7 +696,8 @@ createServiceTrackers ecfg req from = do
                 envOverride <- case (approvedFor (scService svc), scEnvVar svc) of
                     ([appr], Just tgt) -> do
                         -- Re-verify THIS service's env right before use: untouched since review.
-                        chk <- analyzeEnv token (repoSlug repo) commit True svc
+                        let storedBase = listToMaybe [b | an <- maybeToList (dField "analysis" d), Just (Array ss) <- [dField "services" an], x <- foldr (:) [] ss, dText "service" x == Just (scService svc), Just b <- [dText "baseCommit" x]]
+                        chk <- analyzeEnv token (repoSlug repo) commit storedBase True svc
                         live <- readServiceEnv (scAppGroup svc) (scService svc)
                         pure $ case (chk, live) of
                             ((e, _), Right le)
