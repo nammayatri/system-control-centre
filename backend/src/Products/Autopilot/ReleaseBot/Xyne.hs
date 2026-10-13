@@ -292,22 +292,34 @@ flowCard text buttons =
                 ]
         ]
 
--- | Post the Approve/Reject card; returns the native message id (needed to update it).
-postApprovalCard :: (MonadIO m) => Text -> Text -> Text -> m (Either Text Text)
-postApprovalCard channel text requestId = do
+{- | Post a flow card, INTO the thread when @thread@ is given (Spaces' thread id is the
+@conversationId@; the channel id stays the parent channel). Returns (message id, landed in the
+thread?). If Xyne refuses the threaded post, it is retried at channel level so the buttons are never lost.
+-}
+postCard :: (MonadIO m) => Text -> Maybe Text -> Text -> Value -> m (Either Text (Text, Bool))
+postCard channel thread text flow = do
     b <- baseUrl
-    let flow = flowCard text [("Approve & apply", approveVerb <> ":" <> requestId, False), ("Reject", rejectVerb <> ":" <> requestId, True)]
-    r <- call (nativeBase b <> "/chat/postMessage") (object ["channelId" .= channel, "text" .= T.take 300 text, "flow" .= flow])
-    pure (r >>= \v -> Right (fromMaybe "" (str "messageId" v)))
+    let url = nativeBase b <> "/chat/postMessage"
+        body extra = object (["channelId" .= channel, "text" .= T.take 300 text, "flow" .= flow] ++ extra)
+        ok v th = (fromMaybe "" (str "messageId" v), maybe False (\t -> maybe True (== t) (str "conversationId" v)) th)
+    case thread of
+        Just t -> do
+            r <- call url (body ["conversationId" .= t])
+            case r of
+                Right v -> pure (Right (ok v thread))
+                Left _ -> fmap (\v -> (fst (ok v Nothing), False)) <$> call url (body [])
+        Nothing -> fmap (\v -> ok v Nothing) <$> call url (body [])
 
--- | Approve/Discard card for freshly created release trackers; returns the native message id.
-postRolloutCard :: (MonadIO m) => Text -> Text -> Text -> Text -> m (Either Text Text)
-postRolloutCard channel text requestId service = do
-    b <- baseUrl
+-- | Post the Approve/Reject card; returns the native message id.
+postApprovalCard :: (MonadIO m) => Text -> Maybe Text -> Text -> Text -> m (Either Text (Text, Bool))
+postApprovalCard channel thread text requestId =
+    postCard channel thread text (flowCard text [("Approve and apply", approveVerb <> ":" <> requestId, False), ("Reject", rejectVerb <> ":" <> requestId, True)])
+
+-- | Approve/Discard card for freshly created release trackers (one per service).
+postRolloutCard :: (MonadIO m) => Text -> Maybe Text -> Text -> Text -> Text -> m (Either Text (Text, Bool))
+postRolloutCard channel thread text requestId service =
     let tag = requestId <> ":" <> service
-        flow = flowCard text [("Approve & start rollout", rolloutApproveVerb <> ":" <> tag, False), ("Discard release", rolloutRejectVerb <> ":" <> tag, True)]
-    r <- call (nativeBase b <> "/chat/postMessage") (object ["channelId" .= channel, "text" .= T.take 300 text, "flow" .= flow])
-    pure (r >>= \v -> Right (fromMaybe "" (str "messageId" v)))
+     in postCard channel thread text (flowCard text [("Approve and start rollout", rolloutApproveVerb <> ":" <> tag, False), ("Discard release", rolloutRejectVerb <> ":" <> tag, True)])
 
 -- | Replace a card with plain text (buttons removed) once a decision is final.
 updateCard :: (MonadIO m) => Text -> Text -> Text -> m (Either Text ())

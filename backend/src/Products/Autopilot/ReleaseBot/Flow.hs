@@ -368,9 +368,9 @@ startRequest ch repo ap rid thread m token branch fullSha services = do
                 patchRequest rid patch
                 void (transition rid "RECEIVED" "AWAITING_APPROVAL" (object []))
                 reply (summary <> "\n🏗 Jenkins build started: " <> maybe "" trJobUrl jr')
-                card <- X.postApprovalCard (X.mChannel m) (approvalCardText rid an link) rid
+                card <- X.postApprovalCard (X.mChannel m) thread (approvalCardText rid an link) rid
                 case card of
-                    Right mid -> patchRequest rid (object ["cardMessageId" .= mid])
+                    Right (mid, _) -> patchRequest rid (object ["cardMessageId" .= mid])
                     Left e -> reply ("⚠️ Could not post the approval card: " <> e <> ". Ask an approver to open the diff link.")
             | otherwise -> do
                 patchRequest rid patch
@@ -799,11 +799,12 @@ postRolloutCard req svc short tid = case rqChannel req of
     Nothing -> pure ()
     Just chId -> do
         let txt = "**Rollout approval — " <> scService svc <> "** (release request `" <> shortId (rqId req) <> "`)\n`" <> short <> "` · tracker `" <> tid <> "`\nApproving starts this service's rollout. Only authorized approvers can approve."
-        cr <- X.postRolloutCard chId txt (rqId req) (scService svc)
+        cr <- X.postRolloutCard chId (dText "threadTs" (rqData req)) txt (rqId req) (scService svc)
         case cr of
-            Right mid -> do
+            Right (mid, inThread) -> do
                 patchKey req ("rolloutCard:" <> scService svc) mid
-                sayReq req ("⬇️ **" <> scService svc <> "**: approve or discard with the card posted just below in the channel (Xyne cannot show buttons inside a thread).")
+                unless inThread $
+                    sayReq req ("⬇️ **" <> scService svc <> "**: approve or discard with the card posted just below in the channel.")
             Left e -> logError ("[release-bot] rollout card post failed: " <> e)
 
 -- | The service's own configured rollout (deployment_config), else the bot rule's, else one 100% step.
