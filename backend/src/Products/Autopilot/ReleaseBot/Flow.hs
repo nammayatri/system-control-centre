@@ -269,7 +269,7 @@ planRequest pc ch repo ap rid thread m = do
         (Left e, _) -> stop ("⚠️ " <> e)
         (_, Nothing) -> do
             recent <- either (const []) id <$> either (const (pure (Right []))) (\t -> listBranchCommits t (repoSlug repo) branch 5) etoken
-            stop ("I need the commit to release up to. Example: `release " <> T.intercalate " and " (take 2 (map scService (rcServices repo))) <> " till <commit>`." <> recentList recent)
+            stop ("I need the commit to release up to. Example: `release " <> T.intercalate " and " (take 2 (map scService (rcServices repo))) <> " till COMMIT_SHA`." <> recentList recent)
         (Right token, Just sha) ->
             if null services
                 then stop ("Which service(s)? Available: " <> T.intercalate ", " (map scService (rcServices repo)) <> ".")

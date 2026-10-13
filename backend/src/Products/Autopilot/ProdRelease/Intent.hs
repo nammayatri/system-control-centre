@@ -21,7 +21,7 @@ module Products.Autopilot.ProdRelease.Intent (
 
 import Core.Environment (MonadFlow)
 import Data.Aeson (FromJSON (..), ToJSON (..), decodeStrict, object, withObject, (.!=), (.:?), (.=))
-import Data.Char (isHexDigit, isSpace)
+import Data.Char (isAlphaNum, isDigit, isHexDigit, isSpace)
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -183,7 +183,12 @@ keywordIntent cfg known msg =
             listToMaybe [r | r <- prcRepos cfg, T.toLower (rcName r) `T.isInfixOf` lower]
                 `orElseM` (inRepo known >>= findRepo cfg)
         toks = T.words (T.map (\c -> if isSpace c || c `elem` (",;()" :: String) then ' ' else c) msg)
-        commit = listToMaybe (mapMaybe cleanSha toks)
+        -- split on punctuation too so "840d27...", URLs and "sha?" still yield the sha; real shas
+        -- contain a digit (skips words like "decade"). In a compare URL the target is the head.
+        shaToks = [x | x <- mapMaybe cleanSha (T.split (not . isAlphaNum) msg), T.any isDigit x]
+        commit
+            | "/compare/" `T.isInfixOf` lower = listToMaybe (reverse shaToks)
+            | otherwise = listToMaybe (mapMaybe cleanSha toks) `orElseM` listToMaybe shaToks
         branch = do
             r <- mRepo
             listToMaybe [b | b <- rcBranches r, T.toLower b `T.isInfixOf` lower]

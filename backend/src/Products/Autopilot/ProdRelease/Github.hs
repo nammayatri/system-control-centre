@@ -13,6 +13,7 @@ module Products.Autopilot.ProdRelease.Github (
     listBranchCommits,
     compareFiles,
     resolveFullSha,
+    resolveBaseSha,
     getFileAt,
 ) where
 
@@ -123,6 +124,25 @@ resolveFullSha :: (MonadIO m) => Text -> Text -> Text -> m (Either Text Text)
 resolveFullSha token slug sha = do
     r <- get @_ @CommitSummary token "gh-commit" ("https://api.github.com/repos/" <> slug <> "/commits/" <> sha)
     pure (csSha <$> r)
+
+{- | Like 'resolveFullSha' but also accepts the 6-char shas the deployed image tags carry:
+GitHub's API refuses prefixes shorter than 7, so those are matched against the repo's recent history.
+-}
+resolveBaseSha :: (MonadIO m) => Text -> Text -> Text -> m (Either Text Text)
+resolveBaseSha token slug sha
+    | T.length sha >= 7 = resolveFullSha token slug sha
+    | otherwise = go (1 :: Int)
+  where
+    go pg
+        | pg > 10 = pure (Left ("commit " <> sha <> " not found in the last 1000 commits"))
+        | otherwise = do
+            r <- get @_ @[CommitSummary] token "gh-commits" ("https://api.github.com/repos/" <> slug <> "/commits?per_page=100&page=" <> T.pack (show pg))
+            case r of
+                Left e -> pure (Left e)
+                Right [] -> pure (Left ("commit " <> sha <> " not found"))
+                Right cs -> case [csSha c | c <- cs, sha `T.isPrefixOf` csSha c] of
+                    (x : _) -> pure (Right x)
+                    [] -> go (pg + 1)
 
 {- | Raw content of @path@ at @sha@ (GitHub contents API, raw media type).
 'Left' when the file does not exist at that commit or is not valid UTF-8.

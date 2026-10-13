@@ -327,8 +327,13 @@ analyzeService ap token repo fullSha svc = do
                 Just (String v) -> Just v
                 _ -> Nothing
             _ -> Nothing
-        base = oldV >>= toCommitId
+        base0 = oldV >>= toCommitId
         slug = repoSlug repo
+    -- deployed tags carry 6-char shas, which the GitHub API cannot resolve on its own
+    base <- case base0 of
+        Nothing -> pure Nothing
+        Just b0 -> Just . either (const b0) id <$> resolveBaseSha token slug b0
+    let
         mk files verified reason diffUrl =
             SvcResult
                 { srService = scService svc
