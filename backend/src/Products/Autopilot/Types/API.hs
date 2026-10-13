@@ -61,6 +61,8 @@ data UpsertProductReq = UpsertProductReq
     , aiChangelogEnabled :: Maybe Bool
     , slackChannel :: Maybe Text
     , repoName :: Maybe Text
+    , releaseBotConfig :: Maybe Text
+    -- ^ Release-bot rules (JSON text). Absent = leave unchanged; @""@ = clear; else validated + set.
     }
     deriving (Show, Generic)
 
@@ -80,6 +82,7 @@ instance FromJSON UpsertProductReq where
             <*> (v .:? "aiChangelogEnabled" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "ai_changelog_enabled")
             <*> (v .:? "slackChannel" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "slack_channel")
             <*> (v .:? "repoName" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "repo_name")
+            <*> (v .:? "releaseBotConfig" >>= \mv -> case mv of Just x -> pure (Just x); Nothing -> v .:? "release_bot_config")
 
 instance ToJSON UpsertProductReq where
     toJSON = genericToJSON defaultOptions{omitNothingFields = True}
@@ -95,6 +98,8 @@ data UpsertServiceReq = UpsertServiceReq
     , revertStrategyText :: Maybe Text
     , hpaMinReplicas :: Maybe Int32
     , hpaMaxReplicas :: Maybe Int32
+    , releaseBotConfig :: Maybe Text
+    -- ^ Release-bot rules (JSON text). Absent = leave unchanged; @""@ = clear; else validated + set.
     }
     deriving (Show, Generic)
 
@@ -562,6 +567,7 @@ data ProductConfigResponse = ProductConfigResponse
     , vsLockedBy :: Maybe Text
     , slackChannel :: Maybe Text
     , repoName :: Maybe Text
+    , releaseBotConfig :: Maybe Text
     }
     deriving (Show, Generic)
 
@@ -585,6 +591,7 @@ data ReleaseConfigResponse = ReleaseConfigResponse
     , serviceHost :: Maybe Text
     , hpaMinReplicas :: Maybe Int32
     , hpaMaxReplicas :: Maybe Int32
+    , releaseBotConfig :: Maybe Text
     }
     deriving (Show, Generic)
 

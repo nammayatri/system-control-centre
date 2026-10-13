@@ -61,6 +61,19 @@ library
       Products.Autopilot.ConfigReview
       Products.Autopilot.DecisionEngine
       Products.Autopilot.DiffLink
+      Products.Autopilot.ProdRelease.Config
+      Products.Autopilot.ProdRelease.Github
+      Products.Autopilot.ProdRelease.Intent
+      Products.Autopilot.ProdRelease.Jenkins
+      Products.Autopilot.ReleaseBot.ConfigSource
+      Products.Autopilot.ReleaseBot.Diff
+      Products.Autopilot.ReleaseBot.Engine
+      Products.Autopilot.ReleaseBot.Flow
+      Products.Autopilot.ReleaseBot.Routes
+      Products.Autopilot.ReleaseBot.RowConfig
+      Products.Autopilot.ReleaseBot.Live
+      Products.Autopilot.ReleaseBot.Store
+      Products.Autopilot.ReleaseBot.Xyne
       Products.Autopilot.Discovery
       Products.Autopilot.EventLog
       Products.Autopilot.K8s.Deployment

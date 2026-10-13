@@ -279,6 +279,8 @@ export interface ProductConfig {
     ai_changelog_enabled?: number;
     vs_locked_by?: string | null;
     slack_channel?: string | null;
+    /** Release-bot rules (JSON text) for this app group; see backend/RELEASE_BOT.md */
+    release_bot_config?: string;
 }
 
 // ── Namma AP backend → frontend normalizer ─────────────────────────
@@ -613,6 +615,7 @@ export async function fetchProductConfigs(): Promise<ProductConfig[]> {
         ai_changelog_enabled: p.aiChangelogEnabled ? 1 : 0,
         slack_channel: p.slackChannel ?? p.slack_channel ?? null,
         vs_locked_by: p.vsLockedBy || null,
+        release_bot_config: p.releaseBotConfig || '',
     }));
 }
 
@@ -1102,6 +1105,8 @@ export async function createProductConfig(payload: Partial<ProductConfig>): Prom
         needInfraApproval: payload.need_infra_approval ? true : false,
         aiChangelogEnabled: payload.ai_changelog_enabled ? true : false,
         slackChannel: payload.slack_channel || null,
+        // undefined = keep stored rules; '' = clear them
+        releaseBotConfig: payload.release_bot_config,
     };
     const { data } = await apiClient.post('/products/config', body);
     return data;
@@ -1122,6 +1127,7 @@ export async function updateProductConfig(id: number, payload: Partial<ProductCo
         needInfraApproval: payload.need_infra_approval ? true : false,
         aiChangelogEnabled: payload.ai_changelog_enabled ? true : false,
         slackChannel: payload.slack_channel || null,
+        releaseBotConfig: payload.release_bot_config,
     };
     const { data } = await apiClient.put(`/products/config/${id}`, body);
     return data;
@@ -1146,6 +1152,8 @@ export interface ReleaseConfig {
     decision_config?: string;
     hpa_min_replicas?: number | null;
     hpa_max_replicas?: number | null;
+    /** Release-bot rules (JSON text) for this service; see backend/RELEASE_BOT.md */
+    release_bot_config?: string;
 }
 
 export async function fetchReleaseConfigs(appGroup?: string): Promise<ReleaseConfig[]> {
@@ -1164,6 +1172,7 @@ export async function fetchReleaseConfigs(appGroup?: string): Promise<ReleaseCon
         decision_config: d.decisionConfig || d.decision_config || '',
         hpa_min_replicas: d.hpaMinReplicas ?? d.hpa_min_replicas ?? null,
         hpa_max_replicas: d.hpaMaxReplicas ?? d.hpa_max_replicas ?? null,
+        release_bot_config: d.releaseBotConfig || '',
     }));
 }
 
@@ -1179,6 +1188,7 @@ export async function createReleaseConfig(payload: Partial<ReleaseConfig>): Prom
         decisionConfigText: payload.decision_config || null,
         hpaMinReplicas: payload.hpa_min_replicas ?? null,
         hpaMaxReplicas: payload.hpa_max_replicas ?? null,
+        releaseBotConfig: payload.release_bot_config,
     };
     const { data } = await apiClient.post('/services/config', body);
     return data;
@@ -1196,6 +1206,7 @@ export async function updateReleaseConfig(id: number, payload: Partial<ReleaseCo
         decisionConfigText: payload.decision_config || null,
         hpaMinReplicas: payload.hpa_min_replicas ?? null,
         hpaMaxReplicas: payload.hpa_max_replicas ?? null,
+        releaseBotConfig: payload.release_bot_config,
     };
     const { data } = await apiClient.put(`/services/config/${id}`, body);
     return data;

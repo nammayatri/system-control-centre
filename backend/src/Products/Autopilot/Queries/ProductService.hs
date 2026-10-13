@@ -4,7 +4,7 @@
 module Products.Autopilot.Queries.ProductService where
 
 import Control.Exception qualified
-import Control.Monad (void)
+import Control.Monad (join, void)
 import Control.Monad.Catch qualified
 import Core.Config (Config (..))
 import Core.DB.Connection (runBeamLogged, runDB, withConn)
@@ -201,6 +201,15 @@ upsertProduct ::
 upsertProduct productName' cluster' namespace' vsName' productType' productAcronym' syncCluster' needInfraApproval slackChannel' repoName' aiChangelogEnabled' = withCloudDb $ \cloud db -> do
   withConn db $ \conn ->
     withTransaction conn $ do
+      -- This is delete+insert, so any column not passed in would be wiped on every save from
+      -- the Deployment Config UI. Carry the release-bot rules across.
+      keptBot <-
+        runBeamLogged conn $
+          runSelectReturningOne $
+            select $ do
+              p <- all_ (deploymentConfig autopilotDb)
+              guard_ (dcAppGroup p ==. val_ productName' &&. isNothing_ (dcService p) &&. dcCloudType p ==. val_ cloud)
+              pure (dcReleaseBotConfig p)
       runBeamLogged conn $
         runDelete $
           delete (deploymentConfig autopilotDb) (\p -> dcAppGroup p ==. val_ productName' &&. isNothing_ (dcService p) &&. dcCloudType p ==. val_ cloud)
@@ -232,7 +241,8 @@ upsertProduct productName' cluster' namespace' vsName' productType' productAcron
                     dcCloudType = val_ cloud,
                     dcServiceState = val_ Nothing,
                     dcHpaMinReplicas = val_ Nothing,
-                    dcHpaMaxReplicas = val_ Nothing
+                    dcHpaMaxReplicas = val_ Nothing,
+                    dcReleaseBotConfig = val_ (join keptBot)
                   }
               ]
 
@@ -251,6 +261,13 @@ upsertService ::
 upsertService rolloutStrategy decisionConfig serviceName' product' sType serviceHost' revertStrategy hpaMinReplicas' hpaMaxReplicas' = withCloudDb $ \cloud db -> do
   withConn db $ \conn ->
     withTransaction conn $ do
+      keptBot <-
+        runBeamLogged conn $
+          runSelectReturningOne $
+            select $ do
+              s <- all_ (deploymentConfig autopilotDb)
+              guard_ (dcAppGroup s ==. val_ product' &&. dcService s ==. val_ (Just serviceName') &&. dcCloudType s ==. val_ cloud)
+              pure (dcReleaseBotConfig s)
       runBeamLogged conn $
         runDelete $
           delete (deploymentConfig autopilotDb) (\s -> dcAppGroup s ==. val_ product' &&. dcService s ==. val_ (Just serviceName') &&. dcCloudType s ==. val_ cloud)
@@ -282,7 +299,8 @@ upsertService rolloutStrategy decisionConfig serviceName' product' sType service
                     dcCloudType = val_ cloud,
                     dcServiceState = val_ (Just (serviceStateText AVAILABLE)),
                     dcHpaMinReplicas = val_ hpaMinReplicas',
-                    dcHpaMaxReplicas = val_ hpaMaxReplicas'
+                    dcHpaMaxReplicas = val_ hpaMaxReplicas',
+                    dcReleaseBotConfig = val_ (join keptBot)
                   }
               ]
 
@@ -633,3 +651,26 @@ initializeServiceState appGroup serviceName = withCloudDb $ \cloud db -> withCon
       \  AND service = ? \
       \  AND cloud_type = ?"
       (appGroup, serviceName, cloud)
+
+-- | Rows (product- and service-level) that carry release-bot rules.
+listBotConfigRows :: (MonadFlow m) => m [DeploymentConfig]
+listBotConfigRows = withCloudDb $ \cloud db ->
+  runDB db $
+    runSelectReturningList $
+      select $ do
+        r <- all_ (deploymentConfig autopilotDb)
+        guard_ (dcCloudType r ==. val_ cloud)
+        guard_ (isJust_ (dcReleaseBotConfig r))
+        pure r
+
+{- | Set (or, with 'Nothing', clear) one row's release-bot rules. @service = Nothing@ targets the
+app group's product-level row. Callers validate the JSON first.
+-}
+setReleaseBotConfig :: (MonadFlow m) => Text -> Maybe Text -> Maybe Text -> m ()
+setReleaseBotConfig appGroup' mService value = withCloudDb $ \cloud db ->
+  runDB db $
+    runUpdate $
+      update
+        (deploymentConfig autopilotDb)
+        (\r -> dcReleaseBotConfig r <-. val_ value)
+        (\r -> dcAppGroup r ==. val_ appGroup' &&. dcService r ==. val_ mService &&. dcCloudType r ==. val_ cloud)

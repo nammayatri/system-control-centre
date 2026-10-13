@@ -21,6 +21,7 @@ import Products.Autopilot.Actions.Webhook as Webhook
 import Products.Autopilot.Handlers.Ai as Ai
 import Products.Autopilot.Handlers.ConfigReview as ConfigReview
 import Products.Autopilot.Mobile.Routes (MobileAPI, mobileServer)
+import Products.Autopilot.ReleaseBot.Routes (ReleaseBotAPI, releaseBotServer)
 import Products.Autopilot.Types (ReleaseTracker)
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Permission (AutopilotPermission (..))
@@ -138,6 +139,8 @@ type CoreAPI =
         :<|> "ai" :> Protected 'AP_AI_SUMMARIZE :> "models" :> Get '[JSON] AiModelsResp
         -- Mobile releases: app catalog CRUD (suffix mount per unified-product principle)
         :<|> MobileAPI
+        -- Xyne release bot: signed webhooks + token-gated public diff view
+        :<|> ReleaseBotAPI
 
 coreServer :: ServerT CoreAPI Flow
 coreServer =
@@ -245,3 +248,4 @@ coreServer =
         :<|> Ai.listAiModelsH
         -- Mobile releases (suffix mount of MobileAPI)
         :<|> mobileServer
+        :<|> releaseBotServer

@@ -2,6 +2,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { ProtectedRoute } from '../core/auth/ProtectedRoute';
 import LoginPage from '../core/auth/LoginPage';
 import LauncherPage from '../core/layout/LauncherPage';
+import ReleaseRequestPublic from '../core/public/ReleaseRequestPublic';
 import ProductLayout from '../core/layout/ProductLayout';
 import AdminLayout from '../core/layout/AdminLayout';
 import ProfilePage from '../core/profile/ProfilePage';
@@ -20,6 +21,8 @@ function App() {
       <Routes>
         {/* Public */}
         <Route path="/login" element={<LoginPage />} />
+        {/* Release-bot review page: no login, no VPN; gated by its per-request link token */}
+        <Route path="/r/:id" element={<ReleaseRequestPublic />} />
 
         {/* Launcher — product selection page */}
         <Route

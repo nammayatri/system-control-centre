@@ -45,6 +45,8 @@ data DeploymentConfigT f = DeploymentConfigT
     , dcHpaMinReplicas :: Columnar f (Maybe Int32)
     , dcHpaMaxReplicas :: Columnar f (Maybe Int32)
     , dcCloudType :: Columnar f Text
+    , -- Release-bot rules (JSON text) for this row; see RELEASE_BOT.md
+      dcReleaseBotConfig :: Columnar f (Maybe Text)
     }
     deriving (Generic, Beamable)
 
@@ -264,6 +266,7 @@ autopilotDb =
                             , dcSlackChannel = fieldNamed "slack_channel"
                             , dcServiceState = fieldNamed "service_state"
                             , dcCloudType = fieldNamed "cloud_type"
+                            , dcReleaseBotConfig = fieldNamed "release_bot_config"
                             }
             , releaseTrackers =
                 setEntityName "release_tracker"

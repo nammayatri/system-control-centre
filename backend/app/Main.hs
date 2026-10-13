@@ -9,6 +9,7 @@ import Core.Logging (LoggerConfig (..), loadLoggerConfigFromDhall, logInfoIO, pr
 import Core.Server (serverLoop)
 import qualified Data.Text as T
 import Products.AirborneOta.Keepalive (airborneKeepaliveLoop)
+import Products.Autopilot.ReleaseBot.Flow (releaseBotLoop)
 import Products.Autopilot.Runner (runnerLoop, runnerPollLoop, runnerStartupRecovery)
 import Products.Autopilot.SyncWatcher (syncWatcherPollLoop)
 
@@ -44,7 +45,7 @@ main = do
                 -- below (ASC-only, no Play edits).
                 concurrently_
                     (concurrently_ (serverLoop st) (runnerPollLoop st))
-                    (concurrently_ (runFlow st syncWatcherPollLoop) (runFlow st airborneKeepaliveLoop))
+                    (concurrently_ (runFlow st syncWatcherPollLoop) (concurrently_ (runFlow st airborneKeepaliveLoop) (runFlow st releaseBotLoop)))
             _ -> serverLoop st
   where
     show' :: (Show a) => a -> T.Text

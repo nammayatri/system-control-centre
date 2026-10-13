@@ -83,6 +83,21 @@ import Products.Autopilot.Types.Workflow (ReleaseCategory (..), getDefaultDeploy
 import Products.ConfigCatalog (allConfigEntries, findConfigEntry)
 import Products.Mobile.Types.Permission (MobilePermission (..), mobilePermissionToText, textToMobilePermission)
 import Products.Types
+import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BC
+import Data.Aeson.KeyMap qualified as AKM
+import Products.Autopilot.ProdRelease.Config qualified as PRC
+import Products.Autopilot.ProdRelease.Intent qualified as PRI
+import Products.Autopilot.ReleaseBot.Diff qualified as RBD
+import Products.Autopilot.ReleaseBot.Engine qualified as RBE
+import Products.Autopilot.ReleaseBot.Live (refsFromDeployment)
+import Products.Autopilot.ReleaseBot.Flow qualified as RBF
+import Products.Autopilot.ReleaseBot.Live qualified as RBL
+import Products.Autopilot.ReleaseBot.Routes qualified as RBR
+import Products.Autopilot.ProdRelease.Jenkins qualified as PRJ
+import Products.Autopilot.ReleaseBot.RowConfig qualified as RBW
+import Products.Autopilot.Types.Storage.Schema qualified as SCH
+import Products.Autopilot.ReleaseBot.Xyne qualified as RBX
 import Shared.AI.Changelog qualified as CL
 import Shared.Config.Registry (validateConfigValue)
 import Shared.Config.Types
@@ -179,6 +194,17 @@ main = do
   section "[49] Changelog diff link (server-side generation, mirrors frontend)" testDiffLink
   section "[51] extractContainerEnvJson (deployment YAML -> container env array)" testExtractContainerEnvJson
   section "[52] Release Webhooks (dispatch trigger + templating)" testReleaseWebhooks
+  section "[55] Release bot: diff engine" testReleaseBotDiff
+  section "[56] Release bot: base64 fail-closed decode" testReleaseBotBase64
+  section "[57] Release bot: Xyne signature + payload parsing" testReleaseBotXyne
+  section "[58] Release bot: secret-file patterns + config parsing" testReleaseBotConfig
+  section "[59] Release bot: public view redaction + link token" testReleaseBotPublic
+  section "[60] Release bot: env var replacement preserves other entries" testReleaseBotEnv
+  section "[61] Release bot: intent merge" testReleaseBotIntent
+  section "[62] Release bot: deployment reference discovery" testReleaseBotRefs
+  section "[63] Release bot: mention ids + file triggers + DB config" testReleaseBotTriggers
+  section "[64] Release bot: rules stored on deployment config rows" testReleaseBotRows
+  section "[65] Release bot: Jenkins URL re-basing, job path, per-env params" testReleaseBotJenkins
 
   putStrLn ""
   putStrLn "==========================================="
@@ -2679,3 +2705,301 @@ testReleaseWebhooks = do
   assertBool "Enabled hook ignores a trigger it opted out of" (not (triggersOn OnFailure hook))
   assertBool "Disabled hook never fires" (not (triggersOn OnSuccess hook {whEnabled = False}))
 
+
+-- ============================================================================
+-- [55]-[61] Release bot
+-- ============================================================================
+
+testReleaseBotDiff :: IO ()
+testReleaseBotDiff = do
+  let d1 = RBD.diffText "f" "a\nb\nc\n" "a\nb\nc\n"
+  assertBool "identical text -> no hunks" (null (RBD.fdHunks d1))
+  assertEqual "identical text -> 0/0" (0, 0) (RBD.fdAdded d1, RBD.fdRemoved d1)
+  let d2 = RBD.diffText "f" "a\nb\nc\n" "a\nB\nc\n"
+  assertEqual "one changed line -> +1/-1" (1, 1) (RBD.fdAdded d2, RBD.fdRemoved d2)
+  assertEqual
+    "diff lines for one changed line"
+    [RBD.Ctx "a", RBD.Del "b", RBD.Add "B", RBD.Ctx "c"]
+    (RBD.diffLines ["a", "b", "c"] ["a", "B", "c"])
+  assertEqual "pure insertion" [RBD.Ctx "a", RBD.Add "x", RBD.Ctx "b"] (RBD.diffLines ["a", "b"] ["a", "x", "b"])
+  assertEqual "pure deletion" [RBD.Ctx "a", RBD.Del "x", RBD.Ctx "b"] (RBD.diffLines ["a", "x", "b"] ["a", "b"])
+  assertEqual "empty -> content" [RBD.Add "a", RBD.Add "b"] (RBD.diffLines [] ["a", "b"])
+  assertEqual "content -> empty" [RBD.Del "a"] (RBD.diffLines ["a"] [])
+  -- applying the diff to the old text must reproduce the new text (correctness, not just shape)
+  let old = map (T.pack . show) [1 :: Int .. 40]
+      new = take 10 old ++ ["inserted"] ++ drop 12 old ++ ["tail"]
+      replay ls = ([t | l <- ls, t <- case l of RBD.Ctx x -> [x]; RBD.Del _ -> []; RBD.Add x -> [x]], [t | l <- ls, t <- case l of RBD.Ctx x -> [x]; RBD.Del x -> [x]; RBD.Add _ -> []])
+      (rebuiltNew, rebuiltOld) = replay (RBD.diffLines old new)
+  assertEqual "replay(new side) == new" new rebuiltNew
+  assertEqual "replay(old side) == old" old rebuiltOld
+  -- hunks carry context and correct start lines
+  let hs = RBD.hunks 1 (RBD.diffLines (map (T.pack . show) [1 :: Int .. 20]) (map (T.pack . show) ([1 .. 9] ++ [99] ++ [11 .. 20 :: Int])))
+  assertEqual "one hunk for one change" 1 (length hs)
+  assertEqual "hunk old start (1 line of context before change at line 10)" 9 (RBD.hOldStart (head hs))
+
+testReleaseBotBase64 :: IO ()
+testReleaseBotBase64 = do
+  assertEqual "decode ok" (Right "hello\n") (RBD.decodeB64Text "aGVsbG8K")
+  assertEqual "decode ignores line wrapping" (Right "hello\n") (RBD.decodeB64Text "aGVs\nbG8K")
+  assertBool "invalid base64 -> Left (fail closed)" (either (const True) (const False) (RBD.decodeB64Text "not base64!!"))
+  assertBool "non-UTF-8 payload -> Left (fail closed)" (either (const True) (const False) (RBD.decodeB64Text "/+8="))
+  assertEqual "encode/decode round-trip" (Right "let x = 1 in x\n") (RBD.decodeB64Text (RBD.encodeB64Text "let x = 1 in x\n"))
+
+testReleaseBotXyne :: IO ()
+testReleaseBotXyne = do
+  let body = BC.pack "{\"a\":1}"
+      good = "aa9e2e3575f5d7098b6caccd790888c36d5fdb63342a73bada2d6a51747a8494"
+  assertBool "valid signature verifies" (RBX.verifySignature "secret" body good)
+  assertBool "uppercase hex signature verifies" (RBX.verifySignature "secret" body (T.toUpper good))
+  assertBool "wrong secret rejected" (not (RBX.verifySignature "other" body good))
+  assertBool "tampered body rejected" (not (RBX.verifySignature "secret" (BC.pack "{\"a\":2}") good))
+  assertBool "empty signature rejected" (not (RBX.verifySignature "secret" body ""))
+  assertBool "empty secret rejected (never verifies)" (not (RBX.verifySignature "" body good))
+  let mention =
+        Aeson.object
+          [ "eventType" Aeson..= ("APP_MENTIONED" :: Text)
+          , "payload"
+              Aeson..= Aeson.object
+                [ "cleanContent" Aeson..= ("release rider app till e4e0b16" :: Text)
+                , "channelId" Aeson..= ("chan-1" :: Text)
+                , "messageId" Aeson..= ("m-1" :: Text)
+                , "userId" Aeson..= ("u-1" :: Text)
+                , "senderName" Aeson..= ("Dev" :: Text)
+                ]
+          ]
+  assertEqual
+    "mention parsed"
+    (Just (RBX.Mention "chan-1" "m-1" "u-1" "Dev" "" "release rider app till e4e0b16" []))
+    (RBX.parseMention mention)
+  assertBool "non-mention event ignored" (RBX.parseMention (Aeson.object ["eventType" Aeson..= ("OTHER" :: Text)]) == Nothing)
+  let flow = Aeson.object ["actionId" Aeson..= ("scc_release_approve:req-9" :: Text), "context" Aeson..= Aeson.object ["userId" Aeson..= ("u-2" :: Text)]]
+  assertEqual "flow-action click parsed" (Just (RBX.Click "scc_release_approve" "req-9" "u-2" "" "")) (RBX.parseClick flow)
+  let inter = Aeson.object ["actions" Aeson..= [Aeson.object ["action_id" Aeson..= ("scc_release_reject" :: Text), "value" Aeson..= ("req-9" :: Text)]], "user" Aeson..= Aeson.object ["id" Aeson..= ("u-3" :: Text), "email" Aeson..= ("a@x.in" :: Text)]]
+  assertEqual "interaction click parsed" (Just (RBX.Click "scc_release_reject" "req-9" "u-3" "" "a@x.in")) (RBX.parseClick inter)
+  assertBool "unknown verb is not a click (cannot be spoofed into approve)" (RBX.parseClick (Aeson.object ["actionId" Aeson..= ("vk_remediate_approve:req-9" :: Text)]) == Nothing)
+  assertBool "verb without request id is not a click" (RBX.parseClick (Aeson.object ["actionId" Aeson..= ("scc_release_approve:" :: Text)]) == Nothing)
+  assertEqual "form-encoded interaction body decodes" (Just (Aeson.object ["a" Aeson..= (1 :: Int)])) (RBR.decodeWebhookBody (BC.pack "payload=%7B%22a%22%3A1%7D"))
+  assertEqual "plain JSON body decodes" (Just (Aeson.object ["a" Aeson..= (1 :: Int)])) (RBR.decodeWebhookBody (BC.pack "{\"a\":1}"))
+
+testReleaseBotConfig :: IO ()
+testReleaseBotConfig = do
+  parsed <- Aeson.eitherDecodeFileStrict "dhall-configs/prod-release-config.json" :: IO (Either String PRC.ProdReleaseConfig)
+  case parsed of
+    Left e -> fail ("  FAIL: shipped prod-release-config.json does not parse: " <> e)
+    Right cfg -> do
+      assertBool "shipped config parses and has a repo" (not (null (PRC.prcRepos cfg)))
+      let repo = head (PRC.prcRepos cfg)
+      assertEqual "repo slug from URL" "nammayatri/nammayatri" (PRC.repoSlug repo)
+  let mk pats = (head (either (const []) PRC.prcRepos (Aeson.eitherDecodeStrict (BC.pack "{\"repos\":[{\"name\":\"r\",\"url\":\"https://github.com/o/r.git/\",\"branches\":[\"b\"],\"jenkins\":{\"job\":\"j\",\"commitParam\":\"C\",\"fixedParams\":{}},\"services\":[]}]}")))) {PRC.rcSecretFiles = pats}
+  assertEqual "slug tolerates .git and trailing slash" "o/r" (PRC.repoSlug (mk []))
+  assertBool "exact path matches" (PRC.isSecretFile (mk ["config/secrets.dhall"]) "config/secrets.dhall")
+  assertBool "bare name matches in any directory" (PRC.isSecretFile (mk ["secrets.dhall"]) "a/b/secrets.dhall")
+  assertBool "wildcard matches" (PRC.isSecretFile (mk ["*secrets*.dhall"]) "x/prod-secrets-v2.dhall")
+  assertBool "non-secret file not flagged" (not (PRC.isSecretFile (mk ["secrets.dhall"]) "x/common.dhall"))
+  assertBool "pattern with directory does not match other directory" (not (PRC.isSecretFile (mk ["config/secrets.dhall"]) "other/secrets.dhall"))
+  assertBool "no patterns -> nothing flagged" (not (PRC.isSecretFile (mk []) "secrets.dhall"))
+  assertEqual "secretFilesHit dedupes + sorts" ["a/secrets.dhall", "z/secrets.dhall"] (RBE.secretFilesHit (mk ["secrets.dhall"]) ["z/secrets.dhall", "a/secrets.dhall", "a/secrets.dhall", "x.dhall"])
+
+testReleaseBotPublic :: IO ()
+testReleaseBotPublic = do
+  let analysis =
+        Aeson.object
+          [ "commit" Aeson..= ("abc" :: Text)
+          , "liveFingerprint" Aeson..= ("fp" :: Text)
+          , "contentHash" Aeson..= ("ch" :: Text)
+          , "envChanges" Aeson..= [Aeson.object ["service" Aeson..= ("s" :: Text), "diff" Aeson..= ("D" :: Text), "newB64" Aeson..= ("SECRETISH" :: Text), "liveB64" Aeson..= ("OLDSECRETISH" :: Text)]]
+          , "configMaps" Aeson..= [Aeson.object ["name" Aeson..= ("cm" :: Text), "diffs" Aeson..= ("D2" :: Text), "newData" Aeson..= Aeson.object ["k" Aeson..= ("v" :: Text)], "liveData" Aeson..= Aeson.object ["k" Aeson..= ("w" :: Text)]]]
+          ]
+      pub = RBE.publicView analysis
+      rendered = T.pack (show pub)
+  assertBool "public view keeps the reviewed diffs" ("D2" `T.isInfixOf` rendered && "\"D\"" `T.isInfixOf` rendered)
+  assertBool "public view drops base64 apply payloads" (not ("SECRETISH" `T.isInfixOf` rendered))
+  assertBool "public view drops raw configmap data" (not ("newData" `T.isInfixOf` rendered) && not ("liveData" `T.isInfixOf` rendered))
+  assertBool "public view drops approval fingerprints" (not ("liveFingerprint" `T.isInfixOf` rendered) && not ("contentHash" `T.isInfixOf` rendered))
+  assertEqual "link token matches independent HMAC-SHA256" "2f7193b4091652807513b9b3da8005e36b844e1e76766fd1cb9778ea1230e59c" (RBF.linkToken "linksecret" "req-123")
+  assertBool "link token differs per request id" (RBF.linkToken "linksecret" "req-123" /= RBF.linkToken "linksecret" "req-124")
+  assertBool "link token differs per secret" (RBF.linkToken "linksecret" "req-123" /= RBF.linkToken "other" "req-123")
+  assertEqual "hashTexts is SHA-256 over US-joined parts" "f04cdced9736a69da6103f08a4daaf8c485dd481217d218a1b4993c8c3968e13" (RBE.hashTexts ["a", "b"])
+  assertBool "hashTexts is order sensitive" (RBE.hashTexts ["a", "b"] /= RBE.hashTexts ["b", "a"])
+  assertBool "hashTexts boundary-safe (ab,c != a,bc)" (RBE.hashTexts ["ab", "c"] /= RBE.hashTexts ["a", "bc"])
+
+testReleaseBotEnv :: IO ()
+testReleaseBotEnv = do
+  let plain n v = Aeson.object ["name" Aeson..= (n :: Text), "value" Aeson..= (v :: Text)]
+      fromRef n = Aeson.object ["name" Aeson..= (n :: Text), "valueFrom" Aeson..= Aeson.object ["secretKeyRef" Aeson..= Aeson.object ["name" Aeson..= ("s" :: Text), "key" Aeson..= ("k" :: Text)]]]
+      envs = [plain "A" "1", fromRef "DB_PASS", plain "DHALL_CONFIG" "OLD", plain "Z" "9"]
+  assertEqual "reads a plain env var" (Just "OLD") (RBL.envVarValue "DHALL_CONFIG" envs)
+  assertEqual "valueFrom entry is not a plain value" Nothing (RBL.envVarValue "DB_PASS" envs)
+  assertEqual
+    "replace swaps only the target; valueFrom + others untouched, order kept"
+    (Just [plain "A" "1", fromRef "DB_PASS", plain "DHALL_CONFIG" "NEW", plain "Z" "9"])
+    (RBL.replaceEnvVar "DHALL_CONFIG" "NEW" envs)
+  assertEqual "replace refuses to invent a missing var" Nothing (RBL.replaceEnvVar "MISSING" "NEW" envs)
+  assertEqual "replace refuses to overwrite a valueFrom entry" Nothing (RBL.replaceEnvVar "DB_PASS" "NEW" envs)
+  assertBool "key order irrelevant: object still has name+value" (maybe False (any (\v -> case v of Aeson.Object o -> AKM.size o == 2; _ -> False)) (RBL.replaceEnvVar "A" "2" envs))
+
+testReleaseBotIntent :: IO ()
+testReleaseBotIntent = do
+  let a = PRI.Intent (Just "repo1") (Just "b1") (Just "abc123") ["svcA"]
+  assertEqual "empty new keeps old" a (PRI.mergeIntent a PRI.emptyIntent)
+  assertEqual "new commit replaces old, rest kept" a {PRI.inCommit = Just "def456"} (PRI.mergeIntent a PRI.emptyIntent {PRI.inCommit = Just "def456"})
+  assertEqual "changing repo resets branch/commit/services" (PRI.Intent (Just "repo2") Nothing Nothing []) (PRI.mergeIntent a PRI.emptyIntent {PRI.inRepo = Just "repo2"})
+  assertEqual "missing fields in ask order" ["repo", "branch", "commit", "services"] (PRI.missingFields PRI.emptyIntent)
+  assertEqual "nothing missing when complete" [] (PRI.missingFields a)
+  -- channel env scoping: a PROD channel must never see MASTER-only services
+  let svc n e = PRC.ServiceCfg n n [] [] Nothing [] e
+      repoWith ss = (head (either (const []) PRC.prcRepos (Aeson.eitherDecodeStrict (BC.pack "{\"repos\":[{\"name\":\"r\",\"url\":\"https://github.com/o/r\",\"branches\":[\"b\"],\"jenkins\":{\"job\":\"j\",\"commitParam\":\"C\",\"fixedParams\":{}},\"services\":[]}]}")))) {PRC.rcServices = ss}
+      names = map PRC.scService . PRC.rcServices
+      r = repoWith [svc "p" (Just "PROD"), svc "m" (Just "MASTER"), svc "any" Nothing]
+  assertEqual "PROD channel sees PROD + env-less services" ["p", "any"] (names (PRC.forEnv "PROD" r))
+  assertEqual "env match is case-insensitive" ["m", "any"] (names (PRC.forEnv "master" r))
+
+testReleaseBotRefs :: IO ()
+testReleaseBotRefs = do
+  let dep =
+        Aeson.object
+          [ "spec" Aeson..= Aeson.object
+              [ "template" Aeson..= Aeson.object
+                  [ "spec" Aeson..= Aeson.object
+                      [ "containers" Aeson..=
+                          [ Aeson.object
+                              [ "env" Aeson..=
+                                  [ Aeson.object ["name" Aeson..= ("A" :: Text), "value" Aeson..= ("1" :: Text)]
+                                  , Aeson.object ["name" Aeson..= ("B" :: Text), "valueFrom" Aeson..= Aeson.object ["configMapKeyRef" Aeson..= Aeson.object ["name" Aeson..= ("cm-env" :: Text), "key" Aeson..= ("k" :: Text)]]]
+                                  , Aeson.object ["name" Aeson..= ("C" :: Text), "valueFrom" Aeson..= Aeson.object ["secretKeyRef" Aeson..= Aeson.object ["name" Aeson..= ("sec-env" :: Text), "key" Aeson..= ("k" :: Text)]]]
+                                  ]
+                              , "envFrom" Aeson..=
+                                  [ Aeson.object ["configMapRef" Aeson..= Aeson.object ["name" Aeson..= ("beckn-production-pilot" :: Text)]]
+                                  , Aeson.object ["secretRef" Aeson..= Aeson.object ["name" Aeson..= ("sec-from" :: Text)]]
+                                  ]
+                              ]
+                          ]
+                      , "initContainers" Aeson..= [Aeson.object ["envFrom" Aeson..= [Aeson.object ["configMapRef" Aeson..= Aeson.object ["name" Aeson..= ("cm-init" :: Text)]]]]]
+                      , "volumes" Aeson..=
+                          [ Aeson.object ["name" Aeson..= ("v1" :: Text), "configMap" Aeson..= Aeson.object ["name" Aeson..= ("cm-vol" :: Text)]]
+                          , Aeson.object ["name" Aeson..= ("v2" :: Text), "secret" Aeson..= Aeson.object ["secretName" Aeson..= ("sec-vol" :: Text)]]
+                          , Aeson.object ["name" Aeson..= ("v3" :: Text), "projected" Aeson..= Aeson.object ["sources" Aeson..= [Aeson.object ["configMap" Aeson..= Aeson.object ["name" Aeson..= ("kube-root-ca.crt" :: Text)]], Aeson.object ["secret" Aeson..= Aeson.object ["name" Aeson..= ("sec-proj" :: Text)]]]]]
+                          , Aeson.object ["name" Aeson..= ("v4" :: Text), "emptyDir" Aeson..= Aeson.object []]
+                          ]
+                      ]
+                  ]
+              ]
+          ]
+      (cms, secs) = refsFromDeployment dep
+  assertEqual "configmaps from env valueFrom, envFrom, initContainers, volumes and projected (sorted, unique)" ["beckn-production-pilot", "cm-env", "cm-init", "cm-vol", "kube-root-ca.crt"] cms
+  assertEqual "secret NAMES from env valueFrom, envFrom, volumes and projected" ["sec-env", "sec-from", "sec-proj", "sec-vol"] secs
+  assertEqual "plain env values reference nothing" ([], []) (refsFromDeployment (Aeson.object []))
+  assertEqual "defaults ignore the auto-mounted configmaps" ["kube-root-ca.crt", "istio-ca-root-cert"] PRC.defaultIgnoredConfigMaps
+
+testReleaseBotTriggers :: IO ()
+testReleaseBotTriggers = do
+  assertEqual "no mention ids" [] (RBX.mentionedIds "<p>hello</p>")
+  assertEqual "mention ids in order, de-duplicated"
+    ["u1", "u2"]
+    (RBX.mentionedIds "<p><span data-user-id=\"u1\">@a</span> and <span data-user-id=\"u2\">@b</span> <span data-user-id=\"u1\">@a</span></p>")
+  assertEqual "empty id is skipped" ["u9"] (RBX.mentionedIds "<span data-user-id=\"\"></span><span data-user-id=\"u9\"></span>")
+  -- file -> rule triggers
+  assertBool "exact repo path triggers" (PRC.matchesAny ["dhall-configs/prod/rider-app.dhall"] "dhall-configs/prod/rider-app.dhall")
+  assertBool "bare file name triggers from any directory" (PRC.matchesAny ["rider-app.dhall"] "a/b/rider-app.dhall")
+  assertBool "a different dhall does NOT trigger this rule" (not (PRC.matchesAny ["rider-app.dhall"] "a/b/driver-app.dhall"))
+  assertBool "directory pattern with * triggers on files beneath it" (PRC.matchesAny ["dhall-configs/prod/*"] "dhall-configs/prod/common.dhall")
+  assertBool "directory pattern does not trigger on a sibling directory" (not (PRC.matchesAny ["dhall-configs/prod/*"] "dhall-configs/dev/common.dhall"))
+  assertBool "no patterns trigger nothing" (not (PRC.matchesAny [] "x.dhall"))
+  -- DB-stored config
+  case PRC.parseProdReleaseConfig "{\"repos\":[{\"name\":\"r\",\"url\":\"https://github.com/o/r\",\"branches\":[\"b\"],\"jenkins\":{\"job\":\"j\",\"commitParam\":\"C\",\"fixedParams\":{}},\"services\":[{\"service\":\"s\",\"appGroup\":\"g\",\"envVar\":{\"envVar\":\"DHALL_CONFIG\",\"repoPath\":\"p/s.dhall\",\"watch\":[\"p/*.dhall\"]}}],\"ignoreConfigMaps\":[\"x\"]}],\"channels\":[{\"id\":\"c\",\"repo\":\"r\",\"env\":\"PROD\"}]}" of
+    Left e -> fail ("  FAIL: DB-stored config did not parse: " <> T.unpack e)
+    Right cfg -> do
+      let repo = head (PRC.prcRepos cfg)
+          svc = head (PRC.rcServices repo)
+      assertEqual "channel parsed" [PRC.ChannelCfg "c" "r" "PROD"] (PRC.prcChannels cfg)
+      assertEqual "service env-var watch parsed" (Just ["p/*.dhall"]) (PRC.scEnvVar svc >>= PRC.evWatch)
+      assertEqual "repo ignoreConfigMaps parsed" ["x"] (PRC.rcIgnoreConfigMaps repo)
+  assertBool "invalid DB value is an error, not a silent empty config" (either (const True) (const False) (PRC.parseProdReleaseConfig "{not json"))
+
+testReleaseBotRows :: IO ()
+testReleaseBotRows = do
+  let row ag svc repo cfg =
+        SCH.DeploymentConfigT
+          { SCH.dcId = 1, SCH.dcAppGroup = ag, SCH.dcService = svc, SCH.dcCluster = Nothing, SCH.dcNamespace = Nothing
+          , SCH.dcVsName = Nothing, SCH.dcAppGroupAcronym = Nothing, SCH.dcRepoName = repo, SCH.dcAppGroupType = Nothing
+          , SCH.dcSyncCluster = Nothing, SCH.dcNeedInfraApproval = Nothing, SCH.dcAiChangelogEnabled = Nothing
+          , SCH.dcVsLockedBy = Nothing, SCH.dcVsLockTimestamp = Nothing, SCH.dcServiceHost = Nothing, SCH.dcServiceType = Nothing
+          , SCH.dcRolloutStrategy = Nothing, SCH.dcRevertStrategy = Nothing, SCH.dcDecisionConfig = Nothing
+          , SCH.dcSlackChannel = Nothing, SCH.dcServiceState = Nothing, SCH.dcHpaMinReplicas = Nothing
+          , SCH.dcHpaMaxReplicas = Nothing, SCH.dcCloudType = "GCP", SCH.dcReleaseBotConfig = cfg
+          }
+      jenk job = "\"jenkins\":{\"job\":\"" <> job <> "\",\"commitParam\":\"COMMIT\",\"fixedParams\":{}}"
+      prod env chans job = Just ("{\"env\":\"" <> env <> "\",\"branches\":[\"b1\"],\"channels\":" <> chans <> "," <> jenk job <> "}")
+      svc = Just "{\"aliases\":[\"rider\"],\"dhallFiles\":[\"rider-app.dhall\"]}"
+      isLeftWith frag = either (T.isInfixOf frag) (const False)
+  assertEqual "rows with no config produce an empty bot config" (Right 0) (fmap (length . PRC.prcRepos) (RBW.buildFromRows [row "g" Nothing (Just "o/r") Nothing, row "g" (Just "s") Nothing (Just "  ")]))
+  let g1 = row "g1" Nothing (Just "o/r") (prod "PROD" "[\"C1\"]" "job-a")
+      g2 = row "g2" Nothing (Just "https://github.com/O/R.git") (prod "PROD" "[\"C2\"]" "job-a")
+  case RBW.buildFromRows [g1, g2, row "g1" (Just "s1") Nothing svc, row "g2" (Just "s2") Nothing svc] of
+    Left e -> fail ("  FAIL: expected merge, got " <> T.unpack e)
+    Right c -> do
+      assertEqual "two app groups on the same repo (URL form / case differ) merge into ONE repo" 1 (length (PRC.prcRepos c))
+      assertEqual "services from both app groups attach to it" ["s1", "s2"] (map PRC.scService (PRC.rcServices (head (PRC.prcRepos c))))
+      assertEqual "channels from both app groups are kept" ["C1", "C2"] (map PRC.chId (PRC.prcChannels c))
+      assertEqual "service env inherited from its app group" [Just "PROD", Just "PROD"] (map PRC.scEnv (PRC.rcServices (head (PRC.prcRepos c))))
+  assertBool "different Jenkins jobs for one repo is an error, not a silent pick" (isLeftWith "different Jenkins jobs" (RBW.buildFromRows [g1, row "g2" Nothing (Just "o/r") (prod "PROD" "[]" "job-b")]))
+  assertBool "no jenkins job anywhere is an error" (isLeftWith "no \"jenkins\"" (RBW.buildFromRows [row "g" Nothing (Just "o/r") (Just "{\"env\":\"PROD\",\"branches\":[\"b\"]}")]))
+  assertBool "missing repo_name is an error" (isLeftWith "no repo_name" (RBW.buildFromRows [row "g" Nothing Nothing (prod "PROD" "[]" "j")]))
+  assertBool "one channel mapped to two envs is an error" (isLeftWith "mapped to two different" (RBW.buildFromRows [row "g1" Nothing (Just "o/r") (prod "PROD" "[\"C\"]" "j"), row "g2" Nothing (Just "o/r") (prod "MASTER" "[\"C\"]" "j")]))
+  assertBool "service rules under an app group with none are reported" (isLeftWith "app group has none" (RBW.buildFromRows [row "g" (Just "s") Nothing svc]))
+  assertBool "malformed row JSON names the row" (isLeftWith "g:" (RBW.buildFromRows [row "g" Nothing (Just "o/r") (Just "{nope")]))
+  -- the save-request field: absent = keep, blank = clear, else validated
+  assertEqual "absent field leaves stored rules alone" (Right Nothing) (RBW.checkBotField True Nothing)
+  assertEqual "blank clears" (Right (Just Nothing)) (RBW.checkBotField True (Just "  "))
+  assertEqual "valid product rules are written" (Right (Just (Just "{\"env\":\"PROD\"}"))) (RBW.checkBotField True (Just "{\"env\":\"PROD\"}"))
+  assertBool "product rules need an env" (either (const True) (const False) (RBW.checkBotField True (Just "{\"branches\":[\"b\"]}")))
+  assertBool "invalid JSON is rejected before it can be stored" (either (const True) (const False) (RBW.checkBotField False (Just "{x")))
+  assertBool "service envVar needs a repoPath" (either (const True) (const False) (RBW.checkBotField False (Just "{\"envVar\":{\"envVar\":\"X\",\"repoPath\":\"\"}}")))
+
+
+testReleaseBotJenkins :: IO ()
+testReleaseBotJenkins = do
+  -- Jenkins reports URLs on its SSO-fronted host; polling must go through the API host.
+  let api = "https://mcp-jenkins.c2.sso.internal.svc.movingtech.net"
+  assertEqual "queue URL re-rooted onto the API base" (api <> "/queue/item/42/") (PRJ.rebaseUrl api "https://jenkins.c2.sso.internal.svc.movingtech.net/queue/item/42/")
+  assertEqual "build URL keeps its full path" (api <> "/job/ny-internal/job/cloud-jenkins/job/main/4957/") (PRJ.rebaseUrl api "https://jenkins.c2.sso.internal.svc.movingtech.net/job/ny-internal/job/cloud-jenkins/job/main/4957/")
+  assertEqual "trailing slash on the base is tolerated" (api <> "/queue/item/1/") (PRJ.rebaseUrl (api <> "/") "http://jenkins/queue/item/1/")
+  assertEqual "a URL already on the API base is unchanged" (api <> "/queue/item/1/") (PRJ.rebaseUrl api (api <> "/queue/item/1/"))
+  assertEqual "a host-only URL becomes the base" api (PRJ.rebaseUrl api "https://jenkins.example")
+  assertEqual "a relative URL is left alone" "/queue/item/1/" (PRJ.rebaseUrl api "/queue/item/1/")
+  assertEqual "empty base leaves the URL alone" "https://x/y" (PRJ.rebaseUrl "" "https://x/y")
+  assertEqual "org-folder job path -> REST path" "job/ny-internal/job/cloud-jenkins/job/main" (PRJ.jobPath "ny-internal/cloud-jenkins/main")
+  assertEqual "spaces in a segment are encoded" "job/utils%20nammayatri/job/x" (PRJ.jobPath "utils nammayatri/x")
+  -- the shipped config matches the real cloud-jenkins job: first 6 chars, sandbox OFF for PROD
+  parsed <- Aeson.eitherDecodeFileStrict "dhall-configs/prod-release-config.json" :: IO (Either String PRC.ProdReleaseConfig)
+  case parsed of
+    Left e -> fail ("  FAIL: shipped config does not parse: " <> e)
+    Right cfg -> do
+      let repo = head (PRC.prcRepos cfg)
+          prodJ = PRC.jenkinsFor repo "prod"
+          masterJ = PRC.jenkinsFor repo "MASTER"
+      assertEqual "job is the real org-folder path" "ny-internal/cloud-jenkins/main" (PRC.jcJob prodJ)
+      assertEqual "commit param is lower-case `commit`" "commit" (PRC.jcCommitParam prodJ)
+      assertEqual "commit is cut to 6 chars" (Just 6) (PRC.jcCommitLength prodJ)
+      assertEqual "PROD release does NOT push to the sandbox" (Just "false") (Map.lookup "GCP_SANDBOX" (PRC.jcFixedParams prodJ))
+      assertEqual "PROD release pushes to AWS + GCP prod" (Just "true", Just "true") (Map.lookup "AWS_PROD" (PRC.jcFixedParams prodJ), Map.lookup "GCP_PROD" (PRC.jcFixedParams prodJ))
+      assertEqual "PROD release leaves EU and MSIL off" ["false", "false", "false"] [Map.findWithDefault "?" k (PRC.jcFixedParams prodJ) | k <- ["EU_PROD", "EU_PROD_GCP", "MSIL"]]
+      assertEqual "MASTER release pushes to the sandbox only" (Just "true", Just "false", Just "false") (Map.lookup "GCP_SANDBOX" (PRC.jcFixedParams masterJ), Map.lookup "AWS_PROD" (PRC.jcFixedParams masterJ), Map.lookup "GCP_PROD" (PRC.jcFixedParams masterJ))
+  -- rows: same repo, PROD and MASTER app groups may have DIFFERENT jenkins params; same env may not
+  let row ag env job params =
+        SCH.DeploymentConfigT
+          { SCH.dcId = 1, SCH.dcAppGroup = ag, SCH.dcService = Nothing, SCH.dcCluster = Nothing, SCH.dcNamespace = Nothing
+          , SCH.dcVsName = Nothing, SCH.dcAppGroupAcronym = Nothing, SCH.dcRepoName = Just "o/r", SCH.dcAppGroupType = Nothing
+          , SCH.dcSyncCluster = Nothing, SCH.dcNeedInfraApproval = Nothing, SCH.dcAiChangelogEnabled = Nothing
+          , SCH.dcVsLockedBy = Nothing, SCH.dcVsLockTimestamp = Nothing, SCH.dcServiceHost = Nothing, SCH.dcServiceType = Nothing
+          , SCH.dcRolloutStrategy = Nothing, SCH.dcRevertStrategy = Nothing, SCH.dcDecisionConfig = Nothing
+          , SCH.dcSlackChannel = Nothing, SCH.dcServiceState = Nothing, SCH.dcHpaMinReplicas = Nothing
+          , SCH.dcHpaMaxReplicas = Nothing, SCH.dcCloudType = "GCP"
+          , SCH.dcReleaseBotConfig = Just ("{\"env\":\"" <> env <> "\",\"branches\":[\"b\"],\"jenkins\":{\"job\":\"" <> job <> "\",\"commitParam\":\"commit\",\"fixedParams\":{\"P\":\"" <> params <> "\"}}}")
+          }
+  case RBW.buildFromRows [row "prod-g" "PROD" "j" "prod", row "master-g" "MASTER" "j" "master"] of
+    Left e -> fail ("  FAIL: PROD+MASTER on one repo should build: " <> T.unpack e)
+    Right c -> do
+      let repo = head (PRC.prcRepos c)
+      assertEqual "one repo, jenkins params chosen by env" (Just "prod", Just "master") (Map.lookup "P" (PRC.jcFixedParams (PRC.jenkinsFor repo "PROD")), Map.lookup "P" (PRC.jcFixedParams (PRC.jenkinsFor repo "master")))
+  assertBool "two PROD app groups with different params for one repo is an error" (either (T.isInfixOf "different Jenkins") (const False) (RBW.buildFromRows [row "a" "PROD" "j" "x", row "b" "PROD" "j" "y"]))

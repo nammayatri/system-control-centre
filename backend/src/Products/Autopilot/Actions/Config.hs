@@ -67,7 +67,8 @@ toProductConfigResponse p =
       syncCluster = S.dcSyncCluster p,
       vsLockedBy = S.dcVsLockedBy p,
       slackChannel = S.dcSlackChannel p,
-      repoName = S.dcRepoName p
+      repoName = S.dcRepoName p,
+      releaseBotConfig = S.dcReleaseBotConfig p
     }
 
 createProductConfigH :: AuthedPerson -> UpsertProductReq -> Flow APIResponse
@@ -81,7 +82,7 @@ getProductConfigH _ap pid = do
     Just p -> pure $ toJSON (toProductConfigResponse p)
 
 updateProductConfigH :: AuthedPerson -> Int32 -> UpsertProductReq -> Flow APIResponse
-updateProductConfigH ap pathId UpsertProductReq {appGroup = appGroup', cluster = cluster', namespace = namespace', vsName = vsName', productType = productType', productAcronym = productAcronym', syncCluster = syncCluster', needInfraApproval = needInfraApproval', aiChangelogEnabled = aiChangelogEnabled', slackChannel = slackChannel', repoName = repoName'} = do
+updateProductConfigH ap pathId UpsertProductReq {appGroup = appGroup', cluster = cluster', namespace = namespace', vsName = vsName', productType = productType', productAcronym = productAcronym', syncCluster = syncCluster', needInfraApproval = needInfraApproval', aiChangelogEnabled = aiChangelogEnabled', slackChannel = slackChannel', repoName = repoName', releaseBotConfig = releaseBotConfig'} = do
   existing <- findProductConfigById pathId
   case existing of
     Nothing -> throwM $ NotFound "Product config not found"
@@ -106,7 +107,8 @@ updateProductConfigH ap pathId UpsertProductReq {appGroup = appGroup', cluster =
                 needInfraApproval = needInfraApproval',
                 aiChangelogEnabled = aiChangelogEnabled',
                 slackChannel = slackChannel',
-                repoName = repoName'
+                repoName = repoName',
+                releaseBotConfig = releaseBotConfig'
               }
 
 deleteProductConfigH :: AuthedPerson -> Int32 -> Flow APIResponse
@@ -143,7 +145,8 @@ toReleaseConfigResponse r =
       jiraWebhookUrl = Nothing,
       serviceHost = S.dcServiceHost r,
       hpaMinReplicas = S.dcHpaMinReplicas r,
-      hpaMaxReplicas = S.dcHpaMaxReplicas r
+      hpaMaxReplicas = S.dcHpaMaxReplicas r,
+      releaseBotConfig = S.dcReleaseBotConfig r
     }
 
 createReleaseConfigH :: AuthedPerson -> UpsertServiceReq -> Flow APIResponse

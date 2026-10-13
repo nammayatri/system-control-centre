@@ -1,0 +1,130 @@
+{
+  "_readme": "FALLBACK release-bot config (SC_PROD_RELEASE_CONFIG) \u2014 used only when no deployment_config row has release_bot_config and the release_bot_config_json server-config row is empty. Prefer editing the rules on the Deployment Config page. Re-read on every request. Values starting with REPLACE_ are placeholders: a path that does not exist at the commit becomes a blocker, which makes the request build-only (fail closed). See backend/RELEASE_BOT.md.",
+  "channels": [
+    {
+      "id": "REPLACE_WITH_XYNE_CHANNEL_ID_FOR_PROD",
+      "repo": "nammayatri",
+      "env": "PROD"
+    },
+    {
+      "id": "REPLACE_WITH_XYNE_CHANNEL_ID_FOR_MASTER",
+      "repo": "nammayatri",
+      "env": "MASTER"
+    }
+  ],
+  "repos": [
+    {
+      "name": "nammayatri",
+      "url": "https://github.com/nammayatri/nammayatri",
+      "branches": [
+        "prodHotPush-Common"
+      ],
+      "jenkins": {
+        "job": "ny-internal/cloud-jenkins/main",
+        "commitParam": "commit",
+        "commitLength": 6,
+        "fixedParams": {
+          "GCP_SANDBOX": "false",
+          "AWS_PROD": "true",
+          "GCP_PROD": "true",
+          "EU_PROD": "false",
+          "EU_PROD_GCP": "false",
+          "MSIL": "false",
+          "SERVICE": "nammayatri"
+        }
+      },
+      "secretFiles": [
+        "*secret*"
+      ],
+      "configMaps": [
+        {
+          "name": "beckn-production-pilot",
+          "appGroup": "beckn-production-pilot",
+          "env": "PROD",
+          "files": {
+            "common.dhall": "REPLACE_WITH_REPO_PATH/common.dhall",
+            "globalCommon.dhall": "REPLACE_WITH_REPO_PATH/globalCommon.dhall"
+          }
+        },
+        {
+          "name": "dhall-config-master",
+          "appGroup": "REPLACE_WITH_MASTER_APP_GROUP",
+          "env": "MASTER",
+          "files": {
+            "rider-app.dhall": "REPLACE_WITH_REPO_PATH/rider-app.dhall",
+            "dynamic-driver-offer-bpp.dhall": "REPLACE_WITH_REPO_PATH/dynamic-driver-offer-bpp.dhall",
+            "common.dhall": "REPLACE_WITH_REPO_PATH/common.dhall",
+            "globalCommon.dhall": "REPLACE_WITH_REPO_PATH/globalCommon.dhall"
+          }
+        }
+      ],
+      "services": [
+        {
+          "service": "backend-production-pilot",
+          "appGroup": "backend-production-pilot",
+          "aliases": [
+            "rider app",
+            "rider-app",
+            "backend"
+          ],
+          "dhallFiles": [
+            "rider-app.dhall"
+          ],
+          "envVar": {
+            "envVar": "DHALL_CONFIG",
+            "repoPath": "REPLACE_WITH_REPO_PATH/rider-app.dhall"
+          },
+          "defaultRollout": [
+            {
+              "rolloutPercent": 100,
+              "cooloffMinutes": 0,
+              "podCount": 1
+            }
+          ],
+          "env": "PROD"
+        },
+        {
+          "service": "driver-app-production-pilot",
+          "appGroup": "driver-app-production-pilot",
+          "aliases": [
+            "driver app",
+            "driver-app",
+            "dynamic driver offer",
+            "dynamic-driver-offer-bpp"
+          ],
+          "dhallFiles": [
+            "dynamic-driver-offer-bpp.dhall"
+          ],
+          "envVar": {
+            "envVar": "DHALL_CONFIG",
+            "repoPath": "REPLACE_WITH_REPO_PATH/dynamic-driver-offer-bpp.dhall"
+          },
+          "defaultRollout": [
+            {
+              "rolloutPercent": 100,
+              "cooloffMinutes": 0,
+              "podCount": 1
+            }
+          ],
+          "env": "PROD"
+        }
+      ],
+      "jenkinsByEnv": {
+        "MASTER": {
+          "job": "ny-internal/cloud-jenkins/main",
+          "commitParam": "commit",
+          "commitLength": 6,
+          "fixedParams": {
+            "GCP_SANDBOX": "true",
+            "AWS_PROD": "false",
+            "GCP_PROD": "false",
+            "EU_PROD": "false",
+            "EU_PROD_GCP": "false",
+            "MSIL": "false",
+            "SERVICE": "nammayatri"
+          }
+        }
+      }
+    }
+  ]
+}

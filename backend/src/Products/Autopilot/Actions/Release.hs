@@ -99,6 +99,7 @@ import Products.Autopilot.Mobile.Queries.Tracker (heldMobileByApp, incomingMobil
 import Products.Autopilot.Mobile.StoreSync (atOrBelowProductionPure, releaseOrderBehind, releaseOrderStrictlyBehind)
 import Products.Autopilot.Mobile.Types (mbContext, mbWfStatus)
 import Products.Autopilot.Notifications
+import Products.Autopilot.ReleaseBot.RowConfig (checkBotField)
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.Queries.VsEditTracker ()
@@ -141,9 +142,13 @@ upsertProductH ap req = do
   requireDeploymentPermission (Proxy :: Proxy 'AP_PRODUCT_CONFIG_EDIT) ap req.appGroup
   case normalizeProductType req.productType of
     Left err -> pure $ APIResponse "ERROR" err
-    Right canonical -> do
-      upsertProduct req.appGroup req.cluster req.namespace req.vsName canonical req.productAcronym req.syncCluster req.needInfraApproval req.slackChannel req.repoName req.aiChangelogEnabled
-      pure $ APIResponse "SUCCESS" "product_config upserted"
+    Right canonical -> case checkBotField True req.releaseBotConfig of
+      Left why -> pure $ APIResponse "ERROR" ("releaseBotConfig invalid: " <> why)
+      Right botUpdate -> do
+        upsertProduct req.appGroup req.cluster req.namespace req.vsName canonical req.productAcronym req.syncCluster req.needInfraApproval req.slackChannel req.repoName req.aiChangelogEnabled
+        -- upsert preserves the stored rules; only an explicit value (or "" to clear) changes them
+        mapM_ (setReleaseBotConfig req.appGroup Nothing) botUpdate
+        pure $ APIResponse "SUCCESS" "product_config upserted"
 
 -- | Map any incoming productType string to the canonical 'ReleaseCategory'
 -- ADT name. Tolerates legacy aliases ('SERVICE', 'SCHEDULER') so old admin
@@ -251,9 +256,12 @@ upsertServiceH ap req = do
     Left errMsg -> pure $ APIResponse "ERROR" errMsg
     Right () -> case validateOptionalStrategyText "Revert" req.revertStrategyText of
       Left errMsg -> pure $ APIResponse "ERROR" errMsg
-      Right () -> do
-        upsertService req.rolloutStrategyText req.decisionConfigText req.service req.appGroup req.serviceType req.serviceHost req.revertStrategyText req.hpaMinReplicas req.hpaMaxReplicas
-        pure $ APIResponse "SUCCESS" "release_config upserted"
+      Right () -> case checkBotField False req.releaseBotConfig of
+        Left why -> pure $ APIResponse "ERROR" ("releaseBotConfig invalid: " <> why)
+        Right botUpdate -> do
+          upsertService req.rolloutStrategyText req.decisionConfigText req.service req.appGroup req.serviceType req.serviceHost req.revertStrategyText req.hpaMinReplicas req.hpaMaxReplicas
+          mapM_ (setReleaseBotConfig req.appGroup (Just req.service)) botUpdate
+          pure $ APIResponse "SUCCESS" "release_config upserted"
 
 -- ============================================================================
 -- Release CRUD Handlers

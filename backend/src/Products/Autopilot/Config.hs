@@ -372,6 +372,12 @@ autopilotConfigs =
         MobileGroup
         "Effectively-zero Play rollout fraction used when promoting to production for review, so approval exposes ~0 users until the operator rolls out. Must stay strictly in (0,1)."
         (Just "autopilot")
+    , ConfigEntry
+        "release_bot_config_json"
+        (TextConfig "")
+        NotificationGroup
+        "Xyne release bot rules (JSON): channels, repos/branches, Jenkins job, which changed file triggers which env-var / configmap check, secret-file patterns. Empty = use the JSON file (SC_PROD_RELEASE_CONFIG). See backend/RELEASE_BOT.md."
+        (Just "autopilot")
     , -- AI (Grid / LiteLLM). The SC_AI_API_KEY secret is NOT here — it lives in env.
       ConfigEntry
         "ai_enabled"
