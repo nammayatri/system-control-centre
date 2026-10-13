@@ -50,7 +50,7 @@ type ReleaseBotAPI =
     "xyne" :> "events" :> Header "x-xyne-signature" Text :> ReqBody '[RawJSON, RawForm] BS.ByteString :> Post '[JSON] Value
         :<|> "xyne" :> "interactions" :> Header "x-xyne-signature" Text :> ReqBody '[RawJSON, RawForm] BS.ByteString :> Post '[JSON] Value
         :<|> "public" :> "release-requests" :> Capture "id" Text :> QueryParam "t" Text :> Get '[JSON] Value
-        :<|> "public" :> "release-requests" :> Capture "id" Text :> "sql" :> QueryParam "t" Text :> Get '[PlainText] Text
+        :<|> "public" :> "release-requests" :> Capture "id" Text :> "sql" :> QueryParam "s" Text :> QueryParam "t" Text :> Get '[PlainText] Text
 
 releaseBotServer :: ServerT ReleaseBotAPI Flow
 releaseBotServer = eventsH :<|> eventsH :<|> publicH :<|> publicSqlH
@@ -90,8 +90,8 @@ publicH rid mt = do
     maybe (throwM (NotFound "not found")) pure r
 
 -- | The release's combined SQL file, as plain text (same link token as the review page).
-publicSqlH :: Text -> Maybe Text -> Flow Text
-publicSqlH rid mt = do
+publicSqlH :: Text -> Maybe Text -> Maybe Text -> Flow Text
+publicSqlH rid ms mt = do
     requireEnabled
-    r <- publicRequestSql rid mt
+    r <- publicRequestSql rid mt ms
     maybe (throwM (NotFound "not found")) pure r

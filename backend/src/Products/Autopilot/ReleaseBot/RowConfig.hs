@@ -59,7 +59,6 @@ data ProductBot = ProductBot
     , pbSecretFiles :: [Text]
     , pbConfigMaps :: [CmRow]
     , pbIgnore :: [Text]
-    , pbSql :: [SqlRule]
     }
     deriving (Show)
 
@@ -73,7 +72,6 @@ instance FromJSON ProductBot where
             <*> (o .:? "secretFiles" .!= [])
             <*> (o .:? "configMaps" .!= [])
             <*> (o .:? "ignoreConfigMaps" .!= [])
-            <*> (o .:? "sqlFiles" .!= [])
 
 data ServiceBot = ServiceBot
     { sbAliases :: [Text]
@@ -81,6 +79,7 @@ data ServiceBot = ServiceBot
     , sbEnvVar :: Maybe EnvVarTarget
     , sbRollout :: [RolloutStepCfg]
     , sbEnv :: Maybe Text
+    , sbSqlSchemas :: [Text]
     }
     deriving (Show)
 
@@ -92,6 +91,7 @@ instance FromJSON ServiceBot where
             <*> o .:? "envVar"
             <*> (o .:? "defaultRollout" .!= [])
             <*> o .:? "env"
+            <*> (o .:? "sqlSchemas" .!= [])
 
 blank :: Text -> Bool
 blank = T.null . T.strip
@@ -105,7 +105,6 @@ validateProductBot t = do
     when (blank (pbEnv pb)) (Left "\"env\" is required (PROD or MASTER)")
     when (any blank (pbBranches pb)) (Left "\"branches\" contains an empty name")
     when (any blank (pbChannels pb)) (Left "\"channels\" contains an empty id")
-    when (any (\q -> blank (sqDb q) || null (sqPaths q) || any blank (sqPaths q)) (pbSql pb)) (Left "every sqlFiles entry needs a \"db\" name and non-empty \"paths\"")
     when (any (\c -> blank (crName c) || M.null (crFiles c) || any blank (M.elems (crFiles c))) (pbConfigMaps pb)) (Left "every configMaps entry needs a name and files {key: repoPath}")
     pure pb
 
@@ -169,6 +168,7 @@ buildFromRows rows = do
                     , scEnvVar = sbEnvVar sb
                     , scDefaultRollout = sbRollout sb
                     , scEnv = Just env
+                    , scSqlSchemas = sbSqlSchemas sb
                     }
         pure
             RepoCfg
@@ -181,7 +181,6 @@ buildFromRows rows = do
                 , rcConfigMaps = [ConfigMapTarget (crName c) (dcAppGroup r) (crFiles c) (Just (pbEnv pb)) (crMerge c) | (_, r, pb) <- grp, c <- pbConfigMaps pb]
                 , rcIgnoreConfigMaps = nub (concat [pbIgnore pb | (_, _, pb) <- grp])
                 , rcJenkinsByEnv = M.fromList byEnv
-                , rcSql = nub (concat [pbSql pb | (_, _, pb) <- grp])
                 }
     -- A service row configured under an app group that has no repo-level rules can never run: say so.
     let configuredGroups = [dcAppGroup r | (_, r, _) <- prods]

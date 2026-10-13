@@ -103,6 +103,8 @@ data Mention = Mention
 data Click = Click
     { cVerb :: Text
     , cRequestId :: Text
+    , cService :: Maybe Text
+    -- ^ rollout cards are per service: @verb:requestId:service@
     , cUserId :: Text
     , cUserName :: Text
     , cEmail :: Text
@@ -151,11 +153,12 @@ parseClick v = flowShape `orElse` interactionShape `orElse` (obj "payload" v >>=
     flowShape = do
         aid <- str "actionId" v
         let (verb, rest) = T.breakOn ":" aid
-            rid = T.drop 1 rest
+            (rid, svcRest) = T.breakOn ":" (T.drop 1 rest)
+            svc = if T.null svcRest || T.null (T.drop 1 svcRest) then Nothing else Just (T.drop 1 svcRest)
         if known verb && not (T.null rid)
             then
                 let ctx = fromMaybe Null (obj "context" v)
-                 in Just Click{cVerb = verb, cRequestId = rid, cUserId = fromMaybe "" (str "userId" ctx), cUserName = "", cEmail = ""}
+                 in Just Click{cVerb = verb, cRequestId = rid, cService = svc, cUserId = fromMaybe "" (str "userId" ctx), cUserName = "", cEmail = ""}
             else Nothing
     interactionShape = do
         Array as <- obj "actions" v
@@ -170,6 +173,7 @@ parseClick v = flowShape `orElse` interactionShape `orElse` (obj "payload" v >>=
                 Click
                     { cVerb = verb
                     , cRequestId = rid
+                    , cService = Nothing
                     , cUserId = fromMaybe "" (str "id" user `orElse` str "userId" v)
                     , cUserName = fromMaybe "" (str "name" user)
                     , cEmail = email
@@ -297,10 +301,11 @@ postApprovalCard channel text requestId = do
     pure (r >>= \v -> Right (fromMaybe "" (str "messageId" v)))
 
 -- | Approve/Discard card for freshly created release trackers; returns the native message id.
-postRolloutCard :: (MonadIO m) => Text -> Text -> Text -> m (Either Text Text)
-postRolloutCard channel text requestId = do
+postRolloutCard :: (MonadIO m) => Text -> Text -> Text -> Text -> m (Either Text Text)
+postRolloutCard channel text requestId service = do
     b <- baseUrl
-    let flow = flowCard text [("Approve & start rollout", rolloutApproveVerb <> ":" <> requestId, False), ("Discard release", rolloutRejectVerb <> ":" <> requestId, True)]
+    let tag = requestId <> ":" <> service
+        flow = flowCard text [("Approve & start rollout", rolloutApproveVerb <> ":" <> tag, False), ("Discard release", rolloutRejectVerb <> ":" <> tag, True)]
     r <- call (nativeBase b <> "/chat/postMessage") (object ["channelId" .= channel, "text" .= T.take 300 text, "flow" .= flow])
     pure (r >>= \v -> Right (fromMaybe "" (str "messageId" v)))
 

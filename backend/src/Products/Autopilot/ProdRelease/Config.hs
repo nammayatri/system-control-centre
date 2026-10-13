@@ -18,7 +18,6 @@ module Products.Autopilot.ProdRelease.Config (
     ConfigMapTarget (..),
     ChannelCfg (..),
     RolloutStepCfg (..),
-    SqlRule (..),
     loadProdReleaseConfig,
     parseProdReleaseConfig,
     findChannel,
@@ -89,6 +88,9 @@ data ServiceCfg = ServiceCfg
     -- ^ Rollout used when the bot creates the tracker (empty = single 100% step)
     , scEnv :: Maybe Text
     -- ^ Only releasable from channels of this env (@PROD@ / @MASTER@); absent = any
+    , scSqlSchemas :: [Text]
+    -- ^ Database schemas this service uses (e.g. @atlas_app@). SQL statements in the release that
+    -- touch one of them are collected for this service before its tracker is created.
     }
     deriving (Show, Generic)
 
@@ -102,6 +104,7 @@ instance FromJSON ServiceCfg where
             <*> o .:? "envVar"
             <*> (o .:? "defaultRollout" .!= [])
             <*> o .:? "env"
+            <*> (o .:? "sqlSchemas" .!= [])
 instance ToJSON ServiceCfg where
     toJSON s =
         object
@@ -112,6 +115,7 @@ instance ToJSON ServiceCfg where
             , "envVar" .= scEnvVar s
             , "defaultRollout" .= scDefaultRollout s
             , "env" .= scEnv s
+            , "sqlSchemas" .= scSqlSchemas s
             ]
 
 -- | A configmap whose files are tracked from the repo (e.g. @beckn-production-pilot@).
@@ -170,20 +174,6 @@ instance FromJSON JenkinsCfg where
 instance ToJSON JenkinsCfg where
     toJSON = genericToJSON (jsonOpts 2)
 
--- | SQL files (migrations) under any of @paths@ belong to database @db@ and are collected for the release.
-data SqlRule = SqlRule
-    { sqDb :: Text
-    -- ^ Human name of the target database, e.g. @atlas_app (rider-app)@
-    , sqPaths :: [Text]
-    -- ^ Repo path prefixes (or @*@ patterns) of the .sql files that run against it
-    }
-    deriving (Show, Eq, Generic)
-
-instance FromJSON SqlRule where
-    parseJSON = genericParseJSON (jsonOpts 2)
-instance ToJSON SqlRule where
-    toJSON = genericToJSON (jsonOpts 2)
-
 data RepoCfg = RepoCfg
     { rcName :: Text
     , rcUrl :: Text
@@ -199,8 +189,6 @@ data RepoCfg = RepoCfg
     -- ^ Env (upper-case, @PROD@/@MASTER@) -> Jenkins settings. A PROD and a MASTER release of the
     -- same repo send different build parameters (which clouds to push to), so Jenkins is per env.
     -- Falls back to 'rcJenkins' for an env not listed.
-    , rcSql :: [SqlRule]
-    -- ^ Which database each changed .sql file belongs to (see 'SqlRule')
     }
     deriving (Show, Generic)
 
@@ -216,7 +204,6 @@ instance FromJSON RepoCfg where
             <*> (o .:? "configMaps" .!= [])
             <*> (o .:? "ignoreConfigMaps" .!= [])
             <*> (o .:? "jenkinsByEnv" .!= M.empty)
-            <*> (o .:? "sqlFiles" .!= [])
 instance ToJSON RepoCfg where
     toJSON r =
         object
@@ -229,7 +216,6 @@ instance ToJSON RepoCfg where
             , "configMaps" .= rcConfigMaps r
             , "ignoreConfigMaps" .= rcIgnoreConfigMaps r
             , "jenkinsByEnv" .= rcJenkinsByEnv r
-            , "sqlFiles" .= rcSql r
             ]
 
 data ProdReleaseConfig = ProdReleaseConfig

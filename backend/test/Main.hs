@@ -2783,9 +2783,11 @@ testReleaseBotXyne = do
     (RBX.parseMention mention)
   assertBool "non-mention event ignored" (RBX.parseMention (Aeson.object ["eventType" Aeson..= ("OTHER" :: Text)]) == Nothing)
   let flow = Aeson.object ["actionId" Aeson..= ("scc_release_approve:req-9" :: Text), "context" Aeson..= Aeson.object ["userId" Aeson..= ("u-2" :: Text)]]
-  assertEqual "flow-action click parsed" (Just (RBX.Click "scc_release_approve" "req-9" "u-2" "" "")) (RBX.parseClick flow)
+  assertEqual "flow-action click parsed" (Just (RBX.Click "scc_release_approve" "req-9" Nothing "u-2" "" "")) (RBX.parseClick flow)
   let inter = Aeson.object ["actions" Aeson..= [Aeson.object ["action_id" Aeson..= ("scc_release_reject" :: Text), "value" Aeson..= ("req-9" :: Text)]], "user" Aeson..= Aeson.object ["id" Aeson..= ("u-3" :: Text), "email" Aeson..= ("a@x.in" :: Text)]]
-  assertEqual "interaction click parsed" (Just (RBX.Click "scc_release_reject" "req-9" "u-3" "" "a@x.in")) (RBX.parseClick inter)
+  assertEqual "interaction click parsed" (Just (RBX.Click "scc_release_reject" "req-9" Nothing "u-3" "" "a@x.in")) (RBX.parseClick inter)
+  let perSvc = Aeson.object ["actionId" Aeson..= ("scc_rollout_approve:req-9:BECKN_APP_BACKEND_MASTER" :: Text), "context" Aeson..= Aeson.object ["userId" Aeson..= ("u-2" :: Text)]]
+  assertEqual "per-service rollout click parsed" (Just (RBX.Click "scc_rollout_approve" "req-9" (Just "BECKN_APP_BACKEND_MASTER") "u-2" "" "")) (RBX.parseClick perSvc)
   assertBool "unknown verb is not a click (cannot be spoofed into approve)" (RBX.parseClick (Aeson.object ["actionId" Aeson..= ("vk_remediate_approve:req-9" :: Text)]) == Nothing)
   assertBool "verb without request id is not a click" (RBX.parseClick (Aeson.object ["actionId" Aeson..= ("scc_release_approve:" :: Text)]) == Nothing)
   assertEqual "form-encoded interaction body decodes" (Just (Aeson.object ["a" Aeson..= (1 :: Int)])) (RBR.decodeWebhookBody (BC.pack "payload=%7B%22a%22%3A1%7D"))
@@ -2857,7 +2859,7 @@ testReleaseBotIntent = do
   assertEqual "missing fields in ask order" ["repo", "branch", "commit", "services"] (PRI.missingFields PRI.emptyIntent)
   assertEqual "nothing missing when complete" [] (PRI.missingFields a)
   -- channel env scoping: a PROD channel must never see MASTER-only services
-  let svc n e = PRC.ServiceCfg n n [] [] Nothing [] e
+  let svc n e = PRC.ServiceCfg n n [] [] Nothing [] e []
       repoWith ss = (head (either (const []) PRC.prcRepos (Aeson.eitherDecodeStrict (BC.pack "{\"repos\":[{\"name\":\"r\",\"url\":\"https://github.com/o/r\",\"branches\":[\"b\"],\"jenkins\":{\"job\":\"j\",\"commitParam\":\"C\",\"fixedParams\":{}},\"services\":[]}]}")))) {PRC.rcServices = ss}
       names = map PRC.scService . PRC.rcServices
       r = repoWith [svc "p" (Just "PROD"), svc "m" (Just "MASTER"), svc "any" Nothing]
@@ -2928,13 +2930,19 @@ testReleaseBotTriggers = do
 
 testReleaseBotRows :: IO ()
 testReleaseBotRows = do
-  -- sqlFiles rule parses and renders grouped by database
-  case RBW.validateProductBot "{\"env\":\"MASTER\",\"sqlFiles\":[{\"db\":\"atlas_app\",\"paths\":[\"Backend/dev/ddl-migrations/rider-app/\"]}]}" of
-    Right pb -> assertEqual "sqlFiles parsed" [("atlas_app", ["Backend/dev/ddl-migrations/rider-app/"])] (map (\q -> (PRC.sqDb q, PRC.sqPaths q)) (RBW.pbSql pb))
-    Left e -> assertBool ("product rule should parse: " <> T.unpack e) False
-  assertBool "sqlFiles without paths is rejected" (either (const True) (const False) (RBW.validateProductBot "{\"env\":\"MASTER\",\"sqlFiles\":[{\"db\":\"x\",\"paths\":[]}]}"))
-  let rendered = RBS.renderSql "t" (RBS.SqlPlan [("db1", [("a/1.sql", "SELECT 1;\n")])] [] [])
-  assertBool "rendered sql names the database and file" ("DATABASE: db1" `T.isInfixOf` rendered && ">>> a/1.sql" `T.isInfixOf` rendered && "SELECT 1;" `T.isInfixOf` rendered)
+  -- SQL attribution by schema
+  let sqlText = "-- add unique\nALTER TABLE atlas_app.offer DROP CONSTRAINT IF EXISTS u;\nALTER TABLE atlas_app.offer ADD CONSTRAINT u2 UNIQUE (a, b); INSERT INTO atlas_driver_offer_bpp.t VALUES ('x;y', 1);\nDO $$ BEGIN PERFORM 1; END $$;\nSELECT 1; -- trailing"
+      stmts = RBS.splitStatements sqlText
+      file = [RBS.SqlFile "m/1.sql" stmts]
+  assertEqual "statements split on top-level semicolons only" 5 (length stmts)
+  assertEqual "rider schema gets its 2 statements" 2 (RBS.countStatements (RBS.statementsFor ["atlas_app"] file))
+  assertEqual "driver schema gets the insert (quoted ; kept)" 1 (RBS.countStatements (RBS.statementsFor ["atlas_driver_offer_bpp"] file))
+  assertEqual "statements naming no configured schema are reported" 2 (RBS.countStatements (RBS.unattributed ["atlas_app", "atlas_driver_offer_bpp"] file))
+  assertBool "schema must match a whole identifier" (not (RBS.mentionsSchema "app" "UPDATE atlas_app.t SET a=1"))
+  assertBool "rendered sql lists the file and statements" (let r = RBS.renderSql "t" "atlas_app" (RBS.statementsFor ["atlas_app"] file) in ">>> m/1.sql" `T.isInfixOf` r && "ADD CONSTRAINT u2" `T.isInfixOf` r)
+  case RBW.validateServiceBot "{\"sqlSchemas\":[\"atlas_app\"]}" of
+    Right sb -> assertEqual "sqlSchemas parsed" ["atlas_app"] (RBW.sbSqlSchemas sb)
+    Left e -> assertBool ("service rule should parse: " <> T.unpack e) False
   -- custom rollout asked for in the message
   assertEqual "rollout override parsed" (Just (Right [(5, 10), (25, 30), (50, 30), (100, 10)])) (PRI.parseRolloutOverride "release x till abc123 with rollout 5% -> 10, 25% -> 30, 50% -> 30, 100% -> 10")
   assertEqual "rollout override with arrows/newlines" (Just (Right [(10, 5), (100, 0)])) (PRI.parseRolloutOverride "10% \8594 5\n100% \8594 0")

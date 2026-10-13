@@ -173,3 +173,4 @@ readServiceRefs appGroup svcName = do
                         Right (K8sResult out) -> case eitherDecodeStrict' (TE.encodeUtf8 out) of
                             Left e -> Left ("deployment " <> depName <> " is not valid JSON: " <> T.pack e)
                             Right dep -> let (cms, secs) = refsFromDeployment dep in Right (DeployRefs depName cms secs)
+

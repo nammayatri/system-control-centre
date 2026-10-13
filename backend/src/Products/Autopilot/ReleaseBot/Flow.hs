@@ -41,6 +41,7 @@ import Crypto.Hash.Algorithms (SHA256)
 import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Aeson (Result (..), Value (..), fromJSON, object, toJSON, (.=))
 import qualified Data.Aeson as A
+import qualified Data.Aeson.Key as K
 import Data.ByteArray (constEq)
 import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import qualified Data.ByteString as BS
@@ -56,8 +57,8 @@ import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Products.Autopilot.Actions.ConfigMap (createConfigMapH, updateConfigMapH)
 import Products.Autopilot.ConfigReview (reviewStatusInfo)
-import Products.Autopilot.Actions.Release (approveReleaseH, createReleaseH, decodeStrategyText, discardReleaseH)
-import Products.Autopilot.Queries.ProductService (findServiceByProductAndName)
+import Products.Autopilot.Actions.Release (approveReleaseH, createReleaseH, decodeStrategyText, discardReleaseH, normalizeProductType)
+import Products.Autopilot.Queries.ProductService (findProductByName, findServiceByProductAndName)
 import qualified Products.Autopilot.Types.Storage.Schema as S
 import Products.Autopilot.ProdRelease.Config
 import Products.Autopilot.ReleaseBot.ConfigSource (loadBotConfig)
@@ -68,7 +69,7 @@ import Products.Autopilot.ProdRelease.Jenkins (BuildStatus (..), TriggerResult (
 import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker)
 import Products.Autopilot.ReleaseBot.Engine
 import Products.Autopilot.ReleaseBot.Live (LiveEnv (..), readServiceEnv, replaceEnvVar)
-import Products.Autopilot.ReleaseBot.Sql (SqlPlan (..), collectSql, renderSql)
+import Products.Autopilot.ReleaseBot.Sql (SqlFile (..), countStatements, fetchSqlFiles, renderSql, statementsFor, unattributed)
 import Products.Autopilot.ReleaseBot.Store
 import qualified Products.Autopilot.ReleaseBot.Xyne as X
 import Products.Autopilot.Types.API (ApproveReleaseReq (..), DiscardReleaseReq (..), K8sCreateReleaseReq)
@@ -101,6 +102,10 @@ ttlMinutes = do
 
 -- ─── Public links ──────────────────────────────────────────────────
 
+-- | Store one text value under a dynamic key of the request's data.
+patchKey :: Req -> Text -> Text -> Flow ()
+patchKey req k v = patchRequest (rqId req) (object [K.fromText k .= v])
+
 -- | Hex HMAC-SHA256 of the request id; the capability in the no-VPN diff link.
 linkToken :: Text -> Text -> Text
 linkToken secret rid =
@@ -116,21 +121,21 @@ publicLink rid = do
         _ -> Nothing
 
 -- | Link to the request's combined SQL file (same HMAC token as the review page).
-publicSqlLink :: Text -> Flow (Maybe Text)
-publicSqlLink rid = do
+publicSqlLink :: Text -> Text -> Flow (Maybe Text)
+publicSqlLink rid svc = do
     base <- lookupEnvSecret "SC_PUBLIC_BASE_URL"
     sec <- lookupEnvSecret "SC_RELEASE_BOT_LINK_SECRET"
     pure $ case (base, sec) of
-        (Just b, Just s) -> Just (T.dropWhileEnd (== '/') b <> "/api/public/release-requests/" <> rid <> "/sql?t=" <> linkToken s rid)
+        (Just b, Just s) -> Just (T.dropWhileEnd (== '/') b <> "/api/public/release-requests/" <> rid <> "/sql?s=" <> svc <> "&t=" <> linkToken s rid)
         _ -> Nothing
 
-publicRequestSql :: Text -> Maybe Text -> Flow (Maybe Text)
-publicRequestSql rid mTok = do
+publicRequestSql :: Text -> Maybe Text -> Maybe Text -> Flow (Maybe Text)
+publicRequestSql rid mTok mSvc = do
     sec <- lookupEnvSecret "SC_RELEASE_BOT_LINK_SECRET"
     case (sec, mTok) of
         (Just s, Just t) | constEq (TE.encodeUtf8 (linkToken s rid)) (TE.encodeUtf8 (T.toLower (T.strip t))) -> do
             mr <- getRequest rid
-            pure (mr >>= dText "sqlFile" . rqData)
+            pure (mr >>= \r -> mSvc >>= \sv -> dText ("sql:" <> sv) (rqData r))
         _ -> pure Nothing
 
 {- | Public, read-only view for the no-VPN page. Valid only with the request's link
@@ -442,7 +447,7 @@ handleClick c
     | X.cVerb c `elem` [X.rolloutApproveVerb, X.rolloutRejectVerb] = handleRolloutClick c
     | otherwise = handleConfigClick c
 
--- | Approve (which starts the rollout) or discard the trackers the bot created for a request.
+-- | Approve (which starts the rollout) or discard ONE service's tracker (the card's service).
 handleRolloutClick :: X.Click -> Flow Value
 handleRolloutClick c = do
     (name, email0) <- if T.null (X.cEmail c) then X.getUser (X.cUserId c) else pure (X.cUserName c, X.cEmail c)
@@ -454,15 +459,21 @@ handleRolloutClick c = do
         Nothing -> pure (ack "Unknown request.")
         Just req -> do
             auth <- authorize email0 (if approving then "RELEASE_APPROVE" else "RELEASE_DISCARD")
-            let tids = case dField "trackerIds" (rqData req) of
-                    Just (Array xs) -> [t | String t <- foldr (:) [] xs]
-                    _ -> []
+            let d = rqData req
+                svc = X.cService c
+                label = maybe "" (\x -> x <> ": ") svc
+                tids = case svc of
+                    Just sv -> maybeToList (dText ("tracker:" <> sv) d)
+                    Nothing -> case dField "trackerIds" d of
+                        Just (Array xs) -> [t | String t <- foldr (:) [] xs]
+                        _ -> []
+                cardKey = maybe "rolloutCardId" ("rolloutCard:" <>) svc
             case auth of
                 Left why -> do
-                    sayReq req ("⛔ " <> who <> " cannot " <> (if approving then "approve" else "discard") <> " this: " <> why <> ". Nothing was changed.")
+                    sayReq req ("⛔ " <> who <> " cannot " <> (if approving then "approve" else "discard") <> " " <> fromMaybe "this" svc <> ": " <> why <> ". Nothing was changed.")
                     pure (ack "You are not authorized.")
                 Right ap
-                    | null tids -> pure (ack "No release trackers recorded for this request.")
+                    | null tids -> pure (ack "No release tracker recorded for this card.")
                     | otherwise -> do
                         results <- forM tids $ \tid -> do
                             r <-
@@ -475,11 +486,11 @@ handleRolloutClick c = do
                             pure (tid, either (Just . T.take 200 . T.pack . show) (const Nothing) r)
                         let bad = [t <> ": " <> e | (t, Just e) <- results]
                             outcome
-                                | null bad = (if approving then "✅ Approved by " <> who <> " — rollout starting." else "🚫 Discarded by " <> who <> ".")
-                                | otherwise = "⚠️ " <> who <> ": " <> T.intercalate "; " bad
-                        audit (Just ap) (if approving then "RELEASE_BOT_ROLLOUT_APPROVED" else "RELEASE_BOT_ROLLOUT_DISCARDED") rid (object ["trackers" .= tids])
+                                | null bad = label <> (if approving then "✅ Approved by " <> who <> " — rollout starting." else "🚫 Discarded by " <> who <> ".")
+                                | otherwise = "⚠️ " <> label <> who <> ": " <> T.intercalate "; " bad
+                        audit (Just ap) (if approving then "RELEASE_BOT_ROLLOUT_APPROVED" else "RELEASE_BOT_ROLLOUT_DISCARDED") rid (object ["trackers" .= tids, "service" .= svc])
                         when (null bad) $
-                            void $ case (rqChannel req, dText "rolloutCardId" (rqData req)) of
+                            void $ case (rqChannel req, dText cardKey d) of
                                 (Just ch, Just mid) -> X.updateCard ch mid outcome
                                 _ -> pure (Right ())
                         sayReq req outcome
@@ -643,7 +654,6 @@ applyConfig ecfg req = do
         (_, Left e, _) -> failReq req "APPLYING" ("requester no longer authorized: " <> e)
         (_, _, Left e) -> failReq req "APPLYING" e
         (Right (repo, ch, svcs), Right ap, Right token) -> do
-            postSqlMigrations req repo token (fromMaybe "" (dText "commit" (rqData req)))
             let d = rqData req
                 commit = fromMaybe "" (dText "commit" d)
             fresh <- analyze ap token repo (chEnv ch) (dText "branch" d) commit svcs
@@ -741,36 +751,60 @@ approveCmTracker req tid = do
                 Right resp -> sayReq req ("⚠️ ConfigMap tracker " <> tid <> " was not auto-approved: " <> R.message resp <> " Approve it in SCC to continue.")
                 Left e -> sayReq req ("⚠️ ConfigMap tracker " <> tid <> " could not be approved automatically (" <> T.take 200 (T.pack (show e)) <> "). Approve it in SCC to continue.")
 
-{- | Collect the release's SQL migrations (changed .sql files grouped by database), store the
-combined file on the request and post it BEFORE any tracker exists. Never blocks the release:
-anything unmapped or unreadable is flagged so it is not silently skipped.
+{- | The release's changed .sql files (statements split). Anything that cannot be checked is
+flagged in the thread, never silently skipped; statements that name no configured service
+schema are flagged once.
 -}
-postSqlMigrations :: Req -> RepoCfg -> Text -> Text -> Flow ()
-postSqlMigrations req repo token commit = do
+loadSql :: Req -> RepoCfg -> Text -> Text -> Flow [SqlFile]
+loadSql req repo token commit = do
     let d = rqData req
         bases = nub [b | an <- maybeToList (dField "analysis" d), Just (Array ss) <- [dField "services" an], x <- foldr (:) [] ss, Just b <- [dText "baseCommit" x]]
     case bases of
-        [] -> sayReq req "⚠️ Could not determine the deployed commit, so SQL migrations in this release were NOT checked. Review the diff for .sql files before running."
+        [] -> sayReq req "⚠️ Could not determine the deployed commit, so SQL migrations in this release were NOT checked. Review the diff for .sql files before running." >> pure []
         (base : _) -> do
             cmp <- compareFiles token (repoSlug repo) base commit
             case cmp of
-                Left e -> sayReq req ("⚠️ Could not list changed files to look for SQL migrations (" <> e <> "). Check the diff for .sql files manually.")
+                Left e -> sayReq req ("⚠️ Could not list changed files to look for SQL migrations (" <> e <> "). Check the diff for .sql files manually.") >> pure []
                 Right c -> do
-                    plan <- collectSql token (repoSlug repo) repo (crFiles c) commit
-                    let total = sum [length fs | (_, fs) <- spByDb plan]
-                        file = renderSql ("Release request " <> shortId (rqId req) <> " — " <> repoSlug repo <> " @ " <> T.take 7 commit) plan
-                    unless (null (spUnmapped plan)) $
-                        sayReq req ("⚠️ SQL file(s) changed but no database is configured for them (add `sqlFiles` on the app group): " <> T.intercalate ", " (spUnmapped plan))
-                    unless (null (spUnreadable plan)) $
-                        sayReq req ("⚠️ Could not read SQL file(s): " <> T.intercalate "; " (spUnreadable plan))
-                    if total == 0
-                        then when (null (spUnmapped plan) && null (spUnreadable plan)) (sayReq req "🗄 No SQL migrations in this release.")
-                        else do
-                            patchRequest (rqId req) (object ["sqlFile" .= file])
-                            link <- publicSqlLink (rqId req)
-                            let dbs = T.intercalate ", " [db <> " (" <> T.pack (show (length fs)) <> ")" | (db, fs) <- spByDb plan]
-                                inline = if T.length file <= 3000 then "\n```sql\n" <> T.stripEnd file <> "\n```" else "\n(too long to show here — use the link)"
-                            sayReq req ("🗄 **SQL migrations to run before the release:** " <> T.pack (show total) <> " file(s) — " <> dbs <> maybe "" ("\nFull file: " <>) link <> inline)
+                    (files, bad) <- fetchSqlFiles token (repoSlug repo) (crFiles c) commit
+                    unless (null bad) $ sayReq req ("⚠️ Could not read SQL file(s): " <> T.intercalate "; " bad)
+                    let known = nub (concatMap scSqlSchemas (rcServices repo))
+                        loose = unattributed known files
+                    unless (null loose) $
+                        sayReq req ("⚠️ " <> T.pack (show (countStatements loose)) <> " SQL statement(s) name none of the configured service schemas (" <> T.intercalate ", " known <> ") and are not attributed to any service — run them manually: " <> T.intercalate ", " (map sfPath loose))
+                    pure files
+
+{- | Post one service's SQL (the statements that act on its schemas) BEFORE its tracker is created,
+inline when short and always as a downloadable file.
+-}
+postServiceSql :: Req -> ServiceCfg -> [SqlFile] -> Flow ()
+postServiceSql req svc files = unless (null (scSqlSchemas svc)) $ do
+    let schemas = T.intercalate ", " (scSqlSchemas svc)
+        mine = statementsFor (scSqlSchemas svc) files
+        n = countStatements mine
+    if n == 0
+        then sayReq req ("🗄 " <> scService svc <> ": no SQL changes for " <> schemas <> ".")
+        else do
+            let file = renderSql (scService svc <> " — release request " <> shortId (rqId req)) schemas mine
+            patchKey req ("sql:" <> scService svc) file
+            link <- publicSqlLink (rqId req) (scService svc)
+            let inline = if T.length file <= 2500 then "\n```sql\n" <> T.stripEnd file <> "\n```" else "\n(too long to show here — use the link)"
+            sayReq req ("🗄 **" <> scService svc <> " — SQL to run before the release:** " <> T.pack (show n) <> " statement(s) in " <> T.pack (show (length mine)) <> " file(s) on " <> schemas <> maybe "" ("\nFull file: " <>) link <> inline)
+
+{- | One Approve/Discard card per service. Xyne cannot put flow cards inside a thread, so the card
+goes to the channel and the thread gets a pointer to it.
+-}
+postRolloutCard :: Req -> ServiceCfg -> Text -> Text -> Flow ()
+postRolloutCard req svc short tid = case rqChannel req of
+    Nothing -> pure ()
+    Just chId -> do
+        let txt = "**Rollout approval — " <> scService svc <> "** (release request `" <> shortId (rqId req) <> "`)\n`" <> short <> "` · tracker `" <> tid <> "`\nApproving starts this service's rollout. Only authorized approvers can approve."
+        cr <- X.postRolloutCard chId txt (rqId req) (scService svc)
+        case cr of
+            Right mid -> do
+                patchKey req ("rolloutCard:" <> scService svc) mid
+                sayReq req ("⬇️ **" <> scService svc <> "**: approve or discard with the card posted just below in the channel (Xyne cannot show buttons inside a thread).")
+            Left e -> logError ("[release-bot] rollout card post failed: " <> e)
 
 -- | The service's own configured rollout (deployment_config), else the bot rule's, else one 100% step.
 serviceBaseline :: ServiceCfg -> Flow [RolloutStepCfg]
@@ -800,6 +834,7 @@ createServiceTrackers ecfg req from = do
         (_, Left e, _) -> failReq req from ("requester no longer authorized: " <> e)
         (_, _, Left e) -> failReq req from e
         (Right (repo, ch, svcs), Right ap, Right token) -> do
+            sqlFiles <- loadSql req repo token (fromMaybe "" (dText "commit" (rqData req)))
             let d = rqData req
                 commit = fromMaybe "" (dText "commit" d)
                 short = T.take 6 commit
@@ -828,6 +863,17 @@ createServiceTrackers ecfg req from = do
                 case envOverride of
                     Left e -> pure (scService svc, Left e)
                     Right ov -> do
+                        postServiceSql req svc sqlFiles
+                        let storedOld = listToMaybe [o | an <- maybeToList (dField "analysis" d), Just (Array ss) <- [dField "services" an], x <- foldr (:) [] ss, dText "service" x == Just (scService svc), Just o <- [dText "oldVersion" x]]
+                        -- Schedulers/producers (BackendScheduler app groups) must be created as such so SCC
+                        -- resolves their running version from deployment labels, not from a VirtualService.
+                        pCfgM <- findProductByName (scAppGroup svc)
+                        let trackerKind = case pCfgM >>= S.dcAppGroupType of
+                                Just t | Right k <- normalizeProductType t -> k
+                                _ -> "BackendService" :: Text
+                            jk = jenkinsFor repo (chEnv ch)
+                            -- the image tag Jenkins pushes: the same value the build was triggered with
+                            image = fromMaybe "" (jcCommitPrefix jk) <> T.take (fromMaybe 6 (jcCommitLength jk)) commit
                         baseline <- serviceBaseline svc
                         let override = parseRolloutOverride (fromMaybe "" (dText "text" d))
                             rolloutJson = map (\r -> object ["rolloutPercent" .= rsRolloutPercent r, "cooloffMinutes" .= rsCooloffMinutes r, "podCount" .= rsPodCount r])
@@ -839,10 +885,10 @@ createServiceTrackers ecfg req from = do
                                     [ "appGroup" .= scAppGroup svc
                                     , "service" .= [scService svc]
                                     , "env" .= chEnv ch
-                                    , "trackerType" .= ("BackendService" :: Text)
+                                    , "trackerType" .= trackerKind
                                     , "release_manager" .= fromMaybe "" (rqRequester req)
                                     , "release_tag" .= (scService svc <> "-" <> short)
-                                    , "old_version" .= ("unknown" :: Text)
+                                    , "old_version" .= fromMaybe "unknown" storedOld
                                     , "new_version" .= short
                                     , "rollout_strategy" .= rolloutJson rollout
                                     , "mode" .= ("AUTO" :: Text)
@@ -851,6 +897,7 @@ createServiceTrackers ecfg req from = do
                                     , "description" .= ("Created by release bot request " <> shortId (rqId req))
                                     ]
                                         ++ maybe [] (\o -> ["envOverrideData" .= o]) ov
+                                        ++ ["docker_image" .= image | not (T.null image)]
                             create rollout = case fromJSON (mkBody rollout) :: Result K8sCreateReleaseReq of
                                 A.Error e -> pure (Left (T.pack e))
                                 Success r -> do
@@ -871,6 +918,11 @@ createServiceTrackers ecfg req from = do
                             _ -> pure first
                         when (maybe False (const True) customSteps && either (const False) (const True) first) $
                             sayReq req ("🎚 " <> scService svc <> ": custom rollout " <> T.intercalate ", " [T.pack (show (rsRolloutPercent x)) <> "% → " <> T.pack (show (rsCooloffMinutes x)) <> "m" | x <- fromMaybe [] customSteps] <> ".")
+                        case res of
+                            Right tid -> do
+                                patchKey req ("tracker:" <> scService svc) tid
+                                postRolloutCard req svc short tid
+                            Left _ -> pure ()
                         pure (scService svc, res)
             let okIds = [i | (_, Right i) <- results]
                 errs = [s <> ": " <> e | (s, Left e) <- results]
@@ -879,15 +931,7 @@ createServiceTrackers ecfg req from = do
                 then do
                     ok <- transition (rqId req) from "COMPLETED" (object [])
                     when ok $ do
-                        sayReq req ("✅ Release tracker(s) created: " <> T.intercalate ", " okIds <> " (status CREATED). Approve below to start the rollout, or open SCC.")
-                        case rqChannel req of
-                            Just chId -> do
-                                let txt = "**Rollout approval** — release request `" <> shortId (rqId req) <> "`\n" <> T.intercalate ", " [scService s | s <- rcServices repo, scService s `elem` svcs] <> " @ `" <> short <> "`\nApproving starts the rollout (SCC rollout strategy applies). Only authorized approvers can approve."
-                                cr <- X.postRolloutCard chId txt (rqId req)
-                                case cr of
-                                    Right mid -> patchRequest (rqId req) (object ["rolloutCardId" .= mid])
-                                    Left e -> logError ("[release-bot] rollout card post failed: " <> e)
-                            Nothing -> pure ()
+                        sayReq req ("✅ Release tracker(s) created: " <> T.intercalate ", " okIds <> " (status CREATED). Approve each service with its card in the channel, or in SCC.")
                 else failReq req from ("Some trackers were not created: " <> T.intercalate "; " errs <> (if null okIds then "" else ". Created: " <> T.intercalate ", " okIds))
 
 
