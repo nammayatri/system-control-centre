@@ -157,6 +157,8 @@ data JenkinsCfg = JenkinsCfg
     -- ^ Send only the first N chars of the sha. The cloud-jenkins job takes the FIRST 6
     -- ("Enter first 6 digit of commit id") and uses it verbatim as the image tag, so it
     -- must match the 6-char version SCC records. Default 6.
+    , jcCommitPrefix :: Maybe Text
+    -- ^ Prepended to the sent sha, e.g. @"master-"@ gives @master-840d27@ (sandbox image tags)
     , jcFixedParams :: M.Map Text Text
     -- ^ Always-sent params; use these to select the prod envs only
     }

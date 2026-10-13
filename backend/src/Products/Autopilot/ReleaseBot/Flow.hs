@@ -309,7 +309,7 @@ startRequest ch repo ap rid thread m token branch fullSha services = do
     jr <-
         if dry
             then pure (Right Nothing)
-            else fmap Just <$> triggerBuild (jcJob j) (M.insert (jcCommitParam j) (T.take (fromMaybe 6 (jcCommitLength j)) fullSha) (jcFixedParams j))
+            else fmap Just <$> triggerBuild (jcJob j) (M.insert (jcCommitParam j) (fromMaybe "" (jcCommitPrefix j) <> T.take (fromMaybe 6 (jcCommitLength j)) fullSha) (jcFixedParams j))
     let patch =
             object
                 [ "branch" .= branch
