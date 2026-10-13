@@ -2927,6 +2927,11 @@ testReleaseBotTriggers = do
 
 testReleaseBotRows :: IO ()
 testReleaseBotRows = do
+  -- custom rollout asked for in the message
+  assertEqual "rollout override parsed" (Just (Right [(5, 10), (25, 30), (50, 30), (100, 10)])) (PRI.parseRolloutOverride "release x till abc123 with rollout 5% -> 10, 25% -> 30, 50% -> 30, 100% -> 10")
+  assertEqual "rollout override with arrows/newlines" (Just (Right [(10, 5), (100, 0)])) (PRI.parseRolloutOverride "10% \8594 5\n100% \8594 0")
+  assertEqual "no override in a plain request" Nothing (PRI.parseRolloutOverride "release app backend till 840d277")
+  assertBool "override not ending at 100% is rejected" (either (const True) (const False) (maybe (Right []) id (PRI.parseRolloutOverride "5% -> 10, 50% -> 30")))
   -- merge mode parses on both rule kinds (env var + configmap); absent = replace
   case RBW.validateServiceBot "{\"envVar\":{\"envVar\":\"DHALL_CONFIG\",\"repoPath\":\"a/rider-app.dhall\",\"mode\":\"merge\"}}" of
     Right sb -> assertEqual "env var mode=merge parsed" (Just (Just "merge")) (fmap PRC.evMode (RBW.sbEnvVar sb))

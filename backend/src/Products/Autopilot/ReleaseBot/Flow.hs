@@ -54,7 +54,9 @@ import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Products.Autopilot.Actions.ConfigMap (createConfigMapH, updateConfigMapH)
 import Products.Autopilot.ConfigReview (reviewStatusInfo)
-import Products.Autopilot.Actions.Release (createReleaseH)
+import Products.Autopilot.Actions.Release (approveReleaseH, createReleaseH, decodeStrategyText, discardReleaseH)
+import Products.Autopilot.Queries.ProductService (findServiceByProductAndName)
+import qualified Products.Autopilot.Types.Storage.Schema as S
 import Products.Autopilot.ProdRelease.Config
 import Products.Autopilot.ReleaseBot.ConfigSource (loadBotConfig)
 import Products.Autopilot.Mobile.Github.Auth (getInstallationToken, loadGhCreds)
@@ -66,7 +68,7 @@ import Products.Autopilot.ReleaseBot.Engine
 import Products.Autopilot.ReleaseBot.Live (LiveEnv (..), readServiceEnv, replaceEnvVar)
 import Products.Autopilot.ReleaseBot.Store
 import qualified Products.Autopilot.ReleaseBot.Xyne as X
-import Products.Autopilot.Types.API (K8sCreateReleaseReq)
+import Products.Autopilot.Types.API (ApproveReleaseReq (..), DiscardReleaseReq (..), K8sCreateReleaseReq)
 import qualified Products.Autopilot.Types.Release as RT
 import Products.Autopilot.Types.Release (ReleaseStatus (..))
 import qualified Shared.API.Response as R
@@ -415,7 +417,55 @@ ack :: Text -> Value
 ack msg = object ["type" .= ("ack" :: Text), "message" .= msg]
 
 handleClick :: X.Click -> Flow Value
-handleClick c = do
+handleClick c
+    | X.cVerb c `elem` [X.rolloutApproveVerb, X.rolloutRejectVerb] = handleRolloutClick c
+    | otherwise = handleConfigClick c
+
+-- | Approve (which starts the rollout) or discard the trackers the bot created for a request.
+handleRolloutClick :: X.Click -> Flow Value
+handleRolloutClick c = do
+    (name, email0) <- if T.null (X.cEmail c) then X.getUser (X.cUserId c) else pure (X.cUserName c, X.cEmail c)
+    let rid = X.cRequestId c
+        approving = X.cVerb c == X.rolloutApproveVerb
+        who = if T.null name then email0 else name
+    mr <- getRequest rid
+    case mr of
+        Nothing -> pure (ack "Unknown request.")
+        Just req -> do
+            auth <- authorize email0 (if approving then "RELEASE_APPROVE" else "RELEASE_DISCARD")
+            let tids = case dField "trackerIds" (rqData req) of
+                    Just (Array xs) -> [t | String t <- foldr (:) [] xs]
+                    _ -> []
+            case auth of
+                Left why -> do
+                    sayReq req ("⛔ " <> who <> " cannot " <> (if approving then "approve" else "discard") <> " this: " <> why <> ". Nothing was changed.")
+                    pure (ack "You are not authorized.")
+                Right ap
+                    | null tids -> pure (ack "No release trackers recorded for this request.")
+                    | otherwise -> do
+                        results <- forM tids $ \tid -> do
+                            r <-
+                                tryAny $
+                                    if approving
+                                        then void (approveReleaseH ap tid (ApproveReleaseReq{approvedBy = who, isInfraApproved = Nothing}))
+                                        else do
+                                            resp <- discardReleaseH ap tid (DiscardReleaseReq{reason = Just ("Discarded from Xyne by " <> who)})
+                                            when (R.status resp /= "SUCCESS") (C.throwM (userError (T.unpack (R.message resp))))
+                            pure (tid, either (Just . T.take 200 . T.pack . show) (const Nothing) r)
+                        let bad = [t <> ": " <> e | (t, Just e) <- results]
+                            outcome
+                                | null bad = (if approving then "✅ Approved by " <> who <> " — rollout starting." else "🚫 Discarded by " <> who <> ".")
+                                | otherwise = "⚠️ " <> who <> ": " <> T.intercalate "; " bad
+                        audit (Just ap) (if approving then "RELEASE_BOT_ROLLOUT_APPROVED" else "RELEASE_BOT_ROLLOUT_DISCARDED") rid (object ["trackers" .= tids])
+                        when (null bad) $
+                            void $ case (rqChannel req, dText "rolloutCardId" (rqData req)) of
+                                (Just ch, Just mid) -> X.updateCard ch mid outcome
+                                _ -> pure (Right ())
+                        sayReq req outcome
+                        pure (ack outcome)
+
+handleConfigClick :: X.Click -> Flow Value
+handleConfigClick c = do
     (name, email0) <- if T.null (X.cEmail c) then X.getUser (X.cUserId c) else pure (X.cUserName c, X.cEmail c)
     let rid = X.cRequestId c
         approving = X.cVerb c == X.approveVerb
@@ -423,19 +473,13 @@ handleClick c = do
     case mr of
         Nothing -> pure (ack "Unknown request.")
         Just req -> do
-            selfOk <- envFlag "SC_RELEASE_BOT_ALLOW_SELF_APPROVE" False
             auth <- authorize email0 "RELEASE_APPROVE"
-            let requester = T.toLower (fromMaybe "" (rqRequester req))
-                isSelf = T.toLower (T.strip email0) == requester
             case auth of
                 Left why -> do
                     audit Nothing "RELEASE_BOT_APPROVE_DENIED" rid (object ["email" .= email0, "why" .= why])
                     sayReq req ("⛔ " <> (if T.null name then email0 else name) <> " cannot approve this: " <> why <> ". Nothing was run.")
                     pure (ack "You are not authorized to approve this.")
                 Right ap
-                    | isSelf && not selfOk -> do
-                        sayReq req "⛔ The requester cannot approve their own release. Ask another approver."
-                        pure (ack "You cannot approve your own request.")
                     | otherwise -> do
                         now <- liftIO getCurrentTime
                         let to = if approving then "APPROVED" else "REJECTED" :: Text
@@ -675,6 +719,24 @@ approveCmTracker req tid = do
                 Right resp -> sayReq req ("⚠️ ConfigMap tracker " <> tid <> " was not auto-approved: " <> R.message resp <> " Approve it in SCC to continue.")
                 Left e -> sayReq req ("⚠️ ConfigMap tracker " <> tid <> " could not be approved automatically (" <> T.take 200 (T.pack (show e)) <> "). Approve it in SCC to continue.")
 
+-- | The service's own configured rollout (deployment_config), else the bot rule's, else one 100% step.
+serviceBaseline :: ServiceCfg -> Flow [RolloutStepCfg]
+serviceBaseline svc = do
+    m <- findServiceByProductAndName (scAppGroup svc) (scService svc)
+    let fromDb = case m >>= S.dcRolloutStrategy of
+            Just raw | Right steps <- decodeStrategyText raw, not (null steps) -> [RolloutStepCfg (RT.rolloutPercent x) (RT.cooloffMinutes x) (RT.podCount x) | x <- steps]
+            _ -> []
+    pure $ case (fromDb, scDefaultRollout svc) of
+        (xs@(_ : _), _) -> xs
+        ([], ys@(_ : _)) -> ys
+        _ -> [RolloutStepCfg 100 0 1]
+
+-- | Pod count for a requested step: the baseline step at that percent, else the nearest lower one.
+podFor :: [RolloutStepCfg] -> Int -> Int
+podFor base p = case [rsPodCount x | x <- base, rsRolloutPercent x <= p] of
+    [] -> maybe 1 rsPodCount (listToMaybe base)
+    xs -> last xs
+
 createServiceTrackers :: Either Text ProdReleaseConfig -> Req -> Text -> Flow ()
 createServiceTrackers ecfg req from = do
     scope <- loadScope ecfg req
@@ -713,11 +775,13 @@ createServiceTrackers ecfg req from = do
                 case envOverride of
                     Left e -> pure (scService svc, Left e)
                     Right ov -> do
-                        let rollout =
-                                if null (scDefaultRollout svc)
-                                    then [object ["rolloutPercent" .= (100 :: Int), "cooloffMinutes" .= (0 :: Int), "podCount" .= (1 :: Int)]]
-                                    else [object ["rolloutPercent" .= rsRolloutPercent r, "cooloffMinutes" .= rsCooloffMinutes r, "podCount" .= rsPodCount r] | r <- scDefaultRollout svc]
-                            body =
+                        baseline <- serviceBaseline svc
+                        let override = parseRolloutOverride (fromMaybe "" (dText "text" d))
+                            rolloutJson = map (\r -> object ["rolloutPercent" .= rsRolloutPercent r, "cooloffMinutes" .= rsCooloffMinutes r, "podCount" .= rsPodCount r])
+                            customSteps = case override of
+                                Just (Right xs) -> Just [RolloutStepCfg p m (podFor baseline p) | (p, m) <- xs]
+                                _ -> Nothing
+                            mkBody rollout =
                                 object $
                                     [ "appGroup" .= scAppGroup svc
                                     , "service" .= [scService svc]
@@ -727,25 +791,50 @@ createServiceTrackers ecfg req from = do
                                     , "release_tag" .= (scService svc <> "-" <> short)
                                     , "old_version" .= ("unknown" :: Text)
                                     , "new_version" .= short
-                                    , "rollout_strategy" .= rollout
+                                    , "rollout_strategy" .= rolloutJson rollout
                                     , "mode" .= ("AUTO" :: Text)
                                     , "is_approved" .= False
                                     , "globalId" .= (rqId req <> "-" <> scService svc)
                                     , "description" .= ("Created by release bot request " <> shortId (rqId req))
                                     ]
                                         ++ maybe [] (\o -> ["envOverrideData" .= o]) ov
-                        case fromJSON body :: Result K8sCreateReleaseReq of
-                            A.Error e -> pure (scService svc, Left (T.pack e))
-                            Success r -> do
-                                resp <- createReleaseH ap Nothing Nothing r
-                                pure (scService svc, maybe (Left (R.message resp)) Right (idOfResponse resp))
+                            create rollout = case fromJSON (mkBody rollout) :: Result K8sCreateReleaseReq of
+                                A.Error e -> pure (Left (T.pack e))
+                                Success r -> do
+                                    x <- tryAny (createReleaseH ap Nothing Nothing r)
+                                    pure $ case x of
+                                        Left ex -> Left (T.take 200 (T.pack (show ex)))
+                                        Right resp -> maybe (Left (R.message resp)) Right (idOfResponse resp)
+                        case override of
+                            Just (Left why) -> sayReq req ("⚠️ " <> scService svc <> ": ignoring the requested rollout — " <> why <> ". Using the default rollout.")
+                            _ -> pure ()
+                        -- A custom rollout needs the stagger permission (createReleaseH enforces it); if the
+                        -- requester lacks it (or the strategy is refused) fall back to the default one.
+                        first <- create (fromMaybe baseline customSteps)
+                        res <- case (first, customSteps) of
+                            (Left why, Just _) -> do
+                                sayReq req ("⚠️ " <> scService svc <> ": could not use the requested rollout (" <> why <> "). Creating it with the default rollout instead.")
+                                create baseline
+                            _ -> pure first
+                        when (maybe False (const True) customSteps && either (const False) (const True) first) $
+                            sayReq req ("🎚 " <> scService svc <> ": custom rollout " <> T.intercalate ", " [T.pack (show (rsRolloutPercent x)) <> "% → " <> T.pack (show (rsCooloffMinutes x)) <> "m" | x <- fromMaybe [] customSteps] <> ".")
+                        pure (scService svc, res)
             let okIds = [i | (_, Right i) <- results]
                 errs = [s <> ": " <> e | (s, Left e) <- results]
             patchRequest (rqId req) (object ["trackerIds" .= okIds])
             if null errs
                 then do
                     ok <- transition (rqId req) from "COMPLETED" (object [])
-                    when ok $ sayReq req ("✅ Release tracker(s) created: " <> T.intercalate ", " okIds <> " (status CREATED — approve the rollout in SCC).")
+                    when ok $ do
+                        sayReq req ("✅ Release tracker(s) created: " <> T.intercalate ", " okIds <> " (status CREATED). Approve below to start the rollout, or open SCC.")
+                        case rqChannel req of
+                            Just chId -> do
+                                let txt = "**Rollout approval** — release request `" <> shortId (rqId req) <> "`\n" <> T.intercalate ", " [scService s | s <- rcServices repo, scService s `elem` svcs] <> " @ `" <> short <> "`\nApproving starts the rollout (SCC rollout strategy applies). Only authorized approvers can approve."
+                                cr <- X.postRolloutCard chId txt (rqId req)
+                                case cr of
+                                    Right mid -> patchRequest (rqId req) (object ["rolloutCardId" .= mid])
+                                    Left e -> logError ("[release-bot] rollout card post failed: " <> e)
+                            Nothing -> pure ()
                 else failReq req from ("Some trackers were not created: " <> T.intercalate "; " errs <> (if null okIds then "" else ". Created: " <> T.intercalate ", " okIds))
 
 

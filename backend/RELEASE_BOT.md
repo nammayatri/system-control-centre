@@ -25,7 +25,7 @@ Table: `release_request` (migration `0053`).
 6. **No config change** → tracker(s) created when the build succeeds.
    **Config change** → an Approve/Reject card is posted with a no-VPN diff link.
    **Any blocker** (can't verify something) → build only, no tracker, reason posted.
-7. **Approval**: approver needs `RELEASE_APPROVE` and (default) must not be the requester.
+7. **Approval**: approver needs `RELEASE_APPROVE` (the requester may approve their own release if they hold it). After the build, a second **Approve & start rollout / Discard release** card approves or discards the created trackers.
 8. **Apply** after approval *and* a successful build: re-verifies, then creates a `BackendConfig`
    tracker per changed configmap — **unapproved**, one at a time, stopping at the first failure (so a
    partial failure applies nothing). Once SCC's AI config review has settled, the bot approves each through
@@ -72,7 +72,6 @@ Run migrations `0053` and `0054`, then set (env only — nothing secret lives in
 | `SC_RELEASE_BOT_DRY_RUN=true` | Analyze + post, but no Jenkins/trackers/apply. **Start here.** |
 | `SC_PROD_RELEASE_CONFIG` | Path to the fallback config JSON (default `./dhall-configs/prod-release-config.json`). |
 | `SC_RELEASE_BOT_TTL_MINUTES` | Approval window (default 120). |
-| `SC_RELEASE_BOT_ALLOW_SELF_APPROVE` | Default off. |
 
 ## Jenkins
 

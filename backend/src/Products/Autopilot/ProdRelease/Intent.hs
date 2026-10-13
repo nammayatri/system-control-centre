@@ -12,6 +12,7 @@ If AI is disabled / unreachable, 'parseIntent' falls back to a keyword parser,
 so the assistant still works (just less flexibly).
 -}
 module Products.Autopilot.ProdRelease.Intent (
+    parseRolloutOverride,
     Intent (..),
     emptyIntent,
     parseIntent,
@@ -204,3 +205,33 @@ keywordIntent cfg known msg =
     orElseM (Just a) _ = Just a
     orElseM Nothing b = b
 
+
+{- | A custom rollout asked for in the message, e.g. @5% -> 10, 25% -> 30, 50% -> 30, 100% -> 10@
+(traffic percent -> cooloff minutes). @Nothing@ = none asked; @Just (Left why)@ = asked but
+unusable (the caller keeps the default and says why).
+-}
+parseRolloutOverride :: Text -> Maybe (Either Text [(Int, Int)])
+parseRolloutOverride msg =
+    let norm = T.replace "\8594" "->" (T.replace "=>" "->" (T.replace "\8212>" "->" msg))
+        pieces = concatMap (T.splitOn ";") (concatMap (T.splitOn ",") (T.lines norm))
+        step piece = do
+            let (l, r) = T.breakOn "->" piece
+            if T.null r || not ("%" `T.isInfixOf` l)
+                then Nothing
+                else do
+                    let pct = T.takeWhileEnd isDigit (T.strip (T.dropEnd 1 (fst (T.breakOnEnd "%" l))))
+                        mins = T.takeWhile isDigit (T.dropWhile (not . isDigit) (T.drop 2 r))
+                    if T.null pct || T.null mins then Nothing else Just (read (T.unpack pct), read (T.unpack mins))
+        steps = mapMaybe step pieces
+        ok = length steps >= 2 && map fst steps == sortUniq (map fst steps) && fmap fst (lastMay steps) == Just 100 && all (\(p, _) -> p > 0 && p <= 100) steps
+        lastMay xs = if null xs then Nothing else Just (last xs)
+        sortUniq = foldr ins []
+        ins x [] = [x]
+        ins x (y : ys) | x < y = x : y : ys | x == y = y : ys | otherwise = y : ins x ys
+     in if null steps
+            then Nothing
+            else
+                Just $
+                    if ok
+                        then Right steps
+                        else Left "the rollout steps must have increasing percents and end at 100% (e.g. 5% -> 10, 25% -> 30, 100% -> 10)"

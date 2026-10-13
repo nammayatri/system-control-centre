@@ -25,6 +25,9 @@ module Products.Autopilot.ReleaseBot.Xyne (
     Click (..),
     approveVerb,
     rejectVerb,
+    rolloutApproveVerb,
+    rolloutRejectVerb,
+    postRolloutCard,
     verifySignature,
     signingSecret,
     parseMention,
@@ -61,6 +64,11 @@ import qualified Data.Vector as V
 approveVerb, rejectVerb :: Text
 approveVerb = "scc_release_approve"
 rejectVerb = "scc_release_reject"
+
+-- | Verbs of the second card: approve (and so start) / discard the created release trackers.
+rolloutApproveVerb, rolloutRejectVerb :: Text
+rolloutApproveVerb = "scc_rollout_approve"
+rolloutRejectVerb = "scc_rollout_reject"
 
 -- ─── Signature ─────────────────────────────────────────────────────
 
@@ -139,7 +147,7 @@ parseClick v = flowShape `orElse` interactionShape `orElse` (obj "payload" v >>=
   where
     orElse (Just a) _ = Just a
     orElse Nothing b = b
-    known verb = verb == approveVerb || verb == rejectVerb
+    known verb = verb `elem` [approveVerb, rejectVerb, rolloutApproveVerb, rolloutRejectVerb]
     flowShape = do
         aid <- str "actionId" v
         let (verb, rest) = T.breakOn ":" aid
@@ -285,6 +293,14 @@ postApprovalCard :: (MonadIO m) => Text -> Text -> Text -> m (Either Text Text)
 postApprovalCard channel text requestId = do
     b <- baseUrl
     let flow = flowCard text [("Approve & apply", approveVerb <> ":" <> requestId, False), ("Reject", rejectVerb <> ":" <> requestId, True)]
+    r <- call (nativeBase b <> "/chat/postMessage") (object ["channelId" .= channel, "text" .= T.take 300 text, "flow" .= flow])
+    pure (r >>= \v -> Right (fromMaybe "" (str "messageId" v)))
+
+-- | Approve/Discard card for freshly created release trackers; returns the native message id.
+postRolloutCard :: (MonadIO m) => Text -> Text -> Text -> m (Either Text Text)
+postRolloutCard channel text requestId = do
+    b <- baseUrl
+    let flow = flowCard text [("Approve & start rollout", rolloutApproveVerb <> ":" <> requestId, False), ("Discard release", rolloutRejectVerb <> ":" <> requestId, True)]
     r <- call (nativeBase b <> "/chat/postMessage") (object ["channelId" .= channel, "text" .= T.take 300 text, "flow" .= flow])
     pure (r >>= \v -> Right (fromMaybe "" (str "messageId" v)))
 

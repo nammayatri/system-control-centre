@@ -44,6 +44,7 @@ module Products.Autopilot.Actions.Release
 
     -- * Helpers exported for other modules
     isValidK8sVersion,
+    decodeStrategyText,
     injectPromotable,
     injectStoreState,
     normalizeProductType,
