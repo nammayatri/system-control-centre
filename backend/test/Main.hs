@@ -88,6 +88,7 @@ import Data.ByteString.Char8 qualified as BC
 import Data.Aeson.KeyMap qualified as AKM
 import Products.Autopilot.ProdRelease.Config qualified as PRC
 import Products.Autopilot.ProdRelease.Intent qualified as PRI
+import Products.Autopilot.ReleaseBot.Sql qualified as RBS
 import Products.Autopilot.ReleaseBot.Diff qualified as RBD
 import Products.Autopilot.ReleaseBot.Engine qualified as RBE
 import Products.Autopilot.ReleaseBot.Live (refsFromDeployment)
@@ -2927,6 +2928,13 @@ testReleaseBotTriggers = do
 
 testReleaseBotRows :: IO ()
 testReleaseBotRows = do
+  -- sqlFiles rule parses and renders grouped by database
+  case RBW.validateProductBot "{\"env\":\"MASTER\",\"sqlFiles\":[{\"db\":\"atlas_app\",\"paths\":[\"Backend/dev/ddl-migrations/rider-app/\"]}]}" of
+    Right pb -> assertEqual "sqlFiles parsed" [("atlas_app", ["Backend/dev/ddl-migrations/rider-app/"])] (map (\q -> (PRC.sqDb q, PRC.sqPaths q)) (RBW.pbSql pb))
+    Left e -> assertBool ("product rule should parse: " <> T.unpack e) False
+  assertBool "sqlFiles without paths is rejected" (either (const True) (const False) (RBW.validateProductBot "{\"env\":\"MASTER\",\"sqlFiles\":[{\"db\":\"x\",\"paths\":[]}]}"))
+  let rendered = RBS.renderSql "t" (RBS.SqlPlan [("db1", [("a/1.sql", "SELECT 1;\n")])] [] [])
+  assertBool "rendered sql names the database and file" ("DATABASE: db1" `T.isInfixOf` rendered && ">>> a/1.sql" `T.isInfixOf` rendered && "SELECT 1;" `T.isInfixOf` rendered)
   -- custom rollout asked for in the message
   assertEqual "rollout override parsed" (Just (Right [(5, 10), (25, 30), (50, 30), (100, 10)])) (PRI.parseRolloutOverride "release x till abc123 with rollout 5% -> 10, 25% -> 30, 50% -> 30, 100% -> 10")
   assertEqual "rollout override with arrows/newlines" (Just (Right [(10, 5), (100, 0)])) (PRI.parseRolloutOverride "10% \8594 5\n100% \8594 0")

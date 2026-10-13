@@ -72,6 +72,7 @@ library
       Products.Autopilot.ReleaseBot.Routes
       Products.Autopilot.ReleaseBot.RowConfig
       Products.Autopilot.ReleaseBot.Live
+      Products.Autopilot.ReleaseBot.Sql
       Products.Autopilot.ReleaseBot.Store
       Products.Autopilot.ReleaseBot.Xyne
       Products.Autopilot.Discovery

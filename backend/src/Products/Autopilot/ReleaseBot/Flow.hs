@@ -23,6 +23,7 @@ module Products.Autopilot.ReleaseBot.Flow (
     handleClick,
     releaseBotLoop,
     publicRequestView,
+    publicRequestSql,
     linkToken,
     botEnabled,
 ) where
@@ -44,6 +45,7 @@ import Data.ByteArray (constEq)
 import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
+import Data.List (nub)
 import Data.Maybe (fromMaybe, listToMaybe, maybeToList)
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
@@ -66,6 +68,7 @@ import Products.Autopilot.ProdRelease.Jenkins (BuildStatus (..), TriggerResult (
 import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker)
 import Products.Autopilot.ReleaseBot.Engine
 import Products.Autopilot.ReleaseBot.Live (LiveEnv (..), readServiceEnv, replaceEnvVar)
+import Products.Autopilot.ReleaseBot.Sql (SqlPlan (..), collectSql, renderSql)
 import Products.Autopilot.ReleaseBot.Store
 import qualified Products.Autopilot.ReleaseBot.Xyne as X
 import Products.Autopilot.Types.API (ApproveReleaseReq (..), DiscardReleaseReq (..), K8sCreateReleaseReq)
@@ -111,6 +114,24 @@ publicLink rid = do
     pure $ case (base, sec) of
         (Just b, Just s) -> Just (T.dropWhileEnd (== '/') b <> "/r/" <> rid <> "?t=" <> linkToken s rid)
         _ -> Nothing
+
+-- | Link to the request's combined SQL file (same HMAC token as the review page).
+publicSqlLink :: Text -> Flow (Maybe Text)
+publicSqlLink rid = do
+    base <- lookupEnvSecret "SC_PUBLIC_BASE_URL"
+    sec <- lookupEnvSecret "SC_RELEASE_BOT_LINK_SECRET"
+    pure $ case (base, sec) of
+        (Just b, Just s) -> Just (T.dropWhileEnd (== '/') b <> "/api/public/release-requests/" <> rid <> "/sql?t=" <> linkToken s rid)
+        _ -> Nothing
+
+publicRequestSql :: Text -> Maybe Text -> Flow (Maybe Text)
+publicRequestSql rid mTok = do
+    sec <- lookupEnvSecret "SC_RELEASE_BOT_LINK_SECRET"
+    case (sec, mTok) of
+        (Just s, Just t) | constEq (TE.encodeUtf8 (linkToken s rid)) (TE.encodeUtf8 (T.toLower (T.strip t))) -> do
+            mr <- getRequest rid
+            pure (mr >>= dText "sqlFile" . rqData)
+        _ -> pure Nothing
 
 {- | Public, read-only view for the no-VPN page. Valid only with the request's link
 token; any mismatch is indistinguishable from "not found". Never includes apply
@@ -622,6 +643,7 @@ applyConfig ecfg req = do
         (_, Left e, _) -> failReq req "APPLYING" ("requester no longer authorized: " <> e)
         (_, _, Left e) -> failReq req "APPLYING" e
         (Right (repo, ch, svcs), Right ap, Right token) -> do
+            postSqlMigrations req repo token (fromMaybe "" (dText "commit" (rqData req)))
             let d = rqData req
                 commit = fromMaybe "" (dText "commit" d)
             fresh <- analyze ap token repo (chEnv ch) (dText "branch" d) commit svcs
@@ -718,6 +740,37 @@ approveCmTracker req tid = do
                 Right resp | R.status resp == "SUCCESS" -> sayReq req ("✅ ConfigMap tracker " <> tid <> " approved — applying.")
                 Right resp -> sayReq req ("⚠️ ConfigMap tracker " <> tid <> " was not auto-approved: " <> R.message resp <> " Approve it in SCC to continue.")
                 Left e -> sayReq req ("⚠️ ConfigMap tracker " <> tid <> " could not be approved automatically (" <> T.take 200 (T.pack (show e)) <> "). Approve it in SCC to continue.")
+
+{- | Collect the release's SQL migrations (changed .sql files grouped by database), store the
+combined file on the request and post it BEFORE any tracker exists. Never blocks the release:
+anything unmapped or unreadable is flagged so it is not silently skipped.
+-}
+postSqlMigrations :: Req -> RepoCfg -> Text -> Text -> Flow ()
+postSqlMigrations req repo token commit = do
+    let d = rqData req
+        bases = nub [b | an <- maybeToList (dField "analysis" d), Just (Array ss) <- [dField "services" an], x <- foldr (:) [] ss, Just b <- [dText "baseCommit" x]]
+    case bases of
+        [] -> sayReq req "⚠️ Could not determine the deployed commit, so SQL migrations in this release were NOT checked. Review the diff for .sql files before running."
+        (base : _) -> do
+            cmp <- compareFiles token (repoSlug repo) base commit
+            case cmp of
+                Left e -> sayReq req ("⚠️ Could not list changed files to look for SQL migrations (" <> e <> "). Check the diff for .sql files manually.")
+                Right c -> do
+                    plan <- collectSql token (repoSlug repo) repo (crFiles c) commit
+                    let total = sum [length fs | (_, fs) <- spByDb plan]
+                        file = renderSql ("Release request " <> shortId (rqId req) <> " — " <> repoSlug repo <> " @ " <> T.take 7 commit) plan
+                    unless (null (spUnmapped plan)) $
+                        sayReq req ("⚠️ SQL file(s) changed but no database is configured for them (add `sqlFiles` on the app group): " <> T.intercalate ", " (spUnmapped plan))
+                    unless (null (spUnreadable plan)) $
+                        sayReq req ("⚠️ Could not read SQL file(s): " <> T.intercalate "; " (spUnreadable plan))
+                    if total == 0
+                        then when (null (spUnmapped plan) && null (spUnreadable plan)) (sayReq req "🗄 No SQL migrations in this release.")
+                        else do
+                            patchRequest (rqId req) (object ["sqlFile" .= file])
+                            link <- publicSqlLink (rqId req)
+                            let dbs = T.intercalate ", " [db <> " (" <> T.pack (show (length fs)) <> ")" | (db, fs) <- spByDb plan]
+                                inline = if T.length file <= 3000 then "\n```sql\n" <> T.stripEnd file <> "\n```" else "\n(too long to show here — use the link)"
+                            sayReq req ("🗄 **SQL migrations to run before the release:** " <> T.pack (show total) <> " file(s) — " <> dbs <> maybe "" ("\nFull file: " <>) link <> inline)
 
 -- | The service's own configured rollout (deployment_config), else the bot rule's, else one 100% step.
 serviceBaseline :: ServiceCfg -> Flow [RolloutStepCfg]

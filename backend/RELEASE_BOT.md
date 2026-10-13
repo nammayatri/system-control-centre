@@ -184,6 +184,7 @@ never silently resolved.
 | `configMaps[] {name, files{key→repoPath}, mode?}` | If a file in `files` changed → diff that key of the live configmap against the repo file at the commit (`mode` omitted / `"replace"`: the live key is replaced by the repo file — use where the repo file IS the deployed config). `"mode": "merge"`: the live content is an env-specific variant of the repo file (e.g. the MASTER configmap), so only the repo change (deployed commit → target commit) is applied onto it as a 3-way line merge; an overlap with live edits is a conflict → build-only + flagged, never guessed. Needs all selected services on the same deployed commit. |
 | `secretFiles` | Changed secret files are flagged in the thread (never read/applied). |
 | `ignoreConfigMaps` | Extra configmaps to exclude from coverage (`kube-root-ca.crt`, `istio-ca-root-cert` always are). |
+| `sqlFiles[]` | `{db, paths}`: changed `.sql` files whose repo path starts with one of `paths` (or matches a `*` pattern) belong to database `db`. Before any release tracker is created the bot posts all of them, grouped by database, in the thread (inline if short) and as a downloadable file (`/api/public/release-requests/<id>/sql?t=…`). A changed `.sql` file no rule claims is flagged, never skipped. |
 
 If the commit diff can't be fully verified, **every** rule is treated as triggered (fail safe).
 A changed dhall file that **no rule watches** is a blocker (build-only).
