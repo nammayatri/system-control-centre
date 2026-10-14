@@ -72,7 +72,7 @@ data CompareResult = CompareResult
     , crStatus :: Text
     -- ^ @identical@ | @ahead@ | @behind@ | @diverged@ (head relative to base)
     , crTruncated :: Bool
-    -- ^ GitHub caps the compare file list at 300; at/above that we cannot
+    -- ^ GitHub keeps at most 3000 files of a compare (we page through them); at that ceiling we cannot
     -- prove a dhall file did NOT change, so callers must fail closed.
     }
 
@@ -86,7 +86,7 @@ instance FromJSON CompareResult where
         n <- o .:? "total_commits"
         st <- o .:? "status"
         let names = [f | FileEntry f <- fromMaybe [] fs]
-        pure CompareResult{crFiles = names, crTotalCommits = fromMaybe 0 n, crStatus = fromMaybe "" st, crTruncated = length names >= 300}
+        pure CompareResult{crFiles = names, crTotalCommits = fromMaybe 0 n, crStatus = fromMaybe "" st, crTruncated = False}
 
 githubTokenFromEnv :: (MonadIO m) => m (Either Text Text)
 githubTokenFromEnv =
@@ -116,11 +116,29 @@ listBranchCommits token slug branch n =
     get token "gh-commits" $
         "https://api.github.com/repos/" <> slug <> "/commits?per_page=" <> T.pack (show n) <> "&sha=" <> branch
 
--- | Files changed between @base@ and @head@ (three-dot compare).
+{- | Files changed between @base@ and @head@ (three-dot compare). GitHub returns the file list in pages
+of 100 and keeps at most 3000 files, so we page until a short page; 'crTruncated' is only set when we
+hit that 3000 ceiling (then the list really is incomplete).
+-}
 compareFiles :: (MonadIO m) => Text -> Text -> Text -> Text -> m (Either Text CompareResult)
-compareFiles token slug base headSha =
-    get token "gh-compare" $
-        "https://api.github.com/repos/" <> slug <> "/compare/" <> base <> "..." <> headSha
+compareFiles token slug base headSha = do
+    first <- page 1
+    case first of
+        Left e -> pure (Left e)
+        Right r0 -> go r0 (crFiles r0) (2 :: Int)
+  where
+    page n =
+        get token "gh-compare" $
+            "https://api.github.com/repos/" <> slug <> "/compare/" <> base <> "..." <> headSha <> "?per_page=100&page=" <> T.pack (show n)
+    go r0 acc n
+        | length acc `mod` 100 /= 0 || null acc || n > 30 = pure (Right r0{crFiles = acc, crTruncated = length acc >= 3000})
+        | otherwise = do
+            nxt <- page n
+            case nxt of
+                Left e -> pure (Left e)
+                Right r
+                    | null (crFiles r) -> pure (Right r0{crFiles = acc, crTruncated = False})
+                    | otherwise -> go r0 (acc ++ crFiles r) (n + 1)
 
 -- | Expand a short sha to the full 40-char sha (also proves the commit exists).
 resolveFullSha :: (MonadIO m) => Text -> Text -> Text -> m (Either Text Text)

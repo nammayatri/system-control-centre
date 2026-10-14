@@ -340,7 +340,14 @@ planRequest pc ch repo ap rid thread m = do
                 [] -> Left ("These services release from different branches (" <> T.intercalate "; " [scService x <> ": " <> T.intercalate "/" (allowedFor x) | x <- svcCfgs] <> "). Release them in separate requests.")
         branch = either (const (head' (rcBranches repo))) id branchE
     etoken <- githubTokenFlow
-    case (etoken, inCommit parsed) of
+    -- "release X till latest main" / "head": no sha given, take the branch head
+    let wantsHead = any (`T.isInfixOf` T.toLower (X.mText m)) ["latest", "newest", "head of", "tip of", "current main", "current head"]
+    mSha <- case (etoken, inCommit parsed) of
+        (Right token, Nothing) | wantsHead, Right _ <- branchE -> do
+            hs <- listBranchCommits token (repoSlug repo) branch 1
+            pure (case hs of Right (c : _) -> Just (csSha c); _ -> Nothing)
+        (_, c) -> pure c
+    case (etoken, mSha) of
         _ | Left w <- branchE -> stop w
         (Left e, _) -> stop ("⚠️ " <> e)
         (_, Nothing) -> do
@@ -473,7 +480,15 @@ startRequestNow ch repo ap rid thread m token branch fullSha services = do
             let why = "Nothing to release: " <> T.intercalate ", " (map srService (anServices an)) <> " already run `" <> T.take 7 fullSha <> "` (the deployed commit is the one you asked for). Ask for a newer commit on `" <> branch <> "`."
             void (transition rid "RECEIVED" "INFO_ONLY" (object ["error" .= why]))
             void (say (X.mChannel m) thread why)
-        else startAnalysed ch repo rid thread m branch fullSha services an
+        else do
+            let current = [srService r | r <- anServices an, atTarget (srBaseCommit r)]
+                todo = [srService r | r <- anServices an, not (atTarget (srBaseCommit r))]
+            if null current || null todo
+                then startAnalysed ch repo rid thread m branch fullSha services an
+                else do
+                    -- some services already run this commit: leave them out, release the rest
+                    void (say (X.mChannel m) thread ("ℹ️ " <> T.intercalate ", " current <> " already run `" <> T.take 7 fullSha <> "` — skipping " <> (if length current > 1 then "them" else "it") <> ", releasing " <> T.intercalate ", " todo <> "."))
+                    startRequestNow ch repo ap rid thread m token branch fullSha todo
   where
     atTarget = maybe False (\b -> not (T.null b) && (b `T.isPrefixOf` fullSha || fullSha `T.isPrefixOf` b))
 

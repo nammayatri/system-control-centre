@@ -40,7 +40,7 @@ import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import qualified Data.ByteString as BS
 import Data.List (nub, sort)
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe, isNothing, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -347,6 +347,9 @@ analyzeService ap token repo fullSha svc = do
                 , srReason = reason
                 }
         matches f d = f == d || ("/" <> d) `T.isSuffixOf` f
+        -- A capped diff only matters if something is checked against the file list (dhall files, an env
+        -- var rule, configmaps, secret patterns). A service with none of those has nothing to miss.
+        nothingToVerify = null (scDhallFiles svc) && isNothing (scEnvVar svc) && null (rcConfigMaps repo) && null (rcSecretFiles repo)
     case base of
         Nothing -> pure (mk [] False (Just "could not determine the currently deployed commit") Nothing)
         Just b -> do
@@ -355,7 +358,7 @@ analyzeService ap token repo fullSha svc = do
             pure $ case cmp of
                 Left e -> mk [] False (Just ("GitHub compare failed: " <> e)) diffUrl
                 Right c
-                    | crTruncated c -> mk (crFiles c) False (Just "diff too large to verify (GitHub caps compare at 300 files)") diffUrl
+                    | crTruncated c, not nothingToVerify -> mk (crFiles c) False (Just "diff too large to verify (GitHub keeps at most 3000 files of a compare)") diffUrl
                     | otherwise -> mk (crFiles c) True Nothing diffUrl
 
 -- | (change, blockers). Services with no envVar target contribute nothing.
