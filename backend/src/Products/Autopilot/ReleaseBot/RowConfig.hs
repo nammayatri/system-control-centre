@@ -88,6 +88,7 @@ data ServiceBot = ServiceBot
     , sbBranches :: [Text]
     , sbJenkins :: Maybe JenkinsPatch
     , sbSyncSecondary :: Bool
+    , sbDbTarget :: Maybe DbTarget
     }
     deriving (Show)
 
@@ -104,6 +105,7 @@ instance FromJSON ServiceBot where
             <*> (o .:? "branches" .!= [])
             <*> o .:? "jenkins"
             <*> (o .:? "syncToSecondary" .!= False)
+            <*> o .:? "dbManager"
 
 blank :: Text -> Bool
 blank = T.null . T.strip
@@ -189,6 +191,7 @@ buildFromRows rows = do
                     , scBranches = sbBranches sb
                     , scJenkins = sbJenkins sb
                     , scSyncSecondary = sbSyncSecondary sb
+                    , scDbTarget = sbDbTarget sb
                     }
         let branches = nub (concat [pbBranches pb | (_, _, pb) <- grp] ++ concatMap scBranches services)
         when (null branches) (Left (slug0 <> ": no \"branches\" configured (on an app group or a service)"))

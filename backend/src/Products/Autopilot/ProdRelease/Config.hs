@@ -26,6 +26,7 @@ module Products.Autopilot.ProdRelease.Config (
     jenkinsFor,
     jenkinsForSvc,
     JenkinsPatch (..),
+    DbTarget (..),
     noPatch,
     forEnv,
     isSecretFile,
@@ -106,6 +107,8 @@ data ServiceCfg = ServiceCfg
     , scSyncSecondary :: Bool
     -- ^ Also sync the release to the secondary cloud (the create form's "Sync to ..." toggle): the
     -- tracker is created with @isReleaseSync@ and a secondary stagger sized off the secondary cluster.
+    , scDbTarget :: Maybe DbTarget
+    -- ^ Where this service's SQL migrations run in the Multi-Cloud DB Manager (database, cloud mode)
     , scBranches :: [Text]
     -- ^ Branches this service releases from (e.g. @prodHotPush-Frontend@); empty = the repo's branches.
     -- The first one is the default when the message names no branch.
@@ -126,6 +129,7 @@ instance FromJSON ServiceCfg where
             <*> (o .:? "sqlSchemas" .!= [])
             <*> o .:? "jenkins"
             <*> (o .:? "syncToSecondary" .!= False)
+            <*> o .:? "dbManager"
             <*> (o .:? "branches" .!= [])
 instance ToJSON ServiceCfg where
     toJSON s =
@@ -141,6 +145,7 @@ instance ToJSON ServiceCfg where
             , "sqlSchemas" .= scSqlSchemas s
             , "jenkins" .= scJenkins s
             , "syncToSecondary" .= scSyncSecondary s
+            , "dbManager" .= scDbTarget s
             , "branches" .= scBranches s
             ]
 
@@ -219,6 +224,19 @@ instance FromJSON JenkinsPatch where
         JenkinsPatch <$> o .:? "job" <*> o .:? "commitParam" <*> o .:? "commitLength" <*> o .:? "commitPrefix" <*> (o .:? "fixedParams" .!= M.empty)
 instance ToJSON JenkinsPatch where
     toJSON p = object ["job" .= jpJob p, "commitParam" .= jpCommitParam p, "commitLength" .= jpCommitLength p, "commitPrefix" .= jpCommitPrefix p, "fixedParams" .= jpFixedParams p]
+
+-- | A DB Manager target: its database name, the execution mode (cloud selection) and optional pg schema.
+data DbTarget = DbTarget
+    { dtDatabase :: Text
+    , dtMode :: Text
+    , dtPgSchema :: Maybe Text
+    }
+    deriving (Show, Eq, Generic)
+
+instance FromJSON DbTarget where
+    parseJSON = withObject "dbManager" $ \o -> DbTarget <$> o .: "database" <*> o .: "mode" <*> o .:? "pgSchema"
+instance ToJSON DbTarget where
+    toJSON t = object ["database" .= dtDatabase t, "mode" .= dtMode t, "pgSchema" .= dtPgSchema t]
 
 data RepoCfg = RepoCfg
     { rcName :: Text

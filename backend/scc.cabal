@@ -66,6 +66,7 @@ library
       Products.Autopilot.ProdRelease.Intent
       Products.Autopilot.ProdRelease.Jenkins
       Products.Autopilot.ReleaseBot.ConfigSource
+      Products.Autopilot.ReleaseBot.DbManager
       Products.Autopilot.ReleaseBot.Diff
       Products.Autopilot.ReleaseBot.Engine
       Products.Autopilot.ReleaseBot.Flow

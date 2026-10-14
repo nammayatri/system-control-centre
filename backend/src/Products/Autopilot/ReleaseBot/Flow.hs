@@ -38,7 +38,7 @@ import Control.Monad.IO.Class (liftIO)
 import Core.Admin.Queries (writeAuditLog)
 import Core.Auth.Protected (AuthedPerson (..), checkPersonPermission)
 import Core.Auth.Queries (findPersonByEmail)
-import Core.Environment (Flow, logError, logInfo)
+import Core.Environment (Flow, getConfig, logError, logInfo)
 import Core.Secrets (lookupEnvSecret)
 import Core.Types.Time (Seconds (..), threadDelay)
 import Crypto.Hash.Algorithms (SHA256)
@@ -65,7 +65,8 @@ import qualified Data.UUID.V4 as UUID
 import Products.Autopilot.Actions.ConfigMap (createConfigMapH, updateConfigMapH)
 import Products.Autopilot.ConfigReview (reviewStatusInfo)
 import Products.Autopilot.Actions.Release (approveReleaseH, createReleaseH, discardReleaseH, normalizeProductType)
-import Products.Autopilot.Queries.ProductService (findProductByName, findServiceByProductAndName)
+import Products.Autopilot.K8s.Deployment (deploymentExists)
+import Products.Autopilot.Queries.ProductService (findProductByName, findServiceByProductAndName, getProductNamespace, getServiceHost)
 import qualified Products.Autopilot.Types.Storage.Schema as S
 import Products.Autopilot.ProdRelease.Config
 import Products.Autopilot.ReleaseBot.ConfigSource (loadBotConfig)
@@ -79,6 +80,7 @@ import Products.Autopilot.ReleaseBot.Live (LiveEnv (..), readServiceEnv, replace
 import Products.Autopilot.ReleaseBot.Sql (SqlFile (..), countStatements, fetchSqlFiles, renderSql, statementsFor, unattributed)
 import Products.Autopilot.ReleaseBot.Store
 import qualified Products.Autopilot.ReleaseBot.Xyne as X
+import Products.Autopilot.ReleaseBot.DbManager (DbmItem (..), dbmConfigured, submitRequest)
 import Products.Autopilot.Actions.K8sResource (resolveRolloutPodEstimateH, resolveRolloutPodEstimateSecondaryH, resolveSyncRolloutStrategyH)
 import Products.Autopilot.Types.API (ApproveReleaseReq (..), DiscardReleaseReq (..), K8sCreateReleaseReq, RolloutPodEstimateReq (..))
 import qualified Products.Autopilot.Types.Release as RT
@@ -1073,6 +1075,39 @@ postServiceSql req svc files = unless (null (scSqlSchemas svc)) $ do
             let inline = if T.length file <= 2500 then "\n```sql\n" <> T.stripEnd file <> "\n```" else "\n(too long to show here — use the link)"
             sayReq req ("🗄 **" <> scService svc <> " — SQL to run before the release:** " <> T.pack (show n) <> " statement(s) in " <> T.pack (show (length mine)) <> " file(s) on " <> schemas <> maybe "" ("\nFull file: " <>) link <> inline)
 
+{- | The release's SQL as ONE request in the Multi-Cloud DB Manager (one query per target database /
+cloud mode, identical statements across services de-duplicated), with the link posted in the thread. The
+bot only files the request; a human with the right role approves and runs it there. Skipped silently
+when no service has a @dbManager@ target or the DB Manager isn't configured; a failure is reported and the
+inline SQL above stays the fallback.
+-}
+submitSqlRequest :: Req -> RepoCfg -> [ServiceCfg] -> [SqlFile] -> Flow ()
+submitSqlRequest req repo svcs files = do
+    configured <- dbmConfigured
+    let targeted = [(t, x) | x <- svcs, Just t <- [scDbTarget x]]
+        groups = nub (map fst targeted)
+        itemFor t =
+            let owners = [x | (t', x) <- targeted, t' == t]
+                schemas = nub (concatMap scSqlSchemas owners)
+                mine = statementsFor schemas files
+                stmts = nub [ensureSemi s | f <- mine, s <- sfStatements f]
+             in (t, owners, stmts)
+        items = [i | t <- groups, let i@(_, _, ss) = itemFor t, not (null ss)]
+    unless (null targeted || null items) $
+        if not configured
+            then sayReq req "ℹ️ SQL request not filed: the DB Manager isn't configured on this backend (SC_DBM_*). Use the per-service SQL posted in this thread."
+            else do
+                let reason = "Release " <> shortId (rqId req) <> " — " <> rcName repo <> "@" <> T.take 7 (fromMaybe "" (dText "commit" (rqData req))) <> ": SQL migrations for " <> T.intercalate ", " (nub (concat [map scService o | (_, o, _) <- items])) <> ". Requested by " <> fromMaybe "the release bot" (rqRequester req) <> " via the release bot."
+                    dbmItems = [DbmItem (T.intercalate "\n" ss) (dtDatabase t) (dtMode t) (dtPgSchema t) | (t, _, ss) <- items]
+                r <- submitRequest reason dbmItems
+                case r of
+                    Right link -> do
+                        patchKey req "dbmRequest" link
+                        sayReq req ("🗄 SQL migrations filed as one DB Manager request (" <> T.pack (show (length dbmItems)) <> " quer" <> (if length dbmItems == 1 then "y" else "ies") <> "): " <> link <> "\nRun it there (approve) before approving the rollouts.")
+                    Left e -> sayReq req ("⚠️ Could not file the SQL request in the DB Manager (" <> e <> "). Run the per-service SQL posted in this thread manually.")
+  where
+    ensureSemi s = if ";" `T.isSuffixOf` T.stripEnd s then s else s <> ";"
+
 {- | One Approve/Discard card per service. Xyne cannot put flow cards inside a thread, so the card
 goes to the channel and the thread gets a pointer to it.
 -}
@@ -1162,6 +1197,7 @@ createServiceTrackers ecfg req from = do
         (_, _, Left e) -> failReq req from e
         (Right (repo, ch, svcs), Right ap, Right token) -> do
             sqlFiles <- loadSql req repo token (fromMaybe "" (dText "commit" (rqData req)))
+            submitSqlRequest req repo [s | n <- svcs, s <- take 1 [x | x <- rcServices repo, scService x == n]] sqlFiles
             let d = rqData req
                 commit = fromMaybe "" (dText "commit" d)
                 short = T.take 6 commit
@@ -1201,6 +1237,20 @@ createServiceTrackers ecfg req from = do
                             jk = jenkinsForSvc repo (chEnv ch) svc
                             -- the image tag Jenkins pushes: the same value the build was triggered with
                             image = fromMaybe "" (jcCommitPrefix jk) <> T.take (fromMaybe 6 (jcCommitLength jk)) commit
+                        -- A deployment named <host>-<version> may already exist (an earlier attempt, a re-release of the
+                        -- same commit): take the next free version label — <ver>v1, <ver>v2, … — instead of failing.
+                        cfgK <- getConfig
+                        svcRow <- findServiceByProductAndName (scAppGroup svc) (scService svc)
+                        let hostName = fromMaybe (scService svc) (svcRow >>= getServiceHost)
+                            nsName = maybe "" getProductNamespace pCfgM
+                            candidates = short : [short <> "v" <> T.pack (show n) | n <- [1 .. 30 :: Int]]
+                            firstFree [] = pure short
+                            firstFree (v : vs) = do
+                                taken <- liftIO (deploymentExists cfgK nsName (hostName <> "-" <> v))
+                                if taken then firstFree vs else pure v
+                        version <- if T.null nsName then pure short else firstFree candidates
+                        when (version /= short) $
+                            sayReq req ("ℹ️ " <> scService svc <> ": deployment `" <> hostName <> "-" <> short <> "` already exists — using version `" <> version <> "`.")
                         baseline <- serviceBaseline svc
                         -- "Sync to the secondary cloud": the secondary's own saved stagger (else this one's),
                         -- pods sized off the SECONDARY cluster's running version.
@@ -1227,9 +1277,9 @@ createServiceTrackers ecfg req from = do
                                     , "env" .= chEnv ch
                                     , "trackerType" .= trackerKind
                                     , "release_manager" .= fromMaybe "" (rqRequester req)
-                                    , "release_tag" .= (scService svc <> "-" <> short)
+                                    , "release_tag" .= (scService svc <> "-" <> version)
                                     , "old_version" .= fromMaybe "unknown" storedOld
-                                    , "new_version" .= short
+                                    , "new_version" .= version
                                     , "rollout_strategy" .= rolloutJson rollout
                                     , "mode" .= ("AUTO" :: Text)
                                     , "is_approved" .= False
@@ -1265,7 +1315,7 @@ createServiceTrackers ecfg req from = do
                         case res of
                             Right tid -> do
                                 patchKey req ("tracker:" <> scService svc) tid
-                                postRolloutCard req svc short tid
+                                postRolloutCard req svc version tid
                             Left _ -> pure ()
                         pure (scService svc, res)
             let okIds = [i | (_, Right i) <- results]
