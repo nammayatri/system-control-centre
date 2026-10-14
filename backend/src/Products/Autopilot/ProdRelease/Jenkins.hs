@@ -172,13 +172,13 @@ data ExistingBuild = ExistingBuild
 {- | The newest build of @job@ (among the last 100) whose parameters include every one of @params@
 and that either succeeded or is still running. Failed/aborted builds are skipped, so a retry builds again.
 -}
-findExistingBuild :: (MonadIO m) => Text -> M.Map Text Text -> m (Either Text (Maybe ExistingBuild))
-findExistingBuild job params = do
+findExistingBuild :: (MonadIO m) => Text -> M.Map Text Text -> Maybe Text -> m (Either Text (Maybe ExistingBuild))
+findExistingBuild job params mSha = do
     mBase <- lookupEnvSecret "SC_JENKINS_URL"
     case mBase of
         Nothing -> pure (Left "SC_JENKINS_URL is not set on the backend")
         Just base -> do
-            let tree = "builds[number,url,result,building,actions[parameters[name,value]]]{0,100}"
+            let tree = "builds[number,url,result,building,actions[parameters[name,value],lastBuiltRevision[SHA1]]]{0,100}"
                 url = T.dropWhileEnd (== '/') base <> "/" <> jobPath job <> "/api/json?tree=" <> encode tree
             r <- getJson url
             pure $ case r of
@@ -193,7 +193,8 @@ findExistingBuild job params = do
     candidate b = do
         String u <- KM.lookup "url" b
         let bps = buildParams b
-            matches = all (\(k, v) -> M.lookup k bps == Just v) (M.toList params)
+            shaOk = maybe True (\sha -> sha `elem` buildShas b) mSha
+            matches = shaOk && all (\(k, v) -> M.lookup k bps == Just v) (M.toList params)
             result = case KM.lookup "result" b of Just (String x) -> Just x; _ -> Nothing
             building = KM.lookup "building" b == Just (Bool True)
         if not matches
@@ -202,6 +203,14 @@ findExistingBuild job params = do
                 Just "SUCCESS" -> Just (ExistingBuild u (Just "SUCCESS"))
                 Nothing | building -> Just (ExistingBuild u Nothing)
                 _ -> Nothing
+    -- the commit(s) a build checked out (for jobs that take no commit parameter)
+    buildShas b =
+        [ sha
+        | Array acts <- maybe [] pure (KM.lookup "actions" b)
+        , Object a <- V.toList acts
+        , Just (Object lbr) <- [KM.lookup "lastBuiltRevision" a]
+        , Just (String sha) <- [KM.lookup "SHA1" lbr]
+        ]
     buildParams b = M.fromList
         [ (n, renderV v)
         | Array acts <- maybe [] pure (KM.lookup "actions" b)

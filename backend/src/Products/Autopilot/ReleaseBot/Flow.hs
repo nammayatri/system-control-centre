@@ -25,6 +25,9 @@ module Products.Autopilot.ReleaseBot.Flow (
     publicRequestView,
     publicRequestSql,
     parseStoredStrategy,
+    pickChannel,
+    aggregateBuilds,
+    BuildRec (..),
     linkToken,
     botEnabled,
 ) where
@@ -49,17 +52,19 @@ import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (nub)
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, maybeToList)
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe, mapMaybe, maybeToList)
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (addUTCTime, getCurrentTime)
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import Text.Read (readMaybe)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import Products.Autopilot.Actions.ConfigMap (createConfigMapH, updateConfigMapH)
 import Products.Autopilot.ConfigReview (reviewStatusInfo)
-import Products.Autopilot.Actions.Release (approveReleaseH, createReleaseH, decodeStrategyText, discardReleaseH, normalizeProductType)
+import Products.Autopilot.Actions.Release (approveReleaseH, createReleaseH, discardReleaseH, normalizeProductType)
 import Products.Autopilot.Queries.ProductService (findProductByName, findServiceByProductAndName)
 import qualified Products.Autopilot.Types.Storage.Schema as S
 import Products.Autopilot.ProdRelease.Config
@@ -238,13 +243,40 @@ handleMention m = do
         ecfg <- loadBotConfig
         case ecfg of
             Left e -> reply ("⚠️ Release bot is not configured yet: " <> e <> "\nAdd release rules on the Deployment Config page (or release_bot_config_json); see RELEASE_BOT.md.")
-            Right pc -> case findChannel pc (X.mChannel m) of
-                Nothing -> reply "This channel is not enabled for release requests."
-                Just ch -> case findRepo pc (chRepo ch) of
-                    Nothing -> reply ("⚠️ Channel is mapped to unknown repo " <> chRepo ch)
-                    Just repo0 -> do
-                        let repo = forEnv (chEnv ch) repo0
-                        newRequest pc{prcRepos = [repo]} ch repo root m
+            Right pc -> case channelsFor pc (X.mChannel m) of
+                [] -> reply "This channel is not enabled for release requests."
+                cands -> case pickChannel pc (X.mText m) cands of
+                    Left why -> reply why
+                    Right ch -> case findRepo pc (chRepo ch) of
+                        Nothing -> reply ("⚠️ Channel is mapped to unknown repo " <> chRepo ch)
+                        Just repo0 -> do
+                            let repo = forEnv (chEnv ch) repo0
+                            newRequest pc{prcRepos = [repo]} ch repo root m
+
+{- | A channel may serve several repos. Pick the one the message is about: the repo whose name,
+service names or aliases appear in it, the LONGEST such mention winning ("control center backend"
+beats a bare "backend"). A tie, or no mention at all, asks the requester to be specific.
+-}
+pickChannel :: ProdReleaseConfig -> Text -> [ChannelCfg] -> Either Text ChannelCfg
+pickChannel _ _ [c] = Right c
+pickChannel pc msg cands =
+    let low = T.toLower msg
+        score c = case findRepo pc (chRepo c) of
+            Nothing -> 0
+            Just r ->
+                maximum
+                    ( 0
+                        : [ T.length t
+                          | t <- T.toLower (rcName r) : concat [T.toLower (scService x) : map T.toLower (scAliases x) | x <- rcServices (forEnv (chEnv c) r)]
+                          , not (T.null t)
+                          , t `T.isInfixOf` low
+                          ]
+                    )
+        top = maximum (map score cands)
+        winners = [c | c <- cands, score c == top]
+     in case winners of
+            [c] | top > 0 -> Right c
+            _ -> Left ("This channel serves several repos (" <> T.intercalate ", " (map chRepo cands) <> "). Say which one — mention the repo or one of its service names.")
 
 {- | The webhook URL may be shared with other Xyne apps, so react only when THIS app was
 tagged. If the message carries no mention ids, or our own id cannot be determined, we do
@@ -292,10 +324,24 @@ planRequest pc ch repo ap rid thread m = do
     let reply t = void (say (X.mChannel m) thread t)
         stop why = void (transition rid "RECEIVED" "INFO_ONLY" (object ["error" .= why])) >> reply why
     parsed <- parseIntent pc emptyIntent{inRepo = Just (rcName repo)} (X.mText m)
-    let branch = fromMaybe (head' (rcBranches repo)) (inBranch parsed)
-        services = inServices parsed
+    let services = inServices parsed
+        svcCfgs = [x | n <- services, x <- take 1 [y | y <- rcServices repo, scService y == n]]
+        -- a service may release from its own branches (service rule "branches"); empty = the repo's
+        allowedFor x = if null (scBranches x) then rcBranches repo else scBranches x
+        common = case map allowedFor svcCfgs of
+            [] -> rcBranches repo
+            (b : bs) -> foldl (\acc o -> [x | x <- acc, x `elem` o]) b bs
+        branchE = case inBranch parsed of
+            Just b
+                | b `elem` common -> Right b
+                | otherwise -> Left ("`" <> b <> "` is not a release branch for " <> T.intercalate ", " services <> " (allowed: " <> T.intercalate ", " common <> ").")
+            Nothing -> case common of
+                (b : _) -> Right b
+                [] -> Left ("These services release from different branches (" <> T.intercalate "; " [scService x <> ": " <> T.intercalate "/" (allowedFor x) | x <- svcCfgs] <> "). Release them in separate requests.")
+        branch = either (const (head' (rcBranches repo))) id branchE
     etoken <- githubTokenFlow
     case (etoken, inCommit parsed) of
+        _ | Left w <- branchE -> stop w
         (Left e, _) -> stop ("⚠️ " <> e)
         (_, Nothing) -> do
             recent <- either (const []) id <$> either (const (pure (Right []))) (\t -> listBranchCommits t (repoSlug repo) branch 5) etoken
@@ -308,22 +354,131 @@ planRequest pc ch repo ap rid thread m = do
                     case full of
                         Left e -> stop ("I can't find commit `" <> sha <> "` in " <> rcName repo <> ": " <> e)
                         Right fullSha -> do
-                            onBranch <- compareFiles token (repoSlug repo) branch fullSha
-                            case onBranch of
-                                Left e -> stop ("Could not verify the commit is on `" <> branch <> "`: " <> e)
-                                Right c
-                                    | crStatus c `notElem` ["behind", "identical"] ->
-                                        stop ("Commit `" <> T.take 7 fullSha <> "` is not on `" <> branch <> "` (it is " <> crStatus c <> " of it). Refusing.")
-                                    | otherwise -> startRequest ch repo ap rid thread m token branch fullSha services
+                            -- no branch named: take the first allowed branch that contains the commit
+                            let candidates = if isJust (inBranch parsed) then [branch] else common
+                                tryBranches [] lastErr = pure (Left lastErr)
+                                tryBranches (b : bs) _ = do
+                                    r <- compareFiles token (repoSlug repo) b fullSha
+                                    case r of
+                                        Right c | crStatus c `elem` ["behind", "identical"] -> pure (Right b)
+                                        Right c -> tryBranches bs ("Commit `" <> T.take 7 fullSha <> "` is not on `" <> b <> "` (it is " <> crStatus c <> " of it). Refusing.")
+                                        Left e -> tryBranches bs ("Could not verify the commit is on `" <> b <> "`: " <> e)
+                            chosen <- tryBranches candidates "No release branch configured."
+                            case chosen of
+                                Left why
+                                    | length candidates > 1 -> stop ("Commit `" <> T.take 7 fullSha <> "` is not on any of the allowed branches (" <> T.intercalate ", " candidates <> ").")
+                                    | otherwise -> stop why
+                                Right branch' -> do
+                                    headOk <- headGuard token branch' fullSha services
+                                    case headOk of
+                                        Left why -> stop why
+                                        Right () -> startRequest ch repo ap rid thread m token branch' fullSha services
   where
+    -- A Jenkins job without a commit parameter always builds the branch head: only that commit can be released.
+    headGuard token branch fullSha services
+        | all (isJust . jcCommitParam . jenkinsForSvc repo (chEnv ch)) [x | n <- services, x <- take 1 [y | y <- rcServices repo, scService y == n]] = pure (Right ())
+        | otherwise = do
+            r <- listBranchCommits token (repoSlug repo) branch 1
+            pure $ case r of
+                Right (c : _)
+                    | csSha c == fullSha -> Right ()
+                    | otherwise -> Left ("This repo's Jenkins job takes no commit — it always builds the latest `" <> branch <> "` (head is `" <> T.take 7 (csSha c) <> "`), but you asked for `" <> T.take 7 fullSha <> "`. Ask for the head commit instead.")
+                Right [] -> Left ("`" <> branch <> "` has no commits?")
+                Left e -> Left ("Could not read the head of `" <> branch <> "`: " <> e)
     head' (x : _) = x
     head' [] = ""
     recentList [] = ""
     recentList cs = "\nRecent commits on `" <> head' (rcBranches repo) <> "`:\n" <> T.unlines ["• `" <> T.take 7 (csSha c) <> "` " <> csMessage c | c <- cs]
 
+data Gate = GateOk | GateFailed [CheckSummary] | GatePending [CheckSummary]
+
+-- | GitHub CI signals on the commit, minus the ignored names. Fails safe: an API error is @Left@.
+gateChecks :: RepoCfg -> Text -> Text -> Flow (Either Text Gate)
+gateChecks repo token sha = do
+    r <- getCommitChecks token (repoSlug repo) sha
+    pure $ case r of
+        Left e -> Left ("could not read the CI checks of `" <> T.take 7 sha <> "` (" <> e <> ")")
+        Right cs ->
+            let ignored c = any (\i -> T.toLower i `T.isInfixOf` T.toLower (ckName c)) (rcIgnoreChecks repo)
+                live = filter (not . ignored) cs
+                bad = [c | c <- live, ckState c == "failure"]
+                pend = [c | c <- live, ckState c == "pending"]
+             in if not (null bad) then Right (GateFailed bad) else if not (null pend) then Right (GatePending pend) else Right GateOk
+
+checkNames :: [CheckSummary] -> Text
+checkNames cs = T.intercalate ", " [ckName c <> maybe "" (\u -> " ([link](" <> u <> "))") (ckUrl c) | c <- take 8 cs] <> (if length cs > 8 then " …" else "")
+
+{- | With @requireChecks@ on, the Jenkins build only starts once every GitHub check on the commit has
+passed: pending checks park the request in WAITING_CHECKS (the worker re-checks), a failed one stops it.
+-}
 startRequest :: ChannelCfg -> RepoCfg -> AuthedPerson -> Text -> Maybe Text -> X.Mention -> Text -> Text -> Text -> [Text] -> Flow ()
-startRequest ch repo ap rid thread m token branch fullSha services = do
+startRequest ch repo ap rid thread m token branch fullSha services
+    | not (rcRequireChecks repo) = startRequestNow ch repo ap rid thread m token branch fullSha services
+    | otherwise = do
+        let reply t = void (say (X.mChannel m) thread t)
+        g <- gateChecks repo token fullSha
+        case g of
+            Left why -> do
+                void (transition rid "RECEIVED" "FAILED" (object ["error" .= why]))
+                reply ("❌ Not starting the build: " <> why <> ".")
+            Right (GateFailed bs) -> do
+                void (transition rid "RECEIVED" "FAILED" (object ["error" .= ("CI checks failed: " <> checkNames bs)]))
+                reply ("❌ Not starting the Jenkins build — CI checks failed on `" <> T.take 7 fullSha <> "`: " <> checkNames bs)
+            Right (GatePending ps) -> do
+                now <- liftIO getPOSIXTime
+                patchRequest rid (object ["repo" .= rcName repo, "branch" .= branch, "commit" .= fullSha, "services" .= services, "checksSince" .= (T.pack (show (round now :: Integer)))])
+                ok <- transition rid "RECEIVED" "WAITING_CHECKS" (object [])
+                when ok $ reply ("⏳ Waiting for " <> T.pack (show (length ps)) <> " CI check(s) on `" <> T.take 7 fullSha <> "` to finish before building: " <> checkNames ps)
+            Right GateOk -> startRequestNow ch repo ap rid thread m token branch fullSha services
+
+-- | Re-check a parked request; when the checks are green, carry on exactly as a fresh request would.
+resumeChecks :: Either Text ProdReleaseConfig -> Req -> Flow ()
+resumeChecks ecfg req = do
+    let d = rqData req
+        rid = rqId req
+    case (ecfg, rqChannel req, dText "repo" d, dText "branch" d, dText "commit" d) of
+        (Right pc, Just chan, Just rn, Just branch, Just sha)
+            | Just repo <- listToMaybe [r | r <- prcRepos pc, rcName r == rn]
+            , Just ch <- listToMaybe [c | c <- channelsFor pc chan, T.toLower (chRepo c) == T.toLower rn] -> do
+                etoken <- githubTokenFlow
+                case etoken of
+                    Left e -> logError ("[release-bot] " <> rid <> " waiting for checks: " <> e)
+                    Right token -> do
+                        g <- gateChecks repo token sha
+                        now <- liftIO getPOSIXTime
+                        let since = fromMaybe 0 (dText "checksSince" d >>= readMaybe . T.unpack) :: Integer
+                            timedOut = round now - since > 90 * 60
+                        case g of
+                            Left e -> logError ("[release-bot] " <> rid <> " waiting for checks: " <> e)
+                            Right (GateFailed bs) -> failReq req "WAITING_CHECKS" ("CI checks failed on `" <> T.take 7 sha <> "`: " <> checkNames bs <> ". The Jenkins build was not started")
+                            Right (GatePending ps)
+                                | timedOut -> failReq req "WAITING_CHECKS" ("CI checks still pending after 90 minutes (" <> checkNames ps <> "). The Jenkins build was not started")
+                                | otherwise -> pure ()
+                            Right GateOk -> do
+                                eap <- authorize (fromMaybe "" (rqRequester req)) "RELEASE_CREATE"
+                                case eap of
+                                    Left why -> failReq req "WAITING_CHECKS" ("requester can no longer create releases: " <> why)
+                                    Right ap -> do
+                                        won <- transition rid "WAITING_CHECKS" "RECEIVED" (object [])
+                                        when won $ do
+                                            sayReq req ("✅ CI checks passed on `" <> T.take 7 sha <> "` — starting the Jenkins build.")
+                                            startRequestNow ch repo ap rid (dText "threadTs" d) (X.Mention chan "" "" "" "" "" []) token branch sha (dTexts "services" d)
+        _ -> failReq req "WAITING_CHECKS" "the release configuration changed while waiting for CI checks"
+
+startRequestNow :: ChannelCfg -> RepoCfg -> AuthedPerson -> Text -> Maybe Text -> X.Mention -> Text -> Text -> Text -> [Text] -> Flow ()
+startRequestNow ch repo ap rid thread m token branch fullSha services = do
     an <- analyze ap token repo (chEnv ch) (Just branch) fullSha services
+    if not (null (anServices an)) && all (atTarget . srBaseCommit) (anServices an)
+        then do
+            let why = "Nothing to release: " <> T.intercalate ", " (map srService (anServices an)) <> " already run `" <> T.take 7 fullSha <> "` (the deployed commit is the one you asked for). Ask for a newer commit on `" <> branch <> "`."
+            void (transition rid "RECEIVED" "INFO_ONLY" (object ["error" .= why]))
+            void (say (X.mChannel m) thread why)
+        else startAnalysed ch repo rid thread m branch fullSha services an
+  where
+    atTarget = maybe False (\b -> not (T.null b) && (b `T.isPrefixOf` fullSha || fullSha `T.isPrefixOf` b))
+
+startAnalysed :: ChannelCfg -> RepoCfg -> Text -> Maybe Text -> X.Mention -> Text -> Text -> [Text] -> Analysis -> Flow ()
+startAnalysed ch repo rid thread m branch fullSha services an = do
     dry <- dryRun
     link <- publicLink rid
     let blockers = anBlockers an
@@ -335,21 +490,36 @@ startRequest ch repo ap rid thread m token branch fullSha services = do
             , ecState e == "changed"
             ]
         reply t = void (say (X.mChannel m) thread t)
-        j = jenkinsFor repo (chEnv ch)
-    let buildParams = M.insert (jcCommitParam j) (fromMaybe "" (jcCommitPrefix j) <> T.take (fromMaybe 6 (jcCommitLength j)) fullSha) (jcFixedParams j)
-    -- Is this image already built (or being built)? Then do not build it again.
-    existing <-
-        if dry
-            then pure Nothing
-            else do
-                ex <- findExistingBuild (jcJob j) buildParams
-                case ex of
-                    Right found -> pure found
-                    Left e -> logError ("[release-bot] could not look up existing Jenkins builds, will trigger a new one: " <> e) >> pure Nothing
-    jr <-
-        if dry || existing /= Nothing
-            then pure (Right Nothing)
-            else fmap Just <$> triggerBuild (jcJob j) buildParams
+        svcs = [x | n <- services, x <- take 1 [y | y <- rcServices repo, scService y == n]]
+        jOf = jenkinsForSvc repo (chEnv ch)
+        tagOf j = fromMaybe "" (jcCommitPrefix j) <> T.take (fromMaybe 6 (jcCommitLength j)) fullSha
+        paramsOf x =
+            let j = jOf x
+             in maybe id (\p -> M.insert p (tagOf j)) (jcCommitParam j) (M.union (scJenkinsParams x) (jcFixedParams j))
+        -- services with the same Jenkins job AND parameters share ONE build
+        addSet acc x =
+            let k = (jcJob (jOf x), paramsOf x)
+             in case break ((== k) . fst) acc of
+                    (pre, (q, ns) : post) -> pre ++ [(q, ns ++ [scService x])] ++ post
+                    (pre, []) -> pre ++ [(k, [scService x])]
+        sets = foldl addSet [] svcs
+        jobs = nub (map (jcJob . jOf) svcs)
+        -- Is this image already built (or being built)? Then do not build it again.
+        runAll [] acc = pure (Right (reverse acc))
+        runAll (((job, p), names) : rest) acc = do
+            let noCommit = case [jOf x | x <- svcs, scService x `elem` names] of (j : _) -> isNothing (jcCommitParam j); [] -> False
+            ex <- findExistingBuild job p (if noCommit then Just fullSha else Nothing)
+            existing <- case ex of
+                Right found -> pure found
+                Left e -> logError ("[release-bot] could not look up existing Jenkins builds, will trigger a new one: " <> e) >> pure Nothing
+            case existing of
+                Just eb -> runAll rest (BuildRec names Nothing (Just (ebUrl eb)) (Just (fromMaybe "RUNNING" (ebResult eb))) True Nothing : acc)
+                Nothing -> do
+                    t <- triggerBuild job p
+                    case t of
+                        Left e -> pure (Left e)
+                        Right tr -> runAll rest (BuildRec names (trQueueUrl tr) Nothing (Just "QUEUED") False (Just (trJobUrl tr)) : acc)
+    buildsE <- if dry then pure (Right []) else runAll sets []
     let patch =
             object $
                 [ "branch" .= branch
@@ -361,19 +531,18 @@ startRequest ch repo ap rid thread m token branch fullSha services = do
                 , "approvedContentHash" .= anContentHash an
                 , "liveFingerprint" .= anLiveFingerprint an
                 , "publicLink" .= link
-                , "jenkinsQueueUrl" .= (jr' >>= trQueueUrl)
-                , "jenkinsJob" .= jcJob j
+                , "jenkinsJob" .= T.intercalate ", " jobs
                 ]
-                    ++ case existing of
-                        Just eb -> ["jenkinsBuildUrl" .= ebUrl eb, "jenkinsResult" .= fromMaybe ("RUNNING" :: Text) (ebResult eb), "buildReused" .= True]
-                        Nothing -> []
-        jr' = either (const Nothing) id jr
+                    ++ case buildsE of
+                        Right bs@(_ : _) ->
+                            let (res, url, q) = aggregateBuilds bs
+                             in ["jenkinsBuilds" .= map brToJson bs, "jenkinsQueueUrl" .= q, "jenkinsResult" .= res, "jenkinsBuildUrl" .= url, "buildReused" .= any brReused bs]
+                        _ -> []
+        buildLine = case buildsE of
+            Right bs -> T.intercalate "\n" [buildLabel (length bs > 1) b <> describeBuild b | b <- bs]
+            Left _ -> ""
         summary = summaryText rid an link
-        buildLine = case existing of
-            Just ExistingBuild{ebUrl = u, ebResult = Just _} -> "♻️ This image is already built — reusing the successful Jenkins build: " <> u
-            Just ExistingBuild{ebUrl = u, ebResult = Nothing} -> "🏗 This image is already being built — waiting on the running Jenkins build: " <> u
-            Nothing -> "🏗 Jenkins build started: " <> maybe "" trJobUrl jr'
-    case jr of
+    case buildsE of
         Left e -> do
             patchRequest rid patch
             void (transition rid "RECEIVED" "FAILED" (object ["error" .= ("Jenkins trigger failed: " <> e)]))
@@ -594,6 +763,7 @@ progress ecfg req = do
                 sayReq req ("⌛ Request `" <> shortId (rqId req) <> "` expired without approval. Nothing was applied.")
         else case st of
             "BUILDING" -> withBuild (\r -> if dText "mode" (rqData r) == Just "build_only" then finishBuildOnly r else beginApply ecfg r "BUILDING")
+            "WAITING_CHECKS" -> resumeChecks ecfg req
             "APPROVED" -> withBuild (\r -> beginApply ecfg r "APPROVED")
             "AWAITING_APPROVAL" -> void (refreshBuild req) -- keep build status current while waiting
             "APPLYING_CONFIG" -> checkConfigTrackers ecfg req
@@ -610,9 +780,86 @@ progress ecfg req = do
 dBuildUrl :: Req -> Text
 dBuildUrl r = maybe "" (" — " <>) (dText "jenkinsBuildUrl" (rqData r))
 
+-- | One Jenkins build of a request (a request may need several: one per distinct parameter set).
+data BuildRec = BuildRec
+    { brServices :: [Text]
+    , brQueue :: Maybe Text
+    , brUrl :: Maybe Text
+    , brResult :: Maybe Text
+    , brReused :: Bool
+    , brJobUrl :: Maybe Text
+    }
+
+brToJson :: BuildRec -> Value
+brToJson r = object ["services" .= brServices r, "queue" .= brQueue r, "url" .= brUrl r, "result" .= brResult r, "reused" .= brReused r, "jobUrl" .= brJobUrl r]
+
+brFromJson :: Value -> Maybe BuildRec
+brFromJson (Object o) =
+    Just
+        BuildRec
+            { brServices = [t | Just (Array a) <- [KM.lookup "services" o], String t <- foldr (:) [] a]
+            , brQueue = txt "queue"
+            , brUrl = txt "url"
+            , brResult = txt "result"
+            , brReused = KM.lookup "reused" o == Just (Bool True)
+            , brJobUrl = txt "jobUrl"
+            }
+  where
+    txt k = case KM.lookup (K.fromText k) o of Just (String t) -> Just t; _ -> Nothing
+brFromJson _ = Nothing
+
+-- | (overall result, url to show, queue url): a failed build wins, then all-SUCCESS, then RUNNING, else QUEUED.
+aggregateBuilds :: [BuildRec] -> (Text, Maybe Text, Maybe Text)
+aggregateBuilds rs =
+    let res r = fromMaybe "QUEUED" (brResult r)
+        bad = [r | r <- rs, res r `notElem` ["SUCCESS", "QUEUED", "RUNNING"]]
+        pick r = (brUrl r, brQueue r)
+        firstR = listToMaybe rs
+        (u0, q0) = maybe (Nothing, Nothing) pick firstR
+     in case bad of
+            (b : _) -> (res b, brUrl b, brQueue b)
+            []
+                | all ((== "SUCCESS") . res) rs -> ("SUCCESS", u0, q0)
+                | any ((== "RUNNING") . res) rs -> ("RUNNING", u0, q0)
+                | otherwise -> ("QUEUED", u0, q0)
+
+buildLabel :: Bool -> BuildRec -> Text
+buildLabel multi b = if multi then "**" <> T.intercalate ", " (brServices b) <> "**: " else ""
+
+describeBuild :: BuildRec -> Text
+describeBuild b = case (brReused b, brResult b) of
+    (True, Just "SUCCESS") -> "♻️ This image is already built — reusing the successful Jenkins build: " <> fromMaybe "" (brUrl b)
+    (True, _) -> "🏗 This image is already being built — waiting on the running Jenkins build: " <> fromMaybe "" (brUrl b)
+    _ -> "🏗 Jenkins build started: " <> fromMaybe "" (brJobUrl b)
+
 -- | Poll Jenkins and persist the result; returns the refreshed request.
 refreshBuild :: Req -> Flow Req
-refreshBuild req = case dText "jenkinsResult" (rqData req) of
+refreshBuild req = case dField "jenkinsBuilds" (rqData req) of
+    Just (Array xs) | recs@(_ : _) <- mapMaybe brFromJson (foldr (:) [] xs) -> refreshMulti req recs
+    _ -> refreshSingle req
+
+refreshMulti :: Req -> [BuildRec] -> Flow Req
+refreshMulti req recs = case dText "jenkinsResult" (rqData req) of
+    Just res | res `notElem` ["RUNNING", "QUEUED"] -> pure req
+    _ -> do
+        recs' <- forM recs $ \r -> case brResult r of
+            Just res | res `notElem` ["RUNNING", "QUEUED"] -> pure r
+            _ -> do
+                p <- pollBuild (brQueue r) (brUrl r)
+                case p of
+                    Left e -> logError ("[release-bot] jenkins poll " <> rqId req <> ": " <> e) >> pure r
+                    Right bs -> pure $ case bs of
+                        BuildQueued -> r{brResult = Just "QUEUED"}
+                        BuildRunning u -> r{brResult = Just "RUNNING", brUrl = Just u}
+                        BuildFinished u res -> r{brResult = Just res, brUrl = Just u}
+                        BuildCancelled -> r{brResult = Just "CANCELLED"}
+        let (res, url, q) = aggregateBuilds recs'
+        patchRequest (rqId req) (object ["jenkinsBuilds" .= map brToJson recs', "jenkinsResult" .= res, "jenkinsBuildUrl" .= url, "jenkinsQueueUrl" .= q])
+        fresh <- getRequest (rqId req)
+        pure (fromMaybe req fresh)
+
+refreshSingle :: Req -> Flow Req
+refreshSingle req = case dText "jenkinsResult" (rqData req) of
     Just res | res `notElem` ["RUNNING", "QUEUED"] -> pure req
     _ -> do
         r <- pollBuild (dText "jenkinsQueueUrl" (rqData req)) (dText "jenkinsBuildUrl" (rqData req))
@@ -660,7 +907,7 @@ loadScope ecfg req = pure $ do
     pc <- ecfg
     repoName <- maybe (Left "request has no repo") Right (dText "repo" (rqData req))
     repo <- maybe (Left ("unknown repo " <> repoName)) Right (findRepo pc repoName)
-    ch <- maybe (Left "request channel is no longer configured") Right (rqChannel req >>= findChannel pc)
+    ch <- maybe (Left "request channel is no longer configured") Right (rqChannel req >>= \cid -> findChannelRepo pc cid repoName)
     pure (repo, ch, dTexts "services" (rqData req))
 
 applyConfig :: Either Text ProdReleaseConfig -> Req -> Flow ()
@@ -916,7 +1163,7 @@ createServiceTrackers ecfg req from = do
                         let trackerKind = case pCfgM >>= S.dcAppGroupType of
                                 Just t | Right k <- normalizeProductType t -> k
                                 _ -> "BackendService" :: Text
-                            jk = jenkinsFor repo (chEnv ch)
+                            jk = jenkinsForSvc repo (chEnv ch) svc
                             -- the image tag Jenkins pushes: the same value the build was triggered with
                             image = fromMaybe "" (jcCommitPrefix jk) <> T.take (fromMaybe 6 (jcCommitLength jk)) commit
                         baseline <- serviceBaseline svc

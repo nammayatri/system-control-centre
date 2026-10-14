@@ -21,7 +21,12 @@ module Products.Autopilot.ProdRelease.Config (
     loadProdReleaseConfig,
     parseProdReleaseConfig,
     findChannel,
+    channelsFor,
+    findChannelRepo,
     jenkinsFor,
+    jenkinsForSvc,
+    JenkinsPatch (..),
+    noPatch,
     forEnv,
     isSecretFile,
     pathMatches,
@@ -37,6 +42,7 @@ import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecodeFileStrict, eitherDec
 import Data.Aeson.Types (Options (..), defaultOptions)
 import Data.Char (toLower)
 import qualified Data.Map.Strict as M
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -88,9 +94,18 @@ data ServiceCfg = ServiceCfg
     -- ^ Rollout used when the bot creates the tracker (empty = single 100% step)
     , scEnv :: Maybe Text
     -- ^ Only releasable from channels of this env (@PROD@ / @MASTER@); absent = any
+    , scJenkinsParams :: M.Map Text Text
+    -- ^ Extra Jenkins parameters for THIS service's build (e.g. @app@), merged over the repo's fixed
+    -- ones. Services with different params are built by separate Jenkins builds.
     , scSqlSchemas :: [Text]
     -- ^ Database schemas this service uses (e.g. @atlas_app@). SQL statements in the release that
     -- touch one of them are collected for this service before its tracker is created.
+    , scJenkins :: Maybe JenkinsPatch
+    -- ^ This service's own Jenkins settings, laid over the app group's (job, commit param/prefix/length,
+    -- fixed params). A service with no group-level Jenkins must set at least the job here.
+    , scBranches :: [Text]
+    -- ^ Branches this service releases from (e.g. @prodHotPush-Frontend@); empty = the repo's branches.
+    -- The first one is the default when the message names no branch.
     }
     deriving (Show, Generic)
 
@@ -104,7 +119,10 @@ instance FromJSON ServiceCfg where
             <*> o .:? "envVar"
             <*> (o .:? "defaultRollout" .!= [])
             <*> o .:? "env"
+            <*> (o .:? "jenkinsParams" .!= M.empty)
             <*> (o .:? "sqlSchemas" .!= [])
+            <*> o .:? "jenkins"
+            <*> (o .:? "branches" .!= [])
 instance ToJSON ServiceCfg where
     toJSON s =
         object
@@ -115,7 +133,10 @@ instance ToJSON ServiceCfg where
             , "envVar" .= scEnvVar s
             , "defaultRollout" .= scDefaultRollout s
             , "env" .= scEnv s
+            , "jenkinsParams" .= scJenkinsParams s
             , "sqlSchemas" .= scSqlSchemas s
+            , "jenkins" .= scJenkins s
+            , "branches" .= scBranches s
             ]
 
 -- | A configmap whose files are tracked from the repo (e.g. @beckn-production-pilot@).
@@ -156,8 +177,9 @@ instance ToJSON ChannelCfg where
 data JenkinsCfg = JenkinsCfg
     { jcJob :: Text
     -- ^ Full job name, e.g. @nammayatri/cloud-jenkins/main@
-    , jcCommitParam :: Text
-    -- ^ Build parameter that carries the commit sha
+    , jcCommitParam :: Maybe Text
+    -- ^ Build parameter that carries the commit sha. Absent = the job takes no commit and always
+    -- builds the branch head: the bot then only releases the branch's CURRENT head commit.
     , jcCommitLength :: Maybe Int
     -- ^ Send only the first N chars of the sha. The cloud-jenkins job takes the FIRST 6
     -- ("Enter first 6 digit of commit id") and uses it verbatim as the image tag, so it
@@ -174,6 +196,25 @@ instance FromJSON JenkinsCfg where
 instance ToJSON JenkinsCfg where
     toJSON = genericToJSON (jsonOpts 2)
 
+-- | Service-level Jenkins overrides: every field optional, laid over the app group's 'JenkinsCfg'.
+data JenkinsPatch = JenkinsPatch
+    { jpJob :: Maybe Text
+    , jpCommitParam :: Maybe Text
+    , jpCommitLength :: Maybe Int
+    , jpCommitPrefix :: Maybe Text
+    , jpFixedParams :: M.Map Text Text
+    }
+    deriving (Show, Eq, Generic)
+
+noPatch :: JenkinsPatch
+noPatch = JenkinsPatch Nothing Nothing Nothing Nothing M.empty
+
+instance FromJSON JenkinsPatch where
+    parseJSON = withObject "jenkins" $ \o ->
+        JenkinsPatch <$> o .:? "job" <*> o .:? "commitParam" <*> o .:? "commitLength" <*> o .:? "commitPrefix" <*> (o .:? "fixedParams" .!= M.empty)
+instance ToJSON JenkinsPatch where
+    toJSON p = object ["job" .= jpJob p, "commitParam" .= jpCommitParam p, "commitLength" .= jpCommitLength p, "commitPrefix" .= jpCommitPrefix p, "fixedParams" .= jpFixedParams p]
+
 data RepoCfg = RepoCfg
     { rcName :: Text
     , rcUrl :: Text
@@ -189,6 +230,11 @@ data RepoCfg = RepoCfg
     -- ^ Env (upper-case, @PROD@/@MASTER@) -> Jenkins settings. A PROD and a MASTER release of the
     -- same repo send different build parameters (which clouds to push to), so Jenkins is per env.
     -- Falls back to 'rcJenkins' for an env not listed.
+    , rcRequireChecks :: Bool
+    -- ^ Only start the Jenkins build once every GitHub check / status on the commit has passed
+    -- (waits while they are pending, stops if one fails).
+    , rcIgnoreChecks :: [Text]
+    -- ^ Check names (case-insensitive substring) that never gate the build
     }
     deriving (Show, Generic)
 
@@ -204,6 +250,8 @@ instance FromJSON RepoCfg where
             <*> (o .:? "configMaps" .!= [])
             <*> (o .:? "ignoreConfigMaps" .!= [])
             <*> (o .:? "jenkinsByEnv" .!= M.empty)
+            <*> (o .:? "requireChecks" .!= False)
+            <*> (o .:? "ignoreChecks" .!= [])
 instance ToJSON RepoCfg where
     toJSON r =
         object
@@ -216,6 +264,8 @@ instance ToJSON RepoCfg where
             , "configMaps" .= rcConfigMaps r
             , "ignoreConfigMaps" .= rcIgnoreConfigMaps r
             , "jenkinsByEnv" .= rcJenkinsByEnv r
+            , "requireChecks" .= rcRequireChecks r
+            , "ignoreChecks" .= rcIgnoreChecks r
             ]
 
 data ProdReleaseConfig = ProdReleaseConfig
@@ -264,6 +314,16 @@ findChannel cfg cid = case filter ((== cid) . chId) (prcChannels cfg) of
     (c : _) -> Just c
     [] -> Nothing
 
+-- | Every repo/env a channel is enabled for (a channel may serve several repos).
+channelsFor :: ProdReleaseConfig -> Text -> [ChannelCfg]
+channelsFor cfg cid = filter ((== cid) . chId) (prcChannels cfg)
+
+-- | The channel entry for one specific repo (used once a request already belongs to a repo).
+findChannelRepo :: ProdReleaseConfig -> Text -> Text -> Maybe ChannelCfg
+findChannelRepo cfg cid repo = case [c | c <- channelsFor cfg cid, T.toLower (chRepo c) == T.toLower repo] of
+    (c : _) -> Just c
+    [] -> Nothing
+
 -- | Does a changed repo path match one of the configured secret-file patterns?
 isSecretFile :: RepoCfg -> Text -> Bool
 isSecretFile r path = matchesAny (rcSecretFiles r) path
@@ -305,3 +365,18 @@ parseProdReleaseConfig t = either (Left . ("invalid release_bot_config_json: " <
 -- | The Jenkins settings for a release into @env@ (case-insensitive), else the repo default.
 jenkinsFor :: RepoCfg -> Text -> JenkinsCfg
 jenkinsFor r env = M.findWithDefault (rcJenkins r) (T.toUpper env) (rcJenkinsByEnv r)
+
+-- | The Jenkins settings for ONE service: the app group's, with the service's own settings laid over.
+jenkinsForSvc :: RepoCfg -> Text -> ServiceCfg -> JenkinsCfg
+jenkinsForSvc r env svc = case scJenkins svc of
+    Nothing -> base
+    Just p ->
+        base
+            { jcJob = fromMaybe (jcJob base) (jpJob p)
+            , jcCommitParam = maybe (jcCommitParam base) Just (jpCommitParam p)
+            , jcCommitLength = maybe (jcCommitLength base) Just (jpCommitLength p)
+            , jcCommitPrefix = maybe (jcCommitPrefix base) Just (jpCommitPrefix p)
+            , jcFixedParams = M.union (jpFixedParams p) (jcFixedParams base)
+            }
+  where
+    base = jenkinsFor r env

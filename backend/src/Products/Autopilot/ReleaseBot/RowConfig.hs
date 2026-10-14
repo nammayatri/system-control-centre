@@ -31,7 +31,7 @@ import Control.Monad (forM, when)
 import Data.Aeson (FromJSON (..), eitherDecodeStrict, withObject, (.!=), (.:), (.:?))
 import Data.List (nub, sort)
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromMaybe, isNothing)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -59,6 +59,8 @@ data ProductBot = ProductBot
     , pbSecretFiles :: [Text]
     , pbConfigMaps :: [CmRow]
     , pbIgnore :: [Text]
+    , pbRequireChecks :: Bool
+    , pbIgnoreChecks :: [Text]
     }
     deriving (Show)
 
@@ -72,6 +74,8 @@ instance FromJSON ProductBot where
             <*> (o .:? "secretFiles" .!= [])
             <*> (o .:? "configMaps" .!= [])
             <*> (o .:? "ignoreConfigMaps" .!= [])
+            <*> (o .:? "requireChecks" .!= False)
+            <*> (o .:? "ignoreChecks" .!= [])
 
 data ServiceBot = ServiceBot
     { sbAliases :: [Text]
@@ -79,7 +83,10 @@ data ServiceBot = ServiceBot
     , sbEnvVar :: Maybe EnvVarTarget
     , sbRollout :: [RolloutStepCfg]
     , sbEnv :: Maybe Text
+    , sbJenkinsParams :: M.Map Text Text
     , sbSqlSchemas :: [Text]
+    , sbBranches :: [Text]
+    , sbJenkins :: Maybe JenkinsPatch
     }
     deriving (Show)
 
@@ -91,7 +98,10 @@ instance FromJSON ServiceBot where
             <*> o .:? "envVar"
             <*> (o .:? "defaultRollout" .!= [])
             <*> o .:? "env"
+            <*> (o .:? "jenkinsParams" .!= M.empty)
             <*> (o .:? "sqlSchemas" .!= [])
+            <*> (o .:? "branches" .!= [])
+            <*> o .:? "jenkins"
 
 blank :: Text -> Bool
 blank = T.null . T.strip
@@ -111,6 +121,7 @@ validateProductBot t = do
 validateServiceBot :: Text -> Either Text ServiceBot
 validateServiceBot t = do
     sb <- decodeText t
+    when (any blank (sbBranches sb)) (Left "\"branches\" contains an empty name")
     case sbEnvVar sb of
         Just e | blank (evEnvVar e) || blank (evRepoPath e) -> Left "envVar needs both \"envVar\" and \"repoPath\""
         _ -> Right ()
@@ -152,11 +163,14 @@ buildFromRows rows = do
         byEnv <- forM (nub (sort [T.toUpper (pbEnv pb) | (_, _, pb) <- grp])) $ \env ->
             case nub [j | (_, _, pb) <- grp, T.toUpper (pbEnv pb) == env, Just j <- [pbJenkins pb]] of
                 [j] -> Right (env, j)
-                [] -> Left (slug0 <> " (" <> env <> "): no \"jenkins\" job configured on any of its " <> env <> " app groups (" <> T.intercalate ", " groups <> ")")
+                [] ->
+                    -- no group-level Jenkins is fine when EVERY service of this env names its own job
+                    let mine = [sb | (r, sb) <- svcRows, (_, pr, pb) <- grp, dcAppGroup pr == dcAppGroup r, T.toUpper (pbEnv pb) == env]
+                     in if not (null mine) && all (maybe False (isJust . jpJob) . sbJenkins) mine
+                            then Right (env, JenkinsCfg{jcJob = "", jcCommitParam = Nothing, jcCommitLength = Nothing, jcCommitPrefix = Nothing, jcFixedParams = M.empty})
+                            else Left (slug0 <> " (" <> env <> "): no \"jenkins\" job configured on any of its " <> env <> " app groups (" <> T.intercalate ", " groups <> ") and not every service sets its own \"jenkins\".job")
                 _ -> Left (slug0 <> " (" <> env <> "): app groups " <> T.intercalate ", " groups <> " define different Jenkins jobs/params for the same repo and env")
         let jenkins = snd (head byEnv)
-        let branches = nub (concat [pbBranches pb | (_, _, pb) <- grp])
-        when (null branches) (Left (slug0 <> ": no \"branches\" configured"))
         services <- forM [(r, sb) | (r, sb) <- svcRows, (_, pr, _) <- grp, dcAppGroup pr == dcAppGroup r] $ \(r, sb) -> do
             let env = fromMaybe (envOf (dcAppGroup r) grp) (sbEnv sb)
             pure
@@ -168,8 +182,13 @@ buildFromRows rows = do
                     , scEnvVar = sbEnvVar sb
                     , scDefaultRollout = sbRollout sb
                     , scEnv = Just env
+                    , scJenkinsParams = sbJenkinsParams sb
                     , scSqlSchemas = sbSqlSchemas sb
+                    , scBranches = sbBranches sb
+                    , scJenkins = sbJenkins sb
                     }
+        let branches = nub (concat [pbBranches pb | (_, _, pb) <- grp] ++ concatMap scBranches services)
+        when (null branches) (Left (slug0 <> ": no \"branches\" configured (on an app group or a service)"))
         pure
             RepoCfg
                 { rcName = slug0
@@ -181,6 +200,8 @@ buildFromRows rows = do
                 , rcConfigMaps = [ConfigMapTarget (crName c) (dcAppGroup r) (crFiles c) (Just (pbEnv pb)) (crMerge c) | (_, r, pb) <- grp, c <- pbConfigMaps pb]
                 , rcIgnoreConfigMaps = nub (concat [pbIgnore pb | (_, _, pb) <- grp])
                 , rcJenkinsByEnv = M.fromList byEnv
+                , rcRequireChecks = or [pbRequireChecks pb | (_, _, pb) <- grp]
+                , rcIgnoreChecks = nub (concat [pbIgnoreChecks pb | (_, _, pb) <- grp])
                 }
     -- A service row configured under an app group that has no repo-level rules can never run: say so.
     let configuredGroups = [dcAppGroup r | (_, r, _) <- prods]
@@ -192,12 +213,13 @@ buildFromRows rows = do
     lowerKey' = T.toLower
     envOf ag grp = case [pbEnv pb | (_, r, pb) <- grp, dcAppGroup r == ag] of (e : _) -> e; [] -> ""
 
+-- | A channel may serve several repos; only the same channel + repo with two different envs is a conflict.
 mergeChannels :: [ChannelCfg] -> Either Text [ChannelCfg]
 mergeChannels cs = go [] cs
   where
     go acc [] = Right (reverse acc)
-    go acc (c : rest) = case [x | x <- acc, chId x == chId c] of
+    go acc (c : rest) = case [x | x <- acc, chId x == chId c, T.toLower (chRepo x) == T.toLower (chRepo c)] of
         [] -> go (c : acc) rest
         (x : _)
             | x == c -> go acc rest
-            | otherwise -> Left ("channel " <> chId c <> " is mapped to two different repo/env pairs (" <> chRepo x <> "/" <> chEnv x <> " and " <> chRepo c <> "/" <> chEnv c <> ")")
+            | otherwise -> Left ("channel " <> chId c <> " is mapped to " <> chRepo c <> " with two different envs (" <> chEnv x <> " and " <> chEnv c <> ")")

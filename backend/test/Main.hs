@@ -2859,7 +2859,7 @@ testReleaseBotIntent = do
   assertEqual "missing fields in ask order" ["repo", "branch", "commit", "services"] (PRI.missingFields PRI.emptyIntent)
   assertEqual "nothing missing when complete" [] (PRI.missingFields a)
   -- channel env scoping: a PROD channel must never see MASTER-only services
-  let svc n e = PRC.ServiceCfg n n [] [] Nothing [] e []
+  let svc n e = PRC.ServiceCfg n n [] [] Nothing [] e Map.empty [] Nothing []
       repoWith ss = (head (either (const []) PRC.prcRepos (Aeson.eitherDecodeStrict (BC.pack "{\"repos\":[{\"name\":\"r\",\"url\":\"https://github.com/o/r\",\"branches\":[\"b\"],\"jenkins\":{\"job\":\"j\",\"commitParam\":\"C\",\"fixedParams\":{}},\"services\":[]}]}")))) {PRC.rcServices = ss}
       names = map PRC.scService . PRC.rcServices
       r = repoWith [svc "p" (Just "PROD"), svc "m" (Just "MASTER"), svc "any" Nothing]
@@ -2943,6 +2943,20 @@ testReleaseBotRows = do
   case RBW.validateServiceBot "{\"sqlSchemas\":[\"atlas_app\"]}" of
     Right sb -> assertEqual "sqlSchemas parsed" ["atlas_app"] (RBW.sbSqlSchemas sb)
     Left e -> assertBool ("service rule should parse: " <> T.unpack e) False
+  -- channel shared by two repos: the longest service/alias mention picks the repo
+  let svcA nm als = PRC.ServiceCfg nm "G" als [] Nothing [] Nothing Map.empty [] Nothing []
+      jc = PRC.JenkinsCfg "j" (Just "commit") Nothing Nothing Map.empty
+      mkRepo nm svcs = PRC.RepoCfg nm ("https://github.com/" <> nm) ["main"] jc svcs [] [] [] Map.empty False []
+      pcShared = PRC.ProdReleaseConfig [mkRepo "o/ny" [svcA "NY_BACKEND" ["backend master", "backend"]], mkRepo "o/cc" [svcA "CC_BACKEND" ["control center backend"]]] []
+      chs = [PRC.ChannelCfg "C" "o/ny" "MASTER", PRC.ChannelCfg "C" "o/cc" "MASTER"]
+  assertEqual "control center message picks the control-center repo" (Right "o/cc") (fmap PRC.chRepo (RBF.pickChannel pcShared "release control center backend till abc123" chs))
+  assertEqual "backend master message picks the main repo" (Right "o/ny") (fmap PRC.chRepo (RBF.pickChannel pcShared "release backend master till abc123" chs))
+  assertBool "no mention of either repo asks which" (either (const True) (const False) (RBF.pickChannel pcShared "release please" chs))
+  -- several Jenkins builds of one request
+  let br st = RBF.BuildRec ["s"] Nothing (Just "u") (Just st) False Nothing
+  assertEqual "all builds succeeded" "SUCCESS" (let (r, _, _) = RBF.aggregateBuilds [br "SUCCESS", br "SUCCESS"] in r)
+  assertEqual "one failed build fails the request" "FAILURE" (let (r, _, _) = RBF.aggregateBuilds [br "SUCCESS", br "FAILURE"] in r)
+  assertEqual "a running build keeps it running" "RUNNING" (let (r, _, _) = RBF.aggregateBuilds [br "SUCCESS", br "RUNNING"] in r)
   -- stored rollout strategies: legacy cluster wrapper, flat list, double-encoded, invalid
   let steps = map (\r -> (PRC.rsRolloutPercent r, PRC.rsCooloffMinutes r, PRC.rsPodCount r)) . RBF.parseStoredStrategy
   assertEqual "legacy cluster wrapper read" [(100, 1, 2)] (steps "[{\"cluster\":\"BECKN_UAT\",\"rollouts\":[{\"rollout\":100,\"cooloff\":1,\"pods\":2}]}]")
@@ -2988,10 +3002,33 @@ testReleaseBotRows = do
       assertEqual "services from both app groups attach to it" ["s1", "s2"] (map PRC.scService (PRC.rcServices (head (PRC.prcRepos c))))
       assertEqual "channels from both app groups are kept" ["C1", "C2"] (map PRC.chId (PRC.prcChannels c))
       assertEqual "service env inherited from its app group" [Just "PROD", Just "PROD"] (map PRC.scEnv (PRC.rcServices (head (PRC.prcRepos c))))
+  case RBW.buildFromRows [g1, row "g1" (Just "fe") Nothing (Just "{\"branches\":[\"hot-fe\"]}"), row "g1" (Just "be") Nothing (Just "{}")] of
+    Left e -> fail ("  FAIL: expected per-service branches, got " <> T.unpack e)
+    Right c -> do
+      let r = head (PRC.prcRepos c)
+      assertEqual "a service's own branches are kept" [["hot-fe"], []] (map PRC.scBranches (PRC.rcServices r))
+      assertEqual "repo branches = group branches + every service's" ["b1", "hot-fe"] (PRC.rcBranches r)
+  let noJenk = Just "{\"env\":\"PROD\",\"branches\":[\"b1\"],\"channels\":[\"C1\"]}"
+      svcJ j = Just ("{\"jenkins\":" <> j <> "}")
+  case RBW.buildFromRows [row "g" Nothing (Just "o/r") noJenk, row "g" (Just "fe") Nothing (svcJ "{\"job\":\"j/fe\",\"commitParam\":\"c\",\"fixedParams\":{\"x\":\"1\"}}"), row "g" (Just "be") Nothing (svcJ "{\"job\":\"j/be\"}")] of
+    Left e -> fail ("  FAIL: service-level jenkins: " <> T.unpack e)
+    Right c -> do
+      let r = head (PRC.prcRepos c)
+          [fe, be] = PRC.rcServices r
+      assertEqual "each service has its own job" ["j/fe", "j/be"] (map (PRC.jcJob . PRC.jenkinsForSvc r "PROD") [fe, be])
+      assertEqual "commit param is per service" [Just "c", Nothing] (map (PRC.jcCommitParam . PRC.jenkinsForSvc r "PROD") [fe, be])
+  assertBool "no group jenkins and a service without a job is an error" (isLeftWith "own" (RBW.buildFromRows [row "g" Nothing (Just "o/r") noJenk, row "g" (Just "fe") Nothing (svcJ "{\"commitParam\":\"c\"}")]))
+  case RBW.buildFromRows [row "g" Nothing (Just "o/r") (Just "{\"env\":\"PROD\",\"branches\":[\"b\"],\"requireChecks\":true,\"ignoreChecks\":[\"lint\"],\"jenkins\":{\"job\":\"j\",\"fixedParams\":{}}}")] of
+    Left e -> fail ("  FAIL: requireChecks: " <> T.unpack e)
+    Right c -> do
+      let r = head (PRC.prcRepos c)
+      assertEqual "requireChecks is read from the app group" True (PRC.rcRequireChecks r)
+      assertEqual "ignoreChecks is read from the app group" ["lint"] (PRC.rcIgnoreChecks r)
   assertBool "different Jenkins jobs for one repo is an error, not a silent pick" (isLeftWith "different Jenkins jobs" (RBW.buildFromRows [g1, row "g2" Nothing (Just "o/r") (prod "PROD" "[]" "job-b")]))
   assertBool "no jenkins job anywhere is an error" (isLeftWith "no \"jenkins\"" (RBW.buildFromRows [row "g" Nothing (Just "o/r") (Just "{\"env\":\"PROD\",\"branches\":[\"b\"]}")]))
   assertBool "missing repo_name is an error" (isLeftWith "no repo_name" (RBW.buildFromRows [row "g" Nothing Nothing (prod "PROD" "[]" "j")]))
-  assertBool "one channel mapped to two envs is an error" (isLeftWith "mapped to two different" (RBW.buildFromRows [row "g1" Nothing (Just "o/r") (prod "PROD" "[\"C\"]" "j"), row "g2" Nothing (Just "o/r") (prod "MASTER" "[\"C\"]" "j")]))
+  assertBool "one channel mapped to two envs is an error" (isLeftWith "two different envs" (RBW.buildFromRows [row "g1" Nothing (Just "o/r") (prod "PROD" "[\"C\"]" "j"), row "g2" Nothing (Just "o/r") (prod "MASTER" "[\"C\"]" "j")]))
+  assertEqual "one channel may serve two repos" (Right 2) (fmap (\c -> length (PRC.channelsFor c "C")) (RBW.buildFromRows [row "g1" Nothing (Just "o/r") (prod "PROD" "[\"C\"]" "j"), row "g2" Nothing (Just "o/x") (prod "PROD" "[\"C\"]" "j")]))
   assertBool "service rules under an app group with none are reported" (isLeftWith "app group has none" (RBW.buildFromRows [row "g" (Just "s") Nothing svc]))
   assertBool "malformed row JSON names the row" (isLeftWith "g:" (RBW.buildFromRows [row "g" Nothing (Just "o/r") (Just "{nope")]))
   -- the save-request field: absent = keep, blank = clear, else validated
@@ -3025,7 +3062,7 @@ testReleaseBotJenkins = do
           prodJ = PRC.jenkinsFor repo "prod"
           masterJ = PRC.jenkinsFor repo "MASTER"
       assertEqual "job is the real org-folder path" "ny-internal/cloud-jenkins/main" (PRC.jcJob prodJ)
-      assertEqual "commit param is lower-case `commit`" "commit" (PRC.jcCommitParam prodJ)
+      assertEqual "commit param is lower-case `commit`" (Just "commit") (PRC.jcCommitParam prodJ)
       assertEqual "commit is cut to 6 chars" (Just 6) (PRC.jcCommitLength prodJ)
       assertEqual "PROD release does NOT push to the sandbox" (Just "false") (Map.lookup "GCP_SANDBOX" (PRC.jcFixedParams prodJ))
       assertEqual "PROD release pushes to AWS + GCP prod" (Just "true", Just "true") (Map.lookup "AWS_PROD" (PRC.jcFixedParams prodJ), Map.lookup "GCP_PROD" (PRC.jcFixedParams prodJ))

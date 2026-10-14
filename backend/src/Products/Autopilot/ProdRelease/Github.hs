@@ -9,6 +9,8 @@ stored in the DB or repo). Read-only: list commits, compare two commits.
 module Products.Autopilot.ProdRelease.Github (
     CommitSummary (..),
     CompareResult (..),
+    CheckSummary (..),
+    getCommitChecks,
     githubTokenFromEnv,
     listBranchCommits,
     compareFiles,
@@ -22,6 +24,7 @@ import Core.Http.Client (HttpError (..), HttpReq (..), HttpResponse (..), Method
 import Core.Secrets (lookupEnvSecret)
 import Core.Types.Time (Seconds (..))
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
+import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -159,3 +162,53 @@ getFileAt token slug path sha = do
             | respStatus resp /= 200 -> Left ("GitHub HTTP " <> T.pack (show (respStatus resp)) <> " for " <> path)
             | otherwise -> either (const (Left ("not valid UTF-8: " <> path))) Right (TE.decodeUtf8' (LBS.toStrict (respBody resp)))
 
+
+-- | One CI signal on a commit: a check run or a legacy commit status.
+data CheckSummary = CheckSummary
+    { ckName :: Text
+    , ckState :: Text
+    -- ^ @success@ | @pending@ | @failure@
+    , ckUrl :: Maybe Text
+    }
+    deriving (Show, Eq)
+
+newtype CheckRuns = CheckRuns [CheckSummary]
+instance FromJSON CheckRuns where
+    parseJSON = withObject "check-runs" $ \o -> do
+        rs <- o .: "check_runs"
+        CheckRuns <$> mapM one rs
+      where
+        one = withObject "check-run" $ \r -> do
+            name <- r .: "name"
+            status <- r .:? "status"
+            concl <- r .:? "conclusion" :: Parser (Maybe Text)
+            url <- r .:? "html_url"
+            let st
+                    | (status :: Maybe Text) /= Just "completed" = "pending"
+                    | concl `elem` map Just ["success", "neutral", "skipped"] = "success"
+                    | otherwise = "failure"
+            pure (CheckSummary name st url)
+
+newtype CommitStatuses = CommitStatuses [CheckSummary]
+instance FromJSON CommitStatuses where
+    parseJSON = withObject "status" $ \o -> do
+        rs <- o .: "statuses"
+        CommitStatuses <$> mapM one rs
+      where
+        one = withObject "status" $ \r -> do
+            name <- r .: "context"
+            state <- r .: "state"
+            url <- r .:? "target_url"
+            pure (CheckSummary name (case (state :: Text) of "success" -> "success"; "pending" -> "pending"; _ -> "failure") url)
+
+{- | Every CI signal GitHub has for the commit (check runs + commit statuses). Any API error is
+returned as @Left@ so the caller can fail safe (never treat "could not look" as "passed").
+-}
+getCommitChecks :: (MonadIO m) => Text -> Text -> Text -> m (Either Text [CheckSummary])
+getCommitChecks token slug sha = do
+    runs <- get token "gh-check-runs" ("https://api.github.com/repos/" <> slug <> "/commits/" <> sha <> "/check-runs?per_page=100")
+    sts <- get token "gh-statuses" ("https://api.github.com/repos/" <> slug <> "/commits/" <> sha <> "/status?per_page=100")
+    pure $ case (runs, sts) of
+        (Right (CheckRuns a), Right (CommitStatuses b)) -> Right (a ++ b)
+        (Left e, _) -> Left ("check runs: " <> e)
+        (_, Left e) -> Left ("commit statuses: " <> e)
