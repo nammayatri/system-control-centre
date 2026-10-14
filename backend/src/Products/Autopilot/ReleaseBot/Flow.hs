@@ -24,6 +24,7 @@ module Products.Autopilot.ReleaseBot.Flow (
     releaseBotLoop,
     publicRequestView,
     publicRequestSql,
+    parseStoredStrategy,
     linkToken,
     botEnabled,
 ) where
@@ -42,12 +43,13 @@ import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Aeson (Result (..), Value (..), fromJSON, object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
+import qualified Data.Aeson.KeyMap as KM
 import Data.ByteArray (constEq)
 import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (nub)
-import Data.Maybe (fromMaybe, listToMaybe, maybeToList)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, maybeToList)
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -65,7 +67,7 @@ import Products.Autopilot.ReleaseBot.ConfigSource (loadBotConfig)
 import Products.Autopilot.Mobile.Github.Auth (getInstallationToken, loadGhCreds)
 import Products.Autopilot.ProdRelease.Github
 import Products.Autopilot.ProdRelease.Intent
-import Products.Autopilot.ProdRelease.Jenkins (BuildStatus (..), TriggerResult (..), pollBuild, triggerBuild)
+import Products.Autopilot.ProdRelease.Jenkins (BuildStatus (..), ExistingBuild (..), TriggerResult (..), findExistingBuild, pollBuild, triggerBuild)
 import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker)
 import Products.Autopilot.ReleaseBot.Engine
 import Products.Autopilot.ReleaseBot.Live (LiveEnv (..), readServiceEnv, replaceEnvVar)
@@ -334,12 +336,22 @@ startRequest ch repo ap rid thread m token branch fullSha services = do
             ]
         reply t = void (say (X.mChannel m) thread t)
         j = jenkinsFor repo (chEnv ch)
-    jr <-
+    let buildParams = M.insert (jcCommitParam j) (fromMaybe "" (jcCommitPrefix j) <> T.take (fromMaybe 6 (jcCommitLength j)) fullSha) (jcFixedParams j)
+    -- Is this image already built (or being built)? Then do not build it again.
+    existing <-
         if dry
+            then pure Nothing
+            else do
+                ex <- findExistingBuild (jcJob j) buildParams
+                case ex of
+                    Right found -> pure found
+                    Left e -> logError ("[release-bot] could not look up existing Jenkins builds, will trigger a new one: " <> e) >> pure Nothing
+    jr <-
+        if dry || existing /= Nothing
             then pure (Right Nothing)
-            else fmap Just <$> triggerBuild (jcJob j) (M.insert (jcCommitParam j) (fromMaybe "" (jcCommitPrefix j) <> T.take (fromMaybe 6 (jcCommitLength j)) fullSha) (jcFixedParams j))
+            else fmap Just <$> triggerBuild (jcJob j) buildParams
     let patch =
-            object
+            object $
                 [ "branch" .= branch
                 , "commit" .= fullSha
                 , "services" .= services
@@ -352,8 +364,15 @@ startRequest ch repo ap rid thread m token branch fullSha services = do
                 , "jenkinsQueueUrl" .= (jr' >>= trQueueUrl)
                 , "jenkinsJob" .= jcJob j
                 ]
+                    ++ case existing of
+                        Just eb -> ["jenkinsBuildUrl" .= ebUrl eb, "jenkinsResult" .= fromMaybe ("RUNNING" :: Text) (ebResult eb), "buildReused" .= True]
+                        Nothing -> []
         jr' = either (const Nothing) id jr
         summary = summaryText rid an link
+        buildLine = case existing of
+            Just ExistingBuild{ebUrl = u, ebResult = Just _} -> "♻️ This image is already built — reusing the successful Jenkins build: " <> u
+            Just ExistingBuild{ebUrl = u, ebResult = Nothing} -> "🏗 This image is already being built — waiting on the running Jenkins build: " <> u
+            Nothing -> "🏗 Jenkins build started: " <> maybe "" trJobUrl jr'
     case jr of
         Left e -> do
             patchRequest rid patch
@@ -367,7 +386,7 @@ startRequest ch repo ap rid thread m token branch fullSha services = do
             | wantsApproval -> do
                 patchRequest rid patch
                 void (transition rid "RECEIVED" "AWAITING_APPROVAL" (object []))
-                reply (summary <> "\n🏗 Jenkins build started: " <> maybe "" trJobUrl jr')
+                reply (summary <> "\n" <> buildLine)
                 card <- X.postApprovalCard (X.mChannel m) thread (approvalCardText rid an link) rid
                 case card of
                     Right (mid, _) -> patchRequest rid (object ["cardMessageId" .= mid])
@@ -375,7 +394,7 @@ startRequest ch repo ap rid thread m token branch fullSha services = do
             | otherwise -> do
                 patchRequest rid patch
                 void (transition rid "RECEIVED" "BUILDING" (object []))
-                reply (summary <> "\n🏗 Jenkins build started: " <> maybe "" trJobUrl jr' <> "\n" <> nextStep mode)
+                reply (summary <> "\n" <> buildLine <> "\n" <> nextStep mode)
   where
     nextStep mode
         | mode == "build_only" = "ℹ️ Build only — release tracker will NOT be created (see blockers above)."
@@ -807,17 +826,42 @@ postRolloutCard req svc short tid = case rqChannel req of
                     sayReq req ("⬇️ **" <> scService svc <> "**: approve or discard with the card posted just below in the channel.")
             Left e -> logError ("[release-bot] rollout card post failed: " <> e)
 
--- | The service's own configured rollout (deployment_config), else the bot rule's, else one 100% step.
+{- | The service's own configured rollout (deployment_config.rollout_strategy), else the bot rule's, else
+one 100% step. Rows hold either the flat step list, a double-encoded string of it, or the legacy
+@[{"cluster":…,"rollouts":[{"rollout","cooloff","pods"}]}]@ wrapper — all are read; anything that
+is not a valid strategy (empty, or not ending at 100%) falls through to the next source.
+-}
 serviceBaseline :: ServiceCfg -> Flow [RolloutStepCfg]
 serviceBaseline svc = do
     m <- findServiceByProductAndName (scAppGroup svc) (scService svc)
-    let fromDb = case m >>= S.dcRolloutStrategy of
-            Just raw | Right steps <- decodeStrategyText raw, not (null steps) -> [RolloutStepCfg (RT.rolloutPercent x) (RT.cooloffMinutes x) (RT.podCount x) | x <- steps]
-            _ -> []
+    let fromDb = maybe [] parseStoredStrategy (m >>= S.dcRolloutStrategy)
     pure $ case (fromDb, scDefaultRollout svc) of
         (xs@(_ : _), _) -> xs
         ([], ys@(_ : _)) -> ys
         _ -> [RolloutStepCfg 100 0 1]
+
+parseStoredStrategy :: Text -> [RolloutStepCfg]
+parseStoredStrategy = go (3 :: Int)
+  where
+    go n t
+        | n <= 0 = []
+        | otherwise = case A.eitherDecodeStrict (TE.encodeUtf8 t) :: Either String Value of
+            Right (String inner) -> go (n - 1) inner
+            Right (Array xs) -> validSteps (stepsOf (foldr (:) [] xs))
+            _ -> []
+    -- legacy wrapper: take the first cluster entry's "rollouts"; otherwise the array IS the steps
+    stepsOf xs = case [r | Object o <- xs, Just (Array r) <- [KM.lookup "rollouts" o]] of
+        (r : _) -> mapMaybe step (foldr (:) [] r)
+        [] -> mapMaybe step xs
+    step (Object o) = do
+        p <- num ["rolloutPercent", "rollout"] o
+        c <- num ["cooloffMinutes", "cooloff"] o
+        pure (RolloutStepCfg p c (fromMaybe 1 (num ["podCount", "pods"] o)))
+    step _ = Nothing
+    num ks o = listToMaybe [round n | k <- ks, Just (Number n) <- [KM.lookup (K.fromText k) o]] :: Maybe Int
+    validSteps ss
+        | not (null ss) && fmap rsRolloutPercent (listToMaybe (reverse ss)) == Just 100 = ss
+        | otherwise = []
 
 -- | Pod count for a requested step: the baseline step at that percent, else the nearest lower one.
 podFor :: [RolloutStepCfg] -> Int -> Int

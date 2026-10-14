@@ -13,10 +13,13 @@ module Products.Autopilot.ProdRelease.Jenkins (
     BuildStatus (..),
     pollBuild,
     rebaseUrl,
+    ExistingBuild (..),
+    findExistingBuild,
 ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Aeson (Value (..), decode)
+import qualified Data.Vector as V
 import Data.Maybe (fromMaybe)
 import qualified Data.Aeson.KeyMap as KM
 import Core.Http.Client (HttpError (..), HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
@@ -157,3 +160,58 @@ pollBuild mQueueUrl mBuildUrl = case mBuildUrl of
                 _ -> Right (BuildRunning b)
             Right _ -> Left "unexpected Jenkins build response"
 
+
+-- | A previous Jenkins build of the same job with the same parameters.
+data ExistingBuild = ExistingBuild
+    { ebUrl :: Text
+    , ebResult :: Maybe Text
+    -- ^ @Just "SUCCESS"@ = the image is already built; @Nothing@ = that build is still running
+    }
+    deriving (Show, Eq)
+
+{- | The newest build of @job@ (among the last 100) whose parameters include every one of @params@
+and that either succeeded or is still running. Failed/aborted builds are skipped, so a retry builds again.
+-}
+findExistingBuild :: (MonadIO m) => Text -> M.Map Text Text -> m (Either Text (Maybe ExistingBuild))
+findExistingBuild job params = do
+    mBase <- lookupEnvSecret "SC_JENKINS_URL"
+    case mBase of
+        Nothing -> pure (Left "SC_JENKINS_URL is not set on the backend")
+        Just base -> do
+            let tree = "builds[number,url,result,building,actions[parameters[name,value]]]{0,100}"
+                url = T.dropWhileEnd (== '/') base <> "/" <> jobPath job <> "/api/json?tree=" <> encode tree
+            r <- getJson url
+            pure $ case r of
+                Left e -> Left e
+                Right (Object o)
+                    | Just (Array bs) <- KM.lookup "builds" o -> Right (firstMatch (V.toList bs))
+                _ -> Left "unexpected Jenkins job response"
+  where
+    firstMatch bs = case [eb | Object b <- bs, Just eb <- [candidate b]] of
+        (eb : _) -> Just eb
+        [] -> Nothing
+    candidate b = do
+        String u <- KM.lookup "url" b
+        let bps = buildParams b
+            matches = all (\(k, v) -> M.lookup k bps == Just v) (M.toList params)
+            result = case KM.lookup "result" b of Just (String x) -> Just x; _ -> Nothing
+            building = KM.lookup "building" b == Just (Bool True)
+        if not matches
+            then Nothing
+            else case result of
+                Just "SUCCESS" -> Just (ExistingBuild u (Just "SUCCESS"))
+                Nothing | building -> Just (ExistingBuild u Nothing)
+                _ -> Nothing
+    buildParams b = M.fromList
+        [ (n, renderV v)
+        | Array acts <- maybe [] pure (KM.lookup "actions" b)
+        , Object a <- V.toList acts
+        , Just (Array ps) <- [KM.lookup "parameters" a]
+        , Object p <- V.toList ps
+        , Just (String n) <- [KM.lookup "name" p]
+        , Just v <- [KM.lookup "value" p]
+        ]
+    renderV (String t) = t
+    renderV (Bool True) = "true"
+    renderV (Bool False) = "false"
+    renderV other = T.pack (show other)

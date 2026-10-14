@@ -2943,6 +2943,12 @@ testReleaseBotRows = do
   case RBW.validateServiceBot "{\"sqlSchemas\":[\"atlas_app\"]}" of
     Right sb -> assertEqual "sqlSchemas parsed" ["atlas_app"] (RBW.sbSqlSchemas sb)
     Left e -> assertBool ("service rule should parse: " <> T.unpack e) False
+  -- stored rollout strategies: legacy cluster wrapper, flat list, double-encoded, invalid
+  let steps = map (\r -> (PRC.rsRolloutPercent r, PRC.rsCooloffMinutes r, PRC.rsPodCount r)) . RBF.parseStoredStrategy
+  assertEqual "legacy cluster wrapper read" [(100, 1, 2)] (steps "[{\"cluster\":\"BECKN_UAT\",\"rollouts\":[{\"rollout\":100,\"cooloff\":1,\"pods\":2}]}]")
+  assertEqual "flat list read" [(50, 5, 1), (100, 5, 2)] (steps "[{\"rolloutPercent\":50,\"cooloffMinutes\":5,\"podCount\":1},{\"rolloutPercent\":100,\"cooloffMinutes\":5,\"podCount\":2}]")
+  assertEqual "double-encoded string read" [(100, 0, 1)] (steps "\"[{\\\"rolloutPercent\\\":100,\\\"cooloffMinutes\\\":0,\\\"podCount\\\":1}]\"")
+  assertEqual "strategy not ending at 100% is ignored" [] (steps "[{\"rolloutPercent\":50,\"cooloffMinutes\":5,\"podCount\":1}]")
   -- custom rollout asked for in the message
   assertEqual "rollout override parsed" (Just (Right [(5, 10), (25, 30), (50, 30), (100, 10)])) (PRI.parseRolloutOverride "release x till abc123 with rollout 5% -> 10, 25% -> 30, 50% -> 30, 100% -> 10")
   assertEqual "rollout override with arrows/newlines" (Just (Right [(10, 5), (100, 0)])) (PRI.parseRolloutOverride "10% \8594 5\n100% \8594 0")
