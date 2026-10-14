@@ -103,6 +103,9 @@ data ServiceCfg = ServiceCfg
     , scJenkins :: Maybe JenkinsPatch
     -- ^ This service's own Jenkins settings, laid over the app group's (job, commit param/prefix/length,
     -- fixed params). A service with no group-level Jenkins must set at least the job here.
+    , scSyncSecondary :: Bool
+    -- ^ Also sync the release to the secondary cloud (the create form's "Sync to ..." toggle): the
+    -- tracker is created with @isReleaseSync@ and a secondary stagger sized off the secondary cluster.
     , scBranches :: [Text]
     -- ^ Branches this service releases from (e.g. @prodHotPush-Frontend@); empty = the repo's branches.
     -- The first one is the default when the message names no branch.
@@ -122,6 +125,7 @@ instance FromJSON ServiceCfg where
             <*> (o .:? "jenkinsParams" .!= M.empty)
             <*> (o .:? "sqlSchemas" .!= [])
             <*> o .:? "jenkins"
+            <*> (o .:? "syncToSecondary" .!= False)
             <*> (o .:? "branches" .!= [])
 instance ToJSON ServiceCfg where
     toJSON s =
@@ -136,6 +140,7 @@ instance ToJSON ServiceCfg where
             , "jenkinsParams" .= scJenkinsParams s
             , "sqlSchemas" .= scSqlSchemas s
             , "jenkins" .= scJenkins s
+            , "syncToSecondary" .= scSyncSecondary s
             , "branches" .= scBranches s
             ]
 

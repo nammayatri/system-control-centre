@@ -79,7 +79,8 @@ import Products.Autopilot.ReleaseBot.Live (LiveEnv (..), readServiceEnv, replace
 import Products.Autopilot.ReleaseBot.Sql (SqlFile (..), countStatements, fetchSqlFiles, renderSql, statementsFor, unattributed)
 import Products.Autopilot.ReleaseBot.Store
 import qualified Products.Autopilot.ReleaseBot.Xyne as X
-import Products.Autopilot.Types.API (ApproveReleaseReq (..), DiscardReleaseReq (..), K8sCreateReleaseReq)
+import Products.Autopilot.Actions.K8sResource (resolveRolloutPodEstimateH, resolveRolloutPodEstimateSecondaryH, resolveSyncRolloutStrategyH)
+import Products.Autopilot.Types.API (ApproveReleaseReq (..), DiscardReleaseReq (..), K8sCreateReleaseReq, RolloutPodEstimateReq (..))
 import qualified Products.Autopilot.Types.Release as RT
 import Products.Autopilot.Types.Release (ReleaseStatus (..))
 import qualified Shared.API.Response as R
@@ -1126,6 +1127,25 @@ parseStoredStrategy = go (3 :: Int)
         | otherwise = []
 
 -- | Pod count for a requested step: the baseline step at that percent, else the nearest lower one.
+{- | Pod counts for each step sized against the LIVE old version's ready pods — the same
+"Min Pods" estimate the create form fetches (@/rollout-pod-estimate@, or the secondary cluster's
+for the sync stagger): ceil(ready × percent / 100), at least 1. If the running version can't be
+read the configured counts are kept (never guessed).
+-}
+estimatePods :: AuthedPerson -> Bool -> ServiceCfg -> [RolloutStepCfg] -> Flow [RolloutStepCfg]
+estimatePods ap secondary svc steps = do
+    let rq = RolloutPodEstimateReq (scAppGroup svc) (scService svc) (map rsRolloutPercent steps)
+        run = if secondary then resolveRolloutPodEstimateSecondaryH else resolveRolloutPodEstimateH
+    r <- tryAny (run ap rq)
+    pure $ case r of
+        Right (Object o)
+            | Just (String _) <- KM.lookup "oldVersion" o
+            , Just (Array a) <- KM.lookup "podCounts" o
+            , counts <- [round n | Number n <- foldr (:) [] a]
+            , length counts == length steps ->
+                zipWith (\st c -> st{rsPodCount = max 1 c}) steps counts
+        _ -> steps
+
 podFor :: [RolloutStepCfg] -> Int -> Int
 podFor base p = case [rsPodCount x | x <- base, rsRolloutPercent x <= p] of
     [] -> maybe 1 rsPodCount (listToMaybe base)
@@ -1182,6 +1202,18 @@ createServiceTrackers ecfg req from = do
                             -- the image tag Jenkins pushes: the same value the build was triggered with
                             image = fromMaybe "" (jcCommitPrefix jk) <> T.take (fromMaybe 6 (jcCommitLength jk)) commit
                         baseline <- serviceBaseline svc
+                        -- "Sync to the secondary cloud": the secondary's own saved stagger (else this one's),
+                        -- pods sized off the SECONDARY cluster's running version.
+                        let syncOn = scSyncSecondary svc
+                        syncSteps <-
+                            if syncOn
+                                then do
+                                    secStrat <- tryAny (resolveSyncRolloutStrategyH ap (Just (scAppGroup svc)) (Just (scService svc)))
+                                    let strat = case secStrat of
+                                            Right (Object o) | Just (String t) <- KM.lookup "rolloutStrategy" o, xs@(_ : _) <- parseStoredStrategy t -> xs
+                                            _ -> baseline
+                                    estimatePods ap True svc strat
+                                else pure []
                         let override = parseRolloutOverride (fromMaybe "" (dText "text" d))
                             rolloutJson = map (\r -> object ["rolloutPercent" .= rsRolloutPercent r, "cooloffMinutes" .= rsCooloffMinutes r, "podCount" .= rsPodCount r])
                             customSteps = case override of
@@ -1189,6 +1221,7 @@ createServiceTrackers ecfg req from = do
                                 _ -> Nothing
                             mkBody rollout =
                                 object $
+                                    (if syncOn then ["isReleaseSync" .= True, "syncClusterRolloutStrategy" .= rolloutJson syncSteps] else []) ++
                                     [ "appGroup" .= scAppGroup svc
                                     , "service" .= [scService svc]
                                     , "env" .= chEnv ch
@@ -1217,12 +1250,16 @@ createServiceTrackers ecfg req from = do
                             _ -> pure ()
                         -- A custom rollout needs the stagger permission (createReleaseH enforces it); if the
                         -- requester lacks it (or the strategy is refused) fall back to the default one.
-                        first <- create (fromMaybe baseline customSteps)
+                        chosenP <- estimatePods ap False svc (fromMaybe baseline customSteps)
+                        baselineP <- estimatePods ap False svc baseline
+                        first <- create chosenP
                         res <- case (first, customSteps) of
                             (Left why, Just _) -> do
                                 sayReq req ("⚠️ " <> scService svc <> ": could not use the requested rollout (" <> why <> "). Creating it with the default rollout instead.")
-                                create baseline
+                                create baselineP
                             _ -> pure first
+                        when (either (const False) (const True) res) $
+                            sayReq req ("📦 " <> scService svc <> ": pods sized from the running version — " <> T.intercalate ", " [T.pack (show (rsRolloutPercent x)) <> "% → " <> T.pack (show (rsPodCount x)) <> " pod(s)" | x <- chosenP] <> ".")
                         when (maybe False (const True) customSteps && either (const False) (const True) first) $
                             sayReq req ("🎚 " <> scService svc <> ": custom rollout " <> T.intercalate ", " [T.pack (show (rsRolloutPercent x)) <> "% → " <> T.pack (show (rsCooloffMinutes x)) <> "m" | x <- fromMaybe [] customSteps] <> ".")
                         case res of

@@ -2859,7 +2859,7 @@ testReleaseBotIntent = do
   assertEqual "missing fields in ask order" ["repo", "branch", "commit", "services"] (PRI.missingFields PRI.emptyIntent)
   assertEqual "nothing missing when complete" [] (PRI.missingFields a)
   -- channel env scoping: a PROD channel must never see MASTER-only services
-  let svc n e = PRC.ServiceCfg n n [] [] Nothing [] e Map.empty [] Nothing []
+  let svc n e = PRC.ServiceCfg n n [] [] Nothing [] e Map.empty [] Nothing False []
       repoWith ss = (head (either (const []) PRC.prcRepos (Aeson.eitherDecodeStrict (BC.pack "{\"repos\":[{\"name\":\"r\",\"url\":\"https://github.com/o/r\",\"branches\":[\"b\"],\"jenkins\":{\"job\":\"j\",\"commitParam\":\"C\",\"fixedParams\":{}},\"services\":[]}]}")))) {PRC.rcServices = ss}
       names = map PRC.scService . PRC.rcServices
       r = repoWith [svc "p" (Just "PROD"), svc "m" (Just "MASTER"), svc "any" Nothing]
@@ -2944,7 +2944,7 @@ testReleaseBotRows = do
     Right sb -> assertEqual "sqlSchemas parsed" ["atlas_app"] (RBW.sbSqlSchemas sb)
     Left e -> assertBool ("service rule should parse: " <> T.unpack e) False
   -- channel shared by two repos: the longest service/alias mention picks the repo
-  let svcA nm als = PRC.ServiceCfg nm "G" als [] Nothing [] Nothing Map.empty [] Nothing []
+  let svcA nm als = PRC.ServiceCfg nm "G" als [] Nothing [] Nothing Map.empty [] Nothing False []
       jc = PRC.JenkinsCfg "j" (Just "commit") Nothing Nothing Map.empty
       mkRepo nm svcs = PRC.RepoCfg nm ("https://github.com/" <> nm) ["main"] jc svcs [] [] [] Map.empty False []
       pcShared = PRC.ProdReleaseConfig [mkRepo "o/ny" [svcA "NY_BACKEND" ["backend master", "backend"]], mkRepo "o/cc" [svcA "CC_BACKEND" ["control center backend"]]] []
@@ -3024,6 +3024,9 @@ testReleaseBotRows = do
       let r = head (PRC.prcRepos c)
       assertEqual "requireChecks is read from the app group" True (PRC.rcRequireChecks r)
       assertEqual "ignoreChecks is read from the app group" ["lint"] (PRC.rcIgnoreChecks r)
+  case RBW.buildFromRows [g1, row "g1" (Just "a") Nothing (Just "{\"syncToSecondary\":true}"), row "g1" (Just "b") Nothing (Just "{}")] of
+    Left e -> fail ("  FAIL: syncToSecondary: " <> T.unpack e)
+    Right c -> assertEqual "syncToSecondary is per service, default off" [True, False] (map PRC.scSyncSecondary (PRC.rcServices (head (PRC.prcRepos c))))
   assertBool "different Jenkins jobs for one repo is an error, not a silent pick" (isLeftWith "different Jenkins jobs" (RBW.buildFromRows [g1, row "g2" Nothing (Just "o/r") (prod "PROD" "[]" "job-b")]))
   assertBool "no jenkins job anywhere is an error" (isLeftWith "no \"jenkins\"" (RBW.buildFromRows [row "g" Nothing (Just "o/r") (Just "{\"env\":\"PROD\",\"branches\":[\"b\"]}")]))
   assertBool "missing repo_name is an error" (isLeftWith "no repo_name" (RBW.buildFromRows [row "g" Nothing Nothing (prod "PROD" "[]" "j")]))
