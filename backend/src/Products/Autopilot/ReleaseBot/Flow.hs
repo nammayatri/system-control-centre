@@ -77,7 +77,7 @@ import Products.Autopilot.ProdRelease.Jenkins (BuildStatus (..), ExistingBuild (
 import Products.Autopilot.Queries.ReleaseTracker (findReleaseTracker)
 import Products.Autopilot.ReleaseBot.Engine
 import Products.Autopilot.ReleaseBot.Live (LiveEnv (..), readServiceEnv, replaceEnvVar)
-import Products.Autopilot.ReleaseBot.Sql (SqlFile (..), countStatements, fetchSqlFiles, renderSql, statementsFor, unattributed)
+import Products.Autopilot.ReleaseBot.Sql (SqlFile (..), countStatements, renderSql, sqlFromCompare, statementsFor, unattributed)
 import Products.Autopilot.ReleaseBot.Store
 import qualified Products.Autopilot.ReleaseBot.Xyne as X
 import Products.Autopilot.ReleaseBot.DbManager (DbmItem (..), dbmConfigured, submitRequest)
@@ -691,14 +691,17 @@ handleRolloutClick c = do
                                             when (R.status resp /= "SUCCESS") (C.throwM (userError (T.unpack (R.message resp))))
                             pure (tid, either (Just . T.take 200 . T.pack . show) (const Nothing) r)
                         let bad = [t <> ": " <> e | (t, Just e) <- results]
+                            alreadyDone = not (null bad) && all (\(_, e) -> any (`T.isInfixOf` fromMaybe "" e) ["already approved", "Cannot approve again", "already discarded", "already been discarded"]) [r | r@(_, Just _) <- results]
                             outcome
+                                | alreadyDone = "ℹ️ " <> label <> "already " <> (if approving then "approved" else "discarded") <> " — nothing more to do here."
                                 | null bad = label <> (if approving then "✅ Approved by " <> who <> " — rollout starting." else "🚫 Discarded by " <> who <> ".")
                                 | otherwise = "⚠️ " <> label <> who <> ": " <> T.intercalate "; " bad
                         audit (Just ap) (if approving then "RELEASE_BOT_ROLLOUT_APPROVED" else "RELEASE_BOT_ROLLOUT_DISCARDED") rid (object ["trackers" .= tids, "service" .= svc])
-                        when (null bad) $
-                            void $ case (rqChannel req, dText cardKey d) of
-                                (Just ch, Just mid) -> X.updateCard ch mid outcome
-                                _ -> pure (Right ())
+                        -- The card is replaced (buttons gone) on EVERY outcome, errors included: a failed or
+                        -- already-done action must not leave live buttons that can only fail again.
+                        void $ case (rqChannel req, dText cardKey d) of
+                            (Just ch, Just mid) -> X.updateCard ch mid outcome
+                            _ -> pure (Right ())
                         sayReq req outcome
                         pure (ack outcome)
 
@@ -1050,7 +1053,7 @@ loadSql req repo token commit = do
             case cmp of
                 Left e -> sayReq req ("⚠️ Could not list changed files to look for SQL migrations (" <> e <> "). Check the diff for .sql files manually.") >> pure []
                 Right c -> do
-                    (files, bad) <- fetchSqlFiles token (repoSlug repo) (crFiles c) commit
+                    (files, bad) <- sqlFromCompare token (repoSlug repo) commit (crPatches c)
                     unless (null bad) $ sayReq req ("⚠️ Could not read SQL file(s): " <> T.intercalate "; " bad)
                     let known = nub (concatMap scSqlSchemas (rcServices repo))
                         loose = unattributed known files

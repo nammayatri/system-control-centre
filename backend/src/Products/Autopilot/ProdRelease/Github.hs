@@ -10,6 +10,7 @@ module Products.Autopilot.ProdRelease.Github (
     CommitSummary (..),
     CompareResult (..),
     CheckSummary (..),
+    FilePatch (..),
     getCommitChecks,
     githubTokenFromEnv,
     listBranchCommits,
@@ -71,22 +72,31 @@ data CompareResult = CompareResult
     , crTotalCommits :: Int
     , crStatus :: Text
     -- ^ @identical@ | @ahead@ | @behind@ | @diverged@ (head relative to base)
+    , crPatches :: [FilePatch]
+    -- ^ Per-file status and unified-diff patch (absent for huge/binary files)
     , crTruncated :: Bool
     -- ^ GitHub keeps at most 3000 files of a compare (we page through them); at that ceiling we cannot
     -- prove a dhall file did NOT change, so callers must fail closed.
     }
 
-newtype FileEntry = FileEntry Text
+data FilePatch = FilePatch
+    { fpName :: Text
+    , fpStatus :: Text
+    , fpPatch :: Maybe Text
+    }
+    deriving (Show, Eq)
+
+newtype FileEntry = FileEntry FilePatch
 instance FromJSON FileEntry where
-    parseJSON = withObject "File" $ \o -> FileEntry <$> o .: "filename"
+    parseJSON = withObject "File" $ \o -> (\n st p -> FileEntry (FilePatch n (fromMaybe "" st) p)) <$> o .: "filename" <*> o .:? "status" <*> o .:? "patch"
 
 instance FromJSON CompareResult where
     parseJSON = withObject "Compare" $ \o -> do
         fs <- o .:? "files"
         n <- o .:? "total_commits"
         st <- o .:? "status"
-        let names = [f | FileEntry f <- fromMaybe [] fs]
-        pure CompareResult{crFiles = names, crTotalCommits = fromMaybe 0 n, crStatus = fromMaybe "" st, crTruncated = False}
+        let ps = [f | FileEntry f <- fromMaybe [] fs]
+        pure CompareResult{crFiles = map fpName ps, crTotalCommits = fromMaybe 0 n, crStatus = fromMaybe "" st, crPatches = ps, crTruncated = False}
 
 githubTokenFromEnv :: (MonadIO m) => m (Either Text Text)
 githubTokenFromEnv =
@@ -125,20 +135,20 @@ compareFiles token slug base headSha = do
     first <- page 1
     case first of
         Left e -> pure (Left e)
-        Right r0 -> go r0 (crFiles r0) (2 :: Int)
+        Right r0 -> go r0 (crFiles r0) (crPatches r0) (2 :: Int)
   where
     page n =
         get token "gh-compare" $
             "https://api.github.com/repos/" <> slug <> "/compare/" <> base <> "..." <> headSha <> "?per_page=100&page=" <> T.pack (show n)
-    go r0 acc n
-        | length acc `mod` 100 /= 0 || null acc || n > 30 = pure (Right r0{crFiles = acc, crTruncated = length acc >= 3000})
+    go r0 acc accP n
+        | length acc `mod` 100 /= 0 || null acc || n > 30 = pure (Right r0{crFiles = acc, crPatches = accP, crTruncated = length acc >= 3000})
         | otherwise = do
             nxt <- page n
             case nxt of
                 Left e -> pure (Left e)
                 Right r
-                    | null (crFiles r) -> pure (Right r0{crFiles = acc, crTruncated = False})
-                    | otherwise -> go r0 (acc ++ crFiles r) (n + 1)
+                    | null (crFiles r) -> pure (Right r0{crFiles = acc, crPatches = accP, crTruncated = False})
+                    | otherwise -> go r0 (acc ++ crFiles r) (accP ++ crPatches r) (n + 1)
 
 -- | Expand a short sha to the full 40-char sha (also proves the commit exists).
 resolveFullSha :: (MonadIO m) => Text -> Text -> Text -> m (Either Text Text)

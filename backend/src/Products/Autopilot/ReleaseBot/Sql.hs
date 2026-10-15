@@ -12,6 +12,8 @@ module Products.Autopilot.ReleaseBot.Sql (
     SqlFile (..),
     isSqlFile,
     fetchSqlFiles,
+    sqlFromCompare,
+    addedSql,
     splitStatements,
     mentionsSchema,
     statementsFor,
@@ -25,7 +27,7 @@ import Data.Char (isAlphaNum)
 import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Products.Autopilot.ProdRelease.Github (getFileAt)
+import Products.Autopilot.ProdRelease.Github (FilePatch (..), getFileAt)
 
 -- | One changed .sql file and its statements.
 data SqlFile = SqlFile
@@ -48,6 +50,40 @@ fetchSqlFiles token slug changed fullSha = do
         ( [SqlFile f (splitStatements c) | (f, Right c) <- fetched]
         , [f <> ": " <> e | (f, Left e) <- fetched, not ("not found" `T.isInfixOf` T.toLower e)]
         )
+
+{- | The SQL a release ADDS to the changed .sql files — from each file's diff, not its whole content
+(migration files here are cumulative, so the whole file would re-run years of old statements). A file
+without a patch (too large for GitHub to inline) falls back to the whole file and is flagged. A line that
+was removed and re-added unchanged (e.g. only the end-of-file newline changed) is not new.
+-}
+sqlFromCompare :: (MonadIO m) => Text -> Text -> Text -> [FilePatch] -> m ([SqlFile], [Text])
+sqlFromCompare token slug fullSha patches = do
+    let sqls = [p | p <- patches, isSqlFile (fpName p), fpStatus p /= "removed"]
+    rs <- mapM one sqls
+    pure (concatMap fst rs, concatMap snd rs)
+  where
+    one p = case fpPatch p of
+        Just d -> pure (mk (fpName p) (addedSql d), [])
+        Nothing -> do
+            r <- getFileAt token slug (fpName p) fullSha
+            pure $ case r of
+                Right c -> (mk (fpName p) c, [fpName p <> ": GitHub gave no diff for this file, so ALL its statements are shown — only run the new ones"])
+                Left e -> ([], [fpName p <> ": " <> e])
+    mk name txt = [SqlFile name ss | let ss = filter (not . T.null) (map dropLeadingComments (splitStatements txt)), not (null ss)]
+    dropLeadingComments = T.strip . T.unlines . dropWhile (\l -> T.null (T.strip l) || "--" `T.isPrefixOf` T.strip l) . T.lines
+
+-- | The lines a unified-diff patch adds (net of lines removed and re-added identically), joined.
+addedSql :: Text -> Text
+addedSql patch = T.intercalate "\n" (go (map (T.drop 1) added) (map (T.strip . T.drop 1) removed))
+  where
+    ls = T.lines patch
+    added = [l | l <- ls, "+" `T.isPrefixOf` l, not ("+++" `T.isPrefixOf` l)]
+    removed = [l | l <- ls, "-" `T.isPrefixOf` l, not ("---" `T.isPrefixOf` l)]
+    go [] _ = []
+    go (a : as) rs
+        | not (T.null (T.strip a)), T.strip a `elem` rs = go as (dropFirst (T.strip a) rs)
+        | otherwise = a : go as rs
+    dropFirst x xs = case break (== x) xs of (pre, _ : post) -> pre ++ post; (pre, []) -> pre
 
 {- | Split SQL text into statements on top-level @;@, honouring @'…'@ strings, @--@ and
 @/* */@ comments and @$tag$…$tag$@ bodies. Comment-only chunks are dropped.

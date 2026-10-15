@@ -2905,6 +2905,11 @@ testReleaseBotRefs = do
 
 testReleaseBotTriggers :: IO ()
 testReleaseBotTriggers = do
+  assertEqual "the bot's own mention is removed from the message text (its name must not match service aliases)"
+    "be7a73 can u release backend master"
+    (RBX.stripMentions (RBX.mentionTexts "<p><span data-user-id=\"b1\">@System Control Center Master</span> be7a73 can u release backend master</p>") "@System Control Center Master be7a73 can u release backend master")
+  assertEqual "mention text extracted" ["@System Control Center Master"] (RBX.mentionTexts "<p><span data-user-id=\"b1\"><b>@System Control Center Master</b></span> hi</p>")
+  assertEqual "no mention spans -> a leading bot name is still removed" "release x" (RBX.stripMentions [] "System Control Center Master release x" `seq` RBX.stripMentions [] "@System Control Center Master release x")
   assertEqual "no mention ids" [] (RBX.mentionedIds "<p>hello</p>")
   assertEqual "mention ids in order, de-duplicated"
     ["u1", "u2"]
@@ -3030,6 +3035,22 @@ testReleaseBotRows = do
   case RBW.buildFromRows [g1, row "g1" (Just "a") Nothing (Just "{\"dbManager\":{\"database\":\"bap\",\"mode\":\"both\"}}")] of
     Left e -> fail ("  FAIL: dbManager: " <> T.unpack e)
     Right c -> assertEqual "dbManager target is read per service" [Just (PRC.DbTarget "bap" "both" Nothing)] (map PRC.scDbTarget (PRC.rcServices (head (PRC.prcRepos c))))
+  let patch = T.unlines
+        [ "@@ -200,4 +200,9 @@ ALTER TABLE atlas_driver_offer_bpp.document_verification_config ADD COLUMN is_de"
+        , " "
+        , " ------- SQL updates -------"
+        , " "
+        , "-ALTER TABLE atlas_driver_offer_bpp.document_verification_config ADD COLUMN do_not_validate_during_onboarding boolean ;"
+        , "\\ No newline at end of file"
+        , "+ALTER TABLE atlas_driver_offer_bpp.document_verification_config ADD COLUMN do_not_validate_during_onboarding boolean ;"
+        , "+"
+        , "+"
+        , "+------- SQL updates -------"
+        , "+"
+        , "+ALTER TABLE atlas_driver_offer_bpp.document_verification_config ADD COLUMN allow_non_transport_vehicle boolean ;"
+        ]
+      newStmts = RBS.splitStatements (RBS.addedSql patch)
+  assertEqual "only the genuinely new statement comes out of a diff (a re-added identical line is not new)" ["ALTER TABLE atlas_driver_offer_bpp.document_verification_config ADD COLUMN allow_non_transport_vehicle boolean ;"] (map (T.strip . T.unlines . filter (not . T.isPrefixOf "--" . T.strip) . T.lines) newStmts)
   assertBool "different Jenkins jobs for one repo is an error, not a silent pick" (isLeftWith "different Jenkins jobs" (RBW.buildFromRows [g1, row "g2" Nothing (Just "o/r") (prod "PROD" "[]" "job-b")]))
   assertBool "no jenkins job anywhere is an error" (isLeftWith "no \"jenkins\"" (RBW.buildFromRows [row "g" Nothing (Just "o/r") (Just "{\"env\":\"PROD\",\"branches\":[\"b\"]}")]))
   assertBool "missing repo_name is an error" (isLeftWith "no repo_name" (RBW.buildFromRows [row "g" Nothing Nothing (prod "PROD" "[]" "j")]))

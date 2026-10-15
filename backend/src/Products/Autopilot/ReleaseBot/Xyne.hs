@@ -38,6 +38,8 @@ module Products.Autopilot.ReleaseBot.Xyne (
     getUser,
     botUserId,
     mentionedIds,
+    mentionTexts,
+    stripMentions,
 ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -136,7 +138,7 @@ parseMention v = do
                 , mUserId = fromMaybe "" (str "userId" inner)
                 , mSenderName = fromMaybe "" (str "senderName" inner)
                 , mSenderEmail = fromMaybe "" (str "senderEmail" inner)
-                , mText = T.strip text
+                , mText = stripMentions (mentionTexts (fromMaybe "" (str "content" inner))) text
                 , mMentioned = mentionedIds (fromMaybe "" (str "content" inner))
                 }
 
@@ -178,6 +180,35 @@ parseClick v = flowShape `orElse` interactionShape `orElse` (obj "payload" v >>=
                     , cUserName = fromMaybe "" (str "name" user)
                     , cEmail = email
                     }
+
+{- | The visible text of each mention span (e.g. @\@System Control Center Master@). It must not reach
+the intent parser: the bot's own name contains words like "control center master" that would
+otherwise be matched against service aliases and pick the wrong repo.
+-}
+mentionTexts :: Text -> [Text]
+mentionTexts = go
+  where
+    marker = "data-user-id=\""
+    go t = case T.breakOn marker t of
+        (_, rest) | T.null rest -> []
+        (_, rest) ->
+            let afterTag = T.drop 1 (T.dropWhile (/= '>') rest)
+                (inner, remaining) = T.breakOn "</span>" afterTag
+                visible = T.strip (T.pack (stripTags (T.unpack inner)))
+             in [visible | not (T.null visible)] ++ go remaining
+    stripTags ('<' : r) = stripTags (drop 1 (dropWhile (/= '>') r))
+    stripTags (c : r) = c : stripTags r
+    stripTags [] = []
+
+-- | Remove each mention's text (with or without its leading @\@@) from the message and tidy spaces.
+stripMentions :: [Text] -> Text -> Text
+stripMentions ms txt = T.unwords (T.words (foldl rm txt (concatMap variants ms ++ botNames)))
+  where
+    variants m = [m, T.dropWhile (== '@') m]
+    botNames = ["@System Control Center Master", "@System Control Centre Master", "@System Control Centre", "@System Control Center"]
+    rm t m
+        | T.null m = t
+        | otherwise = T.replace m "" t
 
 -- | @data-user-id="X"@ values in Xyne's mention HTML, in order, de-duplicated.
 mentionedIds :: Text -> [Text]
