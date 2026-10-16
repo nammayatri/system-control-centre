@@ -36,6 +36,7 @@ import Products.Autopilot.Types.Storage.Schema (reLabel, rePayload)
 postTrackerCard :: ReleaseTracker -> Text -> Text -> Flow ()
 postTrackerCard t channel thread = do
     facts <- trackerFacts t
+    logInfoG ("[tracker-card] " <> releaseId t <> " facts: " <> T.intercalate " | " facts)
     let tid = releaseId t
         text =
             T.intercalate "\n" $
