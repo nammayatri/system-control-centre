@@ -63,7 +63,7 @@ import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value (..), decode, encode, object, (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
-import Data.Maybe (fromMaybe, isJust, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as TL
@@ -139,7 +139,12 @@ sendSlackRich channel fallbackText color blocks mThreadTs =
 -- error ("account_inactive", "not_in_channel", …), an HTTP status, or a
 -- transport failure. Lets callers persist WHY a post failed.
 sendSlackRichE :: Text -> Text -> Text -> [Value] -> Maybe Text -> Flow (Either Text Text)
-sendSlackRichE channel fallbackText color blocks mThreadTs = do
+sendSlackRichE channel fallbackText color blocks mThreadTs = fmap fst <$> sendSlackRichFull channel fallbackText color blocks mThreadTs
+
+-- | Like 'sendSlackRichE' but also returns the conversation (thread) id Xyne reports for the message,
+-- which the native flow-card API needs to post INTO that message's thread.
+sendSlackRichFull :: Text -> Text -> Text -> [Value] -> Maybe Text -> Flow (Either Text (Text, Maybe Text))
+sendSlackRichFull channel fallbackText color blocks mThreadTs = do
   mToken <- liftIO getSlackToken
   case mToken of
     Nothing -> do
@@ -205,8 +210,9 @@ sendSlackRichE channel fallbackText color blocks mThreadTs = do
                   mTs = strField "ts"
               case mTs of
                 Just ts -> do
-                  logInfoG $ "[SLACK] Sent to #" <> channel <> " (ts=" <> ts <> ")"
-                  pure (Right ts)
+                  let conv = findConversationId (2 :: Int) (maybe Null Object mObj)
+                  logInfoG $ "[SLACK] Sent to #" <> channel <> " (ts=" <> ts <> maybe "" (\c -> ", conversationId=" <> c) conv <> ", response keys=" <> T.intercalate "," (maybe [] (map K.toText . KM.keys) mObj) <> ")"
+                  pure (Right (ts, conv))
                 Nothing -> do
                   -- ok:false (or an unexpected body) — surface
                   -- Slack's error so this never looks like a send.
@@ -219,6 +225,15 @@ sendSlackRichE channel fallbackText color blocks mThreadTs = do
                       <> "): "
                       <> truncateT 200 (TL.toStrict (TLE.decodeUtf8 b))
                   pure (Left err)
+
+-- | The conversation / thread id in a Xyne response (top level or nested a couple of levels).
+findConversationId :: Int -> Value -> Maybe Text
+findConversationId depth (Object o) =
+  case [t | k <- ["conversationId", "conversation_id", "threadId", "thread_id"], Just (String t) <- [KM.lookup k o], not (T.null t)] of
+    (t : _) -> Just t
+    [] | depth > 0 -> listToMaybe (mapMaybe (findConversationId (depth - 1)) (KM.elems o))
+    _ -> Nothing
+findConversationId _ _ = Nothing
 
 sectionBlock :: Text -> Value
 sectionBlock txt =
@@ -480,13 +495,13 @@ notifyReleaseCreated tracker = do
             Just cl | not (T.null (T.strip cl)) -> [contextBlock [cl]]
             _ -> []
           blocks = [sectionBlock link, sectionBlock (versionLine tracker), contextBlock ["Cloud: " <> cloud]] <> clBlocks
-      mTs <- sendSlackRich channel (appGroup tracker <> " | " <> service tracker) colorCreated blocks Nothing
+      mTs <- either (const Nothing) Just <$> sendSlackRichFull channel (appGroup tracker <> " | " <> service tracker) colorCreated blocks Nothing
       case mTs of
-        Just ts -> do
+        Just (ts, conv) -> do
           saveThreadTs (releaseId tracker) ts
           -- Approve / Discard card in this message's thread, for every backend release.
           when (category tracker `elem` [BackendService, BackendScheduler] && not (isApproved tracker)) $
-            void (forkFlow (postTrackerCard tracker channel ts))
+            void (forkFlow (postTrackerCard tracker channel ts (fromMaybe ts conv)))
         Nothing -> pure ()
 
 notifyReleaseApproved :: ReleaseTracker -> Flow ()
