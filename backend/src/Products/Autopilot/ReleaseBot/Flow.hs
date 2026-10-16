@@ -41,15 +41,11 @@ import Core.Auth.Queries (findPersonByEmail)
 import Core.Environment (Flow, getConfig, logError, logInfo)
 import Core.Secrets (lookupEnvSecret)
 import Core.Types.Time (Seconds (..), threadDelay)
-import Crypto.Hash.Algorithms (SHA256)
-import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Aeson (Result (..), Value (..), fromJSON, object, toJSON, (.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.ByteArray (constEq)
-import Data.ByteArray.Encoding (Base (Base16), convertToBase)
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (nub)
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe, mapMaybe, maybeToList)
@@ -79,6 +75,9 @@ import Products.Autopilot.ReleaseBot.Engine
 import Products.Autopilot.ReleaseBot.Live (LiveEnv (..), readServiceEnv, replaceEnvVar)
 import Products.Autopilot.ReleaseBot.Sql (SqlFile (..), countStatements, renderSql, sqlFromCompare, statementsFor, unattributed)
 import Products.Autopilot.ReleaseBot.Store
+import Products.Autopilot.ReleaseBot.GithubAuth (githubTokenFlow)
+import Products.Autopilot.ReleaseBot.TrackerCard (closeTrackerCard)
+import Products.Autopilot.ReleaseBot.PublicLink (linkToken, publicRequestLink)
 import qualified Products.Autopilot.ReleaseBot.Xyne as X
 import Products.Autopilot.ReleaseBot.DbManager (DbmItem (..), dbmConfigured, submitRequest)
 import Products.Autopilot.Actions.K8sResource (resolveRolloutPodEstimateH, resolveRolloutPodEstimateSecondaryH, resolveSyncRolloutStrategyH)
@@ -116,19 +115,8 @@ ttlMinutes = do
 patchKey :: Req -> Text -> Text -> Flow ()
 patchKey req k v = patchRequest (rqId req) (object [K.fromText k .= v])
 
--- | Hex HMAC-SHA256 of the request id; the capability in the no-VPN diff link.
-linkToken :: Text -> Text -> Text
-linkToken secret rid =
-    let mac = hmac (TE.encodeUtf8 secret) (TE.encodeUtf8 rid) :: HMAC SHA256
-     in TE.decodeUtf8 (convertToBase Base16 mac :: BS.ByteString)
-
 publicLink :: Text -> Flow (Maybe Text)
-publicLink rid = do
-    base <- lookupEnvSecret "SC_PUBLIC_BASE_URL"
-    sec <- lookupEnvSecret "SC_RELEASE_BOT_LINK_SECRET"
-    pure $ case (base, sec) of
-        (Just b, Just s) -> Just (T.dropWhileEnd (== '/') b <> "/r/" <> rid <> "?t=" <> linkToken s rid)
-        _ -> Nothing
+publicLink = publicRequestLink
 
 -- | Link to the request's combined SQL file (same HMAC token as the review page).
 publicSqlLink :: Text -> Text -> Flow (Maybe Text)
@@ -178,21 +166,6 @@ publicRequestView rid mTok = do
 
 -- ─── Helpers ───────────────────────────────────────────────────────
 
-{- | A GitHub read token: an explicit @SC_GITHUB_TOKEN@ if set, otherwise an installation
-token minted from the GitHub App the backend already has (@SC_GITHUB_APP_*@), so no new
-GitHub secret is required. The App installation must cover the repo (Contents: read).
--}
-githubTokenFlow :: Flow (Either Text Text)
-githubTokenFlow = do
-    pat <- githubTokenFromEnv
-    case pat of
-        Right t -> pure (Right t)
-        Left _ -> do
-            r <- tryAny (loadGhCreds >>= getInstallationToken)
-            pure $ case r of
-                Right t -> Right t
-                Left e -> Left ("no GitHub credentials (set SC_GITHUB_TOKEN, or install the GitHub App on this repo): " <> T.take 160 (T.pack (show e)))
-
 say :: Text -> Maybe Text -> Text -> Flow (Maybe Text)
 say ch th txt = do
     r <- X.postText ch th txt
@@ -240,7 +213,7 @@ handleMention m = do
     when (enabled && forUs) $ do
         -- Webhook ids cannot be used as a thread_ts, so we open our own root message and
         -- keep everything else (errors, progress, summary) in its thread. Only the
-        -- Approve/Reject card goes top-level: buttons are not supported inside threads.
+        -- Config Approve/Reject card is posted into this thread; rollout cards go in each tracker's own thread.
         root <- say (X.mChannel m) Nothing ("🛠 Release request from " <> X.mSenderName m <> " received — checking…")
         let reply = void . say (X.mChannel m) root
         ecfg <- loadBotConfig
@@ -650,8 +623,38 @@ ack msg = object ["type" .= ("ack" :: Text), "message" .= msg]
 
 handleClick :: X.Click -> Flow Value
 handleClick c
+    | X.cVerb c `elem` [X.trackerApproveVerb, X.trackerDiscardVerb] = handleTrackerClick c
     | X.cVerb c `elem` [X.rolloutApproveVerb, X.rolloutRejectVerb] = handleRolloutClick c
     | otherwise = handleConfigClick c
+
+-- | Approve or discard the tracker a thread card belongs to (any backend release, bot-made or manual).
+handleTrackerClick :: X.Click -> Flow Value
+handleTrackerClick c = do
+    (name, email0) <- if T.null (X.cEmail c) then X.getUser (X.cUserId c) else pure (X.cUserName c, X.cEmail c)
+    let tid = X.cRequestId c
+        approving = X.cVerb c == X.trackerApproveVerb
+        who = if T.null name then email0 else name
+    auth <- authorize email0 (if approving then "RELEASE_APPROVE" else "RELEASE_DISCARD")
+    case auth of
+        Left why -> pure (ack ("⛔ " <> who <> " cannot " <> (if approving then "approve" else "discard") <> " this: " <> why <> ". Nothing was changed."))
+        Right ap -> do
+            r <-
+                tryAny $
+                    if approving
+                        then void (approveReleaseH ap tid (ApproveReleaseReq{approvedBy = who, isInfraApproved = Nothing}))
+                        else do
+                            resp <- discardReleaseH ap tid (DiscardReleaseReq{reason = Just ("Discarded from Xyne by " <> who)})
+                            when (R.status resp /= "SUCCESS") (C.throwM (userError (T.unpack (R.message resp))))
+            let err = either (T.take 200 . T.pack . show) (const "") r
+                alreadyDone = any (`T.isInfixOf` err) ["already approved", "Cannot approve again", "already discarded", "already been discarded"]
+                outcome
+                    | alreadyDone = "ℹ️ Already " <> (if approving then "approved" else "discarded") <> " — nothing more to do here."
+                    | T.null err = if approving then "✅ Approved by " <> who <> " — rollout starting." else "🚫 Discarded by " <> who <> "."
+                    | otherwise = "⚠️ " <> who <> ": " <> err
+            audit (Just ap) (if approving then "RELEASE_BOT_TRACKER_APPROVED" else "RELEASE_BOT_TRACKER_DISCARDED") tid (object ["error" .= err])
+            -- the buttons go away on every outcome: a failed or repeated action must not leave live buttons
+            closeTrackerCard tid outcome
+            pure (ack outcome)
 
 -- | Approve (which starts the rollout) or discard ONE service's tracker (the card's service).
 handleRolloutClick :: X.Click -> Flow Value
@@ -700,7 +703,7 @@ handleRolloutClick c = do
                         -- The card is replaced (buttons gone) on EVERY outcome, errors included: a failed or
                         -- already-done action must not leave live buttons that can only fail again.
                         void $ case (rqChannel req, dText cardKey d) of
-                            (Just ch, Just mid) -> X.updateCard ch mid outcome
+                            (Just ch, Just mid) -> X.updateCard (fromMaybe ch (dText ("rolloutCardCh:" <> fromMaybe "" svc) d)) mid outcome
                             _ -> pure (Right ())
                         sayReq req outcome
                         pure (ack outcome)
@@ -1111,22 +1114,6 @@ submitSqlRequest req repo svcs files = do
   where
     ensureSemi s = if ";" `T.isSuffixOf` T.stripEnd s then s else s <> ";"
 
-{- | One Approve/Discard card per service. Xyne cannot put flow cards inside a thread, so the card
-goes to the channel and the thread gets a pointer to it.
--}
-postRolloutCard :: Req -> ServiceCfg -> Text -> Text -> Flow ()
-postRolloutCard req svc short tid = case rqChannel req of
-    Nothing -> pure ()
-    Just chId -> do
-        let txt = "**Rollout approval — " <> scService svc <> "** (release request `" <> shortId (rqId req) <> "`)\n`" <> short <> "` · tracker `" <> tid <> "`\nApproving starts this service's rollout. Only authorized approvers can approve."
-        cr <- X.postRolloutCard chId (dText "threadTs" (rqData req)) txt (rqId req) (scService svc)
-        case cr of
-            Right (mid, inThread) -> do
-                patchKey req ("rolloutCard:" <> scService svc) mid
-                unless inThread $
-                    sayReq req ("⬇️ **" <> scService svc <> "**: approve or discard with the card posted just below in the channel.")
-            Left e -> logError ("[release-bot] rollout card post failed: " <> e)
-
 {- | The service's own configured rollout (deployment_config.rollout_strategy), else the bot rule's, else
 one 100% step. Rows hold either the flat step list, a double-encoded string of it, or the legacy
 @[{"cluster":…,"rollouts":[{"rollout","cooloff","pods"}]}]@ wrapper — all are read; anything that
@@ -1318,7 +1305,6 @@ createServiceTrackers ecfg req from = do
                         case res of
                             Right tid -> do
                                 patchKey req ("tracker:" <> scService svc) tid
-                                postRolloutCard req svc version tid
                             Left _ -> pure ()
                         pure (scService svc, res)
             let okIds = [i | (_, Right i) <- results]
@@ -1328,7 +1314,7 @@ createServiceTrackers ecfg req from = do
                 then do
                     ok <- transition (rqId req) from "COMPLETED" (object [])
                     when ok $ do
-                        sayReq req ("✅ Release tracker(s) created: " <> T.intercalate ", " okIds <> " (status CREATED). Approve each service with its card in the channel, or in SCC.")
+                        sayReq req ("✅ Release tracker(s) created: " <> T.intercalate ", " okIds <> " (status CREATED). Approve each service with the card in its release thread, or in SCC.")
                 else failReq req from ("Some trackers were not created: " <> T.intercalate "; " errs <> (if null okIds then "" else ". Created: " <> T.intercalate ", " okIds))
 
 

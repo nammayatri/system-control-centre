@@ -77,8 +77,41 @@ const deriveSyncStatus = (events: RolloutEvent[], releaseStatus: string): SyncSt
 };
 
 
+// DHALL_CONFIG (and similar) env values are base64 of a text file; show the decoded text as a
+// YAML block scalar so the diff is line-by-line like the env override panel.
+const decodeB64Utf8 = (b64: string): string | null => {
+  try {
+    const bin = atob(b64);
+    const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return text.length > 0 ? text : null;
+  } catch { return null; }
+};
+
+const decodeDhallEnv = (yaml: string): string => {
+  const lines = yaml.split('\n');
+  const out: string[] = [];
+  let inDhall = false;
+  for (const line of lines) {
+    const nameM = line.match(/^\s*-?\s*name:\s*(\S+)\s*$/);
+    if (nameM) inDhall = nameM[1] === 'DHALL_CONFIG';
+    const valM = inDhall ? line.match(/^(\s*)value:\s*["']?([A-Za-z0-9+/]{16,}={0,2})["']?\s*$/) : null;
+    const decoded = valM ? decodeB64Utf8(valM[2]) : null;
+    if (valM && decoded != null) {
+      const ind = valM[1];
+      out.push(`${ind}value: |-`);
+      for (const l of decoded.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n')) out.push(l === '' ? '' : `${ind}  ${l}`);
+      inDhall = false;
+    } else {
+      out.push(line);
+    }
+  }
+  return out.join('\n');
+};
+
 // Backend returns YAML; legacy records may still be (double-encoded) JSON — convert those to YAML.
-const formatDiff = (raw: string): string => {
+const formatDiff = (raw: string): string => decodeDhallEnv(formatDiffRaw(raw));
+const formatDiffRaw = (raw: string): string => {
   if (!raw) return '';
   const trimmed = raw.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {

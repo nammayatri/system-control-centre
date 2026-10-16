@@ -45,6 +45,8 @@ module Products.Autopilot.Notifications
     notifyDecisionThreadMessage,
     notifyFixedChannelAlert,
     releaseLink,
+    getSlackChannel,
+    getThreadTs,
     sendMobileChangelogSlack,
     sendGroupChangelogSlackIfSettled,
     chunkForSlack,
@@ -72,6 +74,7 @@ import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTarg
 import Products.Autopilot.QaAutomation (dispatchAutoQaRun)
 import Products.Autopilot.Queries.ProductService (findProductByName, getRepoNameDirect, getSlackChannelDirect)
 import Products.Autopilot.Queries.ReleaseTracker qualified as RTQ
+import Products.Autopilot.ReleaseBot.TrackerCard (closeTrackerCard, postTrackerCard)
 import Products.Autopilot.ReleaseChangelog (generateBackendChangelog)
 import Products.Autopilot.RuntimeConfig (getDecisionNotificationDedupMinutes, getMobileSlackChannel, isSlackEnabled)
 import Products.Autopilot.Sync (triggerSyncIfEnabled)
@@ -479,7 +482,11 @@ notifyReleaseCreated tracker = do
           blocks = [sectionBlock link, sectionBlock (versionLine tracker), contextBlock ["Cloud: " <> cloud]] <> clBlocks
       mTs <- sendSlackRich channel (appGroup tracker <> " | " <> service tracker) colorCreated blocks Nothing
       case mTs of
-        Just ts -> saveThreadTs (releaseId tracker) ts
+        Just ts -> do
+          saveThreadTs (releaseId tracker) ts
+          -- Approve / Discard card in this message's thread, for every backend release.
+          when (category tracker `elem` [BackendService, BackendScheduler] && not (isApproved tracker)) $
+            void (forkFlow (postTrackerCard tracker channel ts))
         Nothing -> pure ()
 
 notifyReleaseApproved :: ReleaseTracker -> Flow ()
@@ -488,7 +495,7 @@ notifyReleaseApproved tracker = whenSlackEnabled $
     threadTs <- resolveThreadTs tracker
     let blocks = [sectionBlock ("Approved by *" <> maybe "admin" id (approvedBy tracker) <> "*")]
     _ <- sendSlackRich channel "Approved" colorApproved blocks threadTs
-    pure ()
+    closeTrackerCard (releaseId tracker) ("✅ Approved by " <> maybe "admin" id (approvedBy tracker) <> " — rollout starting.")
 
 notifyReleaseProgress :: ReleaseTracker -> Int -> Flow ()
 notifyReleaseProgress tracker percentage = whenSlackEnabled $
@@ -623,7 +630,7 @@ notifyReleaseDiscarded tracker = whenSlackEnabled $
     threadTs <- resolveThreadTs tracker
     let blocks = [sectionBlock "*DISCARDED*"]
     _ <- sendSlackRich channel "DISCARDED" colorDefault blocks threadTs
-    pure ()
+    closeTrackerCard (releaseId tracker) "🚫 Discarded."
 
 notifyReleaseDeleted :: ReleaseTracker -> Flow ()
 notifyReleaseDeleted tracker = whenSlackEnabled $

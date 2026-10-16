@@ -98,6 +98,7 @@ import Products.Autopilot.ReleaseBot.Routes qualified as RBR
 import Products.Autopilot.ProdRelease.Jenkins qualified as PRJ
 import Products.Autopilot.ReleaseBot.RowConfig qualified as RBW
 import Products.Autopilot.Types.Storage.Schema qualified as SCH
+import Products.Autopilot.ReleaseBot.PublicLink (requestIdOfGlobalId)
 import Products.Autopilot.ReleaseBot.Xyne qualified as RBX
 import Shared.AI.Changelog qualified as CL
 import Shared.Config.Registry (validateConfigValue)
@@ -2905,6 +2906,11 @@ testReleaseBotRefs = do
 
 testReleaseBotTriggers :: IO ()
 testReleaseBotTriggers = do
+  assertEqual "tracker card click parses (verb + tracker id)" (Just (RBX.trackerApproveVerb, "trk-1"))
+    (fmap (\c -> (RBX.cVerb c, RBX.cRequestId c)) (RBX.parseClick (Aeson.object ["actionId" Aeson..= ("scc_tracker_approve:trk-1" :: Text), "context" Aeson..= Aeson.object ["userId" Aeson..= ("u1" :: Text)]])))
+  assertEqual "bot tracker global id -> request id" (Just "0cddc238-38c8-4492-9447-fb8d81524249") (requestIdOfGlobalId "0cddc238-38c8-4492-9447-fb8d81524249-rider-app")
+  assertEqual "hand-made global id is not a bot tracker" Nothing (requestIdOfGlobalId "my-manual-release")
+  assertEqual "uuid alone has no service part" Nothing (requestIdOfGlobalId "0cddc238-38c8-4492-9447-fb8d81524249")
   assertEqual "the bot's own mention is removed from the message text (its name must not match service aliases)"
     "be7a73 can u release backend master"
     (RBX.stripMentions (RBX.mentionTexts "<p><span data-user-id=\"b1\">@System Control Center Master</span> be7a73 can u release backend master</p>") "@System Control Center Master be7a73 can u release backend master")

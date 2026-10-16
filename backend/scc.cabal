@@ -70,11 +70,14 @@ library
       Products.Autopilot.ReleaseBot.Diff
       Products.Autopilot.ReleaseBot.Engine
       Products.Autopilot.ReleaseBot.Flow
+      Products.Autopilot.ReleaseBot.GithubAuth
       Products.Autopilot.ReleaseBot.Routes
       Products.Autopilot.ReleaseBot.RowConfig
       Products.Autopilot.ReleaseBot.Live
+      Products.Autopilot.ReleaseBot.PublicLink
       Products.Autopilot.ReleaseBot.Sql
       Products.Autopilot.ReleaseBot.Store
+      Products.Autopilot.ReleaseBot.TrackerCard
       Products.Autopilot.ReleaseBot.Xyne
       Products.Autopilot.Discovery
       Products.Autopilot.EventLog

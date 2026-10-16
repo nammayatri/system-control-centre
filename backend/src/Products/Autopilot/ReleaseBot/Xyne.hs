@@ -27,6 +27,10 @@ module Products.Autopilot.ReleaseBot.Xyne (
     rejectVerb,
     rolloutApproveVerb,
     rolloutRejectVerb,
+    trackerApproveVerb,
+    trackerDiscardVerb,
+    postCard,
+    flowCard,
     postRolloutCard,
     verifySignature,
     signingSecret,
@@ -44,6 +48,7 @@ module Products.Autopilot.ReleaseBot.Xyne (
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Core.Http.Client (HttpError (..), HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
+import Core.Logging (logInfoG, logWarningG)
 import Core.Secrets (lookupEnvSecret)
 import Core.Types.Time (Seconds (..))
 import Crypto.Hash.Algorithms (SHA256)
@@ -68,8 +73,13 @@ approveVerb = "scc_release_approve"
 rejectVerb = "scc_release_reject"
 
 -- | Verbs of the second card: approve (and so start) / discard the created release trackers.
+trackerApproveVerb, trackerDiscardVerb :: Text
+trackerApproveVerb = "scc_tracker_approve"
+trackerDiscardVerb = "scc_tracker_discard"
+
 rolloutApproveVerb, rolloutRejectVerb :: Text
 rolloutApproveVerb = "scc_rollout_approve"
+
 rolloutRejectVerb = "scc_rollout_reject"
 
 -- ─── Signature ─────────────────────────────────────────────────────
@@ -151,7 +161,7 @@ parseClick v = flowShape `orElse` interactionShape `orElse` (obj "payload" v >>=
   where
     orElse (Just a) _ = Just a
     orElse Nothing b = b
-    known verb = verb `elem` [approveVerb, rejectVerb, rolloutApproveVerb, rolloutRejectVerb]
+    known verb = verb `elem` [approveVerb, rejectVerb, rolloutApproveVerb, rolloutRejectVerb, trackerApproveVerb, trackerDiscardVerb]
     flowShape = do
         aid <- str "actionId" v
         let (verb, rest) = T.breakOn ":" aid
@@ -337,8 +347,13 @@ postCard channel thread text flow = do
         Just t -> do
             r <- call url (body ["conversationId" .= t])
             case r of
-                Right v -> pure (Right (ok v thread))
-                Left _ -> fmap (\v -> (fst (ok v Nothing), False)) <$> call url (body [])
+                Right v -> do
+                    let landed = fst (ok v thread) /= "" && snd (ok v thread)
+                    logInfoG ("[xyne] card to " <> channel <> " thread=" <> t <> " -> conversationId=" <> fromMaybe "-" (str "conversationId" v) <> " messageId=" <> fromMaybe "-" (str "messageId" v) <> (if landed then " (in thread)" else " (NOT in thread)"))
+                    pure (Right (ok v thread))
+                Left e -> do
+                    logWarningG ("[xyne] threaded card post to " <> channel <> " thread=" <> t <> " refused (" <> T.take 300 e <> "); posting at channel level")
+                    fmap (\v -> (fst (ok v Nothing), False)) <$> call url (body [])
         Nothing -> fmap (\v -> ok v Nothing) <$> call url (body [])
 
 -- | Post the Approve/Reject card; returns the native message id.
