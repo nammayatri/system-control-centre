@@ -66,7 +66,6 @@ import Products.Autopilot.Queries.ProductService (findProductByName, findService
 import qualified Products.Autopilot.Types.Storage.Schema as S
 import Products.Autopilot.ProdRelease.Config
 import Products.Autopilot.ReleaseBot.ConfigSource (loadBotConfig)
-import Products.Autopilot.Mobile.Github.Auth (getInstallationToken, loadGhCreds)
 import Products.Autopilot.ProdRelease.Github
 import Products.Autopilot.ProdRelease.Intent
 import Products.Autopilot.ProdRelease.Jenkins (BuildStatus (..), ExistingBuild (..), TriggerResult (..), findExistingBuild, pollBuild, triggerBuild)
@@ -1171,11 +1170,6 @@ estimatePods ap secondary svc steps = do
                 zipWith (\st c -> st{rsPodCount = max 1 c}) steps counts
         _ -> steps
 
-podFor :: [RolloutStepCfg] -> Int -> Int
-podFor base p = case [rsPodCount x | x <- base, rsRolloutPercent x <= p] of
-    [] -> maybe 1 rsPodCount (listToMaybe base)
-    xs -> last xs
-
 createServiceTrackers :: Either Text ProdReleaseConfig -> Req -> Text -> Flow ()
 createServiceTrackers ecfg req from = do
     scope <- loadScope ecfg req
@@ -1254,11 +1248,7 @@ createServiceTrackers ecfg req from = do
                                             _ -> baseline
                                     estimatePods ap True svc strat
                                 else pure []
-                        let override = parseRolloutOverride (fromMaybe "" (dText "text" d))
-                            rolloutJson = map (\r -> object ["rolloutPercent" .= rsRolloutPercent r, "cooloffMinutes" .= rsCooloffMinutes r, "podCount" .= rsPodCount r])
-                            customSteps = case override of
-                                Just (Right xs) -> Just [RolloutStepCfg p m (podFor baseline p) | (p, m) <- xs]
-                                _ -> Nothing
+                        let rolloutJson = map (\r -> object ["rolloutPercent" .= rsRolloutPercent r, "cooloffMinutes" .= rsCooloffMinutes r, "podCount" .= rsPodCount r])
                             mkBody rollout =
                                 object $
                                     (if syncOn then ["isReleaseSync" .= True, "syncClusterRolloutStrategy" .= rolloutJson syncSteps] else []) ++
@@ -1285,23 +1275,11 @@ createServiceTrackers ecfg req from = do
                                     pure $ case x of
                                         Left ex -> Left (T.take 200 (T.pack (show ex)))
                                         Right resp -> maybe (Left (R.message resp)) Right (idOfResponse resp)
-                        case override of
-                            Just (Left why) -> sayReq req ("⚠️ " <> scService svc <> ": ignoring the requested rollout — " <> why <> ". Using the default rollout.")
-                            _ -> pure ()
-                        -- A custom rollout needs the stagger permission (createReleaseH enforces it); if the
-                        -- requester lacks it (or the strategy is refused) fall back to the default one.
-                        chosenP <- estimatePods ap False svc (fromMaybe baseline customSteps)
-                        baselineP <- estimatePods ap False svc baseline
-                        first <- create chosenP
-                        res <- case (first, customSteps) of
-                            (Left why, Just _) -> do
-                                sayReq req ("⚠️ " <> scService svc <> ": could not use the requested rollout (" <> why <> "). Creating it with the default rollout instead.")
-                                create baselineP
-                            _ -> pure first
+                        -- The rollout always comes from the service's saved strategy; the message cannot change it.
+                        chosenP <- estimatePods ap False svc baseline
+                        res <- create chosenP
                         when (either (const False) (const True) res) $
                             sayReq req ("📦 " <> scService svc <> ": pods sized from the running version — " <> T.intercalate ", " [T.pack (show (rsRolloutPercent x)) <> "% → " <> T.pack (show (rsPodCount x)) <> " pod(s)" | x <- chosenP] <> ".")
-                        when (maybe False (const True) customSteps && either (const False) (const True) first) $
-                            sayReq req ("🎚 " <> scService svc <> ": custom rollout " <> T.intercalate ", " [T.pack (show (rsRolloutPercent x)) <> "% → " <> T.pack (show (rsCooloffMinutes x)) <> "m" | x <- fromMaybe [] customSteps] <> ".")
                         case res of
                             Right tid -> do
                                 patchKey req ("tracker:" <> scService svc) tid
