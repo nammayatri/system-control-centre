@@ -25,6 +25,7 @@ import Core.AppError (APIError (..))
 import qualified Core.AppError as E
 import Core.Environment (Flow, forkFlow)
 import Data.Aeson (Value (..), decodeStrict, object, (.=))
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
@@ -81,7 +82,15 @@ eventsH msig raw = do
             Just m -> do
                 _ <- forkFlow (handleMention m)
                 pure (object ["status" .= ("accepted" :: Text)])
-            Nothing -> pure (object ["status" .= ("ignored" :: Text)])
+            Nothing
+                -- a button click we do not recognise (e.g. an old or demo card) still needs the click
+                -- acknowledgement shape, or Xyne reports "invalid response" to the user
+                | isFlowAction payload -> pure (object ["type" .= ("ack" :: Text), "message" .= ("This action is not recognised." :: Text)])
+                | otherwise -> pure (object ["status" .= ("ignored" :: Text)])
+
+isFlowAction :: Value -> Bool
+isFlowAction (Object o) = KM.member "actionId" o || maybe False isFlowAction (KM.lookup "payload" o)
+isFlowAction _ = False
 
 publicH :: Text -> Maybe Text -> Flow Value
 publicH rid mt = do

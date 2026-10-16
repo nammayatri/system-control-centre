@@ -34,8 +34,11 @@ import Products.Autopilot.Types.Release (ReleaseTracker (..))
 import Products.Autopilot.Types.Storage.Schema (reLabel, rePayload)
 
 -- | Post the card into the tracker message's thread and remember where it is.
-postTrackerCard :: ReleaseTracker -> Text -> Text -> Text -> Flow ()
-postTrackerCard t channel threadTs conversation = do
+postTrackerCard :: ReleaseTracker -> Text -> Text -> Maybe Text -> Flow ()
+postTrackerCard t channel threadTs mConv = do
+  conv <- maybe (X.conversationIdOf channel threadTs) (pure . Just) mConv
+  logInfoG ("[tracker-card] " <> releaseId t <> " thread conversation: " <> fromMaybe "unknown (using message ts)" conv)
+  let conversation = fromMaybe threadTs conv
   facts <- trackerFacts t
   logInfoG ("[tracker-card] " <> releaseId t <> " facts: " <> T.intercalate " | " facts)
   let tid = releaseId t

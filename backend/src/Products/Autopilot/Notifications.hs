@@ -501,7 +501,7 @@ notifyReleaseCreated tracker = do
           saveThreadTs (releaseId tracker) ts
           -- Approve / Discard card in this message's thread, for every backend release.
           when (category tracker `elem` [BackendService, BackendScheduler] && not (isApproved tracker)) $
-            void (forkFlow (postTrackerCard tracker channel ts (fromMaybe ts conv)))
+            void (forkFlow (postTrackerCard tracker channel ts conv))
         Nothing -> pure ()
 
 notifyReleaseApproved :: ReleaseTracker -> Flow ()

@@ -30,6 +30,7 @@ module Products.Autopilot.ReleaseBot.Xyne
     trackerDiscardVerb,
     postCard,
     resolveChannelId,
+    conversationIdOf,
     flowCard,
     postRolloutCard,
     verifySignature,
@@ -58,7 +59,7 @@ import Data.Aeson (Value (..), decode, encode, object, (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteArray (constEq)
-import Data.ByteArray.Encoding (Base (Base16), convertToBase)
+import Data.ByteArray.Encoding (Base (Base16, Base64), convertFromBase, convertToBase)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef (IORef, modifyIORef, newIORef, readIORef, writeIORef)
@@ -443,3 +444,39 @@ resolveChannelId raw
                     (i : _, _) -> pure (Just i)
                     ([], Just c) -> search (n + 1) (Just c)
                     _ -> pure Nothing
+
+
+{- | The conversation (thread) id of a top-level message, which the native card API needs to post INTO its
+thread. The Slack-compatible post returns only the message's @ts@, but @conversations.history@'s paging
+cursor is base64 JSON carrying the conversation id of the LAST message returned — so ask for the newest
+@n@ messages until the last one is ours and read its cursor.
+-}
+conversationIdOf :: (MonadIO m) => Text -> Text -> m (Maybe Text)
+conversationIdOf channel0 ts = do
+    channel <- resolveChannelId channel0
+    go channel (1 :: Int)
+  where
+    go ch n
+        | n > 12 = pure Nothing
+        | otherwise = do
+            r <- slackCall "conversations.history" (object ["channel" .= ch, "limit" .= n])
+            case r of
+                Left _ -> pure Nothing
+                Right v ->
+                    let msgs = case obj "messages" v of Just (Array xs) -> V.toList xs; _ -> []
+                     in case msgs of
+                            [] -> pure Nothing
+                            _
+                                | length msgs < n -> pure Nothing
+                                | str "ts" (last msgs) == Just ts -> pure (obj "response_metadata" v >>= str "next_cursor" >>= cursorConversation)
+                                | otherwise -> go ch (n + 1)
+    cursorConversation c = case convertFromBase Base64 (TE.encodeUtf8 c) :: Either String BS.ByteString of
+        Right bs -> decode (LBS.fromStrict bs) >>= str "conversationId"
+        Left _ -> Nothing
+
+
+-- | A message's @ts@ (as the Slack-compatible API gives it) -> the conversation id the card API needs;
+-- the @ts@ itself when it cannot be looked up (the post then falls back to the channel).
+threadConversation :: (MonadIO m) => Text -> Maybe Text -> m (Maybe Text)
+threadConversation _ Nothing = pure Nothing
+threadConversation channel (Just ts) = Just . fromMaybe ts <$> conversationIdOf channel ts
