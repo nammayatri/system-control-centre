@@ -140,6 +140,7 @@ library
       Products.AirborneOta.Routes
       Products.AirborneOta.Types
       Products.AirborneOta.Types.Permission
+      Products.Devbox.Types.Permission
       Products.Autopilot.Actions.ABValidation
       Products.Autopilot.Actions.Config
       Products.Autopilot.Actions.ConfigMap
