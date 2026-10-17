@@ -6,7 +6,8 @@ import { Button } from '../../../shared/ui/button';
 import { Card, CardContent } from '../../../shared/ui/card';
 import { Input, SelectInput } from '../../../shared/ui/input';
 import { devboxError } from '../api';
-import { useBranchStatus, useCreateDevboxRelease } from '../hooks';
+import { BranchField } from '../components/BranchField';
+import { useBranchStatus, useCreateDevboxRelease, useDevboxReleases } from '../hooks';
 import type { DataSource, DevboxRelease } from '../types';
 
 // 'feat/fare-fix' → 'fare-fix' (same rule as the server's nameFromBranch).
@@ -44,6 +45,12 @@ export default function DevboxNewRelease() {
   const [nameTouched, setNameTouched] = useState(false);
   const [blocked, setBlocked] = useState<{ message: string; release?: DevboxRelease } | null>(null);
 
+  // The caller's active count and the limit come with the list.
+  const limits = useDevboxReleases('all', '', 1, 1);
+  const mineActive = limits.data?.mineActive ?? 0;
+  const maxActive = limits.data?.maxActive ?? 2;
+  const full = mineActive >= maxActive;
+
   const debouncedBranch = useDebounced(backendBranch.trim());
   const branchStatus = useBranchStatus(debouncedBranch);
   const running = branchStatus.data?.active ?? null;
@@ -67,7 +74,7 @@ export default function DevboxNewRelease() {
     return undefined;
   }, [workspace]);
   const versionError = dataVersion && !/^v\d+$/.test(dataVersion.trim()) ? 'Looks like v14' : undefined;
-  const canSubmit = backendBranch.trim() && workspace && !nameError && !versionError && !running && !create.isPending;
+  const canSubmit = backendBranch.trim() && workspace && !nameError && !versionError && !running && !full && !create.isPending;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -93,7 +100,7 @@ export default function DevboxNewRelease() {
   };
 
   return (
-    <form onSubmit={submit} className="max-w-3xl space-y-4">
+    <form onSubmit={submit} className="space-y-4">
       <div>
         <h1 className="text-xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100">New devbox release</h1>
         <p className="text-sm text-zinc-500">
@@ -110,6 +117,14 @@ export default function DevboxNewRelease() {
           </button>
         </Banner>
       )}
+      {full && (
+        <Banner tone="bad">
+          You already have {mineActive} active releases (the limit is {maxActive}). Stop one of them first.{' '}
+          <button type="button" className="font-semibold underline" onClick={() => navigate('/devbox/releases')}>
+            See releases
+          </button>
+        </Banner>
+      )}
       {blocked && !running && (
         <Banner tone="bad">
           {blocked.message}{' '}
@@ -121,32 +136,38 @@ export default function DevboxNewRelease() {
         </Banner>
       )}
 
+      <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <div className="min-w-0 space-y-4">
       <Card>
         <CardContent className="grid gap-4 p-5 sm:grid-cols-2">
-          <Input
+          <BranchField
             id="devbox-backend"
             label="Backend branch (nammayatri)"
+            repo="backend"
             value={backendBranch}
-            onChange={(e) => setBackendBranch(e.target.value)}
+            onChange={setBackendBranch}
             placeholder="feat/fare-fix"
             required
-            hint="Pinned to its latest commit on create"
+            emptyHint="Pinned to its latest commit on create"
           />
-          <Input
+          <BranchField
             id="devbox-cc"
             label="Control-centre branch"
+            repo="cc"
             value={ccBranch}
-            onChange={(e) => setCcBranch(e.target.value)}
+            onChange={setCcBranch}
             placeholder="main"
-            hint="Leave empty for no control centre"
+            emptyHint="Leave empty for no control centre"
           />
           <div className="space-y-2">
-            <Input
+            <BranchField
               id="devbox-frontend"
               label="App branch (ny-react-native)"
+              repo="app"
               value={frontendBranch}
-              onChange={(e) => setFrontendBranch(e.target.value)}
+              onChange={setFrontendBranch}
               placeholder="optional"
+              emptyHint="Optional: adds Android / iOS builds"
             />
             <div className="flex flex-wrap gap-4 text-sm">
               <label className="flex items-center gap-2">
@@ -192,10 +213,6 @@ export default function DevboxNewRelease() {
         </CardContent>
       </Card>
 
-      <Banner tone="info">
-        Runs on the least-loaded dev-box with a front desk. Stops by itself after the lifetime set in server config (3 days by default). You can have at most 2 active releases.
-      </Banner>
-
       <div className="flex gap-2">
         <Button type="submit" disabled={!canSubmit} loading={create.isPending}>
           Create release
@@ -204,7 +221,87 @@ export default function DevboxNewRelease() {
           Cancel
         </Button>
       </div>
+      </div>
+
+      <Summary
+        backendBranch={backendBranch.trim()}
+        ccBranch={ccBranch.trim()}
+        frontendBranch={frontendBranch.trim()}
+        builds={[buildAndroid && 'Android', buildIos && 'iOS'].filter(Boolean).join(' + ')}
+        data={`${dataSource} ${dataVersion.trim() || '(latest safe)'}`}
+        workspace={workspace}
+        mineAfter={mineActive + 1}
+        maxActive={maxActive}
+      />
+      </div>
     </form>
+  );
+}
+
+const AFTER_CREATE = [
+  ['Preparing', 'pick the least-loaded dev-box with a front desk, register the workspace'],
+  ['Sync', 'copy the pinned code to the dev-box'],
+  ['Build', 'restore the build cache, compile what changed'],
+  ['Start', 'start the services until rider and driver answer'],
+  ['Data', 'load the chosen data'],
+  ['Control centre', 'start it next to the backend'],
+  ['Ready', 'links appear on the release page'],
+];
+
+// Right-hand panel: what this release will be, filled in as the form changes.
+function Summary(p: {
+  backendBranch: string;
+  ccBranch: string;
+  frontendBranch: string;
+  builds: string;
+  data: string;
+  workspace: string;
+  mineAfter: number;
+  maxActive: number;
+}) {
+  const stopOn = new Date(Date.now() + 3 * 24 * 3600 * 1000).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+  const row = (k: string, v: React.ReactNode) => (
+    <>
+      <dt className="text-zinc-500">{k}</dt>
+      <dd className="min-w-0 break-all font-mono text-xs text-zinc-800 dark:text-zinc-200">{v}</dd>
+    </>
+  );
+  return (
+    <aside className="space-y-4 xl:sticky xl:top-4">
+      <Card>
+        <CardContent className="space-y-3 p-5">
+          <h2 className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">This release</h2>
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
+            {row('Backend', p.backendBranch || <span className="text-zinc-400">pick a branch</span>)}
+            {row('Control centre', p.ccBranch || '—')}
+            {row('App', p.frontendBranch ? `${p.frontendBranch}${p.builds ? ` · ${p.builds}` : ' · no builds'}` : '—')}
+            {row('Data', p.data)}
+            {row('URL', `http://<dev-box>:8888/${p.workspace || '…'}`)}
+            {row('Auto-stop', `${stopOn} (3 days)`)}
+          </dl>
+          <p className="border-t border-zinc-100 pt-3 text-sm text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
+            Your active releases after this: <b className="text-zinc-900 dark:text-zinc-100">{Math.min(p.mineAfter, p.maxActive)} of {p.maxActive}</b>
+          </p>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="space-y-2 p-5">
+          <h2 className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">After you create</h2>
+          <ol className="space-y-2">
+            {AFTER_CREATE.map(([stage, what], i) => (
+              <li key={stage} className="grid grid-cols-[22px_minmax(0,1fr)] gap-2 text-sm">
+                <span className="grid h-5 w-5 place-items-center rounded-full bg-zinc-100 text-[11px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">{i + 1}</span>
+                <span>
+                  <b className="font-semibold text-zinc-800 dark:text-zinc-200">{stage}</b>
+                  <span className="text-zinc-500"> · {what}</span>
+                </span>
+              </li>
+            ))}
+          </ol>
+          <p className="pt-1 text-xs text-zinc-500">Each step is a GitHub Actions step; the release page follows them live. About 10 minutes with a warm build cache.</p>
+        </CardContent>
+      </Card>
+    </aside>
   );
 }
 

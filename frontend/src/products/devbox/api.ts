@@ -1,5 +1,7 @@
 import { apiClient } from '../../lib/api-client';
 import type {
+  BranchOption,
+  BranchRepo,
   BranchStatusResp,
   CreateReleaseReq,
   DevboxRelease,
@@ -28,6 +30,12 @@ export async function fetchDevboxRelease(id: string): Promise<ReleaseDetailResp>
 export async function fetchBranchStatus(branch: string): Promise<BranchStatusResp> {
   const { data } = await apiClient.get('/devbox/branch-status', { params: { branch } });
   return data;
+}
+
+/** Up to 20 branches starting with q (2+ characters), each with the commit it points at now. */
+export async function fetchBranches(repo: BranchRepo, q: string): Promise<BranchOption[]> {
+  const { data } = await apiClient.get('/devbox/branches', { params: { repo, q } });
+  return data.branches ?? [];
 }
 
 export async function createDevboxRelease(req: CreateReleaseReq): Promise<{ release: DevboxRelease }> {

@@ -76,7 +76,17 @@ export interface ReleasesResp {
   counts: FilterCounts;
   page: number;
   count: number;
+  /** The caller's active releases, and the limit (server config devbox_max_active_per_user). */
+  mineActive: number;
+  maxActive: number;
 }
+
+export interface BranchOption {
+  name: string;
+  sha: string;
+}
+
+export type BranchRepo = 'backend' | 'cc' | 'app';
 
 export interface ReleaseDetailResp {
   release: DevboxRelease;

@@ -400,10 +400,11 @@ const devboxProduct: ProductDefinition = {
     { path: 'releases/new', component: DevboxNewRelease, permission: 'DEVBOX_RELEASE_CREATE' },
     { path: 'releases/:id', component: DevboxReleaseDetail },
   ],
+  // parts = the whole path: ['devbox', 'releases', 'new' | <id>]
   getBreadcrumbs: (parts) => {
     const crumbs: Crumb[] = [{ label: 'Devbox Releases', to: '/devbox/releases' }];
-    if (parts[1] === 'new') crumbs.push({ label: 'New release' });
-    else if (parts[1]) crumbs.push({ label: 'Release' });
+    if (parts[2] === 'new') crumbs.push({ label: 'New release' });
+    else if (parts[2]) crumbs.push({ label: 'Release' });
     return crumbs;
   },
 };

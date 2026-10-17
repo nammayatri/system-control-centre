@@ -30,7 +30,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
-import Products.Autopilot.Mobile.Github (cancelRun)
+import Products.Autopilot.Mobile.Github (BranchInfo (..), cancelRun, searchBranches)
 import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
 import Products.Devbox.Github (appRepo, backendRepo, ccRepo, dispatch, pin)
 import Products.Devbox.Queries
@@ -43,17 +43,19 @@ type DevboxAPI =
     "devbox" :> Protected 'DEVBOX_VIEW :> "releases" :> QueryParam "filter" Text :> QueryParam "q" Text :> QueryParam "page" Int :> QueryParam "count" Int :> Get '[JSON] Value
         :<|> "devbox" :> Protected 'DEVBOX_VIEW :> "releases" :> Capture "id" Text :> Get '[JSON] Value
         :<|> "devbox" :> Protected 'DEVBOX_VIEW :> "branch-status" :> QueryParam' '[Required, Strict] "branch" Text :> Get '[JSON] Value
+        -- Branch picker for the form: repo = backend | cc | app.
+        :<|> "devbox" :> Protected 'DEVBOX_RELEASE_CREATE :> "branches" :> QueryParam' '[Required, Strict] "repo" Text :> QueryParam "q" Text :> Get '[JSON] Value
         :<|> "devbox" :> Protected 'DEVBOX_RELEASE_CREATE :> "releases" :> ReqBody '[JSON] CreateReq :> Post '[JSON] Value
         -- STOP is the floor; stopping someone else's release also needs STOP_ANY (checked in the handler).
         :<|> "devbox" :> Protected 'DEVBOX_RELEASE_STOP :> "releases" :> Capture "id" Text :> "stop" :> Post '[JSON] Value
 
 devboxServer :: ServerT DevboxAPI Flow
-devboxServer = listH :<|> getH :<|> branchStatusH :<|> createH :<|> stopH
+devboxServer = listH :<|> getH :<|> branchStatusH :<|> branchesH :<|> createH :<|> stopH
 
 -- ─── Read ──────────────────────────────────────────────────────────
 
 listH :: AuthedPerson -> Maybe Text -> Maybe Text -> Maybe Int -> Maybe Int -> Flow Value
-listH _ap mFilter mQ mPage mCount = do
+listH ap mFilter mQ mPage mCount = do
     sf <- case mFilter of
         Nothing -> pure FilterAll
         Just f -> maybe (throwM (BadRequest ("unknown filter " <> f <> " (all, running, in_progress, stopped)"))) pure (textToStatusFilter f)
@@ -62,7 +64,18 @@ listH _ap mFilter mQ mPage mCount = do
         q = mfilterEmpty (T.strip <$> mQ)
     (rows, total) <- listReleases sf q page count
     counts <- filterCounts
-    pure $ object ["releases" .= rows, "total" .= total, "counts" .= counts, "page" .= page, "count" .= count]
+    mine <- countActiveFor (apEmail ap)
+    maxActive <- getConfigIntForProduct "devbox_max_active_per_user" (Just "devbox") 2
+    pure $
+        object
+            [ "releases" .= rows
+            , "total" .= total
+            , "counts" .= counts
+            , "page" .= page
+            , "count" .= count
+            , "mineActive" .= mine
+            , "maxActive" .= maxActive
+            ]
 
 getH :: AuthedPerson -> Text -> Flow Value
 getH ap rid = do
@@ -76,6 +89,31 @@ branchStatusH :: AuthedPerson -> Text -> Flow Value
 branchStatusH _ap branch = do
     active <- activeForBranch (T.strip branch)
     pure $ object ["branch" .= branch, "active" .= active]
+
+{- | Up to 20 branches starting with @q@, each with the commit it points at now
+(the commit a release would pin). Needs 2+ characters: nammayatri has
+thousands of branches.
+-}
+branchesH :: AuthedPerson -> Text -> Maybe Text -> Flow Value
+branchesH _ap repoKey mQ = do
+    (owner, repo) <- case repoKey of
+        "backend" -> pure backendRepo
+        "cc" -> pure ccRepo
+        "app" -> pure appRepo
+        _ -> throwM (BadRequest "repo must be backend, cc or app")
+    let q = T.strip (fromMaybe "" mQ)
+    if T.length q < 2
+        then pure (object ["branches" .= ([] :: [Value])])
+        else do
+            creds <- loadGhCreds
+            searchBranches creds owner repo q >>= \case
+                Left err -> throwM (BadRequest ("cannot list branches of " <> owner <> "/" <> repo <> ": " <> err))
+                Right bs ->
+                    pure $
+                        object
+                            [ "branches"
+                                .= [object ["name" .= biName b, "sha" .= biSha b] | b <- take 20 bs]
+                            ]
 
 -- ─── Create ────────────────────────────────────────────────────────
 

@@ -55,7 +55,9 @@ export default function DevboxReleasesList() {
   };
 
   const email = user?.email;
-  const mineActive = (data?.releases ?? []).filter((r) => r.createdBy === email && ACTIVE_STATUSES.includes(r.status)).length;
+  const mineActive = data?.mineActive ?? 0;
+  const maxActive = data?.maxActive ?? 2;
+  const full = mineActive >= maxActive;
   const pages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
 
   return (
@@ -68,8 +70,17 @@ export default function DevboxReleasesList() {
           </p>
         </div>
         <div className="flex-1" />
+        {canCreate && email && (
+          <span className="text-sm text-zinc-500">
+            Your active releases: <b className="text-zinc-800 dark:text-zinc-200">{mineActive} of {maxActive}</b>
+          </span>
+        )}
         {canCreate && (
-          <Button onClick={() => navigate('/devbox/releases/new')}>
+          <Button
+            onClick={() => navigate('/devbox/releases/new')}
+            disabled={full}
+            title={full ? 'Stop one of your releases first' : undefined}
+          >
             <Plus className="h-4 w-4" /> New release
           </Button>
         )}
@@ -96,7 +107,6 @@ export default function DevboxReleasesList() {
           ))}
         </div>
         <div className="flex-1" />
-        {email && canCreate && <span className="text-xs text-zinc-500">Your active releases on this page: {mineActive}</span>}
         <label className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-zinc-400" />
           <input

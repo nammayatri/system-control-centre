@@ -18,6 +18,7 @@ module Products.Devbox.Queries (
     getRelease,
     listReleases,
     filterCounts,
+    countActiveFor,
     activeForBranch,
     releaseEvents,
     releaseBuilds,
@@ -182,6 +183,15 @@ filterCounts =
         pure $ case rows of
             (c : _) -> c
             [] -> FilterCounts 0 0 0 0
+
+-- | How many active releases this person has (the "1 of 2" counter).
+countActiveFor :: (MonadFlow m) => Text -> m Int64
+countActiveFor email =
+    withDb $ \db -> withConn db $ \conn -> do
+        rows <- query conn "SELECT count(*) FROM devbox_release WHERE created_by = ? AND status = ANY(?)" (email, activeArr)
+        pure $ case rows of
+            (Only n : _) -> n
+            [] -> 0
 
 -- | The active release for a backend branch, if any (the form's "already running" banner).
 activeForBranch :: (MonadFlow m) => Text -> m (Maybe DevboxRelease)
