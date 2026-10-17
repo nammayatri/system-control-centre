@@ -23,6 +23,8 @@ module Products.Devbox.Queries (
     releaseBuilds,
     pollableReleases,
     insertEvent,
+    insertEventOnce,
+    setError,
     setRun,
     setStage,
     ReadyInfo (..),
@@ -230,6 +232,31 @@ insertEvent rid stage label payload stepUrl =
                 "INSERT INTO devbox_release_event (release_id, stage, label, payload, gh_step_url) VALUES (?, ?, ?, ?, ?)"
                 (rid, stage, label, payload, stepUrl)
         pure ()
+
+{- | Record an event from a GitHub run at most once: the poller sees the same
+finished step on every tick (and on every SCC replica), so it is keyed on
+release + stage + label + the run id stored in @payload.run@.
+-}
+insertEventOnce :: (MonadFlow m) => Text -> Text -> Text -> Int64 -> Value -> Maybe Text -> m ()
+insertEventOnce rid stage label runId payload stepUrl =
+    withDb $ \db -> withConn db $ \conn -> do
+        _ <-
+            execute
+                conn
+                "INSERT INTO devbox_release_event (release_id, stage, label, payload, gh_step_url) \
+                \SELECT ?, ?, ?, ?::jsonb || jsonb_build_object('run', ?::bigint), ? \
+                \WHERE NOT EXISTS ( \
+                \  SELECT 1 FROM devbox_release_event \
+                \  WHERE release_id = ? AND stage = ? AND label = ? AND payload->>'run' = ?::text)"
+                ((rid, stage, label, payload, runId, stepUrl) :. (rid, stage, label, runId))
+        pure ()
+
+-- | Note a problem on the release without changing its status (e.g. a stop run that failed).
+setError :: (MonadFlow m) => Text -> Text -> m Bool
+setError rid err =
+    changed $
+        withDb $ \db -> withConn db $ \conn ->
+            execute conn "UPDATE devbox_release SET error = ?, updated_at = now() WHERE id = ?" (err, rid)
 
 -- | Remember the GitHub run of the current action (the logs button), and which action it is.
 setRun :: (MonadFlow m) => Text -> Text -> Int64 -> Maybe Text -> m Bool

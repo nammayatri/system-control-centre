@@ -140,6 +140,7 @@ library
       Products.AirborneOta.Routes
       Products.AirborneOta.Types
       Products.AirborneOta.Types.Permission
+      Products.Devbox.Poller
       Products.Devbox.Queries
       Products.Devbox.Routes
       Products.Devbox.Types

@@ -12,6 +12,7 @@ import Products.AirborneOta.Keepalive (airborneKeepaliveLoop)
 import Products.Autopilot.ReleaseBot.Flow (releaseBotLoop)
 import Products.Autopilot.Runner (runnerLoop, runnerPollLoop, runnerStartupRecovery)
 import Products.Autopilot.SyncWatcher (syncWatcherPollLoop)
+import Products.Devbox.Poller (devboxPollLoop)
 
 main :: IO ()
 main = do
@@ -45,7 +46,13 @@ main = do
                 -- below (ASC-only, no Play edits).
                 concurrently_
                     (concurrently_ (serverLoop st) (runnerPollLoop st))
-                    (concurrently_ (runFlow st syncWatcherPollLoop) (concurrently_ (runFlow st airborneKeepaliveLoop) (runFlow st releaseBotLoop)))
+                    ( concurrently_
+                        (runFlow st syncWatcherPollLoop)
+                        ( concurrently_
+                            (runFlow st airborneKeepaliveLoop)
+                            (concurrently_ (runFlow st releaseBotLoop) (runFlow st devboxPollLoop))
+                        )
+                    )
             _ -> serverLoop st
   where
     show' :: (Show a) => a -> T.Text
