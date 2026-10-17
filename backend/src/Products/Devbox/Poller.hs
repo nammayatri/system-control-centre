@@ -35,8 +35,10 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time (diffUTCTime)
-import Products.Autopilot.Mobile.Github (Job (..), JobStep (..), WorkflowRun (..), fetchJobLog, getWorkflowRun, listJobs)
+import Data.Aeson.KeyMap qualified as KM
+import Products.Autopilot.Mobile.Github (Job (..), JobStep (..), WorkflowRun (..), cancelRun, fetchJobLog, getWorkflowRun, listJobs)
 import Products.Autopilot.Mobile.Github.Auth (GhAppCreds, loadGhCreds)
+import Products.Devbox.Github (dispatch)
 import Products.Devbox.Queries
 import Products.Devbox.Types (DevboxRelease (..))
 
@@ -73,6 +75,37 @@ tick creds = do
     forM_ rows $ \r ->
         follow creds r `catch` \(e :: SomeException) ->
             logWarning ("[devbox-poller] " <> drId r <> ": " <> T.pack (show e))
+    expired <- expiredReleases
+    forM_ expired $ \r ->
+        expire creds r `catch` \(e :: SomeException) ->
+            logWarning ("[devbox-poller] expiry of " <> drId r <> ": " <> T.pack (show e))
+
+{- | Auto-stop a release past its lifetime (devbox_lifetime_days). Only the
+replica whose STOPPING update wins goes on, so the stop is sent once.
+-}
+expire :: GhAppCreds -> DevboxRelease -> Flow ()
+expire creds r = do
+    won <- setStopping (drId r) "system"
+    when won $ do
+        insertEvent (drId r) "stop" "started" (object ["by" .= ("system" :: Text), "reason" .= ("expired" :: Text)]) Nothing
+        logInfo ("[devbox-poller] " <> drId r <> " expired, stopping")
+        case (drDevboxHost r, drDevboxUser r) of
+            (Just host, Just user) ->
+                dispatch creds (drId r) "stop" $
+                    KM.fromList
+                        [ ("action", A.String "stop")
+                        , ("workspace", A.String (drWorkspace r))
+                        , ("release_id", A.String (drId r))
+                        , ("owner", A.String (drCreatedBy r))
+                        , ("devbox_host", A.String host)
+                        , ("devbox_user", A.String user)
+                        ]
+            _ -> do
+                -- Never reported a dev-box: cancel the run if it is still going.
+                forM_ (drGhRunId r) $ \runId ->
+                    () <$ cancelRun creds owner repo (T.pack (show runId))
+                _ <- setStopped (drId r) "expired"
+                insertEvent (drId r) "stop" "done" (object ["reason" .= ("expired" :: Text)]) Nothing
 
 follow :: GhAppCreds -> DevboxRelease -> Flow ()
 follow creds r = forM_ (drGhRunId r) $ \runId -> do

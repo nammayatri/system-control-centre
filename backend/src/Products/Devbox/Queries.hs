@@ -22,6 +22,7 @@ module Products.Devbox.Queries (
     releaseEvents,
     releaseBuilds,
     pollableReleases,
+    expiredReleases,
     insertEvent,
     insertEventOnce,
     setError,
@@ -220,6 +221,20 @@ pollableReleases =
                 <> releaseCols
                 <> " FROM devbox_release WHERE status IN ('QUEUED', 'RUNNING', 'STOPPING') AND gh_run_id IS NOT NULL \
                    \ORDER BY created_at"
+            )
+
+{- | Releases past their lifetime that still hold a workspace on a dev-box
+(FAILED ones too: their workspace is kept for a look until stopped).
+-}
+expiredReleases :: (MonadFlow m) => m [DevboxRelease]
+expiredReleases =
+    withDb $ \db -> withConn db $ \conn ->
+        query_
+            conn
+            ( "SELECT "
+                <> releaseCols
+                <> " FROM devbox_release WHERE status IN ('QUEUED', 'RUNNING', 'READY', 'FAILED') AND expires_at < now() \
+                   \ORDER BY expires_at"
             )
 
 -- | Record one event (a stage started / done / skipped / failed, or info).

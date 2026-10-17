@@ -30,20 +30,14 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
-import Products.Autopilot.Mobile.Github (
-    CommitDetail (..),
-    DispatchRunDetails (..),
-    WorkflowDispatchReq (..),
-    cancelRun,
-    dispatchWorkflow,
-    getCommitInfo,
- )
-import Products.Autopilot.Mobile.Github.Auth (GhAppCreds, loadGhCreds)
+import Products.Autopilot.Mobile.Github (cancelRun)
+import Products.Autopilot.Mobile.Github.Auth (loadGhCreds)
+import Products.Devbox.Github (appRepo, backendRepo, ccRepo, dispatch, pin)
 import Products.Devbox.Queries
 import Products.Devbox.Types
 import Products.Devbox.Types.Permission (DevboxPermission (..))
 import Servant
-import Shared.Config.Runtime (getConfigIntForProduct, getConfigTextForProduct)
+import Shared.Config.Runtime (getConfigIntForProduct)
 
 type DevboxAPI =
     "devbox" :> Protected 'DEVBOX_VIEW :> "releases" :> QueryParam "filter" Text :> QueryParam "q" Text :> QueryParam "page" Int :> QueryParam "count" Int :> Get '[JSON] Value
@@ -55,17 +49,6 @@ type DevboxAPI =
 
 devboxServer :: ServerT DevboxAPI Flow
 devboxServer = listH :<|> getH :<|> branchStatusH :<|> createH :<|> stopH
-
--- ─── Where the code lives on GitHub ────────────────────────────────
-
--- | nammayatri holds the backend and the devbox workflow.
-backendRepo, ccRepo, appRepo :: (Text, Text)
-backendRepo = ("nammayatri", "nammayatri")
-ccRepo = ("nammayatri", "control-center")
-appRepo = ("nammayatri", "ny-react-native")
-
-workflowFile :: Text
-workflowFile = ".github/workflows/devbox.yaml"
 
 -- ─── Read ──────────────────────────────────────────────────────────
 
@@ -227,33 +210,6 @@ stopH ap rid = do
     pure $ object ["release" .= fromMaybe r final]
 
 -- ─── Helpers ───────────────────────────────────────────────────────
-
-{- | Start the workflow and remember its run (the logs button and the poller
-both use it). A failed dispatch fails the release with the reason.
--}
-dispatch :: GhAppCreds -> Text -> Text -> KM.KeyMap Value -> Flow ()
-dispatch creds rid action inputs = do
-    ref <- getConfigTextForProduct "devbox_workflow_ref" (Just "devbox") "main"
-    res <- dispatchWorkflow creds (fst backendRepo) (snd backendRepo) workflowFile (WorkflowDispatchReq ref inputs)
-    case res of
-        Right (Just d) -> do
-            _ <- setRun rid action (drdRunId d) (drdHtmlUrl d)
-            insertEvent rid (if action == "stop" then "stop" else "preparing") "info" (object ["githubRun" .= drdRunId d]) Nothing
-        Right Nothing ->
-            -- Dispatched, but GitHub did not say which run (older API behaviour).
-            insertEvent rid (if action == "stop" then "stop" else "preparing") "info" (object ["githubRun" .= Null]) Nothing
-        Left err -> do
-            let msg = "could not start the GitHub run: " <> err
-            _ <- if action == "stop" then pure False else setFailed rid msg
-            insertEvent rid (if action == "stop" then "stop" else "preparing") "failed" (object ["error" .= msg]) Nothing
-            when (action == "stop") $ throwM (InternalError msg)
-
--- | The commit a branch points at now, or a 400 naming the repo and branch.
-pin :: GhAppCreds -> (Text, Text) -> Text -> Flow Text
-pin creds (owner, repo) branch =
-    getCommitInfo creds owner repo branch >>= \case
-        Right c -> pure (cdSha c)
-        Left err -> throwM (BadRequest ("branch " <> branch <> " not found in " <> owner <> "/" <> repo <> ": " <> err))
 
 -- | The owner with STOP, or anyone with STOP_ANY (superadmins always).
 canStop :: AuthedPerson -> DevboxRelease -> Flow Bool
