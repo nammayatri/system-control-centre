@@ -16,6 +16,7 @@ module Products.Devbox.Types (
     statusFilterStatuses,
     activeStatuses,
     FilterCounts (..),
+    appBuildSpecs,
 )
 where
 
@@ -24,6 +25,7 @@ import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Time (UTCTime)
 import Database.PostgreSQL.Simple.FromRow (FromRow (..), field)
+import Database.PostgreSQL.Simple.Types (PGArray (..))
 
 -- | One row of @devbox_release@ (columns in table order).
 data DevboxRelease = DevboxRelease
@@ -58,6 +60,8 @@ data DevboxRelease = DevboxRelease
     , drReadyAt :: Maybe UTCTime
     , drExpiresAt :: UTCTime
     , drStoppedAt :: Maybe UTCTime
+    , drAppBuilds :: [Text]
+    -- ^ app builds asked for, as 'app:platform' (rider:android, driver:ios, …)
     }
     deriving (Show)
 
@@ -71,6 +75,7 @@ instance FromRow DevboxRelease where
             <*> field <*> field <*> field <*> field <*> field
             <*> field <*> field <*> field <*> field <*> field
             <*> field
+            <*> (fromPGArray <$> field)
 
 instance ToJSON DevboxRelease where
     toJSON r =
@@ -106,6 +111,7 @@ instance ToJSON DevboxRelease where
             , "readyAt" .= drReadyAt r
             , "expiresAt" .= drExpiresAt r
             , "stoppedAt" .= drStoppedAt r
+            , "appBuilds" .= drAppBuilds r
             ]
 
 -- | One row of @devbox_release_event@: a stage started / done / failed, a stop, an expiry.
@@ -148,6 +154,8 @@ data DevboxBuild = DevboxBuild
     , dbError :: Maybe Text
     , dbCreatedAt :: UTCTime
     , dbUpdatedAt :: UTCTime
+    , dbApp :: Text
+    -- ^ rider | driver
     }
     deriving (Show)
 
@@ -155,7 +163,7 @@ instance FromRow DevboxBuild where
     fromRow =
         DevboxBuild
             <$> field <*> field <*> field <*> field <*> field <*> field
-            <*> field <*> field <*> field <*> field <*> field
+            <*> field <*> field <*> field <*> field <*> field <*> field
 
 instance ToJSON DevboxBuild where
     toJSON b =
@@ -171,6 +179,7 @@ instance ToJSON DevboxBuild where
             , "error" .= dbError b
             , "createdAt" .= dbCreatedAt b
             , "updatedAt" .= dbUpdatedAt b
+            , "app" .= dbApp b
             ]
 
 {- | What the create handler hands to 'Products.Devbox.Queries.createRelease':
@@ -190,6 +199,7 @@ data NewRelease = NewRelease
     , nrDataSource :: Text
     , nrDataVersion :: Maybe Text
     , nrCreatedBy :: Text
+    , nrAppBuilds :: [Text]
     }
     deriving (Show)
 
@@ -245,3 +255,7 @@ instance ToJSON FilterCounts where
             , "inProgress" .= fcInProgress c
             , "stopped" .= fcStopped c
             ]
+
+-- | The app builds a release may ask for, as stored in @app_builds@.
+appBuildSpecs :: [Text]
+appBuildSpecs = ["rider:android", "driver:android", "rider:ios", "driver:ios"]

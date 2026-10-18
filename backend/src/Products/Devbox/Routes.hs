@@ -127,6 +127,8 @@ data CreateReq = CreateReq
     , crDataSource :: Text
     , crDataVersion :: Maybe Text
     , crWorkspace :: Maybe Text
+    , crAppBuilds :: [Text]
+    -- ^ 'rider:android', 'driver:ios', … (see appBuildSpecs)
     }
 
 instance FromJSON CreateReq where
@@ -140,6 +142,7 @@ instance FromJSON CreateReq where
             <*> o .: "dataSource"
             <*> o .:? "dataVersion"
             <*> o .:? "workspace"
+            <*> o .:? "appBuilds" .!= []
 
 createH :: AuthedPerson -> CreateReq -> Flow Value
 createH ap req = do
@@ -155,8 +158,15 @@ createH ap req = do
         throwM (BadRequest "dataSource must be master, prod or prod_international")
     forM_ dataVersion $ \v ->
         unless (validVersion v) $ throwM (BadRequest ("dataVersion " <> v <> " must look like v14"))
-    when (isNothing frontendBranch && (crBuildAndroid req || crBuildIos req)) $
-        throwM (BadRequest "Android / iOS builds need an app (frontend) branch")
+    -- Older clients send only buildAndroid / buildIos: that means the rider app.
+    let appBuilds =
+            if null (crAppBuilds req)
+                then ["rider:android" | crBuildAndroid req] <> ["rider:ios" | crBuildIos req]
+                else crAppBuilds req
+    forM_ appBuilds $ \b ->
+        unless (b `elem` appBuildSpecs) $ throwM (BadRequest ("unknown app build " <> b <> " (" <> T.intercalate ", " appBuildSpecs <> ")"))
+    when (isNothing frontendBranch && not (null appBuilds)) $
+        throwM (BadRequest "app builds need an app (frontend) branch")
 
     -- Pin every branch to the commit it points at now: the release tests exactly these.
     creds <- loadGhCreds
@@ -177,11 +187,12 @@ createH ap req = do
                 , nrCcSha = ccSha
                 , nrFrontendBranch = frontendBranch
                 , nrFrontendSha = frontendSha
-                , nrBuildAndroid = crBuildAndroid req
-                , nrBuildIos = crBuildIos req
+                , nrBuildAndroid = any (T.isSuffixOf ":android") appBuilds
+                , nrBuildIos = any (T.isSuffixOf ":ios") appBuilds
                 , nrDataSource = crDataSource req
                 , nrDataVersion = dataVersion
                 , nrCreatedBy = apEmail ap
+                , nrAppBuilds = appBuilds
                 }
     created <-
         createRelease maxActive lifetime nr >>= \case

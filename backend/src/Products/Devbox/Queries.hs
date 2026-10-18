@@ -34,6 +34,12 @@ module Products.Devbox.Queries (
     setFailed,
     setStopping,
     setStopped,
+    releasesNeedingBuilds,
+    insertBuild,
+    setBuildRun,
+    setBuildDone,
+    setBuildFailed,
+    openBuilds,
 )
 where
 
@@ -55,7 +61,7 @@ releaseCols =
     \build_android, build_ios, data_source, data_version, \
     \devbox_name, devbox_host, devbox_user, backend_url, cc_url, \
     \gh_run_id, gh_run_url, error, created_by, stopped_by, stop_reason, \
-    \created_at, updated_at, ready_at, expires_at, stopped_at"
+    \created_at, updated_at, ready_at, expires_at, stopped_at, app_builds"
 
 activeArr :: PGArray Text
 activeArr = PGArray activeStatuses
@@ -94,8 +100,8 @@ createRelease maxActive lifetimeDays nr =
                                 ( "INSERT INTO devbox_release \
                                   \  (id, workspace, backend_branch, backend_sha, cc_branch, cc_sha, \
                                   \   frontend_branch, frontend_sha, build_android, build_ios, \
-                                  \   data_source, data_version, created_by, expires_at) \
-                                  \VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now() + make_interval(days => ?)) \
+                                  \   data_source, data_version, created_by, app_builds, expires_at) \
+                                  \VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now() + make_interval(days => ?)) \
                                   \RETURNING "
                                     <> releaseCols
                                 )
@@ -110,7 +116,7 @@ createRelease maxActive lifetimeDays nr =
                                   , nrBuildAndroid nr
                                   , nrBuildIos nr
                                   )
-                                    :. (nrDataSource nr, nrDataVersion nr, nrCreatedBy nr, lifetimeDays)
+                                    :. (nrDataSource nr, nrDataVersion nr, nrCreatedBy nr, PGArray (nrAppBuilds nr), lifetimeDays)
                                 )
                         case rows of
                             [x] -> pure (Right x)
@@ -217,8 +223,8 @@ releaseBuilds rid =
         query
             conn
             "SELECT id, release_id, platform, status, gh_run_id, gh_run_url, download_url, \
-            \       build_number, error, created_at, updated_at \
-            \FROM devbox_release_build WHERE release_id = ? ORDER BY platform"
+            \       build_number, error, created_at, updated_at, app \
+            \FROM devbox_release_build WHERE release_id = ? ORDER BY platform, app"
             (Only rid)
 
 -- | Releases with a GitHub run to follow (the poller's work list).
@@ -369,3 +375,73 @@ setStopped rid reason =
 
 changed :: (Functor m) => m Int64 -> m Bool
 changed = fmap (> 0)
+
+-- ─── App builds (ny-react-native debug workflows) ──────────────────
+
+-- | READY releases that asked for app builds and have none started yet.
+releasesNeedingBuilds :: (MonadFlow m) => m [DevboxRelease]
+releasesNeedingBuilds =
+    withDb $ \db -> withConn db $ \conn ->
+        query_
+            conn
+            ( "SELECT "
+                <> releaseCols
+                <> " FROM devbox_release r WHERE status = 'READY' AND cardinality(app_builds) > 0 \
+                   \AND NOT EXISTS (SELECT 1 FROM devbox_release_build b WHERE b.release_id = r.id)"
+            )
+
+{- | Claim one app build for a release; Nothing when it already exists (another
+SCC replica claimed it first), so each build is dispatched once.
+-}
+insertBuild :: (MonadFlow m) => Text -> Text -> Text -> m (Maybe Int64)
+insertBuild rid app platform =
+    withDb $ \db -> withConn db $ \conn -> do
+        rows <-
+            query
+                conn
+                "INSERT INTO devbox_release_build (release_id, app, platform) VALUES (?, ?, ?) \
+                \ON CONFLICT (release_id, app, platform) DO NOTHING RETURNING id"
+                (rid, app, platform)
+        pure $ case rows of
+            (Only bid : _) -> Just bid
+            [] -> Nothing
+
+setBuildRun :: (MonadFlow m) => Int64 -> Int64 -> Maybe Text -> m Bool
+setBuildRun bid runId runUrl =
+    changed $
+        withDb $ \db -> withConn db $ \conn ->
+            execute
+                conn
+                "UPDATE devbox_release_build SET status = 'RUNNING', gh_run_id = ?, gh_run_url = ?, updated_at = now() WHERE id = ?"
+                (runId, runUrl, bid)
+
+-- | The build was uploaded: its Firebase link (android) or TestFlight build number (ios).
+setBuildDone :: (MonadFlow m) => Int64 -> Maybe Text -> Maybe Text -> m Bool
+setBuildDone bid link buildNumber =
+    changed $
+        withDb $ \db -> withConn db $ \conn ->
+            execute
+                conn
+                "UPDATE devbox_release_build SET status = 'DONE', download_url = ?, build_number = ?, error = NULL, updated_at = now() \
+                \WHERE id = ? AND status IN ('QUEUED', 'RUNNING')"
+                (link, buildNumber, bid)
+
+setBuildFailed :: (MonadFlow m) => Int64 -> Text -> m Bool
+setBuildFailed bid err =
+    changed $
+        withDb $ \db -> withConn db $ \conn ->
+            execute
+                conn
+                "UPDATE devbox_release_build SET status = 'FAILED', error = ?, updated_at = now() \
+                \WHERE id = ? AND status IN ('QUEUED', 'RUNNING')"
+                (err, bid)
+
+-- | Builds with a GitHub run still going (the poller follows them).
+openBuilds :: (MonadFlow m) => m [DevboxBuild]
+openBuilds =
+    withDb $ \db -> withConn db $ \conn ->
+        query_
+            conn
+            "SELECT id, release_id, platform, status, gh_run_id, gh_run_url, download_url, \
+            \       build_number, error, created_at, updated_at, app \
+            \FROM devbox_release_build WHERE status IN ('QUEUED', 'RUNNING') AND gh_run_id IS NOT NULL"

@@ -9,7 +9,7 @@ import { copyToClipboard, formatDate, timeAgo } from '../../../lib/utils';
 import { devboxError } from '../api';
 import { DevboxStatusBadge, StageBar, stageLabel } from '../components/DevboxStatus';
 import { useDevboxRelease, useStopDevboxRelease } from '../hooks';
-import { ACTIVE_STATUSES, type DevboxEvent, type DevboxRelease } from '../types';
+import { ACTIVE_STATUSES, APP_BUILDS, type DevboxBuild, type DevboxEvent, type DevboxRelease } from '../types';
 
 export default function DevboxReleaseDetail() {
   const { id } = useParams<{ id: string }>();
@@ -146,19 +146,41 @@ export default function DevboxReleaseDetail() {
               <p className="text-sm text-zinc-500">{live ? 'Links appear when the release is ready.' : 'No links: the workspace is gone.'}</p>
             )}
 
-            {r.frontendBranch && (
+            {r.frontendBranch && (r.appBuilds?.length ?? 0) > 0 && (
               <>
                 <h2 className="pt-2 text-sm font-semibold">App builds</h2>
                 <div className="grid gap-2 sm:grid-cols-2">
-                  {(builds.length ? builds : buildPlaceholders(r)).map((b) => (
-                    <div key={b.platform} className="space-y-1 rounded-lg border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                      <b className="text-sm">{b.platform === 'ios' ? 'iOS · TestFlight' : 'Android · Firebase'}</b>
-                      <p className="text-xs text-zinc-500">{b.status.toLowerCase()}</p>
-                      {b.downloadUrl && (
-                        <a href={b.downloadUrl} target="_blank" rel="noreferrer" className="text-xs font-semibold text-blue-700 hover:underline dark:text-blue-300">
-                          {b.platform === 'ios' ? 'Open in TestFlight' : 'Download'}
-                        </a>
-                      )}
+                  {buildCards(r, builds).map(({ key, label, where, build }) => (
+                    <div key={key} className="space-y-1 rounded-lg border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                      <div className="flex items-center justify-between gap-2">
+                        <b className="text-sm">{label}</b>
+                        <span className={`text-xs font-semibold ${BUILD_COLOR[build?.status ?? 'WAITING']}`}>
+                          {(build?.status ?? (r.status === 'READY' ? 'STARTING' : 'WAITING')).toLowerCase()}
+                        </span>
+                      </div>
+                      <p className="text-xs text-zinc-500">
+                        {build?.status === 'DONE'
+                          ? build.downloadUrl
+                            ? `Uploaded to ${where}`
+                            : `TestFlight build ${build.buildNumber ?? '?'}: install it from the TestFlight app`
+                          : build?.status === 'FAILED'
+                            ? build.error
+                            : build
+                              ? `Building against this backend…`
+                              : `Starts when the backend is ready`}
+                      </p>
+                      <div className="flex gap-3 text-xs font-semibold">
+                        {build?.downloadUrl && (
+                          <a href={build.downloadUrl} target="_blank" rel="noreferrer" className="text-blue-700 hover:underline dark:text-blue-300">
+                            Open in Firebase
+                          </a>
+                        )}
+                        {build?.ghRunUrl && (
+                          <a href={build.ghRunUrl} target="_blank" rel="noreferrer" className="text-zinc-500 hover:underline">
+                            Build logs
+                          </a>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -177,7 +199,7 @@ export default function DevboxReleaseDetail() {
               <dd className="break-all font-mono text-xs">{r.ccBranch ? `${r.ccBranch} @ ${r.ccSha?.slice(0, 10)}` : '—'}</dd>
               <dt className="text-zinc-500">App</dt>
               <dd className="break-all font-mono text-xs">
-                {r.frontendBranch ? `${r.frontendBranch} · ${[r.buildAndroid && 'Android', r.buildIos && 'iOS'].filter(Boolean).join(' + ') || 'no builds'}` : '—'}
+                {r.frontendBranch ? `${r.frontendBranch} · ${APP_BUILDS.filter((b) => r.appBuilds.includes(b.key)).map((b) => b.label).join(', ') || 'no builds'}` : '—'}
               </dd>
               <dt className="text-zinc-500">Data</dt>
               <dd className="font-mono text-xs">{r.dataSource} {r.dataVersion ?? 'latest safe'}</dd>
@@ -191,12 +213,22 @@ export default function DevboxReleaseDetail() {
   );
 }
 
-function buildPlaceholders(r: DevboxRelease) {
-  return [
-    ...(r.buildAndroid ? [{ platform: 'android' as const, status: 'WAITING', downloadUrl: null }] : []),
-    ...(r.buildIos ? [{ platform: 'ios' as const, status: 'WAITING', downloadUrl: null }] : []),
-  ];
+/** One card per app build asked for, with its build row once it has started. */
+function buildCards(r: DevboxRelease, builds: DevboxBuild[]) {
+  return APP_BUILDS.filter((b) => r.appBuilds.includes(b.key)).map((b) => ({
+    ...b,
+    build: builds.find((x) => `${x.app}:${x.platform}` === b.key),
+  }));
 }
+
+const BUILD_COLOR: Record<string, string> = {
+  DONE: 'text-emerald-600',
+  FAILED: 'text-red-600',
+  RUNNING: 'text-amber-600',
+  QUEUED: 'text-amber-600',
+  CANCELLED: 'text-zinc-500',
+  WAITING: 'text-zinc-500',
+};
 
 const LABEL_COLOR: Record<DevboxEvent['label'], string> = {
   done: 'text-emerald-600',

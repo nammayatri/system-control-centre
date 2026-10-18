@@ -8,7 +8,7 @@ import { Input, SelectInput } from '../../../shared/ui/input';
 import { devboxError } from '../api';
 import { BranchField } from '../components/BranchField';
 import { useBranchStatus, useCreateDevboxRelease, useDevboxReleases } from '../hooks';
-import type { DataSource, DevboxRelease } from '../types';
+import { APP_BUILDS, type DataSource, type DevboxRelease } from '../types';
 
 // 'feat/fare-fix' → 'fare-fix' (same rule as the server's nameFromBranch).
 function nameFromBranch(b: string): string {
@@ -37,8 +37,7 @@ export default function DevboxNewRelease() {
   const [backendBranch, setBackendBranch] = useState('');
   const [ccBranch, setCcBranch] = useState('main');
   const [frontendBranch, setFrontendBranch] = useState('');
-  const [buildAndroid, setBuildAndroid] = useState(false);
-  const [buildIos, setBuildIos] = useState(false);
+  const [appBuilds, setAppBuilds] = useState<string[]>([]);
   const [dataSource, setDataSource] = useState<DataSource>('master');
   const [dataVersion, setDataVersion] = useState('');
   const [workspace, setWorkspace] = useState('');
@@ -62,11 +61,10 @@ export default function DevboxNewRelease() {
 
   const hasApp = frontendBranch.trim().length > 0;
   useEffect(() => {
-    if (!hasApp) {
-      setBuildAndroid(false);
-      setBuildIos(false);
-    }
+    if (!hasApp) setAppBuilds([]);
   }, [hasApp]);
+  const toggleBuild = (key: string, on: boolean) =>
+    setAppBuilds((cur) => (on ? [...cur.filter((k) => k !== key), key] : cur.filter((k) => k !== key)));
 
   const nameError = useMemo(() => {
     if (!workspace) return undefined;
@@ -84,8 +82,9 @@ export default function DevboxNewRelease() {
         backendBranch: backendBranch.trim(),
         ccBranch: ccBranch.trim() || undefined,
         frontendBranch: frontendBranch.trim() || undefined,
-        buildAndroid,
-        buildIos,
+        buildAndroid: false,
+        buildIos: false,
+        appBuilds,
         dataSource,
         dataVersion: dataVersion.trim() || undefined,
         workspace,
@@ -167,18 +166,23 @@ export default function DevboxNewRelease() {
               value={frontendBranch}
               onChange={setFrontendBranch}
               placeholder="optional"
-              emptyHint="Optional: adds Android / iOS builds"
+              emptyHint="Optional: adds rider / driver app builds"
             />
-            <div className="flex flex-wrap gap-4 text-sm">
-              <label className="flex items-center gap-2">
-                <input id="devbox-android" type="checkbox" checked={buildAndroid} disabled={!hasApp} onChange={(e) => setBuildAndroid(e.target.checked)} />
-                Android build
-              </label>
-              <label className="flex items-center gap-2">
-                <input id="devbox-ios" type="checkbox" checked={buildIos} disabled={!hasApp} onChange={(e) => setBuildIos(e.target.checked)} />
-                iOS build (TestFlight)
-              </label>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
+              {APP_BUILDS.map((b) => (
+                <label key={b.key} className={`flex items-center gap-2 ${hasApp ? '' : 'text-zinc-400'}`}>
+                  <input
+                    id={`devbox-build-${b.key.replace(':', '-')}`}
+                    type="checkbox"
+                    checked={appBuilds.includes(b.key)}
+                    disabled={!hasApp}
+                    onChange={(e) => toggleBuild(b.key, e.target.checked)}
+                  />
+                  {b.label} <span className="text-xs text-zinc-400">({b.where})</span>
+                </label>
+              ))}
             </div>
+            <p className="text-xs text-zinc-500">Built after the backend is ready, pointed at it. Phones need the office network to reach it.</p>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <SelectInput
@@ -227,7 +231,7 @@ export default function DevboxNewRelease() {
         backendBranch={backendBranch.trim()}
         ccBranch={ccBranch.trim()}
         frontendBranch={frontendBranch.trim()}
-        builds={[buildAndroid && 'Android', buildIos && 'iOS'].filter(Boolean).join(' + ')}
+        builds={APP_BUILDS.filter((b) => appBuilds.includes(b.key)).map((b) => b.label).join(', ')}
         data={`${dataSource} ${dataVersion.trim() || '(latest safe)'}`}
         workspace={workspace}
         mineAfter={mineActive + 1}

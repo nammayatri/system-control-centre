@@ -37,6 +37,8 @@ export interface DevboxRelease {
   readyAt: string | null;
   expiresAt: string;
   stoppedAt: string | null;
+  /** App builds asked for, as 'app:platform' (rider:android, driver:ios, …). */
+  appBuilds: string[];
 }
 
 export interface DevboxEvent {
@@ -52,6 +54,7 @@ export interface DevboxEvent {
 export interface DevboxBuild {
   id: number;
   releaseId: string;
+  app: 'rider' | 'driver';
   platform: 'android' | 'ios';
   status: 'QUEUED' | 'RUNNING' | 'DONE' | 'FAILED' | 'CANCELLED';
   ghRunId: number | null;
@@ -109,7 +112,16 @@ export interface CreateReleaseReq {
   dataSource: DataSource;
   dataVersion?: string;
   workspace?: string;
+  appBuilds?: string[];
 }
+
+/** The app builds a release can ask for (ny-react-native debug workflows). */
+export const APP_BUILDS: { key: string; label: string; where: string }[] = [
+  { key: 'rider:android', label: 'Rider · Android', where: 'Firebase' },
+  { key: 'driver:android', label: 'Driver · Android', where: 'Firebase' },
+  { key: 'rider:ios', label: 'Rider · iOS', where: 'TestFlight' },
+  { key: 'driver:ios', label: 'Driver · iOS', where: 'TestFlight' },
+];
 
 /** A release that still holds its workspace (and counts towards the 2-per-person limit). */
 export const ACTIVE_STATUSES: DevboxStatus[] = ['QUEUED', 'RUNNING', 'READY', 'STOPPING'];

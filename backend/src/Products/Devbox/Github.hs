@@ -12,6 +12,9 @@ module Products.Devbox.Github (
     workflowFile,
     pin,
     dispatch,
+    AppBuild (..),
+    appBuildFor,
+    dispatchAppBuild,
 )
 where
 
@@ -64,3 +67,45 @@ dispatch creds rid action inputs = do
             _ <- if action == "stop" then pure False else setFailed rid msg
             insertEvent rid stage "failed" (object ["error" .= msg]) Nothing
             when (action == "stop") $ throwM (InternalError msg)
+
+-- ─── App builds (ny-react-native debug workflows) ──────────────────
+
+-- | One app build: which ny-react-native workflow and which base URL path.
+data AppBuild = AppBuild
+    { abApp :: Text
+    -- ^ rider | driver
+    , abPlatform :: Text
+    -- ^ android | ios
+    , abWorkflow :: Text
+    , abUrlPath :: Text
+    -- ^ appended to the release's backend URL (front desk route of that service)
+    }
+
+-- | 'rider:android' etc. → the workflow that builds it. Nothing for anything else.
+appBuildFor :: Text -> Maybe AppBuild
+appBuildFor = \case
+    "rider:android" -> Just (AppBuild "rider" "android" ".github/workflows/fastlane-android-debug.yaml" "/rider-app/v2")
+    "rider:ios" -> Just (AppBuild "rider" "ios" ".github/workflows/fastlane-ios-debug.yaml" "/rider-app/v2")
+    "driver:android" -> Just (AppBuild "driver" "android" ".github/workflows/provider-debug-apk-gen.yaml" "/dynamic-offer-driver-app/ui")
+    "driver:ios" -> Just (AppBuild "driver" "ios" ".github/workflows/provider-debug-ios-gen.yaml" "/dynamic-offer-driver-app/ui")
+    _ -> Nothing
+
+{- | Start one app build on the app branch, pointed at the release's backend.
+The rider workflows take a change log; the driver ones a version name and
+release notes. Apps (catalyst names) and the driver version name come from
+server config.
+-}
+dispatchAppBuild :: GhAppCreds -> AppBuild -> Text -> Text -> Text -> Text -> Flow (Either Text (Maybe DispatchRunDetails))
+dispatchAppBuild creds ab ref backendUrl workspace rid = do
+    riderApp <- getConfigTextForProduct "devbox_rider_app" (Just "devbox") "NammaYatri"
+    driverApp <- getConfigTextForProduct "devbox_driver_app" (Just "devbox") "NammaYatriPartner"
+    versionName <- getConfigTextForProduct "devbox_driver_version_name" (Just "devbox") "9.9.9"
+    let note = "Devbox release " <> workspace <> " (" <> rid <> ")"
+        common = [("base_url", String (backendUrl <> abUrlPath ab)), ("devbox_release", String rid)]
+        inputs =
+            KM.fromList $
+                common
+                    <> if abApp ab == "rider"
+                        then [("selected_apps", String riderApp), ("change_log", String note)]
+                        else [("selected_apps", String driverApp), ("version_name", String versionName), ("release_notes", String note)]
+    dispatchWorkflow creds (fst appRepo) (snd appRepo) (abWorkflow ab) (WorkflowDispatchReq ref inputs)
