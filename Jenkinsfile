@@ -117,18 +117,18 @@ pipeline {
       }
     }
 
-    stage('Deploy to AWS Europe (6190...)') {
-      steps {
-        script {
-          ecrLogin(env.AWS_ACCOUNT_EUROPE, env.AWS_REGION_EUROPE)
-          if (params.app == 'autopilot-frontend') {
-            buildAndPushFrontend("${env.AWS_ACCOUNT_EUROPE}.dkr.ecr.${env.AWS_REGION_EUROPE}.amazonaws.com/autopilot-frontend:${env.TAG}", env.API_URL_AWS_EUROPE)
-          } else {
-            buildAndPushBackend("${env.AWS_ACCOUNT_EUROPE}.dkr.ecr.${env.AWS_REGION_EUROPE}.amazonaws.com/autopilot-haskell:${env.TAG}")
-          }
-        }
-      }
-    }
+    // stage('Deploy to AWS Europe (6190...)') {
+    //   steps {
+    //     script {
+    //       ecrLogin(env.AWS_ACCOUNT_EUROPE, env.AWS_REGION_EUROPE)
+    //       if (params.app == 'autopilot-frontend') {
+    //         buildAndPushFrontend("${env.AWS_ACCOUNT_EUROPE}.dkr.ecr.${env.AWS_REGION_EUROPE}.amazonaws.com/autopilot-frontend:${env.TAG}", env.API_URL_AWS_EUROPE)
+    //       } else {
+    //         buildAndPushBackend("${env.AWS_ACCOUNT_EUROPE}.dkr.ecr.${env.AWS_REGION_EUROPE}.amazonaws.com/autopilot-haskell:${env.TAG}")
+    //       }
+    //     }
+    //   }
+    // }
 
     stage('Deploy to GCP Europe (mti-eu-prod)') {
       steps {
