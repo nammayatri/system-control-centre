@@ -3063,6 +3063,7 @@ testReleaseBotRows = do
   assertBool "one channel mapped to two envs is an error" (isLeftWith "two different envs" (RBW.buildFromRows [row "g1" Nothing (Just "o/r") (prod "PROD" "[\"C\"]" "j"), row "g2" Nothing (Just "o/r") (prod "MASTER" "[\"C\"]" "j")]))
   assertEqual "one channel may serve two repos" (Right 2) (fmap (\c -> length (PRC.channelsFor c "C")) (RBW.buildFromRows [row "g1" Nothing (Just "o/r") (prod "PROD" "[\"C\"]" "j"), row "g2" Nothing (Just "o/x") (prod "PROD" "[\"C\"]" "j")]))
   assertBool "service rules under an app group with none are reported" (isLeftWith "app group has none" (RBW.buildFromRows [row "g" (Just "s") Nothing svc]))
+  assertBool "the live bot ignores such orphan service rules instead of failing for every group" (either (const False) (const True) (RBW.buildFromRows (RBW.dropOrphanServiceRules [row "g" (Just "s") Nothing svc])))
   assertBool "malformed row JSON names the row" (isLeftWith "g:" (RBW.buildFromRows [row "g" Nothing (Just "o/r") (Just "{nope")]))
   -- the save-request field: absent = keep, blank = clear, else validated
   assertEqual "absent field leaves stored rules alone" (Right Nothing) (RBW.checkBotField True Nothing)
