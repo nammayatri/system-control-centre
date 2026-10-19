@@ -90,6 +90,9 @@ import DeploymentConfig from './config/pages/DeploymentConfig';
 import ListVSEdit from './vs-editor/pages/ListVSEdit';
 import EditVS from './vs-editor/pages/EditVS';
 import VSEditSummary from './vs-editor/pages/VSEditSummary';
+import HpaOverview from './hpa/pages/HpaOverview';
+import HpaApplies from './hpa/pages/HpaApplies';
+import HpaServiceDetail from './hpa/pages/HpaServiceDetail';
 
 // ── Product: Airborne OTA ─────────────────────────────────────────
 import OtaAppsHome from './airborne-ota/pages/OtaAppsHome';
@@ -136,6 +139,7 @@ const backendProduct: ProductDefinition = {
     { label: 'Config Maps',       path: '/backend/configmap',         icon: 'FileText' },
     { label: 'Deployment Config', path: '/backend/deployment-config', icon: 'Layers' },
     { label: 'VS Editor',         path: '/backend/vs-editor',         icon: 'Settings' },
+    { label: 'HPA Manager',       path: '/backend/hpa',               icon: 'Gauge', permission: 'HPA_VIEW' },
     { label: 'Server Config',     path: '/backend/server-config',     icon: 'Settings' },
   ],
   routes: [
@@ -152,6 +156,9 @@ const backendProduct: ProductDefinition = {
     { path: 'vs-editor',          component: ListVSEdit },
     { path: 'vs-editor/new',      component: EditVS,         permission: 'RELEASE_CREATE' },
     { path: 'vs-editor/:id',      component: VSEditSummary },
+    { path: 'hpa',                component: HpaOverview,      permission: 'HPA_VIEW' },
+    { path: 'hpa/applies',        component: HpaApplies,       permission: 'HPA_VIEW' },
+    { path: 'hpa/:product/:service', component: HpaServiceDetail, permission: 'HPA_VIEW' },
     { path: 'server-config',      component: Configurations },
   ],
   getBreadcrumbs: (parts) => {
@@ -189,6 +196,12 @@ const backendProduct: ProductDefinition = {
       } else if (parts.length >= 3) {
         crumbs.push({ label: 'VS Edit Details' });
       }
+      return crumbs;
+    }
+    if (parts[1] === 'hpa') {
+      crumbs.push({ label: 'HPA Manager', to: '/backend/hpa' });
+      if (parts[2] === 'applies') crumbs.push({ label: 'Activity' });
+      else if (parts.length >= 4) crumbs.push({ label: decodeURIComponent(parts[3]) });
       return crumbs;
     }
     if (parts[1] === 'server-config') {

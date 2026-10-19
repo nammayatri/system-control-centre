@@ -9,6 +9,7 @@ import Core.Logging (LoggerConfig (..), loadLoggerConfigFromDhall, logInfoIO, pr
 import Core.Server (serverLoop)
 import qualified Data.Text as T
 import Products.AirborneOta.Keepalive (airborneKeepaliveLoop)
+import Products.Autopilot.Hpa.Loops (hpaLoops)
 import Products.Autopilot.ReleaseBot.Flow (releaseBotLoop)
 import Products.Autopilot.Runner (runnerLoop, runnerPollLoop, runnerStartupRecovery)
 import Products.Autopilot.SyncWatcher (syncWatcherPollLoop)
@@ -31,7 +32,8 @@ main = do
                     then ", logFile=" <> T.pack (logFilePath logCfg)
                     else ""
         case appState cfg of
-            "RUNNER" -> runnerLoop st
+            -- The HPA scheduler rides with the runner: it is background work that talks to the cluster.
+            "RUNNER" -> concurrently_ (runnerLoop st) (runFlow st hpaLoops)
             -- In local/single-process mode keep server + worker together.
             -- #35 FIX 1 — run startup recovery SYNCHRONOUSLY before the HTTP port
             -- is bound. If we forked the poll loop alongside the server like we
@@ -45,7 +47,7 @@ main = do
                 -- below (ASC-only, no Play edits).
                 concurrently_
                     (concurrently_ (serverLoop st) (runnerPollLoop st))
-                    (concurrently_ (runFlow st syncWatcherPollLoop) (concurrently_ (runFlow st airborneKeepaliveLoop) (runFlow st releaseBotLoop)))
+                    (concurrently_ (runFlow st syncWatcherPollLoop) (concurrently_ (runFlow st airborneKeepaliveLoop) (concurrently_ (runFlow st releaseBotLoop) (runFlow st hpaLoops))))
             _ -> serverLoop st
   where
     show' :: (Show a) => a -> T.Text

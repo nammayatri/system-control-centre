@@ -35,6 +35,7 @@ Owns backend releases, ConfigMap trackers, VS edit trackers, and runtime server 
   - `StageHelpers.hs` — `mkLegacyStateFlowStage` adapter for wrapping existing `StateFlow` bodies as `Stage` values
   - `Recorded.hs` — re-export shim for `Core.Workflow.Recorded`
   - `Types.hs` — `ReleaseState`, `ReleaseWorkFlow`, `StateFlow`, `StageOutcome`
+- `Hpa/` — HPA scheduler (time-windowed HPA changes, restore/rollback, observer); see `HPA_SCHEDULER.md`
 - `K8s/` — kubectl execution wrappers (`Deployment.hs`, `VirtualService.hs`, `DestinationRule.hs`, `HPA.hs`, `Execute.hs`, `Kubectl.hs`)
 - `Runner.hs` — Background worker that polls and executes releases
 - `Sync.hs` — Cross-cluster sync for releases

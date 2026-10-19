@@ -20,6 +20,7 @@ import Products.Autopilot.Actions.VSEdit as VSEdit
 import Products.Autopilot.Actions.Webhook as Webhook
 import Products.Autopilot.Handlers.Ai as Ai
 import Products.Autopilot.Handlers.ConfigReview as ConfigReview
+import Products.Autopilot.Hpa.Routes (HpaAPI, hpaServer)
 import Products.Autopilot.Mobile.Routes (MobileAPI, mobileServer)
 import Products.Autopilot.ReleaseBot.Routes (ReleaseBotAPI, releaseBotServer)
 import Products.Autopilot.Types (ReleaseTracker)
@@ -141,6 +142,8 @@ type CoreAPI =
         :<|> MobileAPI
         -- Xyne release bot: signed webhooks + token-gated public diff view
         :<|> ReleaseBotAPI
+        -- HPA scheduler panel + API
+        :<|> HpaAPI
 
 coreServer :: ServerT CoreAPI Flow
 coreServer =
@@ -249,3 +252,4 @@ coreServer =
         -- Mobile releases (suffix mount of MobileAPI)
         :<|> mobileServer
         :<|> releaseBotServer
+        :<|> hpaServer

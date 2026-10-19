@@ -257,3 +257,10 @@ tests:
     source-dirs: test
     dependencies:
       - scc
+  scc-hpa-it:
+    # Integration tests for the HPA scheduler. They need a Postgres with the migrations
+    # applied and run only when SC_HPA_IT_DB is set (see test-hpa/Main.hs).
+    main: Main.hs
+    source-dirs: test-hpa
+    dependencies:
+      - scc

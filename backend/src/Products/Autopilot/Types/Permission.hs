@@ -44,6 +44,11 @@ data AutopilotPermission
   | AP_AI_ASK
   | AP_AI_AUDIT_VIEW
   | AP_QA_TRIGGER
+  | AP_HPA_VIEW
+  | AP_HPA_SCHEDULE_EDIT
+  | AP_HPA_APPLY
+  | AP_HPA_ROLLBACK
+  | AP_HPA_GUARDRAIL_EDIT
   deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 autopilotPermissionToText :: AutopilotPermission -> Text
@@ -72,6 +77,11 @@ autopilotPermissionToText AP_AI_ASSESS = "AI_ASSESS"
 autopilotPermissionToText AP_AI_ASK = "AI_ASK"
 autopilotPermissionToText AP_AI_AUDIT_VIEW = "AI_AUDIT_VIEW"
 autopilotPermissionToText AP_QA_TRIGGER = "QA_TRIGGER"
+autopilotPermissionToText AP_HPA_VIEW = "HPA_VIEW"
+autopilotPermissionToText AP_HPA_SCHEDULE_EDIT = "HPA_SCHEDULE_EDIT"
+autopilotPermissionToText AP_HPA_APPLY = "HPA_APPLY"
+autopilotPermissionToText AP_HPA_ROLLBACK = "HPA_ROLLBACK"
+autopilotPermissionToText AP_HPA_GUARDRAIL_EDIT = "HPA_GUARDRAIL_EDIT"
 
 textToAutopilotPermission :: Text -> Maybe AutopilotPermission
 textToAutopilotPermission "RELEASE_VIEW" = Just AP_RELEASE_VIEW
@@ -99,6 +109,11 @@ textToAutopilotPermission "AI_ASSESS" = Just AP_AI_ASSESS
 textToAutopilotPermission "AI_ASK" = Just AP_AI_ASK
 textToAutopilotPermission "AI_AUDIT_VIEW" = Just AP_AI_AUDIT_VIEW
 textToAutopilotPermission "QA_TRIGGER" = Just AP_QA_TRIGGER
+textToAutopilotPermission "HPA_VIEW" = Just AP_HPA_VIEW
+textToAutopilotPermission "HPA_SCHEDULE_EDIT" = Just AP_HPA_SCHEDULE_EDIT
+textToAutopilotPermission "HPA_APPLY" = Just AP_HPA_APPLY
+textToAutopilotPermission "HPA_ROLLBACK" = Just AP_HPA_ROLLBACK
+textToAutopilotPermission "HPA_GUARDRAIL_EDIT" = Just AP_HPA_GUARDRAIL_EDIT
 textToAutopilotPermission _ = Nothing
 
 -- | Human-readable description (exhaustive, -Wall catches missing variants).
@@ -128,6 +143,11 @@ permissionDescription AP_AI_ASSESS = "Run AI risk assessment on releases"
 permissionDescription AP_AI_ASK = "Ask AI questions about release context"
 permissionDescription AP_AI_AUDIT_VIEW = "View the AI audit log"
 permissionDescription AP_QA_TRIGGER = "Trigger the QA automation suite for a release"
+permissionDescription AP_HPA_VIEW = "View HPAs, their live specs, scaling status and history"
+permissionDescription AP_HPA_SCHEDULE_EDIT = "Create, edit, pause and delete HPA schedules; watch services"
+permissionDescription AP_HPA_APPLY = "Apply an HPA change by hand and restore one early"
+permissionDescription AP_HPA_ROLLBACK = "Roll back or cancel an HPA change and acknowledge stuck ones"
+permissionDescription AP_HPA_GUARDRAIL_EDIT = "Edit HPA guardrails (replica caps, floors, freeze)"
 
 -- 'permissionName' MUST match 'autopilotPermissionToText' for the same
 -- constructor; the RBAC check compares this string against the DB.
@@ -231,3 +251,23 @@ instance KnownPermission 'AP_AI_AUDIT_VIEW where
 instance KnownPermission 'AP_QA_TRIGGER where
   permissionProduct _ = "autopilot"
   permissionName _ = "QA_TRIGGER"
+
+instance KnownPermission 'AP_HPA_VIEW where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "HPA_VIEW"
+
+instance KnownPermission 'AP_HPA_SCHEDULE_EDIT where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "HPA_SCHEDULE_EDIT"
+
+instance KnownPermission 'AP_HPA_APPLY where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "HPA_APPLY"
+
+instance KnownPermission 'AP_HPA_ROLLBACK where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "HPA_ROLLBACK"
+
+instance KnownPermission 'AP_HPA_GUARDRAIL_EDIT where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "HPA_GUARDRAIL_EDIT"
