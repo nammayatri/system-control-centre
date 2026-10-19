@@ -50,10 +50,20 @@ export default function ReplicaChart({ points, from, to, applies = [], scaleEven
   const x = (ms: number) => M.l + ((ms - t0) / Math.max(1, t1 - t0)) * (W - M.l - M.r);
   const inRange = (ms: number) => ms >= t0 && ms <= t1;
 
-  const pts = useMemo(
-    () => points.map((p) => ({ ...p, ms: new Date(p.ts).getTime() })).sort((a, b) => a.ms - b.ms),
-    [points],
-  );
+  // Points can lack a field (a metric that was not scraped at that moment). Gaps stay gaps; the limits carry forward.
+  const pts = useMemo(() => {
+    let lastMin = 0;
+    let lastMax = 0;
+    return points
+      .map((p) => ({ ...p, ms: new Date(p.ts).getTime() }))
+      .sort((a, b) => a.ms - b.ms)
+      .filter((p) => p.current != null)
+      .map((p) => {
+        lastMin = p.min ?? lastMin;
+        lastMax = p.max ?? lastMax;
+        return { ...p, current: p.current as number, desired: p.desired ?? (p.current as number), min: lastMin, max: lastMax };
+      });
+  }, [points]);
 
   const repMax = niceMax(Math.max(1, ...pts.map((p) => Math.max(p.max, p.current, p.desired))));
   const hRep = 230;
@@ -116,7 +126,7 @@ export default function ReplicaChart({ points, from, to, applies = [], scaleEven
   if (pts.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-zinc-300 bg-zinc-50 px-4 py-10 text-center text-sm text-zinc-500">
-        No data in this range yet. Pod counts and CPU are recorded once a minute while someone is watching the service, so the chart fills in shortly.
+        No history returned for this range.
       </div>
     );
   }

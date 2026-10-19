@@ -1,17 +1,20 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Read-only background sampler behind the performance panel.
+{- | Records WHEN an HPA's spec changes, whoever changed it.
 
-For every watched service (explicitly watched, with a schedule, or with an apply
-in flight) it records, once a minute: replicas and utilisation per HPA, a
-snapshot whenever the HPA's spec changes (whoever changed it), and the
-Kubernetes scale events. It writes nothing to the cluster, so it is safe to run
-everywhere; one pod runs it at a time (lease), and a dead leader's lease expires.
+Deliberately cheap: it writes a row only when a spec differs from the last one recorded
+(a handful of rows per service per month), never a time series. Replica counts and CPU
+over time come from the metrics system on demand ("Products.Autopilot.Hpa.Metrics"), and
+Kubernetes scale events are read live; neither is stored here.
+
+Runs every few minutes for services that have a schedule or a change in flight (those are
+the ones whose history matters). It only reads the cluster. One pod runs it at a time (lease).
 -}
 module Products.Autopilot.Hpa.Observer (
     observerLoop,
     observeOnce,
-    currentUtilization,
+    K8sEvent (..),
+    parseK8sEvent,
     parseNewSize,
     parseK8sTime,
 )
@@ -21,22 +24,19 @@ import Control.Monad (forM_, forever, when)
 import Control.Monad.Catch (throwM, try)
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
-import Core.Environment (Flow, getConfig, logInfo, logWarning)
+import Core.Environment (Flow, getConfig, logWarning)
 import Core.Types.Time (Seconds (..), threadDelay)
 import Data.Aeson (Value (..))
 import Data.Aeson qualified as A
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
-import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
-import Data.Scientific (toRealFloat)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
-import Data.Vector qualified as V
 import Products.Autopilot.Hpa.Change (specHash)
 import Products.Autopilot.Hpa.Kube
 import Products.Autopilot.Hpa.Resolver (Resolution (..), ResolvedHpa (..), classifyHpas)
@@ -48,28 +48,13 @@ import Products.Autopilot.Hpa.Util (isAsync)
 import Products.Autopilot.Hpa.Worker (supervise)
 import Text.Read (readMaybe)
 
--- | How long samples and scale events are kept.
-retentionDays :: Int
-retentionDays = 7
-
 observerLoop :: Text -> Flow ()
-observerLoop holder = do
-    ticks <- liftIO (newIORef (0 :: Int))
-    supervise "observer" $ forever $ do
-        cfg <- getConfig
-        let cloud = cloudProvider cfg
-        leader <- acquireLoopLease "observe" cloud holder 150
-        when leader $ do
-            observeOnce (mkKube cfg) cloud
-            n <- liftIO (readIORef ticks)
-            -- roughly hourly
-            if n >= 60
-                then do
-                    liftIO (writeIORef ticks 0)
-                    deleted <- pruneObserverData cloud retentionDays
-                    when (deleted > 0) (logInfo ("[hpa] pruned " <> T.pack (show deleted) <> " old observer rows"))
-                else liftIO (modifyIORef' ticks (+ 1))
-        liftIO (threadDelay (Seconds 60))
+observerLoop holder = supervise "observer" $ forever $ do
+    cfg <- getConfig
+    let cloud = cloudProvider cfg
+    leader <- acquireLoopLease "observe" cloud holder 900
+    when leader (observeOnce (mkKube cfg) cloud)
+    liftIO (threadDelay (Seconds 300))
 
 observeOnce :: Kube -> Text -> Flow ()
 observeOnce kube cloud = do
@@ -93,38 +78,15 @@ observeProduct kube cloud app svcs = do
             hpaRes <- liftIO (listHpas kube ns)
             case hpaRes of
                 Left e -> logWarning ("[hpa] observer: cannot list HPAs in " <> ns <> ": " <> kubeErrText e)
-                Right (hpas, _) -> do
-                    now <- liftIO getCurrentTime
-                    evRes <- liftIO (listHpaEvents kube ns)
-                    let events = either (const []) id evRes
+                Right (hpas, _) ->
                     forM_ ctxs $ \ctx -> do
                         let res = classifyHpas (scHost ctx) (scOtherHosts ctx) Nothing hpas
-                            mine = map rhHpa (resHpas res)
-                            names = map hoName mine
-                        forM_ mine (observeHpa cloud ctx now)
-                        forM_ events (storeEvent cloud ctx names now)
+                        forM_ (map rhHpa (resHpas res)) (snapshotIfChanged cloud ctx)
 
-observeHpa :: Text -> ServiceCtx -> UTCTime -> HpaObject -> Flow ()
-observeHpa cloud ctx now h = do
-    let spec = hoSpec h
-        st = hoStatus h
-    insertSample
-        SampleRow
-            { smCloud = cloud
-            , smAppGroup = scAppGroup ctx
-            , smService = scService ctx
-            , smNamespace = scNamespace ctx
-            , smHpaName = hoName h
-            , smTs = now
-            , smMin = hsMinReplicas spec
-            , smMax = hsMaxReplicas spec
-            , smCurrent = hstCurrentReplicas st
-            , smDesired = hstDesiredReplicas st
-            , smCpuPct = currentUtilization "cpu" (hstCurrentMetrics st)
-            , smMemPct = currentUtilization "memory" (hstCurrentMetrics st)
-            , smMetrics = hstCurrentMetrics st
-            }
-    let hash = specHash spec
+-- | One row, only when the spec differs from the last recorded one.
+snapshotIfChanged :: Text -> ServiceCtx -> HpaObject -> Flow ()
+snapshotIfChanged cloud ctx h = do
+    let hash = specHash (hoSpec h)
     previous <- lastSnapshotHash cloud (scNamespace ctx) (hoName h)
     when (previous /= Just hash) $
         insertSnapshot
@@ -133,55 +95,56 @@ observeHpa cloud ctx now h = do
             (scService ctx)
             (scNamespace ctx)
             (hoName h)
-            (A.toJSON spec)
+            (A.toJSON (hoSpec h))
             hash
             "OBSERVED"
             (lookup annScheduleId (hoAnnotations h))
             Nothing
             (hoResourceVersion h)
 
-storeEvent :: Text -> ServiceCtx -> [Text] -> UTCTime -> Value -> Flow ()
-storeEvent cloud ctx names now ev = case ev of
-    Object o
-        | Just uid <- str ["metadata", "uid"] o
-        , Just hpa <- str ["involvedObject", "name"] o
-        , hpa `elem` names
-        , Just reason <- str ["reason"] o -> do
-            let msg = fromMaybe "" (str ["message"] o)
-                typ = str ["type"] o
-                cnt = fromMaybe 1 (intAt ["count"] o)
-                firstTs = fromMaybe now (timeAt ["firstTimestamp"] o `orElse` timeAt ["eventTime"] o `orElse` timeAt ["metadata", "creationTimestamp"] o)
-                lastTs = fromMaybe firstTs (timeAt ["lastTimestamp"] o `orElse` timeAt ["eventTime"] o)
-            upsertScaleEvent cloud (scAppGroup ctx) (scService ctx) (scNamespace ctx) hpa uid typ reason msg (parseNewSize msg) cnt firstTs lastTs
-    _ -> pure ()
+-- | A Kubernetes event about an HPA, as shown in the scale-events list.
+data K8sEvent = K8sEvent
+    { keUid :: Text
+    , keHpa :: Text
+    , keType :: Maybe Text
+    , keReason :: Text
+    , keMessage :: Text
+    , keNewSize :: Maybe Int
+    , keCount :: Int
+    , keFirst :: UTCTime
+    , keLast :: UTCTime
+    }
+    deriving (Eq, Show)
+
+parseK8sEvent :: UTCTime -> Value -> Maybe K8sEvent
+parseK8sEvent now (Object o) = do
+    uid <- str ["metadata", "uid"]
+    hpa <- str ["involvedObject", "name"]
+    reason <- str ["reason"]
+    let msg = fromMaybe "" (str ["message"])
+        firstTs = fromMaybe now (time ["firstTimestamp"] `orElse` time ["eventTime"] `orElse` time ["metadata", "creationTimestamp"])
+        lastTs = fromMaybe firstTs (time ["lastTimestamp"] `orElse` time ["eventTime"])
+    pure
+        K8sEvent
+            { keUid = uid
+            , keHpa = hpa
+            , keType = str ["type"]
+            , keReason = reason
+            , keMessage = msg
+            , keNewSize = parseNewSize msg
+            , keCount = fromMaybe 1 (int ["count"])
+            , keFirst = firstTs
+            , keLast = lastTs
+            }
   where
     orElse a b = maybe b Just a
-    str path o = case walk path (Object o) of Just (String t) | not (T.null t) -> Just t; _ -> Nothing
-    intAt path o = case walk path (Object o) of Just (Number n) -> Just (truncate n); _ -> Nothing
-    timeAt path o = case walk path (Object o) of Just (String t) -> parseK8sTime t; _ -> Nothing
+    str path = case walk path (Object o) of Just (String t) | not (T.null t) -> Just t; _ -> Nothing
+    int path = case walk path (Object o) of Just (Number n) -> Just (truncate n); _ -> Nothing
+    time path = case walk path (Object o) of Just (String t) -> parseK8sTime t; _ -> Nothing
     walk [] v = Just v
-    walk (k : ks) (Object o) = KM.lookup (fromText' k) o >>= walk ks
+    walk (k : ks) (Object m) = KM.lookup (K.fromText k) m >>= walk ks
     walk _ _ = Nothing
-    fromText' = K.fromText
-
-{- | The measured average utilisation (percent of request) of a resource from
-@status.currentMetrics@; @Nothing@ when the HPA reports an absolute value instead.
--}
-currentUtilization :: Text -> Value -> Maybe Double
-currentUtilization name (Array ms) = case mapMaybe pick (V.toList ms) of
-    (x : _) -> Just x
-    [] -> Nothing
-  where
-    pick (Object m)
-        | Just (String "Resource") <- KM.lookup "type" m
-        , Just (Object r) <- KM.lookup "resource" m
-        , Just (String n) <- KM.lookup "name" r
-        , n == name
-        , Just (Object cur) <- KM.lookup "current" r
-        , Just (Number u) <- KM.lookup "averageUtilization" cur =
-            Just (toRealFloat u)
-    pick _ = Nothing
-currentUtilization _ _ = Nothing
+parseK8sEvent _ _ = Nothing
 
 -- | The replica count in an HPA rescale message: @New size: 7; reason: ...@.
 parseNewSize :: Text -> Maybe Int

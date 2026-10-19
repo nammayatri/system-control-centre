@@ -104,7 +104,6 @@ export default function HpaOverview() {
                           {s.frozen && <Badge variant="danger">Frozen</Badge>}
                           {s.hpaCount > 1 && <Badge variant="warning">{s.hpaCount} HPAs</Badge>}
                           {h && !h.editable && <Badge variant="danger" >Not editable</Badge>}
-                          {s.watched && <Badge variant="muted">Watched</Badge>}
                         </div>
                       </td>
                     </tr>

@@ -9,12 +9,13 @@ Autopilot product (`src/Products/Autopilot/Hpa/`); UI at `/backend/hpa`.
 | Env var | Default | Effect |
 |---|---|---|
 | `SC_HPA_SCHEDULER_ENABLED` | **off** | Reconciler + apply workers. This is the part that writes to clusters. |
-| `SC_HPA_OBSERVER_ENABLED` | on | Read-only sampler (replicas/CPU every minute, spec snapshots, scale events). |
+| `SC_HPA_OBSERVER_ENABLED` | on | Read-only recorder of *spec changes* (a row only when an HPA's spec differs from the last one seen, checked every 5 min). Writes no time series. |
+| `PROMETHEUS_URL` | unset | Metrics endpoint (Prometheus-compatible) used for the replica/CPU history chart. Unset = the page shows live numbers only. |
 
 Loops start in `SERVER` and `RUNNER` modes, are supervised (a crash restarts them) and are safe on several pods:
 the reconciler/observer elect a leader through `hpa_loop_lease`; workers claim rows with leases. Apply migration
 `dev/migrations/system-control/0055-hpa-scheduler.sql`. Uses the process's kubectl (`SC_KUBECTL_BIN`) and
-`PROMETHEUS_URL` (optional health checks).
+`PROMETHEUS_URL` (history chart, optional health checks).
 
 ## How it works
 
@@ -38,6 +39,17 @@ the reconciler/observer elect a leader through `hpa_loop_lease`; workers claim r
 * **Releases**: applies/restores are deferred while a release is in flight for the service. A release that clones
   a boosted HPA copies the *baseline* (annotation `sc.juspay.in/hpa-base-spec`, see `K8s/HPA.hs`).
 * **Guardrails**: per-service max cap, min floor, max step %, freeze.
+
+## Metrics and storage (nothing per-minute is stored)
+
+* **History chart** (`Hpa/Metrics.hs`): queried on demand from `PROMETHEUS_URL` (`query_range`), never stored.
+  Uses kube-state-metrics `kube_horizontalpodautoscaler_{status_current,status_desired,spec_min,spec_max}_replicas`
+  (label `horizontalpodautoscaler`, falling back to `hpa`) and cAdvisor CPU over
+  `kube_pod_container_resource_requests` for the HPA's Deployment pods. **Check these metric names exist in your Prometheus.**
+* **Live numbers** (pods now / wanted / min / max / CPU / memory) come from the HPA status on every page refresh.
+* **Scale events** are read live from Kubernetes events (the cluster keeps about an hour).
+* The only things written to the database are: schedules, the apply ledger + its timeline, guardrails, and spec snapshots
+  (on change only). `hpa_sample`, `hpa_scale_event` and `hpa_watch` exist from migration 0055 but are no longer written.
 
 ## Permissions (Autopilot product, scoped per app group)
 

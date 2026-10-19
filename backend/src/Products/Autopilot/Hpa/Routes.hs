@@ -44,7 +44,9 @@ import Data.Text qualified as T
 import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Products.Autopilot.Hpa.Change (jsonDiff)
-import Products.Autopilot.Hpa.Kube (Kube, getVirtualService, kubeErrText, listHpas, mkKube)
+import Products.Autopilot.Hpa.Kube (Kube, getVirtualService, kubeErrText, listHpaEvents, listHpas, mkKube)
+import Products.Autopilot.Hpa.Metrics (fetchSeries)
+import Products.Autopilot.Hpa.Observer (K8sEvent (..), parseK8sEvent)
 import Products.Autopilot.Hpa.Preview
 import Products.Autopilot.Hpa.Resolver
 import Products.Autopilot.Hpa.Service
@@ -355,25 +357,57 @@ serviceH ap app svc = do
 bucketFor :: UTCTime -> UTCTime -> Int
 bucketFor from to = max 60 (((truncate (realToFrac (diffUTCTime to from) :: Double) `div` 360) `div` 60) * 60)
 
+{- | Replica and CPU history. Read on demand from the metrics endpoint (PROMETHEUS_URL); nothing is
+stored by this application. Without an endpoint the page shows live values only.
+-}
 seriesH :: AuthedPerson -> Text -> Text -> Maybe Text -> Maybe Text -> Flow Value
 seriesH ap app svc mFrom mTo = do
     need (Proxy :: Proxy 'AP_HPA_VIEW) ap app
-    _ <- ctxOr404 app svc
-    cloud <- cloudOf
+    ctx <- ctxOr404 app svc
+    cfg <- getConfig
+    kube <- kubeOf
     (from, to) <- timeRange mFrom mTo
-    let bucket = bucketFor from to
-    points <- samplesFor cloud app svc from to bucket
-    latest <- latestSampleTime cloud app svc
-    pure (A.object ["from" .= from, "to" .= to, "bucketSeconds" .= bucket, "latestSample" .= latest, "points" .= points])
+    let step = bucketFor from to
+        base = ["from" .= from, "to" .= to, "bucketSeconds" .= step]
+    if null (prometheusUrl cfg)
+        then
+            pure . A.object $
+                base
+                    <> [ "source" .= ("none" :: Text)
+                       , "points" .= ([] :: [Value])
+                       , "note" .= ("No metrics endpoint is configured on this deployment (PROMETHEUS_URL), so history is not available here. Live values are shown instead." :: Text)
+                       ]
+        else do
+            res <- liftIO (resolveServiceHpasWith kube (scNamespace ctx) (scVsName ctx) (scHost ctx) (scOtherHosts ctx))
+            r <- either (throwM . BadRequest) pure res
+            let pairs = [(hoName (rhHpa h), strName (hsTarget (hoSpec (rhHpa h)))) | h <- resHpas r]
+            pts <- liftIO (fetchSeries (prometheusUrl cfg) (scNamespace ctx) pairs from to step)
+            pure . A.object $ case pts of
+                Right ps -> base <> ["source" .= ("prometheus" :: Text), "points" .= ps]
+                Left e -> base <> ["source" .= ("error" :: Text), "points" .= ([] :: [Value]), "note" .= e]
 
+-- | Kubernetes rescale events, read live (the cluster keeps about an hour). Not stored.
 scaleEventsH :: AuthedPerson -> Text -> Text -> Maybe Text -> Maybe Text -> Flow Value
 scaleEventsH ap app svc mFrom mTo = do
     need (Proxy :: Proxy 'AP_HPA_VIEW) ap app
-    _ <- ctxOr404 app svc
-    cloud <- cloudOf
+    ctx <- ctxOr404 app svc
+    kube <- kubeOf
     (from, to) <- timeRange mFrom mTo
-    evs <- scaleEventsFor cloud app svc from to 500
-    pure (A.object ["from" .= from, "to" .= to, "events" .= evs])
+    now <- liftIO getCurrentTime
+    res <- liftIO (resolveServiceHpasWith kube (scNamespace ctx) (scVsName ctx) (scHost ctx) (scOtherHosts ctx))
+    r <- either (throwM . BadRequest) pure res
+    evRes <- liftIO (listHpaEvents kube (scNamespace ctx))
+    let names = map (hoName . rhHpa) (resHpas r)
+        evs = case evRes of
+            Right raw -> [e | Just e <- map (parseK8sEvent now) raw, keHpa e `elem` names, keLast e >= from, keLast e < to]
+            Left _ -> []
+        note = case evRes of Left e -> Just (kubeErrText e); Right _ -> Nothing :: Maybe Text
+        out e =
+            A.object
+                [ "uid" .= keUid e, "hpaName" .= keHpa e, "type" .= keType e, "reason" .= keReason e, "message" .= keMessage e
+                , "newSize" .= keNewSize e, "count" .= keCount e, "firstTs" .= keFirst e, "lastTs" .= keLast e
+                ]
+    pure (A.object ["from" .= from, "to" .= to, "events" .= map out evs, "note" .= note])
 
 {- | Spec history per HPA, newest first, each with the diff from the previous snapshot
 of the same HPA: how the configuration changed, and who (schedule, manual apply, or

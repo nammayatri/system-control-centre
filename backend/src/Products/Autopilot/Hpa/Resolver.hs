@@ -81,6 +81,8 @@ instance ToJSON ResolvedHpa where
             , "spec" .= hoSpec (rhHpa r)
             , "status" .= hoStatus (rhHpa r)
             , "metricSummary" .= map describeMetric (hsMetrics (hoSpec (rhHpa r)))
+            , "cpuUtilization" .= currentUtilization "cpu" (hstCurrentMetrics (hoStatus (rhHpa r)))
+            , "memoryUtilization" .= currentUtilization "memory" (hstCurrentMetrics (hoStatus (rhHpa r)))
             , "validationIssues" .= validateSpec (hoSpec (rhHpa r))
             , "annotations" .= A.object [K.fromText k .= v | (k, v) <- hoAnnotations (rhHpa r)]
             , "resourceVersion" .= hoResourceVersion (rhHpa r)

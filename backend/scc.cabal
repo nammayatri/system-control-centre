@@ -85,6 +85,7 @@ library
       Products.Autopilot.Hpa.Health
       Products.Autopilot.Hpa.Kube
       Products.Autopilot.Hpa.Loops
+      Products.Autopilot.Hpa.Metrics
       Products.Autopilot.Hpa.Observer
       Products.Autopilot.Hpa.Preview
       Products.Autopilot.Hpa.Quantity

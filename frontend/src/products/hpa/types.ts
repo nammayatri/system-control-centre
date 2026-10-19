@@ -88,6 +88,8 @@ export interface ResolvedHpa {
   spec: HpaSpec;
   status: HpaStatus;
   metricSummary: string[];
+  cpuUtilization: number | null;
+  memoryUtilization: number | null;
   validationIssues: string[];
   annotations: Record<string, string>;
   resourceVersion: string;
@@ -164,10 +166,11 @@ export interface ServiceDetail {
 }
 
 export interface SeriesPoint {
-  ts: string; hpaName: string; min: number; max: number; current: number; desired: number;
+  ts: string; hpaName: string; min: number | null; max: number | null; current: number | null; desired: number | null;
   cpuPct: number | null; memoryPct: number | null;
 }
-export interface Series { from: string; to: string; bucketSeconds: number; latestSample: string | null; points: SeriesPoint[] }
+/** `none`: no metrics endpoint configured here; `error`: the endpoint failed; `prometheus`: history returned. Nothing is stored by this app. */
+export interface Series { from: string; to: string; bucketSeconds: number; source: 'none' | 'error' | 'prometheus'; note?: string; points: SeriesPoint[] }
 
 export interface ScaleEvent {
   uid: string; hpaName: string; type: string | null; reason: string; message: string;

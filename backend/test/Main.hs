@@ -106,6 +106,7 @@ import Products.Autopilot.Hpa.Window qualified as HW
 import Products.Autopilot.Hpa.Change qualified as HC
 import Products.Autopilot.Hpa.Health qualified as HH
 import Products.Autopilot.Hpa.Kube qualified as HK
+import Products.Autopilot.Hpa.Metrics qualified as HM
 import Products.Autopilot.Hpa.Observer qualified as HO
 import Data.Time.Clock (UTCTime)
 import Products.Autopilot.Hpa.Resolver qualified as HR
@@ -222,6 +223,7 @@ main = do
   section "[71] HPA: apply state machine + JSON shapes" testHpaTypes
   section "[72] HPA: health judgement, Prometheus + event parsing, resume decision" testHpaMisc
   section "[73] HPA: server-defaulted behavior, kubectl error classification" testHpaDefaults
+  section "[74] HPA: on-demand metrics (queries, parsing, merging) and k8s event parsing" testHpaMetrics
   section "[60] Release bot: env var replacement preserves other entries" testReleaseBotEnv
   section "[61] Release bot: intent merge" testReleaseBotIntent
   section "[62] Release bot: deployment reference discovery" testReleaseBotRefs
@@ -2993,6 +2995,7 @@ testReleaseBotRows = do
       chs = [PRC.ChannelCfg "C" "o/ny" "MASTER", PRC.ChannelCfg "C" "o/cc" "MASTER"]
   assertEqual "control center message picks the control-center repo" (Right "o/cc") (fmap PRC.chRepo (RBF.pickChannel pcShared "release control center backend till abc123" chs))
   assertEqual "backend master message picks the main repo" (Right "o/ny") (fmap PRC.chRepo (RBF.pickChannel pcShared "release backend master till abc123" chs))
+  assertEqual "hyphenated words match the spaced alias" ["CC_BACKEND"] (PRI.inServices (PRI.keywordIntent pcShared PRI.emptyIntent "release control-center-backend till abc123"))
   assertBool "no mention of either repo asks which" (either (const True) (const False) (RBF.pickChannel pcShared "release please" chs))
   -- several Jenkins builds of one request
   let br st = RBF.BuildRec ["s"] Nothing (Just "u") (Just st) False Nothing
@@ -3560,10 +3563,10 @@ testHpaMisc = do
   assertEqual "k8s timestamp with microseconds" (Just (utc "2026-10-19 05:00:00.123456")) (HO.parseK8sTime "2026-10-19T05:00:00.123456Z")
   assertEqual "garbage timestamp" Nothing (HO.parseK8sTime "yesterday")
   let metrics = prom "[{\"type\":\"Resource\",\"resource\":{\"name\":\"memory\",\"current\":{\"averageUtilization\":41}}},{\"type\":\"Resource\",\"resource\":{\"name\":\"cpu\",\"current\":{\"averageUtilization\":63,\"averageValue\":\"250m\"}}}]"
-  assertEqual "cpu utilisation picked by name" (Just 63) (HO.currentUtilization "cpu" metrics)
-  assertEqual "memory utilisation picked by name" (Just 41) (HO.currentUtilization "memory" metrics)
-  assertEqual "absolute-only metrics have no utilisation" Nothing (HO.currentUtilization "cpu" (prom "[{\"type\":\"Resource\",\"resource\":{\"name\":\"cpu\",\"current\":{\"averageValue\":\"250m\"}}}]"))
-  assertEqual "no metrics yet" Nothing (HO.currentUtilization "cpu" A.Null)
+  assertEqual "cpu utilisation picked by name" (Just 63) (HS.currentUtilization "cpu" metrics)
+  assertEqual "memory utilisation picked by name" (Just 41) (HS.currentUtilization "memory" metrics)
+  assertEqual "absolute-only metrics have no utilisation" Nothing (HS.currentUtilization "cpu" (prom "[{\"type\":\"Resource\",\"resource\":{\"name\":\"cpu\",\"current\":{\"averageValue\":\"250m\"}}}]"))
+  assertEqual "no metrics yet" Nothing (HS.currentUtilization "cpu" A.Null)
   -- resume decision
   let spec = HS.hoSpec h
       ch = HT.emptyChange {HT.chMaxReplicas = Just 60, HT.chMinReplicas = Just 10}
@@ -3625,3 +3628,23 @@ testHpaDefaults = do
   assertBool "kubectl itself missing is NOT 'the HPA is gone'" (case cls "sh: kubectl: command not found" of HK.KubeFailed _ -> True; _ -> False)
   assertBool "a conflict" (case cls "Error from server (Conflict): Operation cannot be fulfilled on x: the object has been modified; please apply your changes to the latest version" of HK.KubeConflict _ -> True; _ -> False)
   assertBool "anything else is a plain failure" (case cls "Unable to connect to the server: dial tcp: i/o timeout" of HK.KubeFailed _ -> True; _ -> False)
+
+testHpaMetrics :: IO ()
+testHpaMetrics = do
+  assertEqual "HPA gauge query" "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"atlas\",horizontalpodautoscaler=~\"a-hpa|b-hpa\"}" (HM.hpaQuery "horizontalpodautoscaler" "status_current_replicas" "atlas" ["a-hpa", "b-hpa"])
+  assertBool "dots in names are matched literally ([.], no backslashes)" (T.isInfixOf "b[.]hpa" (HM.hpaQuery "horizontalpodautoscaler" "spec_max_replicas" "atlas" ["a-hpa", "b.hpa"]))
+  assertBool "cpu query targets only that deployment's pods and divides by requests" (let q = HM.cpuQuery "atlas" "app-v1" in T.isInfixOf "pod=~\"app-v1-[a-z0-9]+-[a-z0-9]+\"" q && T.isInfixOf "kube_pod_container_resource_requests" q && T.isInfixOf "resource=\"cpu\"" q)
+  let matrix = either error id (A.eitherDecode "{\"status\":\"success\",\"data\":{\"resultType\":\"matrix\",\"result\":[{\"metric\":{\"horizontalpodautoscaler\":\"a-hpa\"},\"values\":[[1700000000,\"3\"],[1700000060,\"4\"],[1700000120,\"NaN\"]]}]}}") :: A.Value
+  assertEqual "matrix parsed; NaN samples dropped" (Right [(Map.fromList [("horizontalpodautoscaler", "a-hpa")], [(1700000000, 3), (1700000060, 4)])]) (HM.parsePromMatrix matrix)
+  assertBool "an error status is refused" (either (const True) (const False) (HM.parsePromMatrix (either error id (A.eitherDecode "{\"status\":\"error\"}"))))
+  assertEqual "no series is an empty list, not an error" (Right []) (HM.parsePromMatrix (either error id (A.eitherDecode "{\"status\":\"success\",\"data\":{\"result\":[]}}")))
+  let pts = HM.mergeSeries [("current", "a", [(60, 3), (120, 4)]), ("desired", "a", [(60, 3), (120, 6)]), ("min", "a", [(60, 2), (120, 2)]), ("max", "a", [(60, 10), (120, 10)]), ("cpu", "a", [(120, 55)]), ("current", "b", [(60, 0)])]
+  assertEqual "one point per HPA per timestamp, fields joined" 3 (length pts)
+  assertEqual "joined fields" [(Just 4, Just 6, Just 2, Just 10, Just 55)] [(HM.spCurrent p, HM.spDesired p, HM.spMin p, HM.spMax p, HM.spCpuPct p) | p <- pts, HM.spHpa p == "a", HM.spCpuPct p /= Nothing]
+  assertEqual "a missing field stays missing (not zero)" [Nothing] [HM.spCpuPct p | p <- pts, HM.spHpa p == "a", HM.spCurrent p == Just 3]
+  refused <- HM.fetchSeries "http://127.0.0.1:1" "atlas" [("good-hpa", "bad\"} or vector(1) #")] (utc "2026-10-19 00:00:00") (utc "2026-10-19 01:00:00") 60
+  assertBool "an unusual name is refused before any request is made" (either (T.isInfixOf "unusual") (const False) refused)
+  now' <- pure (utc "2026-10-19 06:00:00")
+  let ev = either error id (A.eitherDecode "{\"metadata\":{\"uid\":\"u1\"},\"involvedObject\":{\"name\":\"a-hpa\"},\"type\":\"Normal\",\"reason\":\"SuccessfulRescale\",\"message\":\"New size: 7; reason: cpu above target\",\"count\":3,\"firstTimestamp\":\"2026-10-19T05:00:00Z\",\"lastTimestamp\":\"2026-10-19T05:30:00Z\"}") :: A.Value
+  assertEqual "k8s event parsed" (Just (HO.K8sEvent "u1" "a-hpa" (Just "Normal") "SuccessfulRescale" "New size: 7; reason: cpu above target" (Just 7) 3 (utc "2026-10-19 05:00:00") (utc "2026-10-19 05:30:00"))) (HO.parseK8sEvent now' ev)
+  assertEqual "an event without a uid or reason is ignored" Nothing (HO.parseK8sEvent now' (A.object ["reason" A..= ("x" :: Text)]))

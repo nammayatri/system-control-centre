@@ -29,6 +29,7 @@ module Products.Autopilot.Hpa.Spec (
     metricKey,
     describeMetric,
     validateSpec,
+    currentUtilization,
 )
 where
 
@@ -37,7 +38,7 @@ import Data.Aeson qualified as A
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, parseEither)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
@@ -468,3 +469,22 @@ validateRules dir r =
     policy p =
         [dir <> ": policy value must be > 0" | spValue p <= 0]
             <> [dir <> ": policy periodSeconds must be 1..1800" | spPeriodSeconds p < 1 || spPeriodSeconds p > 1800]
+
+{- | The measured average utilisation (percent of request) of a resource from
+@status.currentMetrics@; @Nothing@ when the HPA reports an absolute value instead.
+-}
+currentUtilization :: Text -> Value -> Maybe Double
+currentUtilization name (Array ms) = case mapMaybe pick (V.toList ms) of
+    (x : _) -> Just x
+    [] -> Nothing
+  where
+    pick (Object m)
+        | Just (String "Resource") <- KM.lookup "type" m
+        , Just (Object r) <- KM.lookup "resource" m
+        , Just (String n) <- KM.lookup "name" r
+        , n == name
+        , Just (Object cur) <- KM.lookup "current" r
+        , Just (Number u) <- KM.lookup "averageUtilization" cur =
+            Just (realToFrac u)
+    pick _ = Nothing
+currentUtilization _ _ = Nothing

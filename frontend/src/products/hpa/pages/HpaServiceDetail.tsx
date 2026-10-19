@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { putWatch } from '../api';
-import { useQueryClient } from '@tanstack/react-query';
-import { Eye, EyeOff, Pencil, Play, Plus, Shield, Trash2, Pause, RefreshCw } from 'lucide-react';
+import { Pencil, Play, Plus, Shield, Trash2, Pause, RefreshCw } from 'lucide-react';
 import { Badge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
 import { Card, CardContent } from '../../../shared/ui/card';
@@ -12,7 +10,7 @@ import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { useRefreshAnimation } from '../../../shared/hooks';
 import { cn } from '../../../lib/utils';
 import {
-  useHistory, useScaleEvents, useScheduleAction, useSeries, useServiceDetail, useServiceEvents, useWatch,
+  useHistory, useScaleEvents, useScheduleAction, useSeries, useServiceDetail, useServiceEvents,
 } from '../hooks';
 import { describeChange, describeKind, fmtTime, fmtTimeFull, relTime } from '../format';
 import { ApplyStatusBadge, RoleBadge } from '../components/Badges';
@@ -42,18 +40,6 @@ export default function HpaServiceDetail() {
   const [manualOpen, setManualOpen] = useState(false);
   const [guardOpen, setGuardOpen] = useState(false);
   const [applyId, setApplyId] = useState<string | null>(null);
-  const watch = useWatch(product, service);
-  const qc = useQueryClient();
-  // Start collecting chart data as soon as someone looks at a service. Quietly skipped if the person
-  // may only view (the server refuses and nothing is shown).
-  const [autoTried, setAutoTried] = useState(false);
-  useEffect(() => {
-    if (!d || d.watched || autoTried) return;
-    setAutoTried(true);
-    putWatch(product, service, true).then(() => qc.invalidateQueries({ queryKey: ['hpa'] })).catch(() => undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [d?.watched]);
-
   const serving = useMemo(() => (d ? d.resolution.hpas.filter((h) => d.resolution.serving.includes(h.name)) : []), [d]);
   const reference = (serving[0] ?? d?.resolution.hpas[0])?.spec ?? null;
 
@@ -76,11 +62,6 @@ export default function HpaServiceDetail() {
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <Button variant="secondary" size="icon" onClick={onRefresh} aria-label="Refresh"><RefreshCw className={cn('h-4 w-4', spinning && 'animate-spin')} /></Button>
-          <PermissionGate product="autopilot" permission="HPA_SCHEDULE_EDIT" appGroup={product}>
-            <Button variant="secondary" size="sm" loading={watch.isPending} onClick={() => watch.mutate(!d.watched)}>
-              {d.watched ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}{d.watched ? 'Stop recording history' : 'Record history'}
-            </Button>
-          </PermissionGate>
           <PermissionGate product="autopilot" permission="HPA_GUARDRAIL_EDIT" appGroup={product}>
             <Button variant="secondary" size="sm" onClick={() => setGuardOpen(true)}><Shield className="h-4 w-4" />Guardrails</Button>
           </PermissionGate>
@@ -105,7 +86,7 @@ export default function HpaServiceDetail() {
         ))}
       </div>
 
-      {tab === 'performance' && <PerformanceTab product={product} service={service} hpaNames={d.resolution.hpas.map((h) => h.name)} servingNames={d.resolution.serving} applies={d.applies} watched={d.watched} />}
+      {tab === 'performance' && <PerformanceTab product={product} service={service} hpaNames={d.resolution.hpas.map((h) => h.name)} servingNames={d.resolution.serving} applies={d.applies} live={d.resolution.hpas} />}
 
       {tab === 'hpas' && (
         <div className="space-y-3">
@@ -131,8 +112,8 @@ export default function HpaServiceDetail() {
 
 // ── Performance ─────────────────────────────────────────────────────────────
 
-function PerformanceTab({ product, service, hpaNames, servingNames, applies, watched }: {
-  product: string; service: string; hpaNames: string[]; servingNames: string[]; applies: import('../types').Apply[]; watched: boolean;
+function PerformanceTab({ product, service, hpaNames, servingNames, applies, live }: {
+  product: string; service: string; hpaNames: string[]; servingNames: string[]; applies: import('../types').Apply[]; live: import('../types').ResolvedHpa[];
 }) {
   const [range, setRange] = useState('6h');
   const [selected, setSelected] = useState('');
@@ -148,7 +129,7 @@ function PerformanceTab({ product, service, hpaNames, servingNames, applies, wat
   const names = useMemo(() => [...new Set([...hpaNames, ...(series.data?.points.map((p) => p.hpaName) ?? [])])], [hpaNames, series.data]);
   const current = selected && names.includes(selected) ? selected : servingNames[0] ?? names[0] ?? '';
   const points = (series.data?.points ?? []).filter((p) => p.hpaName === current);
-  const last = points[points.length - 1];
+  const now = live.find((h) => h.name === current);
 
   return (
     <div className="space-y-4">
@@ -169,27 +150,36 @@ function PerformanceTab({ product, service, hpaNames, servingNames, applies, wat
         </div>
       </div>
 
-      {!watched && (series.data?.points.length ?? 0) === 0 && (
-        <div className="rounded-lg bg-sky-50 px-3 py-2 text-xs text-sky-800">
-          Collecting data for this service now. The chart fills in as samples arrive (one per minute), so check back in a minute or two.
-        </div>
-      )}
-
-      {last && (
+      {/* Right now: read live from the cluster each time the page refreshes. */}
+      {now && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-          <Kpi label="Current replicas" value={last.current} /><Kpi label="Desired" value={last.desired} />
-          <Kpi label="Min – max" value={`${last.min} – ${last.max}`} /><Kpi label="CPU" value={last.cpuPct != null ? `${last.cpuPct.toFixed(0)}%` : '—'} />
-          <Kpi label="Last sample" value={relTime(series.data?.latestSample)} />
+          <Kpi label="Pods running now" value={now.status.currentReplicas} /><Kpi label="Pods wanted" value={now.status.desiredReplicas} />
+          <Kpi label="Limits (min – max)" value={`${now.spec.minReplicas} – ${now.spec.maxReplicas}`} />
+          <Kpi label="CPU use" value={now.cpuUtilization != null ? `${now.cpuUtilization.toFixed(0)}%` : '—'} />
+          <Kpi label="Memory use" value={now.memoryUtilization != null ? `${now.memoryUtilization.toFixed(0)}%` : '—'} />
         </div>
       )}
 
       <Card><CardContent>
-        <ReplicaChart points={points} from={from} to={to} applies={applies.filter((a) => a.hpaName === current)} scaleEvents={(events.data ?? []).filter((e) => e.hpaName === current)} refreshing={series.isFetching} />
+        <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">History</div>
+        {series.data?.source === 'none' && (
+          <div className="rounded-lg bg-zinc-50 px-4 py-6 text-sm text-zinc-600">
+            <div className="font-medium text-zinc-800">History isn't available on this deployment.</div>
+            <div className="mt-1 text-xs">Pod-count and CPU history are read from the metrics system (Prometheus) when one is configured, so nothing is stored here. The live numbers above are always current.</div>
+          </div>
+        )}
+        {series.data?.source === 'error' && (
+          <div className="rounded-lg bg-amber-50 px-4 py-4 text-sm text-amber-900">Couldn't read history from the metrics system: {series.data.note}</div>
+        )}
+        {series.data?.source === 'prometheus' && (
+          <ReplicaChart points={points} from={from} to={to} applies={applies.filter((a) => a.hpaName === current)} scaleEvents={(events.data ?? []).filter((e) => e.hpaName === current)} refreshing={series.isFetching} />
+        )}
+        {!series.data && <Spinner label="Loading history…" />}
       </CardContent></Card>
 
       <Card><CardContent>
-        <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Scale events</div>
-        {(events.data ?? []).length === 0 ? <div className="text-xs text-zinc-500">No Kubernetes scale events in this range.</div> : (
+        <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Recent scaling events <span className="font-normal normal-case text-zinc-400">(read live from Kubernetes, last hour or so)</span></div>
+        {(events.data ?? []).filter((e) => e.hpaName === current).length === 0 ? <div className="text-xs text-zinc-500">No scaling events in this range.</div> : (
           <table className="w-full text-xs">
             <tbody>
               {(events.data ?? []).filter((e) => e.hpaName === current).slice(0, 50).map((e) => (

@@ -330,7 +330,7 @@ planRequest pc ch repo ap rid thread m = do
             stop ("I need the commit to release up to. Example: `release " <> T.intercalate " and " (take 2 (map scService (rcServices repo))) <> " till COMMIT_SHA`." <> recentList recent)
         (Right token, Just sha) ->
             if null services
-                then stop ("Which service(s)? Available: " <> T.intercalate ", " (map scService (rcServices repo)) <> ".")
+                then stop ("Which service(s)? Available: " <> T.intercalate ", " [scService x <> (case scAliases x of (a : _) -> " (say \"" <> a <> "\")"; [] -> "") | x <- rcServices repo] <> ".\nExample: `release " <> T.intercalate " and " (take 2 [fromMaybe (scService x) (listToMaybe (scAliases x)) | x <- rcServices repo]) <> " till COMMIT_SHA`.")
                 else do
                     full <- resolveFullSha token (repoSlug repo) sha
                     case full of

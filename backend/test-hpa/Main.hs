@@ -816,15 +816,18 @@ observer st = do
     flow st (addWatch cloudName app svc "it")
     flow st (observeOnce kube cloudName)
     samples <- sqlOne st "SELECT count(*)::int FROM hpa_sample WHERE cloud = 'ITCLOUD'"
-    checkEq "one sample recorded" [Only 1] samples
+    checkEq "NO time series is written to the database (history comes from the metrics system)" [Only 0] samples
     snaps <- sqlOne st "SELECT count(*)::int FROM hpa_snapshot WHERE cloud = 'ITCLOUD' AND source = 'OBSERVED'"
     checkEq "first observation snapshots the spec" [Only 1] snaps
-    sql st "UPDATE hpa_sample SET ts = ts - interval '2 minutes' WHERE cloud = ?" (Only cloudName)
     flow st (observeOnce kube cloudName)
     snaps2 <- sqlOne st "SELECT count(*)::int FROM hpa_snapshot WHERE cloud = 'ITCLOUD'"
-    checkEq "an unchanged spec is not snapshotted again" [Only 1] snaps2
-    cpu <- sqlOne st "SELECT cpu_pct::int FROM hpa_sample WHERE cloud = 'ITCLOUD' LIMIT 1"
-    checkEq "cpu utilisation read from status.currentMetrics" [Only 55] cpu
+    checkEq "an unchanged spec is not snapshotted again (rows only when something changes)" [Only 1] snaps2
+    flow st (observeOnce kube cloudName)
+    flow st (observeOnce kube cloudName)
+    snapsN <- sqlOne st "SELECT count(*)::int FROM hpa_snapshot WHERE cloud = 'ITCLOUD'"
+    checkEq "any number of further ticks still add nothing" [Only 1] snapsN
+    scaleEv <- sqlOne st "SELECT count(*)::int FROM hpa_scale_event WHERE cloud = 'ITCLOUD'"
+    checkEq "scale events are not stored either" [Only 0] scaleEv
     -- an edit by someone else shows up as a new snapshot
     modifyIORef' (fkHpas (eFake e)) $ Map.insert (ns, "svc-v1-hpa") (mkHpaObj "svc-v1-hpa" "svc-v1" 2 5 40)
     flow st (observeOnce kube cloudName)
@@ -832,9 +835,6 @@ observer st = do
     checkEq "a hand edit is captured as a new snapshot" [Only 2] snaps3
     vals <- flow st (snapshotsFor cloudName app svc 10)
     check "history is returned newest first" (length vals == 2)
-    t <- nowT
-    series <- flow st (samplesFor cloudName app svc (addUTCTime (-3600) t) (addUTCTime 60 t) 60)
-    check "the time series query returns the samples" (not (null series))
 
 workerKilled :: AppState -> IO ()
 workerKilled st = do
