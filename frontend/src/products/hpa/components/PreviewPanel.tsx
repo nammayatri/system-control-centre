@@ -50,7 +50,7 @@ export default function PreviewPanel({ product, service, hpa, change, kind, kind
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settled, q.isError, q.data, kindProblems.join('|')]);
 
-  if (empty) return <div className="rounded-lg bg-zinc-50 px-3 py-2 text-xs text-zinc-500">Change something above to see what it would do.</div>;
+  if (empty) return <div className="rounded-lg bg-zinc-50 px-3 py-2 text-xs text-zinc-500">Fill in step 3 to see exactly what would happen.</div>;
   if (kindProblems.length) return <Problems items={kindProblems} />;
   if (q.isError) return <Problems items={[errorMessage(q.error)]} />;
   if (!q.data) return <div className="rounded-lg bg-zinc-50 px-3 py-2 text-xs text-zinc-500">Checking against the live HPA…</div>;

@@ -49,8 +49,19 @@ export default function HpaOverview() {
       </div>
 
       {data?.clusterError && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          Could not read HPAs from the cluster: {data.clusterError}
+        <div className="space-y-1 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          <div className="font-medium">Could not read HPAs from namespace “{data.namespace || '(none set)'}” for {data.product}.</div>
+          {/forbidden/i.test(data.clusterError) && (
+            <div className="text-xs">
+              The backend's service account has no access there. Usually the namespace in this product's Deployment Config does not exist
+              in this cluster (stale or copied configuration); otherwise grant the service account a Role with
+              get/list/watch/update/patch on <code>horizontalpodautoscalers</code>.
+            </div>
+          )}
+          {/not.?found/i.test(data.clusterError) && !/forbidden/i.test(data.clusterError) && (
+            <div className="text-xs">That namespace was not found. Check the namespace in this product's Deployment Config.</div>
+          )}
+          <details className="text-xs text-red-700"><summary className="cursor-pointer">Details</summary><pre className="mt-1 whitespace-pre-wrap">{data.clusterError}</pre></details>
         </div>
       )}
       {error && !data && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{(error as any)?.response?.data?.message ?? 'Failed to load'}</div>}

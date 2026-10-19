@@ -368,12 +368,16 @@ checkGuardrail :: Guardrail -> HpaSpec -> HpaSpec -> [Text]
 checkGuardrail g current after =
     concat
         [ ["service is frozen" <> maybe "" (": " <>) (grFrozenReason g) | grFrozen g, current /= after]
-        , [ "maxReplicas " <> tshow (hsMaxReplicas after) <> " exceeds the cap of " <> tshow cap
+        , -- A limit judges only the numbers this change touches. An HPA that already sits outside a
+          -- limit (set after the fact) must not block an unrelated change such as a metric target.
+          [ "maxReplicas " <> tshow (hsMaxReplicas after) <> " exceeds the cap of " <> tshow cap
           | Just cap <- [grMaxReplicasCap g]
+          , hsMaxReplicas after /= hsMaxReplicas current
           , hsMaxReplicas after > cap
           ]
         , [ "minReplicas " <> tshow (hsMinReplicas after) <> " is below the floor of " <> tshow fl
           | Just fl <- [grMinReplicasFloor g]
+          , hsMinReplicas after /= hsMinReplicas current
           , hsMinReplicas after < fl
           ]
         , stepIssues "minReplicas" (hsMinReplicas current) (hsMinReplicas after)

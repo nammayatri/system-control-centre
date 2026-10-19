@@ -2767,6 +2767,10 @@ testReleaseBotDiff = do
   assertEqual "merge: repo change in a region live never touched" (Right "a\nLIVE\nc\nd\nE2\n") (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nb\nc\nd\nE2\n")
   assertEqual "merge: identical edit on both sides" (Right "a\nX\nc\nd\ne\n") (RBD.merge3 mBase "a\nX\nc\nd\ne\n" "a\nX\nc\nd\ne\n")
   assertBool "merge: overlapping differing edits conflict (fail closed)" (either (const True) (const False) (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nREPO\nc\nd\ne\n"))
+  assertEqual "merge: repo inserts next to lines live moved/reformatted merge cleanly"
+    (Right "x\nP\nB\nS\nG\nK'\nz\nC1\nC2\n")
+    (RBD.merge3 "x\nP\nC1\nC2\nS\nK\nz\n" "x\nP\nS\nK'\nz\nC1\nC2\n" "x\nP\nB\nC1\nC2\nS\nG\nK\nz\n")
+  assertBool "merge: a repo insertion INSIDE a live-edited block still conflicts" (either (const True) (const False) (RBD.merge3 "a\nb\nc\nd\n" "a\nX\nY\nd\n" "a\nb\nNEW\nc\nd\n"))
   assertBool "merge: adjacent edits conflict (fail closed)" (either (const True) (const False) (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nb\nREPO\nd\ne\n"))
   assertEqual "merge: repo adds a line far from live edits" (Right "a\nLIVE\nc\nd\ne\nf\n") (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nb\nc\nd\ne\nf\n")
   assertEqual "merge: repo deletes a line far from live edits" (Right "a\nLIVE\nc\nd\n") (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nb\nc\nd\n")
@@ -3462,6 +3466,9 @@ testHpaChange = do
   assertBool "floor violated" (not (null (HC.checkGuardrail g spec (afterOf HT.emptyChange {HT.chMinReplicas = Just 1}))))
   assertBool "step too large (max 20 -> 45 is +125%)" (not (null (HC.checkGuardrail g spec (afterOf HT.emptyChange {HT.chMaxReplicas = Just 45}))))
   assertEqual "step exactly at the limit is allowed (20 -> 40 is +100%)" [] (HC.checkGuardrail g spec (afterOf HT.emptyChange {HT.chMaxReplicas = Just 40}))
+  let tight = HT.defaultGuardrail {HT.grMinReplicasFloor = Just 20, HT.grMaxReplicasCap = Just 1}
+  assertEqual "a floor/cap the HPA already violates does NOT block a change that leaves min/max alone" [] (HC.checkGuardrail tight spec (afterOf HT.emptyChange {HT.chScaleDown = Just (HS.ScalingRules (Just 60) Nothing [])}))
+  assertBool "...but still blocks a change that touches the limited number" (not (null (HC.checkGuardrail tight spec (afterOf HT.emptyChange {HT.chMinReplicas = Just 3}))))
   assertBool "frozen service refuses any change" (not (null (HC.checkGuardrail HT.defaultGuardrail {HT.grFrozen = True, HT.grFrozenReason = Just "sale"} spec (afterOf HT.emptyChange {HT.chMaxReplicas = Just 21}))))
   assertEqual "no guardrail, no issues" [] (HC.checkGuardrail HT.defaultGuardrail spec (afterOf HT.emptyChange {HT.chMaxReplicas = Just 500}))
   -- diff

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { putWatch } from '../api';
+import { useQueryClient } from '@tanstack/react-query';
 import { Eye, EyeOff, Pencil, Play, Plus, Shield, Trash2, Pause, RefreshCw } from 'lucide-react';
 import { Badge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
@@ -41,6 +43,16 @@ export default function HpaServiceDetail() {
   const [guardOpen, setGuardOpen] = useState(false);
   const [applyId, setApplyId] = useState<string | null>(null);
   const watch = useWatch(product, service);
+  const qc = useQueryClient();
+  // Start collecting chart data as soon as someone looks at a service. Quietly skipped if the person
+  // may only view (the server refuses and nothing is shown).
+  const [autoTried, setAutoTried] = useState(false);
+  useEffect(() => {
+    if (!d || d.watched || autoTried) return;
+    setAutoTried(true);
+    putWatch(product, service, true).then(() => qc.invalidateQueries({ queryKey: ['hpa'] })).catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [d?.watched]);
 
   const serving = useMemo(() => (d ? d.resolution.hpas.filter((h) => d.resolution.serving.includes(h.name)) : []), [d]);
   const reference = (serving[0] ?? d?.resolution.hpas[0])?.spec ?? null;
@@ -66,7 +78,7 @@ export default function HpaServiceDetail() {
           <Button variant="secondary" size="icon" onClick={onRefresh} aria-label="Refresh"><RefreshCw className={cn('h-4 w-4', spinning && 'animate-spin')} /></Button>
           <PermissionGate product="autopilot" permission="HPA_SCHEDULE_EDIT" appGroup={product}>
             <Button variant="secondary" size="sm" loading={watch.isPending} onClick={() => watch.mutate(!d.watched)}>
-              {d.watched ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}{d.watched ? 'Stop sampling' : 'Sample this service'}
+              {d.watched ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}{d.watched ? 'Stop recording history' : 'Record history'}
             </Button>
           </PermissionGate>
           <PermissionGate product="autopilot" permission="HPA_GUARDRAIL_EDIT" appGroup={product}>
@@ -109,7 +121,7 @@ export default function HpaServiceDetail() {
       {tab === 'history' && <HistoryTab product={product} service={service} />}
       {tab === 'activity' && <ActivityTab product={product} service={service} applies={d.applies} onOpen={setApplyId} />}
 
-      <ScheduleDialog open={scheduleOpen} onOpenChange={setScheduleOpen} product={product} service={service} reference={reference} existing={editing} />
+      <ScheduleDialog open={scheduleOpen} onOpenChange={setScheduleOpen} product={product} service={service} reference={reference} existing={editing} currentReplicas={serving[0]?.status.currentReplicas} />
       <ManualApplyDialog open={manualOpen} onOpenChange={setManualOpen} product={product} service={service} serving={serving} />
       <GuardrailDialog open={guardOpen} onOpenChange={setGuardOpen} product={product} service={service} value={d.guardrail} />
       <ApplyDialog id={applyId} onClose={() => setApplyId(null)} />
@@ -159,7 +171,7 @@ function PerformanceTab({ product, service, hpaNames, servingNames, applies, wat
 
       {!watched && (series.data?.points.length ?? 0) === 0 && (
         <div className="rounded-lg bg-sky-50 px-3 py-2 text-xs text-sky-800">
-          This service isn't being sampled yet. Use “Sample this service” (or create a schedule) to start collecting replica and CPU history every minute.
+          Collecting data for this service now. The chart fills in as samples arrive (one per minute), so check back in a minute or two.
         </div>
       )}
 

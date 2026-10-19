@@ -116,7 +116,7 @@ export default function ReplicaChart({ points, from, to, applies = [], scaleEven
   if (pts.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-zinc-300 bg-zinc-50 px-4 py-10 text-center text-sm text-zinc-500">
-        No samples in this range yet. Sampling runs every minute for services that are watched or have a schedule.
+        No data in this range yet. Pod counts and CPU are recorded once a minute while someone is watching the service, so the chart fills in shortly.
       </div>
     );
   }

@@ -121,3 +121,36 @@ export function numOrUndef(v: string): number | undefined {
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 }
+
+/** Plain-language name and one-line explanation for a metric key such as `resource/cpu`. */
+export function metricLabel(key: string): { title: string; hint: string } {
+  const [kind, ...rest] = key.split('/');
+  const name = rest[rest.length - 1] ?? key;
+  if (kind === 'resource' && name === 'cpu') return { title: 'CPU target', hint: 'Adds pods when average CPU use goes above this, removes them when it falls well below.' };
+  if (kind === 'resource' && name === 'memory') return { title: 'Memory target', hint: 'Adds pods when average memory use goes above this.' };
+  if (kind === 'containerResource') return { title: `${name} target (container ${rest[0]})`, hint: 'Same idea as CPU/memory, measured for one container only.' };
+  if (kind === 'pods') return { title: `Custom metric: ${name}`, hint: 'Average value of this metric per pod.' };
+  if (kind === 'object') return { title: `Object metric: ${name}`, hint: 'A metric read from a Kubernetes object (for example an Ingress).' };
+  if (kind === 'external') return { title: `External metric: ${name}`, hint: 'A metric from outside the cluster (for example a queue length).' };
+  return { title: key, hint: '' };
+}
+
+/** "Min 2 → 10" style lines describing what a change does to a reference spec. */
+export function summaryLines(
+  change: HpaChange,
+  ref: { minReplicas: number; maxReplicas: number; metrics: any[] } | null,
+  keyOf: (m: any) => string | null,
+): string[] {
+  const out: string[] = [];
+  if (change.minReplicas != null) out.push(`Minimum pods: ${ref ? ref.minReplicas : '?'} → ${change.minReplicas}`);
+  if (change.maxReplicas != null) out.push(`Maximum pods: ${ref ? ref.maxReplicas : '?'} → ${change.maxReplicas}`);
+  for (const m of change.metricTargets ?? []) {
+    const cur = ref?.metrics.find((x) => keyOf(x) === m.key);
+    const t = cur ? (cur[{ Resource: 'resource', ContainerResource: 'containerResource', Pods: 'pods', Object: 'object', External: 'external' }[cur.type as string] ?? '']?.target as MetricTarget | undefined) : undefined;
+    out.push(`${metricLabel(m.key).title}: ${t ? describeTarget(t) : '?'} → ${describeTarget(m.target)}`);
+  }
+  const rules = (r: HpaChange['scaleUp']) => (r && (r.stabilizationWindowSeconds != null || r.selectPolicy || (r.policies ?? []).length) ? 'custom rules' : 'reset to defaults (nothing set)');
+  if (change.scaleUp) out.push(`How fast it adds pods: ${rules(change.scaleUp)}`);
+  if (change.scaleDown) out.push(`How fast it removes pods: ${rules(change.scaleDown)}`);
+  return out;
+}

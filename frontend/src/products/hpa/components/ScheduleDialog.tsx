@@ -3,11 +3,13 @@ import { Button } from '../../../shared/ui/button';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../../shared/ui/dialog';
 import { cn } from '../../../lib/utils';
 import { useSaveSchedule } from '../hooks';
-import { WEEKDAYS, fromLocalInput, toLocalInput } from '../format';
+import { WEEKDAYS, describeKind, fromLocalInput, toLocalInput } from '../format';
 import { DEFAULT_HEALTH_POLICY, type HealthPolicy, type HpaChange, type HpaSpec, type Schedule, type ScheduleKind } from '../types';
 import ChangeForm from './ChangeForm';
 import HealthPolicyFields from './HealthPolicyFields';
+import ChangeSummary from './ChangeSummary';
 import PreviewPanel, { type PreviewState } from './PreviewPanel';
+import Step from './Step';
 
 const input = 'h-9 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-400';
 
@@ -19,6 +21,8 @@ interface Props {
   /** A serving HPA's spec: supplies "now" hints and the metrics that can be overridden. */
   reference: HpaSpec | null;
   existing?: Schedule;
+  /** Pods running now, for the quick-fill buttons. */
+  currentReplicas?: number;
 }
 
 type Mode = 'WEEKLY' | 'ONCE';
@@ -30,7 +34,7 @@ const OFFSETS: { label: string; minutes: number }[] = [
   { label: 'PST (UTC-08:00)', minutes: -480 },
 ];
 
-export default function ScheduleDialog({ open, onOpenChange, product, service, reference, existing }: Props) {
+export default function ScheduleDialog({ open, onOpenChange, product, service, reference, existing, currentReplicas }: Props) {
   const [name, setName] = useState('');
   const [mode, setMode] = useState<Mode>('WEEKLY');
   const [days, setDays] = useState<number[]>([1, 2, 3, 4, 5]);
@@ -85,7 +89,16 @@ export default function ScheduleDialog({ open, onOpenChange, product, service, r
   }, [mode, days, startTime, durationMinutes, offset, onceStart, onceEnd, permanent]);
 
   const save = useSaveSchedule(() => onOpenChange(false));
-  const canSave = name.trim().length > 0 && !!kind && problems.length === 0 && preview.ready && preview.blocking.length === 0 && (!!existing || !preview.allNoop) && !save.isPending;
+  const noChange = !change.minReplicas && !change.maxReplicas && !(change.metricTargets?.length) && !change.scaleUp && !change.scaleDown;
+  const whyNot =
+    name.trim().length === 0 ? 'Give the schedule a name.'
+    : problems.length > 0 ? problems[0]
+    : noChange ? 'Choose what to change in step 3.'
+    : !preview.ready ? 'Checking against the live autoscaler…'
+    : preview.blocking.length > 0 ? preview.blocking[0]
+    : !existing && preview.allNoop ? 'These are already the current values, so nothing would change.'
+    : '';
+  const canSave = whyNot === '' && !!kind && !save.isPending;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -93,91 +106,94 @@ export default function ScheduleDialog({ open, onOpenChange, product, service, r
         <DialogHeader>
           <DialogTitle>{existing ? 'Edit schedule' : 'New schedule'} · {service}</DialogTitle>
           <DialogDescription>
-            Changes the serving HPA for a time window and puts the original values back when it ends. If a release moves traffic to a new HPA meanwhile, the change follows it.
+            Use this to change the autoscaler's limits for a time window, for example more pods during a sale. When the window ends, the original values come back on their own.
           </DialogDescription>
         </DialogHeader>
-        <DialogBody className="space-y-5">
-          <label className="block text-xs font-semibold text-zinc-700">Name
-            <input className={cn(input, 'mt-1 font-normal')} value={name} maxLength={100} placeholder="e.g. Weekday morning peak" onChange={(e) => setName(e.target.value)} />
-          </label>
+        <DialogBody className="space-y-7">
+          <Step n={1} title="Name it" help="Something your team will recognise.">
+            <input className={cn(input, 'font-normal')} value={name} maxLength={100} placeholder="e.g. Weekday morning peak" onChange={(e) => setName(e.target.value)} />
+          </Step>
 
-          <div>
-            <div className="mb-1.5 text-xs font-semibold text-zinc-700">When</div>
+          <Step n={2} title="When should it apply?" help="Pick a repeating weekly slot, or a single window.">
             <div className="mb-3 inline-flex rounded-lg border border-zinc-300 p-0.5 text-xs">
               {(['WEEKLY', 'ONCE'] as Mode[]).map((m) => (
                 <button key={m} type="button" onClick={() => setMode(m)} className={cn('cursor-pointer rounded-md px-3 py-1.5 font-medium', mode === m ? 'bg-zinc-900 text-white' : 'text-zinc-600 hover:bg-zinc-100')}>
-                  {m === 'WEEKLY' ? 'Repeats weekly' : 'One-off window'}
+                  {m === 'WEEKLY' ? 'Repeats every week' : 'Just once'}
                 </button>
               ))}
             </div>
 
             {mode === 'WEEKLY' ? (
               <div className="space-y-3">
-                <div className="flex flex-wrap gap-1.5">
-                  {WEEKDAYS.map((d, i) => {
-                    const n = i + 1; const on = days.includes(n);
-                    return (
-                      <button key={d} type="button" aria-pressed={on} onClick={() => setDays(on ? days.filter((x) => x !== n) : [...days, n])}
-                        className={cn('h-8 w-12 cursor-pointer rounded-lg border text-xs font-medium', on ? 'border-sky-600 bg-sky-50 text-sky-800' : 'border-zinc-300 text-zinc-600 hover:bg-zinc-50')}>{d}</button>
-                    );
-                  })}
+                <div>
+                  <div className="mb-1 text-xs font-medium text-zinc-700">On these days</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {WEEKDAYS.map((d, i) => {
+                      const n = i + 1; const on = days.includes(n);
+                      return (
+                        <button key={d} type="button" aria-pressed={on} onClick={() => setDays(on ? days.filter((x) => x !== n) : [...days, n])}
+                          className={cn('h-8 w-12 cursor-pointer rounded-lg border text-xs font-medium', on ? 'border-sky-600 bg-sky-50 text-sky-800' : 'border-zinc-300 text-zinc-600 hover:bg-zinc-50')}>{d}</button>
+                      );
+                    })}
+                  </div>
                 </div>
                 <div className="grid grid-cols-3 gap-3">
-                  <label className="text-xs text-zinc-600">Starts at
-                    <input type="time" className={cn(input, 'mt-1')} value={startTime} onChange={(e) => setStartTime(e.target.value)} />
+                  <label className="text-xs font-medium text-zinc-700">Start at
+                    <input type="time" className={cn(input, 'mt-1 font-normal')} value={startTime} onChange={(e) => setStartTime(e.target.value)} />
                   </label>
-                  <label className="text-xs text-zinc-600">Lasts
-                    <div className="mt-1 flex items-center gap-1">
+                  <label className="text-xs font-medium text-zinc-700">Keep it for
+                    <div className="mt-1 flex items-center gap-1 font-normal">
                       <input type="number" min={0} max={24} className={input} value={durHours} onChange={(e) => setDurHours(Number(e.target.value))} /><span className="text-zinc-500">h</span>
-                      <input type="number" min={0} max={59} className={input} value={durMins} onChange={(e) => setDurMins(Number(e.target.value))} /><span className="text-zinc-500">m</span>
+                      <input type="number" min={0} max={59} className={input} value={durMins} onChange={(e) => setDurMins(Number(e.target.value))} /><span className="text-zinc-500">min</span>
                     </div>
                   </label>
-                  <label className="text-xs text-zinc-600">Time zone
-                    <select className={cn(input, 'mt-1')} value={offset} onChange={(e) => setOffset(Number(e.target.value))}>
+                  <label className="text-xs font-medium text-zinc-700">Time zone
+                    <select className={cn(input, 'mt-1 font-normal')} value={offset} onChange={(e) => setOffset(Number(e.target.value))}>
                       {OFFSETS.map((o) => <option key={o.minutes} value={o.minutes}>{o.label}</option>)}
                       {!OFFSETS.some((o) => o.minutes === offset) && <option value={offset}>UTC offset {offset} min</option>}
                     </select>
                   </label>
                 </div>
-                <p className="text-[11px] text-zinc-500">Fixed offset, no daylight-saving adjustment. A window may run past midnight.</p>
+                <p className="text-[11px] text-zinc-500">The start time is in the time zone you pick. It can run past midnight. Daylight-saving changes are not applied.</p>
               </div>
             ) : (
               <div className="space-y-3">
                 <div className="grid grid-cols-2 gap-3">
-                  <label className="text-xs text-zinc-600">Starts (your local time)
-                    <input type="datetime-local" className={cn(input, 'mt-1')} value={onceStart} onChange={(e) => setOnceStart(e.target.value)} />
+                  <label className="text-xs font-medium text-zinc-700">Starts (your computer's time)
+                    <input type="datetime-local" className={cn(input, 'mt-1 font-normal')} value={onceStart} onChange={(e) => setOnceStart(e.target.value)} />
                   </label>
-                  <label className={cn('text-xs text-zinc-600', permanent && 'opacity-40')}>Ends
-                    <input type="datetime-local" disabled={permanent} className={cn(input, 'mt-1')} value={onceEnd} onChange={(e) => setOnceEnd(e.target.value)} />
+                  <label className={cn('text-xs font-medium text-zinc-700', permanent && 'opacity-40')}>Ends
+                    <input type="datetime-local" disabled={permanent} className={cn(input, 'mt-1 font-normal')} value={onceEnd} onChange={(e) => setOnceEnd(e.target.value)} />
                   </label>
                 </div>
                 <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-700">
-                  <input type="checkbox" checked={permanent} onChange={(e) => setPermanent(e.target.checked)} /> Hold until I restore it by hand
+                  <input type="checkbox" checked={permanent} onChange={(e) => setPermanent(e.target.checked)} /> Don't end it automatically (I'll restore it by hand)
                 </label>
               </div>
             )}
             {problems.length > 0 && <ul className="mt-2 list-disc pl-5 text-xs text-red-700">{problems.map((p) => <li key={p}>{p}</li>)}</ul>}
-          </div>
+          </Step>
 
-          <div>
-            <div className="mb-2 text-xs font-semibold text-zinc-700">What changes</div>
-            <ChangeForm reference={reference} value={change} onChange={setChange} />
-          </div>
+          <Step n={3} title="What should change?" help="Only fill in what you want to change. Everything else is left alone.">
+            <ChangeForm reference={reference} currentReplicas={currentReplicas} value={change} onChange={setChange} />
+          </Step>
 
-          <div>
-            <button type="button" className="cursor-pointer text-xs font-semibold text-zinc-700 hover:underline" onClick={() => setShowPolicy((s) => !s)}>
-              {showPolicy ? '▾' : '▸'} Health check &amp; auto-rollback
+          <Step n={4} title="Safety net" help="Checks the service after the change and undoes it if something goes wrong.">
+            <button type="button" className="cursor-pointer text-xs font-medium text-sky-700 hover:underline" onClick={() => setShowPolicy((x) => !x)}>
+              {showPolicy ? 'Hide settings' : policy.autoRollback ? `On: watches for ${policy.observeSeconds}s and undoes it if over ${policy.maxUnavailablePct}% of pods are not ready. Change…` : 'Off. Change…'}
             </button>
-            {showPolicy && <div className="mt-2"><HealthPolicyFields value={policy} onChange={setPolicy} /></div>}
-          </div>
+            {showPolicy && <div className="mt-3"><HealthPolicyFields value={policy} onChange={setPolicy} /></div>}
+          </Step>
 
-          <div>
-            <div className="mb-2 text-xs font-semibold text-zinc-700">Preview</div>
-            <PreviewPanel product={product} service={service} change={change} kind={kind} kindProblems={problems} onState={setPreview} />
-            {preview.allNoop && !existing && <div className="mt-2 text-xs text-amber-800">Every serving HPA already has these values, so this schedule would do nothing.</div>}
-          </div>
+          <Step n={5} title="Review" help="This is checked against the live autoscaler as you type.">
+            <div className="space-y-3">
+              <ChangeSummary change={change} reference={reference} when={kind ? describeKind(kind) : undefined} />
+              <PreviewPanel product={product} service={service} change={change} kind={kind} kindProblems={problems} onState={setPreview} />
+            </div>
+          </Step>
         </DialogBody>
         <DialogFooter>
+          {whyNot && <span className="mr-auto self-center text-xs text-zinc-500">{whyNot}</span>}
           <Button variant="secondary" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button disabled={!canSave} loading={save.isPending}
             onClick={() => kind && save.mutate({ id: existing?.id, body: { product, service, name: name.trim(), kind, change, healthPolicy: policy } })}>
