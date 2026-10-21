@@ -102,6 +102,7 @@ import Products.Autopilot.Mobile.Types (mbContext, mbWfStatus)
 import Products.Autopilot.Notifications
 import Products.Autopilot.ReleaseBot.RowConfig (checkBotField)
 import Products.Autopilot.Queries.ProductService
+import Products.Autopilot.Queries.ReleaseLock (ReleaseLock (..), findBlockingLock)
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.Queries.VsEditTracker ()
 import Products.Autopilot.Runner (dispatchWorkflow)
@@ -458,6 +459,24 @@ createReleaseHBody mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq {..} = do
 -- without forcing the entire body into nested case-blocks.
 createReleaseHBodyContinue :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
 createReleaseHBodyContinue mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq {..} = do
+  -- Operator lock on the app group or this service (Deployment Config page).
+  -- Cross-cloud sync creates are exempt: the release already exists at its
+  -- origin, and refusing the mirror would leave the two clouds diverged.
+  mLock <- if fromMaybe False isSystemTriggered then pure Nothing else findBlockingLock appGroup service
+  case mLock of
+    Just l ->
+      pure $
+        APIResponse "ERROR" $
+          "Releases are locked for "
+            <> (if T.null l.service then "app group " <> l.appGroup else "service " <> l.appGroup <> "/" <> l.service)
+            <> " by "
+            <> l.lockedBy
+            <> (if T.null l.reason then "" else ": " <> l.reason)
+            <> ". Unlock it from the Deployment Config page to release."
+    Nothing -> createReleaseHBodyUnlocked mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq {..}
+
+createReleaseHBodyUnlocked :: Maybe Text -> Maybe Text -> K8sCreateReleaseReq -> Flow APIResponse
+createReleaseHBodyUnlocked mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq {..} = do
   -- Same-service concurrency guard. Different services in the same app
   -- group can run in parallel (serialised at kubectl-replace via VS lock
   -- retry — see runVsRolloutWithLock). Same (appGroup, service) with any

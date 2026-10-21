@@ -22,6 +22,7 @@ module Products.Autopilot.Notifications
     notifyReleaseRestarted,
     notifyReleaseFastForwarded,
     notifyImmediateReverted,
+    notifyReleaseLockChanged,
     notifyPodsScaledDown,
     notifyVsEditCreated,
     notifyVsEditLocked,
@@ -606,6 +607,25 @@ notifyReleaseAborted tracker = do
       _ <- sendSlackRich channel "ABORTED" colorAborted blocks threadTs
       pure ()
   dispatchTerminalWebhooks tracker
+
+-- | Release lock set or cleared from the Deployment Config page. Posted to the
+-- app group's channel as a new message (no release thread exists for it).
+-- @service@ is empty for a whole-group lock.
+notifyReleaseLockChanged :: Bool -> Text -> Text -> Text -> Text -> Flow ()
+notifyReleaseLockChanged locked grp svc who why =
+  whenSlackEnabled $
+    withChannel grp svc $ \channel -> do
+      let scope = if T.null svc then "App group `" <> grp <> "`" else "Service `" <> grp <> "/" <> svc <> "`"
+          title = if locked then "RELEASES LOCKED" else "RELEASES UNLOCKED"
+          detail
+            | locked = "No new releases until unlocked. In-flight releases, revert and rollback are unaffected."
+            | otherwise = "New releases are allowed again."
+          blocks =
+            [ sectionBlock (scope <> (if locked then " locked by " else " unlocked by ") <> who),
+              contextBlock ([detail] <> [("Reason: " <> why) | locked, not (T.null why)])
+            ]
+      _ <- sendSlackRich channel title (if locked then colorAborted else colorCompleted) blocks Nothing
+      pure ()
 
 notifyReleasePaused :: ReleaseTracker -> Flow ()
 notifyReleasePaused tracker = whenSlackEnabled $

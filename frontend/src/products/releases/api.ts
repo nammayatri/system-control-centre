@@ -1333,6 +1333,32 @@ export async function testWebhook(id: number): Promise<WebhookTestResult> {
     return data;
 }
 
+// ── Release locks ─────────────────────────────────────────────────
+
+/** `service` is '' for a lock on the whole app group. */
+export interface ReleaseLock {
+    appGroup: string;
+    service: string;
+    reason: string;
+    lockedBy: string;
+    lockedAt: string;
+}
+
+export async function fetchReleaseLocks(): Promise<ReleaseLock[]> {
+    const { data } = await apiClient.get('/release-locks');
+    return Array.isArray(data) ? data : [];
+}
+
+export async function lockReleases(appGroup: string, service: string | null, reason: string): Promise<any> {
+    const { data } = await apiClient.post('/release-locks', { appGroup, service: service || null, reason });
+    return data;
+}
+
+export async function unlockReleases(appGroup: string, service: string | null): Promise<any> {
+    const { data } = await apiClient.post('/release-locks/clear', { appGroup, service: service || null });
+    return data;
+}
+
 // ── VS Edit Tracker ───────────────────────────────────────────────
 
 export interface VSEditTracker {

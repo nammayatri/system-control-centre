@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   fetchProductConfigs, createProductConfig, updateProductConfig, deleteProductConfig,
   fetchReleaseConfigs, createReleaseConfig, updateReleaseConfig, deleteReleaseConfig,
+  fetchReleaseLocks, lockReleases, unlockReleases,
 } from '../../releases/api';
 import type { ProductConfig, ReleaseConfig } from '../../releases/api';
 import { parseStrategyStages } from '../../releases/utils';
@@ -18,7 +19,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
   DialogDescription, DialogBody, DialogFooter,
 } from '../../../shared/ui/dialog';
-import { Search, Plus, RefreshCw, Pencil, Trash2, ChevronRight, ChevronDown, Webhook } from 'lucide-react';
+import { Search, Plus, RefreshCw, Pencil, Trash2, ChevronRight, ChevronDown, Webhook, Lock, Unlock } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { toast } from 'sonner';
 import WebhooksModal from './WebhooksModal';
@@ -84,6 +85,9 @@ const DeploymentConfig: React.FC = () => {
   const [serviceForm, setServiceForm] = useState<Partial<ReleaseConfig>>(EMPTY_SERVICE_FORM);
 
   const [webhooksFor, setWebhooksFor] = useState<string | null>(null);
+  // Lock dialog: which scope is being locked ('' service = whole group) and why.
+  const [lockTarget, setLockTarget] = useState<{ appGroup: string; service: string } | null>(null);
+  const [lockReason, setLockReason] = useState('');
 
   const { data: groupConfigs = [], isLoading: groupsLoading, isFetching: groupsFetching, refetch: refetchGroups } = useQuery({
     queryKey: ['product-configs'],
@@ -96,6 +100,73 @@ const DeploymentConfig: React.FC = () => {
     queryFn: () => fetchReleaseConfigs(),
     staleTime: 60000,
   });
+
+  const { data: releaseLocks = [] } = useQuery({
+    queryKey: ['release-locks'],
+    queryFn: fetchReleaseLocks,
+    staleTime: 30000,
+  });
+  const lockFor = (appGroup: string, service = '') =>
+    releaseLocks.find(l => l.appGroup === appGroup && l.service === service);
+
+  const lockMut = useMutation({
+    mutationFn: ({ appGroup, service, reason }: { appGroup: string; service: string; reason: string }) =>
+      lockReleases(appGroup, service, reason),
+    onSuccess: () => { toast.success('Releases locked'); queryClient.invalidateQueries({ queryKey: ['release-locks'] }); setLockTarget(null); },
+    onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to lock releases'),
+  });
+
+  const unlockMut = useMutation({
+    mutationFn: ({ appGroup, service }: { appGroup: string; service: string }) => unlockReleases(appGroup, service),
+    onSuccess: () => { toast.success('Releases unlocked'); queryClient.invalidateQueries({ queryKey: ['release-locks'] }); },
+    onError: (err: any) => toast.error(err?.response?.data?.message || 'Failed to unlock releases'),
+  });
+
+  const handleToggleLock = async (appGroup: string, service = '') => {
+    if (lockFor(appGroup, service)) {
+      const scope = service ? `${appGroup}/${service}` : appGroup;
+      const ok = await confirmAction({
+        title: 'Unlock Releases',
+        description: `Allow new releases for "${scope}" again?`,
+        confirmLabel: 'Unlock',
+      });
+      if (ok) unlockMut.mutate({ appGroup, service });
+    } else {
+      setLockReason('');
+      setLockTarget({ appGroup, service });
+    }
+  };
+
+  const lockButton = (appGroup: string, service: string, size: 'sm' | 'lg') => {
+    const locked = !!lockFor(appGroup, service);
+    const Icon = locked ? Lock : Unlock;
+    return (
+      <PermissionGate product="autopilot" permission="PRODUCT_CONFIG_EDIT" appGroup={appGroup}>
+        <button
+          onClick={() => handleToggleLock(appGroup, service)}
+          title={locked ? 'Locked — click to unlock releases' : 'Lock releases'}
+          aria-label={locked ? 'Unlock releases' : 'Lock releases'}
+          className={cn(
+            size === 'lg' ? 'w-9 h-9 flex items-center justify-center rounded-lg' : 'p-1.5 rounded-lg',
+            'cursor-pointer transition-colors duration-150',
+            locked ? 'text-red-500 hover:bg-red-50' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100'
+          )}
+        >
+          <Icon className={size === 'lg' ? 'w-4 h-4' : 'w-3.5 h-3.5'} />
+        </button>
+      </PermissionGate>
+    );
+  };
+
+  const lockBadge = (appGroup: string, service = '') => {
+    const l = lockFor(appGroup, service);
+    if (!l) return null;
+    return (
+      <span title={`${l.reason || 'No reason given'} — locked by ${l.lockedBy}`}>
+        <Badge variant="danger" size="sm">Releases locked</Badge>
+      </span>
+    );
+  };
 
   const isLoading = groupsLoading || servicesLoading;
   const isFetching = groupsFetching || servicesFetching;
@@ -319,6 +390,7 @@ const DeploymentConfig: React.FC = () => {
                         </td>
                         <td className="py-3 px-4">
                           <span className="font-semibold text-zinc-900">{group.appGroup}</span>
+                          <span className="ml-2">{lockBadge(group.appGroup)}</span>
                           <span className="ml-2 text-xs text-zinc-400">
                             {services.length} service{services.length !== 1 ? 's' : ''}
                           </span>
@@ -357,6 +429,7 @@ const DeploymentConfig: React.FC = () => {
                         </td>
                         <td className="py-3 px-4 text-center">
                           <div className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
+                            {lockButton(group.appGroup, '', 'sm')}
                             <button
                               onClick={() => setWebhooksFor(group.appGroup)}
                               disabled={!canManageWebhooks(group.appGroup)}
@@ -416,6 +489,7 @@ const DeploymentConfig: React.FC = () => {
                             <div className="flex items-center">
                               <div className="border-l-2 border-zinc-200 h-5 mr-3"></div>
                               <span className="text-zinc-700">{svc.service}</span>
+                              <span className="ml-2">{lockBadge(group.appGroup, svc.service)}</span>
                             </div>
                           </td>
                           <td className="py-2.5 px-4 font-mono text-xs text-zinc-600">{svc.host || '-'}</td>
@@ -435,6 +509,7 @@ const DeploymentConfig: React.FC = () => {
                           <td className="py-2.5 px-4" colSpan={6}></td>
                           <td className="py-2.5 px-4 text-center">
                             <div className="flex items-center justify-center gap-1">
+                              {lockButton(group.appGroup, svc.service, 'sm')}
                               <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={group.appGroup}>
                                 <button
                                   onClick={() => openEditService(svc)}
@@ -502,6 +577,7 @@ const DeploymentConfig: React.FC = () => {
                         </span>
                       </div>
                       <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
+                        {lockButton(group.appGroup, '', 'lg')}
                         <button
                           onClick={() => setWebhooksFor(group.appGroup)}
                           disabled={!canManageWebhooks(group.appGroup)}
@@ -547,6 +623,7 @@ const DeploymentConfig: React.FC = () => {
                       {group.need_infra_approval ? <Badge variant="warning" size="sm">Infra Approval</Badge> : null}
                       {group.ai_changelog_enabled ? <Badge variant="blue" size="sm">AI Changelog</Badge> : null}
                       {group.vs_locked_by ? <Badge variant="danger" size="sm">Locked: {group.vs_locked_by}</Badge> : null}
+                      {lockBadge(group.appGroup)}
                     </div>
                   </div>
 
@@ -557,6 +634,7 @@ const DeploymentConfig: React.FC = () => {
                           <div className="flex items-start justify-between gap-2 mb-1">
                             <div className="text-sm font-medium text-zinc-800 break-all min-w-0 flex-1">{svc.service}</div>
                             <div className="flex items-center gap-1 shrink-0">
+                              {lockButton(group.appGroup, svc.service, 'lg')}
                               <PermissionGate product="autopilot" permission="RELEASE_CREATE" appGroup={group.appGroup}>
                                 <button
                                   onClick={() => openEditService(svc)}
@@ -578,6 +656,7 @@ const DeploymentConfig: React.FC = () => {
                           <div className="text-[11px] text-zinc-500 font-mono break-all">{svc.host || '-'}</div>
                           <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                             {svc.serviceType && <Badge variant={typeBadgeVariant(svc.serviceType)} size="sm">{svc.serviceType}</Badge>}
+                            {lockBadge(group.appGroup, svc.service)}
                           </div>
                         </div>
                       ))}
@@ -997,6 +1076,39 @@ const DeploymentConfig: React.FC = () => {
             <Button variant="secondary" size="md" onClick={() => setServiceModalOpen(false)}>Cancel</Button>
             <Button size="md" onClick={handleServiceSubmit} loading={createServiceMut.isPending || updateServiceMut.isPending}>
               {editingService ? 'Update' : 'Create'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!lockTarget} onOpenChange={open => { if (!open) setLockTarget(null); }}>
+        <DialogContent size="md">
+          <DialogHeader>
+            <DialogTitle>Lock Releases</DialogTitle>
+            <DialogDescription>
+              {lockTarget && (lockTarget.service
+                ? `No new releases can be created for ${lockTarget.appGroup}/${lockTarget.service} until it is unlocked.`
+                : `No new releases can be created for any service in ${lockTarget.appGroup} until it is unlocked.`)}
+              {' '}Releases already in progress keep running, and revert and rollback stay available.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+            <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Reason</label>
+            <input
+              value={lockReason}
+              onChange={e => setLockReason(e.target.value)}
+              placeholder="e.g. Peak traffic freeze"
+              className={inputClass}
+            />
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" size="md" onClick={() => setLockTarget(null)}>Cancel</Button>
+            <Button
+              size="md"
+              loading={lockMut.isPending}
+              onClick={() => lockTarget && lockMut.mutate({ ...lockTarget, reason: lockReason })}
+            >
+              Lock releases
             </Button>
           </DialogFooter>
         </DialogContent>

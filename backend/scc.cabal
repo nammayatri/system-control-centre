@@ -149,6 +149,7 @@ library
       Products.Autopilot.Queries.ProductService
       Products.Autopilot.Queries.ReleaseTracker
       Products.Autopilot.Queries.QaAutomation
+      Products.Autopilot.Queries.ReleaseLock
       Products.Autopilot.Queries.ReleaseWebhook
       Products.Autopilot.Queries.VsEditTracker
       Products.AirborneOta.Chime
@@ -165,6 +166,7 @@ library
       Products.Autopilot.Actions.Release
       Products.Autopilot.Actions.QaAutomation
       Products.Autopilot.Actions.VSEdit
+      Products.Autopilot.Actions.ReleaseLock
       Products.Autopilot.Actions.Webhook
       Products.Autopilot.Handlers.Ai
       Products.Autopilot.Handlers.ConfigReview
