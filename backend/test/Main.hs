@@ -3633,6 +3633,7 @@ testHpaMetrics :: IO ()
 testHpaMetrics = do
   assertEqual "HPA gauge query" "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"atlas\",horizontalpodautoscaler=~\"a-hpa|b-hpa\"}" (HM.hpaQuery "horizontalpodautoscaler" "status_current_replicas" "atlas" ["a-hpa", "b-hpa"])
   assertBool "dots in names are matched literally ([.], no backslashes)" (T.isInfixOf "b[.]hpa" (HM.hpaQuery "horizontalpodautoscaler" "spec_max_replicas" "atlas" ["a-hpa", "b.hpa"]))
+  assertEqual "deployment replica query (fallback when HPA series are absent)" "kube_deployment_status_replicas_ready{namespace=\"atlas\",deployment=\"bpp-master-feea99\"}" (HM.deployQuery "status_replicas_ready" "atlas" "bpp-master-feea99")
   assertBool "cpu query targets only that deployment's pods and divides by requests" (let q = HM.cpuQuery "atlas" "app-v1" in T.isInfixOf "pod=~\"app-v1-[a-z0-9]+-[a-z0-9]+\"" q && T.isInfixOf "kube_pod_container_resource_requests" q && T.isInfixOf "resource=\"cpu\"" q)
   let matrix = either error id (A.eitherDecode "{\"status\":\"success\",\"data\":{\"resultType\":\"matrix\",\"result\":[{\"metric\":{\"horizontalpodautoscaler\":\"a-hpa\"},\"values\":[[1700000000,\"3\"],[1700000060,\"4\"],[1700000120,\"NaN\"]]}]}}") :: A.Value
   assertEqual "matrix parsed; NaN samples dropped" (Right [(Map.fromList [("horizontalpodautoscaler", "a-hpa")], [(1700000000, 3), (1700000060, 4)])]) (HM.parsePromMatrix matrix)

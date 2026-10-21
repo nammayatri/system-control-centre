@@ -11,6 +11,10 @@ Metric names follow the standard exporters:
 * kube-state-metrics: @kube_horizontalpodautoscaler_status_current_replicas@,
   @..._status_desired_replicas@, @..._spec_min_replicas@, @..._spec_max_replicas@
   (label @horizontalpodautoscaler@; older versions use @hpa@, tried as a fallback);
+* where kube-state-metrics does not export the HPA series at all (some installs allow-list it
+  away), the pod count falls back to the Deployment the HPA scales:
+  @kube_deployment_status_replicas_ready@ (running) and @kube_deployment_spec_replicas@
+  (wanted, which is what the HPA writes). No min/max lines in that case;
 * cAdvisor + kube-state-metrics for CPU: @container_cpu_usage_seconds_total@ over
   @kube_pod_container_resource_requests{resource="cpu"}@.
 -}
@@ -20,6 +24,7 @@ module Products.Autopilot.Hpa.Metrics (
     parsePromMatrix,
     mergeSeries,
     hpaQuery,
+    deployQuery,
     cpuQuery,
 )
 where
@@ -76,6 +81,11 @@ rx = T.replace "." "[.]"
 hpaQuery :: Text -> Text -> Text -> [Text] -> Text
 hpaQuery labelName metric ns hpas =
     "kube_horizontalpodautoscaler_" <> metric <> "{namespace=\"" <> ns <> "\"," <> labelName <> "=~\"" <> T.intercalate "|" (map rx hpas) <> "\"}"
+
+-- | Deployment replica gauge (kube-state-metrics) for one Deployment in a namespace.
+deployQuery :: Text -> Text -> Text -> Text
+deployQuery metric ns dep =
+    "kube_deployment_" <> metric <> "{namespace=\"" <> ns <> "\",deployment=\"" <> dep <> "\"}"
 
 -- | CPU use as a percentage of the pods' requests for one Deployment's pods.
 cpuQuery :: Text -> Text -> Text
@@ -151,25 +161,37 @@ fetchSeries base ns hpas from to step
     | not (all safeK8sName (ns : concatMap (\(h, d) -> [h, d]) hpas)) = pure (Left "refusing to query metrics for an unusual resource name")
     | null hpas = pure (Right [])
     | otherwise = do
-        r1 <- go "horizontalpodautoscaler"
-        -- kube-state-metrics v1 labelled the HPA "hpa"
-        r <- case r1 of
-            Right [] -> go "hpa"
+        -- Pod counts: HPA series first (label "horizontalpodautoscaler", then the v1 name "hpa"),
+        -- then the Deployment's own replica gauges when the HPA series are not exported at all.
+        r1 <- hpaGauges "horizontalpodautoscaler"
+        r2 <- case r1 of
+            Right [] -> hpaGauges "hpa"
             other -> pure other
-        pure (fmap mergeSeries r)
+        counts <- case r2 of
+            Right [] -> deployGauges
+            other -> pure other
+        -- CPU is best-effort: a missing cAdvisor/requests metric must not hide the replica history.
+        cpu <- mapConcurrently (\(h, d) -> (,) h <$> queryRange base (cpuQuery ns d) from to step) hpas
+        pure (fmap (\gs -> mergeSeries (gs <> [("cpu", h, pts) | (h, Right ss) <- cpu, (_, pts) <- take 1 ss])) counts)
   where
     names = map fst hpas
-    go label = do
+
+    hpaGauges label = do
         let gauges =
                 [ (f, hpaQuery label m ns names)
                 | (f, m) <- [("current", "status_current_replicas"), ("desired", "status_desired_replicas"), ("min", "spec_min_replicas"), ("max", "spec_max_replicas")]
                 ]
         results <- mapConcurrently (\(f, q) -> (,) f <$> queryRange base q from to step) gauges
-        cpu <- mapConcurrently (\(h, d) -> (,) h <$> queryRange base (cpuQuery ns d) from to step) hpas
-        pure $ do
-            gs <- fmap concat (traverse (gaugeSeries label) results)
-            -- CPU is best-effort: a missing cAdvisor/requests metric must not hide the replica history.
-            pure (gs <> [("cpu", h, pts) | (h, Right ss) <- cpu, (_, pts) <- take 1 ss])
+        pure (fmap concat (traverse (gaugeSeries label) results))
+
+    deployGauges = do
+        let gauges =
+                [ (f, h, deployQuery m ns d)
+                | (h, d) <- hpas
+                , (f, m) <- [("current", "status_replicas_ready"), ("desired", "spec_replicas")]
+                ]
+        results <- mapConcurrently (\(f, h, q) -> (,,) f h <$> queryRange base q from to step) gauges
+        pure (fmap concat (traverse (\(f, h, r) -> fmap (\ss -> [(f, h, pts) | (_, pts) <- take 1 ss]) r) results))
 
     gaugeSeries :: Text -> (Text, Either Text [(Map.Map Text Text, [(Double, Double)])]) -> Either Text [(Text, Text, [(Double, Double)])]
     gaugeSeries _ (_, Left e) = Left e

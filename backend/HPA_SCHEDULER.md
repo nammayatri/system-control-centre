@@ -45,7 +45,10 @@ the reconciler/observer elect a leader through `hpa_loop_lease`; workers claim r
 * **History chart** (`Hpa/Metrics.hs`): queried on demand from `PROMETHEUS_URL` (`query_range`), never stored.
   Uses kube-state-metrics `kube_horizontalpodautoscaler_{status_current,status_desired,spec_min,spec_max}_replicas`
   (label `horizontalpodautoscaler`, falling back to `hpa`) and cAdvisor CPU over
-  `kube_pod_container_resource_requests` for the HPA's Deployment pods. **Check these metric names exist in your Prometheus.**
+  `kube_pod_container_resource_requests` for the HPA's Deployment pods. If kube-state-metrics does not export the HPA
+  series at all (as in the ny-prod VictoriaMetrics), the pod count falls back to the Deployment's own
+  `kube_deployment_status_replicas_ready` (running) and `kube_deployment_spec_replicas` (wanted), with no min/max lines.
+  **Check these metric names exist in your Prometheus.**
 * **Live numbers** (pods now / wanted / min / max / CPU / memory) come from the HPA status on every page refresh.
 * **Scale events** are read live from Kubernetes events (the cluster keeps about an hour).
 * The only things written to the database are: schedules, the apply ledger + its timeline, guardrails, and spec snapshots
