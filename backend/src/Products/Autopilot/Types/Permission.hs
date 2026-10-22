@@ -29,6 +29,7 @@ data AutopilotPermission
   | AP_RELEASE_ABORT
   | AP_RELEASE_UPDATE
   | AP_RELEASE_DELETE
+  | AP_RELEASE_CREATE_STANDALONE
   | AP_MANAGE_STAGGER
   | AP_PRODUCT_CONFIG_VIEW
   | AP_PRODUCT_CONFIG_EDIT
@@ -62,6 +63,7 @@ autopilotPermissionToText AP_RELEASE_RESUME = "RELEASE_RESUME"
 autopilotPermissionToText AP_RELEASE_ABORT = "RELEASE_ABORT"
 autopilotPermissionToText AP_RELEASE_UPDATE = "RELEASE_UPDATE"
 autopilotPermissionToText AP_RELEASE_DELETE = "RELEASE_DELETE"
+autopilotPermissionToText AP_RELEASE_CREATE_STANDALONE = "RELEASE_CREATE_STANDALONE"
 autopilotPermissionToText AP_MANAGE_STAGGER = "MANAGE_STAGGER"
 autopilotPermissionToText AP_PRODUCT_CONFIG_VIEW = "PRODUCT_CONFIG_VIEW"
 autopilotPermissionToText AP_PRODUCT_CONFIG_EDIT = "PRODUCT_CONFIG_EDIT"
@@ -94,6 +96,7 @@ textToAutopilotPermission "RELEASE_RESUME" = Just AP_RELEASE_RESUME
 textToAutopilotPermission "RELEASE_ABORT" = Just AP_RELEASE_ABORT
 textToAutopilotPermission "RELEASE_UPDATE" = Just AP_RELEASE_UPDATE
 textToAutopilotPermission "RELEASE_DELETE" = Just AP_RELEASE_DELETE
+textToAutopilotPermission "RELEASE_CREATE_STANDALONE" = Just AP_RELEASE_CREATE_STANDALONE
 textToAutopilotPermission "MANAGE_STAGGER" = Just AP_MANAGE_STAGGER
 textToAutopilotPermission "PRODUCT_CONFIG_VIEW" = Just AP_PRODUCT_CONFIG_VIEW
 textToAutopilotPermission "PRODUCT_CONFIG_EDIT" = Just AP_PRODUCT_CONFIG_EDIT
@@ -128,6 +131,7 @@ permissionDescription AP_RELEASE_RESUME = "Resume paused releases"
 permissionDescription AP_RELEASE_ABORT = "Abort in-progress releases"
 permissionDescription AP_RELEASE_UPDATE = "Update release metadata"
 permissionDescription AP_RELEASE_DELETE = "Delete releases"
+permissionDescription AP_RELEASE_CREATE_STANDALONE = "Create a single-service release for a service that belongs to a release bundle"
 permissionDescription AP_MANAGE_STAGGER = "Manage rollout stagger configuration"
 permissionDescription AP_PRODUCT_CONFIG_VIEW = "View product configurations"
 permissionDescription AP_PRODUCT_CONFIG_EDIT = "Edit product configurations"
@@ -191,6 +195,10 @@ instance KnownPermission 'AP_RELEASE_UPDATE where
 instance KnownPermission 'AP_RELEASE_DELETE where
   permissionProduct _ = "autopilot"
   permissionName _ = "RELEASE_DELETE"
+
+instance KnownPermission 'AP_RELEASE_CREATE_STANDALONE where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "RELEASE_CREATE_STANDALONE"
 
 instance KnownPermission 'AP_MANAGE_STAGGER where
   permissionProduct _ = "autopilot"

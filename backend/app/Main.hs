@@ -11,6 +11,7 @@ import qualified Data.Text as T
 import Products.AirborneOta.Keepalive (airborneKeepaliveLoop)
 import Products.Autopilot.Hpa.Loops (hpaLoops)
 import Products.Autopilot.ReleaseBot.Flow (releaseBotLoop)
+import Products.Autopilot.ReleaseGroup.Coordinator (releaseGroupLoop)
 import Products.Autopilot.Runner (runnerLoop, runnerPollLoop, runnerStartupRecovery)
 import Products.Autopilot.SyncWatcher (syncWatcherPollLoop)
 
@@ -33,7 +34,7 @@ main = do
                     else ""
         case appState cfg of
             -- The HPA scheduler rides with the runner: it is background work that talks to the cluster.
-            "RUNNER" -> concurrently_ (runnerLoop st) (runFlow st hpaLoops)
+            "RUNNER" -> concurrently_ (runnerLoop st) (concurrently_ (runFlow st hpaLoops) (runFlow st releaseGroupLoop))
             -- In local/single-process mode keep server + worker together.
             -- #35 FIX 1 — run startup recovery SYNCHRONOUSLY before the HTTP port
             -- is bound. If we forked the poll loop alongside the server like we
@@ -47,7 +48,7 @@ main = do
                 -- below (ASC-only, no Play edits).
                 concurrently_
                     (concurrently_ (serverLoop st) (runnerPollLoop st))
-                    (concurrently_ (runFlow st syncWatcherPollLoop) (concurrently_ (runFlow st airborneKeepaliveLoop) (concurrently_ (runFlow st releaseBotLoop) (runFlow st hpaLoops))))
+                    (concurrently_ (runFlow st syncWatcherPollLoop) (concurrently_ (runFlow st airborneKeepaliveLoop) (concurrently_ (runFlow st releaseBotLoop) (concurrently_ (runFlow st hpaLoops) (runFlow st releaseGroupLoop)))))
             _ -> serverLoop st
   where
     show' :: (Show a) => a -> T.Text

@@ -35,6 +35,7 @@ import Products.Autopilot.Config (autopilotConfigs)
 import Products.Autopilot.ConfigDiff (extractContainerEnvJson)
 import Products.Autopilot.DiffLink (buildDiffLink, normalizeRepo, toCommitId)
 import Products.Autopilot.K8s.Execute (shellQuote)
+import Products.Autopilot.ReleaseGroup.Types qualified as RG
 import Products.Autopilot.Mobile.Changelog
   ( bumpPatch,
     renderRevertChangelog,
@@ -213,6 +214,7 @@ main = do
   section "[55] Release bot: diff engine" testReleaseBotDiff
   section "[56] Release bot: base64 fail-closed decode" testReleaseBotBase64
   section "[57] Release bot: Xyne signature + payload parsing" testReleaseBotXyne
+  section "[58] Release bundles: stage planner + bundle validation" testReleaseGroupPlanner
   section "[58] Release bot: secret-file patterns + config parsing" testReleaseBotConfig
   section "[59] Release bot: public view redaction + link token" testReleaseBotPublic
   section "[66] HPA: Kubernetes Quantity parsing + equality" testHpaQuantity
@@ -529,8 +531,8 @@ testPermissions = do
   assertBool "Manager can schedule, apply and roll back HPA changes" $
     all (\p -> AutopilotPerm p `elem` managerPerms) [AP_HPA_VIEW, AP_HPA_SCHEDULE_EDIT, AP_HPA_APPLY, AP_HPA_ROLLBACK]
   assertEqual
-    "Manager has all perms minus the 4 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE, HPA_GUARDRAIL_EDIT)"
-    (length allPerms - 4)
+    "Manager has all perms minus the 5 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE, RELEASE_CREATE_STANDALONE, HPA_GUARDRAIL_EDIT)"
+    (length allPerms - 5)
     (length managerPerms)
 
   -- ── Mobile product (2026-07-31 split): MB_* + the whole OTA family ──
@@ -3649,3 +3651,77 @@ testHpaMetrics = do
   let ev = either error id (A.eitherDecode "{\"metadata\":{\"uid\":\"u1\"},\"involvedObject\":{\"name\":\"a-hpa\"},\"type\":\"Normal\",\"reason\":\"SuccessfulRescale\",\"message\":\"New size: 7; reason: cpu above target\",\"count\":3,\"firstTimestamp\":\"2026-10-19T05:00:00Z\",\"lastTimestamp\":\"2026-10-19T05:30:00Z\"}") :: A.Value
   assertEqual "k8s event parsed" (Just (HO.K8sEvent "u1" "a-hpa" (Just "Normal") "SuccessfulRescale" "New size: 7; reason: cpu above target" (Just 7) 3 (utc "2026-10-19 05:00:00") (utc "2026-10-19 05:30:00"))) (HO.parseK8sEvent now' ev)
   assertEqual "an event without a uid or reason is ignored" Nothing (HO.parseK8sEvent now' (A.object ["reason" A..= ("x" :: Text)]))
+
+testReleaseGroupPlanner :: IO ()
+testReleaseGroupPlanner = do
+  let v st sp md o = RG.StepView st sp md o
+      par = RG.Parallel
+      seqM = RG.Sequential
+      stage n m ss = RG.StageDef n m [RG.StepDef g s | (g, s) <- ss]
+
+  -- parallel stage starts everything at once
+  assertEqual
+    "parallel stage starts all waiting steps"
+    (RG.StartSteps [(0, 0), (0, 1)])
+    (RG.planAdvance [v 0 0 par RG.NotStarted, v 0 1 par RG.NotStarted])
+  assertEqual
+    "parallel stage waits while a step runs and none is left to start"
+    RG.Wait
+    (RG.planAdvance [v 0 0 par RG.InFlight, v 0 1 par RG.InFlight])
+  -- sequential stage starts one at a time
+  assertEqual
+    "sequential stage starts only the first"
+    (RG.StartSteps [(0, 0)])
+    (RG.planAdvance [v 0 0 seqM RG.NotStarted, v 0 1 seqM RG.NotStarted])
+  assertEqual
+    "sequential stage waits for the running step"
+    RG.Wait
+    (RG.planAdvance [v 0 0 seqM RG.InFlight, v 0 1 seqM RG.NotStarted])
+  assertEqual
+    "sequential stage starts the next once the first is done"
+    (RG.StartSteps [(0, 1)])
+    (RG.planAdvance [v 0 0 seqM RG.Done, v 0 1 seqM RG.NotStarted, v 0 2 seqM RG.NotStarted])
+  -- stages are strictly ordered
+  assertEqual
+    "later stage is held while an earlier step runs"
+    RG.Wait
+    (RG.planAdvance [v 0 0 par RG.InFlight, v 1 0 par RG.NotStarted])
+  assertEqual
+    "next stage starts once the previous is fully done"
+    (RG.StartSteps [(1, 0)])
+    (RG.planAdvance [v 0 0 par RG.Done, v 0 1 par RG.Done, v 1 0 par RG.NotStarted])
+  assertEqual "all done completes the run" RG.CompleteRun (RG.planAdvance [v 0 0 par RG.Done, v 1 0 seqM RG.Done])
+  -- failure halts and holds later stages
+  assertEqual
+    "a failed step halts the group"
+    (RG.HaltRun "svc is ABORTED")
+    (RG.planAdvance [v 0 0 par (RG.Failed "svc is ABORTED"), v 0 1 par RG.InFlight, v 1 0 par RG.NotStarted])
+  assertEqual
+    "a failure in a finished-looking later stage is not reached until earlier stages are done"
+    RG.Wait
+    (RG.planAdvance [v 0 0 par RG.InFlight, v 1 0 par (RG.Failed "x")])
+  assertEqual "unknown tracker state waits" RG.Wait (RG.planAdvance [v 0 0 par RG.Unknown])
+  assertEqual "input order does not matter" (RG.StartSteps [(0, 0)]) (RG.planAdvance [v 1 0 par RG.NotStarted, v 0 0 par RG.NotStarted])
+
+  -- status classification
+  assertEqual "COMPLETED is done" RG.Done (RG.classifyStatus "COMPLETED")
+  assertEqual "INPROGRESS is in flight" RG.InFlight (RG.classifyStatus "INPROGRESS")
+  assertEqual "PAUSED is in flight, not failed" RG.InFlight (RG.classifyStatus "PAUSED")
+  assertEqual "DISCARDED fails" (RG.Failed "DISCARDED") (RG.classifyStatus "DISCARDED")
+  assertEqual "GCLT_ABORTED fails" (RG.Failed "GCLT_ABORTED") (RG.classifyStatus "GCLT_ABORTED")
+
+  -- bundle validation
+  assertEqual "empty bundle rejected" True (isLeft' (RG.validateStages []))
+  assertEqual "empty stage rejected" True (isLeft' (RG.validateStages [stage "a" par []]))
+  assertEqual "unnamed stage rejected" True (isLeft' (RG.validateStages [stage " " par [("g", "s")]]))
+  assertEqual
+    "duplicate service rejected"
+    True
+    (isLeft' (RG.validateStages [stage "a" par [("g", "s")], stage "b" seqM [("g", "s")]]))
+  assertEqual
+    "valid bundle accepted"
+    (Right ())
+    (RG.validateStages [stage "a" par [("g", "x"), ("g", "y")], stage "b" seqM [("g", "z")]])
+  where
+    isLeft' (Left _) = True
+    isLeft' (Right _) = False

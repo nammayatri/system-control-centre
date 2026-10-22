@@ -14,6 +14,7 @@ module Products.Autopilot.Actions.Release
     listReleasesH,
     approveReleaseH,
     approveReleaseCore,
+    createGroupMemberRelease,
     triggerReleaseH,
     rollbackReleaseH,
     revertReleaseH,
@@ -52,7 +53,7 @@ module Products.Autopilot.Actions.Release
 where
 
 import Control.Applicative ((<|>))
-import Control.Monad (void, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.Catch (throwM, try)
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..))
@@ -103,6 +104,8 @@ import Products.Autopilot.Notifications
 import Products.Autopilot.ReleaseBot.RowConfig (checkBotField)
 import Products.Autopilot.Queries.ProductService
 import Products.Autopilot.Queries.ReleaseLock (ReleaseLock (..), findBlockingLock)
+import Products.Autopilot.ReleaseGroup.Store (runForRelease, serviceIsBundled)
+import Products.Autopilot.ReleaseGroup.Types qualified as RG
 import Products.Autopilot.Queries.ReleaseTracker
 import Products.Autopilot.Queries.VsEditTracker ()
 import Products.Autopilot.Runner (dispatchWorkflow)
@@ -417,6 +420,14 @@ createReleaseH ap mXForwardedEmail mXPomeriumJwt req@K8sCreateReleaseReq {..} = 
   customStagger <- usesCustomStagger appGroup service mode rolloutStrategy
   when customStagger $
     requireDeploymentPermission (Proxy :: Proxy 'AP_MANAGE_STAGGER) ap appGroup
+  -- A service that belongs to a release bundle is meant to ship with it. Going
+  -- around the bundle is allowed, but only for people holding the standalone
+  -- permission. Services in no bundle, and cross-cloud sync mirrors, are not
+  -- affected.
+  unless (fromMaybe False isSystemTriggered) $ do
+    bundled <- serviceIsBundled appGroup service
+    when bundled $
+      requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_CREATE_STANDALONE) ap appGroup
   -- System-triggered (cross-cluster sync) requests already carry the real
   -- release manager's email in the payload; only stamp the authenticated
   -- caller's email for direct, user-initiated creates.
@@ -995,7 +1006,34 @@ approveReleaseH ap rid req = do
     Nothing -> throwM $ NotFound ("Release not found: " <> rid)
     Just (tracker, mTargetState) -> do
       requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_APPROVE) ap (NT.appGroup tracker)
+      rejectIfGroupMember rid
       approveReleaseCore rid req tracker mTargetState
+
+-- | A tracker that belongs to a live group run is approved only by the group
+-- coordinator, in stage order. Approving it by hand would start it out of turn.
+rejectIfGroupMember :: Text -> Flow ()
+rejectIfGroupMember rid = do
+  mGroup <- runForRelease rid
+  case mGroup of
+    Just (gid, st) | st `elem` [RG.PendingApproval, RG.Running, RG.Halted] ->
+      throwM $ BadRequest ("This release is part of group release " <> gid <> ". Approve the group instead; its steps start in order.")
+    _ -> pure ()
+
+-- | Create one member tracker for a grouped release. Same validation, locks and
+-- guards as a normal create, but the tracker is never approved here: the group
+-- approval and coordinator decide when it starts. Returns the new release id.
+createGroupMemberRelease :: AuthedPerson -> K8sCreateReleaseReq -> Flow (Either Text Text)
+createGroupMemberRelease ap req = do
+  requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_CREATE) ap req.appGroup
+  customStagger <- usesCustomStagger req.appGroup req.service req.mode req.rolloutStrategy
+  when customStagger $
+    requireDeploymentPermission (Proxy :: Proxy 'AP_MANAGE_STAGGER) ap req.appGroup
+  let req' =
+        (req {createdBy = apEmail ap, isApproved = Just False, isSystemTriggered = Nothing, globalId = Nothing} :: K8sCreateReleaseReq)
+  resp <- createReleaseHBody Nothing Nothing req'
+  pure $ case T.stripPrefix "Tracker created: " resp.message of
+    Just newId | resp.status == "SUCCESS" -> Right newId
+    _ -> Left resp.message
 
 -- | Permission-free core of approve — the caller has already authorized
 -- (AP route above; MB-gated mobile wrapper in Mobile.Handlers.Release).
@@ -1315,6 +1353,7 @@ updateTrackerH ap rid req = do
     Nothing -> pure $ APIResponse "ERROR" "Release not found"
     Just (tracker, mTargetState) -> do
       requireDeploymentPermission (Proxy :: Proxy 'AP_RELEASE_UPDATE) ap (NT.appGroup tracker)
+      when (req.isApproved == Just True) $ rejectIfGroupMember rid
       let strategyChanged = case req.rolloutStrategy of
             Just newStr -> newStr /= NT.rolloutStrategy tracker
             Nothing -> False
