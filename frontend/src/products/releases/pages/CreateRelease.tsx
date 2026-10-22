@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import { useProductConfigs, useServices } from '../useProducts';
 import { useCreateRelease, useUpdateTracker } from '../hooks';
-import { fetchReleaseDetails, fetchReleaseSourceEnv, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources, resolveOldVersion, fetchRolloutPodEstimate, fetchRolloutPodEstimateSecondary, fetchSyncRolloutStrategy } from '../api';
+import { fetchBundles, fetchReleaseDetails, fetchReleaseSourceEnv, fetchEnvs, fetchSecondaryEnvs, fetchReleaseConfigs, fetchResources, resolveOldVersion, fetchRolloutPodEstimate, fetchRolloutPodEstimateSecondary, fetchSyncRolloutStrategy } from '../api';
 import type { ProductConfig } from '../api';
 import { parseStrategyStages } from '../utils';
 import { Button } from '../../../shared/ui/button';
@@ -86,11 +86,30 @@ const DEFAULT_STAGES: Stage[] = [
 ];
 const cloneStages = (stages: Stage[]): Stage[] => stages.map(s => ({ ...s }));
 
-const CreateRelease: React.FC = () => {
+/**
+ * Wizard mode: the form is one step of a group release. The app group, service
+ * and env are fixed by the bundle, and submit hands the built payload back to
+ * the wizard instead of creating a release (the group is created once, at the end).
+ */
+export interface GroupStepProps {
+  appGroup: string;
+  service: string;
+  env: string;
+  title: string;
+  submitLabel: string;
+  onCollect: (payload: any) => void;
+  onBack?: () => void;
+  /** Release id to copy from (group clone): version, image, env override, mode, priority. */
+  cloneFrom?: string;
+}
+
+const CreateRelease: React.FC<{ groupStep?: GroupStepProps }> = ({ groupStep }) => {
+  const lockedTarget = !!groupStep;
   const navigate = useNavigate();
   const location = useLocation();
   const { id } = useParams<{ id?: string }>();
-  const isClone = location.pathname.endsWith('/clone') && !!id;
+  const cloneId = groupStep?.cloneFrom ?? (location.pathname.endsWith('/clone') ? id : undefined);
+  const isClone = !!cloneId;
   const { env: deploymentEnv, user, products: productAccess, deploymentAccess } = useAuth();
   const { hasPermission } = usePermissions();
   const isUpdate = !!id && location.pathname.endsWith('/edit');
@@ -108,14 +127,14 @@ const CreateRelease: React.FC = () => {
     .sort((a, b) => a.localeCompare(b));
 
   const [formData, setFormData] = useState({
-    appGroup: '', service: '', env: deploymentEnv, old_version: '', new_version: '', docker_image: '', change_log: '',
+    appGroup: groupStep?.appGroup ?? '', service: groupStep?.service ?? '', env: groupStep?.env ?? deploymentEnv, old_version: '', new_version: '', docker_image: '', change_log: '',
     status: 'CREATED', mode: 'AUTO', priority: '0', info: '',
     cluster: 'MOVING_TECH',
     cronjob_suspend: false, description: '', schedule_time: '',
   });
   const canManageStagger = hasPermission('autopilot', 'MANAGE_STAGGER', formData.appGroup);
   const isNewService = false;
-  const [selectedServices, setSelectedServices] = useState<string[]>([]);
+  const [selectedServices, setSelectedServices] = useState<string[]>(groupStep ? [groupStep.service] : []);
   // A multi-service create fans out one POST per service; a single old_version /
   // changelog form value can't represent N services, so those fields go read-only
   // and the backend resolves the old version and generates the diff link per
@@ -209,6 +228,24 @@ const CreateRelease: React.FC = () => {
 
   const { data: services = [], isFetching: servicesLoading } = useServices(formData.appGroup, isNewService);
   const createMutation = useCreateRelease();
+
+  // A service that belongs to a release bundle is released with the bundle.
+  // Going around it needs RELEASE_CREATE_STANDALONE (the backend enforces this;
+  // surfacing it here saves filling in the whole form to be refused).
+  const { data: bundles = [] } = useQuery({
+    queryKey: ['release-bundles', false],
+    queryFn: () => fetchBundles(false),
+    enabled: !groupStep && !isUpdate,
+    staleTime: 60000,
+  });
+  const bundledSelected = useMemo(
+    () => selectedServices.filter(svc =>
+      bundles.some(b => b.stages.some(st => st.steps.some(x => x.appGroup === formData.appGroup && x.service === svc)))),
+    [bundles, selectedServices, formData.appGroup],
+  );
+  const standaloneBlocked =
+    !groupStep && !isUpdate && bundledSelected.length > 0 &&
+    !hasPermission('autopilot', 'RELEASE_CREATE_STANDALONE', formData.appGroup);
   const updateMutation = useUpdateTracker();
 
   // Sync first selected service into formData.service for dependent effects (envs, resources, rollout).
@@ -314,18 +351,19 @@ const CreateRelease: React.FC = () => {
   }, [existingRelease, isUpdate]);
 
   useEffect(() => {
-    if (isClone && id) {
-      fetchReleaseDetails(id).then(data => {
+    if (cloneId) {
+      fetchReleaseDetails(cloneId).then(data => {
         setClonedService(data.service);
         setSelectedServices([data.service].filter(Boolean));
         setFormData(prev => ({
-          ...prev, appGroup: data.appGroup, service: data.service,
-          cluster: data.release_context?.cluster || 'MOVING_TECH', env: data.env,
+          // In a group wizard step the target is fixed by the bundle and the env by the deployment.
+          ...prev, appGroup: lockedTarget ? prev.appGroup : data.appGroup, service: lockedTarget ? prev.service : data.service,
+          cluster: data.release_context?.cluster || 'MOVING_TECH', env: lockedTarget ? prev.env : data.env,
           priority: String(data.priority || '0'),
           docker_image: data.release_context?.docker_image || data.docker_image || '',
           mode: data.mode, new_version: data.new_version || '', change_log: data.change_log || ''
         }));
-        fetchReleaseSourceEnv(id).then(({ source, env: srcEnv }) => {
+        fetchReleaseSourceEnv(cloneId).then(({ source, env: srcEnv }) => {
           if (source !== 'none' && srcEnv != null) {
             setCloneSourceEnv(srcEnv);
             setCloneEnvSourceType(source);
@@ -342,7 +380,7 @@ const CreateRelease: React.FC = () => {
         toast.error(msg);
       });
     }
-  }, [isClone, id]);
+  }, [cloneId]);
 
   useEffect(() => {
     if (formData.appGroup) {
@@ -542,7 +580,7 @@ const CreateRelease: React.FC = () => {
       const config = productConfigs.find((c: ProductConfig) => c.appGroup === formData.appGroup);
       if (config) setFormData(prev => ({ ...prev, cluster: config.cluster }));
     }
-    if (!isUpdate && !isClone) setSelectedServices([]);
+    if (!isUpdate && !isClone && !lockedTarget) setSelectedServices([]);
   }, [formData.appGroup, productConfigs, isUpdate, isClone]);
 
   useEffect(() => {
@@ -742,6 +780,11 @@ const CreateRelease: React.FC = () => {
       post_changelog_slack: postChangelogSlack,
     });
 
+    if (groupStep) {
+      groupStep.onCollect(buildPayload(selectedServices[0]));
+      return;
+    }
+
     try {
       if (selectedServices.length === 1) {
         await createMutation.mutateAsync({ isNewService, payload: buildPayload(selectedServices[0]) });
@@ -790,8 +833,8 @@ const CreateRelease: React.FC = () => {
   // Mid-flight: backend rejects edits to most fields. Only status, rolloutStrategy,
   // changeLog, mode, and envOverrideData can change once a release is live.
   const isMidFlight = isUpdate && ['INPROGRESS', 'PAUSED', 'RESTARTING', 'REVERTING'].includes(formData.status);
-  const pageTitle = isUpdate ? 'Update Release' : isClone ? 'Clone Release' : 'Create Release';
-  const submitLabel = isUpdate
+  const pageTitle = groupStep ? groupStep.title : isUpdate ? 'Update Release' : isClone ? 'Clone Release' : 'Create Release';
+  const submitLabel = groupStep ? groupStep.submitLabel : isUpdate
     ? (updateMutation.isPending ? 'Updating...' : 'Update Release')
     : (createMutation.isPending ? 'Creating...' : selectedServices.length > 1 ? `Create ${selectedServices.length} Releases` : 'Create Release');
 
@@ -833,6 +876,13 @@ const CreateRelease: React.FC = () => {
             </div>
           );
         })()}
+
+        {standaloneBlocked && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-xl text-sm">
+            <strong>{bundledSelected.join(', ')}</strong> {bundledSelected.length > 1 ? 'are' : 'is'} part of a release bundle and
+            can only be released with it. Use <strong>Create Release</strong> to release the bundle, or ask for the standalone release permission.
+          </div>
+        )}
 
         {isMidFlight && (
           <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-xl text-sm">
@@ -890,7 +940,7 @@ const CreateRelease: React.FC = () => {
             <div className="space-y-4">
               <div>
                 <FieldLabel required={!isUpdate}>App Group</FieldLabel>
-                {isUpdate ? (
+                {isUpdate || lockedTarget ? (
                   <input type="text" value={formData.appGroup} disabled className={disabledInputClass} />
                 ) : (
                   <div className="app-group-dropdown relative">
@@ -966,7 +1016,7 @@ const CreateRelease: React.FC = () => {
             <div className="space-y-4">
               <div>
                 <FieldLabel required={!isUpdate}>Service</FieldLabel>
-                {isUpdate ? (
+                {isUpdate || lockedTarget ? (
                   <input type="text" value={selectedServices.join(', ')} disabled className={disabledInputClass} />
                 ) : (
                   <div className="service-dropdown relative">
@@ -1007,7 +1057,7 @@ const CreateRelease: React.FC = () => {
                     )}
                   </div>
                 )}
-                {selectedServices.length > 0 && !isUpdate && (
+                {selectedServices.length > 0 && !isUpdate && !lockedTarget && (
                   <div className="flex flex-wrap gap-1 mt-1.5">
                     {selectedServices.map(svc => (
                       <span key={svc} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-zinc-100 text-zinc-700 text-xs">
@@ -1335,8 +1385,12 @@ const CreateRelease: React.FC = () => {
         )}
 
         <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3 pt-2">
-          <Button type="button" variant="secondary" onClick={() => isUpdate ? navigate(`/backend/releases/${id}`) : navigate('/backend/releases')}>Cancel</Button>
-          <Button type="submit" loading={isSubmitting} disabled={!isUpdate && ((selectedTrackerType === 'BackendScheduler' && oldVersionUnresolved) || secondaryVersionConflict)}>{submitLabel}</Button>
+          {groupStep ? (
+            groupStep.onBack && <Button type="button" variant="secondary" onClick={groupStep.onBack}>Back</Button>
+          ) : (
+            <Button type="button" variant="secondary" onClick={() => isUpdate ? navigate(`/backend/releases/${id}`) : navigate('/backend/releases')}>Cancel</Button>
+          )}
+          <Button type="submit" loading={isSubmitting} disabled={!isUpdate && (standaloneBlocked || (selectedTrackerType === 'BackendScheduler' && oldVersionUnresolved) || secondaryVersionConflict)}>{submitLabel}</Button>
         </div>
       </form>
     </div>

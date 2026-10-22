@@ -124,6 +124,7 @@ isManagerRestrictedPerm (AutopilotPerm p) =
         `elem` [ AP_PRODUCT_CONFIG_EDIT
                , AP_SERVICE_CONFIG_EDIT
                , AP_RELEASE_DELETE
+               , AP_RELEASE_CREATE_STANDALONE
                , AP_HPA_GUARDRAIL_EDIT
                ]
 isManagerRestrictedPerm (MobilePerm p) = p == MB_MOBILE_APP_MANAGE

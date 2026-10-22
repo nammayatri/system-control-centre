@@ -18,6 +18,8 @@ import Products.Autopilot.Actions.QaAutomation as QaAutomation
 import Products.Autopilot.Actions.Release as Release
 import Products.Autopilot.Actions.VSEdit as VSEdit
 import Products.Autopilot.Actions.ReleaseLock qualified as Lock
+import Products.Autopilot.Actions.ReleaseGroup qualified as Group
+import Products.Autopilot.ReleaseGroup.Types (Bundle, GroupRun)
 import Products.Autopilot.Actions.Webhook as Webhook
 import Products.Autopilot.Handlers.Ai as Ai
 import Products.Autopilot.Handlers.ConfigReview as ConfigReview
@@ -95,6 +97,16 @@ type CoreAPI =
         :<|> "release-locks" :> Protected 'AP_PRODUCT_CONFIG_VIEW :> QueryParam "appGroup" Text :> Get '[JSON] [ReleaseLock]
         :<|> "release-locks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> ReqBody '[JSON] Lock.SetReleaseLockReq :> Post '[JSON] APIResponse
         :<|> "release-locks" :> "clear" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> ReqBody '[JSON] Lock.ClearReleaseLockReq :> Post '[JSON] APIResponse
+        :<|> "release-bundles" :> Protected 'AP_RELEASE_VIEW :> QueryParam "includeArchived" Bool :> Get '[JSON] [Bundle]
+        :<|> "release-bundles" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> ReqBody '[JSON] Group.BundleReq :> Post '[JSON] Bundle
+        :<|> "release-bundles" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> Capture "bundleId" Text :> ReqBody '[JSON] Group.BundleReq :> Put '[JSON] Bundle
+        :<|> "release-bundles" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> Capture "bundleId" Text :> "archive" :> ReqBody '[JSON] Group.ArchiveBundleReq :> Post '[JSON] APIResponse
+        :<|> "release-groups" :> Protected 'AP_RELEASE_VIEW :> Get '[JSON] [GroupRun]
+        :<|> "release-groups" :> Protected 'AP_RELEASE_CREATE :> "create" :> ReqBody '[JSON] Group.CreateGroupReq :> Post '[JSON] GroupRun
+        :<|> "release-groups" :> Protected 'AP_RELEASE_VIEW :> Capture "runId" Text :> Get '[JSON] GroupRun
+        :<|> "release-groups" :> Protected 'AP_RELEASE_APPROVE :> Capture "runId" Text :> "approve" :> Post '[JSON] GroupRun
+        :<|> "release-groups" :> Protected 'AP_RELEASE_APPROVE :> Capture "runId" Text :> "resume" :> ReqBody '[JSON] Group.ResumeGroupReq :> Post '[JSON] GroupRun
+        :<|> "release-groups" :> Protected 'AP_RELEASE_DISCARD :> Capture "runId" Text :> "abort" :> ReqBody '[JSON] Group.AbortGroupReq :> Post '[JSON] GroupRun
         -- Release webhooks
         :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> "placeholders" :> Get '[JSON] [PlaceholderDef]
         :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> QueryParam "appGroup" Text :> Get '[JSON] [ReleaseWebhook]
@@ -215,6 +227,16 @@ coreServer =
         :<|> Lock.listReleaseLocksH
         :<|> Lock.setReleaseLockH
         :<|> Lock.clearReleaseLockH
+        :<|> Group.listBundlesH
+        :<|> Group.createBundleH
+        :<|> Group.updateBundleH
+        :<|> Group.archiveBundleH
+        :<|> Group.listGroupsH
+        :<|> Group.createGroupH
+        :<|> Group.getGroupH
+        :<|> Group.approveGroupH
+        :<|> Group.resumeGroupH
+        :<|> Group.abortGroupH
         -- Release webhooks
         :<|> Webhook.listPlaceholdersH
         :<|> Webhook.listWebhooksH
