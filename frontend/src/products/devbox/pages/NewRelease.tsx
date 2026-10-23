@@ -182,7 +182,7 @@ export default function DevboxNewRelease() {
                 </label>
               ))}
             </div>
-            <p className="text-xs text-zinc-500">Built after the backend is ready, pointed at it. Phones need the office network to reach it.</p>
+            <p className="text-xs text-zinc-500">Built after the backend is ready, pointed at it. Phones reach it from any network.</p>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <SelectInput
@@ -211,7 +211,7 @@ export default function DevboxNewRelease() {
                 setWorkspace(e.target.value);
               }}
               error={nameError}
-              hint={nameError ? undefined : `Made from the backend branch; you can change it. Becomes the URL path :8888/${workspace || '…'}`}
+              hint={nameError ? undefined : `Made from the backend branch; you can change it. Becomes the URL path /${workspace || '…'}`}
             />
           </div>
         </CardContent>
@@ -280,7 +280,7 @@ function Summary(p: {
             {row('Control centre', p.ccBranch || '—')}
             {row('App', p.frontendBranch ? `${p.frontendBranch}${p.builds ? ` · ${p.builds}` : ' · no builds'}` : '—')}
             {row('Data', p.data)}
-            {row('URL', `http://<dev-box>:8888/${p.workspace || '…'}`)}
+            {row('URL', `https://service-discovery.devenv.movingtech.net/api/<dev-box>/8889/${p.workspace || '…'}`)}
             {row('Auto-stop', `${stopOn} (3 days)`)}
           </dl>
           <p className="border-t border-zinc-100 pt-3 text-sm text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">

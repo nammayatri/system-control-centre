@@ -45,7 +45,8 @@ export default function DevboxReleaseDetail() {
   const urls: [string, string | null][] =
     r.status === 'READY'
       ? [
-          ['Backend', r.backendUrl],
+          // backendUrl itself is not a link: the public front desk only
+          // passes the rider and driver APIs under it.
           ['Rider app API', r.backendUrl && `${r.backendUrl}/rider-app/v2`],
           ['Driver app API', r.backendUrl && `${r.backendUrl}/dynamic-offer-driver-app/ui`],
           ['Control centre', r.ccUrl],
@@ -140,7 +141,7 @@ export default function DevboxReleaseDetail() {
                     </div>
                   ) : null,
                 )}
-                <p className="text-xs text-zinc-500">These links work on the office network.</p>
+                <p className="text-xs text-zinc-500">API links work from any network. Control centre opens on the office network only.</p>
               </div>
             ) : (
               <p className="text-sm text-zinc-500">{live ? 'Links appear when the release is ready.' : 'No links: the workspace is gone.'}</p>
