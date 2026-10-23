@@ -11,8 +11,10 @@ Tables are created by `dev/sql-seed/system-control-seed.sql`. These migrations a
 | `0001-seed-server-config.sql` | Default server_config entries (incl. decision engine toggles) |
 | `0002-add-indexes.sql` | Performance indexes + unique constraints on all tables |
 | `0010-local-test-data.sql` | Local TEST_AUTOPILOT app group + services for dev |
+| `0055-hpa-scheduler.sql` | HPA scheduler ledger, schedules, snapshots, samples, guardrails — see `../../../HPA_SCHEDULER.md` |
 | `0053-release-request.sql` | Xyne release bot request state (`release_request`) — see `../../../RELEASE_BOT.md` |
-| `0055-devbox-releases.sql` | Devbox Releases: `devbox_release`, `devbox_release_event`, `devbox_release_build`, roles, limits |
+| `0058-devbox-releases.sql` | Devbox Releases: `devbox_release`, `devbox_release_event`, `devbox_release_build`, roles, limits |
+| `0059-devbox-app-builds.sql` | Devbox Releases: rider/driver app builds on Android and iOS |
 
 ## Manual application
 

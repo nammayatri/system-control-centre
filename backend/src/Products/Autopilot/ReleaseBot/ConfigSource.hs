@@ -18,14 +18,14 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Products.Autopilot.ProdRelease.Config
 import Products.Autopilot.Queries.ProductService (listBotConfigRows)
-import Products.Autopilot.ReleaseBot.RowConfig (buildFromRows)
+import Products.Autopilot.ReleaseBot.RowConfig (buildFromRows, dropOrphanServiceRules)
 import Shared.Config.Runtime (getConfigTextForProduct)
 
 loadBotConfig :: Flow (Either Text ProdReleaseConfig)
 loadBotConfig = do
     rows <- listBotConfigRows
     if not (null rows)
-        then pure (buildFromRows rows)
+        then pure (buildFromRows (dropOrphanServiceRules rows))
         else do
             raw <- getConfigTextForProduct "release_bot_config_json" (Just "autopilot") ""
             if T.null (T.strip raw) then loadProdReleaseConfig else pure (parseProdReleaseConfig raw)

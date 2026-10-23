@@ -184,6 +184,9 @@ encodeB64Text = TE.decodeUtf8 . B64.encode . TE.encodeUtf8
 
 {- | Line-based 3-way merge: apply the change @base -> theirs@ onto @ours@.
 
+New lines the repo inserts next to (not inside) lines the live config moved or reformatted merge cleanly;
+replacing or deleting the same lines on both sides is still a conflict.
+
 Used for configmaps whose live content is an environment-specific variant of the repo
 file (so replacing it wholesale would wipe the environment's own settings). Each side's
 edits are blocks over base line ranges. Blocks that touch or overlap (ranges expanded by
@@ -203,11 +206,19 @@ merge3 base ours theirs
          in case clash of
                 ((o, _) : _) -> Left ("the repo change overlaps live edits near base line " <> T.pack (show (bStart o + 1)))
                 [] ->
-                    let merged = dedupe (sortOn' bStart (ob ++ tb))
+                    let merged = dedupe (sortOn' (\x -> (bStart x, bEnd x)) (ob ++ tb))
                      in Right (T.unlines (assemble b 0 merged) `keepTrailing` ours)
   where
     keepTrailing t o = if T.isSuffixOf "\n" o || T.null o then t else T.dropWhileEnd (== '\n') t
-    touches x y = bStart x <= bEnd y + 1 && bStart y <= bEnd x + 1
+    -- A pure insertion (e.g. a new list entry) only clashes with an edit it lands INSIDE of, or with a
+    -- different insertion at the very same point; sitting next to an edit (e.g. a line the live config
+    -- moved elsewhere) is fine. Anything else that touches or overlaps (one line of slack) is a conflict.
+    isIns x = bStart x == bEnd x
+    touches x y
+        | isIns x && isIns y = bStart x == bStart y
+        | isIns x = bStart y < bStart x && bStart x < bEnd y
+        | isIns y = bStart x < bStart y && bStart y < bEnd x
+        | otherwise = bStart x <= bEnd y + 1 && bStart y <= bEnd x + 1
     dedupe (x : y : r) | x == y = dedupe (y : r)
     dedupe (x : r) = x : dedupe r
     dedupe [] = []

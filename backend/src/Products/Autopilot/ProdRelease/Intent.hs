@@ -13,6 +13,7 @@ so the assistant still works (just less flexibly).
 -}
 module Products.Autopilot.ProdRelease.Intent (
     parseRolloutOverride,
+    keywordIntent,
     Intent (..),
     emptyIntent,
     parseIntent,
@@ -180,6 +181,9 @@ dedupe = foldr (\x acc -> x : filter (/= x) acc) []
 keywordIntent :: ProdReleaseConfig -> Intent -> Text -> Intent
 keywordIntent cfg known msg =
     let lower = T.toLower msg
+        -- "control-center" / "control_center" must match the alias "control center"
+        spacify = T.map (\c -> if c == '-' || c == '_' then ' ' else c)
+        spaced = spacify lower
         mRepo =
             listToMaybe [r | r <- prcRepos cfg, T.toLower (rcName r) `T.isInfixOf` lower]
                 `orElseM` (inRepo known >>= findRepo cfg)
@@ -198,7 +202,7 @@ keywordIntent cfg known msg =
             Just r ->
                 [ scService s
                 | s <- rcServices r
-                , any (`T.isInfixOf` lower) (map T.toLower (scService s : scAliases s))
+                , any (`T.isInfixOf` spaced) (map (spacify . T.toLower) (scService s : scAliases s))
                 ]
      in Intent{inRepo = rcName <$> mRepo, inBranch = branch, inCommit = commit, inServices = dedupe svcs}
   where

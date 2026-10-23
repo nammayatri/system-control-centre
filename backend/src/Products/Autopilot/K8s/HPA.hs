@@ -86,12 +86,26 @@ buildCloneHpaCommand cfg ns serviceHost _oldVersion newVersion' oldHpaName =
     -- Deliberately does NOT recompute min/max from replica count: that
     -- caused min=max=N pinned HPAs after revert/restart. The progressive
     -- rollout path scales the deployment directly instead.
+    --
+    -- If the HPA scheduler is holding a temporary change on the old HPA, the
+    -- clone must start from the BASELINE, not the override: the scheduler records
+    -- the pre-change min/max/metrics/behavior in the @sc.juspay.in/hpa-base-spec@
+    -- annotation, which is restored here before our own annotations are dropped
+    -- (so a release in the middle of a boost does not make the boost permanent).
     let newDepName = T.unpack serviceHost <> "-" <> T.unpack newVersion'
         newHpaName = newDepName <> "-hpa"
+        baseKey = "\"sc.juspay.in/hpa-base-spec\""
         jqFilter =
             ".metadata.name = $newHpaName"
                 <> " | .spec.scaleTargetRef.name = $newDepName"
                 <> " | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.status)"
-                <> " | if .metadata.annotations then .metadata.annotations |= (del(.\"kubectl.kubernetes.io/last-applied-configuration\", .\"autoscaling.alpha.kubernetes.io/current-metrics\", .\"autoscaling.alpha.kubernetes.io/conditions\")) else . end"
+                <> " | ((.metadata.annotations // {})[" <> baseKey <> "] // null) as $base"
+                <> " | if $base then ($base | fromjson) as $b"
+                <> " | (if ($b | has(\"minReplicas\")) then .spec.minReplicas = $b.minReplicas else del(.spec.minReplicas) end)"
+                <> " | (if ($b | has(\"maxReplicas\")) then .spec.maxReplicas = $b.maxReplicas else del(.spec.maxReplicas) end)"
+                <> " | (if ($b | has(\"metrics\")) then .spec.metrics = $b.metrics else del(.spec.metrics) end)"
+                <> " | (if ($b | has(\"behavior\")) then .spec.behavior = $b.behavior else del(.spec.behavior) end)"
+                <> " else . end"
+                <> " | if .metadata.annotations then .metadata.annotations |= (del(.\"kubectl.kubernetes.io/last-applied-configuration\", .\"autoscaling.alpha.kubernetes.io/current-metrics\", .\"autoscaling.alpha.kubernetes.io/conditions\", .\"sc.juspay.in/hpa-schedule-id\", .\"sc.juspay.in/hpa-apply-id\", .\"sc.juspay.in/hpa-base-spec\")) else . end"
                 <> " | if .spec.metrics then .spec.metrics |= map(if .object then .object.describedObject.name = $newDepName else . end) else . end"
      in unwords [kubectlBin cfg, "-n", shellQuote ns, "get hpa", shellQuote oldHpaName, "-o json | jq", "--arg newHpaName", shellQuote (T.pack newHpaName), "--arg newDepName", shellQuote (T.pack newDepName), "'" <> jqFilter <> "'", "|", kubectlBin cfg, "-n", shellQuote ns, "apply -f -"]

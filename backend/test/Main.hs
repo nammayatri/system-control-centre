@@ -35,6 +35,7 @@ import Products.Autopilot.Config (autopilotConfigs)
 import Products.Autopilot.ConfigDiff (extractContainerEnvJson)
 import Products.Autopilot.DiffLink (buildDiffLink, normalizeRepo, toCommitId)
 import Products.Autopilot.K8s.Execute (shellQuote)
+import Products.Autopilot.ReleaseGroup.Types qualified as RG
 import Products.Autopilot.Mobile.Changelog
   ( bumpPatch,
     renderRevertChangelog,
@@ -100,6 +101,20 @@ import Products.Autopilot.ReleaseBot.RowConfig qualified as RBW
 import Products.Autopilot.Types.Storage.Schema qualified as SCH
 import Products.Autopilot.ReleaseBot.PublicLink (requestIdOfGlobalId)
 import Products.Autopilot.ReleaseBot.Xyne qualified as RBX
+import Products.Autopilot.Hpa.Quantity qualified as HQ
+import Products.Autopilot.Hpa.Types qualified as HT
+import Products.Autopilot.Hpa.Window qualified as HW
+import Products.Autopilot.Hpa.Change qualified as HC
+import Products.Autopilot.Hpa.Health qualified as HH
+import Products.Autopilot.Hpa.Kube qualified as HK
+import Products.Autopilot.Hpa.Metrics qualified as HM
+import Products.Autopilot.Hpa.Observer qualified as HO
+import Data.Time.Clock (UTCTime)
+import Products.Autopilot.Hpa.Resolver qualified as HR
+import Products.Autopilot.Hpa.Spec qualified as HS
+import Data.Text.Encoding qualified as TE
+import Data.ByteString.Lazy qualified as BL
+import Data.Aeson qualified as A
 import Shared.AI.Changelog qualified as CL
 import Shared.Config.Registry (validateConfigValue)
 import Shared.Config.Types
@@ -199,8 +214,18 @@ main = do
   section "[55] Release bot: diff engine" testReleaseBotDiff
   section "[56] Release bot: base64 fail-closed decode" testReleaseBotBase64
   section "[57] Release bot: Xyne signature + payload parsing" testReleaseBotXyne
+  section "[58] Release bundles: stage planner + bundle validation" testReleaseGroupPlanner
   section "[58] Release bot: secret-file patterns + config parsing" testReleaseBotConfig
   section "[59] Release bot: public view redaction + link token" testReleaseBotPublic
+  section "[66] HPA: Kubernetes Quantity parsing + equality" testHpaQuantity
+  section "[67] HPA: autoscaling/v2 spec parse + validation" testHpaSpec
+  section "[68] HPA: serving-HPA resolution (VS weights, prefix collisions, KEDA)" testHpaResolver
+  section "[69] HPA: schedule windows (weekly / once / offsets / overlap)" testHpaWindow
+  section "[70] HPA: change planning (apply / restore / drift / verify / guardrails / diff)" testHpaChange
+  section "[71] HPA: apply state machine + JSON shapes" testHpaTypes
+  section "[72] HPA: health judgement, Prometheus + event parsing, resume decision" testHpaMisc
+  section "[73] HPA: server-defaulted behavior, kubectl error classification" testHpaDefaults
+  section "[74] HPA: on-demand metrics (queries, parsing, merging) and k8s event parsing" testHpaMetrics
   section "[60] Release bot: env var replacement preserves other entries" testReleaseBotEnv
   section "[61] Release bot: intent merge" testReleaseBotIntent
   section "[62] Release bot: deployment reference discovery" testReleaseBotRefs
@@ -482,7 +507,9 @@ testPermissions = do
   -- 2026-07-31 split: autopilot is backend-only — no OTA family here.
   assertBool "Viewer DOES NOT have OTA_VIEW (moved to mobile)" $
     OtaPerm OTA_VIEW `notElem` viewerPerms
-  assertEqual "Viewer has exactly 3 permissions" 3 (length viewerPerms)
+  assertBool "Viewer has HPA_VIEW (read-only HPA panel)" $
+    AutopilotPerm AP_HPA_VIEW `elem` viewerPerms
+  assertEqual "Viewer has exactly 4 permissions" 4 (length viewerPerms)
 
   -- Manager = all except *_EDIT (per defaultPermissions in Products/Types.hs)
   assertBool "Manager has RELEASE_VIEW" $
@@ -499,9 +526,13 @@ testPermissions = do
     AutopilotPerm AP_SERVICE_CONFIG_EDIT `notElem` managerPerms
   assertBool "Manager DOES NOT have RELEASE_DELETE" $
     AutopilotPerm AP_RELEASE_DELETE `notElem` managerPerms
+  assertBool "Manager DOES NOT have HPA_GUARDRAIL_EDIT" $
+    AutopilotPerm AP_HPA_GUARDRAIL_EDIT `notElem` managerPerms
+  assertBool "Manager can schedule, apply and roll back HPA changes" $
+    all (\p -> AutopilotPerm p `elem` managerPerms) [AP_HPA_VIEW, AP_HPA_SCHEDULE_EDIT, AP_HPA_APPLY, AP_HPA_ROLLBACK]
   assertEqual
-    "Manager has all perms minus the 3 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE)"
-    (length allPerms - 3)
+    "Manager has all perms minus the 5 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE, RELEASE_CREATE_STANDALONE, HPA_GUARDRAIL_EDIT)"
+    (length allPerms - 5)
     (length managerPerms)
 
   -- ── Mobile product (2026-07-31 split): MB_* + the whole OTA family ──
@@ -560,8 +591,8 @@ testPermissions = do
     (length allPerms)
     (length (defaultPermissionsText "autopilot" "Admin"))
   assertEqual
-    "defaultPermissionsText Viewer = 3 (autopilot is backend-only post-split)"
-    3
+    "defaultPermissionsText Viewer = 4 (autopilot is backend-only post-split; includes HPA_VIEW)"
+    4
     (length (defaultPermissionsText "autopilot" "Viewer"))
   assertEqual
     "defaultPermissionsText mobile Viewer = 2 (MB_RELEASE_VIEW + OTA_VIEW)"
@@ -2740,6 +2771,10 @@ testReleaseBotDiff = do
   assertEqual "merge: repo change in a region live never touched" (Right "a\nLIVE\nc\nd\nE2\n") (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nb\nc\nd\nE2\n")
   assertEqual "merge: identical edit on both sides" (Right "a\nX\nc\nd\ne\n") (RBD.merge3 mBase "a\nX\nc\nd\ne\n" "a\nX\nc\nd\ne\n")
   assertBool "merge: overlapping differing edits conflict (fail closed)" (either (const True) (const False) (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nREPO\nc\nd\ne\n"))
+  assertEqual "merge: repo inserts next to lines live moved/reformatted merge cleanly"
+    (Right "x\nP\nB\nS\nG\nK'\nz\nC1\nC2\n")
+    (RBD.merge3 "x\nP\nC1\nC2\nS\nK\nz\n" "x\nP\nS\nK'\nz\nC1\nC2\n" "x\nP\nB\nC1\nC2\nS\nG\nK\nz\n")
+  assertBool "merge: a repo insertion INSIDE a live-edited block still conflicts" (either (const True) (const False) (RBD.merge3 "a\nb\nc\nd\n" "a\nX\nY\nd\n" "a\nb\nNEW\nc\nd\n"))
   assertBool "merge: adjacent edits conflict (fail closed)" (either (const True) (const False) (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nb\nREPO\nd\ne\n"))
   assertEqual "merge: repo adds a line far from live edits" (Right "a\nLIVE\nc\nd\ne\nf\n") (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nb\nc\nd\ne\nf\n")
   assertEqual "merge: repo deletes a line far from live edits" (Right "a\nLIVE\nc\nd\n") (RBD.merge3 mBase "a\nLIVE\nc\nd\ne\n" "a\nb\nc\nd\n")
@@ -2962,6 +2997,7 @@ testReleaseBotRows = do
       chs = [PRC.ChannelCfg "C" "o/ny" "MASTER", PRC.ChannelCfg "C" "o/cc" "MASTER"]
   assertEqual "control center message picks the control-center repo" (Right "o/cc") (fmap PRC.chRepo (RBF.pickChannel pcShared "release control center backend till abc123" chs))
   assertEqual "backend master message picks the main repo" (Right "o/ny") (fmap PRC.chRepo (RBF.pickChannel pcShared "release backend master till abc123" chs))
+  assertEqual "hyphenated words match the spaced alias" ["CC_BACKEND"] (PRI.inServices (PRI.keywordIntent pcShared PRI.emptyIntent "release control-center-backend till abc123"))
   assertBool "no mention of either repo asks which" (either (const True) (const False) (RBF.pickChannel pcShared "release please" chs))
   -- several Jenkins builds of one request
   let br st = RBF.BuildRec ["s"] Nothing (Just "u") (Just st) False Nothing
@@ -3063,6 +3099,7 @@ testReleaseBotRows = do
   assertBool "one channel mapped to two envs is an error" (isLeftWith "two different envs" (RBW.buildFromRows [row "g1" Nothing (Just "o/r") (prod "PROD" "[\"C\"]" "j"), row "g2" Nothing (Just "o/r") (prod "MASTER" "[\"C\"]" "j")]))
   assertEqual "one channel may serve two repos" (Right 2) (fmap (\c -> length (PRC.channelsFor c "C")) (RBW.buildFromRows [row "g1" Nothing (Just "o/r") (prod "PROD" "[\"C\"]" "j"), row "g2" Nothing (Just "o/x") (prod "PROD" "[\"C\"]" "j")]))
   assertBool "service rules under an app group with none are reported" (isLeftWith "app group has none" (RBW.buildFromRows [row "g" (Just "s") Nothing svc]))
+  assertBool "the live bot ignores such orphan service rules instead of failing for every group" (either (const False) (const True) (RBW.buildFromRows (RBW.dropOrphanServiceRules [row "g" (Just "s") Nothing svc])))
   assertBool "malformed row JSON names the row" (isLeftWith "g:" (RBW.buildFromRows [row "g" Nothing (Just "o/r") (Just "{nope")]))
   -- the save-request field: absent = keep, blank = clear, else validated
   assertEqual "absent field leaves stored rules alone" (Right Nothing) (RBW.checkBotField True Nothing)
@@ -3119,3 +3156,572 @@ testReleaseBotJenkins = do
       let repo = head (PRC.prcRepos c)
       assertEqual "one repo, jenkins params chosen by env" (Just "prod", Just "master") (Map.lookup "P" (PRC.jcFixedParams (PRC.jenkinsFor repo "PROD")), Map.lookup "P" (PRC.jcFixedParams (PRC.jenkinsFor repo "master")))
   assertBool "two PROD app groups with different params for one repo is an error" (either (T.isInfixOf "different Jenkins") (const False) (RBW.buildFromRows [row "a" "PROD" "j" "x", row "b" "PROD" "j" "y"]))
+
+-- ============================================================================
+-- HPA
+-- ============================================================================
+
+testHpaQuantity :: IO ()
+testHpaQuantity = do
+  let q t = either (const Nothing) Just (HQ.parseQuantity t)
+      milli t = HQ.qMilli <$> q t
+  assertEqual "500m == 0.5 CPU" (q "500m") (q "0.5")
+  assertEqual "500m is 500 milli" (Just 500) (milli "500m")
+  assertEqual "1 CPU is 1000 milli" (Just 1000) (milli "1")
+  assertEqual "1Gi == 1024Mi" (q "1Gi") (q "1024Mi")
+  assertEqual "1Gi == 1073741824 bytes" (q "1Gi") (q "1073741824")
+  assertBool "1G (decimal) /= 1Gi (binary)" (q "1G" /= q "1Gi")
+  assertEqual "1k == 1000" (q "1k") (q "1000")
+  assertEqual "1e3 == 1k (exponent form)" (q "1e3") (q "1k")
+  assertEqual "1E3 == 1k (upper-case exponent)" (q "1E3") (q "1k")
+  assertEqual "1E alone is exa, not an exponent" (Just (10 ^ (18 :: Int) * 1000)) (milli "1E")
+  assertEqual "1.5Gi" (q "1.5Gi") (q "1536Mi")
+  assertEqual "250Mi < 1Gi" (Just True) ((<) <$> q "250Mi" <*> q "1Gi")
+  assertEqual "sub-milli rounds up like the API server (0.0001 -> 1m)" (Just 1) (milli "0.0001")
+  assertEqual "100u is 0.1 milli, rounds up to 1" (Just 1) (milli "100u")
+  assertEqual ".5 is accepted" (Just 500) (milli ".5")
+  assertEqual "surrounding whitespace is ignored" (Just 500) (milli " 500m ")
+  assertEqual "raw spelling is preserved" (Just "0.5") (HQ.qRaw <$> q "0.5")
+  mapM_ (\bad -> assertEqual ("rejects " <> show bad) Nothing (q bad)) ["", "abc", "5x", "1Kb", "Mi", "1e", "1e99", "1..5", "m"]
+  assertEqual "JSON string quantity" (Just (q "256Mi")) (fmap Just (A.decode "\"256Mi\"" :: Maybe HQ.Quantity))
+  assertEqual "JSON number quantity" (Just (q "2")) (fmap Just (A.decode "2" :: Maybe HQ.Quantity))
+  assertEqual "ToJSON keeps the raw spelling" (Just (A.String "500m")) (A.toJSON <$> q "500m")
+
+hpaJson :: String -> Text -> Text -> Text -> A.Value
+hpaJson name target extraMeta specExtra =
+  let txt =
+        "{\"metadata\":{\"name\":\"" <> T.pack name <> "\",\"namespace\":\"ns\",\"resourceVersion\":\"7\"" <> extraMeta <> "},"
+          <> "\"spec\":{\"scaleTargetRef\":{\"kind\":\"Deployment\",\"name\":\"" <> target <> "\"},\"maxReplicas\":20" <> specExtra <> "},"
+          <> "\"status\":{\"currentReplicas\":3,\"desiredReplicas\":4}}"
+   in either error id (A.eitherDecodeStrict (TE.encodeUtf8 txt))
+
+fullSpecExtra :: Text
+fullSpecExtra =
+  ",\"minReplicas\":2,\"metrics\":["
+    <> "{\"type\":\"Resource\",\"resource\":{\"name\":\"cpu\",\"target\":{\"type\":\"Utilization\",\"averageUtilization\":70}}},"
+    <> "{\"type\":\"Resource\",\"resource\":{\"name\":\"memory\",\"target\":{\"type\":\"AverageValue\",\"averageValue\":\"256Mi\"}}},"
+    <> "{\"type\":\"Pods\",\"pods\":{\"metric\":{\"name\":\"rps\"},\"target\":{\"type\":\"AverageValue\",\"averageValue\":\"100\"}}},"
+    <> "{\"type\":\"SomethingNew\",\"foo\":1}"
+    <> "],\"behavior\":{\"scaleDown\":{\"stabilizationWindowSeconds\":300,\"policies\":[{\"type\":\"Percent\",\"value\":10,\"periodSeconds\":60}]},"
+    <> "\"scaleUp\":{\"selectPolicy\":\"Max\",\"policies\":[{\"type\":\"Pods\",\"value\":4,\"periodSeconds\":15}]}}"
+
+testHpaSpec :: IO ()
+testHpaSpec = do
+  case HS.parseHpaObject (hpaJson "svc-v1-hpa" "svc-v1" "" fullSpecExtra) of
+    Left e -> fail ("  FAIL: full HPA should parse: " <> T.unpack e)
+    Right h -> do
+      let sp = HS.hoSpec h
+      assertEqual "min/max" (2, 20) (HS.hsMinReplicas sp, HS.hsMaxReplicas sp)
+      assertEqual "four metric entries (unknown kept)" 4 (length (HS.hsMetrics sp))
+      assertEqual "cpu is a Utilization percentage" (HS.ResourceMetric HS.Cpu (HS.Utilization 70)) (head (HS.hsMetrics sp))
+      assertBool "memory is an AverageValue quantity, equal to 268435456" $
+        case HS.hsMetrics sp !! 1 of
+          HS.ResourceMetric HS.Memory (HS.AverageValue q) -> HQ.qMilli q == 268435456 * 1000
+          _ -> False
+      assertBool "unknown metric type is preserved, not dropped" $
+        case last (HS.hsMetrics sp) of HS.UnknownMetric _ -> True; _ -> False
+      assertEqual "metric keys address entries stably" ["resource/cpu", "resource/memory", "pods/rps"] (take 3 (map HS.metricKey (HS.hsMetrics sp)))
+      assertEqual "summary strings" ["cpu 70%", "memory avg 256Mi", "rps avg 100"] (take 3 (map HS.describeMetric (HS.hsMetrics sp)))
+      assertEqual "scaleDown window + Percent policy" (Just 300) (HS.hsBehavior sp >>= HS.bScaleDown >>= HS.srStabilizationWindowSeconds)
+      assertEqual "status" (3, 4) (HS.hstCurrentReplicas (HS.hoStatus h), HS.hstDesiredReplicas (HS.hoStatus h))
+      assertEqual "valid spec has no issues" [] (HS.validateSpec sp)
+      assertEqual "spec JSON round-trips (typed view is lossless for modelled fields)" (Right sp) (either (Left . T.pack) Right (A.eitherDecode (A.encode sp)) :: Either Text HS.HpaSpec)
+      assertEqual "not KEDA, not legacy" (False, False) (HS.hoKedaManaged h, HS.hoLegacyV1 h)
+  case HS.parseHpaObject (hpaJson "svc-v1-hpa" "svc-v1" "" "") of
+    Right h -> assertEqual "absent minReplicas defaults to 1 like the API server" 1 (HS.hsMinReplicas (HS.hoSpec h))
+    Left e -> fail ("  FAIL: minimal HPA should parse: " <> T.unpack e)
+  case HS.parseHpaObject (hpaJson "keda-hpa-x" "svc-v1" "" "") of
+    Right h -> assertBool "keda-hpa- prefix is KEDA-managed" (HS.hoKedaManaged h)
+    Left e -> fail (T.unpack e)
+  case HS.parseHpaObject (hpaJson "x" "svc-v1" ",\"labels\":{\"scaledobject.keda.sh/name\":\"s\"}" "") of
+    Right h -> assertBool "KEDA label is KEDA-managed" (HS.hoKedaManaged h)
+    Left e -> fail (T.unpack e)
+  case HS.parseHpaObject (hpaJson "x" "svc-v1" "" ",\"targetCPUUtilizationPercentage\":80") of
+    Right h -> assertBool "v1-shaped HPA is flagged legacy" (HS.hoLegacyV1 h)
+    Left e -> fail (T.unpack e)
+  assertBool "garbage item is a Left, not an exception" (either (const True) (const False) (HS.parseHpaObject (A.String "nope")))
+  -- validation
+  let base = either (error . T.unpack) HS.hoSpec (HS.parseHpaObject (hpaJson "h" "t" "" fullSpecExtra))
+      bad f = not (null (HS.validateSpec (f base)))
+  assertBool "min 0 rejected" (bad (\s -> s {HS.hsMinReplicas = 0}))
+  assertBool "max < min rejected" (bad (\s -> s {HS.hsMaxReplicas = 1}))
+  assertBool "Utilization on a Pods metric rejected" (bad (\s -> s {HS.hsMetrics = [HS.PodsMetric (HS.MetricIdentifier "rps" Nothing) (HS.Utilization 50)]}))
+  assertBool "Value target on a Resource metric rejected" (bad (\s -> s {HS.hsMetrics = [HS.ResourceMetric HS.Cpu (HS.TargetValue (HQ.mkQuantity 1))]}))
+  assertBool "Utilization 0 rejected" (bad (\s -> s {HS.hsMetrics = [HS.ResourceMetric HS.Cpu (HS.Utilization 0)]}))
+  assertBool "Pods metric with Value target rejected" (bad (\s -> s {HS.hsMetrics = [HS.PodsMetric (HS.MetricIdentifier "rps" Nothing) (HS.TargetValue (HQ.mkQuantity 1))]}))
+  assertBool "zero quantity rejected" (bad (\s -> s {HS.hsMetrics = [HS.ResourceMetric HS.Memory (HS.AverageValue (HQ.mkQuantity 0))]}))
+  assertBool "stabilization window > 3600 rejected" (bad (\s -> s {HS.hsBehavior = Just (HS.Behavior Nothing (Just (HS.ScalingRules (Just 4000) Nothing [])))}))
+  assertBool "policy periodSeconds 0 rejected" (bad (\s -> s {HS.hsBehavior = Just (HS.Behavior (Just (HS.ScalingRules Nothing Nothing [HS.ScalingPolicy HS.PolicyPods 1 0])) Nothing)}))
+  assertBool "Percent scale-up policy > 100 is allowed" (not (bad (\s -> s {HS.hsBehavior = Just (HS.Behavior (Just (HS.ScalingRules Nothing Nothing [HS.ScalingPolicy HS.PolicyPercent 200 60])) Nothing)})))
+  assertBool "External metric with Value target allowed" (not (bad (\s -> s {HS.hsMetrics = [HS.ExternalMetric (HS.MetricIdentifier "q" Nothing) (HS.TargetValue (HQ.mkQuantity 30))]})))
+
+testHpaResolver :: IO ()
+testHpaResolver = do
+  let vs routes =
+        either error id . A.eitherDecodeStrict . TE.encodeUtf8 $
+          "{\"spec\":{\"http\":[" <> T.intercalate "," routes <> "]}}"
+      route subs = "{\"route\":[" <> T.intercalate "," subs <> "]}"
+      dest host sub w = "{\"destination\":{\"host\":\"" <> host <> "\",\"subset\":\"" <> sub <> "\"}" <> maybe "" (\n -> ",\"weight\":" <> T.pack (show (n :: Int))) w <> "}"
+      hpa n target = either (error . T.unpack) id (HS.parseHpaObject (hpaJson n target "" ""))
+  assertEqual "weights per subset" [("v1", 70), ("v2", 30)] (HR.subsetWeightsFromVs "svc" (vs [route [dest "svc" "v1" (Just 70), dest "svc" "v2" (Just 30)]]))
+  assertEqual "other hosts ignored" [("v1", 100)] (HR.subsetWeightsFromVs "svc" (vs [route [dest "svc" "v1" (Just 100), dest "other" "v9" (Just 0)]]))
+  assertEqual "single destination without weight is 100 (Istio semantics)" [("v1", 100)] (HR.subsetWeightsFromVs "svc" (vs [route [dest "svc" "v1" Nothing]]))
+  assertEqual "highest weight per subset across http rules" [("v1", 90), ("v2", 90)] (HR.subsetWeightsFromVs "svc" (vs [route [dest "svc" "v1" (Just 10), dest "svc" "v2" (Just 90)], route [dest "svc" "v1" (Just 90), dest "svc" "v2" (Just 10)]]))
+  assertEqual "FQDN host matches short name" [("v1", 100)] (HR.subsetWeightsFromVs "svc" (vs [route [dest "svc.ns.svc.cluster.local" "v1" (Just 100)]]))
+  assertEqual "garbage VS yields no weights" [] (HR.subsetWeightsFromVs "svc" (A.String "x"))
+  -- classification
+  let h1 = hpa "svc-v1-hpa" "svc-v1"
+      h2 = hpa "svc-v2-hpa" "svc-v2"
+      roles r = [(HS.hoName (HR.rhHpa x), HR.rhRole x) | x <- HR.resHpas r]
+      r1 = HR.classifyHpas "svc" [] (Just [("v1", 0), ("v2", 100)]) [h1, h2]
+  assertEqual "two HPAs: v2 serves, v1 drains" [("svc-v1-hpa", HR.RoleDraining), ("svc-v2-hpa", HR.RoleServing)] (roles r1)
+  assertEqual "serving list" ["svc-v2-hpa"] (HR.resServing r1)
+  assertEqual "no warnings in the clean case" [] (HR.resWarnings r1)
+  let r2 = HR.classifyHpas "svc" [] (Just [("v1", 50), ("v2", 50)]) [h1, h2]
+  assertEqual "split traffic: both serve" ["svc-v1-hpa", "svc-v2-hpa"] (HR.resServing r2)
+  assertBool "split traffic warns that a change hits both" (any (T.isInfixOf "apply to all") (HR.resWarnings r2))
+  let r3 = HR.classifyHpas "svc" [] (Just [("v3", 100)]) [h1, h2]
+  assertEqual "HPAs for versions absent from the VS are UNROUTED" [("svc-v1-hpa", HR.RoleUnrouted), ("svc-v2-hpa", HR.RoleUnrouted)] (roles r3)
+  assertBool "serving version without an HPA is flagged" (any (T.isInfixOf "have no HPA") (HR.resWarnings r3))
+  let r4 = HR.classifyHpas "svc" [] Nothing [h1]
+  assertEqual "VS unreadable -> UNKNOWN, never guessed" [("svc-v1-hpa", HR.RoleUnknown)] (roles r4)
+  -- prefix collision: service "foo" must not claim HPAs of service "foo-bar"
+  let foo = hpa "foo-v1-hpa" "foo-v1"
+      fooBar = hpa "foo-bar-v1-hpa" "foo-bar-v1"
+      r5 = HR.classifyHpas "foo" ["foo", "foo-bar"] (Just [("v1", 100)]) [foo, fooBar]
+  assertEqual "foo does not claim foo-bar's HPA" ["foo-v1-hpa"] (map (HS.hoName . HR.rhHpa) (HR.resHpas r5))
+  let r6 = HR.classifyHpas "foo-bar" ["foo", "foo-bar"] (Just [("v1", 100)]) [foo, fooBar]
+  assertEqual "foo-bar claims its own" ["foo-bar-v1-hpa"] (map (HS.hoName . HR.rhHpa) (HR.resHpas r6))
+  assertEqual "version is the suffix after the host" ["v1"] (map HR.rhVersion (HR.resHpas r6))
+  -- editability
+  let keda = either (error . T.unpack) id (HS.parseHpaObject (hpaJson "keda-hpa-svc-v1" "svc-v1" "" ""))
+      r7 = HR.classifyHpas "svc" [] (Just [("v1", 100)]) [keda]
+  assertBool "KEDA HPA is serving but not editable" (all (\x -> HR.rhEditableReason x /= Nothing) (HR.resHpas r7))
+  assertBool "ordinary HPA is editable" (all (\x -> HR.rhEditableReason x == Nothing) (HR.resHpas r1))
+  let nonDep = either (error . T.unpack) id (HS.parseHpaObject (A.Object (case hpaJson "svc-v1-hpa" "svc-v1" "" "" of A.Object o -> AKM.insert "spec" (A.object ["scaleTargetRef" A..= A.object ["kind" A..= ("StatefulSet" :: Text), "name" A..= ("svc-v1" :: Text)], "maxReplicas" A..= (5 :: Int)]) o; _ -> AKM.empty)))
+  assertEqual "only Deployment targets are matched" [] (HR.resHpas (HR.classifyHpas "svc" [] (Just [("v1", 100)]) [nonDep]))
+  assertBool "no HPAs -> explicit reason" (T.isInfixOf "No HPA" (HR.resReason (HR.classifyHpas "svc" [] (Just []) [])))
+
+utc :: String -> UTCTime
+utc t = read (t <> " UTC")
+
+testHpaWindow :: IO ()
+testHpaWindow = do
+  -- 2026-10-19 is a Monday.
+  let weekdaysIst = HT.Weekly [1, 2, 3, 4, 5] (10 * 60) 120 330 -- Mon-Fri 10:00 IST for 2h = 04:30-06:30 UTC
+      active k t = HW.activeWindow k (utc t)
+  assertBool "inside window (05:00 UTC Monday)" (active weekdaysIst "2026-10-19 05:00:00" /= Nothing)
+  assertEqual "window bounds in UTC" (Just (HW.Window (utc "2026-10-19 04:30:00") (Just (utc "2026-10-19 06:30:00")))) (active weekdaysIst "2026-10-19 05:00:00")
+  assertBool "start is inclusive" (active weekdaysIst "2026-10-19 04:30:00" /= Nothing)
+  assertBool "just before start is closed" (active weekdaysIst "2026-10-19 04:29:59" == Nothing)
+  assertBool "end is exclusive" (active weekdaysIst "2026-10-19 06:30:00" == Nothing)
+  assertBool "Saturday has no window" (active weekdaysIst "2026-10-24 05:00:00" == Nothing)
+  assertBool "Friday does" (active weekdaysIst "2026-10-23 05:00:00" /= Nothing)
+  -- overnight: Friday 22:00 UTC for 6h runs into Saturday
+  let overnight = HT.Weekly [5] (22 * 60) 360 0
+  assertBool "overnight window still open Saturday 02:00" (HW.activeWindow overnight (utc "2026-10-24 02:00:00") /= Nothing)
+  assertBool "closed Saturday 04:00" (HW.activeWindow overnight (utc "2026-10-24 04:00:00") == Nothing)
+  -- local weekday differs from UTC weekday: Monday 01:00 IST = Sunday 19:30 UTC
+  let earlyMon = HT.Weekly [1] 60 60 330
+  assertEqual "Monday 01:00 IST starts Sunday 19:30 UTC" (Just (utc "2026-10-18 19:30:00")) (fmap HW.wStart (HW.activeWindow earlyMon (utc "2026-10-18 20:00:00")))
+  assertBool "and is not a Sunday-local window" (HW.activeWindow (HT.Weekly [7] 60 60 330) (utc "2026-10-18 20:00:00") == Nothing)
+  -- negative offset: Monday 20:00 PST(-480) = Tuesday 04:00 UTC
+  let pst = HT.Weekly [1] (20 * 60) 60 (-480)
+  assertEqual "negative offset" (Just (utc "2026-10-20 04:00:00")) (fmap HW.wStart (HW.activeWindow pst (utc "2026-10-20 04:30:00")))
+  -- next window
+  assertEqual "next after Monday window is Tuesday 04:30" (Just (utc "2026-10-20 04:30:00")) (HW.nextWindowStart weekdaysIst (utc "2026-10-19 05:00:00"))
+  assertEqual "next from Friday evening skips the weekend" (Just (utc "2026-10-26 04:30:00")) (HW.nextWindowStart weekdaysIst (utc "2026-10-23 20:00:00"))
+  assertEqual "next is found even 0.1s ahead (sub-second t)" (Just (utc "2026-10-19 04:30:00")) (HW.nextWindowStart weekdaysIst (utc "2026-10-19 04:29:59.9"))
+  assertEqual "next excludes a start equal to t" (Just (utc "2026-10-20 04:30:00")) (HW.nextWindowStart weekdaysIst (utc "2026-10-19 04:30:00"))
+  -- once
+  let once = HT.Once (utc "2026-11-01 10:00:00") (Just (utc "2026-11-01 14:00:00"))
+      perm = HT.Once (utc "2026-11-01 10:00:00") Nothing
+  assertBool "once: before start" (HW.activeWindow once (utc "2026-11-01 09:59:59") == Nothing)
+  assertBool "once: during" (HW.activeWindow once (utc "2026-11-01 12:00:00") /= Nothing)
+  assertBool "once: after end" (HW.activeWindow once (utc "2026-11-01 14:00:00") == Nothing)
+  assertBool "permanent once stays open for months" (HW.activeWindow perm (utc "2027-03-01 00:00:00") /= Nothing)
+  assertEqual "once next start" (Just (utc "2026-11-01 10:00:00")) (HW.nextWindowStart once (utc "2026-10-19 00:00:00"))
+  assertEqual "once has no next after it started" Nothing (HW.nextWindowStart once (utc "2026-11-01 10:00:00"))
+  -- overlap
+  let now = utc "2026-10-19 00:00:00"
+      overlap = HW.schedulesOverlap now 14
+  assertBool "identical weekly schedules overlap" (overlap weekdaysIst weekdaysIst)
+  assertBool "different days do not" (not (overlap (HT.Weekly [1] 600 60 0) (HT.Weekly [2] 600 60 0)))
+  assertBool "adjacent windows do not overlap (half-open)" (not (overlap (HT.Weekly [1] 600 60 0) (HT.Weekly [1] 660 60 0)))
+  assertBool "one minute of overlap is caught" (overlap (HT.Weekly [1] 600 61 0) (HT.Weekly [1] 660 60 0))
+  assertBool "permanent once collides with a later weekly window" (overlap perm (HT.Weekly [1, 2, 3, 4, 5, 6, 7] 720 60 0))
+  assertBool "once in the past of the horizon does not" (not (overlap once (HT.Weekly [1] 600 60 0)))
+  assertBool "an already-open window counts" (overlap (HT.Weekly [1] 0 1440 0) (HT.Weekly [1] 600 60 0))
+  -- validation
+  assertEqual "valid weekly" [] (HW.validateKind weekdaysIst)
+  assertBool "empty days" (not (null (HW.validateKind (HT.Weekly [] 0 60 0))))
+  assertBool "day 0 / 8" (not (null (HW.validateKind (HT.Weekly [0] 0 60 0))) && not (null (HW.validateKind (HT.Weekly [8] 0 60 0))))
+  assertBool "duplicate days" (not (null (HW.validateKind (HT.Weekly [1, 1] 0 60 0))))
+  assertBool "duration 0 and 1441" (not (null (HW.validateKind (HT.Weekly [1] 0 0 0))) && not (null (HW.validateKind (HT.Weekly [1] 0 1441 0))))
+  assertBool "offset out of range" (not (null (HW.validateKind (HT.Weekly [1] 0 60 900))))
+  assertBool "once end before start" (not (null (HW.validateKind (HT.Once (utc "2026-11-01 10:00:00") (Just (utc "2026-11-01 09:00:00"))))))
+  -- JSON
+  assertEqual "weekly JSON round-trip" (Just weekdaysIst) (A.decode (A.encode weekdaysIst))
+  assertEqual "once JSON round-trip" (Just once) (A.decode (A.encode once))
+  assertEqual "permanent once JSON round-trip" (Just perm) (A.decode (A.encode perm))
+  assertEqual "startTime rendered HH:MM" (Just (A.String "10:00")) (case A.toJSON weekdaysIst of A.Object o -> AKM.lookup "startTime" o; _ -> Nothing)
+  assertEqual "bad startTime rejected" (Nothing :: Maybe HT.ScheduleKind) (A.decode "{\"kind\":\"WEEKLY\",\"days\":[1],\"startTime\":\"25:00\",\"durationMinutes\":60}")
+  assertEqual "missing offset defaults to 0" (Just (HT.Weekly [1] 600 60 0)) (A.decode "{\"kind\":\"WEEKLY\",\"days\":[1],\"startTime\":\"10:00\",\"durationMinutes\":60}")
+
+changeSpecExtra :: Text
+changeSpecExtra = T.replace "],\"behavior\"" "],\"unmodelled\":\"keep-me\",\"behavior\"" fullSpecExtra
+
+mkHpa :: Text -> HS.HpaObject
+mkHpa extra = either (error . T.unpack) id (HS.parseHpaObject (hpaJson "svc-v1-hpa" "svc-v1" ",\"managedFields\":[{\"x\":1}]" extra))
+
+testHpaChange :: IO ()
+testHpaChange = do
+  let h = mkHpa changeSpecExtra
+      spec = HS.hoSpec h
+      pct n = HS.Utilization n
+      cpuKey = "resource/cpu"
+      memKey = "resource/memory"
+      ch1 = HT.emptyChange {HT.chMinReplicas = Just 10, HT.chMaxReplicas = Just 60, HT.chMetricTargets = [HT.MetricTargetChange cpuKey (pct 50)]}
+  case HC.applyChangeTyped spec ch1 of
+    Left e -> fail ("  FAIL: ch1 should apply: " <> show e)
+    Right after -> do
+      assertEqual "min/max changed" (10, 60) (HS.hsMinReplicas after, HS.hsMaxReplicas after)
+      assertEqual "cpu target changed" (HS.ResourceMetric HS.Cpu (pct 50)) (head (HS.hsMetrics after))
+      assertEqual "other metrics untouched" (tail (HS.hsMetrics spec)) (tail (HS.hsMetrics after))
+      assertEqual "behavior untouched" (HS.hsBehavior spec) (HS.hsBehavior after)
+      -- raw object
+      case HC.buildChangedObject h ch1 [(HT.annScheduleId, "s1"), (HT.annApplyId, "a1")] of
+        Left e -> fail ("  FAIL: buildChangedObject: " <> show e)
+        Right obj -> do
+          let reparsed = either (error . T.unpack) id (HS.parseHpaObject obj)
+              rawText = TE.decodeUtf8 (BL.toStrict (A.encode obj))
+          assertEqual "re-parsed object equals the intended spec" after (HS.hoSpec reparsed)
+          assertBool "unmodelled spec field survives" (T.isInfixOf "keep-me" rawText)
+          assertBool "unknown metric type survives untouched" (T.isInfixOf "SomethingNew" rawText)
+          assertBool "resourceVersion kept for optimistic concurrency" (HS.hoResourceVersion reparsed == "7")
+          assertBool "managedFields stripped" (not (T.isInfixOf "managedFields" rawText))
+          assertBool "status stripped" (not (T.isInfixOf "currentReplicas" rawText))
+          assertBool "annotations written" (T.isInfixOf "s1" rawText && T.isInfixOf "a1" rawText)
+          -- restore with live == changed object
+          let live = reparsed
+              plan = HC.planRestore spec after ch1 live
+              restoredObj = either (error . T.unpack) id (HS.parseHpaObject (HC.rpObject plan))
+          assertEqual "all touched fields restored" ["minReplicas", "maxReplicas", "metric resource/cpu"] (HC.rpRestored plan)
+          assertEqual "no drift" [] (HC.rpDrifted plan)
+          assertEqual "restored spec equals the original" spec (HS.hoSpec restoredObj)
+          assertBool "our annotations are gone after restore" (not (T.isInfixOf "hpa-apply-id" (TE.decodeUtf8 (BL.toStrict (A.encode (HC.rpObject plan))))))
+          assertBool "unmodelled field still there after restore" (T.isInfixOf "keep-me" (TE.decodeUtf8 (BL.toStrict (A.encode (HC.rpObject plan)))))
+          -- drift: someone raised max to 99 after we set 60
+          let driftedRaw = HC.rpObject (HC.planRestore spec after ch1 (reparsed {HS.hoSpec = (HS.hoSpec reparsed) {HS.hsMaxReplicas = 99}, HS.hoRaw = setMax 99 (HS.hoRaw reparsed)}))
+              setMax n v = case v of A.Object o -> A.Object (case AKM.lookup "spec" o of Just (A.Object so) -> AKM.insert "spec" (A.Object (AKM.insert "maxReplicas" (A.toJSON (n :: Int)) so)) o; _ -> o); x -> x
+              driftPlan = HC.planRestore spec after ch1 (reparsed {HS.hoSpec = (HS.hoSpec reparsed) {HS.hsMaxReplicas = 99}, HS.hoRaw = setMax 99 (HS.hoRaw reparsed)})
+              driftObj = either (error . T.unpack) id (HS.parseHpaObject driftedRaw)
+          assertEqual "drifted field is reported" ["maxReplicas"] (HC.rpDrifted driftPlan)
+          assertEqual "drifted field is left alone" 99 (HS.hsMaxReplicas (HS.hoSpec driftObj))
+          assertEqual "non-drifted fields still restored" 2 (HS.hsMinReplicas (HS.hoSpec driftObj))
+          -- already original
+          let nothing = HC.planRestore spec after ch1 h
+          assertEqual "live == original: nothing to restore" [] (HC.rpRestored nothing)
+          assertEqual "live == original: reported as already original" ["minReplicas", "maxReplicas", "metric resource/cpu"] (HC.rpAlreadyOriginal nothing)
+      -- verify
+      assertEqual "verify passes when the cluster holds the intended spec" [] (HC.verifyApplied after ch1 after)
+      assertEqual "verify reports each mismatching touched field" 3 (length (HC.verifyApplied after ch1 spec))
+      assertEqual "verify ignores untouched fields" [] (HC.verifyApplied after ch1 (after {HS.hsMetrics = HS.hsMetrics after}))
+  -- memory quantity: 256Mi -> 512Mi
+  let chMem = HT.emptyChange {HT.chMetricTargets = [HT.MetricTargetChange memKey (HS.AverageValue (HQ.mkQuantity 536870912))]}
+  assertBool "memory quantity target applies" (either (const False) (const True) (HC.applyChangeTyped spec chMem))
+  -- quantity-aware no-op: 256Mi == 268435456
+  let chSame = HT.emptyChange {HT.chMetricTargets = [HT.MetricTargetChange memKey (HS.AverageValue (HQ.mkQuantity 268435456))]}
+  assertBool "same quantity in another spelling is a no-op" (HC.changeIsNoop spec chSame)
+  assertBool "a real change is not a no-op" (not (HC.changeIsNoop spec ch1))
+  -- failures
+  let leftOf c = either id (const []) (HC.applyChangeTyped spec c)
+  assertBool "empty change refused" (not (null (leftOf HT.emptyChange)))
+  assertBool "unknown metric key refused, listing the real ones" (any (T.isInfixOf "resource/cpu") (leftOf HT.emptyChange {HT.chMetricTargets = [HT.MetricTargetChange "resource/nope" (pct 5)]}))
+  assertBool "duplicate metric key refused" (not (null (leftOf HT.emptyChange {HT.chMetricTargets = [HT.MetricTargetChange cpuKey (pct 5), HT.MetricTargetChange cpuKey (pct 6)]})))
+  assertBool "max below min refused" (not (null (leftOf HT.emptyChange {HT.chMaxReplicas = Just 1})))
+  assertBool "min above existing max refused" (not (null (leftOf HT.emptyChange {HT.chMinReplicas = Just 50})))
+  assertBool "Utilization on a pods metric refused" (not (null (leftOf HT.emptyChange {HT.chMetricTargets = [HT.MetricTargetChange "pods/rps" (pct 50)]})))
+  assertBool "unknown-type metric cannot be edited" (not (null (leftOf HT.emptyChange {HT.chMetricTargets = [HT.MetricTargetChange (HS.metricKey (last (HS.hsMetrics spec))) (pct 50)]})))
+  -- behavior: replace scaleDown only
+  let newDown = HS.ScalingRules (Just 600) (Just HS.SelMin) [HS.ScalingPolicy HS.PolicyPods 2 60]
+      chB = HT.emptyChange {HT.chScaleDown = Just newDown}
+  case HC.applyChangeTyped spec chB of
+    Right a -> do
+      assertEqual "scaleDown replaced wholesale" (Just newDown) (HS.hsBehavior a >>= HS.bScaleDown)
+      assertEqual "scaleUp untouched" (HS.hsBehavior spec >>= HS.bScaleUp) (HS.hsBehavior a >>= HS.bScaleUp)
+    Left e -> fail ("  FAIL: behavior change: " <> show e)
+  -- behavior added where none existed, then restored away entirely
+  let noBeh = mkHpa ",\"minReplicas\":2,\"metrics\":[{\"type\":\"Resource\",\"resource\":{\"name\":\"cpu\",\"target\":{\"type\":\"Utilization\",\"averageUtilization\":70}}}]"
+      chUp = HT.emptyChange {HT.chScaleUp = Just (HS.ScalingRules (Just 0) Nothing [HS.ScalingPolicy HS.PolicyPercent 100 15])}
+  case (HC.applyChangeTyped (HS.hoSpec noBeh) chUp, HC.buildChangedObject noBeh chUp []) of
+    (Right a, Right obj) -> do
+      let live = either (error . T.unpack) id (HS.parseHpaObject obj)
+          plan = HC.planRestore (HS.hoSpec noBeh) a chUp live
+          restored = either (error . T.unpack) id (HS.parseHpaObject (HC.rpObject plan))
+      assertEqual "behavior was added" True (HS.hsBehavior (HS.hoSpec live) /= Nothing)
+      assertEqual "restore removes the behavior block entirely" Nothing (HS.hsBehavior (HS.hoSpec restored))
+      assertBool "no empty behavior object left in the raw object" (not (T.isInfixOf "behavior" (TE.decodeUtf8 (BL.toStrict (A.encode (HC.rpObject plan))))))
+    other -> fail ("  FAIL: behavior add/restore setup: " <> show (fmap (const ()) (fst other)))
+  -- guardrails
+  let g = HT.defaultGuardrail {HT.grMaxReplicasCap = Just 50, HT.grMinReplicasFloor = Just 2, HT.grMaxStepPct = Just 100}
+      afterOf c = either (error . show) id (HC.applyChangeTyped spec c)
+  assertEqual "within limits" [] (HC.checkGuardrail g spec (afterOf HT.emptyChange {HT.chMaxReplicas = Just 40}))
+  assertBool "cap exceeded" (not (null (HC.checkGuardrail g spec (afterOf HT.emptyChange {HT.chMaxReplicas = Just 60}))))
+  assertBool "floor violated" (not (null (HC.checkGuardrail g spec (afterOf HT.emptyChange {HT.chMinReplicas = Just 1}))))
+  assertBool "step too large (max 20 -> 45 is +125%)" (not (null (HC.checkGuardrail g spec (afterOf HT.emptyChange {HT.chMaxReplicas = Just 45}))))
+  assertEqual "step exactly at the limit is allowed (20 -> 40 is +100%)" [] (HC.checkGuardrail g spec (afterOf HT.emptyChange {HT.chMaxReplicas = Just 40}))
+  let tight = HT.defaultGuardrail {HT.grMinReplicasFloor = Just 20, HT.grMaxReplicasCap = Just 1}
+  assertEqual "a floor/cap the HPA already violates does NOT block a change that leaves min/max alone" [] (HC.checkGuardrail tight spec (afterOf HT.emptyChange {HT.chScaleDown = Just (HS.ScalingRules (Just 60) Nothing [])}))
+  assertBool "...but still blocks a change that touches the limited number" (not (null (HC.checkGuardrail tight spec (afterOf HT.emptyChange {HT.chMinReplicas = Just 3}))))
+  assertBool "frozen service refuses any change" (not (null (HC.checkGuardrail HT.defaultGuardrail {HT.grFrozen = True, HT.grFrozenReason = Just "sale"} spec (afterOf HT.emptyChange {HT.chMaxReplicas = Just 21}))))
+  assertEqual "no guardrail, no issues" [] (HC.checkGuardrail HT.defaultGuardrail spec (afterOf HT.emptyChange {HT.chMaxReplicas = Just 500}))
+  -- diff
+  let d = HC.jsonDiff (A.toJSON spec) (A.toJSON (afterOf ch1))
+  assertEqual "diff paths" ["maxReplicas", "metrics[0].resource.target.averageUtilization", "minReplicas"] (map HC.dePath d)
+  assertEqual "diff of equal values is empty" [] (HC.jsonDiff (A.toJSON spec) (A.toJSON spec))
+  assertEqual "array growth reported by index" [HC.DiffEntry "[2]" Nothing (Just (A.Number 3))] (HC.jsonDiff (A.toJSON [1 :: Int, 2]) (A.toJSON [1 :: Int, 2, 3]))
+  assertEqual "1 and 1.0 are equal" [] (HC.jsonDiff (A.Number 1) (A.Number 1.0))
+  -- base spec
+  assertBool "base spec carries min, max, metrics and behavior" $
+    case HC.baseSpecJson h of
+      A.Object o -> all (`AKM.member` o) ["minReplicas", "maxReplicas", "metrics", "behavior"] && not (AKM.member "scaleTargetRef" o)
+      _ -> False
+
+testHpaTypes :: IO ()
+testHpaTypes = do
+  let allS = [minBound .. maxBound] :: [HT.ApplyStatus]
+  assertEqual "status text round-trips" (map Just allS) (map (HT.parseApplyStatus . HT.applyStatusText) allS)
+  assertEqual "blocking + terminal partition all statuses" (length allS) (length HT.blockingStatusTexts + length HT.terminalStatusTexts)
+  assertEqual "terminal statuses" ["RESTORED", "ROLLED_BACK", "FAILED", "SKIPPED"] HT.terminalStatusTexts
+  assertBool "no transition out of a terminal status" (and [not (HT.validApplyTransition f t) | f <- allS, HT.isTerminalApply f, t <- allS])
+  assertBool "PENDING -> APPLYING" (HT.validApplyTransition HT.Pending HT.Applying)
+  assertBool "PENDING cannot jump to APPLIED" (not (HT.validApplyTransition HT.Pending HT.Applied))
+  assertBool "APPLIED -> RESTORING" (HT.validApplyTransition HT.Applied HT.Restoring)
+  assertBool "APPLIED cannot go straight to RESTORED" (not (HT.validApplyTransition HT.Applied HT.Restored))
+  assertBool "OBSERVING -> ROLLING_BACK (health breach)" (HT.validApplyTransition HT.Observing HT.RollingBack)
+  assertBool "NEEDS_ATTENTION can be retried as RESTORING / ROLLING_BACK or closed FAILED" (all (HT.validApplyTransition HT.NeedsAttention) [HT.Restoring, HT.RollingBack, HT.Failed])
+  assertBool "every non-terminal status can reach NEEDS_ATTENTION or a terminal" (and [any (\t -> HT.validApplyTransition f t) allS | f <- allS, not (HT.isTerminalApply f)])
+  assertEqual "step text round-trips" (map Just [minBound .. maxBound :: HT.ApplyStep]) (map (HT.parseApplyStep . HT.applyStepText) [minBound .. maxBound])
+  -- change JSON
+  let ch = HT.emptyChange {HT.chMinReplicas = Just 3, HT.chMetricTargets = [HT.MetricTargetChange "resource/cpu" (HS.Utilization 55)]}
+  assertEqual "change JSON round-trip" (Just ch) (A.decode (A.encode ch))
+  assertEqual "empty change JSON is {}" "{}" (BL.toStrict (A.encode HT.emptyChange))
+  assertBool "empty detected" (HT.changeIsEmpty HT.emptyChange && not (HT.changeIsEmpty ch))
+  -- policy defaults + validation
+  assertEqual "empty policy object takes defaults" (Just HT.defaultHealthPolicy) (A.decode "{}")
+  assertEqual "partial policy keeps other defaults" (Just HT.defaultHealthPolicy {HT.hpObserveSeconds = 60}) (A.decode "{\"observeSeconds\":60}")
+  assertEqual "default policy is valid" [] (HT.validateHealthPolicy HT.defaultHealthPolicy)
+  assertBool "bad policy values rejected" (length (HT.validateHealthPolicy HT.defaultHealthPolicy {HT.hpObserveSeconds = -1, HT.hpMaxUnavailablePct = 0}) == 2)
+  assertEqual "HPA permissions round-trip through their text form" (map Just [AP_HPA_VIEW, AP_HPA_SCHEDULE_EDIT, AP_HPA_APPLY, AP_HPA_ROLLBACK, AP_HPA_GUARDRAIL_EDIT]) (map (textToAutopilotPermission . autopilotPermissionToText) [AP_HPA_VIEW, AP_HPA_SCHEDULE_EDIT, AP_HPA_APPLY, AP_HPA_ROLLBACK, AP_HPA_GUARDRAIL_EDIT])
+  assertEqual "only HPA_VIEW is in the Viewer role" [AP_HPA_VIEW] [p | AutopilotPerm p <- defaultPermissions Viewer Autopilot, p `elem` [AP_HPA_VIEW, AP_HPA_SCHEDULE_EDIT, AP_HPA_APPLY, AP_HPA_ROLLBACK, AP_HPA_GUARDRAIL_EDIT]]
+  assertEqual "guardrail JSON round-trip" (Just HT.defaultGuardrail {HT.grMaxReplicasCap = Just 9}) (A.decode (A.encode HT.defaultGuardrail {HT.grMaxReplicasCap = Just 9}))
+
+testHpaMisc :: IO ()
+testHpaMisc = do
+  let pol = HT.defaultHealthPolicy {HT.hpGraceSeconds = 120, HT.hpMaxUnavailablePct = 50}
+      h = mkHpa changeSpecExtra
+      inputs ready proms = HH.HealthInputs h ready proms
+      t0 = utc "2026-10-19 10:00:00"
+      t1 = utc "2026-10-19 10:01:00"
+      t3 = utc "2026-10-19 10:03:00"
+  -- assessment
+  assertEqual "all pods ready: healthy" [] (HH.hrIssues (HH.assessHealth pol (inputs (Just (10, 10)) [])))
+  assertEqual "exactly at the limit (5 of 10 unready, limit 50%) is fine" [] (HH.hrIssues (HH.assessHealth pol (inputs (Just (10, 5)) [])))
+  assertEqual "over the limit (6 of 10 unready)" 1 (length (HH.hrIssues (HH.assessHealth pol (inputs (Just (10, 4)) []))))
+  assertEqual "zero desired pods never divides or flags" [] (HH.hrIssues (HH.assessHealth pol (inputs (Just (0, 0)) [])))
+  assertEqual "unknown readiness is a note, not an issue" ([], ["pod readiness unavailable"]) (let r = HH.assessHealth pol (inputs Nothing []) in (HH.hrIssues r, HH.hrNotes r))
+  let inactiveHpa = h {HS.hoStatus = (HS.hoStatus h) {HS.hstConditions = [HS.HpaCondition "ScalingActive" "False" (Just "FailedGetResourceMetric") (Just "no metrics")]}}
+  assertEqual "ScalingActive=False is an issue" 1 (length (HH.hrIssues (HH.assessHealth pol (HH.HealthInputs inactiveHpa (Just (4, 4)) []))))
+  assertEqual "... unless the policy ignores it" [] (HH.hrIssues (HH.assessHealth pol {HT.hpRollbackOnScalingInactive = False} (HH.HealthInputs inactiveHpa (Just (4, 4)) [])))
+  let chk = HT.PromCheck "p99" "histogram_quantile(...)" HT.OpGt 500
+  assertEqual "prometheus value over threshold is an issue" 1 (length (HH.hrIssues (HH.assessHealth pol (inputs (Just (4, 4)) [(chk, Right 800)]))))
+  assertEqual "prometheus value under threshold is fine" [] (HH.hrIssues (HH.assessHealth pol (inputs (Just (4, 4)) [(chk, Right 100)])))
+  assertEqual "prometheus failure is a note, never a breach" ([], 1) (let r = HH.assessHealth pol (inputs (Just (4, 4)) [(chk, Left "unreachable")]) in (HH.hrIssues r, length (HH.hrNotes r)))
+  assertEqual "OpLt breaches below the threshold" 1 (length (HH.hrIssues (HH.assessHealth pol (inputs (Just (4, 4)) [(chk {HT.pcOp = HT.OpLt}, Right 100)]))))
+  -- judgement over time (grace 120s)
+  let bad = HH.HealthReport ["3 pods not ready"] []
+      good = HH.HealthReport [] []
+  assertEqual "healthy clears the clock" (HH.VerdictOk, Nothing) (HH.judge pol t1 (Just t0) good)
+  assertEqual "first unhealthy tick starts the clock" (HH.VerdictWatching, Just t0) (HH.judge pol t0 Nothing bad)
+  assertEqual "unhealthy for 60s of 120s: still watching, clock kept" (HH.VerdictWatching, Just t0) (HH.judge pol t1 (Just t0) bad)
+  assertEqual "unhealthy for 180s: breach" (HH.VerdictBreach, Just t0) (HH.judge pol t3 (Just t0) bad)
+  assertEqual "grace 0 breaches immediately" (HH.VerdictBreach, Just t0) (HH.judge pol {HT.hpGraceSeconds = 0} t0 Nothing bad)
+  assertEqual "a recovery then a relapse restarts the clock" (HH.VerdictWatching, Just t3) (HH.judge pol t3 Nothing bad)
+  -- prometheus
+  assertEqual "query placeholders substituted" (Right "up{namespace=\"ns1\",service=\"svc\",deployment=\"svc-v1\"}") (HH.substitutePromQuery "ns1" "svc" "svc-v1" "up{namespace=\"{{namespace}}\",service=\"{{service}}\",deployment=\"{{deployment}}\"}")
+  assertBool "a name that could rewrite the query is refused" (either (const True) (const False) (HH.substitutePromQuery "ns\"} or vector(1) #" "svc" "svc-v1" "up{n=\"{{namespace}}\"}"))
+  assertBool "k8s names accepted / rejected" (HH.safeK8sName "svc-v1.prod" && not (HH.safeK8sName "Svc") && not (HH.safeK8sName "a b") && not (HH.safeK8sName ""))
+  let prom body = either (error . show) id (A.eitherDecode body) :: A.Value
+  assertEqual "scalar parsed" (Right 12.5) (HH.parsePromScalar (prom "{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":[{\"metric\":{},\"value\":[1700000000,\"12.5\"]}]}}"))
+  assertEqual "empty result is 'no data', not zero" (Left "no data") (HH.parsePromScalar (prom "{\"status\":\"success\",\"data\":{\"result\":[]}}"))
+  assertEqual "NaN is not a number" (Left "value is NaN") (HH.parsePromScalar (prom "{\"status\":\"success\",\"data\":{\"result\":[{\"value\":[1,\"NaN\"]}]}}"))
+  assertBool "infinity is refused too" (either (const True) (const False) (HH.parsePromScalar (prom "{\"status\":\"success\",\"data\":{\"result\":[{\"value\":[1,\"+Inf\"]}]}}")))
+  assertBool "error status refused" (either (const True) (const False) (HH.parsePromScalar (prom "{\"status\":\"error\"}")))
+  -- events / metrics parsing
+  assertEqual "rescale message -> new size" (Just 7) (HO.parseNewSize "New size: 7; reason: cpu resource utilization (percentage of request) above target")
+  assertEqual "no size in the message" Nothing (HO.parseNewSize "failed to get cpu utilization")
+  assertEqual "k8s timestamp" (Just (utc "2026-10-19 05:00:00")) (HO.parseK8sTime "2026-10-19T05:00:00Z")
+  assertEqual "k8s timestamp with microseconds" (Just (utc "2026-10-19 05:00:00.123456")) (HO.parseK8sTime "2026-10-19T05:00:00.123456Z")
+  assertEqual "garbage timestamp" Nothing (HO.parseK8sTime "yesterday")
+  let metrics = prom "[{\"type\":\"Resource\",\"resource\":{\"name\":\"memory\",\"current\":{\"averageUtilization\":41}}},{\"type\":\"Resource\",\"resource\":{\"name\":\"cpu\",\"current\":{\"averageUtilization\":63,\"averageValue\":\"250m\"}}}]"
+  assertEqual "cpu utilisation picked by name" (Just 63) (HS.currentUtilization "cpu" metrics)
+  assertEqual "memory utilisation picked by name" (Just 41) (HS.currentUtilization "memory" metrics)
+  assertEqual "absolute-only metrics have no utilisation" Nothing (HS.currentUtilization "cpu" (prom "[{\"type\":\"Resource\",\"resource\":{\"name\":\"cpu\",\"current\":{\"averageValue\":\"250m\"}}}]"))
+  assertEqual "no metrics yet" Nothing (HS.currentUtilization "cpu" A.Null)
+  -- resume decision
+  let spec = HS.hoSpec h
+      ch = HT.emptyChange {HT.chMaxReplicas = Just 60, HT.chMinReplicas = Just 10}
+      after = either (error . show) id (HC.applyChangeTyped spec ch)
+  assertEqual "untouched live: send the change" HC.NeedsPatch (HC.decideApplyAction spec after ch spec)
+  assertEqual "live already has the change: do not send it again" HC.AlreadyApplied (HC.decideApplyAction spec after ch after)
+  assertEqual "someone set max to 33 meanwhile: stop and escalate" (HC.Diverged ["maxReplicas"]) (HC.decideApplyAction spec after ch spec {HS.hsMaxReplicas = 33})
+  assertEqual "a field that did not change is never 'diverged' (min unchanged by us)" HC.NeedsPatch (HC.decideApplyAction spec (after {HS.hsMinReplicas = HS.hsMinReplicas spec}) ch {HT.chMinReplicas = Nothing} spec)
+  -- serving targets
+  let resolved name role = HR.ResolvedHpa (mkHpa changeSpecExtra) {HS.hoName = name} "v" Nothing role Nothing
+      res rs = HR.Resolution rs [] "" []
+  assertEqual "serving HPAs are the targets" ["a"] (map (HS.hoName . HR.rhHpa) (HR.servingTargets (res [resolved "a" HR.RoleServing, resolved "b" HR.RoleDraining])))
+  assertEqual "split traffic targets both" ["a", "b"] (map (HS.hoName . HR.rhHpa) (HR.servingTargets (res [resolved "a" HR.RoleServing, resolved "b" HR.RoleServing])))
+  assertEqual "no VS and one HPA: that HPA" ["a"] (map (HS.hoName . HR.rhHpa) (HR.servingTargets (res [resolved "a" HR.RoleUnknown])))
+  assertEqual "no VS and several HPAs: refuse to guess" [] (map (HS.hoName . HR.rhHpa) (HR.servingTargets (res [resolved "a" HR.RoleUnknown, resolved "b" HR.RoleUnknown])))
+  assertEqual "only draining HPAs: nothing to target" [] (map (HS.hoName . HR.rhHpa) (HR.servingTargets (res [resolved "a" HR.RoleDraining])))
+  -- ASCII-safe JSON for stdin
+  assertEqual "ascii stays" "{\"a\":\"x\"}" (HK.asciiJson (A.object ["a" A..= ("x" :: Text)]))
+  assertEqual "BMP char is \\u-escaped" "{\"a\":\"\\u00e9\"}" (HK.asciiJson (A.object ["a" A..= ("\233" :: Text)]))
+  assertEqual "astral char becomes a surrogate pair" "{\"a\":\"\\ud83d\\ude00\"}" (HK.asciiJson (A.object ["a" A..= ("\128512" :: Text)]))
+  assertEqual "the escaped form decodes back to the same value" (Just (A.object ["a" A..= ("\233\128512 ok" :: Text)])) (A.decodeStrict (TE.encodeUtf8 (HK.asciiJson (A.object ["a" A..= ("\233\128512 ok" :: Text)]))))
+
+testHpaDefaults :: IO ()
+testHpaDefaults = do
+  let rules st sel pols = HS.ScalingRules st sel pols
+      pods4 = HS.ScalingPolicy HS.PolicyPods 4 15
+      want = HC.VRules (Just (rules (Just 60) Nothing []))
+      liveDefaulted = HC.VRules (Just (rules (Just 60) (Just HS.SelMax) [pods4, HS.ScalingPolicy HS.PolicyPercent 100 15]))
+  assertBool "a wanted rule is satisfied when the server adds defaults we did not specify" (HC.fieldMatches want liveDefaulted)
+  assertBool "a differing stabilisation window is not satisfied" (not (HC.fieldMatches want (HC.VRules (Just (rules (Just 30) (Just HS.SelMax) [pods4])))))
+  assertBool "a wanted selectPolicy must match" (not (HC.fieldMatches (HC.VRules (Just (rules Nothing (Just HS.SelMin) []))) liveDefaulted))
+  assertBool "wanted policies must match exactly when given" (not (HC.fieldMatches (HC.VRules (Just (rules Nothing Nothing [pods4]))) (HC.VRules (Just (rules Nothing Nothing [HS.ScalingPolicy HS.PolicyPods 9 15])))))
+  assertBool "wanted policies present in live (alongside defaults) are NOT enough: lists must be equal" (not (HC.fieldMatches (HC.VRules (Just (rules Nothing Nothing [pods4]))) liveDefaulted))
+  assertBool "wanting no rules means the cluster has none" (HC.fieldMatches (HC.VRules Nothing) (HC.VRules Nothing) && not (HC.fieldMatches (HC.VRules Nothing) liveDefaulted))
+  assertBool "wanting rules and finding none is a mismatch" (not (HC.fieldMatches want (HC.VRules Nothing)))
+  assertBool "numbers and targets compare exactly" (HC.fieldMatches (HC.VInt 5) (HC.VInt 5) && not (HC.fieldMatches (HC.VInt 5) (HC.VInt 6)))
+  -- end to end on an HPA that had no behavior: change scaleUp, let the "server" default both directions, then verify/resume/restore
+  let noBeh = mkHpa ",\"minReplicas\":2,\"metrics\":[{\"type\":\"Resource\",\"resource\":{\"name\":\"cpu\",\"target\":{\"type\":\"Utilization\",\"averageUtilization\":70}}}]"
+      ch = HT.emptyChange {HT.chScaleUp = Just (rules (Just 60) Nothing [])}
+      after = either (error . show) id (HC.applyChangeTyped (HS.hoSpec noBeh) ch)
+      changed = either (error . show) id (HC.buildChangedObject noBeh ch [(HT.annApplyId, "a1")])
+      defaulted = case changed of
+        A.Object o -> case AKM.lookup "spec" o of
+          Just (A.Object so) -> A.Object (AKM.insert "spec" (A.Object (AKM.insert "behavior" (either error id (A.eitherDecode "{\"scaleUp\":{\"stabilizationWindowSeconds\":60,\"selectPolicy\":\"Max\",\"policies\":[{\"type\":\"Pods\",\"value\":4,\"periodSeconds\":15}]},\"scaleDown\":{\"stabilizationWindowSeconds\":300,\"selectPolicy\":\"Max\",\"policies\":[{\"type\":\"Percent\",\"value\":100,\"periodSeconds\":15}]}}")) so)) o)
+          _ -> changed
+        _ -> changed
+      live = either (error . T.unpack) id (HS.parseHpaObject defaulted)
+  assertEqual "verify passes against the server-defaulted object" [] (HC.verifyApplied after ch (HS.hoSpec live))
+  assertEqual "a resume sees it as already applied (not diverged)" HC.AlreadyApplied (HC.decideApplyAction (HS.hoSpec noBeh) after ch (HS.hoSpec live))
+  let plan = HC.planRestore (HS.hoSpec noBeh) after ch live
+      restored = either (error . T.unpack) id (HS.parseHpaObject (HC.rpObject plan))
+  assertEqual "restore puts back the field" ["behavior.scaleUp"] (HC.rpRestored plan)
+  assertEqual "the whole defaulted behavior block is removed, as the HPA originally had none" Nothing (HS.hsBehavior (HS.hoSpec restored))
+  assertEqual "and that is exactly what the restore is judged by" [] [fieldLabel' | f <- HC.touchedFields ch, not (HC.fieldMatches (HC.fieldValue f (HS.hoSpec noBeh)) (HC.fieldValue f (HS.hoSpec restored))), let fieldLabel' = HC.fieldLabel f]
+  -- kubectl error classification
+  let cls = HK.classifyKubeError
+  assertEqual "a real NotFound" (HK.KubeNotFound "Error from server (NotFound): horizontalpodautoscalers.autoscaling \"x\" not found") (cls "Error from server (NotFound): horizontalpodautoscalers.autoscaling \"x\" not found\n")
+  assertBool "a missing credential plugin is NOT 'the HPA is gone'" (case cls "getting credentials: exec: executable gke-gcloud-auth-plugin not found" of HK.KubeFailed _ -> True; _ -> False)
+  assertBool "kubectl itself missing is NOT 'the HPA is gone'" (case cls "sh: kubectl: command not found" of HK.KubeFailed _ -> True; _ -> False)
+  assertBool "a conflict" (case cls "Error from server (Conflict): Operation cannot be fulfilled on x: the object has been modified; please apply your changes to the latest version" of HK.KubeConflict _ -> True; _ -> False)
+  assertBool "anything else is a plain failure" (case cls "Unable to connect to the server: dial tcp: i/o timeout" of HK.KubeFailed _ -> True; _ -> False)
+
+testHpaMetrics :: IO ()
+testHpaMetrics = do
+  assertEqual "HPA gauge query" "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"atlas\",horizontalpodautoscaler=~\"a-hpa|b-hpa\"}" (HM.hpaQuery "horizontalpodautoscaler" "status_current_replicas" "atlas" ["a-hpa", "b-hpa"])
+  assertBool "dots in names are matched literally ([.], no backslashes)" (T.isInfixOf "b[.]hpa" (HM.hpaQuery "horizontalpodautoscaler" "spec_max_replicas" "atlas" ["a-hpa", "b.hpa"]))
+  assertEqual "deployment replica query (fallback when HPA series are absent)" "kube_deployment_status_replicas_ready{namespace=\"atlas\",deployment=\"bpp-master-feea99\"}" (HM.deployQuery "status_replicas_ready" "atlas" "bpp-master-feea99")
+  assertBool "cpu query targets only that deployment's pods and divides by requests" (let q = HM.cpuQuery "atlas" "app-v1" in T.isInfixOf "pod=~\"app-v1-[a-z0-9]+-[a-z0-9]+\"" q && T.isInfixOf "kube_pod_container_resource_requests" q && T.isInfixOf "resource=\"cpu\"" q)
+  let matrix = either error id (A.eitherDecode "{\"status\":\"success\",\"data\":{\"resultType\":\"matrix\",\"result\":[{\"metric\":{\"horizontalpodautoscaler\":\"a-hpa\"},\"values\":[[1700000000,\"3\"],[1700000060,\"4\"],[1700000120,\"NaN\"]]}]}}") :: A.Value
+  assertEqual "matrix parsed; NaN samples dropped" (Right [(Map.fromList [("horizontalpodautoscaler", "a-hpa")], [(1700000000, 3), (1700000060, 4)])]) (HM.parsePromMatrix matrix)
+  assertBool "an error status is refused" (either (const True) (const False) (HM.parsePromMatrix (either error id (A.eitherDecode "{\"status\":\"error\"}"))))
+  assertEqual "no series is an empty list, not an error" (Right []) (HM.parsePromMatrix (either error id (A.eitherDecode "{\"status\":\"success\",\"data\":{\"result\":[]}}")))
+  let pts = HM.mergeSeries [("current", "a", [(60, 3), (120, 4)]), ("desired", "a", [(60, 3), (120, 6)]), ("min", "a", [(60, 2), (120, 2)]), ("max", "a", [(60, 10), (120, 10)]), ("cpu", "a", [(120, 55)]), ("current", "b", [(60, 0)])]
+  assertEqual "one point per HPA per timestamp, fields joined" 3 (length pts)
+  assertEqual "joined fields" [(Just 4, Just 6, Just 2, Just 10, Just 55)] [(HM.spCurrent p, HM.spDesired p, HM.spMin p, HM.spMax p, HM.spCpuPct p) | p <- pts, HM.spHpa p == "a", HM.spCpuPct p /= Nothing]
+  assertEqual "a missing field stays missing (not zero)" [Nothing] [HM.spCpuPct p | p <- pts, HM.spHpa p == "a", HM.spCurrent p == Just 3]
+  refused <- HM.fetchSeries "http://127.0.0.1:1" "atlas" [("good-hpa", "bad\"} or vector(1) #")] (utc "2026-10-19 00:00:00") (utc "2026-10-19 01:00:00") 60
+  assertBool "an unusual name is refused before any request is made" (either (T.isInfixOf "unusual") (const False) refused)
+  now' <- pure (utc "2026-10-19 06:00:00")
+  let ev = either error id (A.eitherDecode "{\"metadata\":{\"uid\":\"u1\"},\"involvedObject\":{\"name\":\"a-hpa\"},\"type\":\"Normal\",\"reason\":\"SuccessfulRescale\",\"message\":\"New size: 7; reason: cpu above target\",\"count\":3,\"firstTimestamp\":\"2026-10-19T05:00:00Z\",\"lastTimestamp\":\"2026-10-19T05:30:00Z\"}") :: A.Value
+  assertEqual "k8s event parsed" (Just (HO.K8sEvent "u1" "a-hpa" (Just "Normal") "SuccessfulRescale" "New size: 7; reason: cpu above target" (Just 7) 3 (utc "2026-10-19 05:00:00") (utc "2026-10-19 05:30:00"))) (HO.parseK8sEvent now' ev)
+  assertEqual "an event without a uid or reason is ignored" Nothing (HO.parseK8sEvent now' (A.object ["reason" A..= ("x" :: Text)]))
+
+testReleaseGroupPlanner :: IO ()
+testReleaseGroupPlanner = do
+  let v st sp md o = RG.StepView st sp md o
+      par = RG.Parallel
+      seqM = RG.Sequential
+      stage n m ss = RG.StageDef n m [RG.StepDef g s | (g, s) <- ss]
+
+  -- parallel stage starts everything at once
+  assertEqual
+    "parallel stage starts all waiting steps"
+    (RG.StartSteps [(0, 0), (0, 1)])
+    (RG.planAdvance [v 0 0 par RG.NotStarted, v 0 1 par RG.NotStarted])
+  assertEqual
+    "parallel stage waits while a step runs and none is left to start"
+    RG.Wait
+    (RG.planAdvance [v 0 0 par RG.InFlight, v 0 1 par RG.InFlight])
+  -- sequential stage starts one at a time
+  assertEqual
+    "sequential stage starts only the first"
+    (RG.StartSteps [(0, 0)])
+    (RG.planAdvance [v 0 0 seqM RG.NotStarted, v 0 1 seqM RG.NotStarted])
+  assertEqual
+    "sequential stage waits for the running step"
+    RG.Wait
+    (RG.planAdvance [v 0 0 seqM RG.InFlight, v 0 1 seqM RG.NotStarted])
+  assertEqual
+    "sequential stage starts the next once the first is done"
+    (RG.StartSteps [(0, 1)])
+    (RG.planAdvance [v 0 0 seqM RG.Done, v 0 1 seqM RG.NotStarted, v 0 2 seqM RG.NotStarted])
+  -- stages are strictly ordered
+  assertEqual
+    "later stage is held while an earlier step runs"
+    RG.Wait
+    (RG.planAdvance [v 0 0 par RG.InFlight, v 1 0 par RG.NotStarted])
+  assertEqual
+    "next stage starts once the previous is fully done"
+    (RG.StartSteps [(1, 0)])
+    (RG.planAdvance [v 0 0 par RG.Done, v 0 1 par RG.Done, v 1 0 par RG.NotStarted])
+  assertEqual "all done completes the run" RG.CompleteRun (RG.planAdvance [v 0 0 par RG.Done, v 1 0 seqM RG.Done])
+  -- failure halts and holds later stages
+  assertEqual
+    "a failed step halts the group"
+    (RG.HaltRun "svc is ABORTED")
+    (RG.planAdvance [v 0 0 par (RG.Failed "svc is ABORTED"), v 0 1 par RG.InFlight, v 1 0 par RG.NotStarted])
+  assertEqual
+    "a failure in a finished-looking later stage is not reached until earlier stages are done"
+    RG.Wait
+    (RG.planAdvance [v 0 0 par RG.InFlight, v 1 0 par (RG.Failed "x")])
+  assertEqual "unknown tracker state waits" RG.Wait (RG.planAdvance [v 0 0 par RG.Unknown])
+  assertEqual "input order does not matter" (RG.StartSteps [(0, 0)]) (RG.planAdvance [v 1 0 par RG.NotStarted, v 0 0 par RG.NotStarted])
+
+  -- status classification
+  assertEqual "COMPLETED is done" RG.Done (RG.classifyStatus "COMPLETED")
+  assertEqual "INPROGRESS is in flight" RG.InFlight (RG.classifyStatus "INPROGRESS")
+  assertEqual "PAUSED is in flight, not failed" RG.InFlight (RG.classifyStatus "PAUSED")
+  assertEqual "DISCARDED fails" (RG.Failed "DISCARDED") (RG.classifyStatus "DISCARDED")
+  assertEqual "GCLT_ABORTED fails" (RG.Failed "GCLT_ABORTED") (RG.classifyStatus "GCLT_ABORTED")
+
+  -- bundle validation
+  assertEqual "empty bundle rejected" True (isLeft' (RG.validateStages []))
+  assertEqual "empty stage rejected" True (isLeft' (RG.validateStages [stage "a" par []]))
+  assertEqual "unnamed stage rejected" True (isLeft' (RG.validateStages [stage " " par [("g", "s")]]))
+  assertEqual
+    "duplicate service rejected"
+    True
+    (isLeft' (RG.validateStages [stage "a" par [("g", "s")], stage "b" seqM [("g", "s")]]))
+  assertEqual
+    "valid bundle accepted"
+    (Right ())
+    (RG.validateStages [stage "a" par [("g", "x"), ("g", "y")], stage "b" seqM [("g", "z")]])
+  where
+    isLeft' (Left _) = True
+    isLeft' (Right _) = False

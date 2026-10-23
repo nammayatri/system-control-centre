@@ -112,7 +112,7 @@ textToOverrideType "DENY" = Just Deny
 textToOverrideType _ = Nothing
 
 isViewPerm :: Permission -> Bool
-isViewPerm (AutopilotPerm p) = p `elem` [AP_RELEASE_VIEW, AP_PRODUCT_CONFIG_VIEW, AP_SERVICE_CONFIG_VIEW]
+isViewPerm (AutopilotPerm p) = p `elem` [AP_RELEASE_VIEW, AP_PRODUCT_CONFIG_VIEW, AP_SERVICE_CONFIG_VIEW, AP_HPA_VIEW]
 isViewPerm (MobilePerm p) = p == MB_RELEASE_VIEW
 isViewPerm (OtaPerm p) = p == OTA_VIEW
 isViewPerm (DevboxPerm p) = p == DEVBOX_VIEW
@@ -132,6 +132,8 @@ isManagerRestrictedPerm (AutopilotPerm p) =
         `elem` [ AP_PRODUCT_CONFIG_EDIT
                , AP_SERVICE_CONFIG_EDIT
                , AP_RELEASE_DELETE
+               , AP_RELEASE_CREATE_STANDALONE
+               , AP_HPA_GUARDRAIL_EDIT
                ]
 isManagerRestrictedPerm (MobilePerm p) = p == MB_MOBILE_APP_MANAGE
 isManagerRestrictedPerm (OtaPerm p) =

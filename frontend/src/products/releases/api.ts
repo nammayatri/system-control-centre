@@ -746,11 +746,12 @@ export async function acknowledgeReleaseReview(id: string): Promise<ConfigReview
 
 // ── Release CRUD ───────────────────────────────────────────────────
 
-export async function createRelease(isNewService: boolean, payload: any): Promise<any> {
+/** Maps the create form's payload to the backend's create-release body. */
+export function buildCreateReleaseBody(payload: any) {
     const trackerType =
         payload.trackerType ||
         (payload.serviceType === 'SCHEDULER' ? 'BackendScheduler' : 'BackendService');
-    const requestBody = {
+    return {
         appGroup: payload.appGroup || payload.product,
         service: Array.isArray(payload.service) ? payload.service[0] : payload.service,
         env: payload.env || 'UAT',
@@ -793,7 +794,10 @@ export async function createRelease(isNewService: boolean, payload: any): Promis
         syncClusterRolloutStrategy: payload.syncClusterRolloutStrategy || null,
         post_changelog_slack: payload.post_changelog_slack || false,
     };
-    const { data } = await apiClient.post('/releases/create', requestBody);
+}
+
+export async function createRelease(isNewService: boolean, payload: any): Promise<any> {
+    const { data } = await apiClient.post('/releases/create', buildCreateReleaseBody(payload));
     return data;
 }
 
@@ -1330,6 +1334,149 @@ export async function deleteWebhook(id: number): Promise<any> {
  *  placeholder values. Requires the webhook to be saved first. */
 export async function testWebhook(id: number): Promise<WebhookTestResult> {
     const { data } = await apiClient.post(`/webhooks/${id}/test`);
+    return data;
+}
+
+// ── Release locks ─────────────────────────────────────────────────
+
+/** `service` is '' for a lock on the whole app group. */
+export interface ReleaseLock {
+    appGroup: string;
+    service: string;
+    reason: string;
+    lockedBy: string;
+    lockedAt: string;
+}
+
+export async function fetchReleaseLocks(): Promise<ReleaseLock[]> {
+    const { data } = await apiClient.get('/release-locks');
+    return Array.isArray(data) ? data : [];
+}
+
+export async function lockReleases(appGroup: string, service: string | null, reason: string): Promise<any> {
+    const { data } = await apiClient.post('/release-locks', { appGroup, service: service || null, reason });
+    return data;
+}
+
+export async function unlockReleases(appGroup: string, service: string | null): Promise<any> {
+    const { data } = await apiClient.post('/release-locks/clear', { appGroup, service: service || null });
+    return data;
+}
+
+// ── Release bundles & grouped releases ───────────────────────────
+
+export type StageMode = 'PARALLEL' | 'SEQUENTIAL';
+
+export interface BundleStep {
+    appGroup: string;
+    service: string;
+}
+
+export interface BundleStage {
+    name: string;
+    mode: StageMode;
+    steps: BundleStep[];
+}
+
+export interface ReleaseBundle {
+    bundleId: string;
+    name: string;
+    description: string;
+    stages: BundleStage[];
+    archived: boolean;
+    createdBy: string;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export type GroupRunState = 'PENDING_APPROVAL' | 'RUNNING' | 'HALTED' | 'COMPLETED' | 'ABORTED';
+
+export interface GroupRunStep {
+    stageIdx: number;
+    stepIdx: number;
+    stageName: string;
+    stageMode: StageMode;
+    appGroup: string;
+    service: string;
+    releaseId: string;
+    state: 'WAITING' | 'STARTED' | 'SKIPPED';
+    /** Live status of the step's release tracker. */
+    releaseStatus: string | null;
+}
+
+export interface GroupRun {
+    runId: string;
+    bundleId: string;
+    bundleName: string;
+    env: string;
+    description: string;
+    state: GroupRunState;
+    haltReason: string;
+    createdBy: string;
+    approvedBy: string | null;
+    createdAt: string;
+    updatedAt: string;
+    steps: GroupRunStep[];
+}
+
+export interface BundleInput {
+    name: string;
+    description: string;
+    stages: BundleStage[];
+}
+
+export async function fetchBundles(includeArchived = false): Promise<ReleaseBundle[]> {
+    const { data } = await apiClient.get('/release-bundles', { params: { includeArchived } });
+    return Array.isArray(data) ? data : [];
+}
+
+export async function createBundle(input: BundleInput): Promise<ReleaseBundle> {
+    const { data } = await apiClient.post('/release-bundles', input);
+    return data;
+}
+
+export async function updateBundle(bundleId: string, input: BundleInput): Promise<ReleaseBundle> {
+    const { data } = await apiClient.put(`/release-bundles/${encodeURIComponent(bundleId)}`, input);
+    return data;
+}
+
+export async function archiveBundle(bundleId: string, archived: boolean): Promise<any> {
+    const { data } = await apiClient.post(`/release-bundles/${encodeURIComponent(bundleId)}/archive`, { archived });
+    return data;
+}
+
+export async function fetchGroupRuns(): Promise<GroupRun[]> {
+    const { data } = await apiClient.get('/release-groups');
+    return Array.isArray(data) ? data : [];
+}
+
+export async function fetchGroupRun(runId: string): Promise<GroupRun> {
+    const { data } = await apiClient.get(`/release-groups/${encodeURIComponent(runId)}`);
+    return data;
+}
+
+/** `payloads` are the create form's payloads, one per bundle step. */
+export async function createGroupRun(bundleId: string, description: string, payloads: any[]): Promise<GroupRun> {
+    const { data } = await apiClient.post('/release-groups/create', {
+        bundleId,
+        description: description || null,
+        releases: payloads.map(buildCreateReleaseBody),
+    });
+    return data;
+}
+
+export async function approveGroupRun(runId: string): Promise<GroupRun> {
+    const { data } = await apiClient.post(`/release-groups/${encodeURIComponent(runId)}/approve`);
+    return data;
+}
+
+export async function resumeGroupRun(runId: string, skipFailed: boolean): Promise<GroupRun> {
+    const { data } = await apiClient.post(`/release-groups/${encodeURIComponent(runId)}/resume`, { skipFailed });
+    return data;
+}
+
+export async function abortGroupRun(runId: string, reason?: string): Promise<GroupRun> {
+    const { data } = await apiClient.post(`/release-groups/${encodeURIComponent(runId)}/abort`, { reason: reason || null });
     return data;
 }
 

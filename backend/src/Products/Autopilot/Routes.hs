@@ -17,15 +17,20 @@ import Products.Autopilot.Actions.K8sResource as K8sResource
 import Products.Autopilot.Actions.QaAutomation as QaAutomation
 import Products.Autopilot.Actions.Release as Release
 import Products.Autopilot.Actions.VSEdit as VSEdit
+import Products.Autopilot.Actions.ReleaseLock qualified as Lock
+import Products.Autopilot.Actions.ReleaseGroup qualified as Group
+import Products.Autopilot.ReleaseGroup.Types (Bundle, GroupRun)
 import Products.Autopilot.Actions.Webhook as Webhook
 import Products.Autopilot.Handlers.Ai as Ai
 import Products.Autopilot.Handlers.ConfigReview as ConfigReview
+import Products.Autopilot.Hpa.Routes (HpaAPI, hpaServer)
 import Products.Autopilot.Mobile.Routes (MobileAPI, mobileServer)
 import Products.Autopilot.ReleaseBot.Routes (ReleaseBotAPI, releaseBotServer)
 import Products.Autopilot.Types (ReleaseTracker)
 import Products.Autopilot.Types.API
 import Products.Autopilot.Types.Permission (AutopilotPermission (..))
 import Products.Autopilot.Types.QaAutomation (QaAutomationRun, TriggerQaRunResponse)
+import Products.Autopilot.Queries.ReleaseLock (ReleaseLock)
 import Products.Autopilot.Types.Webhook (PlaceholderDef, ReleaseWebhook, UpsertWebhookReq, WebhookTestResult)
 import Servant
 import Shared.API.Response (APIResponse (..))
@@ -88,6 +93,20 @@ type CoreAPI =
         :<|> "services" :> Protected 'AP_PRODUCT_CONFIG_VIEW :> "config" :> Capture "id" Int32 :> Get '[JSON] Value
         :<|> "services" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> "config" :> Capture "id" Int32 :> ReqBody '[JSON] UpsertServiceReq :> Put '[JSON] APIResponse
         :<|> "services" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> "config" :> Capture "id" Int32 :> Delete '[JSON] APIResponse
+        -- Release locks (stop new releases for an app group / service)
+        :<|> "release-locks" :> Protected 'AP_PRODUCT_CONFIG_VIEW :> QueryParam "appGroup" Text :> Get '[JSON] [ReleaseLock]
+        :<|> "release-locks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> ReqBody '[JSON] Lock.SetReleaseLockReq :> Post '[JSON] APIResponse
+        :<|> "release-locks" :> "clear" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> ReqBody '[JSON] Lock.ClearReleaseLockReq :> Post '[JSON] APIResponse
+        :<|> "release-bundles" :> Protected 'AP_RELEASE_VIEW :> QueryParam "includeArchived" Bool :> Get '[JSON] [Bundle]
+        :<|> "release-bundles" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> ReqBody '[JSON] Group.BundleReq :> Post '[JSON] Bundle
+        :<|> "release-bundles" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> Capture "bundleId" Text :> ReqBody '[JSON] Group.BundleReq :> Put '[JSON] Bundle
+        :<|> "release-bundles" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> Capture "bundleId" Text :> "archive" :> ReqBody '[JSON] Group.ArchiveBundleReq :> Post '[JSON] APIResponse
+        :<|> "release-groups" :> Protected 'AP_RELEASE_VIEW :> Get '[JSON] [GroupRun]
+        :<|> "release-groups" :> Protected 'AP_RELEASE_CREATE :> "create" :> ReqBody '[JSON] Group.CreateGroupReq :> Post '[JSON] GroupRun
+        :<|> "release-groups" :> Protected 'AP_RELEASE_VIEW :> Capture "runId" Text :> Get '[JSON] GroupRun
+        :<|> "release-groups" :> Protected 'AP_RELEASE_APPROVE :> Capture "runId" Text :> "approve" :> Post '[JSON] GroupRun
+        :<|> "release-groups" :> Protected 'AP_RELEASE_APPROVE :> Capture "runId" Text :> "resume" :> ReqBody '[JSON] Group.ResumeGroupReq :> Post '[JSON] GroupRun
+        :<|> "release-groups" :> Protected 'AP_RELEASE_DISCARD :> Capture "runId" Text :> "abort" :> ReqBody '[JSON] Group.AbortGroupReq :> Post '[JSON] GroupRun
         -- Release webhooks
         :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> "placeholders" :> Get '[JSON] [PlaceholderDef]
         :<|> "webhooks" :> Protected 'AP_PRODUCT_CONFIG_EDIT :> QueryParam "appGroup" Text :> Get '[JSON] [ReleaseWebhook]
@@ -141,6 +160,8 @@ type CoreAPI =
         :<|> MobileAPI
         -- Xyne release bot: signed webhooks + token-gated public diff view
         :<|> ReleaseBotAPI
+        -- HPA scheduler panel + API
+        :<|> HpaAPI
 
 coreServer :: ServerT CoreAPI Flow
 coreServer =
@@ -202,6 +223,20 @@ coreServer =
         :<|> Config.getReleaseConfigH
         :<|> Config.updateReleaseConfigH
         :<|> Config.deleteReleaseConfigH
+        -- Release locks
+        :<|> Lock.listReleaseLocksH
+        :<|> Lock.setReleaseLockH
+        :<|> Lock.clearReleaseLockH
+        :<|> Group.listBundlesH
+        :<|> Group.createBundleH
+        :<|> Group.updateBundleH
+        :<|> Group.archiveBundleH
+        :<|> Group.listGroupsH
+        :<|> Group.createGroupH
+        :<|> Group.getGroupH
+        :<|> Group.approveGroupH
+        :<|> Group.resumeGroupH
+        :<|> Group.abortGroupH
         -- Release webhooks
         :<|> Webhook.listPlaceholdersH
         :<|> Webhook.listWebhooksH
@@ -249,3 +284,4 @@ coreServer =
         -- Mobile releases (suffix mount of MobileAPI)
         :<|> mobileServer
         :<|> releaseBotServer
+        :<|> hpaServer

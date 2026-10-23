@@ -81,6 +81,10 @@ export interface ProductDefinition {
 
 import ListRelease from './releases/pages/ListRelease';
 import CreateRelease from './releases/pages/CreateRelease';
+import CreateGroupRelease from './releases/pages/groups/CreateGroupRelease';
+import GroupReleases from './releases/pages/groups/GroupReleases';
+import GroupReleaseDetail from './releases/pages/groups/GroupReleaseDetail';
+import BundlesAdmin from './releases/pages/groups/BundlesAdmin';
 import ReleaseSummary from './releases/pages/ReleaseSummary';
 import ListConfigMap from './configmap/pages/ListConfigMap';
 import CreateConfigMap from './configmap/pages/CreateConfigMap';
@@ -90,6 +94,9 @@ import DeploymentConfig from './config/pages/DeploymentConfig';
 import ListVSEdit from './vs-editor/pages/ListVSEdit';
 import EditVS from './vs-editor/pages/EditVS';
 import VSEditSummary from './vs-editor/pages/VSEditSummary';
+import HpaOverview from './hpa/pages/HpaOverview';
+import HpaApplies from './hpa/pages/HpaApplies';
+import HpaServiceDetail from './hpa/pages/HpaServiceDetail';
 
 // ── Product: Airborne OTA ─────────────────────────────────────────
 import OtaAppsHome from './airborne-ota/pages/OtaAppsHome';
@@ -132,10 +139,14 @@ const backendProduct: ProductDefinition = {
   viewPermission: 'RELEASE_VIEW',
   navItems: [
     { label: 'Releases',          path: '/backend/releases',          icon: 'List' },
-    { label: 'Create Release',    path: '/backend/releases/new',      icon: 'Plus' },
+    { label: 'Create Release',    path: '/backend/group-releases/new', icon: 'Plus', permission: 'RELEASE_CREATE' },
+    { label: 'Group Releases',    path: '/backend/group-releases',    icon: 'LayoutGrid' },
+    { label: 'Single Service Release', path: '/backend/releases/new', icon: 'Plus', permission: 'RELEASE_CREATE' },
+    { label: 'Release Bundles',   path: '/backend/bundles',           icon: 'Layers' },
     { label: 'Config Maps',       path: '/backend/configmap',         icon: 'FileText' },
     { label: 'Deployment Config', path: '/backend/deployment-config', icon: 'Layers' },
     { label: 'VS Editor',         path: '/backend/vs-editor',         icon: 'Settings' },
+    { label: 'HPA Manager',       path: '/backend/hpa',               icon: 'Gauge', permission: 'HPA_VIEW' },
     { label: 'Server Config',     path: '/backend/server-config',     icon: 'Settings' },
   ],
   routes: [
@@ -145,6 +156,10 @@ const backendProduct: ProductDefinition = {
     { path: 'releases/:id',       component: ReleaseSummary },
     { path: 'releases/:id/edit',  component: CreateRelease,  permission: 'RELEASE_UPDATE' },
     { path: 'releases/:id/clone', component: CreateRelease,  permission: 'RELEASE_CREATE' },
+    { path: 'group-releases',     component: GroupReleases },
+    { path: 'group-releases/new', component: CreateGroupRelease, permission: 'RELEASE_CREATE' },
+    { path: 'group-releases/:runId', component: GroupReleaseDetail },
+    { path: 'bundles',            component: BundlesAdmin },
     { path: 'configmap',          component: ListConfigMap },
     { path: 'configmap/new',      component: CreateConfigMap, permission: 'RELEASE_CREATE' },
     { path: 'configmap/:id',      component: ConfigMapSummary },
@@ -152,6 +167,9 @@ const backendProduct: ProductDefinition = {
     { path: 'vs-editor',          component: ListVSEdit },
     { path: 'vs-editor/new',      component: EditVS,         permission: 'RELEASE_CREATE' },
     { path: 'vs-editor/:id',      component: VSEditSummary },
+    { path: 'hpa',                component: HpaOverview,      permission: 'HPA_VIEW' },
+    { path: 'hpa/applies',        component: HpaApplies,       permission: 'HPA_VIEW' },
+    { path: 'hpa/:product/:service', component: HpaServiceDetail, permission: 'HPA_VIEW' },
     { path: 'server-config',      component: Configurations },
   ],
   getBreadcrumbs: (parts) => {
@@ -173,6 +191,16 @@ const backendProduct: ProductDefinition = {
       }
       return crumbs;
     }
+    if (parts[1] === 'group-releases') {
+      crumbs.push({ label: 'Group Releases', to: '/backend/group-releases' });
+      if (parts[2] === 'new') crumbs.push({ label: 'Create Release' });
+      else if (parts.length >= 3) crumbs.push({ label: 'Group Details' });
+      return crumbs;
+    }
+    if (parts[1] === 'bundles') {
+      crumbs.push({ label: 'Release Bundles' });
+      return crumbs;
+    }
     if (parts[1] === 'configmap') {
       crumbs.push({ label: 'Config Maps', to: '/backend/configmap' });
       if (parts[2] === 'new') {
@@ -189,6 +217,12 @@ const backendProduct: ProductDefinition = {
       } else if (parts.length >= 3) {
         crumbs.push({ label: 'VS Edit Details' });
       }
+      return crumbs;
+    }
+    if (parts[1] === 'hpa') {
+      crumbs.push({ label: 'HPA Manager', to: '/backend/hpa' });
+      if (parts[2] === 'applies') crumbs.push({ label: 'Activity' });
+      else if (parts.length >= 4) crumbs.push({ label: decodeURIComponent(parts[3]) });
       return crumbs;
     }
     if (parts[1] === 'server-config') {

@@ -25,6 +25,7 @@ module Products.Autopilot.ReleaseBot.RowConfig (
     validateProductBot,
     validateServiceBot,
     buildFromRows,
+    dropOrphanServiceRules,
 ) where
 
 import Control.Monad (forM, when)
@@ -140,6 +141,16 @@ checkBotField _ Nothing = Right Nothing
 checkBotField _ (Just t) | blank t = Right (Just Nothing)
 checkBotField isProduct (Just t) =
     (if isProduct then () <$ validateProductBot t else () <$ validateServiceBot t) >> Right (Just (Just t))
+
+{- | Service rows whose app group has no release rules cannot run, and must not stop the bot for every
+OTHER app group (a half-configured group — e.g. rules saved on its services but not yet on the group
+row). Drop their rules for the live bot; 'buildFromRows' itself stays strict so a save still reports it.
+-}
+dropOrphanServiceRules :: [DeploymentConfig] -> [DeploymentConfig]
+dropOrphanServiceRules rows = [if orphan r then r{dcReleaseBotConfig = Nothing} else r | r <- rows]
+  where
+    live = [dcAppGroup r | r <- rows, isNothing (dcService r), hasCfg r]
+    orphan r = isJust (dcService r) && hasCfg r && dcAppGroup r `notElem` live
 
 hasCfg :: DeploymentConfig -> Bool
 hasCfg r = maybe False (not . blank) (dcReleaseBotConfig r)
