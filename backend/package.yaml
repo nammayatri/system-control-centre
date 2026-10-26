@@ -153,6 +153,8 @@ library:
     - Products.Autopilot.ReleaseBot.Store
     - Products.Autopilot.ReleaseBot.Xyne
     - Products.Autopilot.Discovery
+    - Products.Autopilot.CronJob.Routes
+    - Products.Autopilot.CronJob.Validate
     - Products.Autopilot.EventLog
     - Products.Autopilot.K8s.Deployment
     - Products.Autopilot.K8s.DestinationRule

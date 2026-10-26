@@ -50,6 +50,10 @@ data AutopilotPermission
   | AP_HPA_APPLY
   | AP_HPA_ROLLBACK
   | AP_HPA_GUARDRAIL_EDIT
+  | AP_CRONJOB_VIEW
+  | AP_CRONJOB_CREATE
+  | AP_CRONJOB_EDIT
+  | AP_CRONJOB_DELETE
   deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 autopilotPermissionToText :: AutopilotPermission -> Text
@@ -84,6 +88,10 @@ autopilotPermissionToText AP_HPA_SCHEDULE_EDIT = "HPA_SCHEDULE_EDIT"
 autopilotPermissionToText AP_HPA_APPLY = "HPA_APPLY"
 autopilotPermissionToText AP_HPA_ROLLBACK = "HPA_ROLLBACK"
 autopilotPermissionToText AP_HPA_GUARDRAIL_EDIT = "HPA_GUARDRAIL_EDIT"
+autopilotPermissionToText AP_CRONJOB_VIEW = "CRONJOB_VIEW"
+autopilotPermissionToText AP_CRONJOB_CREATE = "CRONJOB_CREATE"
+autopilotPermissionToText AP_CRONJOB_EDIT = "CRONJOB_EDIT"
+autopilotPermissionToText AP_CRONJOB_DELETE = "CRONJOB_DELETE"
 
 textToAutopilotPermission :: Text -> Maybe AutopilotPermission
 textToAutopilotPermission "RELEASE_VIEW" = Just AP_RELEASE_VIEW
@@ -117,6 +125,10 @@ textToAutopilotPermission "HPA_SCHEDULE_EDIT" = Just AP_HPA_SCHEDULE_EDIT
 textToAutopilotPermission "HPA_APPLY" = Just AP_HPA_APPLY
 textToAutopilotPermission "HPA_ROLLBACK" = Just AP_HPA_ROLLBACK
 textToAutopilotPermission "HPA_GUARDRAIL_EDIT" = Just AP_HPA_GUARDRAIL_EDIT
+textToAutopilotPermission "CRONJOB_VIEW" = Just AP_CRONJOB_VIEW
+textToAutopilotPermission "CRONJOB_CREATE" = Just AP_CRONJOB_CREATE
+textToAutopilotPermission "CRONJOB_EDIT" = Just AP_CRONJOB_EDIT
+textToAutopilotPermission "CRONJOB_DELETE" = Just AP_CRONJOB_DELETE
 textToAutopilotPermission _ = Nothing
 
 -- | Human-readable description (exhaustive, -Wall catches missing variants).
@@ -152,6 +164,10 @@ permissionDescription AP_HPA_SCHEDULE_EDIT = "Create, edit, pause and delete HPA
 permissionDescription AP_HPA_APPLY = "Apply an HPA change by hand and restore one early"
 permissionDescription AP_HPA_ROLLBACK = "Roll back or cancel an HPA change and acknowledge stuck ones"
 permissionDescription AP_HPA_GUARDRAIL_EDIT = "Edit HPA guardrails (replica caps, floors, freeze)"
+permissionDescription AP_CRONJOB_VIEW = "View CronJobs in a namespace"
+permissionDescription AP_CRONJOB_CREATE = "Create CronJobs from YAML"
+permissionDescription AP_CRONJOB_EDIT = "Edit a CronJob's schedule, suspend/resume it and edit its env vars"
+permissionDescription AP_CRONJOB_DELETE = "Delete CronJobs"
 
 -- 'permissionName' MUST match 'autopilotPermissionToText' for the same
 -- constructor; the RBAC check compares this string against the DB.
@@ -279,3 +295,19 @@ instance KnownPermission 'AP_HPA_ROLLBACK where
 instance KnownPermission 'AP_HPA_GUARDRAIL_EDIT where
   permissionProduct _ = "autopilot"
   permissionName _ = "HPA_GUARDRAIL_EDIT"
+
+instance KnownPermission 'AP_CRONJOB_VIEW where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "CRONJOB_VIEW"
+
+instance KnownPermission 'AP_CRONJOB_CREATE where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "CRONJOB_CREATE"
+
+instance KnownPermission 'AP_CRONJOB_EDIT where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "CRONJOB_EDIT"
+
+instance KnownPermission 'AP_CRONJOB_DELETE where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "CRONJOB_DELETE"

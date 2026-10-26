@@ -81,6 +81,8 @@ library
       Products.Autopilot.ReleaseBot.Xyne
       Products.Autopilot.Discovery
       Products.Autopilot.EventLog
+      Products.Autopilot.CronJob.Routes
+      Products.Autopilot.CronJob.Validate
       Products.Autopilot.Hpa.Change
       Products.Autopilot.Hpa.Health
       Products.Autopilot.Hpa.Kube

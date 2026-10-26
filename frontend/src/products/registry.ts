@@ -97,6 +97,9 @@ import VSEditSummary from './vs-editor/pages/VSEditSummary';
 import HpaOverview from './hpa/pages/HpaOverview';
 import HpaApplies from './hpa/pages/HpaApplies';
 import HpaServiceDetail from './hpa/pages/HpaServiceDetail';
+import CronJobList from './cronjobs/pages/CronJobList';
+import CronJobCreate from './cronjobs/pages/CronJobCreate';
+import CronJobDetail from './cronjobs/pages/CronJobDetail';
 
 // ── Product: Airborne OTA ─────────────────────────────────────────
 import OtaAppsHome from './airborne-ota/pages/OtaAppsHome';
@@ -147,6 +150,7 @@ const backendProduct: ProductDefinition = {
     { label: 'Deployment Config', path: '/backend/deployment-config', icon: 'Layers' },
     { label: 'VS Editor',         path: '/backend/vs-editor',         icon: 'Settings' },
     { label: 'HPA Manager',       path: '/backend/hpa',               icon: 'Gauge', permission: 'HPA_VIEW' },
+    { label: 'CronJobs',          path: '/backend/cronjobs',          icon: 'Clock', permission: 'CRONJOB_VIEW' },
     { label: 'Server Config',     path: '/backend/server-config',     icon: 'Settings' },
   ],
   routes: [
@@ -170,6 +174,9 @@ const backendProduct: ProductDefinition = {
     { path: 'hpa',                component: HpaOverview,      permission: 'HPA_VIEW' },
     { path: 'hpa/applies',        component: HpaApplies,       permission: 'HPA_VIEW' },
     { path: 'hpa/:product/:service', component: HpaServiceDetail, permission: 'HPA_VIEW' },
+    { path: 'cronjobs',           component: CronJobList,      permission: 'CRONJOB_VIEW' },
+    { path: 'cronjobs/new',       component: CronJobCreate,    permission: 'CRONJOB_CREATE' },
+    { path: 'cronjobs/:name',     component: CronJobDetail,    permission: 'CRONJOB_VIEW' },
     { path: 'server-config',      component: Configurations },
   ],
   getBreadcrumbs: (parts) => {
@@ -223,6 +230,12 @@ const backendProduct: ProductDefinition = {
       crumbs.push({ label: 'HPA Manager', to: '/backend/hpa' });
       if (parts[2] === 'applies') crumbs.push({ label: 'Activity' });
       else if (parts.length >= 4) crumbs.push({ label: decodeURIComponent(parts[3]) });
+      return crumbs;
+    }
+    if (parts[1] === 'cronjobs') {
+      crumbs.push({ label: 'CronJobs', to: '/backend/cronjobs' });
+      if (parts[2] === 'new') crumbs.push({ label: 'New CronJob' });
+      else if (parts.length >= 3) crumbs.push({ label: decodeURIComponent(parts[2]) });
       return crumbs;
     }
     if (parts[1] === 'server-config') {

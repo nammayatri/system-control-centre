@@ -23,6 +23,7 @@ import Products.Autopilot.ReleaseGroup.Types (Bundle, GroupRun)
 import Products.Autopilot.Actions.Webhook as Webhook
 import Products.Autopilot.Handlers.Ai as Ai
 import Products.Autopilot.Handlers.ConfigReview as ConfigReview
+import Products.Autopilot.CronJob.Routes (CronJobAPI, cronJobServer)
 import Products.Autopilot.Hpa.Routes (HpaAPI, hpaServer)
 import Products.Autopilot.Mobile.Routes (MobileAPI, mobileServer)
 import Products.Autopilot.ReleaseBot.Routes (ReleaseBotAPI, releaseBotServer)
@@ -162,6 +163,8 @@ type CoreAPI =
         :<|> ReleaseBotAPI
         -- HPA scheduler panel + API
         :<|> HpaAPI
+        -- CronJob manager (list / create from YAML / schedule / suspend / env / delete)
+        :<|> CronJobAPI
 
 coreServer :: ServerT CoreAPI Flow
 coreServer =
@@ -285,3 +288,4 @@ coreServer =
         :<|> mobileServer
         :<|> releaseBotServer
         :<|> hpaServer
+        :<|> cronJobServer

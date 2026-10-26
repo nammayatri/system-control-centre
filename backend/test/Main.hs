@@ -509,7 +509,9 @@ testPermissions = do
     OtaPerm OTA_VIEW `notElem` viewerPerms
   assertBool "Viewer has HPA_VIEW (read-only HPA panel)" $
     AutopilotPerm AP_HPA_VIEW `elem` viewerPerms
-  assertEqual "Viewer has exactly 4 permissions" 4 (length viewerPerms)
+  assertBool "Viewer has CRONJOB_VIEW (read-only CronJob panel)" $
+    AutopilotPerm AP_CRONJOB_VIEW `elem` viewerPerms
+  assertEqual "Viewer has exactly 5 permissions" 5 (length viewerPerms)
 
   -- Manager = all except *_EDIT (per defaultPermissions in Products/Types.hs)
   assertBool "Manager has RELEASE_VIEW" $
@@ -530,9 +532,13 @@ testPermissions = do
     AutopilotPerm AP_HPA_GUARDRAIL_EDIT `notElem` managerPerms
   assertBool "Manager can schedule, apply and roll back HPA changes" $
     all (\p -> AutopilotPerm p `elem` managerPerms) [AP_HPA_VIEW, AP_HPA_SCHEDULE_EDIT, AP_HPA_APPLY, AP_HPA_ROLLBACK]
+  assertBool "Manager DOES NOT have CRONJOB_DELETE" $
+    AutopilotPerm AP_CRONJOB_DELETE `notElem` managerPerms
+  assertBool "Manager can create and edit CronJobs" $
+    all (\p -> AutopilotPerm p `elem` managerPerms) [AP_CRONJOB_VIEW, AP_CRONJOB_CREATE, AP_CRONJOB_EDIT]
   assertEqual
-    "Manager has all perms minus the 5 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE, RELEASE_CREATE_STANDALONE, HPA_GUARDRAIL_EDIT)"
-    (length allPerms - 5)
+    "Manager has all perms minus the 6 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE, RELEASE_CREATE_STANDALONE, HPA_GUARDRAIL_EDIT, CRONJOB_DELETE)"
+    (length allPerms - 6)
     (length managerPerms)
 
   -- ── Mobile product (2026-07-31 split): MB_* + the whole OTA family ──
@@ -591,8 +597,8 @@ testPermissions = do
     (length allPerms)
     (length (defaultPermissionsText "autopilot" "Admin"))
   assertEqual
-    "defaultPermissionsText Viewer = 4 (autopilot is backend-only post-split; includes HPA_VIEW)"
-    4
+    "defaultPermissionsText Viewer = 5 (autopilot is backend-only post-split; includes HPA_VIEW and CRONJOB_VIEW)"
+    5
     (length (defaultPermissionsText "autopilot" "Viewer"))
   assertEqual
     "defaultPermissionsText mobile Viewer = 2 (MB_RELEASE_VIEW + OTA_VIEW)"

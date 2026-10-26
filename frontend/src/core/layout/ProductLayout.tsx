@@ -5,7 +5,7 @@ import {
   Rocket, FileText, Settings, Package, Layers,
   Plus, List, ChevronLeft,
   PanelLeftClose, PanelLeft, X,
-  Activity, Flame, ExternalLink, Smartphone, Server, Gauge,
+  Activity, Flame, ExternalLink, Smartphone, Server, Gauge, Clock,
   CloudDownload, LayoutGrid, Link2,
   SlidersHorizontal, Users, Settings2, Bookmark,
 } from 'lucide-react';
@@ -25,6 +25,7 @@ const iconMap: Record<string, React.ReactNode> = {
   Smartphone: <Smartphone className="w-4 h-4" />,
   Server: <Server className="w-4 h-4" />,
   Gauge: <Gauge className="w-3.5 h-3.5" />,
+  Clock: <Clock className="w-3.5 h-3.5" />,
   CloudDownload: <CloudDownload className="w-4 h-4" />,
   LayoutGrid: <LayoutGrid className="w-3.5 h-3.5" />,
   Link2: <Link2 className="w-3.5 h-3.5" />,
