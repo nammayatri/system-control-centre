@@ -410,6 +410,39 @@ const airborneOtaProduct: ProductDefinition = {
   },
 };
 
+// ── Product: Devbox Releases ──────────────────────────────────────
+// Feature branches (backend + control-center + app) built and run on a fleet
+// dev-box through nammayatri's devbox.yaml workflow.
+import DevboxReleasesList from './devbox/pages/ReleasesList';
+import DevboxNewRelease from './devbox/pages/NewRelease';
+import DevboxReleaseDetail from './devbox/pages/ReleaseDetail';
+
+const devboxProduct: ProductDefinition = {
+  slug: 'devbox',
+  label: 'Devbox Releases',
+  description: 'Test feature branches on a dev-box',
+  icon: 'Server',
+  basePath: '/devbox',
+  viewPermission: 'DEVBOX_VIEW',
+  navItems: [
+    { label: 'Releases',    path: '/devbox/releases',     icon: 'List' },
+    { label: 'New Release', path: '/devbox/releases/new', icon: 'Plus', permission: 'DEVBOX_RELEASE_CREATE' },
+  ],
+  routes: [
+    { path: '',             component: DevboxReleasesList },
+    { path: 'releases',     component: DevboxReleasesList },
+    { path: 'releases/new', component: DevboxNewRelease, permission: 'DEVBOX_RELEASE_CREATE' },
+    { path: 'releases/:id', component: DevboxReleaseDetail },
+  ],
+  // parts = the whole path: ['devbox', 'releases', 'new' | <id>]
+  getBreadcrumbs: (parts) => {
+    const crumbs: Crumb[] = [{ label: 'Devbox Releases', to: '/devbox/releases' }];
+    if (parts[2] === 'new') crumbs.push({ label: 'New release' });
+    else if (parts[2]) crumbs.push({ label: 'Release' });
+    return crumbs;
+  },
+};
+
 // ── Registry ─────────────────────────────────────────────────────
 // 2026-07-31 product split: 'autopilot' is backend-only; 'mobile' owns
 // builds + OTA (MB_* + OTA_* permission universe). Airborne OTA is its own
@@ -420,4 +453,5 @@ export const PRODUCT_REGISTRY: ProductDefinition[] = [
   backendProduct,
   mobileProduct,
   airborneOtaProduct,
+  devboxProduct,
 ];

@@ -26,6 +26,7 @@ import Data.Proxy (Proxy)
 import Data.Text (Text)
 import Products.AirborneOta.Types.Permission
 import Products.Autopilot.Types.Permission
+import Products.Devbox.Types.Permission
 import Products.Mobile.Types.Permission
 
 -- | All known products in the system.
@@ -33,17 +34,20 @@ data ProductSlug
     = Autopilot
     | Mobile
     | AirborneOta
+    | Devbox
     deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 productSlugToText :: ProductSlug -> Text
 productSlugToText Autopilot = "autopilot"
 productSlugToText Mobile = "mobile"
 productSlugToText AirborneOta = "airborne-ota"
+productSlugToText Devbox = "devbox"
 
 textToProductSlug :: Text -> Maybe ProductSlug
 textToProductSlug "autopilot" = Just Autopilot
 textToProductSlug "mobile" = Just Mobile
 textToProductSlug "airborne-ota" = Just AirborneOta
+textToProductSlug "devbox" = Just Devbox
 textToProductSlug _ = Nothing
 
 -- | Union of all product permissions.
@@ -51,12 +55,14 @@ data Permission
     = AutopilotPerm AutopilotPermission
     | MobilePerm MobilePermission
     | OtaPerm OtaPermission
+    | DevboxPerm DevboxPermission
     deriving (Show, Read, Eq, Ord)
 
 permissionToText :: Permission -> Text
 permissionToText (AutopilotPerm p) = autopilotPermissionToText p
 permissionToText (MobilePerm p) = mobilePermissionToText p
 permissionToText (OtaPerm p) = otaPermissionToText p
+permissionToText (DevboxPerm p) = devboxPermissionToText p
 
 -- | All permissions for a given product.
 --
@@ -69,6 +75,7 @@ allPermissions :: ProductSlug -> [Permission]
 allPermissions Autopilot = map AutopilotPerm [minBound .. maxBound]
 allPermissions Mobile = map MobilePerm [minBound .. maxBound] <> map OtaPerm [minBound .. maxBound]
 allPermissions AirborneOta = map OtaPerm [minBound .. maxBound]
+allPermissions Devbox = map DevboxPerm [minBound .. maxBound]
 
 -- | All permissions as Text for a product.
 allPermissionsText :: Text -> [Text]
@@ -108,6 +115,7 @@ isViewPerm :: Permission -> Bool
 isViewPerm (AutopilotPerm p) = p `elem` [AP_RELEASE_VIEW, AP_PRODUCT_CONFIG_VIEW, AP_SERVICE_CONFIG_VIEW, AP_HPA_VIEW]
 isViewPerm (MobilePerm p) = p == MB_RELEASE_VIEW
 isViewPerm (OtaPerm p) = p == OTA_VIEW
+isViewPerm (DevboxPerm p) = p == DEVBOX_VIEW
 
 defaultPermissions :: SystemRole -> ProductSlug -> [Permission]
 defaultPermissions Admin p = allPermissions p
@@ -130,6 +138,8 @@ isManagerRestrictedPerm (AutopilotPerm p) =
 isManagerRestrictedPerm (MobilePerm p) = p == MB_MOBILE_APP_MANAGE
 isManagerRestrictedPerm (OtaPerm p) =
     p `elem` [OTA_RELEASE_DISCARD, OTA_APP_MANAGE]
+-- Managers run devbox releases end to end, including stopping anyone's.
+isManagerRestrictedPerm (DevboxPerm _) = False
 
 -- | Product typeclass - each product must implement this.
 class IsProduct (p :: ProductSlug) where

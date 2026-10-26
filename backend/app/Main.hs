@@ -14,6 +14,7 @@ import Products.Autopilot.ReleaseBot.Flow (releaseBotLoop)
 import Products.Autopilot.ReleaseGroup.Coordinator (releaseGroupLoop)
 import Products.Autopilot.Runner (runnerLoop, runnerPollLoop, runnerStartupRecovery)
 import Products.Autopilot.SyncWatcher (syncWatcherPollLoop)
+import Products.Devbox.Poller (devboxPollLoop)
 
 main :: IO ()
 main = do
@@ -48,7 +49,19 @@ main = do
                 -- below (ASC-only, no Play edits).
                 concurrently_
                     (concurrently_ (serverLoop st) (runnerPollLoop st))
-                    (concurrently_ (runFlow st syncWatcherPollLoop) (concurrently_ (runFlow st airborneKeepaliveLoop) (concurrently_ (runFlow st releaseBotLoop) (concurrently_ (runFlow st hpaLoops) (runFlow st releaseGroupLoop)))))
+                    ( concurrently_
+                        (runFlow st syncWatcherPollLoop)
+                        ( concurrently_
+                            (runFlow st airborneKeepaliveLoop)
+                            ( concurrently_
+                                (runFlow st releaseBotLoop)
+                                ( concurrently_
+                                    (runFlow st devboxPollLoop)
+                                    (concurrently_ (runFlow st hpaLoops) (runFlow st releaseGroupLoop))
+                                )
+                            )
+                        )
+                    )
             _ -> serverLoop st
   where
     show' :: (Show a) => a -> T.Text
