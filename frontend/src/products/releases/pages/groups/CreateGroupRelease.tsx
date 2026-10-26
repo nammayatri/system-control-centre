@@ -70,7 +70,11 @@ const CreateGroupRelease: React.FC = () => {
   const reviewing = !!bundle && cursor === steps.length;
 
   const create = useMutation({
-    mutationFn: () => createGroupRun(bundle!.bundleId, description, steps.map(s => payloads[keyOf(s)])),
+    mutationFn: () => {
+      const missing = steps.filter(s => !payloads[keyOf(s)]).map(s => s.service);
+      if (missing.length) return Promise.reject(new Error(`Configure every service first. Missing: ${missing.join(', ')}`));
+      return createGroupRun(bundle!.bundleId, description, steps.map(s => payloads[keyOf(s)]));
+    },
     onSuccess: run => {
       toast.success('Group release created — approve it to start');
       qc.invalidateQueries({ queryKey: ['release-groups'] });
@@ -171,8 +175,12 @@ const CreateGroupRelease: React.FC = () => {
               cloneFrom: cloneSources[keyOf(s)],
               submitLabel: i === steps.length - 1 ? 'Review plan' : `Next: ${steps[i + 1].service}`,
               onCollect: payload => {
-                setPayloads(prev => ({ ...prev, [keyOf(s)]: payload }));
-                setCursor(i + 1);
+                const next = { ...payloads, [keyOf(s)]: payload };
+                setPayloads(next);
+                // Move on to the next unfilled service; Review only once every service has a config.
+                const open = steps.findIndex((x, j) => j > i && !next[keyOf(x)]);
+                const anyOpen = steps.findIndex(x => !next[keyOf(x)]);
+                setCursor(open >= 0 ? open : anyOpen >= 0 ? anyOpen : steps.length);
                 window.scrollTo({ top: 0 });
               },
               onBack: i > 0 ? () => setCursor(i - 1) : undefined,
