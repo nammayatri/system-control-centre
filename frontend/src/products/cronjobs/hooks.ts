@@ -84,6 +84,15 @@ export function useUpdateEnv(namespace: string, name: string, onDone?: () => voi
   });
 }
 
+export function useUpdateImage(namespace: string, name: string, onDone?: () => void) {
+  const invalidate = useInvalidate();
+  return useMutation({
+    mutationFn: ({ container, image }: { container: string; image: string }) => api.updateImage(namespace, name, container, image),
+    onSuccess: () => { toast.success('Image updated — applies from the next run'); invalidate(); onDone?.(); },
+    onError: fail,
+  });
+}
+
 export function useDelete(namespace: string, name: string, onDone?: () => void) {
   const invalidate = useInvalidate();
   return useMutation({

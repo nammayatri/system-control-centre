@@ -1,0 +1,155 @@
+# RBAC for the CronJob manager (Backend Releases -> CronJobs).
+#
+# The scc-backend service account (namespace: autopilot) needs these in every
+# namespace that appears in the CronJobs namespace dropdown, i.e. every namespace
+# named by a product's Deployment Config. Add a Role + RoleBinding pair per new one.
+#
+#   cronjobs          list/get  : the list and detail views
+#                     create    : "New CronJob" (kubectl create)
+#                     update    : schedule / suspend / env edits (kubectl replace)
+#                     delete    : delete
+#   secrets, configmaps  get    : validation checks that a referenced Secret/ConfigMap and
+#                                 key exist. Key NAMES only are printed (go-template); values
+#                                 never leave kubectl. Kubernetes cannot scope this to
+#                                 "key names", so this is read access to every Secret in the
+#                                 namespace -- drop `secrets` here if you accept losing the
+#                                 Secret-key check.
+#
+# Apply:  kubectl apply -f k8s/rbac/scc-backend-cronjobs.yaml
+# Verify: kubectl auth can-i list cronjobs.batch -n atlas \
+#           --as=system:serviceaccount:autopilot:scc-backend
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scc-backend-cronjobs
+  namespace: app-monitor
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scc-backend-cronjobs
+  namespace: app-monitor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scc-backend-cronjobs
+subjects:
+  - kind: ServiceAccount
+    name: scc-backend
+    namespace: autopilot
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scc-backend-cronjobs
+  namespace: atlas
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scc-backend-cronjobs
+  namespace: atlas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scc-backend-cronjobs
+subjects:
+  - kind: ServiceAccount
+    name: scc-backend
+    namespace: autopilot
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scc-backend-cronjobs
+  namespace: nandi
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scc-backend-cronjobs
+  namespace: nandi
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scc-backend-cronjobs
+subjects:
+  - kind: ServiceAccount
+    name: scc-backend
+    namespace: autopilot
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scc-backend-cronjobs
+  namespace: ojudge
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scc-backend-cronjobs
+  namespace: ojudge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scc-backend-cronjobs
+subjects:
+  - kind: ServiceAccount
+    name: scc-backend
+    namespace: autopilot
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scc-backend-cronjobs
+  namespace: preprod
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scc-backend-cronjobs
+  namespace: preprod
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scc-backend-cronjobs
+subjects:
+  - kind: ServiceAccount
+    name: scc-backend
+    namespace: autopilot

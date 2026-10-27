@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Pause, Pencil, Play, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { Pause, Pencil, Play, Plus, RefreshCw, Tag, Trash2 } from 'lucide-react';
 import { Badge } from '../../../shared/ui/badge';
 import { Button } from '../../../shared/ui/button';
 import { Card } from '../../../shared/ui/card';
@@ -11,7 +11,8 @@ import { PermissionGate } from '../../../core/auth/PermissionGate';
 import { cn } from '../../../lib/utils';
 import { useRefreshAnimation } from '../../../shared/hooks';
 import { errorMessage } from '../api';
-import { useCronJob, useDelete, useSuspend, useUpdateEnv, useUpdateSchedule } from '../hooks';
+import { useCronJob, useDelete, useSuspend, useUpdateEnv, useUpdateImage, useUpdateSchedule } from '../hooks';
+import { ImageDialog } from '../ImageDialog';
 import { EnvDialog } from '../EnvDialog';
 import { fmtTime, relTime } from '../format';
 import type { ContainerDetail, EnvEntry } from '../types';
@@ -45,10 +46,12 @@ export default function CronJobDetail() {
   const [schedule, setSchedule] = useState('');
   const [timeZone, setTimeZone] = useState('');
   const [envDialog, setEnvDialog] = useState<{ container: string; entry?: EnvEntry } | null>(null);
+  const [imageDialog, setImageDialog] = useState<ContainerDetail | null>(null);
 
   const saveSchedule = useUpdateSchedule(namespace, name, () => setEditingSchedule(false));
   const suspend = useSuspend(namespace, name);
   const env = useUpdateEnv(namespace, name, () => setEnvDialog(null));
+  const image = useUpdateImage(namespace, name, () => setImageDialog(null));
   const del = useDelete(namespace, name, () => navigate(`/backend/cronjobs?namespace=${encodeURIComponent(namespace)}`));
 
   const s = data?.summary;
@@ -144,7 +147,8 @@ export default function CronJobDetail() {
               <div className="break-all font-mono text-xs text-zinc-500">{c.image}</div>
             </div>
             <PermissionGate product="autopilot" permission="CRONJOB_EDIT">
-              <Button className="ml-auto" size="sm" variant="secondary" onClick={() => setEnvDialog({ container: c.name })}><Plus className="h-4 w-4" />Add variable</Button>
+              <Button className="ml-auto" size="sm" variant="secondary" onClick={() => setImageDialog(c)}><Tag className="h-4 w-4" />Change version</Button>
+              <Button size="sm" variant="secondary" onClick={() => setEnvDialog({ container: c.name })}><Plus className="h-4 w-4" />Add variable</Button>
             </PermissionGate>
           </div>
           {c.envFrom.length > 0 && (
@@ -183,6 +187,14 @@ export default function CronJobDetail() {
         </Card>
       ))}
 
+      <ImageDialog
+        open={!!imageDialog}
+        onOpenChange={(o) => !o && setImageDialog(null)}
+        container={imageDialog?.name ?? ''}
+        image={imageDialog?.image ?? ''}
+        saving={image.isPending}
+        onSave={(img) => imageDialog && image.mutate({ container: imageDialog.name, image: img })}
+      />
       <EnvDialog
         open={!!envDialog}
         onOpenChange={(o) => !o && setEnvDialog(null)}

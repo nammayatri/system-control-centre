@@ -27,3 +27,11 @@ export function looksSensitive(name: string): boolean {
     toks.some((t) => t === 'PASS' || t === 'PWD' || t === 'PASSWD')
   );
 }
+
+/** Split `repo/name:tag` into repository and tag. A digest (`@sha256:…`) or a missing tag leaves `tag` empty. */
+export function splitImage(image: string): { repo: string; tag: string } {
+  if (image.includes('@')) return { repo: image, tag: '' };
+  const slash = image.lastIndexOf('/');
+  const colon = image.lastIndexOf(':');
+  return colon > slash ? { repo: image.slice(0, colon), tag: image.slice(colon + 1) } : { repo: image, tag: '' };
+}

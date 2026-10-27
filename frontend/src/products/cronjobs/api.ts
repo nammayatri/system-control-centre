@@ -27,6 +27,9 @@ export async function setSuspend(namespace: string, name: string, suspend: boole
 export async function updateEnv(namespace: string, name: string, change: EnvChange): Promise<void> {
   await apiClient.put(`/cronjobs/${enc(name)}/env`, { namespace, ...change });
 }
+export async function updateImage(namespace: string, name: string, container: string, image: string): Promise<void> {
+  await apiClient.put(`/cronjobs/${enc(name)}/image`, { namespace, container, image });
+}
 export async function deleteCronJob(namespace: string, name: string, force: boolean): Promise<void> {
   await apiClient.delete(`/cronjobs/${enc(name)}`, { params: { namespace, force } });
 }

@@ -39,7 +39,7 @@ import Data.Aeson qualified as A
 import Data.Aeson.Key (Key)
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
-import Data.Char (isAlphaNum)
+import Data.Char (isAlphaNum, isPrint, isSpace)
 import Data.List (findIndex, nub, sort, sortOn)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
@@ -66,6 +66,7 @@ type CronJobAPI =
         :<|> "cronjobs" :> Protected 'AP_CRONJOB_EDIT :> Capture "name" Text :> "schedule" :> ReqBody '[JSON] ScheduleReq :> Put '[JSON] APISuccess
         :<|> "cronjobs" :> Protected 'AP_CRONJOB_EDIT :> Capture "name" Text :> "suspend" :> ReqBody '[JSON] SuspendReq :> Put '[JSON] APISuccess
         :<|> "cronjobs" :> Protected 'AP_CRONJOB_EDIT :> Capture "name" Text :> "env" :> ReqBody '[JSON] EnvReq :> Put '[JSON] APISuccess
+        :<|> "cronjobs" :> Protected 'AP_CRONJOB_EDIT :> Capture "name" Text :> "image" :> ReqBody '[JSON] ImageReq :> Put '[JSON] APISuccess
         :<|> "cronjobs" :> Protected 'AP_CRONJOB_DELETE :> Capture "name" Text :> QueryParam "namespace" Text :> QueryParam "force" Bool :> Delete '[JSON] APISuccess
 
 cronJobServer :: ServerT CronJobAPI Flow
@@ -78,6 +79,7 @@ cronJobServer =
         :<|> scheduleH
         :<|> suspendH
         :<|> envH
+        :<|> imageH
         :<|> deleteH
 
 -- ---------------------------------------------------------------------------
@@ -108,6 +110,12 @@ data EnvReq = EnvReq Text (Maybe Text) [Value] [Text]
 instance FromJSON EnvReq where
     parseJSON = A.withObject "EnvReq" $ \o ->
         EnvReq <$> o .: "namespace" <*> o .:? "container" <*> o .:? "set" .!= [] <*> o .:? "remove" .!= []
+
+-- | Fields: namespace, container (defaults to the first), full image reference.
+data ImageReq = ImageReq Text (Maybe Text) Text
+
+instance FromJSON ImageReq where
+    parseJSON = A.withObject "ImageReq" $ \o -> ImageReq <$> o .: "namespace" <*> o .:? "container" <*> o .: "image"
 
 -- ---------------------------------------------------------------------------
 -- Cluster access
@@ -413,17 +421,28 @@ validateEnvEntry e = case e of
             _ -> Left (name <> ": valueFrom must have exactly one of secretKeyRef, configMapKeyRef, fieldRef, resourceFieldRef")
         _ -> Left (name <> ": valueFrom must be an object")
 
--- | Upsert @sets@ and drop @removes@ in one container's env, in place where possible.
-applyEnvEdit :: Maybe Text -> [Value] -> [Text] -> Value -> Either Text Value
-applyEnvEdit mContainer sets removes cj = do
+{- | Apply @f@ to one container (named, or the first) and put it back. A container
+@f@ leaves alone is still rewritten, so @f@ may be as small as one field.
+-}
+editContainer :: Maybe Text -> (Value -> Either Text Value) -> Value -> Either Text Value
+editContainer mContainer f cj = do
     cs <- case getPath containersPath cj of
         Just (Array a) | not (V.null a) -> Right (V.toList a)
         _ -> Left "The CronJob has no containers"
     idx <- case mContainer of
         Nothing -> Right 0
         Just c -> maybe (Left ("No container named " <> c)) Right (findIndex ((== Just c) . str . getK "name") cs)
-    let c = cs !! idx
-        env0 = arr (getK "env" c)
+    c' <- f (cs !! idx)
+    Right (setPath containersPath (Array (V.fromList (take idx cs ++ [c'] ++ drop (idx + 1) cs))) cj)
+
+setContainerKey :: Key -> Value -> Value -> Value
+setContainerKey k v (Object o) = Object (KM.insert k v o)
+setContainerKey _ _ other = other
+
+-- | Upsert @sets@ and drop @removes@ in one container's env, in place where possible.
+applyEnvEdit :: Maybe Text -> [Value] -> [Text] -> Value -> Either Text Value
+applyEnvEdit mContainer sets removes = editContainer mContainer $ \c -> do
+    let env0 = arr (getK "env" c)
         nameOf = str . getK "name"
         present = [n | e <- env0, Just n <- [nameOf e]]
     case [r | r <- removes, r `notElem` present] of
@@ -433,12 +452,7 @@ applyEnvEdit mContainer sets removes cj = do
         upsert acc s
             | nameOf s `elem` map nameOf acc = [if nameOf e == nameOf s then s else e | e <- acc]
             | otherwise = acc ++ [s]
-        env2 = foldl upsert env1 sets
-        c' = case c of
-            Object o -> Object (KM.insert "env" (Array (V.fromList env2)) o)
-            other -> other
-        cs' = take idx cs ++ [c'] ++ drop (idx + 1) cs
-    Right (setPath containersPath (Array (V.fromList cs')) cj)
+    Right (setContainerKey "env" (Array (V.fromList (foldl upsert env1 sets))) c)
 
 envH :: AuthedPerson -> Text -> EnvReq -> Flow APISuccess
 envH ap name (EnvReq nsT mContainer sets removes) = do
@@ -463,6 +477,30 @@ envH ap name (EnvReq nsT mContainer sets removes) = do
             , "removed" .= removes
             ]
         )
+    pure Success
+
+-- ---------------------------------------------------------------------------
+-- Image
+
+-- | A single image reference: no whitespace or control characters.
+validImage :: Text -> Bool
+validImage i = not (T.null i) && T.length i <= 512 && T.all (\c -> isPrint c && not (isSpace c)) i && not ("-" `T.isPrefixOf` i)
+
+{- | Point one container at a different image (typically a new tag). Takes effect
+from the next scheduled run; jobs already running keep the old image.
+-}
+imageH :: AuthedPerson -> Text -> ImageReq -> Flow APISuccess
+imageH ap name (ImageReq nsT mContainer image0) = do
+    ns <- requireNamespace nsT
+    n <- requireName name
+    let image = T.strip image0
+    unless (validImage image) $ throwM (BadRequest "Invalid image reference")
+    k <- kubeOf
+    (old, _) <- modifyCronJob k ns n (editContainer mContainer (Right . setContainerKey "image" (String image)))
+    let oldC = case mContainer of
+            Nothing -> take 1 (containersOf old)
+            Just c -> [x | x <- containersOf old, str (getK "name" x) == Just c]
+    audit ap "CRONJOB_IMAGE" ns n (object ["container" .= mContainer, "from" .= [i | x <- oldC, Just i <- [str (getK "image" x)]], "to" .= image])
     pure Success
 
 -- ---------------------------------------------------------------------------
