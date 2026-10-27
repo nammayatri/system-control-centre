@@ -7,7 +7,7 @@ import { Button } from '../../../../shared/ui/button';
 import { useConfirm } from '../../../../shared/ui/confirm-dialog';
 import { PermissionGate } from '../../../../core/auth/PermissionGate';
 import { StatusBadge } from '../../components/StatusBadge';
-import { abortGroupRun, approveGroupRun, fetchGroupRun, resumeGroupRun } from '../../api';
+import { abortGroupRun, approveGroupRun, fetchGroupRun, groupVersionLabel, groupVersions, resumeGroupRun } from '../../api';
 import type { GroupRun, GroupRunState, GroupRunStep } from '../../api';
 
 const stateVariant: Record<GroupRunState, 'info' | 'warning' | 'danger' | 'success' | 'muted'> = {
@@ -94,6 +94,11 @@ const GroupReleaseDetail: React.FC = () => {
           <div className="flex items-center gap-2">
             <h1 className="text-lg font-semibold text-zinc-900">{run.bundleName}</h1>
             <GroupStateBadge state={run.state} />
+            {groupVersions(run).length > 0 && (
+              <span className="font-mono text-xs px-2 py-0.5 rounded-md bg-zinc-100 text-zinc-700" title={groupVersions(run).join(', ')}>
+                {groupVersionLabel(run)}
+              </span>
+            )}
           </div>
           <p className="text-sm text-zinc-500">
             {run.env} · created by {run.createdBy}

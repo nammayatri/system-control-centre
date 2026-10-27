@@ -137,6 +137,8 @@ data RunStep = RunStep
     , state :: StepState
     , releaseStatus :: Maybe Text
     -- ^ live tracker status; filled in by the API layer, not stored
+    , releaseVersion :: Maybe Text
+    -- ^ the tracker's new version; filled in by the API layer, not stored
     }
     deriving (Show, Eq, Generic)
 

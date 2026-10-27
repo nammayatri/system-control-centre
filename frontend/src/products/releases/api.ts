@@ -1402,6 +1402,8 @@ export interface GroupRunStep {
     state: 'WAITING' | 'STARTED' | 'SKIPPED';
     /** Live status of the step's release tracker. */
     releaseStatus: string | null;
+    /** The step release's new version (tracker's new version). */
+    releaseVersion?: string | null;
 }
 
 export interface GroupRun {
@@ -1417,6 +1419,17 @@ export interface GroupRun {
     createdAt: string;
     updatedAt: string;
     steps: GroupRunStep[];
+}
+
+/** Distinct versions across a group release's steps, in step order. */
+export function groupVersions(run: GroupRun): string[] {
+    return [...new Set(run.steps.map(s => (s.releaseVersion || '').trim()).filter(Boolean))];
+}
+
+/** One version when every step ships the same one, else "N versions". */
+export function groupVersionLabel(run: GroupRun): string {
+    const v = groupVersions(run);
+    return v.length === 0 ? '—' : v.length === 1 ? v[0] : `${v.length} versions`;
 }
 
 export interface BundleInput {

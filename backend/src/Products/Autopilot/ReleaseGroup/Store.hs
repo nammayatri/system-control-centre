@@ -147,7 +147,7 @@ loadSteps conn rid = do
             (Only rid) ::
             IO [(Int, Text, Text, Text, Text, Text, Text, Int)]
     pure
-        [ RunStep si pi' sn (fromMaybe Sequential (parseStageMode m)) ag sv rel (fromMaybe Waiting (parseStepState st)) Nothing
+        [ RunStep si pi' sn (fromMaybe Sequential (parseStageMode m)) ag sv rel (fromMaybe Waiting (parseStepState st)) Nothing Nothing
         | (si, m, sn, ag, sv, rel, st, pi') <- rows
         ]
 

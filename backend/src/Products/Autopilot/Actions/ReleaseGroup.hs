@@ -148,14 +148,20 @@ withLiveStatus :: GroupRun -> Flow GroupRun
 withLiveStatus r = do
     stps <- forM r.steps $ \s -> do
         m <- findReleaseTrackerForCloud s.releaseId
-        pure (s {releaseStatus = fmap (T.pack . show . NT.status . fst) m} :: RunStep)
+        pure
+            ( s
+                { releaseStatus = fmap (T.pack . show . NT.status . fst) m
+                , releaseVersion = fmap (NT.newVersion . fst) m
+                }
+                :: RunStep
+            )
     pure (withSteps stps r)
 
 loadRun :: Text -> Flow GroupRun
 loadRun rid = getRun rid >>= maybe (throwM (NotFound ("Group release not found: " <> rid))) withLiveStatus
 
 listGroupsH :: AuthedPerson -> Flow [GroupRun]
-listGroupsH _ap = listRuns 50 >>= mapM withLiveStatus
+listGroupsH _ap = listRuns 200 >>= mapM withLiveStatus
 
 getGroupH :: AuthedPerson -> Text -> Flow GroupRun
 getGroupH _ap = loadRun
