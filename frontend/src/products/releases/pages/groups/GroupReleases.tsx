@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Plus, Search } from 'lucide-react';
+import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Copy, Plus, Search } from 'lucide-react';
 import { Button } from '../../../../shared/ui/button';
 import { PermissionGate } from '../../../../core/auth/PermissionGate';
 import { fetchGroupRuns, groupVersionLabel, groupVersions } from '../../api';
@@ -28,6 +28,7 @@ const haystack = (r: GroupRun) =>
   ].join(' ').toLowerCase();
 
 const GroupReleases: React.FC = () => {
+  const navigate = useNavigate();
   const { data: runs = [], isLoading } = useQuery({
     queryKey: ['release-groups'],
     queryFn: fetchGroupRuns,
@@ -129,13 +130,20 @@ const GroupReleases: React.FC = () => {
                     </button>
                   </th>
                   <th className="px-4 py-3 text-right">Services</th>
+                  <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                    <th className="px-4 py-3 text-right">Actions</th>
+                  </PermissionGate>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100">
                 {rows.map(r => (
-                  <tr key={r.runId} className="hover:bg-zinc-50">
+                  <tr
+                    key={r.runId}
+                    onClick={() => navigate(`/backend/group-releases/${r.runId}`)}
+                    className="hover:bg-zinc-50 cursor-pointer"
+                  >
                     <td className="px-4 py-3">
-                      <Link to={`/backend/group-releases/${r.runId}`} className="font-medium text-zinc-900 hover:underline">{r.bundleName}</Link>
+                      <Link to={`/backend/group-releases/${r.runId}`} onClick={e => e.stopPropagation()} className="font-medium text-zinc-900 hover:underline">{r.bundleName}</Link>
                       {r.description && <p className="text-xs text-zinc-500 max-w-xs truncate" title={r.description}>{r.description}</p>}
                     </td>
                     <td className="px-4 py-3 text-zinc-600">{r.env}</td>
@@ -144,6 +152,17 @@ const GroupReleases: React.FC = () => {
                     <td className="px-4 py-3 text-zinc-600">{r.createdBy}</td>
                     <td className="px-4 py-3 text-zinc-500 whitespace-nowrap">{new Date(r.createdAt).toLocaleString()}</td>
                     <td className="px-4 py-3 text-right text-zinc-500 whitespace-nowrap">{doneCount(r)}/{r.steps.length} done</td>
+                    <PermissionGate product="autopilot" permission="RELEASE_CREATE">
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          type="button"
+                          onClick={e => { e.stopPropagation(); navigate(`/backend/group-releases/new?from=${r.runId}`); }}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 cursor-pointer"
+                          title="Clone this group release (every service, version and setting)"
+                          aria-label="Clone group release"
+                        ><Copy className="w-4 h-4" /></button>
+                      </td>
+                    </PermissionGate>
                   </tr>
                 ))}
               </tbody>
