@@ -253,7 +253,11 @@ pushEligibility rt ac
         (mRoll, mReview) <- getTrackerRolloutMeta (Rel.releaseId rt)
         let superseded = mRoll == Just "superseded"
             inReview = mReview `elem` ([Just "in_review", Just "submitted", Just "approved"] :: [Maybe Text])
-        if onStore || superseded || inReview
+            -- The tracker's own rollout column (written by setPhase) is authoritative:
+            -- a build rolling out / halted / completed is on production even when the
+            -- on-demand store cache hasn't caught up yet.
+            rolledOut = mRoll `elem` ([Just "rolling_out", Just "halted", Just "completed"] :: [Maybe Text])
+        if onStore || rolledOut || superseded || inReview
             then pure (True, Nothing, superseded)
             else
                 pure

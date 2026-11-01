@@ -456,6 +456,9 @@ const devboxProduct: ProductDefinition = {
   },
 };
 
+// ── Product: Mobile Releases v2 (separate section, same 'mobile' RBAC) ──
+import { mobileV2Product } from './mobile-v2/product';
+
 // ── Registry ─────────────────────────────────────────────────────
 // 2026-07-31 product split: 'autopilot' is backend-only; 'mobile' owns
 // builds + OTA (MB_* + OTA_* permission universe). Airborne OTA is its own
@@ -465,6 +468,7 @@ const devboxProduct: ProductDefinition = {
 export const PRODUCT_REGISTRY: ProductDefinition[] = [
   backendProduct,
   mobileProduct,
+  mobileV2Product,
   airborneOtaProduct,
   devboxProduct,
 ];
