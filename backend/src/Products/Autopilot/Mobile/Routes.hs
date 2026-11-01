@@ -111,6 +111,7 @@ import Products.Autopilot.Mobile.Types.Ota (
     OtaReleaseResp,
     OtaRunJobsResp,
  )
+import Products.Autopilot.Mobile.Handlers.Pins (Pins, getPinsH, putPinsH)
 import Products.Mobile.Types.Permission (MobilePermission (..))
 import Servant
 import Shared.API.Response (APIResponse, APISuccess)
@@ -126,6 +127,18 @@ type MobileAPI =
             :> "access"
             :> Protected 'MB_RELEASE_VIEW
             :> Get '[JSON] MobileAccessResp
+        -- Pinned apps (v2): the caller's own list, so VIEW suffices.
+        :<|> "mobile"
+            :> "me"
+            :> "pins"
+            :> Protected 'MB_RELEASE_VIEW
+            :> Get '[JSON] Pins
+        :<|> "mobile"
+            :> "me"
+            :> "pins"
+            :> Protected 'MB_RELEASE_VIEW
+            :> ReqBody '[JSON] Pins
+            :> Put '[JSON] Pins
         :<|> "mobile"
             :> "apps"
             :> Protected 'MB_MOBILE_APP_MANAGE
@@ -553,6 +566,8 @@ mobileServer :: ServerT MobileAPI Flow
 mobileServer =
     listAppsH
         :<|> mobileAccessH
+        :<|> getPinsH
+        :<|> putPinsH
         :<|> createAppH
         :<|> patchAppH
         :<|> previewVersionsH
