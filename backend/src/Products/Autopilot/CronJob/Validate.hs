@@ -55,6 +55,7 @@ import Data.Char (isAlphaNum, isAscii, isAsciiLower, isAsciiUpper, isDigit)
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Scientific (floatingOrInteger)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Read qualified as TR
@@ -309,7 +310,27 @@ scanManifestSecrets m = concat [scanEnvEntries (podPrefix <> p) (arr (getK "env"
 
 -- | Env entries (@{name, value}@ or @{name, valueFrom}@) carrying an inline credential. @pfx@ names the container.
 scanEnvEntries :: Text -> [Value] -> [Issue]
-scanEnvEntries pfx entries =
+scanEnvEntries pfx entries = nonStringValues ++ credentialIssues
+  where
+    -- Kubernetes only accepts a string here; @value: 8080@ or @value: true@ is rejected at create. It would
+    -- also slip past the credential scan below (which reads strings), e.g. @DB_PASSWORD: 123456@.
+    nonStringValues =
+        [ err "env-value-not-string" (pfx <> ".env[" <> n <> "]") (n <> ": value must be a string, but " <> kind <> " was given. Quote it, e.g. value: \"" <> shown <> "\".")
+        | e <- entries
+        , Just n <- [str (getK "name" e)]
+        , Just v <- [getK "value" e]
+        , Just (kind, shown) <- [nonString v]
+        ]
+    nonString = \case
+        Number x -> Just ("a number", T.pack (either (show :: Double -> String) show (floatingOrInteger x)))
+        Bool b -> Just ("a boolean", if b then "true" else "false")
+        Array _ -> Just ("a list", "...")
+        Object _ -> Just ("a mapping", "...")
+        _ -> Nothing
+    credentialIssues = scanStrings pfx entries
+
+scanStrings :: Text -> [Value] -> [Issue]
+scanStrings pfx entries =
     [ err code (pfx <> ".env[" <> n <> "]") msg
     | e <- entries
     , Just n <- [str (getK "name" e)]

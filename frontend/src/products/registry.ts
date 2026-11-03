@@ -97,6 +97,8 @@ import VSEditSummary from './vs-editor/pages/VSEditSummary';
 import HpaOverview from './hpa/pages/HpaOverview';
 import HpaApplies from './hpa/pages/HpaApplies';
 import HpaServiceDetail from './hpa/pages/HpaServiceDetail';
+import ScalerOverview from './scaler/pages/ScalerOverview';
+import ScalerTargetDetail from './scaler/pages/ScalerTargetDetail';
 import CronJobList from './cronjobs/pages/CronJobList';
 import CronJobCreate from './cronjobs/pages/CronJobCreate';
 import CronJobDetail from './cronjobs/pages/CronJobDetail';
@@ -150,6 +152,7 @@ const backendProduct: ProductDefinition = {
     { label: 'Deployment Config', path: '/backend/deployment-config', icon: 'Layers' },
     { label: 'VS Editor',         path: '/backend/vs-editor',         icon: 'Settings' },
     { label: 'HPA Manager',       path: '/backend/hpa',               icon: 'Gauge', permission: 'HPA_VIEW' },
+    { label: 'Capacity Scaler',   path: '/backend/scaler',            icon: 'Gauge', permission: 'HPA_VIEW' },
     { label: 'CronJobs',          path: '/backend/cronjobs',          icon: 'Clock', permission: 'CRONJOB_VIEW' },
     { label: 'Server Config',     path: '/backend/server-config',     icon: 'Settings' },
   ],
@@ -174,6 +177,8 @@ const backendProduct: ProductDefinition = {
     { path: 'hpa',                component: HpaOverview,      permission: 'HPA_VIEW' },
     { path: 'hpa/applies',        component: HpaApplies,       permission: 'HPA_VIEW' },
     { path: 'hpa/:product/:service', component: HpaServiceDetail, permission: 'HPA_VIEW' },
+    { path: 'scaler',             component: ScalerOverview,   permission: 'HPA_VIEW' },
+    { path: 'scaler/:kind/:id',   component: ScalerTargetDetail, permission: 'HPA_VIEW' },
     { path: 'cronjobs',           component: CronJobList,      permission: 'CRONJOB_VIEW' },
     { path: 'cronjobs/new',       component: CronJobCreate,    permission: 'CRONJOB_CREATE' },
     { path: 'cronjobs/:name',     component: CronJobDetail,    permission: 'CRONJOB_VIEW' },
@@ -230,6 +235,11 @@ const backendProduct: ProductDefinition = {
       crumbs.push({ label: 'HPA Manager', to: '/backend/hpa' });
       if (parts[2] === 'applies') crumbs.push({ label: 'Activity' });
       else if (parts.length >= 4) crumbs.push({ label: decodeURIComponent(parts[3]) });
+      return crumbs;
+    }
+    if (parts[1] === 'scaler') {
+      crumbs.push({ label: 'Capacity Scaler', to: '/backend/scaler' });
+      if (parts.length >= 4) crumbs.push({ label: parts[2] === 'DB' ? 'Read pool' : 'Valkey' });
       return crumbs;
     }
     if (parts[1] === 'cronjobs') {

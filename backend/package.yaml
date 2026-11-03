@@ -266,3 +266,10 @@ tests:
     source-dirs: test-hpa
     dependencies:
       - scc
+  scc-scaler-it:
+    # Integration tests for the capacity scaler. They need a Postgres with the migrations
+    # applied and run only when SC_SCALER_IT_DB is set (see test-scaler/Main.hs).
+    main: Main.hs
+    source-dirs: test-scaler
+    dependencies:
+      - scc

@@ -108,6 +108,15 @@ library
       Products.Autopilot.K8s.Kubectl
       Products.Autopilot.Notifications
       Products.Autopilot.QaAutomation
+      Products.Autopilot.Scaler.Autoscaler
+      Products.Autopilot.Scaler.Gcp
+      Products.Autopilot.Scaler.Logic
+      Products.Autopilot.Scaler.Loops
+      Products.Autopilot.Scaler.Reconcile
+      Products.Autopilot.Scaler.Routes
+      Products.Autopilot.Scaler.Store
+      Products.Autopilot.Scaler.Types
+      Products.Autopilot.Scaler.Worker
       Products.Autopilot.Webhooks
       Products.Autopilot.ReleaseChangelog
       Products.Autopilot.K8s.VirtualService
@@ -387,6 +396,54 @@ test-suite scc-hpa-it
       Paths_scc
   hs-source-dirs:
       test-hpa
+  default-extensions:
+      ConstraintKinds
+      DataKinds
+      DeriveGeneric
+      DuplicateRecordFields
+      FlexibleContexts
+      ImportQualifiedPost
+      OverloadedStrings
+      RecordWildCards
+      TypeOperators
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wpartial-fields -Werror=missing-fields
+  build-depends:
+      aeson
+    , async
+    , base >=4.16 && <5
+    , beam-core
+    , beam-postgres
+    , bytestring
+    , containers
+    , directory
+    , exceptions
+    , filepath
+    , mtl
+    , scc
+    , postgresql-simple
+    , process
+    , resource-pool
+    , scientific
+    , servant
+    , servant-server
+    , stm
+    , text
+    , time
+    , transformers
+    , unordered-containers
+    , uuid
+    , wai
+    , wai-cors
+    , warp
+  default-language: Haskell2010
+
+test-suite scc-scaler-it
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  other-modules:
+      Paths_scc
+  hs-source-dirs:
+      test-scaler
   default-extensions:
       ConstraintKinds
       DataKinds

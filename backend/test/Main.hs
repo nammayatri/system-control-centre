@@ -106,6 +106,9 @@ import Products.Autopilot.Hpa.Types qualified as HT
 import Products.Autopilot.Hpa.Window qualified as HW
 import Products.Autopilot.Hpa.Change qualified as HC
 import Products.Autopilot.Hpa.Health qualified as HH
+import Products.Autopilot.Scaler.Gcp qualified as VG
+import Products.Autopilot.Scaler.Logic qualified as VL
+import Products.Autopilot.Scaler.Types qualified as VT
 import Products.Autopilot.Hpa.Kube qualified as HK
 import Products.Autopilot.Hpa.Metrics qualified as HM
 import Products.Autopilot.Hpa.Observer qualified as HO
@@ -226,6 +229,7 @@ main = do
   section "[72] HPA: health judgement, Prometheus + event parsing, resume decision" testHpaMisc
   section "[73] HPA: server-defaulted behavior, kubectl error classification" testHpaDefaults
   section "[74] HPA: on-demand metrics (queries, parsing, merging) and k8s event parsing" testHpaMetrics
+  section "[75] Capacity scaler: validation, capacity planning, autoscaler entries + editor, Memorystore/AlloyDB parsing" testScaler
   section "[60] Release bot: env var replacement preserves other entries" testReleaseBotEnv
   section "[61] Release bot: intent merge" testReleaseBotIntent
   section "[62] Release bot: deployment reference discovery" testReleaseBotRefs
@@ -3731,3 +3735,195 @@ testReleaseGroupPlanner = do
   where
     isLeft' (Left _) = True
     isLeft' (Right _) = False
+
+testScaler :: IO ()
+testScaler = do
+  let cluster n r = VT.InstanceState VT.ModeCluster "ACTIVE" n r
+      standalone r = VT.InstanceState VT.ModeStandalone "ACTIVE" 1 r
+      pool n = VT.InstanceState VT.ModeReadPool "READY" n 0
+      want = VT.ScaleChange (Just 16) Nothing False False
+      noGuard = VT.defaultGuardrail
+      isLeftV (Left _) = True
+      isLeftV (Right _) = False
+      isRightV = not . isLeftV
+      redisT = VT.Target "t1" VT.KindRedis "beckn" "ny-prod" "asia-south1" Nothing "beckn-redis-cluster-001" (Just "poll-cluster-metrics") Nothing
+      dbT = VT.Target "t2" VT.KindDb "driver pool" "ny-prod" "asia-south1" (Just "driver-db-cluster") "driver-db-cluster-reader-pool" (Just "poll-alloydb-readpool-metrics") Nothing
+      rk = VT.autoscalerKeys redisT
+      dk = VT.autoscalerKeys dbT
+      s :: Text -> A.Value
+      s = A.String
+      i :: Int -> A.Value
+      i = A.toJSON
+      rule nm ty op v = A.object ["name" A..= (nm :: Text), "conditions" A..= A.object ["any" A..= [A.object ["fact" A..= ("cpu_average_utilization" :: Text), "operator" A..= (op :: Text), "value" A..= (v :: Int)]]], "event" A..= A.object ["type" A..= (ty :: Text), "params" A..= A.object []]]
+      rules = A.toJSON [rule "out" "OUT" "greaterThan" 65, rule "in" "IN" "lessThan" 40]
+      redisPayload mn = A.object ["projectId" A..= ("ny-prod" :: Text), "regionId" A..= ("asia-south1" :: Text), "clusterId" A..= ("beckn-redis-cluster-001" :: Text), "minSize" A..= (mn :: Int), "maxSize" A..= (250 :: Int), "scaleOutLimit" A..= (20 :: Int), "scalingMethod" A..= ("LINEAR" :: Text), "scalerPubSubTopic" A..= ("projects/p/topics/t" :: Text), "scalingRules" A..= rules]
+      poolEntry pid mn = A.object ["projectId" A..= ("ny-prod" :: Text), "regionId" A..= ("asia-south1" :: Text), "clusterId" A..= ("driver-db-cluster" :: Text), "readPoolId" A..= (pid :: Text), "minNodeCount" A..= (mn :: Int), "maxNodeCount" A..= (17 :: Int), "stepSize" A..= (1 :: Int), "scaleOutCoolingMinutes" A..= (2 :: Int), "scalingRules" A..= rules]
+      dbPayload = A.toJSON [poolEntry "driver-db-cluster-reader-pool" 1, poolEntry "driver-db-cluster-reader-non-critical" 3]
+      minR = either (const Nothing) Just . VL.readMinimum rk
+      minD = either (const Nothing) Just . VL.readMinimum dk
+  -- change JSON + defaults
+  assertEqual "change defaults: nothing blocked, nothing shrunk" (Just want) (A.decode "{\"units\":16}")
+  assertEqual "change JSON round-trip" (Just (VT.ScaleChange (Just 4) (Just 1) True True)) (A.decode (A.encode (VT.ScaleChange (Just 4) (Just 1) True True)))
+  assertEqual "target kind text round-trips" (map Just [VT.KindRedis, VT.KindDb]) (map (VT.parseTargetKind . VT.targetKindText) [VT.KindRedis, VT.KindDb])
+  assertEqual "unknown target kind" Nothing (VT.parseTargetKind "SQL")
+  assertEqual "instance mode text round-trips" (map Just [VT.ModeCluster, VT.ModeStandalone, VT.ModeReadPool]) (map (VT.parseInstanceMode . VT.instanceModeText) [VT.ModeCluster, VT.ModeStandalone, VT.ModeReadPool])
+  assertEqual "modes belong to their kind" [VT.KindRedis, VT.KindRedis, VT.KindDb] (map VT.modeKind [VT.ModeCluster, VT.ModeStandalone, VT.ModeReadPool])
+  assertEqual "the scheduler job location defaults to the target's" "asia-south1" (VT.jobLocationOf redisT)
+  assertEqual "...unless one is set" "us-central1" (VT.jobLocationOf redisT {VT.tgJobLocation = Just "us-central1"})
+  assertEqual "guardrail JSON round-trip" (Just VT.defaultGuardrail {VT.grMaxUnits = Just 32, VT.grMaxStep = Just 6}) (A.decode (A.encode VT.defaultGuardrail {VT.grMaxUnits = Just 32, VT.grMaxStep = Just 6}))
+  -- validation per mode
+  assertEqual "a valid cluster change has no issues" [] (VT.validateChange VT.ModeCluster want)
+  assertBool "cluster change needs shards" (not (null (VT.validateChange VT.ModeCluster want {VT.scUnits = Nothing})))
+  assertBool "cluster shards 0 and 251 are refused" (all (\n -> not (null (VT.validateChange VT.ModeCluster want {VT.scUnits = Just n}))) [0, 251])
+  assertBool "replicas above the hard cap refused" (not (null (VT.validateChange VT.ModeCluster want {VT.scReplicas = Just 6})))
+  assertEqual "a valid standalone change has no issues" [] (VT.validateChange VT.ModeStandalone (VT.ScaleChange Nothing (Just 2) False False))
+  assertBool "standalone needs replicas" (not (null (VT.validateChange VT.ModeStandalone (VT.ScaleChange Nothing Nothing False False))))
+  assertBool "standalone cannot be scaled by shards" (not (null (VT.validateChange VT.ModeStandalone (VT.ScaleChange (Just 3) (Just 1) False False))))
+  assertBool "standalone cannot block a shard autoscaler" (not (null (VT.validateChange VT.ModeStandalone (VT.ScaleChange Nothing (Just 1) True False))))
+  assertEqual "a valid read-pool change has no issues" [] (VT.validateChange VT.ModeReadPool (VT.ScaleChange (Just 3) Nothing True False))
+  assertBool "a read pool needs nodes" (not (null (VT.validateChange VT.ModeReadPool (VT.ScaleChange Nothing Nothing False False))))
+  assertBool "a read pool is capped at 20 nodes" (not (null (VT.validateChange VT.ModeReadPool (VT.ScaleChange (Just 21) Nothing False False))))
+  assertBool "a read pool has no replicas setting" (not (null (VT.validateChange VT.ModeReadPool (VT.ScaleChange (Just 2) (Just 1) False False))))
+  -- capacity planning
+  assertEqual "11 -> 16 shards asks for 16" (Right (VL.CapacityPlan (Just 16) Nothing)) (VL.planCapacity noGuard (cluster 11 0) want)
+  assertEqual "already at the target changes nothing" (Right (VL.CapacityPlan Nothing Nothing)) (VL.planCapacity noGuard (cluster 16 0) want)
+  assertEqual "above the target is never shrunk" (Right (VL.CapacityPlan Nothing Nothing)) (VL.planCapacity noGuard (cluster 20 0) want)
+  assertBool "no-op is reported as a no-op" (VL.planIsNoop (VL.CapacityPlan Nothing Nothing) && not (VL.planIsNoop (VL.CapacityPlan (Just 2) Nothing)))
+  assertBool "guardrail max units refuses a larger target" (isLeftV (VL.planCapacity noGuard {VT.grMaxUnits = Just 14} (cluster 11 0) want))
+  assertBool "guardrail max step refuses a big jump" (isLeftV (VL.planCapacity noGuard {VT.grMaxStep = Just 3} (cluster 11 0) want))
+  assertBool "guardrail max step allows a small one" (isRightV (VL.planCapacity noGuard {VT.grMaxStep = Just 5} (cluster 11 0) want))
+  assertBool "a freeze refuses everything" (isLeftV (VL.planCapacity noGuard {VT.grFrozen = True, VT.grFrozenReason = Just "sale"} (cluster 11 0) want))
+  assertBool "the hard cap applies even with no guardrail" (isLeftV (VL.planCapacity noGuard (cluster 11 0) want {VT.scUnits = Just 300}))
+  assertEqual "cluster replicas are planned too" (Right (VL.CapacityPlan (Just 16) (Just 1))) (VL.planCapacity noGuard (cluster 11 0) want {VT.scReplicas = Just 1})
+  assertEqual "standalone 0 -> 2 replicas" (Right (VL.CapacityPlan Nothing (Just 2))) (VL.planCapacity noGuard (standalone 0) (VT.ScaleChange Nothing (Just 2) False False))
+  assertEqual "standalone ignores a shard target" (Right (VL.CapacityPlan Nothing Nothing)) (VL.planCapacity noGuard (standalone 2) (VT.ScaleChange (Just 1) (Just 2) False False))
+  assertBool "standalone replicas guardrail" (isLeftV (VL.planCapacity noGuard {VT.grMaxReplicas = Just 1} (standalone 0) (VT.ScaleChange Nothing (Just 2) False False)))
+  assertEqual "read pool 1 -> 4 nodes" (Right (VL.CapacityPlan (Just 4) Nothing)) (VL.planCapacity noGuard (pool 1) (VT.ScaleChange (Just 4) Nothing False False))
+  assertBool "read pool above 20 nodes refused even with no guardrail" (isLeftV (VL.planCapacity noGuard (pool 1) (VT.ScaleChange (Just 25) Nothing False False)))
+  assertBool "read pool step limit" (isLeftV (VL.planCapacity noGuard {VT.grMaxStep = Just 2} (pool 1) (VT.ScaleChange (Just 4) Nothing False False)))
+  assertEqual "plan text names the unit" "nodes -> 4" (VL.describePlan VT.ModeReadPool (VL.CapacityPlan (Just 4) Nothing))
+  -- progress
+  assertBool "reached when ACTIVE and at the target" (VL.capacityReached (cluster 16 0) want)
+  assertBool "reached when a read pool is READY at the target" (VL.capacityReached (pool 4) (VT.ScaleChange (Just 4) Nothing False False))
+  assertBool "not reached while UPDATING even at the target" (not (VL.capacityReached (VT.InstanceState VT.ModeCluster "UPDATING" 16 0) want))
+  assertBool "not reached while a read pool is in MAINTENANCE" (not (VL.capacityReached (VT.InstanceState VT.ModeReadPool "MAINTENANCE" 4 0) (VT.ScaleChange (Just 4) Nothing False False)))
+  assertBool "not reached below the target" (not (VL.capacityReached (cluster 15 0) want))
+  assertBool "ACTIVE and READY are idle; anything else is busy" (not (VL.instanceBusy (cluster 1 0)) && not (VL.instanceBusy (pool 1)) && VL.instanceBusy (VT.InstanceState VT.ModeCluster "UPDATING" 1 0) && VL.instanceBusy (VT.InstanceState VT.ModeReadPool "STOPPED" 1 0))
+  -- shrink back (opt-in) only while the target still holds what we set
+  let before = VT.ScaleSnapshot 11 0 (Just 2)
+      after = VT.emptyAfter {VT.saTargetUnits = Just 16}
+  assertEqual "shrinks back what we added" (VL.CapacityPlan (Just 11) Nothing) (VL.shrinkPlan (cluster 16 0) before after)
+  assertEqual "does not undo someone else's later resize" (VL.CapacityPlan Nothing Nothing) (VL.shrinkPlan (cluster 18 0) before after)
+  assertEqual "replicas shrink back too" (VL.CapacityPlan Nothing (Just 0)) (VL.shrinkPlan (standalone 1) (VT.ScaleSnapshot 1 0 Nothing) VT.emptyAfter {VT.saTargetReplicas = Just 1})
+  assertEqual "a read pool shrinks back by nodes" (VL.CapacityPlan (Just 1) Nothing) (VL.shrinkPlan (pool 4) (VT.ScaleSnapshot 1 0 Nothing) VT.emptyAfter {VT.saTargetUnits = Just 4})
+  -- the autoscaler's entry: Redis
+  assertEqual "reads the Redis minimum" (Just 2) (minR (redisPayload 2))
+  assertBool "refuses a payload for another cluster" (isLeftV (VL.readMinimum rk (A.object ["clusterId" A..= ("other" :: Text), "minSize" A..= (2 :: Int)])))
+  assertBool "refuses a payload with no clusterId" (isLeftV (VL.readMinimum rk (A.object ["minSize" A..= (2 :: Int)])))
+  assertBool "refuses a payload with no minimum" (isLeftV (VL.readMinimum rk (A.object ["clusterId" A..= ("beckn-redis-cluster-001" :: Text)])))
+  assertBool "refuses a payload that is not an object" (isLeftV (VL.readMinimum rk (A.String "x")))
+  assertBool "same cluster name in another project is not ours" (isLeftV (VL.readMinimum rk (A.object ["projectId" A..= ("other-proj" :: Text), "clusterId" A..= ("beckn-redis-cluster-001" :: Text), "minSize" A..= (2 :: Int)])))
+  assertBool "same cluster name in another region is not ours" (isLeftV (VL.readMinimum rk (A.object ["regionId" A..= ("europe-west3" :: Text), "clusterId" A..= ("beckn-redis-cluster-001" :: Text), "minSize" A..= (2 :: Int)])))
+  assertBool "an entry with no project/region still matches on the cluster" (isRightV (VL.readMinimum rk (A.object ["clusterId" A..= ("beckn-redis-cluster-001" :: Text), "minSize" A..= (2 :: Int)])))
+  assertEqual "pin raises the minimum and keeps the other settings" (Right (Just 16, True)) $
+    case VL.pinMinimum rk 16 (redisPayload 2) of
+      Right (VL.Pin prev new) -> Right (minR new, prev == 2 && (case new of A.Object o -> AKM.lookup "maxSize" o == Just (A.Number 250) && AKM.member "scalingRules" o; _ -> False))
+      other -> Left (show other)
+  assertEqual "pin never lowers the minimum" (Right (VL.AlreadyHeld 20)) (VL.pinMinimum rk 16 (redisPayload 20))
+  assertEqual "pin at exactly the target is already held" (Right (VL.AlreadyHeld 16)) (VL.pinMinimum rk 16 (redisPayload 16))
+  assertEqual "restore puts the original back while our value is there" (Right (Just 2)) $
+    case VL.restoreMinimum rk 16 2 (redisPayload 16) of
+      Right (VL.RestoreWrite v) -> Right (minR v)
+      other -> Left (show other)
+  assertEqual "restore does nothing when it is already the original" (Right VL.RestoreAlready) (VL.restoreMinimum rk 16 2 (redisPayload 2))
+  assertEqual "restore leaves someone else's value alone" (Right (VL.RestoreDrifted 20)) (VL.restoreMinimum rk 16 2 (redisPayload 20))
+  assertBool "restore refuses another cluster's payload" (isLeftV (VL.restoreMinimum (VT.autoscalerKeys redisT {VT.tgResource = "other"}) 16 2 (redisPayload 16)))
+  -- the autoscaler's entry: DB read pools (an array, one entry per pool)
+  assertEqual "reads the minimum of the right pool" (Just 1) (minD dbPayload)
+  assertEqual "the other pool has its own" (Just 3) (either (const Nothing) Just (VL.readMinimum (VT.autoscalerKeys dbT {VT.tgResource = "driver-db-cluster-reader-non-critical"}) dbPayload))
+  assertBool "a pool that is not in the payload is refused" (isLeftV (VL.readMinimum (VT.autoscalerKeys dbT {VT.tgResource = "nope"}) dbPayload))
+  assertBool "a different cluster's pool is refused" (isLeftV (VL.readMinimum (VT.autoscalerKeys dbT {VT.tgParent = Just "rider-db-cluster"}) dbPayload))
+  assertEqual "pin edits only the right pool's entry" (Right (Just 4, Just 3)) $
+    case VL.pinMinimum dk 4 dbPayload of
+      Right (VL.Pin _ new) -> Right (minD new, either (const Nothing) Just (VL.readMinimum (VT.autoscalerKeys dbT {VT.tgResource = "driver-db-cluster-reader-non-critical"}) new))
+      other -> Left (show other)
+  assertBool "two entries for one pool are ambiguous" (isLeftV (VL.readMinimum dk (A.toJSON [poolEntry "driver-db-cluster-reader-pool" 1, poolEntry "driver-db-cluster-reader-pool" 2])))
+  -- editing the autoscaler's settings
+  let edit sets rs = VL.applyEdit rk VT.KindRedis (VL.EditReq sets rs) (redisPayload 2)
+      editOk sets rs = either (const Nothing) (\(new, _, _) -> Just new) (edit sets rs)
+  assertEqual "a valid edit changes the setting" (Just (Just 5)) (fmap minR (editOk [("minSize", i 5)] Nothing))
+  assertEqual "...and leaves the rest alone" (Just True) $
+    fmap (\v -> case v of A.Object o -> AKM.lookup "maxSize" o == Just (A.Number 250) && AKM.lookup "clusterId" o == Just (s "beckn-redis-cluster-001"); _ -> False) (editOk [("minSize", i 5)] Nothing)
+  assertEqual "before and after entries are returned" (Right (Just 2, Just 5)) $
+    case edit [("minSize", i 5)] Nothing of
+      Right (_, A.Object b, A.Object a) -> Right (AKM.lookup "minSize" b >>= \x -> case A.fromJSON x of A.Success n -> Just (n :: Int); _ -> Nothing, AKM.lookup "minSize" a >>= \x -> case A.fromJSON x of A.Success n -> Just (n :: Int); _ -> Nothing)
+      other -> Left (show other)
+  assertBool "an unknown setting is refused" (isLeftV (edit [("scalerPubSubTopic", s "x")] Nothing))
+  assertBool "the cluster's identity cannot be edited" (isLeftV (edit [("clusterId", s "other")] Nothing))
+  assertBool "a setting that is not in this entry is refused (nothing is invented)" (isLeftV (edit [("minFreeMemoryPercent", i 25)] Nothing))
+  assertBool "an out-of-range number is refused" (all (\n -> isLeftV (edit [("minSize", i n)] Nothing)) [0, 251, -1])
+  assertBool "a non-number is refused" (isLeftV (edit [("minSize", s "five")] Nothing))
+  assertBool "a minimum above the maximum is refused" (isLeftV (edit [("minSize", i 300)] Nothing) && isLeftV (edit [("maxSize", i 1)] Nothing))
+  assertBool "raising both together in order is accepted" (isRightV (edit [("minSize", i 5), ("maxSize", i 100)] Nothing))
+  assertBool "an enum setting takes only its options" (isRightV (edit [("scalingMethod", s "STEPWISE")] Nothing) && isLeftV (edit [("scalingMethod", s "RANDOM")] Nothing))
+  assertEqual "DB settings use their own keys" (Just (Just 2)) $
+    either (const Nothing) (\(new, _, _) -> Just (minD new)) (VL.applyEdit dk VT.KindDb (VL.EditReq [("minNodeCount", i 2)] Nothing) dbPayload)
+  assertBool "a Redis-only setting is refused on a DB target" (isLeftV (VL.applyEdit dk VT.KindDb (VL.EditReq [("minSize", i 2)] Nothing) dbPayload))
+  assertBool "a DB edit leaves the other pool's entry alone" $
+    case VL.applyEdit dk VT.KindDb (VL.EditReq [("minNodeCount", i 2)] Nothing) dbPayload of
+      Right (new, _, _) -> either (const False) (== 3) (VL.readMinimum (VT.autoscalerKeys dbT {VT.tgResource = "driver-db-cluster-reader-non-critical"}) new)
+      _ -> False
+  -- scaling rules
+  assertEqual "valid rules" [] (VL.validateRules rules)
+  assertBool "rules must be a list" (not (null (VL.validateRules (s "x"))))
+  assertBool "at least one rule" (not (null (VL.validateRules (A.toJSON ([] :: [A.Value])))))
+  assertBool "a rule needs a name" (not (null (VL.validateRules (A.toJSON [rule "" "OUT" "greaterThan" 65]))))
+  assertBool "an unknown operator is refused" (not (null (VL.validateRules (A.toJSON [rule "r" "OUT" "greaterish" 65]))))
+  assertBool "an event type must be OUT or IN" (not (null (VL.validateRules (A.toJSON [rule "r" "SIDEWAYS" "greaterThan" 65]))))
+  assertBool "a condition value must be a number" (not (null (VL.validateRules (A.toJSON [A.object ["name" A..= ("r" :: Text), "conditions" A..= A.object ["any" A..= [A.object ["fact" A..= ("f" :: Text), "operator" A..= ("equal" :: Text), "value" A..= ("x" :: Text)]]], "event" A..= A.object ["type" A..= ("OUT" :: Text)]]]))))
+  assertBool "conditions need exactly one of any / all" (not (null (VL.validateRules (A.toJSON [A.object ["name" A..= ("r" :: Text), "conditions" A..= A.object [], "event" A..= A.object ["type" A..= ("OUT" :: Text)]]]))))
+  assertEqual "new rules replace the old ones" (Just True) $
+    fmap (\v -> case v of A.Object o -> AKM.lookup "scalingRules" o == Just (A.toJSON [rule "only" "OUT" "greaterThan" 80]); _ -> False) (editOk [] (Just (A.toJSON [rule "only" "OUT" "greaterThan" 80])))
+  assertBool "bad rules are refused" (isLeftV (edit [] (Just (A.toJSON [rule "r" "OUT" "greaterish" 1]))))
+  assertEqual "the editable settings differ per kind" (False, True) (("minNodeCount" `elem` map fst (VL.editableKeys VT.KindRedis), "minNodeCount" `elem` map fst (VL.editableKeys VT.KindDb)))
+  -- job payload encoding
+  assertEqual "job data round-trips" (Right (redisPayload 2)) (VL.decodeJobData (VL.encodeJobData (redisPayload 2)))
+  assertBool "job data that is not base64 is refused" (isLeftV (VL.decodeJobData "!!!not base64!!!"))
+  assertBool "job data that is not JSON is refused" (isLeftV (VL.decodeJobData "aGVsbG8="))
+  -- Memorystore + AlloyDB parsing
+  let parseI :: BL.ByteString -> Either T.Text VT.InstanceState
+      parseI b = maybe (Left "bad json") VG.parseInstance (A.decode b)
+      parseP :: BL.ByteString -> Either T.Text VT.InstanceState
+      parseP b = maybe (Left "bad json") VG.parseReadPool (A.decode b)
+  assertEqual "cluster instance" (Right (cluster 16 0)) (parseI "{\"name\":\"projects/p/locations/l/instances/i\",\"state\":\"ACTIVE\",\"mode\":\"CLUSTER\",\"shardCount\":16}")
+  assertEqual "standalone instance" (Right (standalone 1)) (parseI "{\"state\":\"ACTIVE\",\"mode\":\"CLUSTER_DISABLED\",\"shardCount\":1,\"replicaCount\":1}")
+  assertEqual "standalone with no replicaCount means zero" (Right (standalone 0)) (parseI "{\"state\":\"ACTIVE\",\"mode\":\"CLUSTER_DISABLED\"}")
+  assertEqual "int64 counts may arrive as strings" (Right (cluster 16 2)) (parseI "{\"state\":\"ACTIVE\",\"mode\":\"CLUSTER\",\"shardCount\":\"16\",\"replicaCount\":\"2\"}")
+  assertBool "unsupported mode refused" (isLeftV (parseI "{\"state\":\"ACTIVE\",\"mode\":\"MODE_UNSPECIFIED\",\"shardCount\":1}"))
+  assertBool "missing mode / state refused" (isLeftV (parseI "{\"state\":\"ACTIVE\",\"shardCount\":1}") && isLeftV (parseI "{\"mode\":\"CLUSTER\",\"shardCount\":1}"))
+  assertBool "a cluster with no shardCount is refused" (isLeftV (parseI "{\"state\":\"ACTIVE\",\"mode\":\"CLUSTER\"}"))
+  assertEqual "AlloyDB read pool" (Right (pool 3)) (parseP "{\"instanceType\":\"READ_POOL\",\"state\":\"READY\",\"readPoolConfig\":{\"nodeCount\":3}}")
+  assertEqual "AlloyDB node count may be a string" (Right (pool 3)) (parseP "{\"instanceType\":\"READ_POOL\",\"state\":\"READY\",\"readPoolConfig\":{\"nodeCount\":\"3\"}}")
+  assertBool "an AlloyDB primary cannot be scaled" (isLeftV (parseP "{\"instanceType\":\"PRIMARY\",\"state\":\"READY\"}"))
+  assertBool "a read pool with no node count is refused" (isLeftV (parseP "{\"instanceType\":\"READ_POOL\",\"state\":\"READY\",\"readPoolConfig\":{}}"))
+  assertBool "a read pool with no state is refused" (isLeftV (parseP "{\"instanceType\":\"READ_POOL\",\"readPoolConfig\":{\"nodeCount\":1}}"))
+  assertEqual "discovered Valkey instance" (Just (VG.Discovered Nothing "i" (cluster 4 0))) (A.decode "{\"name\":\"projects/p/locations/l/instances/i\",\"state\":\"ACTIVE\",\"mode\":\"CLUSTER\",\"shardCount\":4}" >>= VG.parseDiscovered VT.KindRedis)
+  assertEqual "discovered read pool carries its cluster" (Just (VG.Discovered (Just "c") "pool" (pool 2))) (A.decode "{\"name\":\"projects/p/locations/l/clusters/c/instances/pool\",\"instanceType\":\"READ_POOL\",\"state\":\"READY\",\"readPoolConfig\":{\"nodeCount\":2}}" >>= VG.parseDiscovered VT.KindDb)
+  assertEqual "a primary is left out of discovery" Nothing (A.decode "{\"name\":\"projects/p/locations/l/clusters/c/instances/primary\",\"instanceType\":\"PRIMARY\",\"state\":\"READY\"}" >>= VG.parseDiscovered VT.KindDb)
+  assertEqual "operation in progress (done is omitted)" (Right (VG.Op "operations/1" False Nothing)) (maybe (Left "bad") VG.parseOp (A.decode "{\"name\":\"operations/1\"}"))
+  assertEqual "operation failed" (Right (VG.Op "operations/1" True (Just "no quota"))) (maybe (Left "bad") VG.parseOp (A.decode "{\"name\":\"operations/1\",\"done\":true,\"error\":{\"code\":8,\"message\":\"no quota\"}}"))
+  assertBool "operation without a name refused" (isLeftV (maybe (Left "bad") VG.parseOp (A.decode "{\"done\":true}")))
+  let jobJson = A.object ["name" A..= ("jobs/j" :: Text), "state" A..= ("PAUSED" :: Text), "schedule" A..= ("*/1 * * * *" :: Text), "pubsubTarget" A..= A.object ["topicName" A..= ("projects/p/topics/t" :: Text), "data" A..= ("e30=" :: Text), "attributes" A..= A.object ["a" A..= ("b" :: Text)]]]
+  assertEqual "job payload, state and schedule read" (Right ("e30=", "PAUSED", "*/1 * * * *")) (fmap (\j -> (VG.sjData j, VG.sjState j, VG.sjSchedule j)) (VG.parseJob jobJson))
+  assertBool "a job without a payload is refused" (isLeftV (VG.parseJob (A.object ["pubsubTarget" A..= A.object ["topicName" A..= ("t" :: Text)]])))
+  assertBool "a job that is not Pub/Sub is refused" (isLeftV (VG.parseJob (A.object ["httpTarget" A..= A.object []])))
+  assertEqual "job patch keeps topic and attributes and swaps only data"
+    (A.object ["pubsubTarget" A..= A.object ["topicName" A..= ("projects/p/topics/t" :: Text), "data" A..= ("NEW" :: Text), "attributes" A..= A.object ["a" A..= ("b" :: Text)]]])
+    (either (const A.Null) (\j -> VG.jobPatchBody j "NEW") (VG.parseJob jobJson))
+  assertEqual "Valkey shard resize request" (Just ("shardCount", A.object ["shardCount" A..= (16 :: Int)])) (VG.resizeRequest VT.KindRedis (VG.UpdateUnits 16))
+  assertEqual "Valkey replica resize request" (Just ("replicaCount", A.object ["replicaCount" A..= (2 :: Int)])) (VG.resizeRequest VT.KindRedis (VG.UpdateReplicas 2))
+  assertEqual "AlloyDB node resize request" (Just ("readPoolConfig.nodeCount", A.object ["readPoolConfig" A..= A.object ["nodeCount" A..= (3 :: Int)]])) (VG.resizeRequest VT.KindDb (VG.UpdateUnits 3))
+  assertEqual "AlloyDB has no replica resize" Nothing (VG.resizeRequest VT.KindDb (VG.UpdateReplicas 1))
+  -- names that go into URLs
+  assertBool "plain names are safe" (all VG.safeSegment ["ny-prod", "beckn-redis-cluster-001", "asia-south1", "poll_cluster_metrics", "driver-db-cluster-reader-pool"])
+  assertBool "path tricks are not" (not (any VG.safeSegment ["", "a/b", "..", "a b", "a?b", "a#b", "a%2Fb", "x\ny"]))

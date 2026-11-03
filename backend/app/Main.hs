@@ -10,6 +10,7 @@ import Core.Server (serverLoop)
 import qualified Data.Text as T
 import Products.AirborneOta.Keepalive (airborneKeepaliveLoop)
 import Products.Autopilot.Hpa.Loops (hpaLoops)
+import Products.Autopilot.Scaler.Loops (scalerLoops)
 import Products.Autopilot.ReleaseBot.Flow (releaseBotLoop)
 import Products.Autopilot.ReleaseGroup.Coordinator (releaseGroupLoop)
 import Products.Autopilot.Runner (runnerLoop, runnerPollLoop, runnerStartupRecovery)
@@ -35,7 +36,7 @@ main = do
                     else ""
         case appState cfg of
             -- The HPA scheduler rides with the runner: it is background work that talks to the cluster.
-            "RUNNER" -> concurrently_ (runnerLoop st) (concurrently_ (runFlow st hpaLoops) (runFlow st releaseGroupLoop))
+            "RUNNER" -> concurrently_ (runnerLoop st) (concurrently_ (runFlow st hpaLoops) (concurrently_ (runFlow st scalerLoops) (runFlow st releaseGroupLoop)))
             -- In local/single-process mode keep server + worker together.
             -- #35 FIX 1 — run startup recovery SYNCHRONOUSLY before the HTTP port
             -- is bound. If we forked the poll loop alongside the server like we
@@ -57,7 +58,7 @@ main = do
                                 (runFlow st releaseBotLoop)
                                 ( concurrently_
                                     (runFlow st devboxPollLoop)
-                                    (concurrently_ (runFlow st hpaLoops) (runFlow st releaseGroupLoop))
+                                    (concurrently_ (runFlow st hpaLoops) (concurrently_ (runFlow st scalerLoops) (runFlow st releaseGroupLoop)))
                                 )
                             )
                         )
