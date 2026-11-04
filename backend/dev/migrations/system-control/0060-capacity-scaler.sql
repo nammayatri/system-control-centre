@@ -7,6 +7,10 @@
 -- claimed with a lease, and the unique indexes make a second in-flight apply for the same target, or a
 -- second apply of the same schedule window, impossible. Loop leader election reuses hpa_loop_lease.
 
+-- Indexes are built CONCURRENTLY (no table lock), so this file must not run inside a transaction: apply it with
+-- plain `psql -f`, not `psql -1`. If a build is ever interrupted it leaves an INVALID index that IF NOT EXISTS
+-- would then skip: drop it (`DROP INDEX CONCURRENTLY <name>`) and run this file again.
+
 CREATE TABLE IF NOT EXISTS redis_config (
   id                  TEXT PRIMARY KEY,
   cloud               TEXT NOT NULL,
@@ -21,7 +25,7 @@ CREATE TABLE IF NOT EXISTS redis_config (
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at          TIMESTAMPTZ
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_redis_config_instance
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_redis_config_instance
   ON redis_config (cloud, project, location, instance) WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS db_config (
@@ -39,7 +43,7 @@ CREATE TABLE IF NOT EXISTS db_config (
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at          TIMESTAMPTZ
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_db_config_pool
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_db_config_pool
   ON db_config (cloud, project, location, cluster, read_pool) WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS scaler_schedule (
@@ -57,7 +61,7 @@ CREATE TABLE IF NOT EXISTS scaler_schedule (
   last_eval_at TIMESTAMPTZ,
   deleted_at   TIMESTAMPTZ
 );
-CREATE INDEX IF NOT EXISTS idx_scaler_schedule_target
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_scaler_schedule_target
   ON scaler_schedule (cloud, target_kind, target_id) WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS scaler_apply (
@@ -90,21 +94,21 @@ CREATE TABLE IF NOT EXISTS scaler_apply (
 );
 
 -- One in-flight apply per target. Keep the status list in sync with Hpa.Types.blockingStatusTexts.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_scaler_apply_inflight
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_scaler_apply_inflight
   ON scaler_apply (cloud, target_kind, target_id)
   WHERE status NOT IN ('RESTORED', 'ROLLED_BACK', 'FAILED', 'SKIPPED');
 
 -- A scheduled window is applied to a target at most once, even after a rollback.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_scaler_apply_window
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_scaler_apply_window
   ON scaler_apply (schedule_id, target_kind, target_id, window_start)
   WHERE schedule_id IS NOT NULL AND window_start IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS idx_scaler_apply_work
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_scaler_apply_work
   ON scaler_apply (cloud, next_run_at)
   WHERE status IN ('PENDING', 'APPLYING', 'OBSERVING', 'APPLIED', 'RESTORING', 'ROLLING_BACK');
-CREATE INDEX IF NOT EXISTS idx_scaler_apply_target
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_scaler_apply_target
   ON scaler_apply (cloud, target_kind, target_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_scaler_apply_schedule ON scaler_apply (schedule_id);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_scaler_apply_schedule ON scaler_apply (schedule_id);
 
 CREATE TABLE IF NOT EXISTS scaler_event (
   id          BIGSERIAL PRIMARY KEY,
@@ -118,8 +122,8 @@ CREATE TABLE IF NOT EXISTS scaler_event (
   message     TEXT NOT NULL,
   data        JSONB NOT NULL DEFAULT '{}'::jsonb
 );
-CREATE INDEX IF NOT EXISTS idx_scaler_event_apply ON scaler_event (apply_id, id);
-CREATE INDEX IF NOT EXISTS idx_scaler_event_target ON scaler_event (cloud, target_kind, target_id, ts DESC);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_scaler_event_apply ON scaler_event (apply_id, id);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_scaler_event_target ON scaler_event (cloud, target_kind, target_id, ts DESC);
 
 CREATE TABLE IF NOT EXISTS scaler_guardrail (
   cloud       TEXT NOT NULL,
@@ -145,4 +149,4 @@ CREATE TABLE IF NOT EXISTS scaler_autoscaler_history (
   before      JSONB,                                    -- the target's config entry before
   after       JSONB                                     -- ... and after
 );
-CREATE INDEX IF NOT EXISTS idx_scaler_autoscaler_history ON scaler_autoscaler_history (cloud, target_kind, target_id, id DESC);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_scaler_autoscaler_history ON scaler_autoscaler_history (cloud, target_kind, target_id, id DESC);

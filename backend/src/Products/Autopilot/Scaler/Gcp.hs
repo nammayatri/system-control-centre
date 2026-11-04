@@ -26,6 +26,7 @@ module Products.Autopilot.Scaler.Gcp (
     parseJob,
     resizeRequest,
     jobPatchBody,
+    refreshableStatus,
 )
 where
 
@@ -39,7 +40,8 @@ import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as BL
 import Data.Char (isAlphaNum)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -276,31 +278,46 @@ apiMessage body raw = case A.decode body of
     Just (Object o) | Just (Object e) <- KM.lookup "error" o, Just m <- str e "message" -> m
     _ -> T.take 300 raw
 
+{- | A rejected credential (401) or a denied permission (403) may only mean the cached token was issued before an
+identity or role change (a Workload Identity binding, a new role). A fresh token is tried once before giving up.
+-}
+refreshableStatus :: Int -> Bool
+refreshableStatus s = s == 401 || s == 403
+
+-- | Forget the cached token; 'True' if there was one (so a retry would really use a different token).
+dropCachedToken :: IO Bool
+dropCachedToken = atomicModifyIORef' tokenRef (\c -> (Nothing, isJust c))
+
 call :: Method -> Text -> Maybe Value -> Int -> IO (Either GcpErr Value)
-call method url mbody retries = do
-    tok <- getToken
-    case tok of
-        Left e -> pure (Left (GcpFailed e))
-        Right t -> do
-            r <-
-                try
-                    ( httpRaw
-                        (defaultReq url)
-                            { reqMethod = method
-                            , reqHeaders = [("Authorization", "Bearer " <> t), ("Content-Type", "application/json")]
-                            , reqBody = A.encode <$> mbody
-                            , reqTimeout = Seconds 30
-                            , reqRetries = retries
-                            , reqLogTag = "gcp"
-                            }
-                    )
-            pure $ case r of
-                Left (e :: SomeException) -> Left (GcpFailed (T.pack (show e)))
-                Right (Left e) -> Left (GcpFailed (httpErrText e))
-                Right (Right resp)
-                    | respStatus resp >= 400 -> Left (classify (respStatus resp) (respBody resp))
-                    | BL.null (respBody resp) -> Right Null
-                    | otherwise -> either (Left . GcpFailed . ("unreadable response: " <>) . T.pack) Right (A.eitherDecode (respBody resp))
+call method url mbody retries = attempt True
+  where
+    attempt canRefresh = do
+        tok <- getToken
+        case tok of
+            Left e -> pure (Left (GcpFailed e))
+            Right t -> do
+                r <-
+                    try
+                        ( httpRaw
+                            (defaultReq url)
+                                { reqMethod = method
+                                , reqHeaders = [("Authorization", "Bearer " <> t), ("Content-Type", "application/json")]
+                                , reqBody = A.encode <$> mbody
+                                , reqTimeout = Seconds 30
+                                , reqRetries = retries
+                                , reqLogTag = "gcp"
+                                }
+                        )
+                case r of
+                    Left (e :: SomeException) -> pure (Left (GcpFailed (T.pack (show e))))
+                    Right (Left e) -> pure (Left (GcpFailed (httpErrText e)))
+                    Right (Right resp)
+                        | refreshableStatus (respStatus resp) && canRefresh -> do
+                            hadCached <- dropCachedToken
+                            if hadCached then attempt False else pure (Left (classify (respStatus resp) (respBody resp)))
+                        | respStatus resp >= 400 -> pure (Left (classify (respStatus resp) (respBody resp)))
+                        | BL.null (respBody resp) -> pure (Right Null)
+                        | otherwise -> pure (either (Left . GcpFailed . ("unreadable response: " <>) . T.pack) Right (A.eitherDecode (respBody resp)))
 
 memorystore, alloydb, scheduler :: Text
 memorystore = "https://memorystore.googleapis.com/v1/"

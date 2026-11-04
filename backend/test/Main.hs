@@ -3924,6 +3924,9 @@ testScaler = do
   assertEqual "Valkey replica resize request" (Just ("replicaCount", A.object ["replicaCount" A..= (2 :: Int)])) (VG.resizeRequest VT.KindRedis (VG.UpdateReplicas 2))
   assertEqual "AlloyDB node resize request" (Just ("readPoolConfig.nodeCount", A.object ["readPoolConfig" A..= A.object ["nodeCount" A..= (3 :: Int)]])) (VG.resizeRequest VT.KindDb (VG.UpdateUnits 3))
   assertEqual "AlloyDB has no replica resize" Nothing (VG.resizeRequest VT.KindDb (VG.UpdateReplicas 1))
+  -- a stale token is refreshed once, only for credential / permission rejections
+  assertBool "401 and 403 trigger a token refresh" (VG.refreshableStatus 401 && VG.refreshableStatus 403)
+  assertBool "other statuses do not" (not (any VG.refreshableStatus [200, 400, 404, 409, 429, 500, 503]))
   -- names that go into URLs
   assertBool "plain names are safe" (all VG.safeSegment ["ny-prod", "beckn-redis-cluster-001", "asia-south1", "poll_cluster_metrics", "driver-db-cluster-reader-pool"])
   assertBool "path tricks are not" (not (any VG.safeSegment ["", "a/b", "..", "a b", "a?b", "a#b", "a%2Fb", "x\ny"]))
