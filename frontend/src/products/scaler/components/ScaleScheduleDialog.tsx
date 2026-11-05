@@ -171,7 +171,7 @@ export default function ScaleScheduleDialog({ open, onOpenChange, target, state,
           <Step n={4} title="Review" help="This is checked against the live target as you type.">
             <div className="space-y-3">
               {timing && <div className="rounded-lg bg-zinc-50 px-3 py-2 text-xs text-zinc-700">{describeKind(timing)}</div>}
-              <PreviewBox target={target} change={change} timing={timing} onState={setPreview} />
+              <PreviewBox target={target} change={change} timing={timing} excludeScheduleId={existing?.id} onState={setPreview} />
             </div>
           </Step>
         </DialogBody>

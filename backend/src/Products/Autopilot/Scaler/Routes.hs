@@ -194,11 +194,13 @@ data PreviewReq = PreviewReq
     , pqTargetId :: Text
     , pqChange :: ScaleChange
     , pqTiming :: Maybe ScheduleKind
+    , pqExcludeScheduleId :: Maybe Text
+    -- ^ the schedule being edited, so it is not reported as overlapping itself
     }
 
 instance FromJSON PreviewReq where
     parseJSON = A.withObject "PreviewReq" $ \o ->
-        PreviewReq <$> o .: "targetKind" <*> o .: "targetId" <*> o .: "change" <*> o .:? "timing"
+        PreviewReq <$> o .: "targetKind" <*> o .: "targetId" <*> o .: "change" <*> o .:? "timing" <*> o .:? "excludeScheduleId"
 
 data ManualApplyReq = ManualApplyReq
     { maKind :: TargetKind
@@ -626,7 +628,7 @@ previewH _ req = do
         Just timing -> do
             now <- liftIO getCurrentTime
             others <- schedulesForTarget cloud (tgKind t) (tgId t)
-            pure [srName o | o <- others, Right ok <- [decodeValue (srTiming o)], schedulesOverlap now 14 timing ok]
+            pure [srName o | o <- others, Just (srId o) /= pqExcludeScheduleId req, Right ok <- [decodeValue (srTiming o)], schedulesOverlap now 14 timing ok]
     pure $
         A.object
             [ "state" .= st

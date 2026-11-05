@@ -57,7 +57,7 @@ export async function pauseAutoscaler(t: Pick<Target, 'kind' | 'id'>, paused: bo
 export interface ScheduleBody {
   targetKind: TargetKind; targetId: string; name: string; timing: ScheduleKind; change: ScaleChange;
 }
-export async function previewChange(body: { targetKind: TargetKind; targetId: string; change: ScaleChange; timing?: ScheduleKind }): Promise<Preview> {
+export async function previewChange(body: { targetKind: TargetKind; targetId: string; change: ScaleChange; timing?: ScheduleKind; excludeScheduleId?: string }): Promise<Preview> {
   return (await apiClient.post('/scaler/schedules/preview', body)).data;
 }
 export async function createSchedule(body: ScheduleBody): Promise<{ id: string }> {

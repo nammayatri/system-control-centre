@@ -63,8 +63,8 @@ export function ChangeFields({ target, state, value, onChange }: { target: Targe
 export interface PreviewState { ready: boolean; blocking: string[] }
 
 /** Checks the change against the live target (and the autoscaler's job) as the user types. */
-export function PreviewBox({ target, change, timing, onState }: {
-  target: Target; change: ScaleChange; timing?: ScheduleKind; onState: (s: PreviewState) => void;
+export function PreviewBox({ target, change, timing, excludeScheduleId, onState }: {
+  target: Target; change: ScaleChange; timing?: ScheduleKind; excludeScheduleId?: string; onState: (s: PreviewState) => void;
 }) {
   const [data, setData] = useState<Preview | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -73,7 +73,7 @@ export function PreviewBox({ target, change, timing, onState }: {
   const cb = useRef(onState);
   cb.current = onState;
 
-  const key = JSON.stringify({ id: target.id, change, timing });
+  const key = JSON.stringify({ id: target.id, change, timing, excludeScheduleId });
   const empty = change.units == null && change.replicas == null;
   useEffect(() => {
     if (empty) { setData(null); setErr(null); cb.current({ ready: false, blocking: [] }); return; }
@@ -82,7 +82,7 @@ export function PreviewBox({ target, change, timing, onState }: {
     cb.current({ ready: false, blocking: [] });
     const t = setTimeout(async () => {
       try {
-        const p = await previewChange({ targetKind: target.kind, targetId: target.id, change, timing });
+        const p = await previewChange({ targetKind: target.kind, targetId: target.id, change, timing, excludeScheduleId });
         if (mine !== seq.current) return;
         setData(p); setErr(null);
         const blocking = [...p.issues, ...p.refusedBecause, ...p.overlaps.map((o) => `Overlaps schedule “${o}”`),
